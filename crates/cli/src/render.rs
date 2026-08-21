@@ -139,10 +139,43 @@ fn clip(s: &str, max: usize) -> String {
 
 /// The one argument worth showing in a progress line.
 fn summarize(args: &serde_json::Value) -> String {
+    // A patch is many lines; the files it touches are the useful part.
+    if let Some(patch) = args.get("patch").and_then(|v| v.as_str()) {
+        let files: Vec<&str> = patch
+            .lines()
+            .filter_map(|l| {
+                l.trim()
+                    .strip_prefix('[')?
+                    .strip_suffix(']')?
+                    .rsplit_once('#')
+            })
+            .map(|(path, _)| path)
+            .collect();
+        return clip(&files.join(" "), 80);
+    }
     for key in ["path", "command", "pattern", "query"] {
         if let Some(v) = args.get(key).and_then(|v| v.as_str()) {
             return clip(v, 80);
         }
     }
     String::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::summarize;
+    use serde_json::json;
+
+    #[test]
+    fn a_patch_summarizes_to_the_files_it_touches() {
+        let patch = "[a.rs#A1B2]\nPUT 1.=1:\n+x\n[b.rs#C3D4]\nREM\n";
+        assert_eq!(summarize(&json!({ "patch": patch })), "a.rs b.rs");
+    }
+
+    #[test]
+    fn other_tools_show_their_leading_argument() {
+        assert_eq!(summarize(&json!({ "path": "src/a.rs" })), "src/a.rs");
+        assert_eq!(summarize(&json!({ "command": "cargo test" })), "cargo test");
+        assert_eq!(summarize(&json!({ "nothing": 1 })), "");
+    }
 }

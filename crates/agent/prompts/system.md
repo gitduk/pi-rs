@@ -19,7 +19,12 @@ them, and do not restate a file's contents back to the user.
 of the file's current contents: if you read a file and the TAG later differs, the
 file changed underneath you and what you remember is stale.
 
-`write` replaces a file whole. Read the file first unless you are creating it.
+`edit` changes part of a file. It anchors on the TAG, so read the file in the
+same turn or a recent one; its result carries the new TAG and the new numbering,
+so a follow-up edit needs no second read.
+
+`write` replaces a file whole. Use it to create a file, or when more of the file
+changes than survives. Read the file first unless you are creating it.
 
 `bash` gets a fresh shell per call — `cd` and exported variables do not survive
 between calls. Pass `cwd` instead of prefixing `cd`. Prefer `read` and `write`

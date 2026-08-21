@@ -3,6 +3,7 @@ use brain::message::ToolResultContent;
 use serde_json::Value;
 
 pub mod bash;
+pub mod edit;
 pub mod read;
 pub mod registry;
 pub mod workspace;

@@ -28,6 +28,7 @@ impl Registry {
         Self::new()
             .with(crate::read::Read)
             .with(crate::write::Write)
+            .with(crate::edit::Edit)
             .with(crate::bash::Bash)
     }
 

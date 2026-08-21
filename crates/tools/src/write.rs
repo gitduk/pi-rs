@@ -54,7 +54,7 @@ impl Tool for Write {
 
         let lines = args.content.lines().count();
         let unit = if lines == 1 { "line" } else { "lines" };
-        let tag = crate::read::tag(&args.content);
+        let tag = hashline::tag(&args.content);
         Ok(ToolOutput::text(format!(
             "[{rel}#{tag}] wrote {lines} {unit}, {} bytes",
             args.content.len()

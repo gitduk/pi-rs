@@ -2,6 +2,8 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use hashline::tag;
+
 use crate::{Ctx, Tier, Tool, ToolError, ToolOutput};
 
 const DEFAULT_LIMIT: usize = 2_000;
@@ -17,17 +19,6 @@ struct Args {
     offset: Option<usize>,
     #[serde(default)]
     limit: Option<usize>,
-}
-
-/// Content hash shown as `[path#TAG]`. An edit carrying a stale tag is rejected
-/// before it lands, and recomputing beats storing a snapshot per read.
-pub fn tag(content: &str) -> String {
-    let mut h: u32 = 0x811c_9dc5;
-    for b in content.as_bytes() {
-        h ^= *b as u32;
-        h = h.wrapping_mul(0x0100_0193);
-    }
-    format!("{:04X}", (h ^ (h >> 16)) & 0xFFFF)
 }
 
 fn looks_binary(bytes: &[u8]) -> bool {

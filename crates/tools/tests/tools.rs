@@ -19,15 +19,15 @@ async fn read_numbers_lines_under_a_content_tag() {
     let out = run(&tools::read::Read, json!({ "path": "a.rs" }), &c).await;
     assert_eq!(
         out.lines().next().unwrap(),
-        format!("[a.rs#{}]", tools::read::tag("one\ntwo\nthree\n"))
+        format!("[a.rs#{}]", hashline::tag("one\ntwo\nthree\n"))
     );
     assert!(out.contains("\n1:one\n2:two\n3:three\n"), "{out}");
 }
 
 #[test]
 fn the_tag_moves_when_the_file_does() {
-    let before = tools::read::tag("one\n");
-    let after = tools::read::tag("one\ntwo\n");
+    let before = hashline::tag("one\n");
+    let after = hashline::tag("one\ntwo\n");
     assert_ne!(before, after, "a stale anchor must be detectable");
     assert_eq!(before.len(), 4);
 }
@@ -163,9 +163,10 @@ async fn silent_success_is_marked_useless() {
 #[test]
 fn registry_exposes_a_stable_ordered_tool_block() {
     let r = Registry::builtin();
-    assert_eq!(r.names(), vec!["bash", "read", "write"]);
+    assert_eq!(r.names(), vec!["bash", "edit", "read", "write"]);
     let names: Vec<String> = r.defs().iter().map(|d| d.name.clone()).collect();
-    assert_eq!(names, vec!["bash", "read", "write"]);
+    assert_eq!(names, vec!["bash", "edit", "read", "write"]);
+    assert_eq!(r.get("edit").unwrap().tier(), Tier::Write);
     assert_eq!(r.get("bash").unwrap().tier(), Tier::Exec);
     assert_eq!(r.get("read").unwrap().tier(), Tier::Read);
 }
@@ -214,4 +215,134 @@ async fn multibyte_output_respects_the_byte_budget_and_stays_valid_utf8() {
         &out[..80.min(out.len())]
     );
     assert!(out.len() < 40_000, "clamped output was {} bytes", out.len());
+}
+
+/// Read a file the way the model would, then edit it with the TAG that read returned.
+async fn read_then_edit(c: &Ctx, path: &str, ops: &str) -> Result<String, ToolError> {
+    let view = run(&tools::read::Read, json!({ "path": path }), c).await;
+    let tag = view.split('#').nth(1).unwrap().split(']').next().unwrap();
+    let patch = format!("[{path}#{tag}]\n{ops}");
+    tools::edit::Edit
+        .execute(json!({ "patch": patch }), c)
+        .await
+        .map(|o| o.flatten())
+}
+
+#[tokio::test]
+async fn edit_applies_a_patch_anchored_to_the_tag_read_returned() {
+    let (_d, c) = ctx();
+    let path = c.workspace.root().join("a.rs");
+    std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
+
+    let report = read_then_edit(&c, "a.rs", "PUT 2.=2:\n+TWO\n")
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\nTWO\nthree\n");
+    // The report must carry the new tag and the new numbering, or the model
+    // has to re-read before it can edit again.
+    assert!(
+        report.starts_with(&format!("[a.rs#{}]", hashline::tag("one\nTWO\nthree\n"))),
+        "{report}"
+    );
+    assert!(report.contains("2:TWO"), "{report}");
+}
+
+#[tokio::test]
+async fn two_edits_in_a_row_need_no_re_read() {
+    let (_d, c) = ctx();
+    let path = c.workspace.root().join("a.rs");
+    std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
+
+    let first = read_then_edit(&c, "a.rs", "PUT 1.=1:\n+a\n+b\n")
+        .await
+        .unwrap();
+    let tag = first.split('#').nth(1).unwrap().split(']').next().unwrap();
+    let second = format!("[a.rs#{tag}]\nPUT 4.=4:\n+THREE\n");
+    tools::edit::Edit
+        .execute(json!({ "patch": second }), &c)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "a\nb\ntwo\nTHREE\n"
+    );
+}
+
+#[tokio::test]
+async fn a_stale_tag_leaves_the_file_untouched() {
+    let (_d, c) = ctx();
+    let path = c.workspace.root().join("a.rs");
+    std::fs::write(&path, "one\ntwo\n").unwrap();
+
+    let err = tools::edit::Edit
+        .execute(json!({ "patch": "[a.rs#0000]\nPUT 1.=1:\n+X\n" }), &c)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("Re-read it"), "{err}");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "one\ntwo\n",
+        "nothing may be written"
+    );
+}
+
+#[tokio::test]
+async fn a_multi_file_patch_is_all_or_nothing_on_disk() {
+    let (_d, c) = ctx();
+    std::fs::write(c.workspace.root().join("a.rs"), "a\n").unwrap();
+    std::fs::write(c.workspace.root().join("b.rs"), "b\n").unwrap();
+
+    let patch = format!(
+        "[a.rs#{}]\nPUT 1.=1:\n+A\n[b.rs#0000]\nPUT 1.=1:\n+B\n",
+        hashline::tag("a\n")
+    );
+    assert!(
+        tools::edit::Edit
+            .execute(json!({ "patch": patch }), &c)
+            .await
+            .is_err()
+    );
+    // a.rs was valid, but a half-applied patch is worse than a rejected one.
+    assert_eq!(
+        std::fs::read_to_string(c.workspace.root().join("a.rs")).unwrap(),
+        "a\n"
+    );
+}
+
+#[tokio::test]
+async fn edit_moves_a_file_and_reports_the_destination() {
+    let (_d, c) = ctx();
+    std::fs::write(c.workspace.root().join("a.rs"), "one\n").unwrap();
+
+    let report = read_then_edit(&c, "a.rs", "PUT 1.=1:\n+ONE\nMV lib/a.rs\n")
+        .await
+        .unwrap();
+    assert!(report.starts_with("a.rs → [lib/a.rs#"), "{report}");
+    assert!(!c.workspace.root().join("a.rs").exists());
+    assert_eq!(
+        std::fs::read_to_string(c.workspace.root().join("lib/a.rs")).unwrap(),
+        "ONE\n"
+    );
+}
+
+#[tokio::test]
+async fn edit_refuses_a_file_it_cannot_read_and_says_to_use_write() {
+    let (_d, c) = ctx();
+    let err = tools::edit::Edit
+        .execute(json!({ "patch": "[new.rs#0000]\nPUT 1.=1:\n+x\n" }), &c)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("use write to create one"), "{err}");
+}
+
+#[tokio::test]
+async fn edit_cannot_reach_outside_the_workspace() {
+    let (_d, c) = ctx();
+    let r = tools::edit::Edit
+        .execute(json!({ "patch": "[../escape.rs#0000]\nREM\n" }), &c)
+        .await;
+    assert!(matches!(r, Err(ToolError::Escape(_))), "{r:?}");
 }
