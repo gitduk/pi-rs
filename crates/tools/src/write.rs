@@ -53,9 +53,10 @@ impl Tool for Write {
         tokio::fs::write(&path, &args.content).await?;
 
         let lines = args.content.lines().count();
+        let unit = if lines == 1 { "line" } else { "lines" };
         let tag = crate::read::tag(&args.content);
         Ok(ToolOutput::text(format!(
-            "[{rel}#{tag}] wrote {lines} lines, {} bytes",
+            "[{rel}#{tag}] wrote {lines} {unit}, {} bytes",
             args.content.len()
         )))
     }

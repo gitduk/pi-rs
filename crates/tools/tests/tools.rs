@@ -85,7 +85,7 @@ async fn write_creates_parents_and_round_trips_through_read() {
         &c,
     )
     .await;
-    assert!(out.contains("wrote 1 lines"), "{out}");
+    assert!(out.contains("wrote 1 line,"), "{out}");
 
     let back = run(&tools::read::Read, json!({ "path": "a/b/c.rs" }), &c).await;
     assert!(back.contains("1:fn main() {}"), "{back}");
