@@ -170,7 +170,9 @@ fn summarize(args: &serde_json::Value) -> String {
             .collect();
         return clip(&files.join(" "), 80);
     }
-    for key in ["path", "command", "pattern", "query"] {
+    // `pattern` before `path`: a grep call carries both, and the pattern is the
+    // half that says what the agent was looking for.
+    for key in ["pattern", "command", "path", "query"] {
         if let Some(v) = args.get(key).and_then(|v| v.as_str()) {
             return clip(v, 80);
         }
@@ -206,5 +208,11 @@ mod tests {
         assert_eq!(summarize(&json!({ "path": "src/a.rs" })), "src/a.rs");
         assert_eq!(summarize(&json!({ "command": "cargo test" })), "cargo test");
         assert_eq!(summarize(&json!({ "nothing": 1 })), "");
+    }
+
+    #[test]
+    fn a_search_shows_what_it_looked_for_not_where() {
+        let args = json!({ "pattern": "fn tier", "path": "crates/tools/src" });
+        assert_eq!(summarize(&args), "fn tier");
     }
 }

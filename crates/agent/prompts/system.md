@@ -26,9 +26,15 @@ so a follow-up edit needs no second read.
 `write` replaces a file whole. Use it to create a file, or when more of the file
 changes than survives. Read the file first unless you are creating it.
 
+`grep` searches file contents; `glob` finds files by path. Both respect
+.gitignore and skip `.git`. grep returns the same `[path#TAG]` sections read
+does, so a match can go straight into an edit. Reach for them before `bash` with
+`find` or `rg`: they already know what to ignore.
+
 `bash` gets a fresh shell per call — `cd` and exported variables do not survive
-between calls. Pass `cwd` instead of prefixing `cd`. Prefer `read` and `write`
-over `cat`, heredocs, and `sed -i`: they report failures you can act on.
+between calls. Pass `cwd` instead of prefixing `cd`. Prefer `read`, `edit` and `write` over
+`cat`, heredocs, and `sed -i`: they report failures you can act on, and only they
+give you a TAG to edit against.
 
 Call independent tools in the same turn; they run in parallel. Chain them across
 turns only when a later call needs an earlier result.

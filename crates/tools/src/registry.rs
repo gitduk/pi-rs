@@ -29,6 +29,8 @@ impl Registry {
             .with(crate::read::Read)
             .with(crate::write::Write)
             .with(crate::edit::Edit)
+            .with(crate::grep::Grep)
+            .with(crate::glob::Glob)
             .with(crate::bash::Bash)
     }
 

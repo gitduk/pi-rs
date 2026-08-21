@@ -163,9 +163,12 @@ async fn silent_success_is_marked_useless() {
 #[test]
 fn registry_exposes_a_stable_ordered_tool_block() {
     let r = Registry::builtin();
-    assert_eq!(r.names(), vec!["bash", "edit", "read", "write"]);
+    assert_eq!(
+        r.names(),
+        vec!["bash", "edit", "glob", "grep", "read", "write"]
+    );
     let names: Vec<String> = r.defs().iter().map(|d| d.name.clone()).collect();
-    assert_eq!(names, vec!["bash", "edit", "read", "write"]);
+    assert_eq!(names, vec!["bash", "edit", "glob", "grep", "read", "write"]);
     assert_eq!(r.get("edit").unwrap().tier(), Tier::Write);
     assert_eq!(r.get("bash").unwrap().tier(), Tier::Exec);
     assert_eq!(r.get("read").unwrap().tier(), Tier::Read);
