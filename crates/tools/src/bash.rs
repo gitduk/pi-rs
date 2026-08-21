@@ -51,6 +51,26 @@ fn clamp(label: &str, body: &str) -> String {
     format!("<{label}>\n{h}\n… {dropped} bytes elided …\n{t}\n</{label}>\n")
 }
 
+/// SIGTERM the group, then SIGKILL whatever ignored it. A build killed outright
+/// can leave a corrupt output tree, so the polite signal goes first.
+#[cfg(unix)]
+async fn reap(group: Option<u32>) {
+    // A freshly spawned pid can never equal our own group's id, and the filter
+    // rejects 0 — `killpg(0, …)` would signal the agent itself.
+    let Some(pid) = group.filter(|p| *p > 1) else {
+        return;
+    };
+    let pid = pid as i32;
+    unsafe { libc::killpg(pid, libc::SIGTERM) };
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    unsafe { libc::killpg(pid, libc::SIGKILL) };
+}
+
+/// Windows has no process group to signal: the direct child still dies with
+/// `kill_on_drop`, but its descendants outlive a timeout.
+#[cfg(not(unix))]
+async fn reap(_group: Option<u32>) {}
+
 pub struct Bash;
 
 #[async_trait]
@@ -94,25 +114,36 @@ impl Tool for Bash {
                 .min(MAX_TIMEOUT_MS),
         );
 
-        let child = Command::new("sh")
-            .arg("-c")
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
             .arg(&args.command)
             .current_dir(&cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()?;
+            .kill_on_drop(true);
+        // Its own process group, so a timeout takes the whole tree. Killing the
+        // shell alone leaves everything it backgrounded running.
+        #[cfg(unix)]
+        cmd.process_group(0);
+
+        let child = cmd.spawn()?;
+        // wait_with_output consumes the child, so the group id is taken first.
+        let group = child.id();
 
         let waited = tokio::select! {
             r = child.wait_with_output() => Some(r?),
             _ = tokio::time::sleep(timeout) => None,
-            _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+            _ = ctx.cancel.cancelled() => {
+                reap(group).await;
+                return Err(ToolError::Cancelled);
+            }
         };
 
         let Some(out) = waited else {
+            reap(group).await;
             return Ok(ToolOutput::text(format!(
-                "timed out after {}ms; the shell was killed",
+                "timed out after {}ms; the command and everything it spawned were killed",
                 timeout.as_millis()
             )));
         };

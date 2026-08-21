@@ -12,6 +12,7 @@ use clap::{Parser, ValueEnum};
 use tokio::sync::mpsc;
 
 mod render;
+mod session;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum WireArg {
@@ -43,9 +44,18 @@ struct Args {
     /// The prompt. Reads stdin when omitted.
     prompt: Option<String>,
 
-    /// Catalog id, or the upstream model id together with --openai.
-    #[arg(short, long, default_value = "opus-5")]
-    model: String,
+    /// Catalog id, or the upstream id together with --wire. Defaults to the
+    /// resumed session's model, else opus-5.
+    #[arg(short, long)]
+    model: Option<String>,
+
+    /// Continue a saved session by id.
+    #[arg(long, value_name = "ID")]
+    resume: Option<String>,
+
+    /// Continue the most recent session for this workspace.
+    #[arg(short = 'c', long = "continue")]
+    continue_last: bool,
 
     /// Treat --model as an upstream id on this wire rather than a catalog entry.
     #[arg(long, value_enum)]
@@ -84,7 +94,7 @@ struct Args {
 
 /// A model described entirely by flags. Endpoints that mimic a known wire are
 /// not worth a catalog entry each until their quirks have been measured.
-fn ad_hoc(args: &Args, wire: WireArg) -> Result<ModelSpec> {
+fn ad_hoc(args: &Args, model: &str, wire: WireArg) -> Result<ModelSpec> {
     let base_url = args
         .base_url
         .clone()
@@ -100,8 +110,8 @@ fn ad_hoc(args: &Args, wire: WireArg) -> Result<ModelSpec> {
         ),
     };
     Ok(ModelSpec {
-        id: args.model.clone(),
-        wire_id: args.model.clone(),
+        id: model.to_string(),
+        wire_id: model.to_string(),
         base_url,
         wire,
         context_window: 128_000,
@@ -153,13 +163,30 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let prompt = read_prompt(&args)?;
 
+    let workspace = tools::Workspace::new(&args.cwd)
+        .with_context(|| format!("cannot use {} as a workspace", args.cwd))?;
+
+    let store = session::Store::default();
+    let prior = match (&args.resume, args.continue_last) {
+        (Some(id), _) => Some(store.load(id)?),
+        (None, true) => Some(store.latest(workspace.root())?),
+        _ => None,
+    };
+
+    // An explicit -m wins; otherwise a resumed run stays on the model that
+    // produced the transcript, whose reasoning blocks only replay to itself.
+    let model = args
+        .model
+        .clone()
+        .or_else(|| prior.as_ref().map(|p| p.model.clone()))
+        .unwrap_or_else(|| "opus-5".to_string());
+
     let mut spec = if let Some(wire) = args.wire {
-        ad_hoc(&args, wire)?
+        ad_hoc(&args, &model, wire)?
     } else {
-        brain::catalog::find(&args.model).with_context(|| {
+        brain::catalog::find(&model).with_context(|| {
             format!(
-                "unknown model `{}`; known: {}. Use --wire for anything else.",
-                args.model,
+                "unknown model `{model}`; known: {}. Use --wire for anything else.",
                 brain::catalog::builtin()
                     .iter()
                     .map(|m| m.id.clone())
@@ -171,9 +198,6 @@ async fn main() -> Result<()> {
     if let Some(url) = &args.base_url {
         spec.base_url = url.clone();
     }
-
-    let workspace = tools::Workspace::new(&args.cwd)
-        .with_context(|| format!("cannot use {} as a workspace", args.cwd))?;
 
     let mut registry = tools::Registry::builtin();
     if !args.tools.is_empty() {
@@ -202,6 +226,10 @@ async fn main() -> Result<()> {
         None => agent::DEFAULT_SYSTEM.to_string(),
     };
 
+    // Captured before the spec and workspace move into the agent and context.
+    let root = workspace.root().to_path_buf();
+    let model_id = spec.id.clone();
+
     let transport = transport_for(&spec)?;
     let mut ag = agent::Agent::new(transport, spec);
     ag.registry = registry;
@@ -225,11 +253,34 @@ async fn main() -> Result<()> {
         r.finish();
     });
 
-    let mut session = agent::Session::with_prompt(prompt);
+    let id = prior
+        .as_ref()
+        .map(|p| p.id.clone())
+        .unwrap_or_else(session::new_id);
+    let carried = prior.map(|p| p.messages).unwrap_or_default();
+    let resumed = carried.len();
+    let messages = session::resume_with(carried, prompt);
+
+    let mut session = agent::Session { messages };
     let outcome = ag.run(&mut session, &ctx, &tx).await;
 
     drop(tx);
     let _ = painter.await;
+
+    // Saved whichever way the run ended: an aborted turn is exactly the one
+    // worth resuming.
+    match store.save(&id, &root, &model_id, &session.messages) {
+        Ok(_) if !args.quiet => {
+            let carried = if resumed > 0 {
+                format!(" · resumed {resumed} messages")
+            } else {
+                String::new()
+            };
+            eprintln!("session {id}{carried} — continue with `pir -c` or `pir --resume {id}`");
+        }
+        Err(e) => eprintln!("warning: the transcript was not saved: {e}"),
+        _ => {}
+    }
 
     outcome?;
     Ok(())

@@ -211,7 +211,9 @@ dependencies = [
  "anyhow",
  "brain",
  "clap",
+ "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tools",
 ]
@@ -1234,6 +1236,7 @@ dependencies = [
  "async-trait",
  "brain",
  "hashline",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",
