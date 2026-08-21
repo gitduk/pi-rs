@@ -3,6 +3,7 @@ use brain::message::ToolResultContent;
 use serde_json::Value;
 
 pub mod bash;
+pub mod blocks;
 pub mod edit;
 pub mod glob;
 pub mod grep;

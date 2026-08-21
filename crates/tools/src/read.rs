@@ -10,6 +10,7 @@ const DEFAULT_LIMIT: usize = 2_000;
 const MAX_LINE: usize = 2_000;
 const BINARY_SNIFF: usize = 8_000;
 const MAX_BYTES: u64 = 10 << 20;
+const OUTLINE_OVER: usize = 300;
 
 #[derive(Deserialize)]
 struct Args {
@@ -19,6 +20,9 @@ struct Args {
     offset: Option<usize>,
     #[serde(default)]
     limit: Option<usize>,
+    /// Force the skeleton on, or off for a file long enough to trigger it.
+    #[serde(default)]
+    outline: Option<bool>,
 }
 
 fn looks_binary(bytes: &[u8]) -> bool {
@@ -36,7 +40,9 @@ impl Tool for Read {
     fn description(&self) -> &str {
         "Read a file as numbered lines, or list a directory. Output is headed by \
          [path#TAG]; the TAG is required by later edits and goes stale when the \
-         file changes."
+         file changes. A long file comes back as a skeleton of its declarations \
+         instead — read a range with offset and limit, or replace one whole \
+         construct with edit's `PUT N*:`."
     }
 
     fn schema(&self) -> Value {
@@ -46,6 +52,12 @@ impl Tool for Read {
                 "path": { "type": "string", "description": "Workspace-relative path." },
                 "offset": { "type": "integer", "description": "1-based first line. Default 1." },
                 "limit": { "type": "integer", "description": "Max lines. Default 2000." },
+                "outline": {
+                    "type": "boolean",
+                    "description": "Return the file's declarations instead of its lines. \
+                                    Applied automatically to long files unless offset or \
+                                    limit is given.",
+                },
             },
             "required": ["path"],
             "additionalProperties": false,
@@ -101,6 +113,26 @@ impl Tool for Read {
         let tag = tag(&content);
 
         let all: Vec<&str> = content.lines().collect();
+
+        // A range request is an explicit ask for lines; only an unqualified read
+        // of a long file is worth answering with a skeleton.
+        let ranged = args.offset.is_some() || args.limit.is_some();
+        let wants_outline = args.outline.unwrap_or(!ranged && all.len() > OUTLINE_OVER);
+        if wants_outline && let Some(lang) = syntax::Lang::of(&rel) {
+            let items = syntax::outline(lang, &content);
+            if !items.is_empty() {
+                let mut out = format!("[{rel}#{tag}] {} lines · outline\n", all.len());
+                for item in &items {
+                    out.push_str(&format!("{}:{}\n", item.line, item.text));
+                }
+                out.push_str(
+                    "… declarations only. Read a range with offset and limit, or \
+                     replace one whole with edit's `PUT N*:`.\n",
+                );
+                return Ok(ToolOutput::text(out));
+            }
+        }
+
         let offset = args.offset.unwrap_or(1).max(1);
         let limit = args.limit.unwrap_or(DEFAULT_LIMIT).max(1);
         let start = offset - 1;

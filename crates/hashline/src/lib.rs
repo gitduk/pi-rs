@@ -22,6 +22,38 @@ pub enum LinePos {
     At(usize),
     /// `$` — after the last line, whatever it turns out to be.
     Tail,
+    /// `>N*` — after the construct opening at N, wherever it closes.
+    AfterBlock(usize),
+}
+
+/// What a hunk names. `Block` is resolved against the file's syntax before
+/// anything is applied, so the applier only ever sees line ranges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    Range {
+        start: usize,
+        end: usize,
+    },
+    /// `N*` — the construct opening at N, through wherever it closes.
+    Block {
+        line: usize,
+    },
+}
+
+/// Resolves `N*` to the construct's closing line. Injected rather than linked
+/// so this crate stays a pure function of its inputs.
+pub trait Blocks {
+    /// Inclusive end line of the construct opening at `line`, if there is one.
+    fn end_of(&self, path: &str, content: &str, line: usize) -> Option<usize>;
+}
+
+/// For callers with no parser. Every `N*` then reports that it cannot resolve.
+pub struct NoBlocks;
+
+impl Blocks for NoBlocks {
+    fn end_of(&self, _path: &str, _content: &str, _line: usize) -> Option<usize> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,8 +66,7 @@ pub enum Body {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
     Replace {
-        start: usize,
-        end: usize,
+        target: Target,
         body: Body,
     },
     InsertBefore {
@@ -47,8 +78,7 @@ pub enum Op {
         body: Body,
     },
     Cut {
-        start: usize,
-        end: usize,
+        target: Target,
         register: Option<String>,
     },
     Remove,
@@ -123,6 +153,13 @@ pub enum Error {
         b_end: usize,
         overlap: usize,
     },
+
+    #[error(
+        "{path} line {line} opens no construct a block op can resolve — a closing \
+         brace, a blank line, or a language with no parser. Name the lines with \
+         `N.=M` instead."
+    )]
+    NoBlockAt { path: String, line: usize },
 
     #[error("register `@{name}` was never filled; a CUT must fill it before a PUT pastes it")]
     UnknownRegister { name: String },

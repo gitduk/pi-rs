@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 brain.workspace = true
 hashline.workspace = true
+syntax.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -25,9 +25,14 @@ Ops. Every op line starts with a verb — PUT, CUT, MV or REM — and every line
 number is the ORIGINAL one from that read: earlier hunks in the same patch never
 shift later ones.
   PUT N.=M:   replace original lines N through M, inclusive, with the body
+  PUT N*:     replace the whole construct opening at line N; its closing line is
+              resolved for you. Point N at the first decorator or attribute to
+              take those with it.
   PUT <N:     insert the body before line N (`<1` is the file head)
   PUT >N:     insert the body after line N (`>$` is the file tail)
+  PUT >N*:    insert the body after the construct at N closes
   CUT N.=M    delete lines N through M, capturing them; add `@name` to label it
+  CUT N*      the same, for a whole construct
   PUT <N @name / PUT >N @name / PUT N.=M @name   paste a captured register
   MV dest     rename; edits in this section land first, then the file moves
   REM         delete the file; may not share a section with other ops
@@ -117,7 +122,8 @@ impl Tool for Edit {
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
         // Nothing has touched the disk yet: a rejected patch leaves no trace.
-        let plan = hashline::apply(&patch, &view).map_err(|e| ToolError::Invalid(e.to_string()))?;
+        let plan = hashline::apply(&patch, &view, &crate::blocks::TreeSitter)
+            .map_err(|e| ToolError::Invalid(e.to_string()))?;
 
         let mut report = String::new();
         for change in &plan.changes {

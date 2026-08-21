@@ -1,9 +1,7 @@
 use std::collections::HashMap;
 
-use crate::{Body, Error, Files, LinePos, Op, Patch, Section, tag};
+use crate::{Blocks, Body, Error, Files, LinePos, Op, Patch, Section, Target, tag};
 
-/// Where new content landed, in the file's *new* numbering. Reported back so a
-/// second edit needs no re-read: the format only pays off if it removes them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Landed {
     pub start: usize,
@@ -58,7 +56,7 @@ fn join(lines: &[String], trailing: bool) -> String {
 
 /// Validate every section, then build the whole plan. Nothing reaches the caller
 /// unless all of it succeeds: a half-applied patch is worse than a rejected one.
-pub fn apply(patch: &Patch, files: &Files<'_>) -> Result<Plan, Error> {
+pub fn apply(patch: &Patch, files: &Files<'_>, blocks: &dyn Blocks) -> Result<Plan, Error> {
     for section in &patch.sections {
         let content = *files
             .get(section.path.as_str())
@@ -75,16 +73,23 @@ pub fn apply(patch: &Patch, files: &Files<'_>) -> Result<Plan, Error> {
         }
     }
 
+    // Blocks resolve first, so everything below sees only line ranges and a
+    // construct that cannot be found rejects the patch before any edit is built.
+    let resolved: Vec<Vec<Op>> = patch
+        .sections
+        .iter()
+        .map(|s| resolve(s, files[s.path.as_str()], blocks))
+        .collect::<Result<_, _>>()?;
+
     // Registers fill from original content, so a move reads the same bytes
     // whether its CUT and PUT sit in one section or in two files.
     let mut registers: HashMap<Option<String>, Vec<String>> = HashMap::new();
-    for section in &patch.sections {
+    for (section, ops) in patch.sections.iter().zip(&resolved) {
         let content = files[section.path.as_str()];
         let (lines, _) = split(content);
-        for op in &section.ops {
+        for op in ops {
             if let Op::Cut {
-                start,
-                end,
+                target: Target::Range { start, end },
                 register,
             } = op
             {
@@ -99,11 +104,62 @@ pub fn apply(patch: &Patch, files: &Files<'_>) -> Result<Plan, Error> {
     }
 
     let mut plan = Plan::default();
-    for section in &patch.sections {
-        plan.changes
-            .push(build(section, files[section.path.as_str()], &registers)?);
+    for (section, ops) in patch.sections.iter().zip(&resolved) {
+        plan.changes.push(build(
+            section,
+            ops,
+            files[section.path.as_str()],
+            &registers,
+        )?);
     }
     Ok(plan)
+}
+
+/// Turn every `N*` into the range it names. A construct that cannot be found is
+/// an error, never a guess: guessing here rewrites code nobody looked at.
+fn resolve(section: &Section, content: &str, blocks: &dyn Blocks) -> Result<Vec<Op>, Error> {
+    let end_of = |line: usize| -> Result<usize, Error> {
+        blocks
+            .end_of(&section.path, content, line)
+            .ok_or_else(|| Error::NoBlockAt {
+                path: section.path.clone(),
+                line,
+            })
+    };
+    let as_range = |t: &Target| -> Result<Target, Error> {
+        Ok(match *t {
+            Target::Range { .. } => *t,
+            Target::Block { line } => Target::Range {
+                start: line,
+                end: end_of(line)?,
+            },
+        })
+    };
+
+    section
+        .ops
+        .iter()
+        .map(|op| {
+            Ok(match op {
+                Op::Replace { target, body } => Op::Replace {
+                    target: as_range(target)?,
+                    body: body.clone(),
+                },
+                Op::Cut { target, register } => Op::Cut {
+                    target: as_range(target)?,
+                    register: register.clone(),
+                },
+                Op::InsertAfter {
+                    at: LinePos::AfterBlock(line),
+                    body,
+                } => Op::InsertAfter {
+                    at: LinePos::At(end_of(*line)?),
+                    body: body.clone(),
+                },
+                other => other.clone(),
+            })
+        })
+        .collect()
 }
 
 fn bounds(section: &Section, start: usize, end: usize, len: usize) -> Result<(), Error> {
@@ -118,7 +174,7 @@ fn bounds(section: &Section, start: usize, end: usize, len: usize) -> Result<(),
     Ok(())
 }
 
-fn resolve(
+fn fill(
     body: &Body,
     registers: &HashMap<Option<String>, Vec<String>>,
 ) -> Result<Vec<String>, Error> {
@@ -133,12 +189,12 @@ fn resolve(
 
 fn build(
     section: &Section,
+    ops: &[Op],
     content: &str,
     registers: &HashMap<Option<String>, Vec<String>>,
 ) -> Result<Change, Error> {
-    let has_remove = section.ops.iter().any(|o| matches!(o, Op::Remove));
-    if has_remove {
-        if section.ops.len() > 1 {
+    if ops.iter().any(|o| matches!(o, Op::Remove)) {
+        if ops.len() > 1 {
             return Err(Error::RemoveWithOps {
                 path: section.path.clone(),
             });
@@ -156,13 +212,19 @@ fn build(
     let mut after: HashMap<usize, Vec<String>> = HashMap::new();
     let mut dest: Option<&str> = None;
 
-    for op in &section.ops {
+    for op in ops {
         match op {
-            Op::Replace { start, end, body } => {
+            Op::Replace {
+                target: Target::Range { start, end },
+                body,
+            } => {
                 bounds(section, *start, *end, len)?;
-                spans.push((*start, *end, resolve(body, registers)?));
+                spans.push((*start, *end, fill(body, registers)?));
             }
-            Op::Cut { start, end, .. } => spans.push((*start, *end, Vec::new())),
+            Op::Cut {
+                target: Target::Range { start, end },
+                ..
+            } => spans.push((*start, *end, Vec::new())),
             Op::InsertBefore { line, body } => {
                 if *line > len.max(1) {
                     return Err(Error::OutOfRange {
@@ -175,7 +237,7 @@ fn build(
                 before
                     .entry(*line)
                     .or_default()
-                    .extend(resolve(body, registers)?);
+                    .extend(fill(body, registers)?);
             }
             Op::InsertAfter { at, body } => {
                 let n = match at {
@@ -184,14 +246,13 @@ fn build(
                         bounds(section, *n, *n, len)?;
                         *n
                     }
+                    LinePos::AfterBlock(_) => unreachable!("resolved before build"),
                 };
-                after
-                    .entry(n)
-                    .or_default()
-                    .extend(resolve(body, registers)?);
+                after.entry(n).or_default().extend(fill(body, registers)?);
             }
             Op::Move { dest: d } => dest = Some(d),
             Op::Remove => unreachable!("handled above"),
+            Op::Replace { .. } | Op::Cut { .. } => unreachable!("blocks resolved before build"),
         }
     }
 
@@ -211,8 +272,7 @@ fn build(
     }
 
     // An insertion buried inside a replaced span has no anchor left once the
-    // span is gone; dropping it silently would apply a patch the model did not
-    // write.
+    // span is gone; dropping it silently would apply a patch nobody wrote.
     for (start, end, _) in &spans {
         let inside_before = before.keys().find(|k| **k > *start && **k <= *end);
         let inside_after = after.keys().find(|k| **k >= *start && **k < *end);

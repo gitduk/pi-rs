@@ -1,4 +1,4 @@
-use crate::{Body, Error, LinePos, Op, Patch, Section};
+use crate::{Body, Error, LinePos, Op, Patch, Section, Target};
 
 /// Where a body row must start. A model reaching for unified-diff habits writes
 /// `-old` or a bare context line; both are rejected by name.
@@ -48,6 +48,28 @@ fn register(rest: &str, line: usize) -> Result<Option<String>, Error> {
             line,
             what: format!("expected `@name` or nothing, got `{rest}`"),
         }),
+    }
+}
+
+/// `N*` or `N.=M`.
+fn target(spec: &str, line: usize) -> Result<Target, Error> {
+    match spec.strip_suffix('*') {
+        Some(n) => {
+            let n = n
+                .trim()
+                .parse::<usize>()
+                .ok()
+                .filter(|n| *n > 0)
+                .ok_or_else(|| Error::Syntax {
+                    line,
+                    what: format!("`{spec}` needs a line number before `*`"),
+                })?;
+            Ok(Target::Block { line: n })
+        }
+        None => {
+            let (start, end) = range(spec, line)?;
+            Ok(Target::Range { start, end })
+        }
     }
 }
 
@@ -126,10 +148,8 @@ pub fn parse(input: &str) -> Result<Patch, Error> {
             parse_put(rest.trim(), no)?
         } else if let Some(rest) = line.strip_prefix("CUT ") {
             let (spec, tail) = split_target(rest.trim());
-            let (start, end) = range(spec, no)?;
             Op::Cut {
-                start,
-                end,
+                target: target(spec, no)?,
                 register: register(tail, no)?,
             }
         } else if line == "REM" {
@@ -155,8 +175,17 @@ pub fn parse(input: &str) -> Result<Patch, Error> {
         } else {
             // A bare range or target is the verb-less slip a model makes most;
             // naming the repair costs a token and saves a turn.
+            let numbered = line
+                .split_once(':')
+                .is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
             let hint = if line.starts_with(['<', '>']) || line.contains(".=") {
                 format!(" — did you mean `PUT {line}`?")
+            } else if numbered {
+                // A line pasted straight out of read or grep output.
+                " — that is a line from a read, not an op. Name it in a range \
+                 (`PUT N.=N:`) or a block (`PUT N*:`), and put the new text in \
+                 `+` rows."
+                    .into()
             } else {
                 String::new()
             };
@@ -206,6 +235,17 @@ pub fn parse(input: &str) -> Result<Patch, Error> {
     Ok(Patch { sections })
 }
 
+fn number(text: &str, line: usize, what: &str) -> Result<usize, Error> {
+    text.trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|n| *n > 0)
+        .ok_or_else(|| Error::Syntax {
+            line,
+            what: what.to_string(),
+        })
+}
+
 fn parse_put(rest: &str, no: usize) -> Result<Op, Error> {
     // `:` marks a header whose content arrives as `+` rows; without it the
     // content comes from a register.
@@ -238,29 +278,22 @@ fn parse_put(rest: &str, no: usize) -> Result<Op, Error> {
         let t = t.trim();
         let at = if t == "$" {
             LinePos::Tail
+        } else if let Some(n) = t.strip_suffix('*') {
+            LinePos::AfterBlock(number(n, no, "`>N*` needs a line number before `*`")?)
         } else {
-            LinePos::At(t.parse::<usize>().ok().filter(|n| *n > 0).ok_or_else(|| {
-                Error::Syntax {
-                    line: no,
-                    what: format!("`>{t}` needs a line number or `$` for the file tail"),
-                }
-            })?)
+            LinePos::At(number(
+                t,
+                no,
+                "`>N` needs a line number or `$` for the file tail",
+            )?)
         };
         return Ok(Op::InsertAfter {
             at,
             body: placeholder(),
         });
     }
-    if spec.contains('*') {
-        return Err(Error::Syntax {
-            line: no,
-            what: "block ops (`N*`) are not supported yet; name the lines with `N.=M`".into(),
-        });
-    }
-    let (start, end) = range(spec, no)?;
     Ok(Op::Replace {
-        start,
-        end,
+        target: target(spec, no)?,
         body: placeholder(),
     })
 }

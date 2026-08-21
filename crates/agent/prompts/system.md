@@ -19,9 +19,15 @@ them, and do not restate a file's contents back to the user.
 of the file's current contents: if you read a file and the TAG later differs, the
 file changed underneath you and what you remember is stale.
 
+A long file comes back as a skeleton of its declarations, not its lines. Those
+line numbers are real: read a range around one with offset and limit, or replace
+a whole construct with `PUT N*:` without reading its body at all.
+
 `edit` changes part of a file. It anchors on the TAG, so read the file in the
 same turn or a recent one; its result carries the new TAG and the new numbering,
-so a follow-up edit needs no second read.
+so a follow-up edit needs no second read. `PUT N*:` replaces the whole construct
+opening at line N — prefer it to counting lines when you are replacing a
+function, a type, or a section.
 
 `write` replaces a file whole. Use it to create a file, or when more of the file
 changes than survives. Read the file first unless you are creating it.

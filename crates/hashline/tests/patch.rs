@@ -1,6 +1,16 @@
 use std::collections::HashMap;
 
-use hashline::{Change, Error, apply, parse, tag};
+use hashline::{Blocks, Change, Error, NoBlocks, apply, parse, tag};
+
+/// Explicit start→end pairs. hashline never parses source itself, so its own
+/// tests should not either.
+struct Fake(&'static [(usize, usize)]);
+
+impl Blocks for Fake {
+    fn end_of(&self, _path: &str, _content: &str, line: usize) -> Option<usize> {
+        self.0.iter().find(|(s, _)| *s == line).map(|(_, e)| *e)
+    }
+}
 
 fn files<'a>(pairs: &[(&'a str, &'a str)]) -> HashMap<&'a str, &'a str> {
     pairs.iter().copied().collect()
@@ -10,7 +20,7 @@ fn files<'a>(pairs: &[(&'a str, &'a str)]) -> HashMap<&'a str, &'a str> {
 fn edit(before: &str, ops: &str) -> Result<String, Error> {
     let src = format!("[a.rs#{}]\n{ops}", tag(before));
     let patch = parse(&src)?;
-    let plan = apply(&patch, &files(&[("a.rs", before)]))?;
+    let plan = apply(&patch, &files(&[("a.rs", before)]), &NoBlocks)?;
     match &plan.changes[0] {
         Change::Write { content, .. } => Ok(content.clone()),
         other => panic!("expected a write, got {other:?}"),
@@ -76,7 +86,7 @@ fn later_hunks_keep_their_original_numbering() {
 fn a_stale_tag_is_rejected_before_anything_is_built() {
     let src = "[a.rs#0000]\nPUT 1.=1:\n+x\n";
     let patch = parse(src).unwrap();
-    let err = apply(&patch, &files(&[("a.rs", SRC)])).unwrap_err();
+    let err = apply(&patch, &files(&[("a.rs", SRC)]), &NoBlocks).unwrap_err();
     assert!(matches!(err, Error::StaleTag { .. }), "{err}");
     assert!(err.to_string().contains("Re-read it"), "{err}");
 }
@@ -89,7 +99,7 @@ fn one_stale_section_rejects_the_whole_patch() {
     );
     let patch = parse(&src).unwrap();
     // a.rs is valid, but a partly-applied patch is worse than a rejected one.
-    assert!(apply(&patch, &files(&[("a.rs", SRC), ("b.rs", SRC)])).is_err());
+    assert!(apply(&patch, &files(&[("a.rs", SRC), ("b.rs", SRC)]), &NoBlocks).is_err());
 }
 
 #[test]
@@ -141,7 +151,7 @@ fn a_register_flows_between_files() {
         tag(b)
     );
     let patch = parse(&src).unwrap();
-    let plan = apply(&patch, &files(&[("a.rs", a), ("b.rs", b)])).unwrap();
+    let plan = apply(&patch, &files(&[("a.rs", a), ("b.rs", b)]), &NoBlocks).unwrap();
 
     assert_eq!(
         plan.changes[0],
@@ -170,7 +180,7 @@ fn pasting_an_unfilled_register_is_an_error() {
 #[test]
 fn rem_deletes_and_refuses_company() {
     let src = format!("[a.rs#{}]\nREM\n", tag(SRC));
-    let plan = apply(&parse(&src).unwrap(), &files(&[("a.rs", SRC)])).unwrap();
+    let plan = apply(&parse(&src).unwrap(), &files(&[("a.rs", SRC)]), &NoBlocks).unwrap();
     assert_eq!(
         plan.changes[0],
         Change::Remove {
@@ -179,14 +189,14 @@ fn rem_deletes_and_refuses_company() {
     );
 
     let src = format!("[a.rs#{}]\nREM\nPUT 1.=1:\n+x\n", tag(SRC));
-    let err = apply(&parse(&src).unwrap(), &files(&[("a.rs", SRC)])).unwrap_err();
+    let err = apply(&parse(&src).unwrap(), &files(&[("a.rs", SRC)]), &NoBlocks).unwrap_err();
     assert!(matches!(err, Error::RemoveWithOps { .. }), "{err}");
 }
 
 #[test]
 fn mv_carries_the_edited_content_to_the_destination() {
     let src = format!("[a.rs#{}]\nPUT 1.=1:\n+ONE\nMV lib/a.rs\n", tag(SRC));
-    let plan = apply(&parse(&src).unwrap(), &files(&[("a.rs", SRC)])).unwrap();
+    let plan = apply(&parse(&src).unwrap(), &files(&[("a.rs", SRC)]), &NoBlocks).unwrap();
     assert_eq!(
         plan.changes[0],
         Change::Rename {
@@ -216,10 +226,56 @@ fn unified_diff_habits_are_named_rather_than_guessed_at() {
     assert!(err.to_string().contains("not a unified diff"), "{err}");
 }
 
+/// Apply `ops` with a resolver that knows the given start→end pairs.
+fn edit_blocks(before: &str, ops: &str, pairs: &'static [(usize, usize)]) -> Result<String, Error> {
+    let src = format!("[a.rs#{}]\n{ops}", tag(before));
+    let plan = apply(&parse(&src)?, &files(&[("a.rs", before)]), &Fake(pairs))?;
+    match &plan.changes[0] {
+        Change::Write { content, .. } => Ok(content.clone()),
+        other => panic!("expected a write, got {other:?}"),
+    }
+}
+
 #[test]
-fn block_ops_say_they_are_unsupported_instead_of_misapplying() {
+fn a_block_op_replaces_through_the_construct_it_names() {
+    // `2*` covers lines 2-3; the body length is unrelated to the range.
+    assert_eq!(
+        edit_blocks(SRC, "PUT 2*:\n+X\n", &[(2, 3)]).unwrap(),
+        "one\nX\nfour\n"
+    );
+    assert_eq!(
+        edit_blocks(SRC, "CUT 2*\n", &[(2, 3)]).unwrap(),
+        "one\nfour\n"
+    );
+}
+
+#[test]
+fn an_insert_after_a_block_lands_past_its_closing_line() {
+    let out = edit_blocks(SRC, "PUT >2*:\n+after\n", &[(2, 3)]).unwrap();
+    assert_eq!(out, "one\ntwo\nthree\nafter\nfour\n");
+}
+
+#[test]
+fn a_block_and_a_range_still_may_not_overlap() {
+    let err = edit_blocks(SRC, "PUT 1*:\n+a\nPUT 2.=2:\n+b\n", &[(1, 2)]).unwrap_err();
+    assert!(matches!(err, Error::Overlap { .. }), "{err}");
+}
+
+#[test]
+fn a_block_op_on_a_line_that_opens_nothing_is_rejected() {
+    // Guessing here would rewrite code nobody looked at.
+    let err = edit_blocks(SRC, "PUT 3*:\n+x\n", &[(2, 3)]).unwrap_err();
+    assert!(matches!(err, Error::NoBlockAt { line: 3, .. }), "{err}");
+    assert!(
+        err.to_string().contains("Name the lines with `N.=M`"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_caller_with_no_parser_reports_that_rather_than_guessing() {
     let err = edit(SRC, "PUT 1*:\n+x\n").unwrap_err();
-    assert!(err.to_string().contains("block ops"), "{err}");
+    assert!(matches!(err, Error::NoBlockAt { .. }), "{err}");
 }
 
 #[test]
@@ -241,7 +297,7 @@ fn landed_reports_new_numbering_so_a_second_edit_needs_no_re_read() {
         "[a.rs#{}]\nPUT 1.=1:\n+a\n+b\n+c\nPUT >4:\n+tail\n",
         tag(SRC)
     );
-    let plan = apply(&parse(&src).unwrap(), &files(&[("a.rs", SRC)])).unwrap();
+    let plan = apply(&parse(&src).unwrap(), &files(&[("a.rs", SRC)]), &NoBlocks).unwrap();
     let Change::Write {
         content, landed, ..
     } = &plan.changes[0]
@@ -271,4 +327,14 @@ fn a_verb_less_op_line_names_the_repair() {
 
     let err = edit(SRC, ">3:\n+x\n").unwrap_err().to_string();
     assert!(err.contains("did you mean `PUT >3:`?"), "{err}");
+}
+
+#[test]
+fn a_line_pasted_from_read_output_is_recognized_as_such() {
+    let err = edit(SRC, "2:two\n+new\n").unwrap_err().to_string();
+    assert!(
+        err.contains("that is a line from a read, not an op"),
+        "{err}"
+    );
+    assert!(err.contains("`PUT N*:`"), "{err}");
 }
