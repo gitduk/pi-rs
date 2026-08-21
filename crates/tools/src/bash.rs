@@ -130,6 +130,21 @@ impl Tool for Bash {
         if body.is_empty() {
             return Ok(ToolOutput::useless("exit 0, no output"));
         }
-        Ok(ToolOutput::text(body))
+        // The first line of the result is `<stdout>`; the first line of the
+        // command's own output is what a progress display should show.
+        let first = stdout
+            .lines()
+            .chain(stderr.lines())
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("no output");
+        let summary = format!(
+            "{first}{}",
+            if code == 0 {
+                String::new()
+            } else {
+                format!(" · exit {code}")
+            }
+        );
+        Ok(ToolOutput::text(body).with_preview(summary))
     }
 }

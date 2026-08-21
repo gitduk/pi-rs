@@ -258,12 +258,11 @@ impl Agent {
                     ToolResult::error(call.id.clone(), &call.name, body)
                 }
                 (_, Some(Ok(out))) => {
-                    let body = out.flatten();
                     let _ = tx.send(Event::ToolEnd {
                         id: call.id.0.clone(),
                         name: call.name.clone(),
                         is_error: false,
-                        preview: body.lines().next().unwrap_or_default().to_string(),
+                        preview: out.preview(),
                     });
                     ToolResult {
                         call: call.id.clone(),

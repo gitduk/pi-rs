@@ -21,8 +21,9 @@ PUT 2.=4:
 +replacement line one
 +replacement line two
 
-Ops. Every line number is the ORIGINAL one from that read: earlier hunks in the
-same patch never shift later ones.
+Ops. Every op line starts with a verb — PUT, CUT, MV or REM — and every line
+number is the ORIGINAL one from that read: earlier hunks in the same patch never
+shift later ones.
   PUT N.=M:   replace original lines N through M, inclusive, with the body
   PUT <N:     insert the body before line N (`<1` is the file head)
   PUT >N:     insert the body after line N (`>$` is the file tail)

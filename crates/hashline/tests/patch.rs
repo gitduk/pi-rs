@@ -259,3 +259,16 @@ fn landed_reports_new_numbering_so_a_second_edit_needs_no_re_read() {
         ]
     );
 }
+
+#[test]
+fn a_verb_less_op_line_names_the_repair() {
+    let err = edit(SRC, "1.=2:\n+x\n").unwrap_err().to_string();
+    assert!(
+        err.contains("every op line starts with PUT, CUT, MV or REM"),
+        "{err}"
+    );
+    assert!(err.contains("did you mean `PUT 1.=2:`?"), "{err}");
+
+    let err = edit(SRC, ">3:\n+x\n").unwrap_err().to_string();
+    assert!(err.contains("did you mean `PUT >3:`?"), "{err}");
+}

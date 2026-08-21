@@ -167,6 +167,7 @@ impl ModelSpec {
 }
 
 const ANTHROPIC_BASE: &str = "https://api.anthropic.com";
+const DEEPSEEK_BASE: &str = "https://api.deepseek.com/anthropic";
 
 /// The models we actually run. Hand-written on purpose: a borrowed quirk table
 /// carries entries you cannot tell have gone stale.
@@ -222,7 +223,47 @@ pub fn builtin() -> Vec<ModelSpec> {
                 cache_write_per_mtok: 3.75,
             },
         },
+        deepseek("deepseek-chat", "deepseek-chat", None, 8_192),
+        deepseek(
+            "deepseek-reasoner",
+            "deepseek-reasoner",
+            Some(ThinkingSupport::Budget),
+            32_768,
+        ),
     ]
+}
+
+/// DeepSeek behind its Anthropic-compatible shim. Every compat value below was
+/// measured against the live endpoint, not inferred from the vendor it mimics.
+fn deepseek(id: &str, wire_id: &str, thinking: Option<ThinkingSupport>, max_out: u32) -> ModelSpec {
+    ModelSpec {
+        id: id.into(),
+        wire_id: wire_id.into(),
+        base_url: DEEPSEEK_BASE.into(),
+        wire: Wire::Anthropic(AnthropicCompat {
+            sampling_params: true,
+            forced_tool_choice: true,
+            tool_result_id_alias: false,
+            // `ttl: "1h"` is accepted without error, but nothing confirms it is
+            // honored; plain ephemeral is the claim we can defend.
+            long_cache_retention: false,
+            adaptive_thinking: true,
+        }),
+        context_window: 128_000,
+        // What we ask for, not a discovered ceiling: the endpoint accepts
+        // 200_000 and silently clamps, so it reports no real limit.
+        max_output_tokens: max_out,
+        caps: Capabilities {
+            tools: true,
+            parallel_tool_calls: true,
+            vision: false,
+            thinking,
+            cache_breakpoints: true,
+        },
+        thinking_replay: ThinkingReplay::Signed,
+        // Unpriced: a wrong cost reads as authoritative, an absent one does not.
+        pricing: Pricing::default(),
+    }
 }
 
 pub fn find(id: &str) -> Option<ModelSpec> {

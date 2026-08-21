@@ -53,6 +53,9 @@ pub struct ToolOutput {
     pub content: Vec<ToolResultContent>,
     /// Carries no information for later turns. Compaction may drop it.
     pub useless: bool,
+    /// One line for a progress display. Set it when the first line of the
+    /// result is structure rather than content.
+    pub preview: Option<String>,
 }
 
 impl ToolOutput {
@@ -62,6 +65,26 @@ impl ToolOutput {
                 text: body.into(),
             })],
             useless: false,
+            preview: None,
+        }
+    }
+
+    pub fn with_preview(mut self, line: impl Into<String>) -> Self {
+        self.preview = Some(line.into());
+        self
+    }
+
+    /// Falls back to the first line of the result, which is right for tools
+    /// whose result opens with content rather than a marker.
+    pub fn preview(&self) -> String {
+        match &self.preview {
+            Some(p) => p.clone(),
+            None => self
+                .flatten()
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_string(),
         }
     }
 

@@ -153,9 +153,18 @@ pub fn parse(input: &str) -> Result<Patch, Error> {
                     .into(),
             });
         } else {
+            // A bare range or target is the verb-less slip a model makes most;
+            // naming the repair costs a token and saves a turn.
+            let hint = if line.starts_with(['<', '>']) || line.contains(".=") {
+                format!(" — did you mean `PUT {line}`?")
+            } else {
+                String::new()
+            };
             return Err(Error::Syntax {
                 line: no,
-                what: format!("`{line}` is not an op; expected PUT, CUT, REM or MV"),
+                what: format!(
+                    "`{line}` is not an op; every op line starts with PUT, CUT, MV or REM{hint}"
+                ),
             });
         };
 

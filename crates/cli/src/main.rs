@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use brain::catalog::{
-    Capabilities, ModelSpec, OpenAiCompat, Pricing, ThinkingReplay, ThinkingSupport, Wire,
+    AnthropicCompat, Capabilities, ModelSpec, OpenAiCompat, Pricing, ThinkingReplay,
+    ThinkingSupport, Wire,
 };
 use brain::request::Effort;
 use brain::transport::{Transport, anthropic::Anthropic, openai::OpenAi};
@@ -11,6 +12,12 @@ use clap::{Parser, ValueEnum};
 use tokio::sync::mpsc;
 
 mod render;
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum WireArg {
+    Anthropic,
+    Openai,
+}
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum TierArg {
@@ -40,11 +47,11 @@ struct Args {
     #[arg(short, long, default_value = "opus-5")]
     model: String,
 
-    /// Treat --model as an OpenAI-compatible endpoint rather than a catalog entry.
-    #[arg(long)]
-    openai: bool,
+    /// Treat --model as an upstream id on this wire rather than a catalog entry.
+    #[arg(long, value_enum)]
+    wire: Option<WireArg>,
 
-    /// Overrides the model's base url. Required with --openai.
+    /// Overrides the model's base url. Required with --wire.
     #[arg(long)]
     base_url: Option<String>,
 
@@ -75,25 +82,35 @@ struct Args {
     quiet: bool,
 }
 
-/// A model reached over an OpenAI-compatible endpoint, described entirely by
-/// flags: local servers are not worth a catalog entry each.
-fn ad_hoc_openai(args: &Args) -> Result<ModelSpec> {
+/// A model described entirely by flags. Endpoints that mimic a known wire are
+/// not worth a catalog entry each until their quirks have been measured.
+fn ad_hoc(args: &Args, wire: WireArg) -> Result<ModelSpec> {
     let base_url = args
         .base_url
         .clone()
-        .context("--openai needs --base-url, e.g. http://localhost:8000/v1")?;
+        .context("--wire needs --base-url, e.g. --base-url http://localhost:8000/v1")?;
+    let (wire, thinking) = match wire {
+        WireArg::Anthropic => (
+            Wire::Anthropic(AnthropicCompat::default()),
+            Some(ThinkingSupport::Budget),
+        ),
+        WireArg::Openai => (
+            Wire::OpenAi(OpenAiCompat::default()),
+            Some(ThinkingSupport::Effort),
+        ),
+    };
     Ok(ModelSpec {
         id: args.model.clone(),
         wire_id: args.model.clone(),
         base_url,
-        wire: Wire::OpenAi(OpenAiCompat::default()),
+        wire,
         context_window: 128_000,
         max_output_tokens: 8_192,
         caps: Capabilities {
             tools: true,
             parallel_tool_calls: true,
             vision: false,
-            thinking: Some(ThinkingSupport::Effort),
+            thinking,
             cache_breakpoints: false,
         },
         thinking_replay: ThinkingReplay::Tagged,
@@ -136,12 +153,12 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let prompt = read_prompt(&args)?;
 
-    let mut spec = if args.openai {
-        ad_hoc_openai(&args)?
+    let mut spec = if let Some(wire) = args.wire {
+        ad_hoc(&args, wire)?
     } else {
         brain::catalog::find(&args.model).with_context(|| {
             format!(
-                "unknown model `{}`; known: {}. Use --openai for anything else.",
+                "unknown model `{}`; known: {}. Use --wire for anything else.",
                 args.model,
                 brain::catalog::builtin()
                     .iter()

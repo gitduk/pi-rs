@@ -346,3 +346,36 @@ async fn edit_cannot_reach_outside_the_workspace() {
         .await;
     assert!(matches!(r, Err(ToolError::Escape(_))), "{r:?}");
 }
+
+#[tokio::test]
+async fn bash_previews_its_output_not_the_stdout_marker() {
+    let (_d, c) = ctx();
+    let out = tools::bash::Bash
+        .execute(json!({ "command": "echo first; echo second" }), &c)
+        .await
+        .unwrap();
+    // The result opens with `<stdout>`, which tells a progress line nothing.
+    assert!(out.flatten().starts_with("<stdout>"));
+    assert_eq!(out.preview(), "first");
+}
+
+#[tokio::test]
+async fn a_failing_command_previews_the_error_and_the_code() {
+    let (_d, c) = ctx();
+    let out = tools::bash::Bash
+        .execute(json!({ "command": "echo boom >&2; exit 2" }), &c)
+        .await
+        .unwrap();
+    assert_eq!(out.preview(), "boom · exit 2");
+}
+
+#[tokio::test]
+async fn tools_whose_result_opens_with_content_need_no_explicit_preview() {
+    let (_d, c) = ctx();
+    std::fs::write(c.workspace.root().join("a.rs"), "one\n").unwrap();
+    let out = tools::read::Read
+        .execute(json!({ "path": "a.rs" }), &c)
+        .await
+        .unwrap();
+    assert_eq!(out.preview(), format!("[a.rs#{}]", hashline::tag("one\n")));
+}
