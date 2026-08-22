@@ -98,14 +98,14 @@ fn ancestral_agents(workspace: &Path) -> Vec<PathBuf> {
 
 /// Where skills come from, nearest first.
 ///
-/// Two names only: `.pi/skills`, which is ours, and `.agents/skills`, which is
-/// the shared standard. Another harness's private directory is deliberately not
-/// on the list — supporting the vendor-neutral location is what makes a shared
-/// skill shared, and reading each vendor's own folder as well only spreads the
-/// question of where a skill belongs. Anyone wanting one of those can point
-/// `.agents/skills` at it with a symlink.
+/// A repository contributes skills under one name, `.agents/skills`, and that
+/// is the shared standard rather than ours. Supporting the vendor-neutral
+/// location is what makes a shared skill shared; carrying a private name
+/// beside it — anyone's — only leaves the question of where a skill belongs
+/// permanently open. A directory under some other name reaches the list by
+/// being symlinked into this one, which is the same mechanism said out loud.
 pub fn sources(workspace: &Path) -> Vec<PathBuf> {
-    let mut out = vec![workspace.join(".pi/skills")];
+    let mut out = Vec::new();
     out.extend(ancestral_agents(workspace));
     let config = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
