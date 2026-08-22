@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use agent::log::Log;
 use anyhow::{Context, Result};
 use brain::message::Message;
 use serde::{Deserialize, Serialize};
@@ -10,7 +11,22 @@ pub struct Stored {
     pub workspace: String,
     pub model: String,
     pub created: u64,
-    pub messages: Vec<Message>,
+    #[serde(default)]
+    pub log: Log,
+    /// Transcripts written before the log existed. Read, never written.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    messages: Vec<Message>,
+}
+
+impl Stored {
+    /// The transcript, whichever shape it was stored in.
+    pub fn into_log(self) -> Log {
+        if self.log.is_empty() && !self.messages.is_empty() {
+            Log::from_messages(self.messages)
+        } else {
+            self.log
+        }
+    }
 }
 
 fn now() -> u64 {
@@ -43,33 +59,6 @@ pub fn new_id() -> String {
     format!("{}-{}", now(), std::process::id())
 }
 
-/// Graft a new prompt onto a saved transcript.
-///
-/// A run that died mid-turn usually ends on tool results the model never
-/// answered. Trimming back to the last clean assistant turn would throw the
-/// whole conversation away, so the prompt joins that trailing user message
-/// instead — results and text in one turn is a shape both wires accept. Only an
-/// assistant turn whose calls were never answered has to go: an unanswered
-/// `tool_use` makes the next request invalid.
-pub fn resume_with(mut messages: Vec<Message>, prompt: String) -> Vec<Message> {
-    while messages
-        .last()
-        .is_some_and(|m| matches!(m, Message::Assistant { .. }) && m.tool_calls().next().is_some())
-    {
-        messages.pop();
-    }
-
-    match messages.last_mut() {
-        Some(Message::User { content }) => {
-            content.push(brain::message::UserContent::Text(brain::message::Text {
-                text: prompt,
-            }));
-        }
-        _ => messages.push(Message::user(prompt)),
-    }
-    messages
-}
-
 impl Store {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
@@ -79,13 +68,7 @@ impl Store {
         self.root.join(format!("{id}.json"))
     }
 
-    pub fn save(
-        &self,
-        id: &str,
-        workspace: &Path,
-        model: &str,
-        messages: &[Message],
-    ) -> Result<PathBuf> {
+    pub fn save(&self, id: &str, workspace: &Path, model: &str, log: &Log) -> Result<PathBuf> {
         std::fs::create_dir_all(&self.root)?;
         let path = self.path(id);
 
@@ -94,7 +77,8 @@ impl Store {
             workspace: workspace.display().to_string(),
             model: model.to_string(),
             created: now(),
-            messages: messages.to_vec(),
+            log: log.clone(),
+            messages: Vec::new(),
         };
 
         // Rename, so a crash mid-write cannot leave a truncated transcript.
@@ -152,6 +136,10 @@ mod tests {
     use brain::message::{AssistantContent, ToolCall, ToolCallId};
     use serde_json::json;
 
+    fn log_with(messages: Vec<Message>) -> Log {
+        Log::from_messages(messages)
+    }
+
     fn call(name: &str) -> Message {
         Message::Assistant {
             id: None,
@@ -173,89 +161,12 @@ mod tests {
     }
 
     #[test]
-    fn an_unanswered_call_is_dropped_and_the_prompt_joins_the_turn_before_it() {
-        let messages = vec![
-            Message::user("hi"),
-            Message::assistant_text("ok"),
-            call("read"),
-        ];
-        let out = resume_with(messages, "next".into());
-
-        // The dangling call is gone; the two turns before it are not, and the
-        // prompt starts a fresh turn because the last one is a clean answer.
-        assert_eq!(out.len(), 3);
-        assert_eq!(out[1].text(), "ok");
-        assert_eq!(out[2].text(), "next");
-        assert!(out.iter().all(|m| m.tool_calls().next().is_none()));
-    }
-
-    #[test]
-    fn a_prompt_after_tool_results_joins_them_rather_than_starting_a_turn() {
-        let messages = vec![Message::user("hi"), call("read"), results()];
-        let out = resume_with(messages, "and now?".into());
-
-        // Two user turns in a row are rejected outright, and trimming back to
-        // the last clean assistant turn would discard the whole conversation.
-        assert_eq!(out.len(), 3);
-        let Message::User { content } = &out[2] else {
-            panic!()
-        };
-        assert_eq!(content.len(), 2);
-        assert!(matches!(
-            &content[0],
-            brain::message::UserContent::ToolResult(_)
-        ));
-        assert_eq!(out[2].text(), "and now?");
-    }
-
-    #[test]
-    fn a_clean_transcript_gains_one_new_turn() {
-        let messages = vec![Message::user("hi"), Message::assistant_text("done")];
-        let out = resume_with(messages, "more".into());
-        assert_eq!(out.len(), 3);
-        assert_eq!(out[2].text(), "more");
-    }
-
-    #[test]
-    fn an_empty_transcript_starts_the_conversation() {
-        let out = resume_with(Vec::new(), "first".into());
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].text(), "first");
-    }
-
-    #[test]
-    fn a_transcript_with_tool_traffic_survives_the_round_trip() {
-        let tmp = tempfile::tempdir().unwrap();
-        let store = Store::new(tmp.path());
-        let messages = vec![Message::user("go"), call("read"), results()];
-        store
-            .save("t", std::path::Path::new("/w"), "m", &messages)
-            .unwrap();
-
-        let back = store.load("t").unwrap();
-        assert_eq!(
-            back.messages.len(),
-            3,
-            "tool traffic must not vanish in transit"
-        );
-        assert_eq!(back.messages[1].tool_calls().next().unwrap().name, "read");
-        assert_eq!(
-            store
-                .latest(std::path::Path::new("/w"))
-                .unwrap()
-                .messages
-                .len(),
-            3
-        );
-    }
-
-    #[test]
     fn a_saved_transcript_round_trips_and_stays_private() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::new(tmp.path());
-        let messages = vec![Message::user("hi"), Message::assistant_text("there")];
+        let log = log_with(vec![Message::user("hi"), Message::assistant_text("there")]);
         let path = store
-            .save("t1", std::path::Path::new("/w"), "opus-5", &messages)
+            .save("t1", std::path::Path::new("/w"), "opus-5", &log)
             .unwrap();
 
         #[cfg(unix)]
@@ -270,20 +181,79 @@ mod tests {
         }
         let back = store.load("t1").unwrap();
         assert_eq!(back.model, "opus-5");
-        assert_eq!(back.messages.len(), 2);
-        assert_eq!(back.messages[1].text(), "there");
+        assert_eq!(back.into_log(), log);
+    }
+
+    #[test]
+    fn a_transcript_with_tool_traffic_survives_the_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::new(tmp.path());
+        let log = log_with(vec![Message::user("go"), call("read"), results()]);
+        store
+            .save("t", std::path::Path::new("/w"), "m", &log)
+            .unwrap();
+
+        let back = store.load("t").unwrap().into_log();
+        assert_eq!(
+            back.context().len(),
+            3,
+            "tool traffic must not vanish in transit"
+        );
+        assert_eq!(back.context()[1].tool_calls().next().unwrap().name, "read");
+    }
+
+    #[test]
+    fn a_compaction_record_survives_the_round_trip_with_its_history() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::new(tmp.path());
+        let mut log = log_with(vec![Message::user("go"), call("read"), results()]);
+        log.record(agent::log::Compaction {
+            elisions: vec![agent::log::Elision {
+                call: ToolCallId("c1".into()),
+                notice: "[gone]".into(),
+            }],
+            ..Default::default()
+        });
+        store
+            .save("t", std::path::Path::new("/w"), "m", &log)
+            .unwrap();
+
+        let back = store.load("t").unwrap().into_log();
+        // The view is shrunk, and the body that was elided is still on disk.
+        assert!(format!("{:?}", back.context()[2]).contains("[gone]"));
+        assert!(
+            back.messages()
+                .any(|(_, m)| format!("{m:?}").contains("body"))
+        );
+    }
+
+    #[test]
+    fn a_transcript_written_before_the_log_existed_still_loads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::new(tmp.path());
+        std::fs::create_dir_all(tmp.path()).unwrap();
+        std::fs::write(
+            store.path("old"),
+            r#"{"id":"old","workspace":"/w","model":"m","created":1,
+                "messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}"#,
+        )
+        .unwrap();
+
+        let log = store.load("old").unwrap().into_log();
+        assert_eq!(log.context().len(), 1);
+        assert_eq!(log.context()[0].text(), "hi");
     }
 
     #[test]
     fn latest_picks_the_newest_session_for_that_workspace_only() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::new(tmp.path());
-        let msg = vec![Message::user("x")];
+        let log = log_with(vec![Message::user("x")]);
         store
-            .save("old", std::path::Path::new("/a"), "m", &msg)
+            .save("old", std::path::Path::new("/a"), "m", &log)
             .unwrap();
         store
-            .save("other", std::path::Path::new("/b"), "m", &msg)
+            .save("other", std::path::Path::new("/b"), "m", &log)
             .unwrap();
 
         // `created` has one-second resolution, so newness is forced explicitly.

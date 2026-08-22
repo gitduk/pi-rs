@@ -160,8 +160,8 @@ async fn a_turn_without_tool_calls_ends_the_run() {
     let totals = out.unwrap();
     assert_eq!(totals.usage.input, 10);
     assert_eq!(totals.cost, 10.0 / 1e6 + 5.0 * 2.0 / 1e6);
-    assert_eq!(session.messages.len(), 2);
-    assert_eq!(session.messages[1].text(), "done");
+    assert_eq!(session.context().len(), 2);
+    assert_eq!(session.context()[1].text(), "done");
     assert!(events.contains(&Event::TextDelta("done".into())));
 }
 
@@ -175,8 +175,9 @@ async fn a_tool_call_round_trips_into_the_transcript() {
     out.unwrap();
 
     // user, assistant(call), user(result), assistant(text)
-    assert_eq!(session.messages.len(), 4);
-    let results = tool_results(&session.messages[2]);
+    assert_eq!(session.context().len(), 4);
+    let view = session.context();
+    let results = tool_results(&view[2]);
     assert_eq!(results.len(), 1);
     assert!(!results[0].is_error, "{:?}", results[0]);
     assert_eq!(results[0].name, "write");
@@ -200,7 +201,8 @@ async fn every_call_gets_a_result_even_when_nothing_runs() {
     out.unwrap();
 
     // An unanswered tool_use makes the next request invalid on both wires.
-    let results = tool_results(&session.messages[2]);
+    let view = session.context();
+    let results = tool_results(&view[2]);
     assert_eq!(results.len(), 3);
     assert!(results.iter().all(|r| r.is_error), "{results:?}");
     assert!(
@@ -214,7 +216,7 @@ async fn every_call_gets_a_result_even_when_nothing_runs() {
         results[2]
     );
 
-    let calls: Vec<_> = session.messages[1].tool_calls().collect();
+    let calls: Vec<_> = view[1].tool_calls().collect();
     assert_eq!(calls.len(), 3);
     for (call, result) in calls.iter().zip(&results) {
         assert_eq!(call.id, result.call, "results must line up with calls");
@@ -231,7 +233,8 @@ async fn a_denied_tier_comes_back_as_a_result_not_an_abort() {
     let (session, out, events) = drive(&a, &ctx, "run it").await;
     out.unwrap();
 
-    let results = tool_results(&session.messages[2]);
+    let view = session.context();
+    let results = tool_results(&view[2]);
     assert!(results[0].is_error);
     assert!(
         results[0].flatten_text().contains("capped at Read"),
@@ -301,7 +304,8 @@ async fn parallel_results_follow_call_order_not_completion_order() {
     let (session, out, _) = drive(&a, &ctx, "go").await;
     out.unwrap();
 
-    let results = tool_results(&session.messages[2]);
+    let view = session.context();
+    let results = tool_results(&view[2]);
     assert_eq!(
         results[0].flatten_text(),
         "slow",
@@ -353,7 +357,7 @@ async fn the_turn_limit_stops_a_runaway_loop_but_keeps_the_transcript() {
 
     assert!(matches!(out, Err(AgentError::TurnLimit(2))), "{out:?}");
     assert_eq!(
-        session.messages.len(),
+        session.context().len(),
         5,
         "work done before the limit survives"
     );
@@ -399,7 +403,7 @@ async fn reasoning_deltas_reach_the_renderer_separately_from_text() {
 
     assert!(events.contains(&Event::ReasoningDelta("thinking".into())));
     assert!(events.contains(&Event::TextDelta("answer".into())));
-    let Message::Assistant { content, .. } = &session.messages[1] else {
+    let Message::Assistant { content, .. } = &session.context()[1] else {
         panic!()
     };
     assert!(matches!(content[0], AssistantContent::Reasoning(_)));

@@ -11,9 +11,12 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 use tools::{Concurrency, Ctx, Registry, ToolError, ToolOutput};
 
+use crate::log::Log;
+
 pub mod approval;
 pub mod compact;
 pub mod event;
+pub mod log;
 
 pub use approval::{Approver, Ceiling, Decision};
 pub use compact::Policy;
@@ -39,16 +42,27 @@ pub enum AgentError {
 
 /// The transcript. Held by the caller so a run that ends in an error still
 /// leaves behind everything it produced.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Session {
-    pub messages: Vec<Message>,
+    pub log: Log,
 }
 
 impl Session {
     pub fn with_prompt(prompt: impl Into<String>) -> Self {
-        Self {
-            messages: vec![Message::user(prompt)],
-        }
+        let mut log = Log::new();
+        log.push(Message::user(prompt));
+        Self { log }
+    }
+
+    /// Continue an existing transcript with a new prompt.
+    pub fn resumed(mut log: Log, prompt: impl Into<String>) -> Self {
+        log.resume(prompt);
+        Self { log }
+    }
+
+    /// What the model sees this turn.
+    pub fn context(&self) -> Vec<Message> {
+        self.log.context()
     }
 }
 
@@ -98,11 +112,12 @@ impl Agent {
 
             if let Some(policy) = &self.compaction {
                 let budget = self.budget();
-                if brain::estimate::tokens(&session.messages) > budget {
-                    let report = compact::compact(&mut session.messages, budget, policy);
+                if brain::estimate::tokens(&session.context()) > budget {
+                    let (record, report) = compact::plan(&session.log, budget, policy);
                     // A pass that reclaimed nothing is not news; reporting it
                     // every turn buries the ones that did.
                     if report.touched() {
+                        session.log.record(record);
                         let _ = tx.send(Event::Compacted(report));
                     }
                 }
@@ -110,7 +125,7 @@ impl Agent {
 
             let req = Request {
                 system: Some(self.system.clone()),
-                messages: session.messages.clone(),
+                messages: session.context(),
                 tools: self.registry.defs(),
                 max_output_tokens: None,
                 temperature: None,
@@ -127,7 +142,7 @@ impl Agent {
             });
 
             let calls: Vec<ToolCall> = done.message.tool_calls().cloned().collect();
-            session.messages.push(done.message);
+            session.log.push(done.message);
 
             if calls.is_empty() {
                 let _ = tx.send(Event::Done {
@@ -144,7 +159,7 @@ impl Agent {
                 .map(|i| (i.call.clone(), i.error.clone()))
                 .collect();
             let results = self.run_calls(&calls, &bad, ctx, tx).await?;
-            session.messages.push(Message::tool_results(results));
+            session.log.push(Message::tool_results(results));
         }
 
         Err(AgentError::TurnLimit(self.max_turns))

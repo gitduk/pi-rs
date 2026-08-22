@@ -1,4 +1,14 @@
-use agent::compact::{Policy, Report, compact};
+use agent::compact::{Policy, Report, plan};
+use agent::log::Log;
+
+/// Drive the real path — plan, record, derive — and hand back the new view.
+fn compact(messages: &mut Vec<Message>, budget: usize, policy: &Policy) -> Report {
+    let mut log = Log::from_messages(messages.clone());
+    let (record, report) = plan(&log, budget, policy);
+    log.record(record);
+    *messages = log.context();
+    report
+}
 use brain::estimate;
 use brain::message::{
     AssistantContent, Message, ProviderCallId, ToolCall, ToolCallId, ToolResult, ToolResultContent,
@@ -322,10 +332,16 @@ mod budget {
     #[test]
     fn a_healthy_transcript_is_under_budget_and_stays_untouched() {
         let a = agent_with(200_000, 32_000);
-        let mut s = Session::with_prompt("hello");
-        let before = s.messages.clone();
-        let r = agent::compact::compact(&mut s.messages, a.budget(), &agent::Policy::default());
+        let s = Session::with_prompt("hello");
+        let (record, r) = agent::compact::plan(&s.log, a.budget(), &agent::Policy::default());
         assert!(!r.touched());
-        assert_eq!(s.messages, before);
+        assert_eq!(
+            record,
+            agent::log::Compaction {
+                tokens_before: r.before,
+                tokens_after: r.after,
+                ..Default::default()
+            }
+        );
     }
 }

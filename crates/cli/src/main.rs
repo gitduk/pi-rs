@@ -272,11 +272,11 @@ async fn main() -> Result<()> {
         .as_ref()
         .map(|p| p.id.clone())
         .unwrap_or_else(session::new_id);
-    let carried = prior.map(|p| p.messages).unwrap_or_default();
-    let resumed = carried.len();
-    let messages = session::resume_with(carried, prompt);
-
-    let mut session = agent::Session { messages };
+    let carried = prior.map(|p| p.into_log()).unwrap_or_default();
+    let resumed = carried.context().len();
+    // Always through the log: a loaded session whose view happens to be empty
+    // still has history worth keeping, and `resume` handles an empty log.
+    let mut session = agent::Session::resumed(carried, prompt);
     let outcome = ag.run(&mut session, &ctx, &tx).await;
 
     drop(tx);
@@ -284,7 +284,7 @@ async fn main() -> Result<()> {
 
     // Saved whichever way the run ended: an aborted turn is exactly the one
     // worth resuming.
-    match store.save(&id, &root, &model_id, &session.messages) {
+    match store.save(&id, &root, &model_id, &session.log) {
         Ok(_) if !args.quiet => {
             let carried = if resumed > 0 {
                 format!(" · resumed {resumed} messages")

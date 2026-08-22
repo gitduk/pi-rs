@@ -9,6 +9,7 @@ dependencies = [
  "async-trait",
  "brain",
  "futures",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror",
