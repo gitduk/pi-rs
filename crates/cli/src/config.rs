@@ -178,6 +178,34 @@ impl Entry {
     }
 }
 
+/// Who asked for the model.
+///
+/// Carried alongside the name so that an unknown one can say where it came
+/// from: a bare `pi` that fails on a name the user never typed is a mystery
+/// with three files to search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    Flag,
+    Resumed,
+    Project,
+    Global,
+    OnlyModel,
+    BuiltIn,
+}
+
+impl Origin {
+    pub fn describe(self) -> &'static str {
+        match self {
+            Origin::Flag => "-m",
+            Origin::Resumed => "the resumed session",
+            Origin::Project => "defaults.model in the project's .pi.toml",
+            Origin::Global => "defaults.model in ~/.pi.toml",
+            Origin::OnlyModel => "the only model in ~/.pi.toml",
+            Origin::BuiltIn => "the built-in default",
+        }
+    }
+}
+
 /// What the flags said, so the chain below can be resolved in one place.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Flags {
@@ -238,12 +266,33 @@ impl Config {
 
     /// A resumed run stays on the model that produced the transcript, whose
     /// reasoning blocks only replay to itself — so `prior` outranks both files.
-    pub fn model(&self, project: &Project, flag: Option<&str>, prior: Option<&str>) -> String {
-        flag.or(prior)
-            .map(str::to_string)
-            .or_else(|| project.defaults.model.clone())
-            .or_else(|| self.defaults.model.clone())
-            .unwrap_or_else(|| "opus-5".to_string())
+    ///
+    /// A config that defines exactly one model and names no default means that
+    /// one: there is nothing else it could mean, and making the user write the
+    /// name twice only creates the chance to write it differently.
+    pub fn model(
+        &self,
+        project: &Project,
+        flag: Option<&str>,
+        prior: Option<&str>,
+    ) -> (String, Origin) {
+        if let Some(m) = flag {
+            return (m.to_string(), Origin::Flag);
+        }
+        if let Some(m) = prior {
+            return (m.to_string(), Origin::Resumed);
+        }
+        if let Some(m) = &project.defaults.model {
+            return (m.clone(), Origin::Project);
+        }
+        if let Some(m) = &self.defaults.model {
+            return (m.clone(), Origin::Global);
+        }
+        if self.models.len() == 1 {
+            let only = self.models.keys().next().expect("len is 1");
+            return (only.clone(), Origin::OnlyModel);
+        }
+        ("opus-5".to_string(), Origin::BuiltIn)
     }
 }
 
@@ -454,7 +503,7 @@ usage_in_streaming = false
     fn a_project_may_pick_a_model_and_turn_the_dials() {
         let p = parse_project("[defaults]\nmodel = \"flash\"\nmax_turns = 10\n").unwrap();
         let c = Config::default();
-        assert_eq!(c.model(&p, None, None), "flash");
+        assert_eq!(c.model(&p, None, None).0, "flash");
         assert_eq!(c.settle(&p, Flags::default()).max_turns, 10);
     }
 
@@ -502,9 +551,9 @@ usage_in_streaming = false
         // Reasoning blocks only replay to the model that produced them.
         let c = parse(SAMPLE).unwrap();
         let p = parse_project("[defaults]\nmodel = \"other\"\n").unwrap();
-        assert_eq!(c.model(&p, None, Some("resumed")), "resumed");
-        assert_eq!(c.model(&p, Some("flag"), Some("resumed")), "flag");
-        assert_eq!(c.model(&p, None, None), "other");
+        assert_eq!(c.model(&p, None, Some("resumed")).0, "resumed");
+        assert_eq!(c.model(&p, Some("flag"), Some("resumed")).0, "flag");
+        assert_eq!(c.model(&p, None, None), ("other".into(), Origin::Project));
     }
 
     #[test]
@@ -534,5 +583,32 @@ usage_in_streaming = false
         let inside = repo.join(".pi.toml");
         std::fs::write(&inside, "").unwrap();
         assert_eq!(project_path(&deep, None), Some(inside));
+    }
+
+    #[test]
+    fn one_model_and_no_default_needs_no_name() {
+        // Writing the id twice is only a chance to write it differently, which
+        // is exactly what happens.
+        let body = "[models.flash]\nbase_url = \"http://x/v1\"\nwire = \"openai\"\n";
+        let c = parse(body).unwrap();
+        let got = c.model(&Project::default(), None, None);
+        assert_eq!(got, ("flash".to_string(), Origin::OnlyModel));
+    }
+
+    #[test]
+    fn two_models_and_no_default_still_has_to_be_told() {
+        // There is no defensible pick among them, and alphabetical is not one.
+        let two = "[models.a]\nbase_url=\"http://x/v1\"\nwire=\"openai\"\n\
+                   [models.b]\nbase_url=\"http://y/v1\"\nwire=\"openai\"\n";
+        let c = parse(two).unwrap();
+        assert_eq!(c.model(&Project::default(), None, None).1, Origin::BuiltIn);
+    }
+
+    #[test]
+    fn an_unknown_model_can_say_which_file_asked_for_it() {
+        let c = parse("[defaults]\nmodel = \"typo\"\n").unwrap();
+        let (name, origin) = c.model(&Project::default(), None, None);
+        assert_eq!(name, "typo");
+        assert!(origin.describe().contains("~/.pi.toml"));
     }
 }

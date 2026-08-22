@@ -249,7 +249,7 @@ async fn main() -> Result<()> {
         _ => None,
     };
 
-    let model = config.model(
+    let (model, named_by) = config.model(
         &project,
         args.model.as_deref(),
         prior.as_ref().map(|p| p.model.as_str()),
@@ -269,8 +269,9 @@ async fn main() -> Result<()> {
                 .collect();
             known.extend(builtin.iter().map(String::as_str));
             format!(
-                "unknown model `{model}`; known: {}. Define it in the config, \
-                 or use --wire for a one-off.",
+                "unknown model `{model}`, named by {}; known: {}. Define it in \
+                 the config, or use --wire for a one-off.",
+                named_by.describe(),
                 known.join(", ")
             )
         })?
