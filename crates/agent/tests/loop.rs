@@ -127,7 +127,7 @@ async fn drive(
     agent: &Agent,
     ctx: &Ctx,
     prompt: &str,
-) -> (Session, Result<agent::Totals, AgentError>, Vec<Event>) {
+) -> (Session, Result<agent::Outcome, AgentError>, Vec<Event>) {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut session = Session::with_prompt(prompt);
     let out = agent.run(&mut session, ctx, &tx).await;
@@ -157,7 +157,7 @@ async fn a_turn_without_tool_calls_ends_the_run() {
     let (_d, a, ctx) = harness(vec![text_turn("done")]);
     let (session, out, events) = drive(&a, &ctx, "hi").await;
 
-    let totals = out.unwrap();
+    let totals = out.unwrap().totals;
     assert_eq!(totals.usage.input, 10);
     assert_eq!(totals.cost, 10.0 / 1e6 + 5.0 * 2.0 / 1e6);
     assert_eq!(session.context().len(), 2);
@@ -897,4 +897,111 @@ async fn an_overflow_with_no_number_falls_back_to_squeezing() {
             .any(|e| matches!(e, Event::Warning(w) if w.contains("named no limit"))),
         "{events:?}"
     );
+}
+
+fn schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": { "count": { "type": "integer" }, "note": { "type": "string" } },
+        "required": ["count"],
+    })
+}
+
+fn yielding_agent(turns: Vec<Vec<StreamEvent>>) -> (tempfile::TempDir, Agent, Ctx) {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
+    let mut a = Agent::new(Scripted::new(turns), spec());
+    a.registry = Registry::builtin().with(tools::finish::Yield::new(schema()));
+    a.finish_tool = Some(tools::finish::NAME.to_string());
+    (dir, a, ctx)
+}
+
+#[tokio::test]
+async fn a_yield_ends_the_run_and_hands_back_the_value() {
+    let (_d, a, ctx) = yielding_agent(vec![
+        call_turn(&[("y1", "yield", r#"{"count":3,"note":"three files"}"#)]),
+        text_turn("never reached"),
+    ]);
+    let (_s, out, _) = drive(&a, &ctx, "count things").await;
+
+    let value = out
+        .unwrap()
+        .yielded
+        .expect("the run must hand back a value");
+    assert_eq!(value["count"], 3);
+    assert_eq!(value["note"], "three files");
+}
+
+#[tokio::test]
+async fn nothing_runs_after_a_yield() {
+    let (_d, a, ctx) = yielding_agent(vec![
+        call_turn(&[("y1", "yield", r#"{"count":1}"#)]),
+        call_turn(&[(
+            "w1",
+            "write",
+            r#"{"path":"should-not-exist","content":"x"}"#,
+        )]),
+    ]);
+    let (_s, out, _) = drive(&a, &ctx, "go").await;
+    out.unwrap();
+    assert!(!ctx.workspace.root().join("should-not-exist").exists());
+}
+
+#[tokio::test]
+async fn a_missing_required_field_comes_back_as_a_result_to_fix() {
+    let (_d, a, ctx) = yielding_agent(vec![
+        call_turn(&[("y1", "yield", r#"{"note":"forgot the count"}"#)]),
+        call_turn(&[("y2", "yield", r#"{"count":7}"#)]),
+        text_turn("done"),
+    ]);
+    let (session, out, _) = drive(&a, &ctx, "go").await;
+
+    assert_eq!(out.unwrap().yielded.unwrap()["count"], 7);
+    let view = session.context();
+    let first = tool_results(&view[2]);
+    assert!(first[0].is_error);
+    assert!(
+        first[0]
+            .flatten_text()
+            .contains("missing required field(s): count"),
+        "{first:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_run_that_forgets_to_yield_is_reminded_once() {
+    let (_d, a, ctx) = yielding_agent(vec![
+        text_turn("here is my prose answer"),
+        call_turn(&[("y1", "yield", r#"{"count":2}"#)]),
+        text_turn("done"),
+    ]);
+    let (session, out, _) = drive(&a, &ctx, "go").await;
+
+    assert_eq!(out.unwrap().yielded.unwrap()["count"], 2);
+    assert!(
+        session
+            .context()
+            .iter()
+            .any(|m| m.text().contains("Call `yield` with it now")),
+        "the reminder must be in the transcript"
+    );
+}
+
+#[tokio::test]
+async fn a_run_that_never_yields_fails_rather_than_returning_prose() {
+    let (_d, a, ctx) = yielding_agent(vec![text_turn("prose"), text_turn("more prose")]);
+    let (_s, out, _) = drive(&a, &ctx, "go").await;
+    // One reminder, then the run is a failure: the caller asked for a value.
+    assert!(matches!(out, Err(AgentError::NoResult)), "{out:?}");
+}
+
+#[test]
+fn a_schema_that_is_not_an_object_is_refused_with_the_fix() {
+    let err = tools::finish::check(&json!({ "type": "array" })).unwrap_err();
+    assert!(err.contains("a tool input must be an object"), "{err}");
+    assert!(
+        err.contains(r#""result""#),
+        "the message shows the wrapper: {err}"
+    );
+    assert!(tools::finish::check(&schema()).is_ok());
 }

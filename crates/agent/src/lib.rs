@@ -76,6 +76,14 @@ impl Retry {
     }
 }
 
+/// What a run leaves behind.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Outcome {
+    pub totals: Totals,
+    /// Present when the run ended through the `yield` tool.
+    pub yielded: Option<serde_json::Value>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
     #[error(transparent)]
@@ -86,6 +94,9 @@ pub enum AgentError {
 
     #[error("stopped at the {0}-turn limit")]
     TurnLimit(usize),
+
+    #[error("the run ended without calling `yield`, so it produced no result")]
+    NoResult,
 }
 
 /// The transcript. Held by the caller so a run that ends in an error still
@@ -128,6 +139,9 @@ pub struct Agent {
     /// False drops it outright, which is faster and loses more.
     pub summarize: bool,
     pub retry: Retry,
+    /// When set, the run must end by calling this tool, and its argument is the
+    /// result. Set by adding a `yield` tool to the registry.
+    pub finish_tool: Option<String>,
 }
 
 /// What a streamed call resolves to before anything runs. Deciding first keeps
@@ -150,6 +164,7 @@ impl Agent {
             compaction: Some(Policy::default()),
             summarize: true,
             retry: Retry::default(),
+            finish_tool: None,
         }
     }
 
@@ -158,8 +173,15 @@ impl Agent {
         session: &mut Session,
         ctx: &Ctx,
         tx: &UnboundedSender<Event>,
-    ) -> Result<Totals, AgentError> {
+    ) -> Result<Outcome, AgentError> {
         let mut totals = Totals::default();
+        let mut nudged = false;
+
+        // A resumed session brings its plan back; the tool sees it as the list
+        // it left behind rather than an empty one.
+        if let Ok(mut held) = ctx.todos.lock() {
+            *held = session.log.todos().to_vec();
+        }
 
         // Our token estimate is a bound, not a measurement. When the provider
         // says otherwise, this is what carries the correction forward.
@@ -243,12 +265,27 @@ impl Agent {
             session.log.push(done.message);
 
             if calls.is_empty() {
+                // A run that owes a structured result gets one reminder; the
+                // model usually just forgot the last step.
+                if self.finish_tool.is_some() && self.yielded(ctx).is_none() {
+                    if nudged {
+                        return Err(AgentError::NoResult);
+                    }
+                    nudged = true;
+                    session.log.push(Message::user(
+                        "The result has not been delivered yet. Call `yield` with it now.",
+                    ));
+                    continue;
+                }
                 let _ = tx.send(Event::Done {
                     turns: turn,
                     usage: totals.usage,
                     cost: totals.cost,
                 });
-                return Ok(totals);
+                return Ok(Outcome {
+                    totals,
+                    yielded: self.yielded(ctx),
+                });
             }
 
             let bad: HashMap<_, _> = done
@@ -258,9 +295,41 @@ impl Agent {
                 .collect();
             let results = self.run_calls(&calls, &bad, ctx, tx).await?;
             session.log.push(Message::tool_results(results));
+            self.record_todos(session, ctx);
+
+            if let Some(value) = self.yielded(ctx) {
+                let _ = tx.send(Event::Done {
+                    turns: turn,
+                    usage: totals.usage,
+                    cost: totals.cost,
+                });
+                return Ok(Outcome {
+                    totals,
+                    yielded: Some(value),
+                });
+            }
         }
 
         Err(AgentError::TurnLimit(self.max_turns))
+    }
+
+    fn yielded(&self, ctx: &Ctx) -> Option<serde_json::Value> {
+        ctx.yielded.lock().ok()?.clone()
+    }
+
+    /// Fold a plan the todo tool wrote into the session, so it survives
+    /// compaction and comes back on resume.
+    fn record_todos(&self, session: &mut Session, ctx: &Ctx) {
+        let Ok(mut held) = ctx.todos.lock() else {
+            return;
+        };
+        if *held == session.log.todos() {
+            return;
+        }
+        session.log.set_todos(held.clone());
+        // The log normalizes; writing it back keeps the next comparison from
+        // seeing a difference that is only the normalization.
+        *held = session.log.todos().to_vec();
     }
 
     /// Shrink the transcript to `budget` if it is over, recording what went.

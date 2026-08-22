@@ -165,10 +165,13 @@ fn registry_exposes_a_stable_ordered_tool_block() {
     let r = Registry::builtin();
     assert_eq!(
         r.names(),
-        vec!["bash", "edit", "glob", "grep", "read", "write"]
+        vec!["bash", "edit", "glob", "grep", "read", "todo", "write"]
     );
     let names: Vec<String> = r.defs().iter().map(|d| d.name.clone()).collect();
-    assert_eq!(names, vec!["bash", "edit", "glob", "grep", "read", "write"]);
+    assert_eq!(
+        names,
+        vec!["bash", "edit", "glob", "grep", "read", "todo", "write"]
+    );
     assert_eq!(r.get("edit").unwrap().tier(), Tier::Write);
     assert_eq!(r.get("bash").unwrap().tier(), Tier::Exec);
     assert_eq!(r.get("read").unwrap().tier(), Tier::Read);

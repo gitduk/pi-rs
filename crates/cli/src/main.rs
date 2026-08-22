@@ -108,6 +108,11 @@ struct Args {
     #[arg(long)]
     system: Option<String>,
 
+    /// A JSON Schema file. The run must end by calling `yield` with a matching
+    /// object, which is printed to stdout instead of prose.
+    #[arg(long, value_name = "FILE")]
+    schema: Option<String>,
+
     /// Answer only; no progress, no usage line.
     #[arg(short, long)]
     quiet: bool,
@@ -233,6 +238,15 @@ async fn main() -> Result<()> {
         })?;
     }
 
+    if let Some(path) = &args.schema {
+        let body =
+            std::fs::read_to_string(path).with_context(|| format!("cannot read schema {path}"))?;
+        let schema: serde_json::Value =
+            serde_json::from_str(&body).with_context(|| format!("{path} is not valid JSON"))?;
+        tools::finish::check(&schema).map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
+        registry = registry.with(tools::finish::Yield::new(schema));
+    }
+
     let tier = match args.tier {
         TierArg::Read => tools::Tier::Read,
         TierArg::Write => tools::Tier::Write,
@@ -267,16 +281,22 @@ async fn main() -> Result<()> {
     ag.summarize = !args.no_summary;
     ag.retry.attempts = args.retries;
     ag.retry.idle = std::time::Duration::from_secs(args.idle_timeout.max(1));
+    if args.schema.is_some() {
+        ag.finish_tool = Some(tools::finish::NAME.to_string());
+    }
 
     let ctx = tools::Ctx {
         workspace,
         cancel: agent::cancel_on_interrupt(),
+        todos: Default::default(),
+        yielded: Default::default(),
     };
 
     let (tx, mut rx) = mpsc::unbounded_channel();
     let quiet = args.quiet;
+    let structured = args.schema.is_some();
     let painter = tokio::spawn(async move {
-        let mut r = render::Renderer::new(quiet);
+        let mut r = render::Renderer::new(quiet, structured);
         while let Some(event) = rx.recv().await {
             r.on(event);
         }
@@ -310,6 +330,11 @@ async fn main() -> Result<()> {
         }
         Err(e) => eprintln!("warning: the transcript was not saved: {e}"),
         _ => {}
+    }
+
+    // stdout carries the result and nothing else, so it pipes into jq.
+    if let Some(value) = outcome.as_ref().ok().and_then(|o| o.yielded.as_ref()) {
+        println!("{}", serde_json::to_string_pretty(value)?);
     }
 
     outcome?;

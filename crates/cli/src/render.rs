@@ -10,6 +10,9 @@ const RESET: &str = "\x1b[0m";
 pub struct Renderer {
     color: bool,
     quiet: bool,
+    /// A schema was asked for, so stdout belongs to the result alone. Prose the
+    /// model produces on the way there is progress, not the answer.
+    structured: bool,
     thinking: bool,
     /// Each stream is tracked separately: they share a terminal when both are
     /// a tty, but only the dirty one may be terminated when piped apart.
@@ -18,10 +21,11 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(quiet: bool) -> Self {
+    pub fn new(quiet: bool, structured: bool) -> Self {
         Self {
             color: std::io::stderr().is_terminal(),
             quiet,
+            structured,
             thinking: false,
             out_dirty: false,
             err_dirty: false,
@@ -48,6 +52,16 @@ impl Renderer {
                 }
                 eprint!("{}", self.paint(DIM, &d));
                 self.err_dirty = true;
+                let _ = std::io::stderr().flush();
+            }
+            Event::TextDelta(d) if self.structured => {
+                if self.quiet {
+                    return;
+                }
+                self.end_thinking();
+                self.settle_out();
+                eprint!("{}", self.paint(DIM, &d));
+                self.err_dirty = !d.ends_with('\n');
                 let _ = std::io::stderr().flush();
             }
             Event::TextDelta(d) => {
@@ -251,8 +265,17 @@ mod tests {
     }
 
     #[test]
+    fn a_schema_keeps_prose_off_stdout() {
+        let mut r = super::Renderer::new(false, true);
+        r.on(agent::Event::TextDelta("thinking out loud".into()));
+        // stdout carries the result and nothing else, so it pipes into jq.
+        assert!(!r.out_dirty, "prose must not reach stdout under a schema");
+        assert!(r.err_dirty);
+    }
+
+    #[test]
     fn consecutive_text_deltas_stay_on_one_line() {
-        let mut r = super::Renderer::new(false);
+        let mut r = super::Renderer::new(false, false);
         r.on(agent::Event::TextDelta("There".into()));
         assert!(r.out_dirty, "an unterminated delta leaves the line open");
         r.on(agent::Event::TextDelta("'s a bug".into()));

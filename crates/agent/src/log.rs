@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use brain::message::{Message, Text, ToolCallId, ToolResultContent, UserContent};
 use serde::{Deserialize, Serialize};
+use tools::todo::Todo;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct EntryId(pub u64);
@@ -40,6 +41,12 @@ pub enum Entry {
         id: EntryId,
         record: Compaction,
     },
+    /// The task list as it stood. State is derived by taking the last one, so
+    /// it survives compaction and comes back with a resumed session.
+    Todos {
+        id: EntryId,
+        items: Vec<Todo>,
+    },
     /// Text the view appends to an earlier user turn. Resuming a session that
     /// died mid-turn cannot start a second user message in a row — both wires
     /// require the roles to alternate — and rewriting the stored message would
@@ -54,9 +61,10 @@ pub enum Entry {
 impl Entry {
     pub fn id(&self) -> EntryId {
         match self {
-            Entry::Message { id, .. } | Entry::Compaction { id, .. } | Entry::Amend { id, .. } => {
-                *id
-            }
+            Entry::Message { id, .. }
+            | Entry::Compaction { id, .. }
+            | Entry::Amend { id, .. }
+            | Entry::Todos { id, .. } => *id,
         }
     }
 }
@@ -97,6 +105,28 @@ impl Log {
         self.next += 1;
         self.entries.push(Entry::Compaction { id, record });
         id
+    }
+
+    /// Record the task list. At most one item may be in progress: two are a
+    /// plan the agent is not actually following.
+    pub fn set_todos(&mut self, mut items: Vec<Todo>) -> EntryId {
+        tools::todo::normalize(&mut items);
+        let id = EntryId(self.next);
+        self.next += 1;
+        self.entries.push(Entry::Todos { id, items });
+        id
+    }
+
+    /// The task list as it now stands.
+    pub fn todos(&self) -> &[Todo] {
+        self.entries
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                Entry::Todos { items, .. } => Some(items.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[])
     }
 
     pub fn amend(&mut self, target: EntryId, text: impl Into<String>) -> EntryId {

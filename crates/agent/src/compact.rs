@@ -6,10 +6,11 @@ use serde_json::Value;
 
 use crate::log::{Compaction, Elision, EntryId, Log};
 
-/// Tools whose results describe a file or a query rather than an action. Only
+/// Tools whose results describe current state rather than an action taken. Only
 /// these supersede: an `edit` result records something that happened, and the
-/// record stays true however many later edits land.
-const SUPERSEDABLE: &[&str] = &["read", "grep", "glob"];
+/// record stays true however many later edits land — but only the newest task
+/// list or file read is worth carrying.
+const SUPERSEDABLE: &[&str] = &["read", "grep", "glob", "todo"];
 
 #[derive(Debug, Clone, Copy)]
 pub struct Policy {

@@ -5,10 +5,12 @@ use serde_json::Value;
 pub mod bash;
 pub mod blocks;
 pub mod edit;
+pub mod finish;
 pub mod glob;
 pub mod grep;
 pub mod read;
 pub mod registry;
+pub mod todo;
 pub mod walk;
 pub mod workspace;
 pub mod write;
@@ -115,6 +117,11 @@ impl ToolOutput {
 pub struct Ctx {
     pub workspace: Workspace,
     pub cancel: tokio_util::sync::CancellationToken,
+    /// The agent's plan. Shared so the tool can write it and the loop can record
+    /// it into the session, without the tool knowing a session exists.
+    pub todos: std::sync::Arc<std::sync::Mutex<Vec<todo::Todo>>>,
+    /// Where `yield` leaves the run's result, when a schema was asked for.
+    pub yielded: std::sync::Arc<std::sync::Mutex<Option<serde_json::Value>>>,
 }
 
 impl Ctx {
@@ -122,6 +129,8 @@ impl Ctx {
         Self {
             workspace,
             cancel: tokio_util::sync::CancellationToken::new(),
+            todos: Default::default(),
+            yielded: Default::default(),
         }
     }
 }
