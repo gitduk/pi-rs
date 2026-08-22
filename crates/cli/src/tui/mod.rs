@@ -514,7 +514,14 @@ impl Tui {
             self.save_history();
             match self.core.command(&line, &self.totals) {
                 Step::Quit => break,
-                Step::Handled(lines) => self.ui.above.extend(lines),
+                Step::Handled(lines) => {
+                    self.ui.above.extend(lines);
+                    // The key map lives in two places; a reload has to reach
+                    // both or the screen keeps answering to the old bindings.
+                    if !Arc::ptr_eq(&self.ui.keys, &self.core.keys) {
+                        self.ui.keys = self.core.keys.clone();
+                    }
+                }
                 Step::Compact(focus) => {
                     // Long enough to want the spinner, so it borrows the run's.
                     self.ui.started = Some(Instant::now());

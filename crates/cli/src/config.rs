@@ -93,14 +93,14 @@ pub struct Defaults {
 /// is `system`, which would let a checkout name any file on disk and have its
 /// contents sent to the provider. What is left can only pick among models the
 /// user has already defined and turn the dials on how hard the run works.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Project {
     #[serde(default)]
     pub defaults: ProjectDefaults,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectDefaults {
     pub model: Option<String>,

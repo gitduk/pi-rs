@@ -24,7 +24,7 @@ mod tui;
 /// tier the same way the command line does.
 #[derive(Debug, Clone, Copy, ValueEnum, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum WireArg {
+pub enum WireArg {
     Anthropic,
     Openai,
 }
@@ -33,7 +33,7 @@ enum WireArg {
 /// raise it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum TierArg {
+pub enum TierArg {
     Read,
     Write,
     Exec,
@@ -41,7 +41,7 @@ enum TierArg {
 
 #[derive(Debug, Clone, Copy, ValueEnum, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum EffortArg {
+pub enum EffortArg {
     Off,
     Low,
     Medium,
@@ -50,7 +50,7 @@ enum EffortArg {
 
 #[derive(Parser, Debug)]
 #[command(name = "pi", about = "A coding agent that stays inside one directory.")]
-struct Args {
+pub struct Args {
     /// The prompt. Reads stdin when omitted.
     prompt: Option<String>,
 
@@ -227,6 +227,119 @@ fn read_prompt(args: &Args) -> Result<Option<String>> {
     Ok(Some(body))
 }
 
+/// Everything the config and the workspace decide, as opposed to what the
+/// command line fixed for the whole run. `/reload` recomputes exactly this.
+pub struct Resolved {
+    pub registry: tools::Registry,
+    pub system: String,
+    pub tier: tools::Tier,
+    pub effort: Effort,
+    pub max_turns: usize,
+    pub keys: keys::Keys,
+    /// Worth saying once, at startup and at each reload.
+    pub notes: Vec<String>,
+}
+
+/// Fails whole or not at all. A half-applied config is worse than a stale one,
+/// which is why `/reload` computes all of this before touching anything.
+pub fn resolve(
+    args: &Args,
+    root: &std::path::Path,
+    config: &config::Config,
+    project: &config::Project,
+) -> Result<Resolved> {
+    let mut notes = Vec::new();
+
+    let mut registry = tools::Registry::builtin();
+    if !args.tools.is_empty() {
+        registry = registry.restrict(&args.tools).map_err(|bad| {
+            anyhow::anyhow!(
+                "no tool named `{bad}`; known: {}",
+                tools::Registry::builtin().names().join(", ")
+            )
+        })?;
+    }
+    if !args.no_skills {
+        let found = tools::skills::discover(root);
+        // A skill that silently fails to appear is one the user goes looking
+        // for in the wrong place.
+        notes.extend(
+            found
+                .problems
+                .iter()
+                .map(|p| format!("skill skipped — {p}")),
+        );
+        let tool = tools::skill::SkillTool::new(found.skills);
+        if !tool.is_empty() {
+            registry = registry.with(tool);
+        }
+    }
+    if let Some(path) = &args.schema {
+        let body =
+            std::fs::read_to_string(path).with_context(|| format!("cannot read schema {path}"))?;
+        let schema: serde_json::Value =
+            serde_json::from_str(&body).with_context(|| format!("{path} is not valid JSON"))?;
+        tools::finish::check(&schema).map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
+        registry = registry.with(tools::finish::Yield::new(schema));
+    }
+
+    let settled = config.settle(
+        &project.clone(),
+        config::Flags {
+            effort: args.effort,
+            tier: args.tier,
+            max_turns: args.max_turns,
+        },
+    );
+    let tier = match settled.tier {
+        TierArg::Read => tools::Tier::Read,
+        TierArg::Write => tools::Tier::Write,
+        TierArg::Exec => tools::Tier::Exec,
+    };
+    let effort = match settled.effort {
+        EffortArg::Off => Effort::Off,
+        EffortArg::Low => Effort::Low,
+        EffortArg::Medium => Effort::Medium,
+        EffortArg::High => Effort::High,
+    };
+
+    let mut system = match args.system.as_ref().or(config.defaults.system.as_ref()) {
+        Some(path) => std::fs::read_to_string(path)
+            .with_context(|| format!("cannot read system prompt {path}"))?,
+        None => agent::DEFAULT_SYSTEM.to_string(),
+    };
+    // Appended rather than sent as a message: these are standing instructions,
+    // they do not change within a run, and the system prompt is the part of the
+    // request a provider will cache.
+    if !args.no_context_files {
+        let loaded = context::load(root);
+        if !loaded.files.is_empty() {
+            let names: Vec<String> = loaded
+                .files
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect();
+            let warn = if loaded.oversized() {
+                format!(" — {}KB on every request", loaded.bytes / 1024)
+            } else {
+                String::new()
+            };
+            notes.push(format!("instructions: {}{warn}", names.join(", ")));
+        }
+        system.push_str(&loaded.text);
+    }
+
+    Ok(Resolved {
+        registry,
+        system,
+        tier,
+        effort,
+        max_turns: settled.max_turns,
+        keys: config.key_map()?,
+        notes,
+    })
+}
+
 /// Renders events by printing them, for every surface that is not the terminal
 /// one. Its own task so a slow write never holds the run up.
 fn paint(
@@ -245,10 +358,9 @@ fn paint(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::parse();
+    let args = std::sync::Arc::new(Args::parse());
     let prompt = read_prompt(&args)?;
     let config = config::load(args.config.as_deref())?;
-    let key_map = std::sync::Arc::new(config.key_map()?);
 
     let workspace = tools::Workspace::new(&args.cwd)
         .with_context(|| format!("cannot use {} as a workspace", args.cwd))?;
@@ -324,82 +436,13 @@ async fn main() -> Result<()> {
         );
     }
 
-    let mut registry = tools::Registry::builtin();
-    if !args.tools.is_empty() {
-        registry = registry.restrict(&args.tools).map_err(|bad| {
-            anyhow::anyhow!(
-                "no tool named `{bad}`; known: {}",
-                tools::Registry::builtin().names().join(", ")
-            )
-        })?;
-    }
-
-    if !args.no_skills {
-        let found = tools::skills::discover(workspace.root());
-        // Said once, at startup: a skill that silently fails to appear is one
-        // the user goes looking for in the wrong place.
-        for problem in &found.problems {
-            eprintln!("\x1b[2mskill skipped — {problem}\x1b[0m");
-        }
-        let tool = tools::skill::SkillTool::new(found.skills);
-        if !tool.is_empty() {
-            registry = registry.with(tool);
+    let resolved = resolve(&args, workspace.root(), &config, &project)?;
+    if !args.quiet {
+        for note in &resolved.notes {
+            eprintln!("\x1b[2m{note}\x1b[0m");
         }
     }
-
-    if let Some(path) = &args.schema {
-        let body =
-            std::fs::read_to_string(path).with_context(|| format!("cannot read schema {path}"))?;
-        let schema: serde_json::Value =
-            serde_json::from_str(&body).with_context(|| format!("{path} is not valid JSON"))?;
-        tools::finish::check(&schema).map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
-        registry = registry.with(tools::finish::Yield::new(schema));
-    }
-
-    let settled = config.settle(
-        &project,
-        config::Flags {
-            effort: args.effort,
-            tier: args.tier,
-            max_turns: args.max_turns,
-        },
-    );
-    let tier = match settled.tier {
-        TierArg::Read => tools::Tier::Read,
-        TierArg::Write => tools::Tier::Write,
-        TierArg::Exec => tools::Tier::Exec,
-    };
-    let effort = match settled.effort {
-        EffortArg::Off => Effort::Off,
-        EffortArg::Low => Effort::Low,
-        EffortArg::Medium => Effort::Medium,
-        EffortArg::High => Effort::High,
-    };
-    let mut system = match args.system.as_ref().or(config.defaults.system.as_ref()) {
-        Some(path) => std::fs::read_to_string(path)
-            .with_context(|| format!("cannot read system prompt {path}"))?,
-        None => agent::DEFAULT_SYSTEM.to_string(),
-    };
-    // Appended rather than sent as a message: these are standing instructions,
-    // they do not change within a run, and the system prompt is the part of the
-    // request a provider will cache.
-    if !args.no_context_files {
-        let loaded = context::load(workspace.root());
-        if !args.quiet && !loaded.files.is_empty() {
-            let names: Vec<String> = loaded
-                .files
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect();
-            let warn = if loaded.oversized() {
-                format!(" — {}KB on every request", loaded.bytes / 1024)
-            } else {
-                String::new()
-            };
-            eprintln!("\x1b[2minstructions: {}{warn}\x1b[0m", names.join(", "));
-        }
-        system.push_str(&loaded.text);
-    }
+    let key_map = std::sync::Arc::new(resolved.keys);
 
     // Captured before the spec and workspace move into the agent and context.
     let root = workspace.root().to_path_buf();
@@ -420,11 +463,11 @@ async fn main() -> Result<()> {
     }
     let transport = transport_for(&spec, key)?;
     let mut ag = agent::Agent::new(transport, spec);
-    ag.registry = registry;
-    ag.approver = Arc::new(agent::Ceiling(tier));
-    ag.system = system;
-    ag.effort = effort;
-    ag.max_turns = settled.max_turns;
+    ag.registry = resolved.registry;
+    ag.approver = Arc::new(agent::Ceiling(resolved.tier));
+    ag.system = resolved.system;
+    ag.effort = resolved.effort;
+    ag.max_turns = resolved.max_turns;
     if args.no_compact {
         ag.compaction = None;
     }
@@ -460,6 +503,7 @@ async fn main() -> Result<()> {
             id,
             name,
             keys: key_map.clone(),
+            args: args.clone(),
             ctx: tools::Ctx::new(workspace),
         };
         // The live region needs the terminal at both ends: keys come in one

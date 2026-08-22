@@ -42,6 +42,11 @@ pub const COMMANDS: &[Command] = &[
         help: "what this session has spent so far",
     },
     Command {
+        word: "/reload",
+        args: "",
+        help: "re-read ~/.pi.toml, the instructions and the skills",
+    },
+    Command {
         word: "/keys",
         args: "",
         help: "what every key does, and the id to rebind it under",
@@ -102,11 +107,61 @@ pub struct Repl {
     pub name: Option<String>,
     /// Held so `/keys` can show what is actually in force, overrides included.
     pub keys: std::sync::Arc<crate::keys::Keys>,
+    /// The command line, kept because it outranks the config and so has to be
+    /// re-applied over every reload.
+    pub args: std::sync::Arc<crate::Args>,
     /// Carried across turns: the plan and the file locks outlive any one run.
     pub ctx: Ctx,
 }
 
 impl Repl {
+    /// Re-read the config and everything it decides.
+    ///
+    /// Whole or not at all: on any failure nothing changes, which is why the
+    /// new state is computed in full before a field is touched. Pi separates
+    /// global from project so a broken one of each does not take the other
+    /// down; here the whole reload is refused instead, and what was running
+    /// keeps running — the case that separation protects against cannot arise
+    /// when nothing is applied.
+    ///
+    /// What the session owns is untouched by construction: the transcript, the
+    /// plan, the name, the history, the model. Only what the config decides is
+    /// replaced.
+    pub fn reload(&mut self) -> Vec<String> {
+        let config = match crate::config::load(self.args.config.as_deref()) {
+            Ok(c) => c,
+            Err(e) => return vec![format!("nothing reloaded — {e:#}")],
+        };
+        let project = match crate::config::load_project(self.ctx.workspace.root()) {
+            Ok(p) => p,
+            Err(e) => return vec![format!("nothing reloaded — {e:#}")],
+        };
+        let resolved =
+            match crate::resolve(&self.args, self.ctx.workspace.root(), &config, &project) {
+                Ok(r) => r,
+                Err(e) => return vec![format!("nothing reloaded — {e:#}")],
+            };
+
+        let changed = resolved.system != self.agent.system;
+        self.agent.registry = resolved.registry;
+        self.agent.approver = std::sync::Arc::new(agent::Ceiling(resolved.tier));
+        self.agent.system = resolved.system;
+        self.agent.effort = resolved.effort;
+        self.agent.max_turns = resolved.max_turns;
+        self.keys = std::sync::Arc::new(resolved.keys);
+
+        let mut said = resolved.notes;
+        said.push(if changed {
+            // Worth saying: the prompt is what a provider caches, so a changed
+            // one starts the cache over. An unchanged one costs nothing, which
+            // is why there is no narrower `/reload keys`.
+            "reloaded — the instructions changed, so the prompt cache starts over".into()
+        } else {
+            "reloaded".into()
+        });
+        said
+    }
+
     /// Save the transcript. Called after every turn: an interrupted one is
     /// exactly the one worth keeping.
     pub fn save(&self) -> anyhow::Result<()> {
@@ -130,6 +185,7 @@ pub enum Cmd {
     Cost,
     New,
     Keys,
+    Reload,
     /// Everything after the word, or empty to clear.
     Name(String),
     /// Everything after the word focuses the summary.
@@ -151,6 +207,7 @@ pub fn parse(line: &str) -> Option<Cmd> {
         "/cost" => Cmd::Cost,
         "/new" => Cmd::New,
         "/keys" => Cmd::Keys,
+        "/reload" => Cmd::Reload,
         "/name" => Cmd::Name(rest(line)),
         "/compact" => Cmd::Compact(rest(line)),
         other => Cmd::Unknown(other.to_string()),
@@ -187,6 +244,7 @@ impl Repl {
             Cmd::Exit => Step::Quit,
             Cmd::Help => Step::Handled(help()),
             Cmd::Keys => Step::Handled(self.keys.listing()),
+            Cmd::Reload => Step::Handled(self.reload()),
             Cmd::Todo => lines(tools::todo::render(self.session.log.todos())),
             Cmd::Cost => {
                 let u = &totals.usage;
