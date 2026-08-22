@@ -94,21 +94,33 @@ key when they are never live together, which is how `up` is `menu.previous`
 with the list open and `history.older` without it. Sharing one *within* a
 context is refused at load, along with an unknown id or an unreadable binding.
 
-`/help` `/new` `/name` `/compact` `/reload` `/keys` `/todo` `/cost` `/exit`. Typing `/` opens a
-list of what the line could still become; `↑` `↓` pick, `Tab` accepts, `Esc`
-dismisses it until the next keystroke.
+`/help` `/new` `/name` `/model` `/compact` `/reload` `/keys` `/todo` `/cost` `/exit`. Typing `/`
+opens a list of what the line could still become; `↑` `↓` pick, `Tab` accepts,
+`Esc` dismisses it until the next keystroke. `/model` is the one command whose
+argument completes too, because the name is the tedious part and the config
+already knows it.
 
 `/compact [what to keep in view]` summarizes everything outside the tail
 you are working from — for when a phase has ended and no budget can tell.
 `/name` and `--name` label a session, because the ids are timestamps.
 
+`/model` on its own lists what `~/.pi.toml` defines — wire, window, price —
+with a mark against the one running. `/model <name>` moves the session to
+another, transcript and all. Prior reasoning does not survive the move intact:
+a block carries the model that produced it, and a model that did not write it
+gets the text without the signature, as prose or wrapped in `<think>` depending
+on what it accepts. Nothing is rewritten on the way, so switching back makes
+the original blocks native again. What has been spent stays spent — every turn
+was priced by the model that ran it. Under `--wire` the config is not consulted
+at all, and `/model <id>` asks that same endpoint for another of its models.
+
 `/reload` re-reads the config, the standing instructions and the skills. It
 fails whole or not at all: a broken config leaves what was running running,
-and says what was wrong with it. The model is not among what reloads —
-reasoning blocks only replay to the model that produced them, which is the same
-reason a resumed session stays on its own. There is no narrower `/reload keys`
-because there is nothing to save: an unchanged system prompt is the same
-string, so the provider's cache survives a reload that changed nothing.
+and says what was wrong with it. The model is not among what reloads — which
+model a session is on is a decision, not a preference, and `/model` is how it
+changes. There is no narrower `/reload keys` because there is nothing to save:
+an unchanged system prompt is the same string, so the provider's cache survives
+a reload that changed nothing.
 
 ### Standing instructions
 

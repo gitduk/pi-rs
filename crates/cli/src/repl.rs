@@ -27,6 +27,11 @@ pub const COMMANDS: &[Command] = &[
         help: "call this session something you will recognise",
     },
     Command {
+        word: "/model",
+        args: "[name]",
+        help: "list the models in ~/.pi.toml, or move this session to one",
+    },
+    Command {
         word: "/compact",
         args: "[focus]",
         help: "summarize everything but what you are working on now",
@@ -78,18 +83,70 @@ fn help() -> Vec<String> {
         .collect()
 }
 
-/// Commands the line could still become, while the command word is still being
-/// typed. Empty once there is whitespace: the word is settled by then and what
-/// follows is its argument.
-pub fn complete(line: &str) -> Vec<&'static Command> {
-    if !line.starts_with('/') || line.contains(char::is_whitespace) {
+/// A model the prompt can complete to, and what tells it apart from the others.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Choice {
+    pub name: String,
+    pub note: String,
+}
+
+/// One thing the line could still become.
+///
+/// Owned rather than borrowed from the table, because half the candidates come
+/// from the config and none of those are `'static`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    /// Shown in the list.
+    pub show: String,
+    /// What the whole line becomes when this is accepted.
+    pub line: String,
+    pub help: String,
+    /// Something is still expected after it, so accepting leaves a trailing
+    /// space and the caret past it.
+    pub more: bool,
+}
+
+/// What the line could still become: a command while its word is being typed,
+/// then that command's own argument once the word is settled.
+///
+/// Only `/model` has an argument worth completing. A prompt is prose and a
+/// focus phrase is prose; guessing at either is worse than leaving it alone.
+pub fn complete(line: &str, models: &[Choice]) -> Vec<Candidate> {
+    if !line.starts_with('/') {
         return Vec::new();
     }
-    COMMANDS
+    let Some((word, rest)) = line.split_once(char::is_whitespace) else {
+        return COMMANDS
+            .iter()
+            .filter(|c| c.word.starts_with(line))
+            // An exact and only match is already typed; offering it is noise.
+            .filter(|c| c.word != line)
+            .map(|c| Candidate {
+                show: format!("{} {}", c.word, c.args).trim_end().to_string(),
+                line: c.word.to_string(),
+                help: c.help.to_string(),
+                more: !c.args.is_empty(),
+            })
+            .collect();
+    };
+    if word != "/model" {
+        return Vec::new();
+    }
+    let typed = rest.trim_start();
+    // A second word means the name is settled and something else is being
+    // typed. There is no third thing to offer.
+    if typed.contains(char::is_whitespace) {
+        return Vec::new();
+    }
+    models
         .iter()
-        .filter(|c| c.word.starts_with(line))
-        // An exact and only match is already typed; offering it is noise.
-        .filter(|c| c.word != line)
+        .filter(|m| m.name.starts_with(typed) && m.name != typed)
+        .map(|m| Candidate {
+            show: m.name.clone(),
+            line: format!("/model {}", m.name),
+            help: m.note.clone(),
+            more: false,
+        })
         .collect()
 }
 
@@ -100,13 +157,15 @@ pub fn complete(line: &str) -> Vec<&'static Command> {
 pub struct Repl {
     pub agent: Agent,
     pub store: Store,
-    pub model: String,
     pub session: Session,
     pub id: String,
     /// What the user calls this session, if anything.
     pub name: Option<String>,
     /// Held so `/keys` can show what is actually in force, overrides included.
     pub keys: std::sync::Arc<crate::keys::Keys>,
+    /// The config in force, as opposed to the one on disk. `/model` picks from
+    /// this, so a switch cannot quietly apply an edit `/reload` has not.
+    pub config: std::sync::Arc<crate::config::Config>,
     /// The command line, kept because it outranks the config and so has to be
     /// re-applied over every reload.
     pub args: std::sync::Arc<crate::Args>,
@@ -149,6 +208,10 @@ impl Repl {
         self.agent.effort = resolved.effort;
         self.agent.max_turns = resolved.max_turns;
         self.keys = std::sync::Arc::new(resolved.keys);
+        // The running model is deliberately not re-dialled: a reload re-reads
+        // preferences, and which model this session is on was a decision, not a
+        // preference. `/model` is how that one changes.
+        self.config = std::sync::Arc::new(config);
 
         let mut said = resolved.notes;
         said.push(if changed {
@@ -162,18 +225,160 @@ impl Repl {
         said
     }
 
+    /// The models `/model` can reach, with what tells them apart.
+    ///
+    /// Empty under `--wire`: the command line named one endpoint directly and
+    /// the config is not consulted, so there is no list to pick from — only a
+    /// wire id to type.
+    pub fn choices(&self) -> Vec<Choice> {
+        if self.args.wire.is_some() {
+            return Vec::new();
+        }
+        self.config
+            .models
+            .iter()
+            .map(|(name, entry)| Choice {
+                name: name.clone(),
+                note: summary(
+                    entry.wire.transport_name(),
+                    entry.context_window,
+                    &entry.pricing,
+                ),
+            })
+            .collect()
+    }
+
+    /// Move this session to another model.
+    ///
+    /// The transcript comes with it. Reasoning blocks carry the model that
+    /// produced them and every transport demotes one it did not write —
+    /// signature dropped, replayed as text or as `<think>` per the new model's
+    /// `thinking_replay` — so the history stays sendable instead of becoming a
+    /// 400 on the next turn. Nothing is rewritten on the way: switch back and
+    /// the original blocks are native again.
+    ///
+    /// What has been spent stays spent. Each turn was priced by the spec in
+    /// force when it ran, and the total is the sum of those, so a switch to a
+    /// dearer model does not reprice the cheap turns behind it.
+    pub fn switch(&mut self, name: &str) -> Vec<String> {
+        let dialled = match crate::dial(
+            &self.args,
+            &self.config,
+            name,
+            crate::config::Origin::Command,
+        ) {
+            Ok(d) => d,
+            Err(e) => return vec![format!("still on {} — {e:#}", self.agent.spec.id)],
+        };
+        // Compared after resolving, not before: `find` accepts a model's
+        // `wire_id` as well as its table name, so the name typed and the id it
+        // lands on need not be the same string. Comparing the typed one would
+        // re-dial the model already running and then announce a reasoning
+        // demotion that never happened.
+        if dialled.spec.id == self.agent.spec.id {
+            return vec![format!("already on {}", self.agent.spec.id)];
+        }
+        let mut said: Vec<String> = dialled.warning.into_iter().chain(dialled.notes).collect();
+        let spec = &dialled.spec;
+        said.push(format!(
+            "now on {} · {}",
+            spec.id,
+            summary(spec.transport_name(), spec.context_window, &spec.pricing)
+        ));
+        if carries_reasoning(&self.session.log) {
+            said.push(demotion(spec.thinking_replay).into());
+        }
+        self.agent.spec = dialled.spec;
+        self.agent.transport = dialled.transport;
+        said
+    }
+
+    /// What `/model` on its own shows.
+    fn listing(&self) -> Vec<String> {
+        let here = &self.agent.spec.id;
+        // Two different reasons the list can be empty, and reporting the wrong
+        // one sends the reader to the wrong file.
+        if self.args.wire.is_some() {
+            return vec![
+                format!("on {here}, at the endpoint --base-url named"),
+                "--wire bypasses ~/.pi.toml, so `/model <id>` asks that same endpoint \
+                 for another of its models"
+                    .into(),
+            ];
+        }
+        let choices = self.choices();
+        if choices.is_empty() {
+            return vec![
+                format!("on {here}, and ~/.pi.toml now defines no model to switch to"),
+                "see examples/pi.toml for what a [models.<name>] entry looks like".into(),
+            ];
+        }
+        let width = choices.iter().map(|c| c.name.len()).max().unwrap_or(0);
+        choices
+            .iter()
+            .map(|c| {
+                let mark = if &c.name == here { "●" } else { " " };
+                format!("{mark} {:width$}  {}", c.name, c.note)
+            })
+            .collect()
+    }
+
     /// Save the transcript. Called after every turn: an interrupted one is
     /// exactly the one worth keeping.
     pub fn save(&self) -> anyhow::Result<()> {
         self.store.save(
             &self.id,
             self.ctx.workspace.root(),
-            &self.model,
+            &self.agent.spec.id,
             self.name.as_deref(),
             &self.session.log,
         )?;
         Ok(())
     }
+}
+
+/// Enough about a model to choose between them: who serves it, how much it
+/// holds, and what it costs where that is known.
+///
+/// Takes the three pieces rather than a config entry, because the running model
+/// may never have been one — an ad-hoc `--wire` spec has no entry to read.
+fn summary(wire: &str, window: u32, p: &brain::catalog::Pricing) -> String {
+    let mut parts = vec![wire.to_string(), format!("{}k", window / 1000)];
+    if p.input_per_mtok > 0.0 || p.output_per_mtok > 0.0 {
+        parts.push(format!(
+            "${:.2}/${:.2} per Mtok",
+            p.input_per_mtok, p.output_per_mtok
+        ));
+    }
+    parts.join(" · ")
+}
+
+/// What becomes of the transcript's reasoning once another model is reading it.
+///
+/// Only ever asked about a model that did not write it — the origin recorded on
+/// each block cannot match after a switch — so the signed path is out and one of
+/// these three is what the transport will do with it.
+fn demotion(replay: brain::catalog::ThinkingReplay) -> &'static str {
+    use brain::catalog::ThinkingReplay as R;
+    match replay {
+        R::Signed | R::BareProse => "reasoning from the earlier turns replays as plain text",
+        R::Tagged => "reasoning from the earlier turns replays wrapped in <think> tags",
+        R::Drop => "reasoning from the earlier turns is dropped rather than replayed",
+    }
+}
+
+/// Whether the transcript holds any prior-turn reasoning at all.
+///
+/// Worth saying at a switch: it is the one part of the history that does not
+/// survive intact, and a model that suddenly reads its own earlier thinking as
+/// quoted prose is otherwise an unexplained change in tone.
+fn carries_reasoning(log: &agent::log::Log) -> bool {
+    // `live`, not `messages`: what compaction has already dropped is not going
+    // to reach the new model in any form, demoted or otherwise.
+    log.live().iter().any(|(_, m)| {
+        matches!(m, brain::message::Message::Assistant { content, .. }
+            if content.iter().any(|b| matches!(b, brain::message::AssistantContent::Reasoning(_))))
+    })
 }
 
 /// What a line at the prompt asks for.
@@ -190,6 +395,8 @@ pub enum Cmd {
     Name(String),
     /// Everything after the word focuses the summary.
     Compact(String),
+    /// The name to move to, or empty to list what there is.
+    Model(String),
     Unknown(String),
 }
 
@@ -210,6 +417,7 @@ pub fn parse(line: &str) -> Option<Cmd> {
         "/reload" => Cmd::Reload,
         "/name" => Cmd::Name(rest(line)),
         "/compact" => Cmd::Compact(rest(line)),
+        "/model" => Cmd::Model(rest(line)),
         other => Cmd::Unknown(other.to_string()),
     })
 }
@@ -278,6 +486,11 @@ impl Repl {
                 }
             }
             Cmd::Compact(focus) => Step::Compact(Some(focus).filter(|f| !f.is_empty())),
+            Cmd::Model(name) => Step::Handled(if name.is_empty() {
+                self.listing()
+            } else {
+                self.switch(&name)
+            }),
             Cmd::Unknown(other) => lines(format!("unknown command {other} — /help lists them")),
         }
     }
@@ -285,7 +498,7 @@ impl Repl {
 
 #[cfg(test)]
 mod tests {
-    use super::{COMMANDS, Cmd, complete, parse};
+    use super::{COMMANDS, Candidate, Choice, Cmd, complete, parse};
 
     #[test]
     fn every_listed_command_actually_parses() {
@@ -300,18 +513,67 @@ mod tests {
         }
     }
 
+    fn choices() -> Vec<Choice> {
+        ["flash", "flint", "sonnet"]
+            .iter()
+            .map(|n| Choice {
+                name: (*n).to_string(),
+                note: "openai · 128k".into(),
+            })
+            .collect()
+    }
+
+    fn offered(line: &str) -> Vec<String> {
+        complete(line, &choices())
+            .into_iter()
+            .map(|c| c.show)
+            .collect()
+    }
+
     #[test]
     fn completion_narrows_as_the_word_is_typed() {
-        let words = |s: &str| -> Vec<&str> { complete(s).iter().map(|c| c.word).collect() };
-        assert_eq!(words("/n"), vec!["/new", "/name"]);
-        assert_eq!(words("/na"), vec!["/name"]);
+        assert_eq!(offered("/n"), ["/new", "/name [text]"]);
+        assert_eq!(offered("/na"), ["/name [text]"]);
         // Already whole: there is nothing left to offer.
-        assert!(words("/name").is_empty());
-        // Past the word, the rest is an argument.
-        assert!(words("/name the flaky test").is_empty());
+        assert!(offered("/name").is_empty());
+        // Past a word with nothing to complete, the rest is prose.
+        assert!(offered("/name the flaky test").is_empty());
         // Not a command at all.
-        assert!(words("what does /help do").is_empty());
-        assert!(words("").is_empty());
+        assert!(offered("what does /help do").is_empty());
+        assert!(offered("").is_empty());
+    }
+
+    #[test]
+    fn accepting_a_command_that_wants_an_argument_leaves_room_for_one() {
+        let of = |line: &str| -> Candidate { complete(line, &choices()).swap_remove(0) };
+        let name = of("/nam");
+        assert_eq!((name.line.as_str(), name.more), ("/name", true));
+        // Nothing follows /todo, so the caret should not be pushed past a space
+        // the user then has to delete.
+        let todo = of("/tod");
+        assert_eq!((todo.line.as_str(), todo.more), ("/todo", false));
+    }
+
+    #[test]
+    fn the_models_complete_once_the_command_word_is_settled() {
+        // The whole point: the name is the tedious part to type, and it is the
+        // one thing the config already knows.
+        assert_eq!(offered("/model fl"), ["flash", "flint"]);
+        assert_eq!(offered("/model fla"), ["flash"]);
+        // A bare space offers all of them rather than nothing.
+        assert_eq!(offered("/model "), ["flash", "flint", "sonnet"]);
+        // Whole already, and there is no second argument behind it.
+        assert!(offered("/model flash").is_empty());
+        assert!(offered("/model flash and").is_empty());
+        // Accepting one replaces the line, not just the word.
+        assert_eq!(complete("/model fla", &choices())[0].line, "/model flash");
+    }
+
+    #[test]
+    fn a_config_with_no_models_offers_nothing_rather_than_every_command() {
+        // The `--wire` case: choices() is empty there, and the argument branch
+        // must not fall back to completing command words again.
+        assert!(complete("/model fl", &[]).is_empty());
     }
 
     #[test]

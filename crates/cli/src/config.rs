@@ -221,6 +221,7 @@ impl Entry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
     Flag,
+    Command,
     Resumed,
     Project,
     Global,
@@ -231,6 +232,7 @@ impl Origin {
     pub fn describe(self) -> &'static str {
         match self {
             Origin::Flag => "-m",
+            Origin::Command => "/model",
             Origin::Resumed => "the resumed session",
             Origin::Project => "defaults.model in the project's .pi.toml",
             Origin::Global => "defaults.model in ~/.pi.toml",
@@ -297,8 +299,10 @@ impl Config {
         }
     }
 
-    /// A resumed run stays on the model that produced the transcript, whose
-    /// reasoning blocks only replay to itself — so `prior` outranks both files.
+    /// A resumed run stays on the model that produced the transcript, so `prior`
+    /// outranks both files: continuing is continuing, and a project default
+    /// that quietly moved a half-finished session elsewhere would be a surprise
+    /// nobody asked for. `/model` is the deliberate way to move it.
     ///
     /// A config that defines exactly one model and names no default means that
     /// one: there is nothing else it could mean, and making the user write the
@@ -417,20 +421,23 @@ fn parse_project(body: &str) -> Result<Project> {
 }
 
 /// A key written into a file others can read is worth one line of warning.
-pub fn warn_if_exposed(path: &Path) {
+///
+/// Returned rather than printed: the same check runs behind `/model`, where the
+/// terminal is in raw mode and a stray `eprintln!` lands wherever the cursor
+/// happens to be.
+pub fn warn_if_exposed(path: &Path) -> Option<String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        let Ok(meta) = std::fs::metadata(path) else {
-            return;
-        };
+        let meta = std::fs::metadata(path).ok()?;
         if meta.permissions().mode() & 0o077 != 0 {
-            eprintln!(
-                "\x1b[2m{} holds a key and is readable by others; chmod 600 it\x1b[0m",
+            return Some(format!(
+                "{} holds a key and is readable by others; chmod 600 it",
                 path.display()
-            );
+            ));
         }
     }
+    None
 }
 
 #[cfg(test)]
@@ -586,7 +593,8 @@ usage_in_streaming = false
 
     #[test]
     fn the_resumed_model_outranks_a_project_that_wants_another() {
-        // Reasoning blocks only replay to the model that produced them.
+        // Resuming means resuming, project default or not. Moving the session
+        // is `/model`'s job, and it says so when it happens.
         let c = parse(SAMPLE).unwrap();
         let p = parse_project("[defaults]\nmodel = \"other\"\n").unwrap();
         assert_eq!(c.model(&p, None, Some("resumed")).unwrap().0, "resumed");

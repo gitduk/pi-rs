@@ -29,6 +29,23 @@ pub enum WireArg {
     Openai,
 }
 
+impl WireArg {
+    /// The wire this names, carrying the protocol's own defaults for its
+    /// quirks. A config entry that states quirks builds its own instead.
+    fn wire(self) -> Wire {
+        match self {
+            WireArg::Anthropic => Wire::Anthropic(AnthropicCompat::default()),
+            WireArg::Openai => Wire::OpenAi(OpenAiCompat::default()),
+        }
+    }
+
+    /// Delegated rather than matched again, so a model `/model` lists and one
+    /// it has just switched to cannot print two names for the same protocol.
+    pub fn transport_name(self) -> &'static str {
+        self.wire().transport_name()
+    }
+}
+
 /// Ordered, so a project file can lower the ceiling without being able to
 /// raise it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum, serde::Deserialize)]
@@ -158,28 +175,22 @@ fn ad_hoc(args: &Args, model: &str, wire: WireArg) -> Result<ModelSpec> {
         .base_url
         .clone()
         .context("--wire needs --base-url, e.g. --base-url http://localhost:8000/v1")?;
-    let (wire, thinking) = match wire {
-        WireArg::Anthropic => (
-            Wire::Anthropic(AnthropicCompat::default()),
-            Some(ThinkingSupport::Budget),
-        ),
-        WireArg::Openai => (
-            Wire::OpenAi(OpenAiCompat::default()),
-            Some(ThinkingSupport::Effort),
-        ),
+    let thinking = match wire {
+        WireArg::Anthropic => ThinkingSupport::Budget,
+        WireArg::Openai => ThinkingSupport::Effort,
     };
     Ok(ModelSpec {
         id: model.to_string(),
         wire_id: model.to_string(),
         base_url,
-        wire,
+        wire: wire.wire(),
         context_window: 128_000,
         max_output_tokens: 8_192,
         caps: Capabilities {
             tools: true,
             parallel_tool_calls: true,
             vision: false,
-            thinking,
+            thinking: Some(thinking),
             cache_breakpoints: false,
         },
         thinking_replay: ThinkingReplay::Tagged,
@@ -207,6 +218,105 @@ fn transport_for(spec: &ModelSpec, configured: Option<String>) -> Result<Arc<dyn
             Ok(Arc::new(OpenAi::new(key)))
         }
     }
+}
+
+/// One model, ready to talk to: what to send, and the client to send it with.
+pub struct Dialled {
+    pub spec: ModelSpec,
+    pub transport: Arc<dyn Transport>,
+    /// Worth saying once — at startup, and again at every `/model`. Startup
+    /// drops these under `--quiet`, which asks for the answer and nothing
+    /// around it. `/model` prints them either way: the user typed a command
+    /// whose whole purpose is to report, and a silent one would read as broken.
+    pub notes: Vec<String>,
+    /// Said even under `--quiet`, which is why it is not one of the notes. An
+    /// exposed key is a fact about the machine rather than progress chatter,
+    /// and the run that asked for silence is the scripted one nobody is
+    /// watching — exactly the one that would never hear it again.
+    pub warning: Option<String>,
+}
+
+/// The table name is the wire name, easy to miss when the two were written at
+/// different times: say the edit, not just the mismatch.
+fn unknown(config: &config::Config, model: &str, named_by: config::Origin) -> anyhow::Error {
+    let by = named_by.describe();
+    match config.ids().as_slice() {
+        [] => anyhow::anyhow!(
+            "unknown model `{model}`, named by {by}, and ~/.pi.toml defines none — \
+             see examples/pi.toml."
+        ),
+        [only] => anyhow::anyhow!(
+            "unknown model `{model}`, named by {by}; the only one defined is `{only}`. \
+             Rename [models.{only}] to [models.{model}], or point {by} at `{only}`."
+        ),
+        ids => anyhow::anyhow!(
+            "unknown model `{model}`, named by {by}; defined: {}.",
+            ids.join(", ")
+        ),
+    }
+}
+
+/// Resolve a model name into something that can be talked to.
+///
+/// Startup and `/model` share this so the two cannot decide differently about
+/// the same name. `--wire` short-circuits the config in both: it says the
+/// command line has named one endpoint and one protocol for the whole run, and
+/// a config entry of the same name would name a different server. Both cannot
+/// hold, and the flag wins here as flags do everywhere else.
+pub fn dial(
+    args: &Args,
+    config: &config::Config,
+    model: &str,
+    named_by: config::Origin,
+) -> Result<Dialled> {
+    let entry = args.wire.is_none().then(|| config.find(model)).flatten();
+    let mut spec = match (args.wire, entry) {
+        (Some(wire), _) => ad_hoc(args, model, wire)?,
+        (None, Some((id, e))) => e.spec(id)?,
+        (None, None) => return Err(unknown(config, model, named_by)),
+    };
+    if let Some(url) = &args.base_url {
+        spec.base_url = url.clone();
+    }
+    if let Some(window) = args.context {
+        spec.context_window = window;
+    }
+
+    let mut notes = Vec::new();
+    // An ad-hoc spec is a guess. Saying which guess lets the user correct the
+    // one that matters instead of debugging a 400 later.
+    if args.wire.is_some() {
+        notes.push(format!(
+            "assuming a {}-token window, {} max output, and no pricing for `{}`. \
+             Set --context if the server's window differs.",
+            spec.context_window, spec.max_output_tokens, spec.id
+        ));
+    }
+
+    // The table name was only needed to build the spec; what is left is the
+    // entry itself.
+    let entry = entry.map(|(_, e)| e);
+    let key = match entry.and_then(config::Entry::key) {
+        Some(k) => Some(k.with_context(|| format!("the key for `{model}`"))?),
+        None => None,
+    };
+    let warning = entry
+        .filter(|e| e.api_key.is_some())
+        .and_then(|_| {
+            args.config
+                .clone()
+                .map(std::path::PathBuf::from)
+                .or_else(config::global_path)
+        })
+        .and_then(|path| config::warn_if_exposed(&path));
+
+    let transport = transport_for(&spec, key)?;
+    Ok(Dialled {
+        spec,
+        transport,
+        notes,
+        warning,
+    })
 }
 
 /// The prompt, or None when the run should ask for one.
@@ -360,7 +470,7 @@ fn paint(
 async fn main() -> Result<()> {
     let args = std::sync::Arc::new(Args::parse());
     let prompt = read_prompt(&args)?;
-    let config = config::load(args.config.as_deref())?;
+    let config = Arc::new(config::load(args.config.as_deref())?);
 
     let workspace = tools::Workspace::new(&args.cwd)
         .with_context(|| format!("cannot use {} as a workspace", args.cwd))?;
@@ -373,72 +483,28 @@ async fn main() -> Result<()> {
         _ => None,
     };
 
-    let named = config.model(
+    let Some((named, named_by)) = config.model(
         &project,
         args.model.as_deref(),
         prior.as_ref().map(|p| p.model.as_str()),
-    );
-
-    let mut spec = match (args.wire, &named) {
-        // A one-off against an endpoint not worth writing down yet.
-        (Some(wire), Some((model, _))) => ad_hoc(&args, model, wire)?,
-        (Some(_), None) => bail!("--wire needs -m to say what the endpoint calls the model"),
-        (None, Some((model, named_by))) => match config.find(model) {
-            Some((id, entry)) => entry.spec(id)?,
-            None => {
-                // The table name is the wire name, easy to miss when the two
-                // were written at different times: say the edit, not just the
-                // mismatch.
-                match config.ids().as_slice() {
-                    [] => bail!(
-                        "unknown model `{model}`, named by {}, and ~/.pi.toml defines \
-                         none — see examples/pi.toml.",
-                        named_by.describe()
-                    ),
-                    [only] => bail!(
-                        "unknown model `{model}`, named by {}; the only one defined is \
-                         `{only}`. Rename [models.{only}] to [models.{model}], or point \
-                         {} at `{only}`.",
-                        named_by.describe(),
-                        named_by.describe()
-                    ),
-                    ids => bail!(
-                        "unknown model `{model}`, named by {}; defined: {}.",
-                        named_by.describe(),
-                        ids.join(", ")
-                    ),
-                }
-            }
-        },
-        (None, None) => bail!(
+    ) else {
+        if args.wire.is_some() {
+            bail!("--wire needs -m to say what the endpoint calls the model");
+        }
+        bail!(
             "no model to run. Define one in ~/.pi.toml — see examples/pi.toml — \
              or name an endpoint with --wire and --base-url."
-        ),
-    };
-    let entry = named
-        .as_ref()
-        .and_then(|(m, _)| config.find(m))
-        .map(|(_, e)| e);
-    let model = spec.id.clone();
-    if let Some(url) = &args.base_url {
-        spec.base_url = url.clone();
-    }
-    if let Some(window) = args.context {
-        spec.context_window = window;
-    }
-    // An ad-hoc spec is a guess. Saying which guess lets the user correct the
-    // one that matters instead of debugging a 400 later.
-    if args.wire.is_some() && !args.quiet {
-        eprintln!(
-            "\x1b[2massuming a {}-token window, {} max output, and no pricing for `{}`. \
-             Set --context if the server's window differs.\x1b[0m",
-            spec.context_window, spec.max_output_tokens, spec.id
         );
-    }
+    };
+    let dialled = dial(&args, &config, &named, named_by)?;
 
     let resolved = resolve(&args, workspace.root(), &config, &project)?;
+    // Ahead of the quiet check on purpose: see `Dialled::warning`.
+    if let Some(warning) = &dialled.warning {
+        eprintln!("\x1b[2m{warning}\x1b[0m");
+    }
     if !args.quiet {
-        for note in &resolved.notes {
+        for note in dialled.notes.iter().chain(&resolved.notes) {
             eprintln!("\x1b[2m{note}\x1b[0m");
         }
     }
@@ -446,23 +512,9 @@ async fn main() -> Result<()> {
 
     // Captured before the spec and workspace move into the agent and context.
     let root = workspace.root().to_path_buf();
-    let model_id = spec.id.clone();
+    let model_id = dialled.spec.id.clone();
 
-    let key = match entry.and_then(config::Entry::key) {
-        Some(k) => Some(k.with_context(|| format!("the key for `{model}`"))?),
-        None => None,
-    };
-    if entry.is_some_and(|e| e.api_key.is_some())
-        && let Some(path) = args
-            .config
-            .clone()
-            .map(std::path::PathBuf::from)
-            .or_else(config::global_path)
-    {
-        config::warn_if_exposed(&path);
-    }
-    let transport = transport_for(&spec, key)?;
-    let mut ag = agent::Agent::new(transport, spec);
+    let mut ag = agent::Agent::new(dialled.transport, dialled.spec);
     ag.registry = resolved.registry;
     ag.approver = Arc::new(agent::Ceiling(resolved.tier));
     ag.system = resolved.system;
@@ -498,11 +550,11 @@ async fn main() -> Result<()> {
         let core = repl::Repl {
             agent: ag,
             store,
-            model: model_id,
             session: agent::Session { log: carried },
             id,
             name,
             keys: key_map.clone(),
+            config: config.clone(),
             args: args.clone(),
             ctx: tools::Ctx::new(workspace),
         };

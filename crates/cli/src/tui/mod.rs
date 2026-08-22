@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::keys::{Action, Keys, Press};
 use crate::render::{self, Paint};
-use crate::repl::{self, Command, Repl, Step};
+use crate::repl::{self, Candidate, Choice, Repl, Step};
 use editor::Editor;
 use screen::{Caret, Screen};
 use std::sync::Arc;
@@ -74,6 +74,9 @@ struct Ui {
     /// list comes back, which is what makes Esc mean "not that" rather than
     /// "never again".
     dismissed_at: Option<String>,
+    /// What `/model` can complete to. A copy rather than a borrow of the
+    /// config: the loop holds the session mutably while it draws.
+    choices: Vec<Choice>,
     last_interrupt: Option<Instant>,
     started: Option<Instant>,
     spinner: usize,
@@ -91,10 +94,11 @@ struct Ui {
 }
 
 impl Ui {
-    fn new(screen: Screen, keys: Arc<Keys>) -> Self {
+    fn new(screen: Screen, keys: Arc<Keys>, choices: Vec<Choice>) -> Self {
         Self {
             screen,
             keys,
+            choices,
             editor: Editor::default(),
             paint: Paint { color: true },
             open: String::new(),
@@ -185,18 +189,20 @@ impl Ui {
     /// What the line could still become. Only while a command word is being
     /// typed, and never during a run — the editor is a queue then, not a
     /// command line.
-    fn menu(&self) -> Vec<&'static Command> {
+    fn menu(&self) -> Vec<Candidate> {
         if self.started.is_some() || self.dismissed_at.as_deref() == Some(self.editor.text()) {
             return Vec::new();
         }
-        repl::complete(self.editor.text())
+        repl::complete(self.editor.text(), &self.choices)
     }
 
     /// The highlighted completion, clamped: the list shrinks as the word grows.
-    fn highlighted(&self) -> Option<&'static Command> {
-        let menu = self.menu();
-        menu.get(self.picked.min(menu.len().saturating_sub(1)))
-            .copied()
+    fn highlighted(&self) -> Option<Candidate> {
+        let mut menu = self.menu();
+        if menu.is_empty() {
+            return None;
+        }
+        Some(menu.swap_remove(self.picked.min(menu.len() - 1)))
     }
 
     fn menu_rows(&self, width: usize) -> Vec<String> {
@@ -205,16 +211,11 @@ impl Ui {
             return Vec::new();
         }
         let picked = self.picked.min(menu.len() - 1);
-        let head = menu
-            .iter()
-            .map(|c| c.word.len() + c.args.len() + 1)
-            .max()
-            .unwrap_or(0);
+        let head = menu.iter().map(|c| c.show.len()).max().unwrap_or(0);
         menu.iter()
             .enumerate()
             .map(|(i, c)| {
-                let name = format!("{} {}", c.word, c.args);
-                let line = format!("  {name:head$}  {}", c.help);
+                let line = format!("  {:head$}  {}", c.show, c.help);
                 let painted = if i == picked {
                     format!("\x1b[7m{line}\x1b[0m")
                 } else {
@@ -353,9 +354,9 @@ impl Ui {
             Some(Action::AppClearScreen) => self.screen.clear(),
             Some(Action::MenuAccept) => {
                 if let Some(c) = self.highlighted() {
-                    self.editor.set_line(c.word);
-                    // A command that takes something wants a space after it.
-                    if !c.args.is_empty() {
+                    self.editor.set_line(&c.line);
+                    // Something still expected after it wants a space first.
+                    if c.more {
                         self.editor.insert(' ');
                     }
                     self.picked = 0;
@@ -470,7 +471,7 @@ const HISTORY_KEEP: usize = 1_000;
 
 impl Tui {
     pub fn new(core: Repl, keys: Arc<Keys>) -> Result<Self> {
-        let mut ui = Ui::new(Screen::new()?, keys);
+        let mut ui = Ui::new(Screen::new()?, keys, core.choices());
         if let Some(prior) = history_path().and_then(|p| std::fs::read_to_string(p).ok()) {
             ui.editor.seed_history(editor::decode(&prior));
         }
@@ -521,6 +522,9 @@ impl Tui {
                     if !Arc::ptr_eq(&self.ui.keys, &self.core.keys) {
                         self.ui.keys = self.core.keys.clone();
                     }
+                    // Likewise the completion list: /reload is allowed to
+                    // define models the last one did not.
+                    self.ui.choices = self.core.choices();
                 }
                 Step::Compact(focus) => {
                     // Long enough to want the spinner, so it borrows the run's.
