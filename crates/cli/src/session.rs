@@ -11,6 +11,10 @@ pub struct Stored {
     pub workspace: String,
     pub model: String,
     pub created: u64,
+    /// What the user calls this session. Ids are a timestamp and a pid, which
+    /// nobody recognises a week later.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     #[serde(default)]
     pub log: Log,
     /// Transcripts written before the log existed. Read, never written.
@@ -76,7 +80,14 @@ impl Store {
         self.root.join(format!("{id}.json"))
     }
 
-    pub fn save(&self, id: &str, workspace: &Path, model: &str, log: &Log) -> Result<PathBuf> {
+    pub fn save(
+        &self,
+        id: &str,
+        workspace: &Path,
+        model: &str,
+        name: Option<&str>,
+        log: &Log,
+    ) -> Result<PathBuf> {
         std::fs::create_dir_all(&self.root)?;
         let path = self.path(id);
 
@@ -85,6 +96,7 @@ impl Store {
             workspace: workspace.display().to_string(),
             model: model.to_string(),
             created: now(),
+            name: name.map(str::to_string),
             log: log.clone(),
             messages: Vec::new(),
         };
@@ -174,7 +186,13 @@ mod tests {
         let store = Store::new(tmp.path());
         let log = log_with(vec![Message::user("hi"), Message::assistant_text("there")]);
         let path = store
-            .save("t1", std::path::Path::new("/w"), "test-model", &log)
+            .save(
+                "t1",
+                std::path::Path::new("/w"),
+                "test-model",
+                Some("the flaky test"),
+                &log,
+            )
             .unwrap();
 
         #[cfg(unix)]
@@ -189,6 +207,7 @@ mod tests {
         }
         let back = store.load("t1").unwrap();
         assert_eq!(back.model, "test-model");
+        assert_eq!(back.name.as_deref(), Some("the flaky test"));
         assert_eq!(back.into_log(), log);
     }
 
@@ -198,7 +217,7 @@ mod tests {
         let store = Store::new(tmp.path());
         let log = log_with(vec![Message::user("go"), call("read"), results()]);
         store
-            .save("t", std::path::Path::new("/w"), "m", &log)
+            .save("t", std::path::Path::new("/w"), "m", None, &log)
             .unwrap();
 
         let back = store.load("t").unwrap().into_log();
@@ -223,7 +242,7 @@ mod tests {
             ..Default::default()
         });
         store
-            .save("t", std::path::Path::new("/w"), "m", &log)
+            .save("t", std::path::Path::new("/w"), "m", None, &log)
             .unwrap();
 
         let back = store.load("t").unwrap().into_log();
@@ -258,10 +277,10 @@ mod tests {
         let store = Store::new(tmp.path());
         let log = log_with(vec![Message::user("x")]);
         store
-            .save("old", std::path::Path::new("/a"), "m", &log)
+            .save("old", std::path::Path::new("/a"), "m", None, &log)
             .unwrap();
         store
-            .save("other", std::path::Path::new("/b"), "m", &log)
+            .save("other", std::path::Path::new("/b"), "m", None, &log)
             .unwrap();
 
         // `created` has one-second resolution, so newness is forced explicitly.

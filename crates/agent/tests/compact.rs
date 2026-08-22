@@ -282,6 +282,7 @@ fn an_already_elided_result_is_not_counted_twice() {
 }
 
 mod budget {
+    use super::{big, call, result};
     use agent::{Agent, Session};
     use async_trait::async_trait;
     use brain::catalog::ModelSpec;
@@ -289,6 +290,7 @@ mod budget {
     use brain::stream::StreamEvent;
     use brain::transport::Transport;
     use futures::stream::BoxStream;
+    use serde_json::json;
     use std::sync::Arc;
 
     struct Never;
@@ -345,6 +347,42 @@ mod budget {
         let a = agent_with(200_000, 32_000);
         let b = a.budget();
         assert!(b > 120_000 && b < 200_000, "{b}");
+    }
+
+    #[tokio::test]
+    async fn a_manual_compaction_runs_even_though_the_transcript_fits() {
+        // The whole point of asking for it: the user knows a phase ended, and
+        // no budget can tell. This transcript is far under the window.
+        let mut a = agent_with(1_000_000, 32_000);
+        a.summarize = false; // Never has no network to summarize with.
+        let mut s = Session::with_prompt("go");
+        // Distinct paths, so the supersede tier has nothing to take and the
+        // tail protection is what has to stop the descent.
+        for i in 0..14 {
+            let path = format!("f{i}.rs");
+            s.log
+                .push(call(&format!("c{i}"), "read", json!({ "path": path })));
+            s.log.push(result(&format!("c{i}"), "read", &big(4_000)));
+        }
+        let before = brain::estimate::tokens(&s.context());
+        assert!(before < a.budget(), "the automatic pass would decline this");
+
+        let (report, _) = a.compact_now(&mut s, None).await.expect("something to do");
+        assert!(report.touched());
+        let after = brain::estimate::tokens(&s.context());
+        assert!(after < before, "{before} -> {after}");
+        // It stops at the tail the agent is working from rather than at zero.
+        assert!(
+            after >= a.kept_tokens().unwrap() / 2,
+            "took the tail too: {after}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_short_transcript_has_nothing_to_compact() {
+        let a = agent_with(200_000, 32_000);
+        let mut s = Session::with_prompt("hello");
+        assert!(a.compact_now(&mut s, None).await.is_none());
     }
 
     #[test]

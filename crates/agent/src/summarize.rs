@@ -94,14 +94,22 @@ pub fn render(earlier: &[&str], messages: &[&Message]) -> String {
 }
 
 /// Ask the model to compact a span of history into prose.
+/// `focus` rides in the user turn rather than the system prompt: the prompt is
+/// the same string on every summarization, which is what makes its cache worth
+/// having, and a per-call instruction folded into it would break that.
 pub async fn run(
     transport: &dyn Transport,
     spec: &ModelSpec,
     history: String,
+    focus: Option<&str>,
 ) -> brain::Result<(String, Usage)> {
+    let body = match focus.map(str::trim).filter(|f| !f.is_empty()) {
+        Some(f) => format!("Focus the summary on: {f}\n\n{history}"),
+        None => history,
+    };
     let req = Request {
         system: Some(PROMPT.to_string()),
-        messages: vec![Message::user(history)],
+        messages: vec![Message::user(body)],
         tools: Vec::new(),
         max_output_tokens: Some(MAX_SUMMARY_TOKENS.min(spec.max_output_tokens)),
         temperature: None,

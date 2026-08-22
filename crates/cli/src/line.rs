@@ -43,6 +43,26 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
                     println!("{line}");
                 }
             }
+            Step::Compact(focus) => match core
+                .agent
+                .compact_now(&mut core.session, focus.as_deref())
+                .await
+            {
+                Some((report, spent)) => {
+                    totals.add(&spent.usage, spent.cost);
+                    println!("compacted {} → {} tokens", report.before, report.after);
+                    if let Err(e) = core.save() {
+                        eprintln!("warning: the transcript was not saved: {e}");
+                    }
+                }
+                None => {
+                    let held = core.agent.kept_tokens().unwrap_or(0);
+                    let now = brain::estimate::tokens(&core.session.context());
+                    println!(
+                        "nothing to compact — {now} tokens, all inside the {held} kept as working context"
+                    );
+                }
+            },
             Step::Prompt(prompt) => {
                 let spent = turn(&mut core, prompt, &tx).await;
                 totals.add(&spent.usage, spent.cost);
@@ -62,12 +82,7 @@ async fn turn(core: &mut Repl, prompt: String, tx: &UnboundedSender<Event>) -> T
     let out = core.agent.run(&mut core.session, &ctx, tx).await;
 
     // Saved either way: an interrupted turn is exactly the one worth keeping.
-    if let Err(e) = core.store.save(
-        &core.id,
-        core.ctx.workspace.root(),
-        &core.model,
-        &core.session.log,
-    ) {
+    if let Err(e) = core.save() {
         eprintln!("warning: the transcript was not saved: {e}");
     }
 

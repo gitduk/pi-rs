@@ -499,6 +499,35 @@ impl Tui {
             match self.core.command(&line, &self.totals) {
                 Step::Quit => break,
                 Step::Handled(lines) => self.ui.above.extend(lines),
+                Step::Compact(focus) => {
+                    // Long enough to want the spinner, so it borrows the run's.
+                    self.ui.started = Some(Instant::now());
+                    let done = self
+                        .core
+                        .agent
+                        .compact_now(&mut self.core.session, focus.as_deref())
+                        .await;
+                    self.ui.started = None;
+                    match done {
+                        Some((report, spent)) => {
+                            self.totals.add(&spent.usage, spent.cost);
+                            self.ui.on_event(Event::Compacted(report));
+                            if let Err(e) = self.core.save() {
+                                self.ui
+                                    .say(format!("warning: the transcript was not saved: {e}"));
+                            }
+                        }
+                        None => {
+                            let held = self.core.agent.kept_tokens().unwrap_or(0);
+                            let now = brain::estimate::tokens(&self.core.session.context());
+                            let why = format!(
+                                "nothing to compact — {now} tokens, all inside the {held} \
+                                 kept as working context"
+                            );
+                            self.ui.say(self.ui.paint.on(DIM, &why));
+                        }
+                    }
+                }
                 Step::Prompt(prompt) => {
                     let mut next = Some(prompt);
                     // Anything submitted while the run worked becomes the next
@@ -576,12 +605,7 @@ impl Tui {
         self.ui.started = None;
 
         // Saved either way: an interrupted turn is exactly the one worth keeping.
-        if let Err(e) = self.core.store.save(
-            &self.core.id,
-            self.core.ctx.workspace.root(),
-            &self.core.model,
-            &self.core.session.log,
-        ) {
+        if let Err(e) = self.core.save() {
             self.ui
                 .say(format!("warning: the transcript was not saved: {e}"));
         }

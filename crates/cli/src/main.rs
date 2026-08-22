@@ -62,6 +62,10 @@ struct Args {
     #[arg(short, long)]
     model: Option<String>,
 
+    /// Call this session something you will recognise later.
+    #[arg(long, value_name = "TEXT")]
+    name: Option<String>,
+
     /// Continue a saved session by id.
     #[arg(long, value_name = "ID")]
     resume: Option<String>,
@@ -437,6 +441,11 @@ async fn main() -> Result<()> {
         .as_ref()
         .map(|p| p.id.clone())
         .unwrap_or_else(session::new_id);
+    // An explicit --name renames a resumed session; otherwise it keeps its own.
+    let name = args
+        .name
+        .clone()
+        .or_else(|| prior.as_ref().and_then(|p| p.name.clone()));
     let carried = prior.map(|p| p.into_log()).unwrap_or_default();
     let resumed = carried.context().len();
 
@@ -447,6 +456,7 @@ async fn main() -> Result<()> {
             model: model_id,
             session: agent::Session { log: carried },
             id,
+            name,
             ctx: tools::Ctx::new(workspace),
         };
         // The live region needs the terminal at both ends: keys come in one
@@ -474,14 +484,17 @@ async fn main() -> Result<()> {
 
     // Saved whichever way the run ended: an aborted turn is exactly the one
     // worth resuming.
-    match store.save(&id, &root, &model_id, &session.log) {
+    match store.save(&id, &root, &model_id, name.as_deref(), &session.log) {
         Ok(_) if !args.quiet => {
+            let called = name.as_deref().map_or(String::new(), |n| format!(" “{n}”"));
             let carried = if resumed > 0 {
                 format!(" · resumed {resumed} messages")
             } else {
                 String::new()
             };
-            eprintln!("session {id}{carried} — continue with `pi -c` or `pi --resume {id}`");
+            eprintln!(
+                "session {id}{called}{carried} — continue with `pi -c` or `pi --resume {id}`"
+            );
         }
         Err(e) => eprintln!("warning: the transcript was not saved: {e}"),
         _ => {}

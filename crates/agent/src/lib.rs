@@ -371,7 +371,7 @@ impl Agent {
         };
         let (mut record, mut report) = compact::plan(&session.log, budget, &policy);
         if !record.dropped.is_empty() && self.summarize {
-            let cost = self.write_summary(&session.log, &mut record).await;
+            let cost = self.write_summary(&session.log, &mut record, None).await;
             report.summarized = record.summary.is_some();
             totals.add(&cost, self.spec.cost(&cost));
         }
@@ -383,14 +383,51 @@ impl Agent {
         }
     }
 
+    /// What a manual compaction leaves alone, when there is one.
+    pub fn kept_tokens(&self) -> Option<usize> {
+        self.compaction.map(|p| p.protect_tail)
+    }
+
+    /// Compact now, at the user's word rather than the window's.
+    ///
+    /// The target is the tail the agent is working from — the same number the
+    /// automatic pass protects — so this means "summarize everything but what I
+    /// am in the middle of". Unlike the automatic pass it runs even when the
+    /// transcript already fits: the point is that the user knows a phase has
+    /// ended, which no budget can tell.
+    pub async fn compact_now(
+        &self,
+        session: &mut Session,
+        focus: Option<&str>,
+    ) -> Option<(compact::Report, Totals)> {
+        let policy = self.compaction?;
+        let (mut record, mut report) = compact::plan(&session.log, policy.protect_tail, &policy);
+        let mut spent = Totals::default();
+        if !record.dropped.is_empty() && self.summarize {
+            let cost = self.write_summary(&session.log, &mut record, focus).await;
+            report.summarized = record.summary.is_some();
+            spent.add(&cost, self.spec.cost(&cost));
+        }
+        if !report.touched() {
+            return None;
+        }
+        session.log.record(record);
+        Some((report, spent))
+    }
+
     /// Summarize what is about to be dropped, folding in any summary already in
     /// force and retiring it.
     ///
     /// A failure here is not fatal: the entries still go, unsummarized. Losing
     /// the summary costs context; failing the turn costs the whole run.
-    async fn write_summary(&self, log: &Log, record: &mut log::Compaction) -> brain::stream::Usage {
+    async fn write_summary(
+        &self,
+        log: &Log,
+        record: &mut log::Compaction,
+        focus: Option<&str>,
+    ) -> brain::stream::Usage {
         let history = summarize::render(&log.summaries(), &log.messages_for(&record.dropped));
-        match summarize::run(&*self.transport, &self.spec, history).await {
+        match summarize::run(&*self.transport, &self.spec, history, focus).await {
             Ok((text, usage)) => {
                 record.summary = Some(text);
                 // The new summary covers what the old one did, so the entry

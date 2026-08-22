@@ -4,10 +4,12 @@ use tools::Ctx;
 use crate::session::Store;
 
 const HELP: &str = "\
-/new    start a fresh session, keeping this one on disk
-/todo   show the current plan
-/cost   what this session has spent so far
-/exit   leave (Ctrl-D does the same)";
+/new       start a fresh session, keeping this one on disk
+/name      call this session something you will recognise
+/compact   summarize everything but what you are working on now
+/todo      show the current plan
+/cost      what this session has spent so far
+/exit      leave (Ctrl-D does the same)";
 
 /// A session and everything that outlives any one turn of it.
 ///
@@ -19,8 +21,25 @@ pub struct Repl {
     pub model: String,
     pub session: Session,
     pub id: String,
+    /// What the user calls this session, if anything.
+    pub name: Option<String>,
     /// Carried across turns: the plan and the file locks outlive any one run.
     pub ctx: Ctx,
+}
+
+impl Repl {
+    /// Save the transcript. Called after every turn: an interrupted one is
+    /// exactly the one worth keeping.
+    pub fn save(&self) -> anyhow::Result<()> {
+        self.store.save(
+            &self.id,
+            self.ctx.workspace.root(),
+            &self.model,
+            self.name.as_deref(),
+            &self.session.log,
+        )?;
+        Ok(())
+    }
 }
 
 /// What a line at the prompt asks for.
@@ -31,6 +50,10 @@ pub enum Cmd {
     Todo,
     Cost,
     New,
+    /// Everything after the word, or empty to clear.
+    Name(String),
+    /// Everything after the word focuses the summary.
+    Compact(String),
     Unknown(String),
 }
 
@@ -47,12 +70,23 @@ pub fn parse(line: &str) -> Option<Cmd> {
         "/todo" => Cmd::Todo,
         "/cost" => Cmd::Cost,
         "/new" => Cmd::New,
+        "/name" => Cmd::Name(rest(line)),
+        "/compact" => Cmd::Compact(rest(line)),
         other => Cmd::Unknown(other.to_string()),
     })
 }
 
+/// Whatever followed the command word.
+fn rest(line: &str) -> String {
+    line.trim_start()
+        .split_once(char::is_whitespace)
+        .map_or(String::new(), |(_, r)| r.trim().to_string())
+}
+
 pub enum Step {
     Prompt(String),
+    /// Needs the network, so the surface runs it and reports.
+    Compact(Option<String>),
     /// Dealt with here; these lines are what there is to show for it. Returned
     /// rather than printed because one surface prints and the other paints.
     Handled(Vec<String>),
@@ -93,6 +127,17 @@ impl Repl {
                 }
                 lines(format!("started {}", self.id))
             }
+            Cmd::Name(name) => {
+                if name.is_empty() {
+                    self.name = None;
+                    lines(format!("{} is unnamed again", self.id))
+                } else {
+                    let said = format!("{} is now “{name}”", self.id);
+                    self.name = Some(name);
+                    lines(said)
+                }
+            }
+            Cmd::Compact(focus) => Step::Compact(Some(focus).filter(|f| !f.is_empty())),
             Cmd::Unknown(other) => lines(format!("unknown command {other} — /help lists them")),
         }
     }
@@ -126,5 +171,20 @@ mod tests {
     #[test]
     fn trailing_words_do_not_break_a_command() {
         assert_eq!(parse("/todo please"), Some(Cmd::Todo));
+    }
+
+    #[test]
+    fn a_command_that_takes_words_keeps_all_of_them() {
+        assert_eq!(
+            parse("/name the flaky test"),
+            Some(Cmd::Name("the flaky test".into()))
+        );
+        assert_eq!(
+            parse("/compact  keep the parser work "),
+            Some(Cmd::Compact("keep the parser work".into()))
+        );
+        // Bare, they mean clear and unfocused respectively.
+        assert_eq!(parse("/name"), Some(Cmd::Name(String::new())));
+        assert_eq!(parse("/compact"), Some(Cmd::Compact(String::new())));
     }
 }
