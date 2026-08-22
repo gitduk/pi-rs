@@ -268,9 +268,19 @@ async fn main() -> Result<()> {
                 .map(|m| m.id.clone())
                 .collect();
             known.extend(builtin.iter().map(String::as_str));
+            // The table name is the wire name, which is easy to miss when the
+            // two were written at different times. Say the edit, not just the
+            // mismatch.
+            let fix = match config.ids().as_slice() {
+                [only] => format!(
+                    " Rename [models.{only}] to [models.{model}], or point \
+                     {} at `{only}`.",
+                    named_by.describe()
+                ),
+                _ => String::new(),
+            };
             format!(
-                "unknown model `{model}`, named by {}; known: {}. Define it in \
-                 the config, or use --wire for a one-off.",
+                "unknown model `{model}`, named by {}; known: {}.{fix}",
                 named_by.describe(),
                 known.join(", ")
             )
