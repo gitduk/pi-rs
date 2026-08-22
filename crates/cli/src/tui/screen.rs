@@ -54,6 +54,17 @@ pub fn fit(line: &str, width: usize) -> Vec<String> {
     out
 }
 
+/// One column short of the real width, so nothing ever lands on the last cell.
+///
+/// Two reasons, and the second is the load-bearing one. Terminals disagree
+/// about whether a character written to the last cell has already wrapped. And
+/// a row that stops short carries no wrap flag, so a terminal that reflows on
+/// resize will not join it to the next — which is what lets the region's row
+/// count survive a resize at all. See [`Screen::resized`].
+pub fn usable(width: u16) -> usize {
+    width.saturating_sub(1).max(1) as usize
+}
+
 /// Where the caret should sit inside the live region: a row index, and a column
 /// measured in terminal cells.
 pub type Caret = (u16, u16);
@@ -97,19 +108,21 @@ impl Screen {
         })
     }
 
-    /// One column short of the real width, so nothing ever lands on the last
-    /// cell: terminals disagree about whether that has already wrapped.
     pub fn usable(&self) -> usize {
-        self.width.saturating_sub(1).max(1) as usize
+        usable(self.width)
     }
 
+    /// The row count survives a resize deliberately.
+    ///
+    /// A terminal reflows only lines it wrapped itself, and no row here is ever
+    /// one of those — `usable` keeps every row a column short of the width, so
+    /// each ends in a hard break the reflow leaves alone. The region therefore
+    /// still occupies the rows it did, and the walk back over them still lands
+    /// on its top. Forgetting the count instead leaves those rows on screen as
+    /// a copy of the region, with the real one redrawn below it.
     pub fn resized(&mut self, width: u16, height: u16) {
         self.width = width;
         self.height = height;
-        // The old region's rows are gone as far as this terminal is concerned;
-        // walking back over them would eat lines that are now above.
-        self.rows = 0;
-        self.at = 0;
     }
 
     fn rewind(&self, buf: &mut String) {
@@ -191,6 +204,20 @@ impl Drop for Screen {
 #[cfg(test)]
 mod tests {
     use super::fit;
+
+    #[test]
+    fn a_row_always_stops_short_of_the_last_cell() {
+        // Reaching it costs both ways: the terminal may or may not count it as
+        // wrapped already, and a row that did reach it would be rejoined to the
+        // next one by any terminal that reflows on resize — taking the row
+        // count that `resized` relies on with it.
+        for width in [2u16, 3, 40, 200] {
+            assert!(super::usable(width) < width as usize, "width {width}");
+        }
+        // Never zero, or `fit` would have no room to make progress.
+        assert_eq!(super::usable(0), 1);
+        assert_eq!(super::usable(1), 1);
+    }
 
     #[test]
     fn a_short_line_is_one_row() {
