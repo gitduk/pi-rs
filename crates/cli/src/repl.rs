@@ -9,8 +9,19 @@ use tools::Ctx;
 
 use crate::session::Store;
 
-const BANNER: &str =
-    "\x1b[2m/help for commands · Ctrl-C stops a run, twice to quit · Ctrl-D exits\x1b[0m";
+const BANNER: &str = "\x1b[2m/help for commands · Ctrl-C stops a run or clears the line, twice quickly to \
+     quit · Ctrl-D exits\x1b[0m";
+
+/// How close two Ctrl-C presses must be to read as one deliberate quit.
+///
+/// Borrowed from pi, which uses the same 500ms. A latching flag looks simpler
+/// and is wrong: clear one half-typed line, type another, clear that — and the
+/// second clear reads as the second half of a double-tap and quits.
+const DOUBLE_TAP: std::time::Duration = std::time::Duration::from_millis(500);
+
+fn is_double_tap(previous: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    previous.is_some_and(|p| now.duration_since(p) < DOUBLE_TAP)
+}
 const HELP: &str = "\
 /new    start a fresh session, keeping this one on disk
 /todo   show the current plan
@@ -142,7 +153,7 @@ impl Repl {
         match out {
             Ok(o) => (o.totals, false),
             Err(AgentError::Cancelled) => {
-                eprintln!("\x1b[2mstopped — press Ctrl-C again to quit\x1b[0m");
+                eprintln!("\x1b[2mstopped\x1b[0m");
                 (Totals::default(), true)
             }
             Err(e) => {
@@ -161,23 +172,25 @@ impl Repl {
         eprintln!("{BANNER}");
 
         let mut totals = Totals::default();
-        // Ctrl-C at the prompt clears the line; twice in a row means leave.
-        // Without the second reading as an exit there is no way out but Ctrl-D,
-        // because SIGINT no longer reaches the default handler.
-        let mut armed = false;
+        // Ctrl-C clears the line; twice in quick succession means leave. Without
+        // the second reading as an exit there is no way out but Ctrl-D, because
+        // SIGINT no longer reaches the default handler once tokio has claimed it.
+        let mut last_interrupt: Option<std::time::Instant> = None;
         loop {
             let line = match editor.readline("\x1b[36m›\x1b[0m ") {
                 Ok(line) => line,
-                Err(ReadlineError::Interrupted) if armed => break,
                 Err(ReadlineError::Interrupted) => {
-                    armed = true;
+                    let now = std::time::Instant::now();
+                    if is_double_tap(last_interrupt, now) {
+                        break;
+                    }
+                    last_interrupt = Some(now);
                     eprintln!("\x1b[2mpress Ctrl-C again to quit\x1b[0m");
                     continue;
                 }
                 Err(ReadlineError::Eof) => break,
                 Err(e) => return Err(e.into()),
             };
-            armed = false;
             let line = line.trim();
             if line.is_empty() {
                 continue;
@@ -188,11 +201,8 @@ impl Repl {
                 Step::Quit => break,
                 Step::Handled => continue,
                 Step::Prompt(prompt) => {
-                    let (spent, interrupted) = self.turn(prompt, &tx).await;
+                    let (spent, _) = self.turn(prompt, &tx).await;
                     totals.add(&spent.usage, spent.cost);
-                    // A run the user just stopped leaves the prompt armed, so
-                    // the follow-up press quits instead of warning again.
-                    armed = interrupted;
                 }
             }
         }
@@ -206,7 +216,27 @@ impl Repl {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cmd, parse};
+    use super::{Cmd, DOUBLE_TAP, is_double_tap, parse};
+    use std::time::Instant;
+
+    #[test]
+    fn two_quick_presses_are_a_quit() {
+        let first = Instant::now();
+        assert!(is_double_tap(Some(first), first + DOUBLE_TAP / 2));
+    }
+
+    #[test]
+    fn two_presses_far_apart_are_two_line_clears() {
+        // Clear a half-typed line, type another, clear that one too. A latching
+        // flag would read the second clear as a quit.
+        let first = Instant::now();
+        assert!(!is_double_tap(Some(first), first + DOUBLE_TAP * 3));
+    }
+
+    #[test]
+    fn the_very_first_press_never_quits() {
+        assert!(!is_double_tap(None, Instant::now()));
+    }
 
     #[test]
     fn slash_words_are_commands_and_prose_is_not() {
