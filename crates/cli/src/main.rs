@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 
 mod config;
 mod context;
+mod keys;
 mod line;
 mod render;
 mod repl;
@@ -247,6 +248,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let prompt = read_prompt(&args)?;
     let config = config::load(args.config.as_deref())?;
+    let key_map = std::sync::Arc::new(config.key_map()?);
 
     let workspace = tools::Workspace::new(&args.cwd)
         .with_context(|| format!("cannot use {} as a workspace", args.cwd))?;
@@ -457,13 +459,14 @@ async fn main() -> Result<()> {
             session: agent::Session { log: carried },
             id,
             name,
+            keys: key_map.clone(),
             ctx: tools::Ctx::new(workspace),
         };
         // The live region needs the terminal at both ends: keys come in one
         // side and the repaint goes out the other. Missing either, there is
         // nothing to hold still, and printing a line at a time is right.
         if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-            return tui::Tui::new(core)?.run(tx, rx).await;
+            return tui::Tui::new(core, key_map)?.run(tx, rx).await;
         }
         let painter = paint(rx, quiet, structured);
         let out = line::run(core, tx).await;

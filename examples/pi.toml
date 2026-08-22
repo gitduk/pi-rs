@@ -98,3 +98,18 @@ long_cache_retention = false
 # that are: a typo otherwise leaves a quirk at its default and produces a 400
 # much later, pointing at nothing.
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Keys. An id here replaces that action's defaults rather than adding to them,
+# because a default that could only be buried and never removed is not really
+# configurable. `/keys` lists every id with what it is bound to.
+#
+# The namespace decides when a binding is live: edit.* and move.* whenever you
+# are typing, menu.* only with the completion list open, run.* only during a
+# turn. Two actions may share a key when they are never live together — `up` is
+# menu.previous with the list open and history.older without it. Sharing one
+# within a context is refused at load, as is an unknown id.
+# ---------------------------------------------------------------------------
+# [keys]
+# "app.clear-screen" = "ctrl+g"
+# "move.line.start"  = ["home", "f5"]

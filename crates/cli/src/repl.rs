@@ -42,6 +42,11 @@ pub const COMMANDS: &[Command] = &[
         help: "what this session has spent so far",
     },
     Command {
+        word: "/keys",
+        args: "",
+        help: "what every key does, and the id to rebind it under",
+    },
+    Command {
         word: "/help",
         args: "",
         help: "this list",
@@ -95,6 +100,8 @@ pub struct Repl {
     pub id: String,
     /// What the user calls this session, if anything.
     pub name: Option<String>,
+    /// Held so `/keys` can show what is actually in force, overrides included.
+    pub keys: std::sync::Arc<crate::keys::Keys>,
     /// Carried across turns: the plan and the file locks outlive any one run.
     pub ctx: Ctx,
 }
@@ -122,6 +129,7 @@ pub enum Cmd {
     Todo,
     Cost,
     New,
+    Keys,
     /// Everything after the word, or empty to clear.
     Name(String),
     /// Everything after the word focuses the summary.
@@ -142,6 +150,7 @@ pub fn parse(line: &str) -> Option<Cmd> {
         "/todo" => Cmd::Todo,
         "/cost" => Cmd::Cost,
         "/new" => Cmd::New,
+        "/keys" => Cmd::Keys,
         "/name" => Cmd::Name(rest(line)),
         "/compact" => Cmd::Compact(rest(line)),
         other => Cmd::Unknown(other.to_string()),
@@ -177,6 +186,7 @@ impl Repl {
         match cmd {
             Cmd::Exit => Step::Quit,
             Cmd::Help => Step::Handled(help()),
+            Cmd::Keys => Step::Handled(self.keys.listing()),
             Cmd::Todo => lines(tools::todo::render(self.session.log.todos())),
             Cmd::Cost => {
                 let u = &totals.usage;

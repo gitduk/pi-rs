@@ -78,18 +78,23 @@ One loop owns the terminal for the whole session. Finished output is pushed
 *above* the live region and becomes ordinary scrollback — selectable,
 searchable, still there after exit. Only what is still changing is repainted.
 
-| | |
-|---|---|
-| `Esc` | stop the run |
-| `Enter` | send; during a run, queue it for when this one ends |
-| `Alt-Enter`, `Ctrl-J` | newline |
-| `Ctrl-C` | clear the line; twice within 500ms to quit |
-| `Ctrl-D` | exit on an empty line |
-| `↑` `↓` | history, or move the caret within a multi-line prompt |
-| `Ctrl-A/E/K/U/W`, `Alt-B/F` | the readline habits |
-| `Ctrl-L` | clear |
+Keys are rebindable. `/keys` lists every action with what it is bound to; an
+id under `[keys]` in `~/.pi.toml` replaces that action's defaults:
 
-`/help` `/new` `/name` `/compact` `/todo` `/cost` `/exit`. Typing `/` opens a
+```toml
+[keys]
+"app.clear-screen" = "ctrl+g"
+"move.line.start"  = ["home", "f5"]
+```
+
+The namespace says what the action touches, and that is also what decides when
+it is live — `edit.*` and `move.*` whenever you are typing, `menu.*` only with
+the completion list open, `run.*` only during a turn. Two actions may share a
+key when they are never live together, which is how `up` is `menu.previous`
+with the list open and `history.older` without it. Sharing one *within* a
+context is refused at load, along with an unknown id or an unreadable binding.
+
+`/help` `/new` `/name` `/compact` `/keys` `/todo` `/cost` `/exit`. Typing `/` opens a
 list of what the line could still become; `↑` `↓` pick, `Tab` accepts, `Esc`
 dismisses it until the next keystroke.
 
@@ -165,7 +170,7 @@ is not the provider's, and a cost derived from it is not a bill.
 | `hashline` | 1.2k | the patch format — pure, no IO |
 | `syntax` | 0.4k | tree-sitter outlines for eight languages |
 
-~15k lines, 295 tests. `cargo test` runs everything; `cargo clippy
+~15k lines, 307 tests. `cargo test` runs everything; `cargo clippy
 --all-targets` is expected to be silent.
 
 ## Not built

@@ -16,14 +16,16 @@ use std::time::Instant;
 use agent::{AgentError, Event, Totals};
 use anyhow::Result;
 use brain::stream::Usage;
-use crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
+use crate::keys::{Action, Keys, Press};
 use crate::render::{self, Paint};
 use crate::repl::{self, Command, Repl, Step};
 use editor::Editor;
 use screen::{Caret, Screen};
+use std::sync::Arc;
 
 const DIM: &str = "\x1b[2m";
 const BANNER: &str = "\x1b[2m/help for commands · esc stops a run · ctrl-c clears the line, twice \
@@ -52,6 +54,7 @@ enum Act {
 /// Everything the terminal shows, and nothing the session knows.
 struct Ui {
     screen: Screen,
+    keys: Arc<Keys>,
     editor: Editor,
     paint: Paint,
     /// Model output with no newline after it yet. Kept live because it is still
@@ -88,9 +91,10 @@ struct Ui {
 }
 
 impl Ui {
-    fn new(screen: Screen) -> Self {
+    fn new(screen: Screen, keys: Arc<Keys>) -> Self {
         Self {
             screen,
+            keys,
             editor: Editor::default(),
             paint: Paint { color: true },
             open: String::new(),
@@ -306,52 +310,48 @@ impl Ui {
             TermEvent::Key(k) if k.kind != KeyEventKind::Release => k,
             _ => return Act::None,
         };
-        let KeyEvent {
-            code, modifiers, ..
-        } = key;
-        let ctrl = modifiers.contains(KeyModifiers::CONTROL);
-        let alt = modifiers.contains(KeyModifiers::ALT);
+        let press = Press::of(key.code, key.modifiers);
+        let bound = self.keys.action(press, !self.menu().is_empty(), running);
 
-        match code {
-            KeyCode::Char('c') if ctrl => {
-                let now = Instant::now();
-                let quit = is_double_tap(self.last_interrupt, now);
-                self.last_interrupt = Some(now);
-                if quit {
-                    return Act::Quit;
-                }
-                if running {
-                    return Act::Interrupt;
-                }
-                if self.editor.is_empty() {
-                    self.say(self.paint.on(DIM, "press ctrl-c again to quit"));
+        match bound {
+            Some(Action::LineClear) => return self.interrupt_or_clear(running),
+            Some(Action::LineSubmit) => {
+                let line = self.editor.take();
+                return if line.trim().is_empty() {
+                    Act::None
                 } else {
-                    self.editor.clear();
-                }
-                Act::None
+                    Act::Submit(line)
+                };
             }
-            KeyCode::Char('d') if ctrl => {
-                if self.editor.is_empty() && !running {
+            Some(Action::RunInterrupt) => return Act::Interrupt,
+            Some(Action::AppExit) => {
+                return if self.editor.is_empty() && !running {
                     Act::Quit
                 } else {
                     self.editor.delete();
                     Act::None
-                }
+                };
             }
-            KeyCode::Esc => {
-                if running {
-                    Act::Interrupt
-                } else {
-                    // Dismiss the list by settling on nothing: it reappears on
-                    // the next keystroke, which is the behaviour that lets Esc
-                    // mean "not that" without meaning "undo my typing".
-                    if !self.menu().is_empty() {
-                        self.dismissed_at = Some(self.editor.text().to_string());
-                    }
-                    Act::None
-                }
-            }
-            KeyCode::Tab => {
+            _ => {}
+        }
+
+        match bound {
+            Some(Action::InsertNewline) => self.editor.insert('\n'),
+            Some(Action::DeleteCharBack) => self.editor.backspace(),
+            Some(Action::DeleteCharForward) => self.editor.delete(),
+            Some(Action::DeleteWordBack) => self.editor.kill_word_back(),
+            Some(Action::DeleteToLineEnd) => self.editor.kill_to_end(),
+            Some(Action::DeleteToLineStart) => self.editor.kill_to_start(),
+            Some(Action::MoveCharLeft) => self.editor.left(),
+            Some(Action::MoveCharRight) => self.editor.right(),
+            Some(Action::MoveWordLeft) => self.editor.word_left(),
+            Some(Action::MoveWordRight) => self.editor.word_right(),
+            Some(Action::MoveLineStart) => self.editor.home(),
+            Some(Action::MoveLineEnd) => self.editor.end(),
+            Some(Action::HistoryOlder) => self.editor.up(),
+            Some(Action::HistoryNewer) => self.editor.down(),
+            Some(Action::AppClearScreen) => self.screen.clear(),
+            Some(Action::MenuAccept) => {
                 if let Some(c) = self.highlighted() {
                     self.editor.set_line(c.word);
                     // A command that takes something wants a space after it.
@@ -360,120 +360,53 @@ impl Ui {
                     }
                     self.picked = 0;
                 }
-                Act::None
             }
-            // Alt-Enter and Ctrl-J both continue the line; plain Enter sends it.
-            // Shift-Enter only reaches us from terminals that speak the kitty
-            // protocol, so it cannot be the only way to type a newline.
-            KeyCode::Enter if alt || ctrl || modifiers.contains(KeyModifiers::SHIFT) => {
-                self.editor.insert('\n');
-                Act::None
-            }
-            KeyCode::Char('j') if ctrl => {
-                self.editor.insert('\n');
-                Act::None
-            }
-            KeyCode::Enter => {
-                let line = self.editor.take();
-                if line.trim().is_empty() {
-                    Act::None
-                } else {
-                    Act::Submit(line)
-                }
-            }
-            KeyCode::Backspace => {
-                if alt || ctrl {
-                    self.editor.kill_word_back();
-                } else {
-                    self.editor.backspace();
-                }
-                Act::None
-            }
-            KeyCode::Delete => {
-                self.editor.delete();
-                Act::None
-            }
-            KeyCode::Left if alt || ctrl => {
-                self.editor.word_left();
-                Act::None
-            }
-            KeyCode::Right if alt || ctrl => {
-                self.editor.word_right();
-                Act::None
-            }
-            KeyCode::Left => {
-                self.editor.left();
-                Act::None
-            }
-            KeyCode::Right => {
-                self.editor.right();
-                Act::None
-            }
-            KeyCode::Up => {
-                if self.menu().is_empty() {
-                    self.editor.up();
-                } else {
-                    self.picked = self.picked.saturating_sub(1);
-                }
-                Act::None
-            }
-            KeyCode::Down => {
+            Some(Action::MenuNext) => {
                 let n = self.menu().len();
-                if n == 0 {
-                    self.editor.down();
-                } else {
-                    self.picked = (self.picked + 1).min(n - 1);
+                self.picked = (self.picked + 1).min(n.saturating_sub(1));
+            }
+            Some(Action::MenuPrevious) => self.picked = self.picked.saturating_sub(1),
+            Some(Action::MenuDismiss) => {
+                // Recorded against the text, so any edit brings the list back:
+                // this means "not that", not "never again".
+                self.dismissed_at = Some(self.editor.text().to_string());
+            }
+            // Unbound and printable is the one thing no table has to say.
+            None => {
+                if let KeyCode::Char(c) = key.code
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                {
+                    self.editor.insert(c);
                 }
-                Act::None
             }
-            KeyCode::Home => {
-                self.editor.home();
-                Act::None
-            }
-            KeyCode::End => {
-                self.editor.end();
-                Act::None
-            }
-            KeyCode::Char('a') if ctrl => {
-                self.editor.home();
-                Act::None
-            }
-            KeyCode::Char('e') if ctrl => {
-                self.editor.end();
-                Act::None
-            }
-            KeyCode::Char('k') if ctrl => {
-                self.editor.kill_to_end();
-                Act::None
-            }
-            KeyCode::Char('u') if ctrl => {
-                self.editor.kill_to_start();
-                Act::None
-            }
-            KeyCode::Char('w') if ctrl => {
-                self.editor.kill_word_back();
-                Act::None
-            }
-            KeyCode::Char('l') if ctrl => {
-                self.screen.clear();
-                Act::None
-            }
-            KeyCode::Char('b') if alt => {
-                self.editor.word_left();
-                Act::None
-            }
-            KeyCode::Char('f') if alt => {
-                self.editor.word_right();
-                Act::None
-            }
-            // Alt excluded too: an unbound Alt-chord is a chord, not the letter
-            // it was pressed with.
-            KeyCode::Char(c) if !ctrl && !alt => {
-                self.editor.insert(c);
-                Act::None
-            }
-            _ => Act::None,
+            Some(
+                Action::LineClear | Action::LineSubmit | Action::RunInterrupt | Action::AppExit,
+            ) => unreachable!("handled above"),
         }
+        Act::None
+    }
+
+    /// One key, three meanings, and the escalation travels with the binding
+    /// rather than with Ctrl-C: stop the run, clear the line, or — pressed
+    /// twice inside the window — leave.
+    fn interrupt_or_clear(&mut self, running: bool) -> Act {
+        let now = Instant::now();
+        let quit = is_double_tap(self.last_interrupt, now);
+        self.last_interrupt = Some(now);
+        if quit {
+            return Act::Quit;
+        }
+        if running {
+            return Act::Interrupt;
+        }
+        if self.editor.is_empty() {
+            self.say(self.paint.on(DIM, "press it again to quit"));
+        } else {
+            self.editor.clear();
+        }
+        Act::None
     }
 }
 
@@ -536,8 +469,8 @@ fn history_path() -> Option<std::path::PathBuf> {
 const HISTORY_KEEP: usize = 1_000;
 
 impl Tui {
-    pub fn new(core: Repl) -> Result<Self> {
-        let mut ui = Ui::new(Screen::new()?);
+    pub fn new(core: Repl, keys: Arc<Keys>) -> Result<Self> {
+        let mut ui = Ui::new(Screen::new()?, keys);
         if let Some(prior) = history_path().and_then(|p| std::fs::read_to_string(p).ok()) {
             ui.editor.seed_history(editor::decode(&prior));
         }

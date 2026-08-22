@@ -35,6 +35,41 @@ pub struct Config {
     /// Keyed by the handle `-m` selects.
     #[serde(default)]
     pub models: BTreeMap<String, Entry>,
+    /// Key actions, each mapped to the presses that trigger it. An entry
+    /// replaces that action's defaults rather than adding to them.
+    #[serde(default)]
+    pub keys: BTreeMap<String, Binds>,
+}
+
+/// One key or several — `"ctrl+g"` and `["ctrl+g", "f5"]` both mean the same
+/// thing for an action with a single binding, and requiring the brackets for
+/// the common case would be noise.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum Binds {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Binds {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            Binds::One(s) => vec![s],
+            Binds::Many(v) => v,
+        }
+    }
+}
+
+impl Config {
+    /// The key table this config asks for, defaults included.
+    pub fn key_map(&self) -> Result<crate::keys::Keys> {
+        let overrides = self
+            .keys
+            .iter()
+            .map(|(id, b)| (id.clone(), b.clone().into_vec()))
+            .collect();
+        crate::keys::Keys::resolve(&overrides)
+    }
 }
 
 /// What a flag would have said. Every one is optional: an absent key leaves the
@@ -369,6 +404,7 @@ fn parse(body: &str) -> Result<Config> {
             bail!("{id}: api_key and api_key_env both set; one would be silently ignored");
         }
     }
+    config.key_map()?;
     Ok(config)
 }
 
@@ -626,5 +662,35 @@ usage_in_streaming = false
         let (name, origin) = c.model(&Project::default(), None, None).unwrap();
         assert_eq!(name, "typo");
         assert!(origin.describe().contains("~/.pi.toml"));
+    }
+    #[test]
+    fn a_key_may_be_given_alone_or_in_a_list() {
+        let c = parse(
+            "[keys]\n\"app.clear-screen\" = \"ctrl+g\"\n\
+             \"move.line.start\" = [\"home\", \"f5\"]\n",
+        )
+        .unwrap();
+        let k = c.key_map().unwrap();
+        let press = crate::keys::parse;
+        assert_eq!(
+            k.action(press("ctrl+g").unwrap(), false, false),
+            Some(crate::keys::Action::AppClearScreen)
+        );
+        assert_eq!(
+            k.action(press("f5").unwrap(), false, false),
+            Some(crate::keys::Action::MoveLineStart)
+        );
+        // Replaced, so the default it displaced is gone.
+        assert_eq!(k.action(press("ctrl+l").unwrap(), false, false), None);
+    }
+
+    #[test]
+    fn a_broken_binding_is_refused_at_load() {
+        // Not at the keystroke: a key that silently does nothing is the worst
+        // way to find out a config is wrong.
+        let e = parse("[keys]\n\"move.line.start\" = \"ctrl+nope\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("move.line.start"), "{e}");
     }
 }
