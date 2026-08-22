@@ -98,24 +98,15 @@ fn ancestral_agents(workspace: &Path) -> Vec<PathBuf> {
 
 /// Where skills come from, nearest first.
 ///
-/// A repository contributes skills under one name, `.agents/skills`, and that
-/// is the shared standard rather than ours. Supporting the vendor-neutral
-/// location is what makes a shared skill shared; carrying a private name
-/// beside it — anyone's — only leaves the question of where a skill belongs
-/// permanently open. A directory under some other name reaches the list by
-/// being symlinked into this one, which is the same mechanism said out loud.
+/// One name, `.agents/skills`, at both levels, and it is the shared standard
+/// rather than ours. Supporting the vendor-neutral location is what makes a
+/// shared skill shared; carrying a private name beside it — anyone's, ours
+/// included — only leaves the question of where a skill belongs permanently
+/// open. A directory under some other name reaches the list by being symlinked
+/// into this one, which is the same mechanism said out loud.
 pub fn sources(workspace: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    out.extend(ancestral_agents(workspace));
-    let config = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| home().map(|h| h.join(".config")));
-    if let Some(c) = config {
-        out.push(c.join("pi/skills"));
-    }
-    if let Some(h) = home() {
-        out.push(h.join(".agents/skills"));
-    }
+    let mut out = ancestral_agents(workspace);
+    out.extend(home().map(|h| h.join(".agents/skills")));
     out
 }
 
