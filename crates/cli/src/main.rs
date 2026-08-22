@@ -12,6 +12,7 @@ use clap::{Parser, ValueEnum};
 use tokio::sync::mpsc;
 
 mod config;
+mod context;
 mod line;
 mod render;
 mod repl;
@@ -129,6 +130,10 @@ struct Args {
     /// Ignore the skills on disk.
     #[arg(long)]
     no_skills: bool,
+
+    /// Ignore ~/.pi.md and the project's AGENTS.md.
+    #[arg(long)]
+    no_context_files: bool,
 
     /// A JSON Schema file. The run must end by calling `yield` with a matching
     /// object, which is printed to stdout instead of prose.
@@ -353,11 +358,31 @@ async fn main() -> Result<()> {
         EffortArg::Medium => Effort::Medium,
         EffortArg::High => Effort::High,
     };
-    let system = match args.system.as_ref().or(config.defaults.system.as_ref()) {
+    let mut system = match args.system.as_ref().or(config.defaults.system.as_ref()) {
         Some(path) => std::fs::read_to_string(path)
             .with_context(|| format!("cannot read system prompt {path}"))?,
         None => agent::DEFAULT_SYSTEM.to_string(),
     };
+    // Appended rather than sent as a message: these are standing instructions,
+    // they do not change within a run, and the system prompt is the part of the
+    // request a provider will cache.
+    if !args.no_context_files {
+        let loaded = context::load(workspace.root());
+        if !args.quiet && !loaded.files.is_empty() {
+            let names: Vec<String> = loaded
+                .files
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect();
+            let warn = if loaded.oversized() {
+                format!(" — {}KB on every request", loaded.bytes / 1024)
+            } else {
+                String::new()
+            };
+            eprintln!("\x1b[2minstructions: {}{warn}\x1b[0m", names.join(", "));
+        }
+        system.push_str(&loaded.text);
+    }
 
     // Captured before the spec and workspace move into the agent and context.
     let root = workspace.root().to_path_buf();
