@@ -314,7 +314,12 @@ async fn main() -> Result<()> {
 
     if !args.no_skills {
         let found = tools::skills::discover(workspace.root());
-        let tool = tools::skill::SkillTool::new(found);
+        // Said once, at startup: a skill that silently fails to appear is one
+        // the user goes looking for in the wrong place.
+        for problem in &found.problems {
+            eprintln!("\x1b[2mskill skipped — {problem}\x1b[0m");
+        }
+        let tool = tools::skill::SkillTool::new(found.skills);
         if !tool.is_empty() {
             registry = registry.with(tool);
         }

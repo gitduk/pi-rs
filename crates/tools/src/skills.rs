@@ -43,6 +43,11 @@ pub fn frontmatter(text: &str) -> (Option<String>, Option<String>) {
 
     let (mut name, mut description) = (None, None);
     for line in rest[..end].lines() {
+        // Top level only: `metadata:` carries a nested mapping, and a `name:`
+        // indented under it describes the metadata, not the skill.
+        if line.starts_with([' ', '\t']) {
+            continue;
+        }
         let Some((key, value)) = line.split_once(':') else {
             continue;
         };
@@ -70,15 +75,39 @@ fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
+/// `.agents/skills` here and in every ancestor up to the repository root.
+///
+/// A monorepo keeps shared skills at the top while the work happens several
+/// directories below, so stopping at the workspace would hide them. The walk
+/// ends at the repository root and never reaches `$HOME`, whose `.agents` is
+/// the personal one and is added separately.
+fn ancestral_agents(workspace: &Path) -> Vec<PathBuf> {
+    let home = home();
+    let mut out = Vec::new();
+    for dir in workspace.ancestors() {
+        if home.as_deref() == Some(dir) {
+            break;
+        }
+        out.push(dir.join(".agents/skills"));
+        if dir.join(".git").exists() {
+            break;
+        }
+    }
+    out
+}
+
 /// Where skills come from, nearest first.
 ///
-/// Project directories outrank personal ones, and `.claude/skills` is read as
-/// it stands: a skill already written for another tool is a skill.
+/// Project directories outrank personal ones, and `.claude/skills` and
+/// `.agents/skills` are read as they stand: a skill already written for another
+/// tool is a skill. `.agents` is the vendor-neutral one, which is why it is
+/// searched at both levels.
 pub fn sources(workspace: &Path) -> Vec<PathBuf> {
     let mut out = vec![
         workspace.join(".pi/skills"),
         workspace.join(".claude/skills"),
     ];
+    out.extend(ancestral_agents(workspace));
     let config = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| home().map(|h| h.join(".config")));
@@ -86,55 +115,120 @@ pub fn sources(workspace: &Path) -> Vec<PathBuf> {
         out.push(c.join("pi/skills"));
     }
     if let Some(h) = home() {
+        out.push(h.join(".agents/skills"));
         out.push(h.join(".claude/skills"));
     }
     out
 }
 
-fn read_one(dir: &Path) -> Option<Skill> {
-    let text = std::fs::read_to_string(dir.join("SKILL.md")).ok()?;
+/// What a skill directory turned out to be.
+enum Read {
+    Skill(Box<Skill>),
+    /// Present but unusable, and worth saying so: a skill that silently fails
+    /// to appear is one the user goes looking for in the wrong place.
+    Problem(String),
+    /// No SKILL.md here; keep descending.
+    None,
+}
+
+fn read_one(dir: &Path) -> Read {
+    let Ok(text) = std::fs::read_to_string(dir.join("SKILL.md")) else {
+        return Read::None;
+    };
     let (declared, description) = frontmatter(&text);
-    let name = declared
-        .filter(|n| usable(n))
-        .or_else(|| dir.file_name()?.to_str().map(str::to_string))
-        .filter(|n| usable(n))?;
-    Some(Skill {
+    let shown = dir.display();
+
+    // The description is what the model decides on; without it the entry costs
+    // context and can never be chosen. Pi refuses these too.
+    let Some(description) = description.filter(|d| !d.trim().is_empty()) else {
+        return Read::Problem(format!("{shown}: SKILL.md has no description"));
+    };
+    let fallback = dir.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    let name = declared.unwrap_or_else(|| fallback.to_string());
+    if !usable(&name) {
+        return Read::Problem(format!(
+            "{shown}: `{name}` is not a usable skill name (a-z, 0-9, - and _, up to 64)"
+        ));
+    }
+    Read::Skill(Box::new(Skill {
         name,
-        description: description.unwrap_or_else(|| "(no description)".into()),
+        description,
         dir: dir.to_path_buf(),
-    })
+    }))
+}
+
+/// Skills, and what could not be read.
+#[derive(Debug, Default)]
+pub struct Found {
+    pub skills: Vec<Skill>,
+    pub problems: Vec<String>,
 }
 
 /// Every skill reachable from `workspace`, sorted by name.
-pub fn discover(workspace: &Path) -> Vec<Skill> {
+pub fn discover(workspace: &Path) -> Found {
     discover_from(&sources(workspace))
 }
+
+/// How far below a source directory a skill may sit.
+///
+/// Skill collections group by category, so the top level is not always where
+/// they are. A bound keeps a stray symlink or a `node_modules` from turning
+/// discovery into a full filesystem walk.
+const MAX_DEPTH: usize = 3;
 
 /// The same, over explicit directories. Taking them as an argument keeps the
 /// environment out of the call, which is what lets tests run in parallel.
 ///
 /// A nearer source wins a name collision, so a project can shadow a personal
 /// skill.
-pub fn discover_from(sources: &[PathBuf]) -> Vec<Skill> {
-    let mut found: Vec<Skill> = Vec::new();
+pub fn discover_from(sources: &[PathBuf]) -> Found {
+    let mut found = Found::default();
     for source in sources {
-        let Ok(entries) = std::fs::read_dir(source) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            if !entry.file_type().is_ok_and(|t| t.is_dir()) {
-                continue;
-            }
-            let Some(skill) = read_one(&entry.path()) else {
-                continue;
-            };
-            if !found.iter().any(|s| s.name == skill.name) {
-                found.push(skill);
-            }
-        }
+        walk(source, MAX_DEPTH, &mut found);
     }
-    found.sort_by(|a, b| a.name.cmp(&b.name));
+    found.skills.sort_by(|a, b| a.name.cmp(&b.name));
     found
+}
+
+fn walk(dir: &Path, depth: usize, found: &mut Found) {
+    match read_one(dir) {
+        // A skill's own subdirectories are its scripts and references, not more
+        // skills; descending into them would find its own fragments.
+        Read::Skill(skill) => {
+            if let Some(first) = found.skills.iter().find(|s| s.name == skill.name) {
+                found.problems.push(format!(
+                    "{}: `{}` is already defined by {}",
+                    skill.dir.display(),
+                    skill.name,
+                    first.dir.display()
+                ));
+            } else {
+                found.skills.push(*skill);
+            }
+            return;
+        }
+        Read::Problem(why) => {
+            found.problems.push(why);
+            return;
+        }
+        Read::None => {}
+    }
+    if depth == 0 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut kids: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .map(|e| e.path())
+        .collect();
+    // Stable order, so a collision resolves the same way on every machine.
+    kids.sort();
+    for kid in kids {
+        walk(&kid, depth - 1, found);
+    }
 }
 
 #[cfg(test)]
@@ -195,11 +289,103 @@ mod tests {
         }
 
         let found = discover_from(&[near, far]);
-        let names: Vec<&str> = found.iter().map(|s| s.name.as_str()).collect();
+        let names: Vec<&str> = found.skills.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, vec!["only-personal", "shared"]);
         assert_eq!(
-            found[1].description, "project version",
+            found.skills[1].description, "project version",
             "a project skill shadows a personal one"
+        );
+    }
+
+    fn skill_at(root: &Path, rel: &str, front: &str) {
+        let dir = root.join(rel);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), format!("---\n{front}\n---\nbody\n")).unwrap();
+    }
+
+    #[test]
+    fn a_skill_is_found_below_the_top_of_a_collection() {
+        // Skill repositories group by category, so the top level is not always
+        // where they are.
+        let tmp = tempfile::tempdir().unwrap();
+        skill_at(tmp.path(), "writing/commit", "description: Write a commit.");
+        let found = discover_from(&[tmp.path().to_path_buf()]);
+        assert_eq!(found.skills.len(), 1);
+        assert_eq!(found.skills[0].name, "commit");
+    }
+
+    #[test]
+    fn a_skills_own_subdirectories_are_not_more_skills() {
+        // scripts/ and references/ belong to the skill; descending into them
+        // would rediscover its own fragments.
+        let tmp = tempfile::tempdir().unwrap();
+        skill_at(tmp.path(), "archify", "description: Draw diagrams.");
+        skill_at(tmp.path(), "archify/recipes", "description: Not a skill.");
+        let found = discover_from(&[tmp.path().to_path_buf()]);
+        assert_eq!(found.skills.len(), 1, "{:?}", found.skills);
+    }
+
+    #[test]
+    fn what_cannot_be_loaded_is_reported_rather_than_dropped() {
+        // Silently vanishing sends the user looking in the wrong place.
+        let tmp = tempfile::tempdir().unwrap();
+        skill_at(tmp.path(), "nameless", "license: MIT");
+        // Unsafe rather than merely non-standard: a name is used to address the
+        // skill, so one that can leave its directory must not load. Casing and
+        // hyphen style are left alone on purpose — a shared `.agents/skills`
+        // holds skills written to other tools' rules, and rejecting those makes
+        // them invisible for no gain.
+        skill_at(tmp.path(), "escapee", "name: ../../etc\ndescription: x");
+        let found = discover_from(&[tmp.path().to_path_buf()]);
+        assert!(found.skills.is_empty());
+        assert_eq!(found.problems.len(), 2, "{:?}", found.problems);
+        assert!(found.problems.iter().any(|p| p.contains("no description")));
+        assert!(
+            found
+                .problems
+                .iter()
+                .any(|p| p.contains("usable skill name"))
+        );
+    }
+
+    #[test]
+    fn a_shadowed_skill_says_which_one_won() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (near, far) = (tmp.path().join("a"), tmp.path().join("b"));
+        skill_at(&near, "commit", "description: near");
+        skill_at(&far, "commit", "description: far");
+        let found = discover_from(&[near, far]);
+        assert_eq!(found.skills.len(), 1);
+        assert_eq!(found.skills[0].description, "near");
+        assert!(found.problems[0].contains("already defined by"));
+    }
+
+    #[test]
+    fn a_nested_metadata_key_does_not_rename_the_skill() {
+        // `metadata:` carries its own mapping, and a `name:` indented under it
+        // describes the metadata rather than the skill.
+        let text = "---\nname: archify\nmetadata:\n  name: not-this\n                      description: nor this\ndescription: Draw diagrams.\n---\nbody\n";
+        let (name, description) = frontmatter(text);
+        assert_eq!(name.as_deref(), Some("archify"));
+        assert_eq!(description.as_deref(), Some("Draw diagrams."));
+    }
+
+    #[test]
+    fn the_agents_walk_climbs_to_the_repository_root_and_no_further() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let deep = repo.join("packages/web");
+        std::fs::create_dir_all(&deep).unwrap();
+        let dirs = ancestral_agents(&deep);
+        assert_eq!(
+            dirs,
+            vec![
+                deep.join(".agents/skills"),
+                repo.join("packages/.agents/skills"),
+                repo.join(".agents/skills"),
+            ],
+            "the walk must stop at the repository root"
         );
     }
 }

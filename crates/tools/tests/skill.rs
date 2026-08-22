@@ -28,7 +28,7 @@ fn tree() -> (tempfile::TempDir, Vec<Skill>) {
     .unwrap();
 
     let found = discover_from(&[root]);
-    (dir, found)
+    (dir, found.skills)
 }
 
 fn ctx() -> (tempfile::TempDir, Ctx) {
@@ -113,7 +113,11 @@ fn a_directory_with_no_skill_file_is_not_a_skill() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("skills/notaskill")).unwrap();
     std::fs::write(dir.path().join("skills/notaskill/README.md"), "hi").unwrap();
-    assert!(discover_from(&[dir.path().join("skills")]).is_empty());
+    assert!(
+        discover_from(&[dir.path().join("skills")])
+            .skills
+            .is_empty()
+    );
 }
 
 #[tokio::test]
