@@ -64,21 +64,31 @@ pub fn describe(event: &Event, p: Paint) -> Option<String> {
             &format!("retry {attempt} in {delay_ms}ms · {}", clip(reason, 90)),
         ),
         Event::Warning(w) => format!("{} {}", p.on(RED, "!"), p.on(DIM, w)),
-        Event::Done { turns, usage, cost } => p.on(
-            DIM,
-            &format!(
-                "{turns} turns · {} in / {} out · {} cached{}",
-                usage.input,
-                usage.output,
-                usage.cache_read,
-                // An unpriced model reports no cost rather than $0.
-                if *cost > 0.0 {
-                    format!(" · ${cost:.4}")
-                } else {
-                    String::new()
-                },
-            ),
-        ),
+        Event::Done {
+            turns,
+            usage,
+            cost,
+            estimated,
+        } => {
+            // A tilde on every figure, because a count we made is not the
+            // provider's and a cost derived from it is not a bill.
+            let m = if *estimated { "~" } else { "" };
+            p.on(
+                DIM,
+                &format!(
+                    "{turns} turns · {m}{} in / {m}{} out · {} cached{}",
+                    usage.input,
+                    usage.output,
+                    usage.cache_read,
+                    // An unpriced model reports no cost rather than $0.
+                    if *cost > 0.0 {
+                        format!(" · {m}${cost:.4}")
+                    } else {
+                        String::new()
+                    },
+                ),
+            )
+        }
         _ => return None,
     })
 }

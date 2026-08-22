@@ -74,6 +74,8 @@ struct Ui {
     /// Bytes of answer and reasoning this turn has produced, which is all there
     /// is to go on until the provider reports an output count.
     produced: usize,
+    /// Set once a turn's figures came from us rather than the provider.
+    estimated: bool,
     stopping: bool,
 }
 
@@ -93,6 +95,7 @@ impl Ui {
             settled: Usage::default(),
             turn: Usage::default(),
             produced: 0,
+            estimated: false,
             stopping: false,
         }
     }
@@ -143,7 +146,10 @@ impl Ui {
                 self.turn = *usage;
                 self.produced = 0;
             }
-            Event::TurnEnd { usage, .. } => {
+            Event::TurnEnd {
+                usage, estimated, ..
+            } => {
+                self.estimated |= estimated;
                 self.settled.input += usage.input;
                 self.settled.output += usage.output;
                 self.settled.cache_read += usage.cache_read;
@@ -186,7 +192,7 @@ impl Ui {
             let line = status::line(
                 self.spinner,
                 since.elapsed(),
-                &counts(&self.settled, &self.turn, self.produced),
+                &counts(&self.settled, &self.turn, self.produced, self.estimated),
                 self.queued.len(),
                 self.stopping,
             );
@@ -394,8 +400,8 @@ impl Ui {
 /// so its output is stood in for by the bytes that have arrived. Its measured
 /// figures are replaced, never added to, when its `TurnEnd` folds them into
 /// `settled`, or a turn's input would be counted twice.
-fn counts(settled: &Usage, turn: &Usage, produced: usize) -> status::Counts {
-    let exact = turn.output > 0;
+fn counts(settled: &Usage, turn: &Usage, produced: usize, estimated: bool) -> status::Counts {
+    let exact = turn.output > 0 && !estimated;
     status::Counts {
         input: settled.input + turn.input,
         output: settled.output
@@ -523,6 +529,7 @@ impl Tui {
         self.ui.settled = Usage::default();
         self.ui.turn = Usage::default();
         self.ui.produced = 0;
+        self.ui.estimated = false;
 
         let out = {
             // Disjoint borrows: the run holds the session while the loop keeps
@@ -592,7 +599,7 @@ mod tests {
             input: 8_400,
             ..Default::default()
         };
-        let c = counts(&Usage::default(), &turn, 1_536);
+        let c = counts(&Usage::default(), &turn, 1_536, false);
         assert_eq!((c.input, c.output, c.exact), (8_400, 512, false));
     }
 
@@ -609,7 +616,7 @@ mod tests {
             input: 2_000,
             ..Default::default()
         };
-        let c = counts(&settled, &turn, 300);
+        let c = counts(&settled, &turn, 300, false);
         assert_eq!((c.input, c.output, c.exact), (12_000, 700, false));
     }
 
@@ -620,7 +627,20 @@ mod tests {
             output: 90,
             ..Default::default()
         };
-        let c = counts(&Usage::default(), &turn, 9_000);
+        let c = counts(&Usage::default(), &turn, 9_000, false);
         assert_eq!((c.output, c.exact), (90, true));
+    }
+
+    #[test]
+    fn a_turn_the_provider_did_not_measure_stays_marked() {
+        // The figures are real numbers and still not the provider's; a status
+        // line that dropped the tilde would be claiming they were.
+        let turn = Usage {
+            input: 8_400,
+            output: 300,
+            ..Default::default()
+        };
+        assert!(!counts(&Usage::default(), &turn, 0, true).exact);
+        assert!(counts(&Usage::default(), &turn, 0, false).exact);
     }
 }

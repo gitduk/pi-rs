@@ -42,14 +42,19 @@ pub enum Event {
     /// OpenAI host reports nothing until the stream ends. A surface that shows
     /// a running count treats its absence as "not known yet", never as zero.
     Usage(Usage),
+
     TurnEnd {
         usage: Usage,
         cost: f64,
+        /// False when the provider reported nothing and these are our own
+        /// count. See [`crate::Agent`]'s fallback.
+        estimated: bool,
     },
     Done {
         turns: usize,
         usage: Usage,
         cost: f64,
+        estimated: bool,
     },
 }
 
@@ -57,6 +62,9 @@ pub enum Event {
 pub struct Totals {
     pub usage: Usage,
     pub cost: f64,
+    /// Set once any turn's figures were ours rather than the provider's. It
+    /// never clears: a total mixing the two is not a measurement.
+    pub estimated: bool,
 }
 
 impl Totals {
@@ -66,5 +74,10 @@ impl Totals {
         self.usage.cache_read += usage.cache_read;
         self.usage.cache_write += usage.cache_write;
         self.cost += cost;
+    }
+
+    pub fn add_estimated(&mut self, usage: &Usage, cost: f64, estimated: bool) {
+        self.add(usage, cost);
+        self.estimated |= estimated;
     }
 }

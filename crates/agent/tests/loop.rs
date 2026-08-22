@@ -165,6 +165,61 @@ async fn a_turn_without_tool_calls_ends_the_run() {
     assert!(events.contains(&Event::TextDelta("done".into())));
 }
 
+/// A turn whose Done carries exactly this usage.
+fn turn_reporting(body: &str, usage: Usage) -> Vec<StreamEvent> {
+    let mut ev = text_turn(body);
+    ev.pop();
+    ev.push(StreamEvent::Done {
+        stop: StopReason::EndTurn,
+        usage,
+    });
+    ev
+}
+
+#[tokio::test]
+async fn a_provider_that_reports_nothing_gets_our_own_count_instead() {
+    // A proxy reporting zeros would otherwise make a whole session look free,
+    // and take the compaction-facing numbers down with it.
+    let (_d, a, ctx) = harness(vec![turn_reporting("done", Usage::default())]);
+    let totals = drive(&a, &ctx, "hi").await.1.unwrap().totals;
+
+    assert!(
+        totals.usage.input > 0,
+        "input was left at the reported zero"
+    );
+    assert!(totals.usage.output > 0);
+    assert!(totals.cost > 0.0);
+    assert!(totals.estimated, "our own count must not pass as measured");
+}
+
+#[tokio::test]
+async fn only_the_half_the_provider_withheld_is_filled_in() {
+    // Reporting one and not the other is the ordinary case, not a broken one:
+    // the measured half has to survive intact.
+    let reported = Usage {
+        input: 4_321,
+        output: 0,
+        ..Default::default()
+    };
+    let (_d, a, ctx) = harness(vec![turn_reporting("done", reported)]);
+    let totals = drive(&a, &ctx, "hi").await.1.unwrap().totals;
+
+    assert_eq!(
+        totals.usage.input, 4_321,
+        "a measured count was overwritten"
+    );
+    assert!(totals.usage.output > 0);
+    assert!(totals.estimated);
+}
+
+#[tokio::test]
+async fn a_fully_measured_turn_is_not_marked() {
+    let (_d, a, ctx) = harness(vec![text_turn("done")]);
+    let totals = drive(&a, &ctx, "hi").await.1.unwrap().totals;
+    assert_eq!((totals.usage.input, totals.usage.output), (10, 5));
+    assert!(!totals.estimated);
+}
+
 #[tokio::test]
 async fn a_tool_call_round_trips_into_the_transcript() {
     let (_d, a, ctx) = harness(vec![

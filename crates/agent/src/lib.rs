@@ -199,15 +199,19 @@ impl Agent {
         for turn in 1..=self.max_turns {
             let _ = tx.send(Event::TurnStart { turn });
             let mut squeezes = 0usize;
+            // Kept past the retry loop: the fallback below prices what was
+            // actually sent, which a squeeze or a compaction may have changed.
+            let mut sent;
 
             let done = loop {
                 let budget = ((hard.unwrap_or_else(|| self.budget()) as f64) * scale) as usize;
                 self.maybe_compact(session, budget, squeezes > 0, &mut totals, tx)
                     .await;
 
+                sent = session.context();
                 let req = Request {
                     system: Some(self.system.clone()),
-                    messages: session.context(),
+                    messages: sent.clone(),
                     tools: self.registry.defs(),
                     max_output_tokens: None,
                     temperature: None,
@@ -246,11 +250,13 @@ impl Agent {
                 }
             };
 
-            let cost = self.spec.cost(&done.usage);
-            totals.add(&done.usage, cost);
+            let (usage, estimated) = self.fill_usage(done.usage, &sent, &done.message);
+            let cost = self.spec.cost(&usage);
+            totals.add_estimated(&usage, cost, estimated);
             let _ = tx.send(Event::TurnEnd {
-                usage: done.usage,
+                usage,
                 cost,
+                estimated,
             });
 
             // Two providers accept an oversized request instead of refusing it:
@@ -288,6 +294,7 @@ impl Agent {
                     turns: turn,
                     usage: totals.usage,
                     cost: totals.cost,
+                    estimated: totals.estimated,
                 });
                 return Ok(Outcome {
                     totals,
@@ -309,6 +316,7 @@ impl Agent {
                     turns: turn,
                     usage: totals.usage,
                     cost: totals.cost,
+                    estimated: totals.estimated,
                 });
                 return Ok(Outcome {
                     totals,
@@ -405,6 +413,40 @@ impl Agent {
     }
 
     /// The same accounting against a window the provider named instead of the
+    /// Fill in whatever the provider left at zero, and say that we did.
+    ///
+    /// A real request never costs zero input tokens, and a turn that produced a
+    /// reply never costs zero output tokens; a zero in either place means the
+    /// host reported nothing, not that nothing was sent. Filled per field
+    /// rather than all-or-nothing, because a host that reports one and not the
+    /// other is the ordinary case, not a broken one.
+    ///
+    /// What goes in is the same bound compaction runs on, so a turn reporting
+    /// its own numbers reports the ones it is already steering by. It is the
+    /// wrong bound for billing and the right one for noticing, which is why it
+    /// travels marked.
+    fn fill_usage(
+        &self,
+        reported: brain::stream::Usage,
+        sent: &[Message],
+        reply: &Message,
+    ) -> (brain::stream::Usage, bool) {
+        let mut usage = reported;
+        let mut estimated = false;
+        if usage.input == 0 {
+            usage.input = (brain::estimate::tokens(sent)
+                + brain::estimate::text(&self.system)
+                + brain::estimate::tool_defs(&self.registry.defs()))
+                as u64;
+            estimated = true;
+        }
+        if usage.output == 0 {
+            usage.output = brain::estimate::message(reply) as u64;
+            estimated = true;
+        }
+        (usage, estimated)
+    }
+
     /// one the catalog claims.
     fn budget_within(&self, window: usize) -> usize {
         // A spec may declare an output cap larger than the window it is being
