@@ -397,8 +397,8 @@ mod tests {
 
     fn spec(c: AnthropicCompat) -> ModelSpec {
         ModelSpec {
-            id: "opus-5".into(),
-            wire_id: "claude-opus-5".into(),
+            id: "test".into(),
+            wire_id: "test-model".into(),
             base_url: "https://api.anthropic.com".into(),
             wire: Wire::Anthropic(c),
             context_window: 200_000,
@@ -492,7 +492,7 @@ mod tests {
                 }],
                 origin: Some(Origin {
                     transport: "openai".into(),
-                    model: "gpt-5".into(),
+                    model: "another-model".into(),
                 }),
             })],
         };
@@ -522,7 +522,7 @@ mod tests {
                 }],
                 origin: Some(Origin {
                     transport: "anthropic".into(),
-                    model: "claude-opus-5".into(),
+                    model: "test-model".into(),
                 }),
             })],
         };

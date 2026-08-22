@@ -254,7 +254,7 @@ mod tests {
     use super::*;
 
     fn acc() -> Accumulator {
-        Accumulator::new("anthropic", "claude-opus-5")
+        Accumulator::new("anthropic", "test-model")
     }
 
     #[test]
@@ -380,7 +380,7 @@ mod tests {
         let AssistantContent::Reasoning(r) = &content[0] else {
             panic!("{content:?}")
         };
-        assert_eq!(r.origin.as_ref().unwrap().model, "claude-opus-5");
+        assert_eq!(r.origin.as_ref().unwrap().model, "test-model");
         assert_eq!(
             r.content[0],
             ReasoningContent::Text {

@@ -1,0 +1,100 @@
+# ~/.pi.toml — copy what you need and delete the rest.
+#
+# There is no built-in list of models. One would go stale the week a vendor
+# ships something, and nothing in it would tell you which entries still
+# describe reality. What follows was measured against live endpoints on the
+# date in each comment; treat it as a starting point, not as current.
+
+[defaults]
+# Omit this when the file defines exactly one model — there is nothing else it
+# could mean.
+model = "flash"
+effort = "medium"      # off | low | medium | high
+tier = "exec"          # read | write | exec
+max_turns = 50
+
+# ---------------------------------------------------------------------------
+# A local proxy speaking the OpenAI wire.
+# ---------------------------------------------------------------------------
+[models.flash]
+# The table name is what goes on the wire. Set `wire_id` only to give `-m` a
+# shorter handle than the endpoint's own name for the model.
+base_url = "http://127.0.0.1:7896/v1"
+wire = "openai"
+context_window = 1_000_000
+max_output_tokens = 384_000
+thinking = "effort"    # effort (OpenAI-family) | budget (Anthropic) | omit
+# A local server usually wants any non-empty string. Anything actually secret
+# belongs in `api_key_env`, which names an environment variable instead.
+api_key = "x"
+
+[models.flash.pricing]
+input_per_mtok = 0.14
+output_per_mtok = 0.28
+cache_read_per_mtok = 0.0028
+
+# ---------------------------------------------------------------------------
+# Anthropic direct. Measured 2026-08.
+# ---------------------------------------------------------------------------
+[models.opus]
+wire_id = "claude-opus-5"
+base_url = "https://api.anthropic.com"
+wire = "anthropic"
+context_window = 200_000
+max_output_tokens = 64_000
+thinking = "budget"
+thinking_replay = "signed"
+vision = true
+cache_breakpoints = true
+api_key_env = "ANTHROPIC_API_KEY"
+
+[models.opus.pricing]
+input_per_mtok = 5.0
+output_per_mtok = 25.0
+cache_read_per_mtok = 0.5
+cache_write_per_mtok = 6.25
+
+[models.opus.compat]
+# Rejected with a 400 on the newer Anthropic models.
+sampling_params = false
+
+# ---------------------------------------------------------------------------
+# DeepSeek behind its Anthropic-compatible shim. Every value below was measured
+# against the live endpoint in 2026-08, not inferred from the vendor it mimics.
+# ---------------------------------------------------------------------------
+[models.deepseek]
+wire_id = "deepseek-reasoner"
+base_url = "https://api.deepseek.com/anthropic"
+wire = "anthropic"
+context_window = 128_000
+# What we ask for, not a discovered ceiling: the endpoint accepts 200_000 and
+# silently clamps, so it reports no real limit.
+max_output_tokens = 32_768
+thinking = "budget"
+thinking_replay = "signed"
+cache_breakpoints = true
+api_key_env = "DEEPSEEK_API_KEY"
+
+[models.deepseek.compat]
+# `ttl: "1h"` is accepted without error, but nothing confirms it is honored;
+# plain ephemeral is the claim that can be defended.
+long_cache_retention = false
+
+# ---------------------------------------------------------------------------
+# Every compat key, with the default each wire uses when it is not named.
+#
+#   anthropic: sampling_params = true, forced_tool_choice = true,
+#              tool_result_id_alias = false, long_cache_retention = true,
+#              adaptive_thinking = true
+#
+#   openai:    max_tokens_field = "max_completion_tokens",
+#              multiple_system_messages = true, mistral_tool_ids = false,
+#              assistant_after_tool_result = false, tool_result_name = false,
+#              reasoning_effort = false,
+#              reasoning_field = "reasoning_content",
+#              usage_in_streaming = true
+#
+# A key that is not one of these is refused at load with the list of the ones
+# that are: a typo otherwise leaves a quirk at its default and produces a 400
+# much later, pointing at nothing.
+# ---------------------------------------------------------------------------

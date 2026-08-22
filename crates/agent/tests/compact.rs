@@ -308,9 +308,27 @@ mod budget {
     }
 
     fn agent_with(context: u32, max_output: u32) -> Agent {
-        let mut spec = brain::catalog::find("opus-5").unwrap();
-        spec.context_window = context;
-        spec.max_output_tokens = max_output;
+        use brain::catalog::{
+            AnthropicCompat, Capabilities, ModelSpec, Pricing, ThinkingReplay, ThinkingSupport,
+            Wire,
+        };
+        let spec = ModelSpec {
+            id: "test".into(),
+            wire_id: "test".into(),
+            base_url: "http://localhost".into(),
+            wire: Wire::Anthropic(AnthropicCompat::default()),
+            context_window: context,
+            max_output_tokens: max_output,
+            caps: Capabilities {
+                tools: true,
+                parallel_tool_calls: true,
+                vision: true,
+                thinking: Some(ThinkingSupport::Budget),
+                cache_breakpoints: true,
+            },
+            thinking_replay: ThinkingReplay::Signed,
+            pricing: Pricing::default(),
+        };
         Agent::new(Arc::new(Never), spec)
     }
 

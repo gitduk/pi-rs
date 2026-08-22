@@ -1,3 +1,11 @@
+//! What a model is, as far as the wire is concerned.
+//!
+//! No table of models lives here. A hand-written one goes stale the week a
+//! vendor ships something, and there is no way to tell by reading it which
+//! entries still describe reality — so the models a run can reach are the ones
+//! the user has written down in `~/.pi.toml`, against the endpoint they are
+//! actually pointed at. `examples/pi.toml` carries measured starting points.
+
 use serde::{Deserialize, Serialize};
 
 /// Wire protocol plus its fully-resolved quirk record. One field, so a spec can
@@ -167,110 +175,4 @@ impl ModelSpec {
             + usage.cache_read as f64 / m * self.pricing.cache_read_per_mtok
             + usage.cache_write as f64 / m * self.pricing.cache_write_per_mtok
     }
-}
-
-const ANTHROPIC_BASE: &str = "https://api.anthropic.com";
-const DEEPSEEK_BASE: &str = "https://api.deepseek.com/anthropic";
-
-/// The models we actually run. Hand-written on purpose: a borrowed quirk table
-/// carries entries you cannot tell have gone stale.
-pub fn builtin() -> Vec<ModelSpec> {
-    vec![
-        ModelSpec {
-            id: "opus-5".into(),
-            wire_id: "claude-opus-5".into(),
-            base_url: ANTHROPIC_BASE.into(),
-            wire: Wire::Anthropic(AnthropicCompat {
-                sampling_params: false,
-                ..Default::default()
-            }),
-            context_window: 200_000,
-            max_output_tokens: 64_000,
-            caps: Capabilities {
-                tools: true,
-                parallel_tool_calls: true,
-                vision: true,
-                thinking: Some(ThinkingSupport::Budget),
-                cache_breakpoints: true,
-            },
-            thinking_replay: ThinkingReplay::Signed,
-            pricing: Pricing {
-                input_per_mtok: 5.0,
-                output_per_mtok: 25.0,
-                cache_read_per_mtok: 0.5,
-                cache_write_per_mtok: 6.25,
-            },
-        },
-        ModelSpec {
-            id: "sonnet-5".into(),
-            wire_id: "claude-sonnet-5".into(),
-            base_url: ANTHROPIC_BASE.into(),
-            wire: Wire::Anthropic(AnthropicCompat {
-                sampling_params: false,
-                ..Default::default()
-            }),
-            context_window: 200_000,
-            max_output_tokens: 64_000,
-            caps: Capabilities {
-                tools: true,
-                parallel_tool_calls: true,
-                vision: true,
-                thinking: Some(ThinkingSupport::Budget),
-                cache_breakpoints: true,
-            },
-            thinking_replay: ThinkingReplay::Signed,
-            pricing: Pricing {
-                input_per_mtok: 3.0,
-                output_per_mtok: 15.0,
-                cache_read_per_mtok: 0.3,
-                cache_write_per_mtok: 3.75,
-            },
-        },
-        deepseek("deepseek-chat", "deepseek-chat", None, 8_192),
-        deepseek(
-            "deepseek-reasoner",
-            "deepseek-reasoner",
-            Some(ThinkingSupport::Budget),
-            32_768,
-        ),
-    ]
-}
-
-/// DeepSeek behind its Anthropic-compatible shim. Every compat value below was
-/// measured against the live endpoint, not inferred from the vendor it mimics.
-fn deepseek(id: &str, wire_id: &str, thinking: Option<ThinkingSupport>, max_out: u32) -> ModelSpec {
-    ModelSpec {
-        id: id.into(),
-        wire_id: wire_id.into(),
-        base_url: DEEPSEEK_BASE.into(),
-        wire: Wire::Anthropic(AnthropicCompat {
-            sampling_params: true,
-            forced_tool_choice: true,
-            tool_result_id_alias: false,
-            // `ttl: "1h"` is accepted without error, but nothing confirms it is
-            // honored; plain ephemeral is the claim we can defend.
-            long_cache_retention: false,
-            adaptive_thinking: true,
-        }),
-        context_window: 128_000,
-        // What we ask for, not a discovered ceiling: the endpoint accepts
-        // 200_000 and silently clamps, so it reports no real limit.
-        max_output_tokens: max_out,
-        caps: Capabilities {
-            tools: true,
-            parallel_tool_calls: true,
-            vision: false,
-            thinking,
-            cache_breakpoints: true,
-        },
-        thinking_replay: ThinkingReplay::Signed,
-        // Unpriced: a wrong cost reads as authoritative, an absent one does not.
-        pricing: Pricing::default(),
-    }
-}
-
-pub fn find(id: &str) -> Option<ModelSpec> {
-    builtin()
-        .into_iter()
-        .find(|m| m.id == id || m.wire_id == id)
 }

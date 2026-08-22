@@ -57,8 +57,8 @@ struct Args {
     #[arg(long, value_name = "FILE", env = "PI_CONFIG")]
     config: Option<String>,
 
-    /// Catalog id, or the upstream id together with --wire. Defaults to the
-    /// resumed session's model, else opus-5.
+    /// A model defined in ~/.pi.toml, or the upstream id together with --wire.
+    /// Defaults to the resumed session's model, else the config's.
     #[arg(short, long)]
     model: Option<String>,
 
@@ -254,43 +254,53 @@ async fn main() -> Result<()> {
         _ => None,
     };
 
-    let (model, named_by) = config.model(
+    let named = config.model(
         &project,
         args.model.as_deref(),
         prior.as_ref().map(|p| p.model.as_str()),
     );
 
-    let entry = config.find(&model).map(|(_, e)| e);
-    let mut spec = if let Some(wire) = args.wire {
-        ad_hoc(&args, &model, wire)?
-    } else if let Some((id, entry)) = config.find(&model) {
-        entry.spec(id)?
-    } else {
-        brain::catalog::find(&model).with_context(|| {
-            let mut known = config.ids();
-            let builtin: Vec<String> = brain::catalog::builtin()
-                .iter()
-                .map(|m| m.id.clone())
-                .collect();
-            known.extend(builtin.iter().map(String::as_str));
-            // The table name is the wire name, which is easy to miss when the
-            // two were written at different times. Say the edit, not just the
-            // mismatch.
-            let fix = match config.ids().as_slice() {
-                [only] => format!(
-                    " Rename [models.{only}] to [models.{model}], or point \
-                     {} at `{only}`.",
-                    named_by.describe()
-                ),
-                _ => String::new(),
-            };
-            format!(
-                "unknown model `{model}`, named by {}; known: {}.{fix}",
-                named_by.describe(),
-                known.join(", ")
-            )
-        })?
+    let mut spec = match (args.wire, &named) {
+        // A one-off against an endpoint not worth writing down yet.
+        (Some(wire), Some((model, _))) => ad_hoc(&args, model, wire)?,
+        (Some(_), None) => bail!("--wire needs -m to say what the endpoint calls the model"),
+        (None, Some((model, named_by))) => match config.find(model) {
+            Some((id, entry)) => entry.spec(id)?,
+            None => {
+                // The table name is the wire name, easy to miss when the two
+                // were written at different times: say the edit, not just the
+                // mismatch.
+                match config.ids().as_slice() {
+                    [] => bail!(
+                        "unknown model `{model}`, named by {}, and ~/.pi.toml defines \
+                         none — see examples/pi.toml.",
+                        named_by.describe()
+                    ),
+                    [only] => bail!(
+                        "unknown model `{model}`, named by {}; the only one defined is \
+                         `{only}`. Rename [models.{only}] to [models.{model}], or point \
+                         {} at `{only}`.",
+                        named_by.describe(),
+                        named_by.describe()
+                    ),
+                    ids => bail!(
+                        "unknown model `{model}`, named by {}; defined: {}.",
+                        named_by.describe(),
+                        ids.join(", ")
+                    ),
+                }
+            }
+        },
+        (None, None) => bail!(
+            "no model to run. Define one in ~/.pi.toml — see examples/pi.toml — \
+             or name an endpoint with --wire and --base-url."
+        ),
     };
+    let entry = named
+        .as_ref()
+        .and_then(|(m, _)| config.find(m))
+        .map(|(_, e)| e);
+    let model = spec.id.clone();
     if let Some(url) = &args.base_url {
         spec.base_url = url.clone();
     }

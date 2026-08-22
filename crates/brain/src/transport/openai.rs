@@ -456,7 +456,7 @@ mod tests {
     fn spec(c: OpenAiCompat) -> ModelSpec {
         ModelSpec {
             id: "local".into(),
-            wire_id: "qwen3".into(),
+            wire_id: "test-model".into(),
             base_url: "http://127.0.0.1:8000/v1".into(),
             wire: Wire::OpenAi(c),
             context_window: 128_000,
@@ -645,7 +645,7 @@ mod tests {
                 }],
                 origin: Some(crate::message::Origin {
                     transport: "anthropic".into(),
-                    model: "claude-opus-5".into(),
+                    model: "test-model".into(),
                 }),
             })],
         };
@@ -737,7 +737,7 @@ mod tests {
                 }],
                 origin: Some(crate::message::Origin {
                     transport: "anthropic".into(),
-                    model: "claude-opus-5".into(),
+                    model: "test-model".into(),
                 }),
             })],
         };

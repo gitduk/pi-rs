@@ -190,7 +190,6 @@ pub enum Origin {
     Project,
     Global,
     OnlyModel,
-    BuiltIn,
 }
 
 impl Origin {
@@ -201,7 +200,6 @@ impl Origin {
             Origin::Project => "defaults.model in the project's .pi.toml",
             Origin::Global => "defaults.model in ~/.pi.toml",
             Origin::OnlyModel => "the only model in ~/.pi.toml",
-            Origin::BuiltIn => "the built-in default",
         }
     }
 }
@@ -270,29 +268,33 @@ impl Config {
     /// A config that defines exactly one model and names no default means that
     /// one: there is nothing else it could mean, and making the user write the
     /// name twice only creates the chance to write it differently.
+    ///
+    /// None when nothing named one. There is no fallback to a model we picked:
+    /// a hardcoded name is a claim about what exists, and it goes stale the
+    /// week a vendor ships something.
     pub fn model(
         &self,
         project: &Project,
         flag: Option<&str>,
         prior: Option<&str>,
-    ) -> (String, Origin) {
+    ) -> Option<(String, Origin)> {
         if let Some(m) = flag {
-            return (m.to_string(), Origin::Flag);
+            return Some((m.to_string(), Origin::Flag));
         }
         if let Some(m) = prior {
-            return (m.to_string(), Origin::Resumed);
+            return Some((m.to_string(), Origin::Resumed));
         }
         if let Some(m) = &project.defaults.model {
-            return (m.clone(), Origin::Project);
+            return Some((m.clone(), Origin::Project));
         }
         if let Some(m) = &self.defaults.model {
-            return (m.clone(), Origin::Global);
+            return Some((m.clone(), Origin::Global));
         }
         if self.models.len() == 1 {
             let only = self.models.keys().next().expect("len is 1");
-            return (only.clone(), Origin::OnlyModel);
+            return Some((only.clone(), Origin::OnlyModel));
         }
-        ("opus-5".to_string(), Origin::BuiltIn)
+        None
     }
 }
 
@@ -464,9 +466,9 @@ usage_in_streaming = false
                     base_url = \"http://x/v1\"\nwire = \"openai\"\n";
         let c = parse(body).unwrap();
         assert!(c.find("flash").is_some());
-        let (id, entry) = c.find("deepseek-v4-flash").unwrap();
+        let (id, entry) = c.find("vendor-model-name").unwrap();
         assert_eq!(id, "flash");
-        assert_eq!(entry.spec(id).unwrap().wire_id, "deepseek-v4-flash");
+        assert_eq!(entry.spec(id).unwrap().wire_id, "vendor-model-name");
     }
 
     #[test]
@@ -503,7 +505,7 @@ usage_in_streaming = false
     fn a_project_may_pick_a_model_and_turn_the_dials() {
         let p = parse_project("[defaults]\nmodel = \"flash\"\nmax_turns = 10\n").unwrap();
         let c = Config::default();
-        assert_eq!(c.model(&p, None, None).0, "flash");
+        assert_eq!(c.model(&p, None, None).unwrap().0, "flash");
         assert_eq!(c.settle(&p, Flags::default()).max_turns, 10);
     }
 
@@ -551,9 +553,15 @@ usage_in_streaming = false
         // Reasoning blocks only replay to the model that produced them.
         let c = parse(SAMPLE).unwrap();
         let p = parse_project("[defaults]\nmodel = \"other\"\n").unwrap();
-        assert_eq!(c.model(&p, None, Some("resumed")).0, "resumed");
-        assert_eq!(c.model(&p, Some("flag"), Some("resumed")).0, "flag");
-        assert_eq!(c.model(&p, None, None), ("other".into(), Origin::Project));
+        assert_eq!(c.model(&p, None, Some("resumed")).unwrap().0, "resumed");
+        assert_eq!(
+            c.model(&p, Some("flag"), Some("resumed")).unwrap().0,
+            "flag"
+        );
+        assert_eq!(
+            c.model(&p, None, None),
+            Some(("other".into(), Origin::Project))
+        );
     }
 
     #[test]
@@ -592,7 +600,7 @@ usage_in_streaming = false
         let body = "[models.flash]\nbase_url = \"http://x/v1\"\nwire = \"openai\"\n";
         let c = parse(body).unwrap();
         let got = c.model(&Project::default(), None, None);
-        assert_eq!(got, ("flash".to_string(), Origin::OnlyModel));
+        assert_eq!(got, Some(("flash".to_string(), Origin::OnlyModel)));
     }
 
     #[test]
@@ -601,13 +609,21 @@ usage_in_streaming = false
         let two = "[models.a]\nbase_url=\"http://x/v1\"\nwire=\"openai\"\n\
                    [models.b]\nbase_url=\"http://y/v1\"\nwire=\"openai\"\n";
         let c = parse(two).unwrap();
-        assert_eq!(c.model(&Project::default(), None, None).1, Origin::BuiltIn);
+        assert_eq!(c.model(&Project::default(), None, None), None);
+    }
+
+    #[test]
+    fn an_empty_config_names_no_model_rather_than_one_we_invented() {
+        // A hardcoded fallback is a claim about what exists, and it goes stale
+        // the week a vendor ships something.
+        let c = Config::default();
+        assert_eq!(c.model(&Project::default(), None, None), None);
     }
 
     #[test]
     fn an_unknown_model_can_say_which_file_asked_for_it() {
         let c = parse("[defaults]\nmodel = \"typo\"\n").unwrap();
-        let (name, origin) = c.model(&Project::default(), None, None);
+        let (name, origin) = c.model(&Project::default(), None, None).unwrap();
         assert_eq!(name, "typo");
         assert!(origin.describe().contains("~/.pi.toml"));
     }

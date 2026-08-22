@@ -174,7 +174,7 @@ mod tests {
         let store = Store::new(tmp.path());
         let log = log_with(vec![Message::user("hi"), Message::assistant_text("there")]);
         let path = store
-            .save("t1", std::path::Path::new("/w"), "opus-5", &log)
+            .save("t1", std::path::Path::new("/w"), "test-model", &log)
             .unwrap();
 
         #[cfg(unix)]
@@ -188,7 +188,7 @@ mod tests {
             );
         }
         let back = store.load("t1").unwrap();
-        assert_eq!(back.model, "opus-5");
+        assert_eq!(back.model, "test-model");
         assert_eq!(back.into_log(), log);
     }
 

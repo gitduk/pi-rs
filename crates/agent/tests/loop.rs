@@ -95,7 +95,7 @@ fn call_turn(calls: &[(&str, &str, &str)]) -> Vec<StreamEvent> {
 fn spec() -> ModelSpec {
     ModelSpec {
         id: "test".into(),
-        wire_id: "claude-test".into(),
+        wire_id: "test-wire-id".into(),
         base_url: "http://localhost".into(),
         wire: Wire::Anthropic(AnthropicCompat::default()),
         context_window: 200_000,
