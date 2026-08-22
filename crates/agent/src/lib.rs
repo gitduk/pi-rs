@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use brain::catalog::ModelSpec;
-use brain::message::{Message, ToolCall, ToolResult};
+use brain::message::{Message, ToolCall, ToolResult, ToolResultContent};
 use brain::request::{Effort, Request};
 use brain::stream::{Accumulator, StreamEvent};
 use brain::transport::Transport;
@@ -24,6 +24,10 @@ pub use compact::Policy;
 pub use event::{Event, Totals};
 
 pub const DEFAULT_SYSTEM: &str = include_str!("../prompts/system.md");
+
+/// Identical calls before the loop is named. Two is not enough: a re-read
+/// after compaction is legitimate, and the content really is the same.
+const REPEAT_LIMIT: usize = 2;
 
 /// Headroom for framing the estimate does not model. Compacting slightly early
 /// costs a little quality; compacting late costs the whole turn.
@@ -176,6 +180,9 @@ impl Agent {
     ) -> Result<Outcome, AgentError> {
         let mut totals = Totals::default();
         let mut nudged = false;
+        // What each call last returned, so a loop can be named rather than run
+        // until the turn limit stops it.
+        let mut echoes: HashMap<(String, String), (String, usize)> = HashMap::new();
 
         // A resumed session brings its plan back; the tool sees it as the list
         // it left behind rather than an empty one.
@@ -293,7 +300,7 @@ impl Agent {
                 .iter()
                 .map(|i| (i.call.clone(), i.error.clone()))
                 .collect();
-            let results = self.run_calls(&calls, &bad, ctx, tx).await?;
+            let results = self.run_calls(&calls, &bad, ctx, tx, &mut echoes).await?;
             session.log.push(Message::tool_results(results));
             self.record_todos(session, ctx);
 
@@ -504,6 +511,7 @@ impl Agent {
         bad: &HashMap<brain::message::ToolCallId, String>,
         ctx: &Ctx,
         tx: &UnboundedSender<Event>,
+        echoes: &mut HashMap<(String, String), (String, usize)>,
     ) -> Result<Vec<ToolResult>, AgentError> {
         let actions: Vec<Action> = calls
             .iter()
@@ -597,11 +605,18 @@ impl Agent {
                         is_error: false,
                         preview: out.preview(),
                     });
+                    let body = out.flatten();
+                    let mut content = out.content;
+                    if let Some(notice) = repeat_notice(echoes, call, &body) {
+                        content.push(ToolResultContent::Text(brain::message::Text {
+                            text: notice,
+                        }));
+                    }
                     ToolResult {
                         call: call.id.clone(),
                         provider: call.provider.clone(),
                         name: call.name.clone(),
-                        content: out.content,
+                        content,
                         is_error: false,
                         useless: out.useless,
                     }
@@ -613,6 +628,40 @@ impl Agent {
 
         Ok(results)
     }
+}
+
+/// Name a call that has come back identical too many times.
+///
+/// A model that keeps making the same call and reading the same answer is
+/// stuck, and it will keep going until the turn limit stops it. Saying so is
+/// what breaks the loop.
+fn repeat_notice(
+    echoes: &mut HashMap<(String, String), (String, usize)>,
+    call: &ToolCall,
+    body: &str,
+) -> Option<String> {
+    let key = (call.name.clone(), call.args.to_string());
+    // Explicit rather than `entry().or_insert()`: the first call must not be
+    // counted as a repeat of itself.
+    let Some(slot) = echoes.get_mut(&key) else {
+        echoes.insert(key, (body.to_string(), 0));
+        return None;
+    };
+    if slot.0 != body {
+        // A different answer: whatever the model was waiting for has happened.
+        *slot = (body.to_string(), 0);
+        return None;
+    }
+    slot.1 += 1;
+    let seen = slot.1;
+    (seen >= REPEAT_LIMIT).then(|| {
+        format!(
+            "\n[this is the same `{}` call with the same result, {} times now. \
+             Nothing has changed — try something else.]",
+            call.name,
+            seen + 1
+        )
+    })
 }
 
 fn wedged(idle: std::time::Duration) -> AgentError {

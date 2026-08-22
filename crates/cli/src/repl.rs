@@ -1,12 +1,11 @@
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use agent::{Agent, AgentError, Session, Totals};
 use anyhow::Result;
 use rustyline::error::ReadlineError;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
-use tools::{Ctx, Workspace};
+use tools::Ctx;
 
 use crate::session::Store;
 
@@ -20,12 +19,12 @@ const HELP: &str = "\
 /// A prompt and everything the session accumulates around it.
 pub struct Repl {
     pub agent: Agent,
-    pub workspace: Workspace,
     pub store: Store,
     pub model: String,
     pub session: Session,
     pub id: String,
-    pub todos: Arc<std::sync::Mutex<Vec<tools::todo::Todo>>>,
+    /// Carried across turns: the plan and the file locks outlive any one run.
+    pub ctx: Ctx,
 }
 
 /// What a line at the prompt asks for.
@@ -91,7 +90,7 @@ impl Repl {
                 // The old one stays on disk; only the thread of conversation ends.
                 self.session = Session::default();
                 self.id = crate::session::new_id();
-                if let Ok(mut held) = self.todos.lock() {
+                if let Ok(mut held) = self.ctx.todos.lock() {
                     held.clear();
                 }
                 println!("started {}", self.id);
@@ -116,19 +115,14 @@ impl Repl {
             }
         });
 
-        let ctx = Ctx {
-            workspace: self.workspace.clone(),
-            cancel,
-            todos: self.todos.clone(),
-            yielded: Default::default(),
-        };
+        let ctx = self.ctx.clone().with_cancel(cancel).with_fresh_result();
         let out = self.agent.run(&mut self.session, &ctx, tx).await;
         watcher.abort();
 
         // Saved either way: an interrupted turn is exactly the one worth keeping.
         if let Err(e) = self.store.save(
             &self.id,
-            self.workspace.root(),
+            self.ctx.workspace.root(),
             &self.model,
             &self.session.log,
         ) {

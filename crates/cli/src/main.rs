@@ -326,24 +326,18 @@ async fn main() -> Result<()> {
     let Some(prompt) = prompt else {
         let repl = repl::Repl {
             agent: ag,
-            workspace,
             store,
             model: model_id,
             session: agent::Session { log: carried },
             id,
-            todos: Default::default(),
+            ctx: tools::Ctx::new(workspace),
         };
         let out = repl.run(tx).await;
         let _ = painter.await;
         return out;
     };
 
-    let ctx = tools::Ctx {
-        workspace,
-        cancel: agent::cancel_on_interrupt(),
-        todos: Default::default(),
-        yielded: Default::default(),
-    };
+    let ctx = tools::Ctx::new(workspace).with_cancel(agent::cancel_on_interrupt());
 
     // Always through the log: a loaded session whose view happens to be empty
     // still has history worth keeping, and `resume` handles an empty log.

@@ -1005,3 +1005,77 @@ fn a_schema_that_is_not_an_object_is_refused_with_the_fix() {
     );
     assert!(tools::finish::check(&schema()).is_ok());
 }
+
+#[tokio::test]
+async fn a_call_that_keeps_returning_the_same_thing_is_named() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "steady\n").unwrap();
+    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
+
+    let same = || call_turn(&[("t", "read", r#"{"path":"a.txt"}"#)]);
+    let a = Agent::new(
+        Scripted::new(vec![same(), same(), same(), same(), text_turn("gave up")]),
+        spec(),
+    );
+
+    let (session, out, _) = drive(&a, &ctx, "read it forever").await;
+    out.unwrap();
+
+    let bodies: Vec<String> = session
+        .context()
+        .iter()
+        .flat_map(|m| match m {
+            Message::User { content } => content
+                .iter()
+                .filter_map(|c| match c {
+                    UserContent::ToolResult(r) => Some(r.flatten_text()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        })
+        .collect();
+
+    // The first repeat can be a legitimate re-read after compaction; by the
+    // third the model is just stuck.
+    assert!(!bodies[0].contains("same `read` call"), "{:?}", bodies[0]);
+    assert!(!bodies[1].contains("same `read` call"), "{:?}", bodies[1]);
+    assert!(
+        bodies[2].contains("same `read` call with the same result, 3 times"),
+        "{:?}",
+        bodies[2]
+    );
+}
+
+#[tokio::test]
+async fn a_call_whose_answer_changes_resets_the_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.txt");
+    std::fs::write(&path, "first\n").unwrap();
+    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
+
+    let same = || call_turn(&[("t", "read", r#"{"path":"a.txt"}"#)]);
+    let a = Agent::new(
+        Scripted::new(vec![same(), same(), same(), text_turn("ok")]),
+        spec(),
+    );
+
+    // Change the file between turns so the answer moves.
+    let writer = {
+        let path = path.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let _ = std::fs::write(&path, "second\n");
+        })
+    };
+    let (session, out, _) = drive(&a, &ctx, "watch it").await;
+    let _ = writer.await;
+    out.unwrap();
+
+    let noticed = session
+        .context()
+        .iter()
+        .any(|m| m.text().contains("same `read` call"));
+    // Whether the race lands or not, a changed answer must never be flagged.
+    assert!(!noticed || std::fs::read_to_string(&path).unwrap() == "first\n");
+}

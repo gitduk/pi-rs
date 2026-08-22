@@ -109,8 +109,20 @@ impl Tool for Read {
                 meta.len()
             )));
         }
-        let content = String::from_utf8_lossy(&bytes);
-        let tag = tag(&content);
+        // Lossy decoding would hand back a wall of U+FFFD, and a model that
+        // writes any of it back corrupts the file for real. grep can afford
+        // lossy — a matching line is still a match — but read cannot.
+        let content = match std::str::from_utf8(&bytes) {
+            Ok(text) => text,
+            Err(e) => {
+                return Ok(ToolOutput::useless(format!(
+                    "{rel} is not valid UTF-8 (byte {} is invalid). If it is text in \
+                     another encoding, convert it with bash first.",
+                    e.valid_up_to()
+                )));
+            }
+        };
+        let tag = tag(content);
 
         let all: Vec<&str> = content.lines().collect();
 
@@ -119,7 +131,7 @@ impl Tool for Read {
         let ranged = args.offset.is_some() || args.limit.is_some();
         let wants_outline = args.outline.unwrap_or(!ranged && all.len() > OUTLINE_OVER);
         if wants_outline && let Some(lang) = syntax::Lang::of(&rel) {
-            let items = syntax::outline(lang, &content);
+            let items = syntax::outline(lang, content);
             if !items.is_empty() {
                 let mut out = format!("[{rel}#{tag}] {} lines · outline\n", all.len());
                 for item in &items {

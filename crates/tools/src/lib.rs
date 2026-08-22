@@ -116,6 +116,7 @@ impl ToolOutput {
     }
 }
 
+#[derive(Clone)]
 pub struct Ctx {
     pub workspace: Workspace,
     pub cancel: tokio_util::sync::CancellationToken,
@@ -124,7 +125,16 @@ pub struct Ctx {
     pub todos: std::sync::Arc<std::sync::Mutex<Vec<todo::Todo>>>,
     /// Where `yield` leaves the run's result, when a schema was asked for.
     pub yielded: std::sync::Arc<std::sync::Mutex<Option<serde_json::Value>>>,
+    /// One lock per file. Tools in the same turn run concurrently, and two
+    /// writers to one path otherwise read the same bytes, both succeed, and
+    /// one change vanishes without anyone being told.
+    pub file_locks: FileLocks,
 }
+
+pub type FileLocks =
+    std::sync::Arc<std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, FileLock>>>;
+
+pub type FileLock = std::sync::Arc<tokio::sync::Mutex<()>>;
 
 impl Ctx {
     pub fn new(workspace: Workspace) -> Self {
@@ -133,7 +143,33 @@ impl Ctx {
             cancel: tokio_util::sync::CancellationToken::new(),
             todos: Default::default(),
             yielded: Default::default(),
+            file_locks: Default::default(),
         }
+    }
+}
+
+impl Ctx {
+    /// Swap in a cancellation token. A caller that runs many turns wants a
+    /// fresh one each time while the shared handles carry over.
+    pub fn with_cancel(mut self, cancel: tokio_util::sync::CancellationToken) -> Self {
+        self.cancel = cancel;
+        self
+    }
+
+    /// A fresh slot for a run's structured result, leaving everything else.
+    pub fn with_fresh_result(mut self) -> Self {
+        self.yielded = Default::default();
+        self
+    }
+
+    /// Hold this while mutating `path`. Keyed on the resolved path, so two
+    /// spellings of one file serialize together.
+    pub async fn lock_file(&self, path: &std::path::Path) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut map = self.file_locks.lock().expect("file locks poisoned");
+            map.entry(path.to_path_buf()).or_default().clone()
+        };
+        lock.lock_owned().await
     }
 }
 

@@ -106,9 +106,14 @@ impl Tool for Edit {
         let args: Args = serde_json::from_value(args)?;
         let patch = hashline::parse(&args.patch).map_err(|e| ToolError::Invalid(e.to_string()))?;
 
+        // Held for the whole patch: two edits to one file in the same turn would
+        // otherwise both read the same bytes, both pass their tag check, and
+        // one change would vanish with no error to show for it.
+        let mut guards = Vec::new();
         let mut loaded: HashMap<String, String> = HashMap::new();
         for path in patch.paths() {
             let real = ctx.workspace.resolve(path)?;
+            guards.push(ctx.lock_file(&real).await);
             let content = tokio::fs::read_to_string(&real).await.map_err(|e| {
                 ToolError::Invalid(format!(
                     "{path}: {e}. edit changes existing files; use write to create one"
@@ -133,6 +138,16 @@ impl Tool for Edit {
                     content,
                     landed,
                 } => {
+                    // A patch whose body already matches produces a valid write
+                    // and no change. Saying so is what stops the model from
+                    // believing a fix landed when nothing moved.
+                    if loaded.get(path).is_some_and(|before| before == content) {
+                        report.push_str(&format!(
+                            "[{path}#{}] unchanged — the patch matches what is already there\n",
+                            hashline::tag(content)
+                        ));
+                        continue;
+                    }
                     tokio::fs::write(ctx.workspace.resolve(path)?, content).await?;
                     report.push_str(&echo(path, content, landed));
                 }

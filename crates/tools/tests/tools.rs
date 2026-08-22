@@ -385,3 +385,147 @@ async fn tools_whose_result_opens_with_content_need_no_explicit_preview() {
         .unwrap();
     assert_eq!(out.preview(), format!("[a.rs#{}]", hashline::tag("one\n")));
 }
+
+#[tokio::test]
+async fn two_edits_to_one_file_in_the_same_turn_do_not_clobber_each_other() {
+    let (_d, c) = ctx();
+    let path = c.workspace.root().join("a.rs");
+    let src = "one\ntwo\nthree\n";
+    std::fs::write(&path, src).unwrap();
+    let tag = hashline::tag(src);
+
+    // Both patches are valid against the same read, and the loop runs shared
+    // tools concurrently.
+    let first = tools::edit::Edit.execute(
+        json!({ "patch": format!("[a.rs#{tag}]\nPUT 1.=1:\n+ONE\n") }),
+        &c,
+    );
+    let second = tools::edit::Edit.execute(
+        json!({ "patch": format!("[a.rs#{tag}]\nPUT 3.=3:\n+THREE\n") }),
+        &c,
+    );
+    let (a, b) = tokio::join!(first, second);
+
+    // Serialized, so the second one sees a file that moved under it and says
+    // so. A patch format cannot merge here; what it can do is refuse quietly
+    // instead of losing a change silently.
+    let (ok, failed) = match (&a, &b) {
+        (Ok(_), Err(e)) => (a.as_ref().unwrap(), e),
+        (Err(e), Ok(_)) => (b.as_ref().unwrap(), e),
+        _ => panic!("exactly one must land: {a:?} / {b:?}"),
+    };
+    assert!(ok.flatten().starts_with("[a.rs#"));
+    assert!(failed.to_string().contains("Re-read it"), "{failed}");
+
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        after == "ONE\ntwo\nthree\n" || after == "one\ntwo\nTHREE\n",
+        "{after:?}"
+    );
+}
+
+#[tokio::test]
+async fn write_strips_display_prefixes_the_model_copied_from_read() {
+    let (_d, c) = ctx();
+    std::fs::write(
+        c.workspace.root().join("a.rs"),
+        "fn main() {}\nlet x = 1;\n",
+    )
+    .unwrap();
+    let view = run(&tools::read::Read, json!({ "path": "a.rs" }), &c).await;
+
+    // The whole read output, pasted straight back — a habit the numbered format
+    // invites and one nothing else catches.
+    tools::write::Write
+        .execute(json!({ "path": "b.rs", "content": view }), &c)
+        .await
+        .unwrap();
+
+    let written = std::fs::read_to_string(c.workspace.root().join("b.rs")).unwrap();
+    assert_eq!(written, "fn main() {}\nlet x = 1;\n", "got: {written:?}");
+}
+
+#[tokio::test]
+async fn a_zero_timeout_is_not_an_instant_kill() {
+    let (_d, c) = ctx();
+    // A command that takes real time: with zero read literally, this dies
+    // before it starts.
+    let out = run(
+        &tools::bash::Bash,
+        json!({ "command": "sleep 0.3; echo hi", "timeout_ms": 0 }),
+        &c,
+    )
+    .await;
+    assert!(out.contains("hi"), "{out}");
+}
+
+#[tokio::test]
+async fn an_over_long_output_is_kept_somewhere_the_model_can_reach() {
+    let (_d, c) = ctx();
+    let out = run(
+        &tools::bash::Bash,
+        json!({ "command": "printf 'z%.0s' $(seq 1 40000); echo; echo MIDDLE_MARKER; printf 'z%.0s' $(seq 1 40000)" }),
+        &c,
+    )
+    .await;
+
+    assert!(
+        out.contains("bytes elided"),
+        "{}",
+        &out[..90.min(out.len())]
+    );
+    let path = out
+        .lines()
+        .find_map(|l| l.strip_prefix("full output: "))
+        .expect("the elided middle must be recoverable");
+    let whole = std::fs::read_to_string(path).unwrap();
+    assert!(
+        whole.contains("MIDDLE_MARKER"),
+        "the spill must hold what the result dropped"
+    );
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
+async fn a_short_output_leaves_no_file_behind() {
+    let (_d, c) = ctx();
+    let out = run(&tools::bash::Bash, json!({ "command": "echo hi" }), &c).await;
+    assert!(!out.contains("full output:"), "{out}");
+}
+
+#[tokio::test]
+async fn an_edit_that_changes_nothing_says_so() {
+    let (_d, c) = ctx();
+    let src = "one\ntwo\n";
+    std::fs::write(c.workspace.root().join("a.rs"), src).unwrap();
+
+    // A patch whose body already matches. It "succeeds", and the model has no
+    // way to tell its fix did not land.
+    let patch = format!("[a.rs#{}]\nPUT 1.=1:\n+one\n", hashline::tag(src));
+    let out = tools::edit::Edit
+        .execute(json!({ "patch": patch }), &c)
+        .await
+        .unwrap()
+        .flatten();
+    assert!(out.contains("unchanged"), "{out}");
+}
+
+#[tokio::test]
+async fn text_that_is_not_utf8_is_refused_rather_than_mangled() {
+    let (_d, c) = ctx();
+    // Latin-1 prose: no NUL byte, so a NUL sniff calls it text, and a lossy
+    // decode turns every accent into U+FFFD.
+    let mut bytes = b"caf\xe9 na\xefve r\xe9sum\xe9\n".to_vec();
+    bytes.extend_from_slice(&b"pr\xe9cis \xe0 la carte\n".repeat(40));
+    std::fs::write(c.workspace.root().join("latin.txt"), &bytes).unwrap();
+
+    let out = tools::read::Read
+        .execute(json!({ "path": "latin.txt" }), &c)
+        .await
+        .unwrap();
+    assert!(
+        !out.flatten().contains('\u{FFFD}'),
+        "mojibake reached the model: {}",
+        out.flatten()
+    );
+}

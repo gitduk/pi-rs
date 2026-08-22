@@ -51,6 +51,20 @@ fn clamp(label: &str, body: &str) -> String {
     format!("<{label}>\n{h}\n… {dropped} bytes elided …\n{t}\n</{label}>\n")
 }
 
+/// Write the whole of an over-long output somewhere the model can go back to.
+/// Returns the path when there was anything worth keeping.
+fn spill(stdout: &str, stderr: &str) -> Option<String> {
+    if stdout.len() <= MAX_OUTPUT && stderr.len() <= MAX_OUTPUT {
+        return None;
+    }
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("pir-bash-{}-{n}.log", std::process::id()));
+    let whole = format!("<stdout>\n{stdout}\n</stdout>\n<stderr>\n{stderr}\n</stderr>\n");
+    std::fs::write(&path, whole).ok()?;
+    Some(path.display().to_string())
+}
+
 /// SIGTERM the group, then SIGKILL whatever ignored it. A build killed outright
 /// can leave a corrupt output tree, so the polite signal goes first.
 #[cfg(unix)]
@@ -108,8 +122,10 @@ impl Tool for Bash {
             Some(p) => ctx.workspace.resolve(p)?,
             None => ctx.workspace.root().to_path_buf(),
         };
+        // A zero would otherwise kill the command before it started.
         let timeout = std::time::Duration::from_millis(
             args.timeout_ms
+                .filter(|ms| *ms > 0)
                 .unwrap_or(DEFAULT_TIMEOUT_MS)
                 .min(MAX_TIMEOUT_MS),
         );
@@ -152,9 +168,16 @@ impl Tool for Bash {
         let stderr = String::from_utf8_lossy(&out.stderr);
         let code = out.status.code().unwrap_or(-1);
 
+        // Anything elided is written out first, so a build log the model needs
+        // the middle of is one grep away rather than gone.
+        let spilled = spill(&stdout, &stderr);
+
         let mut body = String::new();
         body.push_str(&clamp("stdout", stdout.trim_end()));
         body.push_str(&clamp("stderr", stderr.trim_end()));
+        if let Some(path) = spilled {
+            body.push_str(&format!("full output: {path}\n"));
+        }
         if code != 0 {
             body.push_str(&format!("exit {code}\n"));
         }
