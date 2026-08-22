@@ -3,13 +3,85 @@ use tools::Ctx;
 
 use crate::session::Store;
 
-const HELP: &str = "\
-/new       start a fresh session, keeping this one on disk
-/name      call this session something you will recognise
-/compact   summarize everything but what you are working on now
-/todo      show the current plan
-/cost      what this session has spent so far
-/exit      leave (Ctrl-D does the same)";
+/// One command: the word, what it takes, and what it does.
+pub struct Command {
+    pub word: &'static str,
+    /// Shown in completion, in the shape prompt templates use elsewhere:
+    /// angle brackets required, square brackets optional.
+    pub args: &'static str,
+    pub help: &'static str,
+}
+
+/// Every command, once. `parse` still maps words to typed variants, but the
+/// help text and the completion list are generated from here — a new command
+/// that reached only one of the three was the bug this table prevents.
+pub const COMMANDS: &[Command] = &[
+    Command {
+        word: "/new",
+        args: "",
+        help: "start a fresh session, keeping this one on disk",
+    },
+    Command {
+        word: "/name",
+        args: "[text]",
+        help: "call this session something you will recognise",
+    },
+    Command {
+        word: "/compact",
+        args: "[focus]",
+        help: "summarize everything but what you are working on now",
+    },
+    Command {
+        word: "/todo",
+        args: "",
+        help: "show the current plan",
+    },
+    Command {
+        word: "/cost",
+        args: "",
+        help: "what this session has spent so far",
+    },
+    Command {
+        word: "/help",
+        args: "",
+        help: "this list",
+    },
+    Command {
+        word: "/exit",
+        args: "",
+        help: "leave (Ctrl-D does the same)",
+    },
+];
+
+fn help() -> Vec<String> {
+    let width = COMMANDS
+        .iter()
+        .map(|c| c.word.len() + c.args.len() + 1)
+        .max()
+        .unwrap_or(0);
+    COMMANDS
+        .iter()
+        .map(|c| {
+            let head = format!("{} {}", c.word, c.args);
+            format!("{head:width$}  {}", c.help)
+        })
+        .collect()
+}
+
+/// Commands the line could still become, while the command word is still being
+/// typed. Empty once there is whitespace: the word is settled by then and what
+/// follows is its argument.
+pub fn complete(line: &str) -> Vec<&'static Command> {
+    if !line.starts_with('/') || line.contains(char::is_whitespace) {
+        return Vec::new();
+    }
+    COMMANDS
+        .iter()
+        .filter(|c| c.word.starts_with(line))
+        // An exact and only match is already typed; offering it is noise.
+        .filter(|c| c.word != line)
+        .collect()
+}
 
 /// A session and everything that outlives any one turn of it.
 ///
@@ -104,7 +176,7 @@ impl Repl {
         };
         match cmd {
             Cmd::Exit => Step::Quit,
-            Cmd::Help => lines(HELP),
+            Cmd::Help => Step::Handled(help()),
             Cmd::Todo => lines(tools::todo::render(self.session.log.todos())),
             Cmd::Cost => {
                 let u = &totals.usage;
@@ -145,7 +217,34 @@ impl Repl {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cmd, parse};
+    use super::{COMMANDS, Cmd, complete, parse};
+
+    #[test]
+    fn every_listed_command_actually_parses() {
+        // The table drives help and completion; a word that reached the list
+        // without reaching `parse` would offer to complete into nothing.
+        for c in COMMANDS {
+            assert!(
+                !matches!(parse(c.word), Some(Cmd::Unknown(_)) | None),
+                "{} is listed but does not parse",
+                c.word
+            );
+        }
+    }
+
+    #[test]
+    fn completion_narrows_as_the_word_is_typed() {
+        let words = |s: &str| -> Vec<&str> { complete(s).iter().map(|c| c.word).collect() };
+        assert_eq!(words("/n"), vec!["/new", "/name"]);
+        assert_eq!(words("/na"), vec!["/name"]);
+        // Already whole: there is nothing left to offer.
+        assert!(words("/name").is_empty());
+        // Past the word, the rest is an argument.
+        assert!(words("/name the flaky test").is_empty());
+        // Not a command at all.
+        assert!(words("what does /help do").is_empty());
+        assert!(words("").is_empty());
+    }
 
     #[test]
     fn slash_words_are_commands_and_prose_is_not() {

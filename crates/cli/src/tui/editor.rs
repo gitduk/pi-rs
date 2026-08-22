@@ -25,6 +25,17 @@ impl Editor {
         self.text.is_empty()
     }
 
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Replace the whole buffer, caret at the end. For accepting a completion.
+    pub fn set_line(&mut self, line: &str) {
+        self.text.clear();
+        self.text.push_str(line);
+        self.cursor = self.text.len();
+    }
+
     /// Lines recalled with Up, oldest first.
     pub fn history(&self) -> &[String] {
         &self.history

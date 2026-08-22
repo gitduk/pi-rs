@@ -89,7 +89,9 @@ searchable, still there after exit. Only what is still changing is repainted.
 | `Ctrl-A/E/K/U/W`, `Alt-B/F` | the readline habits |
 | `Ctrl-L` | clear |
 
-`/help` `/new` `/name` `/compact` `/todo` `/cost` `/exit`.
+`/help` `/new` `/name` `/compact` `/todo` `/cost` `/exit`. Typing `/` opens a
+list of what the line could still become; `↑` `↓` pick, `Tab` accepts, `Esc`
+dismisses it until the next keystroke.
 
 `/compact [what to keep in view]` summarizes everything outside the tail
 you are working from — for when a phase has ended and no budget can tell.
@@ -163,7 +165,7 @@ is not the provider's, and a cost derived from it is not a bill.
 | `hashline` | 1.2k | the patch format — pure, no IO |
 | `syntax` | 0.4k | tree-sitter outlines for eight languages |
 
-~15k lines, 293 tests. `cargo test` runs everything; `cargo clippy
+~15k lines, 295 tests. `cargo test` runs everything; `cargo clippy
 --all-targets` is expected to be silent.
 
 ## Not built

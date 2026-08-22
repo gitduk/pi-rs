@@ -21,7 +21,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
 use crate::render::{self, Paint};
-use crate::repl::{Repl, Step};
+use crate::repl::{self, Command, Repl, Step};
 use editor::Editor;
 use screen::{Caret, Screen};
 
@@ -63,6 +63,14 @@ struct Ui {
     above: Vec<String>,
     /// Lines submitted while the run was working.
     queued: Vec<String>,
+    /// Which completion is highlighted. Kept rather than the list itself: the
+    /// list is a function of what has been typed, and caching it is one more
+    /// thing to invalidate.
+    picked: usize,
+    /// The text the list was dismissed at. Any edit changes the text and the
+    /// list comes back, which is what makes Esc mean "not that" rather than
+    /// "never again".
+    dismissed_at: Option<String>,
     last_interrupt: Option<Instant>,
     started: Option<Instant>,
     spinner: usize,
@@ -89,6 +97,8 @@ impl Ui {
             dim: false,
             above: vec![BANNER.to_string()],
             queued: Vec::new(),
+            picked: 0,
+            dismissed_at: None,
             last_interrupt: None,
             started: None,
             spinner: 0,
@@ -168,6 +178,50 @@ impl Ui {
         }
     }
 
+    /// What the line could still become. Only while a command word is being
+    /// typed, and never during a run — the editor is a queue then, not a
+    /// command line.
+    fn menu(&self) -> Vec<&'static Command> {
+        if self.started.is_some() || self.dismissed_at.as_deref() == Some(self.editor.text()) {
+            return Vec::new();
+        }
+        repl::complete(self.editor.text())
+    }
+
+    /// The highlighted completion, clamped: the list shrinks as the word grows.
+    fn highlighted(&self) -> Option<&'static Command> {
+        let menu = self.menu();
+        menu.get(self.picked.min(menu.len().saturating_sub(1)))
+            .copied()
+    }
+
+    fn menu_rows(&self, width: usize) -> Vec<String> {
+        let menu = self.menu();
+        if menu.is_empty() {
+            return Vec::new();
+        }
+        let picked = self.picked.min(menu.len() - 1);
+        let head = menu
+            .iter()
+            .map(|c| c.word.len() + c.args.len() + 1)
+            .max()
+            .unwrap_or(0);
+        menu.iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let name = format!("{} {}", c.word, c.args);
+                let line = format!("  {name:head$}  {}", c.help);
+                let painted = if i == picked {
+                    format!("\x1b[7m{line}\x1b[0m")
+                } else {
+                    self.paint.on(DIM, &line)
+                };
+                screen::fit(&painted, width)
+            })
+            .map(|rows| rows.into_iter().next().unwrap_or_default())
+            .collect()
+    }
+
     /// The rows to repaint, and where the caret sits among them.
     fn live(&self) -> (Vec<String>, Caret) {
         let width = self.screen.usable();
@@ -199,6 +253,8 @@ impl Ui {
             );
             rows.extend(screen::fit(&self.paint.on(DIM, &line), width));
         }
+
+        rows.extend(self.menu_rows(width));
 
         let (input, caret) = self.editor.view(width);
         let offset = rows.len() as u16;
@@ -285,8 +341,25 @@ impl Ui {
                 if running {
                     Act::Interrupt
                 } else {
+                    // Dismiss the list by settling on nothing: it reappears on
+                    // the next keystroke, which is the behaviour that lets Esc
+                    // mean "not that" without meaning "undo my typing".
+                    if !self.menu().is_empty() {
+                        self.dismissed_at = Some(self.editor.text().to_string());
+                    }
                     Act::None
                 }
+            }
+            KeyCode::Tab => {
+                if let Some(c) = self.highlighted() {
+                    self.editor.set_line(c.word);
+                    // A command that takes something wants a space after it.
+                    if !c.args.is_empty() {
+                        self.editor.insert(' ');
+                    }
+                    self.picked = 0;
+                }
+                Act::None
             }
             // Alt-Enter and Ctrl-J both continue the line; plain Enter sends it.
             // Shift-Enter only reaches us from terminals that speak the kitty
@@ -336,11 +409,20 @@ impl Ui {
                 Act::None
             }
             KeyCode::Up => {
-                self.editor.up();
+                if self.menu().is_empty() {
+                    self.editor.up();
+                } else {
+                    self.picked = self.picked.saturating_sub(1);
+                }
                 Act::None
             }
             KeyCode::Down => {
-                self.editor.down();
+                let n = self.menu().len();
+                if n == 0 {
+                    self.editor.down();
+                } else {
+                    self.picked = (self.picked + 1).min(n - 1);
+                }
                 Act::None
             }
             KeyCode::Home => {
