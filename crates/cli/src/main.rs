@@ -373,6 +373,12 @@ async fn main() -> Result<()> {
         println!("{}", serde_json::to_string_pretty(value)?);
     }
 
+    // A run the user stopped is not a failure of the run; scripts should be
+    // able to tell the two apart.
+    if matches!(outcome, Err(agent::AgentError::Cancelled)) {
+        std::process::exit(130);
+    }
+
     outcome?;
     Ok(())
 }

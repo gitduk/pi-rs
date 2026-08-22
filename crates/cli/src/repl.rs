@@ -9,7 +9,8 @@ use tools::Ctx;
 
 use crate::session::Store;
 
-const BANNER: &str = "\x1b[2m/help for commands · Ctrl-C stops a run · Ctrl-D exits\x1b[0m";
+const BANNER: &str =
+    "\x1b[2m/help for commands · Ctrl-C stops a run, twice to quit · Ctrl-D exits\x1b[0m";
 const HELP: &str = "\
 /new    start a fresh session, keeping this one on disk
 /todo   show the current plan
@@ -101,16 +102,25 @@ impl Repl {
     }
 
     /// One run, cancellable on its own without taking the session with it.
-    async fn turn(&mut self, prompt: String, tx: &UnboundedSender<agent::Event>) -> Totals {
+    ///
+    /// Reports whether the interrupt landed, so the prompt it returns to is
+    /// already armed: two presses should leave, not three.
+    async fn turn(&mut self, prompt: String, tx: &UnboundedSender<agent::Event>) -> (Totals, bool) {
         self.session.log.resume(prompt);
 
         let cancel = CancellationToken::new();
-        // Ctrl-C belongs to the run, not the process: the session survives it.
+        // The first Ctrl-C belongs to the run — the session survives it. The
+        // second belongs to the process: `tokio::signal::ctrl_c` has already
+        // replaced SIGINT's default action, so nothing else can do the killing.
         let watcher = tokio::spawn({
             let cancel = cancel.clone();
             async move {
+                if tokio::signal::ctrl_c().await.is_err() {
+                    return;
+                }
+                cancel.cancel();
                 if tokio::signal::ctrl_c().await.is_ok() {
-                    cancel.cancel();
+                    std::process::exit(130);
                 }
             }
         });
@@ -130,14 +140,14 @@ impl Repl {
         }
 
         match out {
-            Ok(o) => o.totals,
+            Ok(o) => (o.totals, false),
             Err(AgentError::Cancelled) => {
-                eprintln!("\x1b[2mstopped\x1b[0m");
-                Totals::default()
+                eprintln!("\x1b[2mstopped — press Ctrl-C again to quit\x1b[0m");
+                (Totals::default(), true)
             }
             Err(e) => {
                 eprintln!("\x1b[31merror\x1b[0m {e}");
-                Totals::default()
+                (Totals::default(), false)
             }
         }
     }
@@ -151,14 +161,23 @@ impl Repl {
         eprintln!("{BANNER}");
 
         let mut totals = Totals::default();
+        // Ctrl-C at the prompt clears the line; twice in a row means leave.
+        // Without the second reading as an exit there is no way out but Ctrl-D,
+        // because SIGINT no longer reaches the default handler.
+        let mut armed = false;
         loop {
             let line = match editor.readline("\x1b[36m›\x1b[0m ") {
                 Ok(line) => line,
-                // Ctrl-C at an empty prompt clears the line, not the program.
-                Err(ReadlineError::Interrupted) => continue,
+                Err(ReadlineError::Interrupted) if armed => break,
+                Err(ReadlineError::Interrupted) => {
+                    armed = true;
+                    eprintln!("\x1b[2mpress Ctrl-C again to quit\x1b[0m");
+                    continue;
+                }
                 Err(ReadlineError::Eof) => break,
                 Err(e) => return Err(e.into()),
             };
+            armed = false;
             let line = line.trim();
             if line.is_empty() {
                 continue;
@@ -169,8 +188,11 @@ impl Repl {
                 Step::Quit => break,
                 Step::Handled => continue,
                 Step::Prompt(prompt) => {
-                    let spent = self.turn(prompt, &tx).await;
+                    let (spent, interrupted) = self.turn(prompt, &tx).await;
                     totals.add(&spent.usage, spent.cost);
+                    // A run the user just stopped leaves the prompt armed, so
+                    // the follow-up press quits instead of warning again.
+                    armed = interrupted;
                 }
             }
         }

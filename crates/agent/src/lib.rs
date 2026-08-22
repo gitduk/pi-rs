@@ -671,14 +671,25 @@ fn wedged(idle: std::time::Duration) -> AgentError {
     )))
 }
 
-/// Cancels on the first Ctrl-C so a runaway turn stops without killing the
-/// process mid-write.
+/// Conventional exit code for a process killed by SIGINT.
+const INTERRUPTED: i32 = 130;
+
+/// First Ctrl-C cancels; a second one leaves.
+///
+/// `tokio::signal::ctrl_c` replaces SIGINT's default action for the whole
+/// process and never restores it, so a handler that only fires once leaves no
+/// way out at all — the second press has to do the killing itself.
 pub fn cancel_on_interrupt() -> CancellationToken {
     let token = CancellationToken::new();
     let child = token.clone();
     tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_err() {
+            return;
+        }
+        child.cancel();
+        eprintln!("\ninterrupting — press Ctrl-C again to quit");
         if tokio::signal::ctrl_c().await.is_ok() {
-            child.cancel();
+            std::process::exit(INTERRUPTED);
         }
     });
     token
