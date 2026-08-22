@@ -254,12 +254,13 @@ impl Ui {
             rows.extend(screen::fit(&self.paint.on(DIM, &line), width));
         }
 
-        rows.extend(self.menu_rows(width));
-
         let (input, caret) = self.editor.view(width);
         let offset = rows.len() as u16;
         rows.extend(input);
         let mut caret = (caret.0 + offset, caret.1);
+        // Below the prompt, so the line being typed does not move under the
+        // cursor as the list grows and shrinks with it.
+        rows.extend(self.menu_rows(width));
 
         // A region taller than the screen scrolls its own top rows away, and
         // the walk back over it then eats lines that are no longer part of it.
