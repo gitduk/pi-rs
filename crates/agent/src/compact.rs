@@ -34,6 +34,8 @@ pub struct Report {
     pub uneventful: usize,
     pub aged_out: usize,
     pub dropped: usize,
+    /// The dropped span left a summary behind.
+    pub summarized: bool,
     /// Even after dropping history the transcript is still over budget.
     pub still_over: bool,
 }

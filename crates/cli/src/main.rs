@@ -92,6 +92,10 @@ struct Args {
     #[arg(long)]
     no_compact: bool,
 
+    /// Drop old history outright instead of summarizing it first.
+    #[arg(long)]
+    no_summary: bool,
+
     /// Replace the built-in system prompt.
     #[arg(long)]
     system: Option<String>,
@@ -252,6 +256,7 @@ async fn main() -> Result<()> {
     if args.no_compact {
         ag.compaction = None;
     }
+    ag.summarize = !args.no_summary;
 
     let ctx = tools::Ctx {
         workspace,

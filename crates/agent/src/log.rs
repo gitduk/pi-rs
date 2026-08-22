@@ -21,6 +21,10 @@ pub struct Compaction {
     pub dropped: Vec<EntryId>,
     /// Tool results the view shows as a notice instead of their content.
     pub elisions: Vec<Elision>,
+    /// Stands in for the dropped entries. Absent when nothing was dropped, or
+    /// when summarizing failed — the entries still go, unsummarized.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
     pub tokens_before: usize,
     pub tokens_after: usize,
 }
@@ -192,6 +196,46 @@ impl Log {
         out
     }
 
+    /// Summaries still in force, oldest first. A compaction entry can itself be
+    /// dropped — that is how a fresh summary replaces the one it folded in,
+    /// instead of the view accumulating one section per pass.
+    pub fn summaries(&self) -> Vec<&str> {
+        let dropped = self.dropped();
+        self.entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Compaction { id, record } if !dropped.contains(id) => {
+                    record.summary.as_deref()
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The messages behind a set of ids, in log order.
+    pub fn messages_for(&self, ids: &[EntryId]) -> Vec<&Message> {
+        self.messages()
+            .filter(|(id, _)| ids.contains(id))
+            .map(|(_, m)| m)
+            .collect()
+    }
+
+    /// Ids of compaction entries carrying a summary, for a later pass to retire.
+    pub fn summary_entries(&self) -> Vec<EntryId> {
+        let dropped = self.dropped();
+        self.entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Compaction { id, record }
+                    if record.summary.is_some() && !dropped.contains(id) =>
+                {
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     fn amendments(&self) -> HashMap<EntryId, Vec<&str>> {
         let mut out: HashMap<EntryId, Vec<&str>> = HashMap::new();
         for e in &self.entries {
@@ -203,9 +247,16 @@ impl Log {
     }
 
     /// What goes on the wire.
+    ///
+    /// A summary rides on the opening turn rather than as a message of its own:
+    /// dropping whole exchanges leaves the history starting on an assistant
+    /// turn, and both wires require the roles to alternate.
     pub fn context(&self) -> Vec<Message> {
         let elisions = self.elisions();
         let amendments = self.amendments();
+        let summaries = self.summaries();
+        let mut first_user = true;
+
         self.live()
             .into_iter()
             .map(|(id, m)| {
@@ -214,6 +265,14 @@ impl Log {
                 };
                 let mut content: Vec<UserContent> =
                     content.iter().map(|b| apply(b, &elisions)).collect();
+                if first_user {
+                    first_user = false;
+                    for s in &summaries {
+                        content.push(UserContent::Text(Text {
+                            text: format!("<earlier-work>\n{s}\n</earlier-work>"),
+                        }));
+                    }
+                }
                 for text in amendments.get(&id).into_iter().flatten() {
                     content.push(UserContent::Text(Text {
                         text: (*text).to_string(),
@@ -336,6 +395,7 @@ mod tests {
                 call: ToolCallId("c2".into()),
                 notice: "[x]".into(),
             }],
+            summary: Some("did some work".into()),
             tokens_before: 900,
             tokens_after: 100,
         });

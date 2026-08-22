@@ -17,6 +17,7 @@ pub mod approval;
 pub mod compact;
 pub mod event;
 pub mod log;
+pub mod summarize;
 
 pub use approval::{Approver, Ceiling, Decision};
 pub use compact::Policy;
@@ -76,6 +77,9 @@ pub struct Agent {
     pub max_turns: usize,
     /// None leaves the transcript alone and lets the provider refuse it.
     pub compaction: Option<Policy>,
+    /// Ask the model to summarize the history compaction is about to drop.
+    /// False drops it outright, which is faster and loses more.
+    pub summarize: bool,
 }
 
 /// What a streamed call resolves to before anything runs. Deciding first keeps
@@ -96,6 +100,7 @@ impl Agent {
             effort: Effort::Off,
             max_turns: 50,
             compaction: Some(Policy::default()),
+            summarize: true,
         }
     }
 
@@ -113,7 +118,12 @@ impl Agent {
             if let Some(policy) = &self.compaction {
                 let budget = self.budget();
                 if brain::estimate::tokens(&session.context()) > budget {
-                    let (record, report) = compact::plan(&session.log, budget, policy);
+                    let (mut record, mut report) = compact::plan(&session.log, budget, policy);
+                    if !record.dropped.is_empty() && self.summarize {
+                        let cost = self.write_summary(&session.log, &mut record).await;
+                        report.summarized = record.summary.is_some();
+                        totals.add(&cost, self.spec.cost(&cost));
+                    }
                     // A pass that reclaimed nothing is not news; reporting it
                     // every turn buries the ones that did.
                     if report.touched() {
@@ -163,6 +173,28 @@ impl Agent {
         }
 
         Err(AgentError::TurnLimit(self.max_turns))
+    }
+
+    /// Summarize what is about to be dropped, folding in any summary already in
+    /// force and retiring it.
+    ///
+    /// A failure here is not fatal: the entries still go, unsummarized. Losing
+    /// the summary costs context; failing the turn costs the whole run.
+    async fn write_summary(&self, log: &Log, record: &mut log::Compaction) -> brain::stream::Usage {
+        let history = summarize::render(&log.summaries(), &log.messages_for(&record.dropped));
+        match summarize::run(&*self.transport, &self.spec, history).await {
+            Ok((text, usage)) => {
+                record.summary = Some(text);
+                // The new summary covers what the old one did, so the entry
+                // carrying the old one leaves the view.
+                record.dropped.extend(log.summary_entries());
+                usage
+            }
+            Err(e) => {
+                tracing::warn!("summarizing dropped history failed: {e}");
+                brain::stream::Usage::default()
+            }
+        }
     }
 
     /// What the transcript may occupy. The reply, the system prompt and the

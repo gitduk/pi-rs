@@ -165,7 +165,12 @@ fn compaction_line(r: &agent::compact::Report) -> String {
         parts.push(format!("{} aged out", r.aged_out));
     }
     if r.dropped > 0 {
-        parts.push(format!("{} messages dropped", r.dropped));
+        let how = if r.summarized {
+            "summarized"
+        } else {
+            "dropped"
+        };
+        parts.push(format!("{} messages {how}", r.dropped));
     }
     let detail = if parts.is_empty() {
         String::new()
@@ -253,12 +258,25 @@ mod tests {
             uneventful: 1,
             aged_out: 6,
             dropped: 0,
+            summarized: false,
             still_over: false,
         };
         assert_eq!(
             super::compaction_line(&r),
             "compacted 130000 → 48000 tokens · 3 superseded, 1 uneventful, 6 aged out"
         );
+    }
+
+    #[test]
+    fn a_summarized_drop_says_so_rather_than_reading_as_a_loss() {
+        let r = agent::compact::Report {
+            before: 9,
+            after: 5,
+            dropped: 4,
+            summarized: true,
+            ..Default::default()
+        };
+        assert!(super::compaction_line(&r).contains("4 messages summarized"));
     }
 
     #[test]

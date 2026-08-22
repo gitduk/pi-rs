@@ -408,3 +408,175 @@ async fn reasoning_deltas_reach_the_renderer_separately_from_text() {
     };
     assert!(matches!(content[0], AssistantContent::Reasoning(_)));
 }
+
+/// Answers tool-bearing turns from a script and any tool-free turn — which is
+/// what a summarization request is — with a fixed summary.
+struct WithSummarizer {
+    turns: Vec<Vec<StreamEvent>>,
+    next: AtomicUsize,
+    summaries: AtomicUsize,
+}
+
+#[async_trait]
+impl Transport for WithSummarizer {
+    fn name(&self) -> &'static str {
+        "anthropic"
+    }
+
+    async fn stream(
+        &self,
+        _spec: &ModelSpec,
+        req: &Request,
+    ) -> brain::Result<BoxStream<'static, brain::Result<StreamEvent>>> {
+        let events = if req.tools.is_empty() {
+            self.summaries.fetch_add(1, Ordering::SeqCst);
+            // The history to summarize arrives flattened into one user turn.
+            assert_eq!(req.messages.len(), 1, "a summarization request is one turn");
+            assert!(
+                req.messages[0].text().contains("[calls read]"),
+                "{:?}",
+                req.messages[0]
+            );
+            text_turn("read a.txt twice; nothing changed on disk")
+        } else {
+            let i = self.next.fetch_add(1, Ordering::SeqCst);
+            self.turns
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| text_turn("done"))
+        };
+        Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
+    }
+}
+
+/// Weight in assistant prose, which elision cannot reclaim — only dropping the
+/// exchange does, and that is what the summarizer exists for.
+fn bulky_turn(id: &str) -> Vec<StreamEvent> {
+    let mut ev = vec![
+        StreamEvent::BlockStart {
+            index: 0,
+            kind: BlockKind::Text,
+        },
+        StreamEvent::TextDelta {
+            index: 0,
+            delta: format!("{id}: ") + &"w".repeat(20_000),
+        },
+        StreamEvent::BlockStart {
+            index: 1,
+            kind: BlockKind::ToolCall {
+                provider: Some(ProviderCallId(id.into())),
+                name: "read".into(),
+            },
+        },
+        StreamEvent::ToolArgsDelta {
+            index: 1,
+            delta: r#"{"path":"a.txt"}"#.into(),
+        },
+    ];
+    ev.push(StreamEvent::Done {
+        stop: StopReason::ToolUse,
+        usage: Usage::default(),
+    });
+    ev
+}
+
+#[tokio::test]
+async fn dropped_history_comes_back_as_a_summary_on_the_opening_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "z".repeat(2_000)).unwrap();
+    let ws = Workspace::new(dir.path()).unwrap();
+    let ctx = Ctx::new(ws);
+
+    let transport = Arc::new(WithSummarizer {
+        turns: vec![
+            bulky_turn("t1"),
+            bulky_turn("t2"),
+            bulky_turn("t3"),
+            bulky_turn("t4"),
+        ],
+        next: AtomicUsize::new(0),
+        summaries: AtomicUsize::new(0),
+    });
+    let mut spec = spec();
+    spec.context_window = 24_000;
+    spec.max_output_tokens = 2_000;
+
+    let mut a = Agent::new(transport.clone(), spec);
+    a.max_turns = 6;
+
+    let (session, out, events) = drive(&a, &ctx, "read it repeatedly").await;
+    out.unwrap();
+
+    assert!(
+        transport.summaries.load(Ordering::SeqCst) > 0,
+        "the summarizer must have run"
+    );
+    let compacted: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Compacted(r) => Some(*r),
+            _ => None,
+        })
+        .collect();
+    assert!(compacted.iter().any(|r| r.summarized), "{compacted:?}");
+
+    // The summary rides the opening user turn, so the roles still alternate.
+    let view = session.context();
+    assert!(view[0].text().contains("<earlier-work>"), "{:?}", view[0]);
+    assert!(view[0].text().contains("read a.txt twice"), "{:?}", view[0]);
+    assert!(
+        matches!(view[1], Message::Assistant { .. }),
+        "{:?}",
+        view[1]
+    );
+
+    // And the bodies it replaced are still in the log.
+    assert!(session.log.messages().count() > view.len());
+}
+
+#[tokio::test]
+async fn a_summarizer_that_fails_drops_the_history_without_failing_the_turn() {
+    struct Broken(AtomicUsize);
+
+    #[async_trait]
+    impl Transport for Broken {
+        fn name(&self) -> &'static str {
+            "anthropic"
+        }
+        async fn stream(
+            &self,
+            _: &ModelSpec,
+            req: &Request,
+        ) -> brain::Result<BoxStream<'static, brain::Result<StreamEvent>>> {
+            if req.tools.is_empty() {
+                return Err(brain::BrainError::Stream("summarizer is down".into()));
+            }
+            let i = self.0.fetch_add(1, Ordering::SeqCst);
+            let events = if i < 4 {
+                bulky_turn(&format!("t{i}"))
+            } else {
+                text_turn("done")
+            };
+            Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "z".repeat(2_000)).unwrap();
+    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
+
+    let mut spec = spec();
+    spec.context_window = 24_000;
+    spec.max_output_tokens = 2_000;
+    let mut a = Agent::new(Arc::new(Broken(AtomicUsize::new(0))), spec);
+    a.max_turns = 6;
+
+    let (_session, out, events) = drive(&a, &ctx, "read it repeatedly").await;
+    // Losing the summary costs context; failing the turn costs the whole run.
+    out.unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::Compacted(r) if r.dropped > 0 && !r.summarized))
+    );
+}
