@@ -66,7 +66,14 @@ struct Ui {
     last_interrupt: Option<Instant>,
     started: Option<Instant>,
     spinner: usize,
-    usage: Usage,
+    /// Turns of this run that have already reported their totals.
+    settled: Usage,
+    /// The turn in flight, as far as the provider has said. Superseded rather
+    /// than added to when its `TurnEnd` lands, or the input would count twice.
+    turn: Usage,
+    /// Bytes of answer and reasoning this turn has produced, which is all there
+    /// is to go on until the provider reports an output count.
+    produced: usize,
     stopping: bool,
 }
 
@@ -83,7 +90,9 @@ impl Ui {
             last_interrupt: None,
             started: None,
             spinner: 0,
-            usage: Usage::default(),
+            settled: Usage::default(),
+            turn: Usage::default(),
+            produced: 0,
             stopping: false,
         }
     }
@@ -107,6 +116,7 @@ impl Ui {
     }
 
     fn write(&mut self, delta: &str, dim: bool) {
+        self.produced += delta.len();
         if dim != self.dim {
             self.close();
             self.dim = dim;
@@ -126,11 +136,20 @@ impl Ui {
         match &event {
             Event::TextDelta(d) => self.write(d, false),
             Event::ReasoningDelta(d) => self.write(d, true),
+            Event::Usage(usage) => {
+                // A retry sends a second one for the same turn: the count it
+                // carries replaces the abandoned attempt's rather than joining
+                // it, and the bytes that attempt produced go with it.
+                self.turn = *usage;
+                self.produced = 0;
+            }
             Event::TurnEnd { usage, .. } => {
-                self.usage.input += usage.input;
-                self.usage.output += usage.output;
-                self.usage.cache_read += usage.cache_read;
-                self.usage.cache_write += usage.cache_write;
+                self.settled.input += usage.input;
+                self.settled.output += usage.output;
+                self.settled.cache_read += usage.cache_read;
+                self.settled.cache_write += usage.cache_write;
+                self.turn = Usage::default();
+                self.produced = 0;
             }
             Event::TurnStart { .. } => {}
             _ => {
@@ -167,7 +186,7 @@ impl Ui {
             let line = status::line(
                 self.spinner,
                 since.elapsed(),
-                &self.usage,
+                &counts(&self.settled, &self.turn, self.produced),
                 self.queued.len(),
                 self.stopping,
             );
@@ -368,6 +387,27 @@ impl Ui {
     }
 }
 
+/// What the status line should say the run has cost.
+///
+/// The turn in flight contributes only what the provider has already stated —
+/// the input count on the Anthropic wire, nothing at all on the OpenAI one —
+/// so its output is stood in for by the bytes that have arrived. Its measured
+/// figures are replaced, never added to, when its `TurnEnd` folds them into
+/// `settled`, or a turn's input would be counted twice.
+fn counts(settled: &Usage, turn: &Usage, produced: usize) -> status::Counts {
+    let exact = turn.output > 0;
+    status::Counts {
+        input: settled.input + turn.input,
+        output: settled.output
+            + if exact {
+                turn.output
+            } else {
+                brain::estimate::bytes(produced) as u64
+            },
+        exact,
+    }
+}
+
 pub struct Tui {
     core: Repl,
     ui: Ui,
@@ -480,7 +520,9 @@ impl Tui {
 
         self.ui.started = Some(Instant::now());
         self.ui.stopping = false;
-        self.ui.usage = Usage::default();
+        self.ui.settled = Usage::default();
+        self.ui.turn = Usage::default();
+        self.ui.produced = 0;
 
         let out = {
             // Disjoint borrows: the run holds the session while the loop keeps
@@ -536,5 +578,49 @@ impl Tui {
                 self.ui.say(text);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::counts;
+    use brain::stream::Usage;
+
+    #[test]
+    fn a_turn_that_has_only_started_shows_its_input_and_guesses_its_output() {
+        let turn = Usage {
+            input: 8_400,
+            ..Default::default()
+        };
+        let c = counts(&Usage::default(), &turn, 1_536);
+        assert_eq!((c.input, c.output, c.exact), (8_400, 512, false));
+    }
+
+    #[test]
+    fn a_later_turn_adds_to_what_the_earlier_ones_measured() {
+        // The guess covers only the turn in flight; the settled figures behind
+        // it are measured and must not be re-guessed.
+        let settled = Usage {
+            input: 10_000,
+            output: 600,
+            ..Default::default()
+        };
+        let turn = Usage {
+            input: 2_000,
+            ..Default::default()
+        };
+        let c = counts(&settled, &turn, 300);
+        assert_eq!((c.input, c.output, c.exact), (12_000, 700, false));
+    }
+
+    #[test]
+    fn a_measured_output_supersedes_the_guess_for_the_same_turn() {
+        let turn = Usage {
+            input: 2_000,
+            output: 90,
+            ..Default::default()
+        };
+        let c = counts(&Usage::default(), &turn, 9_000);
+        assert_eq!((c.output, c.exact), (90, true));
     }
 }

@@ -2,8 +2,6 @@
 
 use std::time::Duration;
 
-use brain::stream::Usage;
-
 pub const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 pub const SPIN: Duration = Duration::from_millis(90);
 
@@ -26,18 +24,32 @@ fn elapsed(d: Duration) -> String {
     }
 }
 
+/// What the line should show. `exact` is false while the output number is pi's
+/// own count of the bytes that have arrived: most hosts report nothing until
+/// the stream ends, and a counter frozen at zero for a minute reads as a stall.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Counts {
+    pub input: u64,
+    pub output: u64,
+    pub exact: bool,
+}
+
+fn counts(c: &Counts) -> Option<String> {
+    let input = (c.input > 0).then(|| format!("{} in", short(c.input)));
+    let mark = if c.exact { "" } else { "~" };
+    let output = (c.output > 0).then(|| format!("{mark}{} out", short(c.output)));
+    match (input, output) {
+        (Some(i), Some(o)) => Some(format!("{i} / {o}")),
+        (some, None) | (None, some) => some,
+    }
+}
+
 /// `stopping` is its own state rather than an absence: a cancelled run keeps
 /// going until the request it is inside of returns, and a status line that
 /// stayed unchanged would read as the key press having been missed.
-pub fn line(frame: usize, since: Duration, usage: &Usage, queued: usize, stopping: bool) -> String {
+pub fn line(frame: usize, since: Duration, c: &Counts, queued: usize, stopping: bool) -> String {
     let mut parts = vec![elapsed(since)];
-    if usage.input + usage.output > 0 {
-        parts.push(format!(
-            "{} in / {} out",
-            short(usage.input),
-            short(usage.output)
-        ));
-    }
+    parts.extend(counts(c));
     if queued > 0 {
         parts.push(format!("{queued} queued"));
     }
@@ -56,8 +68,7 @@ pub fn line(frame: usize, since: Duration, usage: &Usage, queued: usize, stoppin
 
 #[cfg(test)]
 mod tests {
-    use super::{line, short};
-    use brain::stream::Usage;
+    use super::{Counts, line, short};
     use std::time::Duration;
 
     #[test]
@@ -69,18 +80,53 @@ mod tests {
 
     #[test]
     fn a_fresh_run_shows_no_token_counts_it_does_not_have_yet() {
-        let s = line(0, Duration::from_secs(3), &Usage::default(), 0, false);
+        let s = line(0, Duration::from_secs(3), &Counts::default(), 0, false);
         assert_eq!(s, "⠋ 3s · esc to stop");
     }
 
     #[test]
-    fn a_long_run_reads_in_minutes() {
-        let u = Usage {
-            input: 12_000,
-            output: 340,
+    fn what_the_provider_has_not_said_yet_is_marked_as_a_guess() {
+        // The Anthropic wire states the input count up front and the output
+        // count only at the end; the half that is known must not wait for the
+        // half that is not.
+        let c = Counts {
+            input: 8_400,
+            output: 512,
+            exact: false,
+        };
+        let s = line(0, Duration::from_secs(4), &c, 0, false);
+        assert_eq!(s, "⠋ 4s · 8.4k in / ~512 out · esc to stop");
+    }
+
+    #[test]
+    fn a_measured_count_replaces_the_guess_rather_than_joining_it() {
+        let c = Counts {
+            input: 8_400,
+            output: 390,
+            exact: true,
+        };
+        let s = line(0, Duration::from_secs(4), &c, 0, false);
+        assert_eq!(s, "⠋ 4s · 8.4k in / 390 out · esc to stop");
+    }
+
+    #[test]
+    fn an_openai_host_that_says_nothing_still_shows_the_output_climbing() {
+        let c = Counts {
+            output: 1_500,
             ..Default::default()
         };
-        let s = line(1, Duration::from_secs(125), &u, 2, false);
+        let s = line(0, Duration::from_secs(9), &c, 0, false);
+        assert_eq!(s, "⠋ 9s · ~1.5k out · esc to stop");
+    }
+
+    #[test]
+    fn a_long_run_reads_in_minutes() {
+        let c = Counts {
+            input: 12_000,
+            output: 340,
+            exact: true,
+        };
+        let s = line(1, Duration::from_secs(125), &c, 2, false);
         assert_eq!(s, "⠙ 2m05s · 12.0k in / 340 out · 2 queued · esc to stop");
     }
 
@@ -88,7 +134,7 @@ mod tests {
     fn a_stopping_run_says_so_and_stops_spinning() {
         // The request it is inside of has to return first, and a line that went
         // on spinning would read as the key press having been missed.
-        let s = line(4, Duration::from_secs(1), &Usage::default(), 0, true);
+        let s = line(4, Duration::from_secs(1), &Counts::default(), 0, true);
         assert_eq!(s, "· 1s · stopping…");
     }
 }

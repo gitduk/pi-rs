@@ -18,7 +18,14 @@ const IMAGE_TOKENS: usize = 1_500;
 /// A bound on what a string costs. Public because the system prompt and tool
 /// schemas come out of the same budget the transcript does.
 pub fn text(s: &str) -> usize {
-    s.len().div_ceil(BYTES_PER_TOKEN)
+    bytes(s.len())
+}
+
+/// The same bound for text that was never assembled into one string — a stream
+/// counted as it arrives. Public so a running count uses this ratio rather than
+/// picking its own.
+pub fn bytes(n: usize) -> usize {
+    n.div_ceil(BYTES_PER_TOKEN)
 }
 
 use text as of;

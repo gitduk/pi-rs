@@ -495,6 +495,10 @@ impl Agent {
                 StreamEvent::ReasoningDelta { delta, .. } => {
                     let _ = tx.send(Event::ReasoningDelta(delta.clone()));
                 }
+                // The one measured number that arrives before the answer does.
+                StreamEvent::MessageStart { usage, .. } => {
+                    let _ = tx.send(Event::Usage(*usage));
+                }
                 _ => {}
             }
             acc.push(ev);

@@ -35,6 +35,13 @@ pub enum Event {
     },
     /// Something the run recovered from but the user should know about.
     Warning(String),
+    /// What the turn has cost so far, as the provider has reported it.
+    ///
+    /// Cumulative for the turn, not a delta, and not every wire sends one: the
+    /// Anthropic wire states the input count before the first token, while an
+    /// OpenAI host reports nothing until the stream ends. A surface that shows
+    /// a running count treats its absence as "not known yet", never as zero.
+    Usage(Usage),
     TurnEnd {
         usage: Usage,
         cost: f64,
