@@ -12,12 +12,18 @@ use tokio_util::sync::CancellationToken;
 use tools::{Concurrency, Ctx, Registry, ToolError, ToolOutput};
 
 pub mod approval;
+pub mod compact;
 pub mod event;
 
 pub use approval::{Approver, Ceiling, Decision};
+pub use compact::Policy;
 pub use event::{Event, Totals};
 
 pub const DEFAULT_SYSTEM: &str = include_str!("../prompts/system.md");
+
+/// Headroom for framing the estimate does not model. Compacting slightly early
+/// costs a little quality; compacting late costs the whole turn.
+const SAFETY_MARGIN: usize = 2_000;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
@@ -54,6 +60,8 @@ pub struct Agent {
     pub system: String,
     pub effort: Effort,
     pub max_turns: usize,
+    /// None leaves the transcript alone and lets the provider refuse it.
+    pub compaction: Option<Policy>,
 }
 
 /// What a streamed call resolves to before anything runs. Deciding first keeps
@@ -73,6 +81,7 @@ impl Agent {
             system: DEFAULT_SYSTEM.to_string(),
             effort: Effort::Off,
             max_turns: 50,
+            compaction: Some(Policy::default()),
         }
     }
 
@@ -86,6 +95,18 @@ impl Agent {
 
         for turn in 1..=self.max_turns {
             let _ = tx.send(Event::TurnStart { turn });
+
+            if let Some(policy) = &self.compaction {
+                let budget = self.budget();
+                if brain::estimate::tokens(&session.messages) > budget {
+                    let report = compact::compact(&mut session.messages, budget, policy);
+                    // A pass that reclaimed nothing is not news; reporting it
+                    // every turn buries the ones that did.
+                    if report.touched() {
+                        let _ = tx.send(Event::Compacted(report));
+                    }
+                }
+            }
 
             let req = Request {
                 system: Some(self.system.clone()),
@@ -127,6 +148,24 @@ impl Agent {
         }
 
         Err(AgentError::TurnLimit(self.max_turns))
+    }
+
+    /// What the transcript may occupy. The reply, the system prompt and the
+    /// tool schemas all share the window with it, so each is subtracted before
+    /// the transcript gets to claim what is left.
+    pub fn budget(&self) -> usize {
+        let window = self.spec.context_window as usize;
+        // A spec may declare an output cap larger than the window it is being
+        // used against — an overridden window, a proxy, a stale entry. Reserving
+        // it verbatim would leave the transcript nothing at all.
+        let reply = (self.spec.max_output_tokens as usize).min(window / 4);
+        let fixed = brain::estimate::text(&self.system)
+            + brain::estimate::tool_defs(&self.registry.defs())
+            + reply
+            + SAFETY_MARGIN;
+        // Even an unworkable configuration leaves a floor: stripping the
+        // transcript to nothing helps no one.
+        window.saturating_sub(fixed).max(window / 4)
     }
 
     async fn stream_turn(

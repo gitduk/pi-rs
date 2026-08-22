@@ -80,6 +80,11 @@ impl Renderer {
                 };
                 eprintln!("{mark} {name} {}", self.paint(DIM, &clip(&preview, 100)));
             }
+            Event::Compacted(r) if !self.quiet => {
+                self.end_thinking();
+                self.settle();
+                eprintln!("{}", self.paint(DIM, &compaction_line(&r)));
+            }
             Event::ToolDenied { name, reason, .. } => {
                 self.settle();
                 eprintln!(
@@ -146,6 +151,35 @@ impl Renderer {
     }
 }
 
+/// Says what was given up, not just how much. A silent shrink looks like the
+/// agent forgetting things for no reason.
+fn compaction_line(r: &agent::compact::Report) -> String {
+    let mut parts = Vec::new();
+    if r.superseded > 0 {
+        parts.push(format!("{} superseded", r.superseded));
+    }
+    if r.uneventful > 0 {
+        parts.push(format!("{} uneventful", r.uneventful));
+    }
+    if r.aged_out > 0 {
+        parts.push(format!("{} aged out", r.aged_out));
+    }
+    if r.dropped > 0 {
+        parts.push(format!("{} messages dropped", r.dropped));
+    }
+    let detail = if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" · {}", parts.join(", "))
+    };
+    let warn = if r.still_over {
+        " · still over budget"
+    } else {
+        ""
+    };
+    format!("compacted {} → {} tokens{detail}{warn}", r.before, r.after)
+}
+
 fn clip(s: &str, max: usize) -> String {
     let one = s.replace('\n', " ");
     match one.char_indices().nth(max) {
@@ -208,6 +242,34 @@ mod tests {
         assert_eq!(summarize(&json!({ "path": "src/a.rs" })), "src/a.rs");
         assert_eq!(summarize(&json!({ "command": "cargo test" })), "cargo test");
         assert_eq!(summarize(&json!({ "nothing": 1 })), "");
+    }
+
+    #[test]
+    fn a_compaction_line_names_what_was_given_up() {
+        let r = agent::compact::Report {
+            before: 130_000,
+            after: 48_000,
+            superseded: 3,
+            uneventful: 1,
+            aged_out: 6,
+            dropped: 0,
+            still_over: false,
+        };
+        assert_eq!(
+            super::compaction_line(&r),
+            "compacted 130000 → 48000 tokens · 3 superseded, 1 uneventful, 6 aged out"
+        );
+    }
+
+    #[test]
+    fn a_compaction_that_did_not_fit_says_so() {
+        let r = agent::compact::Report {
+            before: 9,
+            after: 9,
+            still_over: true,
+            ..Default::default()
+        };
+        assert!(super::compaction_line(&r).ends_with("still over budget"));
     }
 
     #[test]

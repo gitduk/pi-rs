@@ -83,6 +83,15 @@ struct Args {
     #[arg(long, default_value_t = 50)]
     max_turns: usize,
 
+    /// Override the model's context window. Useful against a proxy whose real
+    /// window is smaller than the catalog claims.
+    #[arg(long, value_name = "TOKENS")]
+    context: Option<u32>,
+
+    /// Send the transcript untouched and let the provider refuse it.
+    #[arg(long)]
+    no_compact: bool,
+
     /// Replace the built-in system prompt.
     #[arg(long)]
     system: Option<String>,
@@ -198,6 +207,9 @@ async fn main() -> Result<()> {
     if let Some(url) = &args.base_url {
         spec.base_url = url.clone();
     }
+    if let Some(window) = args.context {
+        spec.context_window = window;
+    }
 
     let mut registry = tools::Registry::builtin();
     if !args.tools.is_empty() {
@@ -237,6 +249,9 @@ async fn main() -> Result<()> {
     ag.system = system;
     ag.effort = effort;
     ag.max_turns = args.max_turns;
+    if args.no_compact {
+        ag.compaction = None;
+    }
 
     let ctx = tools::Ctx {
         workspace,

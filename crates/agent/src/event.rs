@@ -25,6 +25,8 @@ pub enum Event {
         name: String,
         reason: String,
     },
+    /// The transcript was shrunk to fit before this turn was sent.
+    Compacted(crate::compact::Report),
     TurnEnd {
         usage: Usage,
         cost: f64,
