@@ -1,10 +1,10 @@
 //! Standing instructions: what to do here, as opposed to what to do now.
 //!
 //! Personal ones live in `~/.pi.md`, beside `~/.pi.toml`. A project's live in
-//! its `AGENTS.md`, which is the vendor-neutral name every harness reads —
-//! `CLAUDE.md` stands in where a repository only has that one, on the same
-//! reasoning that makes `.claude/skills` worth reading: instructions written
-//! for another tool are still instructions.
+//! its `AGENTS.md`, the vendor-neutral name every harness reads. Another
+//! harness's own file is deliberately not read in its place: the shared name
+//! exists so that one file serves every tool, and reading the alternatives too
+//! would reward keeping them apart.
 
 use std::path::{Path, PathBuf};
 
@@ -32,14 +32,9 @@ fn home() -> Option<PathBuf> {
 }
 
 /// The one file a directory contributes, or none.
-///
-/// `AGENTS.md` wins where both exist: a repository carrying both is one that
-/// adopted the shared name and kept the old file behind it.
 fn in_dir(dir: &Path) -> Option<PathBuf> {
-    ["AGENTS.md", "CLAUDE.md"]
-        .iter()
-        .map(|n| dir.join(n))
-        .find(|p| p.is_file())
+    let path = dir.join("AGENTS.md");
+    path.is_file().then_some(path)
 }
 
 /// Every instructions file that applies, most general first.
@@ -127,15 +122,16 @@ mod tests {
     }
 
     #[test]
-    fn a_repository_with_only_the_other_tools_file_is_still_read() {
+    fn only_the_shared_name_counts() {
+        // The point of a vendor-neutral name is that one file serves every
+        // tool; reading the alternatives as well would reward keeping them
+        // apart.
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
-        write(&repo.join("CLAUDE.md"), "claude");
-        assert_eq!(paths(&repo, None), vec![repo.join("CLAUDE.md")]);
+        write(&repo.join("CLAUDE.md"), "another harness's file");
+        assert!(paths(&repo, None).is_empty());
 
-        // With both, the shared name wins: keeping the old file behind it is
-        // the ordinary way a repository adopts the new one.
         write(&repo.join("AGENTS.md"), "agents");
         assert_eq!(paths(&repo, None), vec![repo.join("AGENTS.md")]);
     }

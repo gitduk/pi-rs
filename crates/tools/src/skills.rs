@@ -98,15 +98,14 @@ fn ancestral_agents(workspace: &Path) -> Vec<PathBuf> {
 
 /// Where skills come from, nearest first.
 ///
-/// Project directories outrank personal ones, and `.claude/skills` and
-/// `.agents/skills` are read as they stand: a skill already written for another
-/// tool is a skill. `.agents` is the vendor-neutral one, which is why it is
-/// searched at both levels.
+/// Two names only: `.pi/skills`, which is ours, and `.agents/skills`, which is
+/// the shared standard. Another harness's private directory is deliberately not
+/// on the list — supporting the vendor-neutral location is what makes a shared
+/// skill shared, and reading each vendor's own folder as well only spreads the
+/// question of where a skill belongs. Anyone wanting one of those can point
+/// `.agents/skills` at it with a symlink.
 pub fn sources(workspace: &Path) -> Vec<PathBuf> {
-    let mut out = vec![
-        workspace.join(".pi/skills"),
-        workspace.join(".claude/skills"),
-    ];
+    let mut out = vec![workspace.join(".pi/skills")];
     out.extend(ancestral_agents(workspace));
     let config = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -116,7 +115,6 @@ pub fn sources(workspace: &Path) -> Vec<PathBuf> {
     }
     if let Some(h) = home() {
         out.push(h.join(".agents/skills"));
-        out.push(h.join(".claude/skills"));
     }
     out
 }
