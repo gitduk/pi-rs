@@ -10,6 +10,8 @@ pub mod glob;
 pub mod grep;
 pub mod read;
 pub mod registry;
+pub mod skill;
+pub mod skills;
 pub mod todo;
 pub mod walk;
 pub mod workspace;

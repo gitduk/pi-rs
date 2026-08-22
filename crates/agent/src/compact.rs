@@ -12,6 +12,13 @@ use crate::log::{Compaction, Elision, EntryId, Log};
 /// list or file read is worth carrying.
 const SUPERSEDABLE: &[&str] = &["read", "grep", "glob", "todo"];
 
+/// Results that must survive compaction whatever the budget says.
+///
+/// A skill body is instructions the agent is in the middle of following.
+/// Eliding it saves tokens and breaks the task — omp protects these for the
+/// same reason.
+const PROTECTED: &[&str] = &["skill"];
+
 #[derive(Debug, Clone, Copy)]
 pub struct Policy {
     /// Results within this many estimated tokens of the end are left alone —
@@ -48,6 +55,9 @@ impl Report {
 }
 
 fn elide(result: &mut ToolResult, notice: &str) -> bool {
+    if PROTECTED.contains(&result.name.as_str()) {
+        return false;
+    }
     let already = matches!(
         result.content.as_slice(),
         [ToolResultContent::Text(t)] if t.text.starts_with("[elided")

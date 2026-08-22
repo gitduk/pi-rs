@@ -345,3 +345,29 @@ mod budget {
         );
     }
 }
+
+#[test]
+fn a_skill_body_survives_a_compaction_that_takes_everything_else() {
+    let mut m = vec![
+        Message::user("go"),
+        call("c1", "skill", json!({ "name": "commit" })),
+        result("c1", "skill", &big(9_000)),
+        call("c2", "read", json!({ "path": "a.rs" })),
+        result("c2", "read", &big(9_000)),
+        call("c3", "read", json!({ "path": "a.rs" })),
+        result("c3", "read", &big(9_000)),
+    ];
+    let r = compact(&mut m, 4_000, &Policy { protect_tail: 0 });
+
+    // Instructions the agent is in the middle of following are not spare
+    // context, whatever the budget says.
+    assert!(
+        body_of(&m[2]).starts_with("xxx"),
+        "the skill body must survive: {}",
+        body_of(&m[2])
+    );
+    assert!(
+        r.superseded + r.aged_out > 0,
+        "everything else was still reclaimed: {r:?}"
+    );
+}

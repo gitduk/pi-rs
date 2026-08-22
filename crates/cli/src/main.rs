@@ -108,6 +108,10 @@ struct Args {
     #[arg(long)]
     system: Option<String>,
 
+    /// Ignore the skills on disk.
+    #[arg(long)]
+    no_skills: bool,
+
     /// A JSON Schema file. The run must end by calling `yield` with a matching
     /// object, which is printed to stdout instead of prose.
     #[arg(long, value_name = "FILE")]
@@ -236,6 +240,14 @@ async fn main() -> Result<()> {
                 tools::Registry::builtin().names().join(", ")
             )
         })?;
+    }
+
+    if !args.no_skills {
+        let found = tools::skills::discover(workspace.root());
+        let tool = tools::skill::SkillTool::new(found);
+        if !tool.is_empty() {
+            registry = registry.with(tool);
+        }
     }
 
     if let Some(path) = &args.schema {
