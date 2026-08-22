@@ -43,15 +43,23 @@ pub struct Store {
     root: PathBuf,
 }
 
+/// Where pir keeps what it accumulates between runs.
+pub fn state_dir() -> Option<PathBuf> {
+    std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
+        .map(|b| b.join("pir"))
+}
+
 impl Default for Store {
     /// Outside the workspace: transcripts are the agent's state, not the
     /// project's, and a stray file in a repo is one the user has to clean up.
     fn default() -> Self {
-        let base = std::env::var_os("XDG_STATE_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
-            .unwrap_or_else(|| PathBuf::from("."));
-        Self::new(base.join("pir/sessions"))
+        Self::new(
+            state_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("sessions"),
+        )
     }
 }
 

@@ -12,6 +12,7 @@ use clap::{Parser, ValueEnum};
 use tokio::sync::mpsc;
 
 mod render;
+mod repl;
 mod session;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -108,6 +109,11 @@ struct Args {
     #[arg(long)]
     system: Option<String>,
 
+    /// Keep the conversation open instead of running once. Implied by a bare
+    /// `pir` at a terminal.
+    #[arg(short, long)]
+    interactive: bool,
+
     /// Ignore the skills on disk.
     #[arg(long)]
     no_skills: bool,
@@ -172,20 +178,22 @@ fn transport_for(spec: &ModelSpec) -> Result<Arc<dyn Transport>> {
     }
 }
 
-fn read_prompt(args: &Args) -> Result<String> {
+/// The prompt, or None when the run should ask for one.
+fn read_prompt(args: &Args) -> Result<Option<String>> {
     if let Some(p) = &args.prompt {
-        return Ok(p.clone());
+        return Ok(Some(p.clone()));
     }
-    // Without this, a bare `pir` in a terminal blocks on a tty nobody is typing into.
-    if std::io::stdin().is_terminal() {
-        bail!("no prompt given; pass one as an argument or pipe it in");
+    // A bare `pir` at a terminal means "talk to me"; piped in, it means the
+    // prompt is on stdin.
+    if args.interactive || std::io::stdin().is_terminal() {
+        return Ok(None);
     }
     let mut body = String::new();
     std::io::stdin().read_to_string(&mut body)?;
     if body.trim().is_empty() {
         bail!("no prompt given, and stdin was empty");
     }
-    Ok(body)
+    Ok(Some(body))
 }
 
 #[tokio::main]
@@ -297,13 +305,6 @@ async fn main() -> Result<()> {
         ag.finish_tool = Some(tools::finish::NAME.to_string());
     }
 
-    let ctx = tools::Ctx {
-        workspace,
-        cancel: agent::cancel_on_interrupt(),
-        todos: Default::default(),
-        yielded: Default::default(),
-    };
-
     let (tx, mut rx) = mpsc::unbounded_channel();
     let quiet = args.quiet;
     let structured = args.schema.is_some();
@@ -321,6 +322,29 @@ async fn main() -> Result<()> {
         .unwrap_or_else(session::new_id);
     let carried = prior.map(|p| p.into_log()).unwrap_or_default();
     let resumed = carried.context().len();
+
+    let Some(prompt) = prompt else {
+        let repl = repl::Repl {
+            agent: ag,
+            workspace,
+            store,
+            model: model_id,
+            session: agent::Session { log: carried },
+            id,
+            todos: Default::default(),
+        };
+        let out = repl.run(tx).await;
+        let _ = painter.await;
+        return out;
+    };
+
+    let ctx = tools::Ctx {
+        workspace,
+        cancel: agent::cancel_on_interrupt(),
+        todos: Default::default(),
+        yielded: Default::default(),
+    };
+
     // Always through the log: a loaded session whose view happens to be empty
     // still has history worth keeping, and `resume` handles an empty log.
     let mut session = agent::Session::resumed(carried, prompt);
