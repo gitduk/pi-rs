@@ -70,7 +70,8 @@ struct Args {
     #[arg(short = 'c', long = "continue")]
     continue_last: bool,
 
-    /// Treat --model as an upstream id on this wire rather than a catalog entry.
+    /// Treat --model as the endpoint's own id on this wire, for a one-off
+    /// against a server not worth writing into the config yet.
     #[arg(long, value_enum)]
     wire: Option<WireArg>,
 
@@ -97,8 +98,8 @@ struct Args {
     #[arg(long)]
     max_turns: Option<usize>,
 
-    /// Override the model's context window. Useful against a proxy whose real
-    /// window is smaller than the catalog claims.
+    /// Override the model's context window, for a proxy whose real window is
+    /// smaller than the config says.
     #[arg(long, value_name = "TOKENS")]
     context: Option<u32>,
 
