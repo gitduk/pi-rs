@@ -114,12 +114,22 @@ impl Repl {
 
     /// One run, cancellable on its own without taking the session with it.
     ///
-    /// Reports whether the interrupt landed, so the prompt it returns to is
-    /// already armed: two presses should leave, not three.
-    async fn turn(&mut self, prompt: String, tx: &UnboundedSender<agent::Event>) -> (Totals, bool) {
+    /// Hands back anything typed while it worked, so the next prompt opens with
+    /// it already there instead of having eaten it.
+    async fn turn(
+        &mut self,
+        prompt: String,
+        tx: &UnboundedSender<agent::Event>,
+    ) -> (Totals, String) {
         self.session.log.resume(prompt);
 
         let cancel = CancellationToken::new();
+        // Escape needs someone reading the keyboard, and between readline calls
+        // nobody is. Anything else typed while waiting comes back below rather
+        // than being swallowed.
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let keys = crate::keys::watch(cancel.clone(), stop.clone());
+
         // The first Ctrl-C belongs to the run — the session survives it. The
         // second belongs to the process: `tokio::signal::ctrl_c` has already
         // replaced SIGINT's default action, so nothing else can do the killing.
@@ -131,6 +141,9 @@ impl Repl {
                 }
                 cancel.cancel();
                 if tokio::signal::ctrl_c().await.is_ok() {
+                    // Nothing runs on the way out of process::exit, and a
+                    // terminal left without ICANON needs a `reset` to use.
+                    crate::keys::restore();
                     std::process::exit(130);
                 }
             }
@@ -139,6 +152,8 @@ impl Repl {
         let ctx = self.ctx.clone().with_cancel(cancel).with_fresh_result();
         let out = self.agent.run(&mut self.session, &ctx, tx).await;
         watcher.abort();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let typed = keys.await.unwrap_or_default();
 
         // Saved either way: an interrupted turn is exactly the one worth keeping.
         if let Err(e) = self.store.save(
@@ -151,14 +166,14 @@ impl Repl {
         }
 
         match out {
-            Ok(o) => (o.totals, false),
+            Ok(o) => (o.totals, typed),
             Err(AgentError::Cancelled) => {
                 eprintln!("\x1b[2mstopped\x1b[0m");
-                (Totals::default(), true)
+                (Totals::default(), typed)
             }
             Err(e) => {
                 eprintln!("\x1b[31merror\x1b[0m {e}");
-                (Totals::default(), false)
+                (Totals::default(), typed)
             }
         }
     }
@@ -176,8 +191,10 @@ impl Repl {
         // the second reading as an exit there is no way out but Ctrl-D, because
         // SIGINT no longer reaches the default handler once tokio has claimed it.
         let mut last_interrupt: Option<std::time::Instant> = None;
+        // What was typed while the last run was working.
+        let mut pending = String::new();
         loop {
-            let line = match editor.readline("\x1b[36m›\x1b[0m ") {
+            let line = match editor.readline_with_initial("\x1b[36m›\x1b[0m ", (&pending, "")) {
                 Ok(line) => line,
                 Err(ReadlineError::Interrupted) => {
                     let now = std::time::Instant::now();
@@ -191,6 +208,7 @@ impl Repl {
                 Err(ReadlineError::Eof) => break,
                 Err(e) => return Err(e.into()),
             };
+            pending.clear();
             let line = line.trim();
             if line.is_empty() {
                 continue;
@@ -201,8 +219,9 @@ impl Repl {
                 Step::Quit => break,
                 Step::Handled => continue,
                 Step::Prompt(prompt) => {
-                    let (spent, _) = self.turn(prompt, &tx).await;
+                    let (spent, typed) = self.turn(prompt, &tx).await;
                     totals.add(&spent.usage, spent.cost);
+                    pending = typed;
                 }
             }
         }

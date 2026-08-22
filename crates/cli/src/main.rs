@@ -11,6 +11,7 @@ use brain::transport::{Transport, anthropic::Anthropic, openai::OpenAi};
 use clap::{Parser, ValueEnum};
 use tokio::sync::mpsc;
 
+mod keys;
 mod render;
 mod repl;
 mod session;
