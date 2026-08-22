@@ -125,7 +125,7 @@ impl Tool for Write {
         // Temp then rename: a write interrupted halfway would otherwise leave a
         // truncated file where a whole one used to be.
         let tmp = path.with_extension(format!(
-            "{}.pir-tmp",
+            "{}.pi-tmp",
             path.extension().and_then(|e| e.to_str()).unwrap_or("")
         ));
         tokio::fs::write(&tmp, &content).await?;

@@ -59,7 +59,7 @@ fn spill(stdout: &str, stderr: &str) -> Option<String> {
     }
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("pir-bash-{}-{n}.log", std::process::id()));
+    let path = std::env::temp_dir().join(format!("pi-bash-{}-{n}.log", std::process::id()));
     let whole = format!("<stdout>\n{stdout}\n</stdout>\n<stderr>\n{stderr}\n</stderr>\n");
     std::fs::write(&path, whole).ok()?;
     Some(path.display().to_string())

@@ -43,12 +43,12 @@ pub struct Store {
     root: PathBuf,
 }
 
-/// Where pir keeps what it accumulates between runs.
+/// Where pi keeps what it accumulates between runs.
 pub fn state_dir() -> Option<PathBuf> {
     std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
-        .map(|b| b.join("pir"))
+        .map(|b| b.join("pi"))
 }
 
 impl Default for Store {

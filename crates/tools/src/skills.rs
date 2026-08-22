@@ -76,14 +76,14 @@ fn home() -> Option<PathBuf> {
 /// it stands: a skill already written for another tool is a skill.
 pub fn sources(workspace: &Path) -> Vec<PathBuf> {
     let mut out = vec![
-        workspace.join(".pir/skills"),
+        workspace.join(".pi/skills"),
         workspace.join(".claude/skills"),
     ];
     let config = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| home().map(|h| h.join(".config")));
     if let Some(c) = config {
-        out.push(c.join("pir/skills"));
+        out.push(c.join("pi/skills"));
     }
     if let Some(h) = home() {
         out.push(h.join(".claude/skills"));

@@ -37,10 +37,7 @@ enum EffortArg {
 }
 
 #[derive(Parser, Debug)]
-#[command(
-    name = "pir",
-    about = "A coding agent that stays inside one directory."
-)]
+#[command(name = "pi", about = "A coding agent that stays inside one directory.")]
 struct Args {
     /// The prompt. Reads stdin when omitted.
     prompt: Option<String>,
@@ -110,7 +107,7 @@ struct Args {
     system: Option<String>,
 
     /// Keep the conversation open instead of running once. Implied by a bare
-    /// `pir` at a terminal.
+    /// `pi` at a terminal.
     #[arg(short, long)]
     interactive: bool,
 
@@ -183,7 +180,7 @@ fn read_prompt(args: &Args) -> Result<Option<String>> {
     if let Some(p) = &args.prompt {
         return Ok(Some(p.clone()));
     }
-    // A bare `pir` at a terminal means "talk to me"; piped in, it means the
+    // A bare `pi` at a terminal means "talk to me"; piped in, it means the
     // prompt is on stdin.
     if args.interactive || std::io::stdin().is_terminal() {
         return Ok(None);
@@ -365,7 +362,7 @@ async fn main() -> Result<()> {
             } else {
                 String::new()
             };
-            eprintln!("session {id}{carried} — continue with `pir -c` or `pir --resume {id}`");
+            eprintln!("session {id}{carried} — continue with `pi -c` or `pi --resume {id}`");
         }
         Err(e) => eprintln!("warning: the transcript was not saved: {e}"),
         _ => {}
