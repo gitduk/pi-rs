@@ -129,7 +129,10 @@ pub struct Capabilities {
     pub cache_breakpoints: bool,
 }
 
+/// `default` so a config can price only the halves it knows: an unstated rate
+/// is zero, and a zero rate reports no cost rather than a wrong one.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Pricing {
     pub input_per_mtok: f64,
     pub output_per_mtok: f64,

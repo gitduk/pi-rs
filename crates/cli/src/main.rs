@@ -11,26 +11,32 @@ use brain::transport::{Transport, anthropic::Anthropic, openai::OpenAi};
 use clap::{Parser, ValueEnum};
 use tokio::sync::mpsc;
 
+mod config;
 mod line;
 mod render;
 mod repl;
 mod session;
 mod tui;
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+/// The three below are both flags and config values, so a config file names a
+/// tier the same way the command line does.
+#[derive(Debug, Clone, Copy, ValueEnum, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 enum WireArg {
     Anthropic,
     Openai,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 enum TierArg {
     Read,
     Write,
     Exec,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 enum EffortArg {
     Off,
     Low,
@@ -43,6 +49,11 @@ enum EffortArg {
 struct Args {
     /// The prompt. Reads stdin when omitted.
     prompt: Option<String>,
+
+    /// Defaults and locally-defined models. Defaults to
+    /// $XDG_CONFIG_HOME/pi/config.json.
+    #[arg(long, value_name = "FILE", env = "PI_CONFIG")]
+    config: Option<String>,
 
     /// Catalog id, or the upstream id together with --wire. Defaults to the
     /// resumed session's model, else opus-5.
@@ -69,19 +80,20 @@ struct Args {
     #[arg(short = 'C', long, default_value = ".")]
     cwd: String,
 
-    /// Highest tool tier this run may use.
-    #[arg(long, value_enum, default_value = "exec")]
-    tier: TierArg,
+    /// Highest tool tier this run may use. Defaults to exec.
+    #[arg(long, value_enum)]
+    tier: Option<TierArg>,
 
     /// Restrict the tool set, e.g. --tools read,bash
     #[arg(long, value_delimiter = ',')]
     tools: Vec<String>,
 
-    #[arg(long, value_enum, default_value = "off")]
-    effort: EffortArg,
+    #[arg(long, value_enum)]
+    effort: Option<EffortArg>,
 
-    #[arg(long, default_value_t = 50)]
-    max_turns: usize,
+    /// Defaults to 50.
+    #[arg(long)]
+    max_turns: Option<usize>,
 
     /// Override the model's context window. Useful against a proxy whose real
     /// window is smaller than the catalog claims.
@@ -163,15 +175,23 @@ fn ad_hoc(args: &Args, model: &str, wire: WireArg) -> Result<ModelSpec> {
     })
 }
 
-fn transport_for(spec: &ModelSpec) -> Result<Arc<dyn Transport>> {
+/// `configured` is what the config entry supplied, if the model came from one.
+fn transport_for(spec: &ModelSpec, configured: Option<String>) -> Result<Arc<dyn Transport>> {
     match spec.wire {
         Wire::Anthropic(_) => {
-            let key = std::env::var("ANTHROPIC_API_KEY").context("ANTHROPIC_API_KEY is not set")?;
+            let key = match configured {
+                Some(k) => k,
+                None => {
+                    std::env::var("ANTHROPIC_API_KEY").context("ANTHROPIC_API_KEY is not set")?
+                }
+            };
             Ok(Arc::new(Anthropic::new(key)))
         }
         Wire::OpenAi(_) => {
             // A local server usually wants no key at all.
-            let key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| "sk-none".into());
+            let key = configured
+                .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+                .unwrap_or_else(|| "sk-none".into());
             Ok(Arc::new(OpenAi::new(key)))
         }
     }
@@ -215,6 +235,7 @@ fn paint(
 async fn main() -> Result<()> {
     let args = Args::parse();
     let prompt = read_prompt(&args)?;
+    let config = config::load(args.config.as_deref())?;
 
     let workspace = tools::Workspace::new(&args.cwd)
         .with_context(|| format!("cannot use {} as a workspace", args.cwd))?;
@@ -226,25 +247,33 @@ async fn main() -> Result<()> {
         _ => None,
     };
 
-    // An explicit -m wins; otherwise a resumed run stays on the model that
-    // produced the transcript, whose reasoning blocks only replay to itself.
+    // An explicit -m wins; a resumed run then stays on the model that produced
+    // the transcript, whose reasoning blocks only replay to itself; the config's
+    // default is for when neither has said.
     let model = args
         .model
         .clone()
         .or_else(|| prior.as_ref().map(|p| p.model.clone()))
+        .or_else(|| config.defaults.model.clone())
         .unwrap_or_else(|| "opus-5".to_string());
 
+    let entry = config.find(&model);
     let mut spec = if let Some(wire) = args.wire {
         ad_hoc(&args, &model, wire)?
+    } else if let Some(entry) = entry {
+        entry.spec()?
     } else {
         brain::catalog::find(&model).with_context(|| {
+            let mut known = config.ids();
+            let builtin: Vec<String> = brain::catalog::builtin()
+                .iter()
+                .map(|m| m.id.clone())
+                .collect();
+            known.extend(builtin.iter().map(String::as_str));
             format!(
-                "unknown model `{model}`; known: {}. Use --wire for anything else.",
-                brain::catalog::builtin()
-                    .iter()
-                    .map(|m| m.id.clone())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                "unknown model `{model}`; known: {}. Define it in the config, \
+                 or use --wire for a one-off.",
+                known.join(", ")
             )
         })?
     };
@@ -291,18 +320,23 @@ async fn main() -> Result<()> {
         registry = registry.with(tools::finish::Yield::new(schema));
     }
 
-    let tier = match args.tier {
+    // Flag, then config, then the built-in default.
+    let tier = match args.tier.or(config.defaults.tier).unwrap_or(TierArg::Exec) {
         TierArg::Read => tools::Tier::Read,
         TierArg::Write => tools::Tier::Write,
         TierArg::Exec => tools::Tier::Exec,
     };
-    let effort = match args.effort {
+    let effort = match args
+        .effort
+        .or(config.defaults.effort)
+        .unwrap_or(EffortArg::Off)
+    {
         EffortArg::Off => Effort::Off,
         EffortArg::Low => Effort::Low,
         EffortArg::Medium => Effort::Medium,
         EffortArg::High => Effort::High,
     };
-    let system = match &args.system {
+    let system = match args.system.as_ref().or(config.defaults.system.as_ref()) {
         Some(path) => std::fs::read_to_string(path)
             .with_context(|| format!("cannot read system prompt {path}"))?,
         None => agent::DEFAULT_SYSTEM.to_string(),
@@ -312,13 +346,27 @@ async fn main() -> Result<()> {
     let root = workspace.root().to_path_buf();
     let model_id = spec.id.clone();
 
-    let transport = transport_for(&spec)?;
+    let key = match entry.and_then(config::Entry::key) {
+        Some(k) => Some(k?),
+        None => None,
+    };
+    if key.is_some()
+        && entry.is_some_and(|e| e.api_key.is_some())
+        && let Some(path) = args
+            .config
+            .clone()
+            .map(std::path::PathBuf::from)
+            .or_else(config::default_path)
+    {
+        config::warn_if_exposed(&path);
+    }
+    let transport = transport_for(&spec, key)?;
     let mut ag = agent::Agent::new(transport, spec);
     ag.registry = registry;
     ag.approver = Arc::new(agent::Ceiling(tier));
     ag.system = system;
     ag.effort = effort;
-    ag.max_turns = args.max_turns;
+    ag.max_turns = args.max_turns.or(config.defaults.max_turns).unwrap_or(50);
     if args.no_compact {
         ag.compaction = None;
     }
