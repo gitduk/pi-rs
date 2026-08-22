@@ -239,6 +239,15 @@ async fn main() -> Result<()> {
     if let Some(window) = args.context {
         spec.context_window = window;
     }
+    // An ad-hoc spec is a guess. Saying which guess lets the user correct the
+    // one that matters instead of debugging a 400 later.
+    if args.wire.is_some() && !args.quiet {
+        eprintln!(
+            "\x1b[2massuming a {}-token window, {} max output, and no pricing for `{}`. \
+             Set --context if the server's window differs.\x1b[0m",
+            spec.context_window, spec.max_output_tokens, spec.id
+        );
+    }
 
     let mut registry = tools::Registry::builtin();
     if !args.tools.is_empty() {
