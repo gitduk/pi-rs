@@ -31,4 +31,3 @@ grep-matcher = "0.1"
 grep-regex = "0.1"
 grep-searcher = "0.1"
 clap = { version = "4", features = ["derive", "env"] }
-rustyline = { version = "17", default-features = false, features = ["with-file-history"] }

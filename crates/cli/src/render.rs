@@ -7,8 +7,84 @@ const GREEN: &str = "\x1b[32m";
 const RED: &str = "\x1b[31m";
 const RESET: &str = "\x1b[0m";
 
+/// Whether the surface being written to can carry colour.
+#[derive(Debug, Clone, Copy)]
+pub struct Paint {
+    pub color: bool,
+}
+
+impl Paint {
+    pub fn on(&self, code: &str, body: &str) -> String {
+        if self.color {
+            format!("{code}{body}{RESET}")
+        } else {
+            body.to_string()
+        }
+    }
+}
+
+/// The wording for every event that occupies a whole line.
+///
+/// Both surfaces call this: a tool call has to read the same in a pipe as in
+/// the terminal, and two copies of the wording would drift on the first edit.
+/// Events that are a fragment rather than a line — the two deltas — are the
+/// caller's to place, and return None.
+pub fn describe(event: &Event, p: Paint) -> Option<String> {
+    Some(match event {
+        Event::ToolStart { name, args, .. } => {
+            format!("{} {name} {}", p.on(DIM, "→"), p.on(DIM, &summarize(args)))
+        }
+        Event::ToolEnd {
+            name,
+            is_error,
+            preview,
+            ..
+        } => {
+            let mark = if *is_error {
+                p.on(RED, "✗")
+            } else {
+                p.on(GREEN, "✓")
+            };
+            format!("{mark} {name} {}", p.on(DIM, &clip(preview, 100)))
+        }
+        Event::ToolDenied { name, reason, .. } => {
+            format!(
+                "{} {name} {}",
+                p.on(RED, "✗"),
+                p.on(DIM, &clip(reason, 100))
+            )
+        }
+        Event::Compacted(r) => p.on(DIM, &compaction_line(r)),
+        Event::Retrying {
+            attempt,
+            delay_ms,
+            reason,
+        } => p.on(
+            DIM,
+            &format!("retry {attempt} in {delay_ms}ms · {}", clip(reason, 90)),
+        ),
+        Event::Warning(w) => format!("{} {}", p.on(RED, "!"), p.on(DIM, w)),
+        Event::Done { turns, usage, cost } => p.on(
+            DIM,
+            &format!(
+                "{turns} turns · {} in / {} out · {} cached{}",
+                usage.input,
+                usage.output,
+                usage.cache_read,
+                // An unpriced model reports no cost rather than $0.
+                if *cost > 0.0 {
+                    format!(" · ${cost:.4}")
+                } else {
+                    String::new()
+                },
+            ),
+        ),
+        _ => return None,
+    })
+}
+
 pub struct Renderer {
-    color: bool,
+    paint: Paint,
     quiet: bool,
     /// A schema was asked for, so stdout belongs to the result alone. Prose the
     /// model produces on the way there is progress, not the answer.
@@ -23,7 +99,9 @@ pub struct Renderer {
 impl Renderer {
     pub fn new(quiet: bool, structured: bool) -> Self {
         Self {
-            color: std::io::stderr().is_terminal(),
+            paint: Paint {
+                color: std::io::stderr().is_terminal(),
+            },
             quiet,
             structured,
             thinking: false,
@@ -32,25 +110,17 @@ impl Renderer {
         }
     }
 
-    fn paint(&self, code: &str, body: &str) -> String {
-        if self.color {
-            format!("{code}{body}{RESET}")
-        } else {
-            body.to_string()
-        }
-    }
-
     /// Answer text goes to stdout so it pipes; everything else is progress and
     /// goes to stderr.
     pub fn on(&mut self, event: Event) {
-        match event {
+        match &event {
             Event::ReasoningDelta(d) if !self.quiet => {
                 if !self.thinking {
                     self.settle_out();
-                    eprint!("{}", self.paint(DIM, "thinking "));
+                    eprint!("{}", self.paint.on(DIM, "thinking "));
                     self.thinking = true;
                 }
-                eprint!("{}", self.paint(DIM, &d));
+                eprint!("{}", self.paint.on(DIM, d));
                 self.err_dirty = true;
                 let _ = std::io::stderr().flush();
             }
@@ -60,7 +130,7 @@ impl Renderer {
                 }
                 self.end_thinking();
                 self.settle_out();
-                eprint!("{}", self.paint(DIM, &d));
+                eprint!("{}", self.paint.on(DIM, d));
                 self.err_dirty = !d.ends_with('\n');
                 let _ = std::io::stderr().flush();
             }
@@ -71,85 +141,21 @@ impl Renderer {
                 self.out_dirty = !d.ends_with('\n');
                 let _ = std::io::stdout().flush();
             }
-            Event::ToolStart { name, args, .. } if !self.quiet => {
-                self.end_thinking();
+            // Worth seeing even under --quiet: the run did less than it was asked.
+            Event::ToolDenied { .. } => {
                 self.settle();
-                eprintln!(
-                    "{} {name} {}",
-                    self.paint(DIM, "→"),
-                    self.paint(DIM, &summarize(&args))
-                );
+                if let Some(line) = describe(&event, self.paint) {
+                    eprintln!("{line}");
+                }
             }
-            Event::ToolEnd {
-                name,
-                is_error,
-                preview,
-                ..
-            } if !self.quiet => {
-                self.settle();
-                let mark = if is_error {
-                    self.paint(RED, "✗")
-                } else {
-                    self.paint(GREEN, "✓")
-                };
-                eprintln!("{mark} {name} {}", self.paint(DIM, &clip(&preview, 100)));
+            _ if self.quiet => {}
+            _ => {
+                if let Some(line) = describe(&event, self.paint) {
+                    self.end_thinking();
+                    self.settle();
+                    eprintln!("{line}");
+                }
             }
-            Event::Compacted(r) if !self.quiet => {
-                self.end_thinking();
-                self.settle();
-                eprintln!("{}", self.paint(DIM, &compaction_line(&r)));
-            }
-            Event::Retrying {
-                attempt,
-                delay_ms,
-                reason,
-            } if !self.quiet => {
-                self.end_thinking();
-                self.settle();
-                eprintln!(
-                    "{}",
-                    self.paint(
-                        DIM,
-                        &format!("retry {attempt} in {delay_ms}ms · {}", clip(&reason, 90))
-                    )
-                );
-            }
-            Event::Warning(w) => {
-                self.end_thinking();
-                self.settle();
-                eprintln!("{} {}", self.paint(RED, "!"), self.paint(DIM, &w));
-            }
-            Event::ToolDenied { name, reason, .. } => {
-                self.settle();
-                eprintln!(
-                    "{} {name} {}",
-                    self.paint(RED, "✗"),
-                    self.paint(DIM, &clip(&reason, 100))
-                );
-            }
-            Event::Done { turns, usage, cost } if !self.quiet => {
-                self.end_thinking();
-                self.settle();
-                eprintln!(
-                    "{}",
-                    self.paint(
-                        DIM,
-                        &format!(
-                            "{turns} turns · {} in / {} out · {} cached{}",
-                            usage.input,
-                            usage.output,
-                            usage.cache_read,
-                            // An unpriced model reports no cost rather than $0.
-                            if cost > 0.0 {
-                                format!(" · ${cost:.4}")
-                            } else {
-                                String::new()
-                            },
-                        )
-                    )
-                );
-            }
-            _ => {}
         }
     }
 
@@ -219,7 +225,7 @@ fn compaction_line(r: &agent::compact::Report) -> String {
     format!("compacted {} → {} tokens{detail}{warn}", r.before, r.after)
 }
 
-fn clip(s: &str, max: usize) -> String {
+pub fn clip(s: &str, max: usize) -> String {
     let one = s.replace('\n', " ");
     match one.char_indices().nth(max) {
         Some((i, _)) => format!("{}…", &one[..i]),
@@ -228,7 +234,7 @@ fn clip(s: &str, max: usize) -> String {
 }
 
 /// The one argument worth showing in a progress line.
-fn summarize(args: &serde_json::Value) -> String {
+pub fn summarize(args: &serde_json::Value) -> String {
     // A patch is many lines; the files it touches are the useful part.
     if let Some(patch) = args.get("patch").and_then(|v| v.as_str()) {
         let files: Vec<&str> = patch

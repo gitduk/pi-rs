@@ -11,10 +11,11 @@ use brain::transport::{Transport, anthropic::Anthropic, openai::OpenAi};
 use clap::{Parser, ValueEnum};
 use tokio::sync::mpsc;
 
-mod keys;
+mod line;
 mod render;
 mod repl;
 mod session;
+mod tui;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum WireArg {
@@ -194,6 +195,22 @@ fn read_prompt(args: &Args) -> Result<Option<String>> {
     Ok(Some(body))
 }
 
+/// Renders events by printing them, for every surface that is not the terminal
+/// one. Its own task so a slow write never holds the run up.
+fn paint(
+    mut rx: mpsc::UnboundedReceiver<agent::Event>,
+    quiet: bool,
+    structured: bool,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut r = render::Renderer::new(quiet, structured);
+        while let Some(event) = rx.recv().await {
+            r.on(event);
+        }
+        r.finish();
+    })
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -312,16 +329,9 @@ async fn main() -> Result<()> {
         ag.finish_tool = Some(tools::finish::NAME.to_string());
     }
 
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, rx) = mpsc::unbounded_channel();
     let quiet = args.quiet;
     let structured = args.schema.is_some();
-    let painter = tokio::spawn(async move {
-        let mut r = render::Renderer::new(quiet, structured);
-        while let Some(event) = rx.recv().await {
-            r.on(event);
-        }
-        r.finish();
-    });
 
     let id = prior
         .as_ref()
@@ -331,7 +341,7 @@ async fn main() -> Result<()> {
     let resumed = carried.context().len();
 
     let Some(prompt) = prompt else {
-        let repl = repl::Repl {
+        let core = repl::Repl {
             agent: ag,
             store,
             model: model_id,
@@ -339,11 +349,19 @@ async fn main() -> Result<()> {
             id,
             ctx: tools::Ctx::new(workspace),
         };
-        let out = repl.run(tx).await;
+        // The live region needs the terminal at both ends: keys come in one
+        // side and the repaint goes out the other. Missing either, there is
+        // nothing to hold still, and printing a line at a time is right.
+        if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+            return tui::Tui::new(core)?.run(tx, rx).await;
+        }
+        let painter = paint(rx, quiet, structured);
+        let out = line::run(core, tx).await;
         let _ = painter.await;
         return out;
     };
 
+    let painter = paint(rx, quiet, structured);
     let ctx = tools::Ctx::new(workspace).with_cancel(agent::cancel_on_interrupt());
 
     // Always through the log: a loaded session whose view happens to be empty
