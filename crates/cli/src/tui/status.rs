@@ -24,20 +24,25 @@ fn elapsed(d: Duration) -> String {
     }
 }
 
-/// What the line should show. `exact` is false while the output number is pi's
-/// own count of the bytes that have arrived: most hosts report nothing until
-/// the stream ends, and a counter frozen at zero for a minute reads as a stall.
+/// What the line should show, and which half the provider actually stated.
+///
+/// A half is inexact while it is pi's own count: most hosts report nothing
+/// until the stream ends, and a counter frozen at zero for a minute reads as a
+/// stall. Marked per half, because a host that states one and not the other is
+/// the ordinary case.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Counts {
     pub input: u64,
     pub output: u64,
-    pub exact: bool,
+    pub input_exact: bool,
+    pub output_exact: bool,
 }
 
 fn counts(c: &Counts) -> Option<String> {
-    let input = (c.input > 0).then(|| format!("{} in", short(c.input)));
-    let mark = if c.exact { "" } else { "~" };
-    let output = (c.output > 0).then(|| format!("{mark}{} out", short(c.output)));
+    let im = if c.input_exact { "" } else { "~" };
+    let om = if c.output_exact { "" } else { "~" };
+    let input = (c.input > 0).then(|| format!("{im}{} in", short(c.input)));
+    let output = (c.output > 0).then(|| format!("{om}{} out", short(c.output)));
     match (input, output) {
         (Some(i), Some(o)) => Some(format!("{i} / {o}")),
         (some, None) | (None, some) => some,
@@ -92,7 +97,8 @@ mod tests {
         let c = Counts {
             input: 8_400,
             output: 512,
-            exact: false,
+            input_exact: true,
+            output_exact: false,
         };
         let s = line(0, Duration::from_secs(4), &c, 0, false);
         assert_eq!(s, "⠋ 4s · 8.4k in / ~512 out · esc to stop");
@@ -103,7 +109,8 @@ mod tests {
         let c = Counts {
             input: 8_400,
             output: 390,
-            exact: true,
+            input_exact: true,
+            output_exact: true,
         };
         let s = line(0, Duration::from_secs(4), &c, 0, false);
         assert_eq!(s, "⠋ 4s · 8.4k in / 390 out · esc to stop");
@@ -124,7 +131,8 @@ mod tests {
         let c = Counts {
             input: 12_000,
             output: 340,
-            exact: true,
+            input_exact: true,
+            output_exact: true,
         };
         let s = line(1, Duration::from_secs(125), &c, 2, false);
         assert_eq!(s, "⠙ 2m05s · 12.0k in / 340 out · 2 queued · esc to stop");
@@ -136,5 +144,17 @@ mod tests {
         // on spinning would read as the key press having been missed.
         let s = line(4, Duration::from_secs(1), &Counts::default(), 0, true);
         assert_eq!(s, "· 1s · stopping…");
+    }
+    #[test]
+    fn only_the_guessed_half_wears_the_tilde() {
+        // The provider stated the input; borrowing the output's doubt for it
+        // claims less than is known.
+        let c = Counts {
+            input: 2_814,
+            output: 92,
+            input_exact: true,
+            output_exact: false,
+        };
+        assert_eq!(super::counts(&c).unwrap(), "2.8k in / ~92 out");
     }
 }

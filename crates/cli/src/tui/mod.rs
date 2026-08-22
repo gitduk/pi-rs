@@ -74,8 +74,8 @@ struct Ui {
     /// Bytes of answer and reasoning this turn has produced, which is all there
     /// is to go on until the provider reports an output count.
     produced: usize,
-    /// Set once a turn's figures came from us rather than the provider.
-    estimated: bool,
+    /// Which halves of the settled figures came from us, not the provider.
+    estimated: agent::Estimated,
     stopping: bool,
 }
 
@@ -95,7 +95,7 @@ impl Ui {
             settled: Usage::default(),
             turn: Usage::default(),
             produced: 0,
-            estimated: false,
+            estimated: agent::Estimated::default(),
             stopping: false,
         }
     }
@@ -149,7 +149,8 @@ impl Ui {
             Event::TurnEnd {
                 usage, estimated, ..
             } => {
-                self.estimated |= estimated;
+                self.estimated.input |= estimated.input;
+                self.estimated.output |= estimated.output;
                 self.settled.input += usage.input;
                 self.settled.output += usage.output;
                 self.settled.cache_read += usage.cache_read;
@@ -400,17 +401,25 @@ impl Ui {
 /// so its output is stood in for by the bytes that have arrived. Its measured
 /// figures are replaced, never added to, when its `TurnEnd` folds them into
 /// `settled`, or a turn's input would be counted twice.
-fn counts(settled: &Usage, turn: &Usage, produced: usize, estimated: bool) -> status::Counts {
-    let exact = turn.output > 0 && !estimated;
+fn counts(
+    settled: &Usage,
+    turn: &Usage,
+    produced: usize,
+    estimated: agent::Estimated,
+) -> status::Counts {
+    let output_exact = turn.output > 0 && !estimated.output;
     status::Counts {
         input: settled.input + turn.input,
         output: settled.output
-            + if exact {
+            + if output_exact {
                 turn.output
             } else {
                 brain::estimate::bytes(produced) as u64
             },
-        exact,
+        // The turn in flight contributes an input count only once the provider
+        // has stated one, so the settled half is what decides this.
+        input_exact: !estimated.input,
+        output_exact,
     }
 }
 
@@ -529,7 +538,7 @@ impl Tui {
         self.ui.settled = Usage::default();
         self.ui.turn = Usage::default();
         self.ui.produced = 0;
-        self.ui.estimated = false;
+        self.ui.estimated = agent::Estimated::default();
 
         let out = {
             // Disjoint borrows: the run holds the session while the loop keeps
@@ -599,8 +608,8 @@ mod tests {
             input: 8_400,
             ..Default::default()
         };
-        let c = counts(&Usage::default(), &turn, 1_536, false);
-        assert_eq!((c.input, c.output, c.exact), (8_400, 512, false));
+        let c = counts(&Usage::default(), &turn, 1_536, Default::default());
+        assert_eq!((c.input, c.output, c.output_exact), (8_400, 512, false));
     }
 
     #[test]
@@ -616,8 +625,8 @@ mod tests {
             input: 2_000,
             ..Default::default()
         };
-        let c = counts(&settled, &turn, 300, false);
-        assert_eq!((c.input, c.output, c.exact), (12_000, 700, false));
+        let c = counts(&settled, &turn, 300, Default::default());
+        assert_eq!((c.input, c.output, c.output_exact), (12_000, 700, false));
     }
 
     #[test]
@@ -627,8 +636,8 @@ mod tests {
             output: 90,
             ..Default::default()
         };
-        let c = counts(&Usage::default(), &turn, 9_000, false);
-        assert_eq!((c.output, c.exact), (90, true));
+        let c = counts(&Usage::default(), &turn, 9_000, Default::default());
+        assert_eq!((c.output, c.output_exact), (90, true));
     }
 
     #[test]
@@ -640,7 +649,13 @@ mod tests {
             output: 300,
             ..Default::default()
         };
-        assert!(!counts(&Usage::default(), &turn, 0, true).exact);
-        assert!(counts(&Usage::default(), &turn, 0, false).exact);
+        let guessed = agent::Estimated {
+            input: true,
+            output: true,
+        };
+        assert!(!counts(&Usage::default(), &turn, 0, guessed).output_exact);
+        assert!(!counts(&Usage::default(), &turn, 0, guessed).input_exact);
+        let measured = counts(&Usage::default(), &turn, 0, Default::default());
+        assert!(measured.output_exact && measured.input_exact);
     }
 }

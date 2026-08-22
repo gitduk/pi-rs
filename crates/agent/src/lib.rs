@@ -21,7 +21,7 @@ pub mod summarize;
 
 pub use approval::{Approver, Ceiling, Decision};
 pub use compact::Policy;
-pub use event::{Event, Totals};
+pub use event::{Estimated, Event, Totals};
 
 pub const DEFAULT_SYSTEM: &str = include_str!("../prompts/system.md");
 
@@ -430,19 +430,19 @@ impl Agent {
         reported: brain::stream::Usage,
         sent: &[Message],
         reply: &Message,
-    ) -> (brain::stream::Usage, bool) {
+    ) -> (brain::stream::Usage, Estimated) {
         let mut usage = reported;
-        let mut estimated = false;
+        let mut estimated = Estimated::default();
         if usage.input == 0 {
             usage.input = (brain::estimate::tokens(sent)
                 + brain::estimate::text(&self.system)
                 + brain::estimate::tool_defs(&self.registry.defs()))
                 as u64;
-            estimated = true;
+            estimated.input = true;
         }
         if usage.output == 0 {
             usage.output = brain::estimate::message(reply) as u64;
-            estimated = true;
+            estimated.output = true;
         }
         (usage, estimated)
     }

@@ -46,25 +46,46 @@ pub enum Event {
     TurnEnd {
         usage: Usage,
         cost: f64,
-        /// False when the provider reported nothing and these are our own
-        /// count. See [`crate::Agent`]'s fallback.
-        estimated: bool,
+        estimated: Estimated,
     },
     Done {
         turns: usize,
         usage: Usage,
         cost: f64,
-        estimated: bool,
+        estimated: Estimated,
     },
+}
+
+/// Which halves of a usage figure are our own count rather than the provider's.
+///
+/// Per half, because a host that reports one and not the other is the ordinary
+/// case: marking the pair would put a tilde on a number the provider actually
+/// stated, which claims less than is known just as wrongly as claiming more.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Estimated {
+    pub input: bool,
+    pub output: bool,
+}
+
+impl Estimated {
+    /// Anything derived from both — a cost, a total — is only as measured as
+    /// its least measured part.
+    pub fn any(self) -> bool {
+        self.input || self.output
+    }
+
+    pub fn mark(flag: bool) -> &'static str {
+        if flag { "~" } else { "" }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Totals {
     pub usage: Usage,
     pub cost: f64,
-    /// Set once any turn's figures were ours rather than the provider's. It
-    /// never clears: a total mixing the two is not a measurement.
-    pub estimated: bool,
+    /// Set once any turn's figures were ours. It never clears: a total mixing
+    /// the two is not a measurement.
+    pub estimated: Estimated,
 }
 
 impl Totals {
@@ -76,8 +97,9 @@ impl Totals {
         self.cost += cost;
     }
 
-    pub fn add_estimated(&mut self, usage: &Usage, cost: f64, estimated: bool) {
+    pub fn add_estimated(&mut self, usage: &Usage, cost: f64, estimated: Estimated) {
         self.add(usage, cost);
-        self.estimated |= estimated;
+        self.estimated.input |= estimated.input;
+        self.estimated.output |= estimated.output;
     }
 }

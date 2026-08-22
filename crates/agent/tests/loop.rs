@@ -189,7 +189,14 @@ async fn a_provider_that_reports_nothing_gets_our_own_count_instead() {
     );
     assert!(totals.usage.output > 0);
     assert!(totals.cost > 0.0);
-    assert!(totals.estimated, "our own count must not pass as measured");
+    assert_eq!(
+        totals.estimated,
+        agent::Estimated {
+            input: true,
+            output: true
+        },
+        "our own count must not pass as measured"
+    );
 }
 
 #[tokio::test]
@@ -209,7 +216,10 @@ async fn only_the_half_the_provider_withheld_is_filled_in() {
         "a measured count was overwritten"
     );
     assert!(totals.usage.output > 0);
-    assert!(totals.estimated);
+    // Only the half that was withheld is marked; the stated one keeps its
+    // standing.
+    assert!(!totals.estimated.input);
+    assert!(totals.estimated.output);
 }
 
 #[tokio::test]
@@ -217,7 +227,7 @@ async fn a_fully_measured_turn_is_not_marked() {
     let (_d, a, ctx) = harness(vec![text_turn("done")]);
     let totals = drive(&a, &ctx, "hi").await.1.unwrap().totals;
     assert_eq!((totals.usage.input, totals.usage.output), (10, 5));
-    assert!(!totals.estimated);
+    assert!(!totals.estimated.any());
 }
 
 #[tokio::test]

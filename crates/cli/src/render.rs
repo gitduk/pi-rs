@@ -70,19 +70,23 @@ pub fn describe(event: &Event, p: Paint) -> Option<String> {
             cost,
             estimated,
         } => {
-            // A tilde on every figure, because a count we made is not the
-            // provider's and a cost derived from it is not a bill.
-            let m = if *estimated { "~" } else { "" };
+            // A tilde marks the half we counted ourselves, and only that half.
+            // The cost carries one whenever either half did, because a number
+            // derived from a guess is not a bill.
+            let (i, o) = (
+                agent::Estimated::mark(estimated.input),
+                agent::Estimated::mark(estimated.output),
+            );
             p.on(
                 DIM,
                 &format!(
-                    "{turns} turns · {m}{} in / {m}{} out · {} cached{}",
+                    "{turns} turns · {i}{} in / {o}{} out · {} cached{}",
                     usage.input,
                     usage.output,
                     usage.cache_read,
                     // An unpriced model reports no cost rather than $0.
                     if *cost > 0.0 {
-                        format!(" · {m}${cost:.4}")
+                        format!(" · {}${cost:.4}", agent::Estimated::mark(estimated.any()))
                     } else {
                         String::new()
                     },
