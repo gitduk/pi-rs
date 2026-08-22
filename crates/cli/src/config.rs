@@ -462,7 +462,7 @@ usage_in_streaming = false
 
     #[test]
     fn an_id_the_wire_spells_differently_is_still_findable() {
-        let body = "[models.flash]\nwire_id = \"deepseek-v4-flash\"\n\
+        let body = "[models.flash]\nwire_id = \"vendor-model-name\"\n\
                     base_url = \"http://x/v1\"\nwire = \"openai\"\n";
         let c = parse(body).unwrap();
         assert!(c.find("flash").is_some());
