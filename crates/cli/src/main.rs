@@ -27,7 +27,9 @@ enum WireArg {
     Openai,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum, serde::Deserialize)]
+/// Ordered, so a project file can lower the ceiling without being able to
+/// raise it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum TierArg {
     Read,
@@ -50,8 +52,7 @@ struct Args {
     /// The prompt. Reads stdin when omitted.
     prompt: Option<String>,
 
-    /// Defaults and locally-defined models. Defaults to
-    /// $XDG_CONFIG_HOME/pi/config.json.
+    /// Defaults and locally-defined models. Defaults to ~/.pi.toml.
     #[arg(long, value_name = "FILE", env = "PI_CONFIG")]
     config: Option<String>,
 
@@ -239,6 +240,7 @@ async fn main() -> Result<()> {
 
     let workspace = tools::Workspace::new(&args.cwd)
         .with_context(|| format!("cannot use {} as a workspace", args.cwd))?;
+    let project = config::load_project(workspace.root())?;
 
     let store = session::Store::default();
     let prior = match (&args.resume, args.continue_last) {
@@ -247,21 +249,17 @@ async fn main() -> Result<()> {
         _ => None,
     };
 
-    // An explicit -m wins; a resumed run then stays on the model that produced
-    // the transcript, whose reasoning blocks only replay to itself; the config's
-    // default is for when neither has said.
-    let model = args
-        .model
-        .clone()
-        .or_else(|| prior.as_ref().map(|p| p.model.clone()))
-        .or_else(|| config.defaults.model.clone())
-        .unwrap_or_else(|| "opus-5".to_string());
+    let model = config.model(
+        &project,
+        args.model.as_deref(),
+        prior.as_ref().map(|p| p.model.as_str()),
+    );
 
-    let entry = config.find(&model);
+    let entry = config.find(&model).map(|(_, e)| e);
     let mut spec = if let Some(wire) = args.wire {
         ad_hoc(&args, &model, wire)?
-    } else if let Some(entry) = entry {
-        entry.spec()?
+    } else if let Some((id, entry)) = config.find(&model) {
+        entry.spec(id)?
     } else {
         brain::catalog::find(&model).with_context(|| {
             let mut known = config.ids();
@@ -320,17 +318,20 @@ async fn main() -> Result<()> {
         registry = registry.with(tools::finish::Yield::new(schema));
     }
 
-    // Flag, then config, then the built-in default.
-    let tier = match args.tier.or(config.defaults.tier).unwrap_or(TierArg::Exec) {
+    let settled = config.settle(
+        &project,
+        config::Flags {
+            effort: args.effort,
+            tier: args.tier,
+            max_turns: args.max_turns,
+        },
+    );
+    let tier = match settled.tier {
         TierArg::Read => tools::Tier::Read,
         TierArg::Write => tools::Tier::Write,
         TierArg::Exec => tools::Tier::Exec,
     };
-    let effort = match args
-        .effort
-        .or(config.defaults.effort)
-        .unwrap_or(EffortArg::Off)
-    {
+    let effort = match settled.effort {
         EffortArg::Off => Effort::Off,
         EffortArg::Low => Effort::Low,
         EffortArg::Medium => Effort::Medium,
@@ -347,16 +348,15 @@ async fn main() -> Result<()> {
     let model_id = spec.id.clone();
 
     let key = match entry.and_then(config::Entry::key) {
-        Some(k) => Some(k?),
+        Some(k) => Some(k.with_context(|| format!("the key for `{model}`"))?),
         None => None,
     };
-    if key.is_some()
-        && entry.is_some_and(|e| e.api_key.is_some())
+    if entry.is_some_and(|e| e.api_key.is_some())
         && let Some(path) = args
             .config
             .clone()
             .map(std::path::PathBuf::from)
-            .or_else(config::default_path)
+            .or_else(config::global_path)
     {
         config::warn_if_exposed(&path);
     }
@@ -366,7 +366,7 @@ async fn main() -> Result<()> {
     ag.approver = Arc::new(agent::Ceiling(tier));
     ag.system = system;
     ag.effort = effort;
-    ag.max_turns = args.max_turns.or(config.defaults.max_turns).unwrap_or(50);
+    ag.max_turns = settled.max_turns;
     if args.no_compact {
         ag.compaction = None;
     }
