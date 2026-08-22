@@ -580,3 +580,321 @@ async fn a_summarizer_that_fails_drops_the_history_without_failing_the_turn() {
             .any(|e| matches!(e, Event::Compacted(r) if r.dropped > 0 && !r.summarized))
     );
 }
+
+/// Fails the first `fail` attempts with `err`, then answers normally.
+struct Flaky {
+    remaining: AtomicUsize,
+    err: fn() -> brain::BrainError,
+}
+
+#[async_trait]
+impl Transport for Flaky {
+    fn name(&self) -> &'static str {
+        "anthropic"
+    }
+    async fn stream(
+        &self,
+        _: &ModelSpec,
+        _: &Request,
+    ) -> brain::Result<BoxStream<'static, brain::Result<StreamEvent>>> {
+        if self.remaining.fetch_sub(1, Ordering::SeqCst) > 0 {
+            return Err((self.err)());
+        }
+        Ok(futures::stream::iter(text_turn("recovered").into_iter().map(Ok)).boxed())
+    }
+}
+
+fn flaky(times: usize, err: fn() -> brain::BrainError) -> Arc<Flaky> {
+    Arc::new(Flaky {
+        remaining: AtomicUsize::new(times),
+        err,
+    })
+}
+
+fn fast_retry(a: &mut Agent) {
+    a.retry.base = std::time::Duration::from_millis(1);
+    a.retry.max = std::time::Duration::from_millis(4);
+}
+
+#[tokio::test]
+async fn a_throttled_request_is_retried_until_it_lands() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
+    let mut a = Agent::new(
+        flaky(2, || brain::BrainError::Api {
+            transport: "anthropic",
+            status: 429,
+            body: "rate limit exceeded".into(),
+        }),
+        spec(),
+    );
+    fast_retry(&mut a);
+
+    let (session, out, events) = drive(&a, &ctx, "go").await;
+    out.unwrap();
+    assert_eq!(session.context()[1].text(), "recovered");
+
+    let retries: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e, Event::Retrying { .. }))
+        .collect();
+    assert_eq!(retries.len(), 2, "{retries:?}");
+}
+
+#[tokio::test]
+async fn a_spent_quota_is_not_retried_however_much_it_looks_like_a_throttle() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
+    let mut a = Agent::new(
+        flaky(99, || brain::BrainError::Api {
+            transport: "anthropic",
+            status: 429,
+            body: r#"{"error":{"code":"insufficient_quota"}}"#.into(),
+        }),
+        spec(),
+    );
+    fast_retry(&mut a);
+
+    let (_s, out, events) = drive(&a, &ctx, "go").await;
+    // The status is a throttle's; retrying it just spends money.
+    assert!(out.is_err(), "{out:?}");
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Retrying { .. })),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn retries_give_up_rather_than_hammering_forever() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
+    let mut a = Agent::new(
+        flaky(99, || brain::BrainError::Stream("connection reset".into())),
+        spec(),
+    );
+    fast_retry(&mut a);
+    a.retry.attempts = 3;
+
+    let (_s, out, events) = drive(&a, &ctx, "go").await;
+    assert!(out.is_err());
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, Event::Retrying { .. }))
+            .count(),
+        3
+    );
+}
+
+/// Opens a stream and then never sends anything.
+struct Wedged;
+
+#[async_trait]
+impl Transport for Wedged {
+    fn name(&self) -> &'static str {
+        "anthropic"
+    }
+    async fn stream(
+        &self,
+        _: &ModelSpec,
+        _: &Request,
+    ) -> brain::Result<BoxStream<'static, brain::Result<StreamEvent>>> {
+        Ok(futures::stream::pending().boxed())
+    }
+}
+
+#[tokio::test]
+async fn a_stream_that_stops_sending_does_not_hold_the_turn_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
+    let mut a = Agent::new(Arc::new(Wedged), spec());
+    fast_retry(&mut a);
+    a.retry.attempts = 1;
+    a.retry.idle = std::time::Duration::from_millis(120);
+
+    let started = std::time::Instant::now();
+    let (_s, out, events) = drive(&a, &ctx, "go").await;
+
+    assert!(out.is_err(), "{out:?}");
+    assert!(
+        started.elapsed().as_secs() < 5,
+        "the watchdog must fire, not the test"
+    );
+    // A wedged stream reads as transient, so it is retried before giving up.
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, Event::Retrying { .. }))
+            .count(),
+        1
+    );
+}
+
+fn call_message(id: &str) -> Message {
+    Message::Assistant {
+        id: None,
+        content: vec![brain::message::AssistantContent::ToolCall(
+            brain::message::ToolCall {
+                id: brain::message::ToolCallId(id.into()),
+                provider: Some(ProviderCallId(id.into())),
+                name: "read".into(),
+                args: json!({ "path": "a.rs" }),
+            },
+        )],
+    }
+}
+
+/// Refuses oversized requests until the transcript shrinks below `fits`.
+struct Picky {
+    fits: usize,
+    refusals: AtomicUsize,
+}
+
+#[async_trait]
+impl Transport for Picky {
+    fn name(&self) -> &'static str {
+        "anthropic"
+    }
+    async fn stream(
+        &self,
+        _: &ModelSpec,
+        req: &Request,
+    ) -> brain::Result<BoxStream<'static, brain::Result<StreamEvent>>> {
+        let size = brain::estimate::tokens(&req.messages);
+        if size > self.fits {
+            self.refusals.fetch_add(1, Ordering::SeqCst);
+            return Err(brain::BrainError::Api {
+                transport: "anthropic",
+                status: 400,
+                body: format!("prompt is too long: {size} tokens > {} maximum", self.fits),
+            });
+        }
+        Ok(futures::stream::iter(text_turn("fits now").into_iter().map(Ok)).boxed())
+    }
+}
+
+#[tokio::test]
+async fn an_overflow_refusal_shrinks_the_transcript_and_retries() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
+    let picky = Arc::new(Picky {
+        fits: 2_000,
+        refusals: AtomicUsize::new(0),
+    });
+
+    let mut a = Agent::new(picky.clone(), spec());
+    fast_retry(&mut a);
+    // A transcript our own estimate calls comfortable, which the provider does
+    // not — and one compaction can actually shrink, unlike a lone huge prompt.
+    let mut history = vec![Message::user("the task")];
+    for i in 0..3 {
+        history.push(call_message(&format!("h{i}")));
+        history.push(Message::tool_results(vec![
+            brain::message::ToolResult::text(
+                brain::message::ToolCallId(format!("h{i}")),
+                "read",
+                "z".repeat(12_000),
+            ),
+        ]));
+    }
+    let mut session = Session {
+        log: agent::log::Log::from_messages(history),
+    };
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let out = a.run(&mut session, &ctx, &tx).await;
+    drop(tx);
+    let mut events = Vec::new();
+    while let Some(e) = rx.recv().await {
+        events.push(e);
+    }
+
+    out.unwrap();
+    assert!(
+        picky.refusals.load(Ordering::SeqCst) > 0,
+        "the refusal must have happened"
+    );
+    // The refusal named its window, so the budget is refitted to it rather
+    // than squeezed blindly.
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::Warning(w) if w.contains("2000-token window"))),
+        "{events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::Compacted(r) if r.after < 1_000)),
+        "{events:?}"
+    );
+    assert_eq!(session.context().last().unwrap().text(), "fits now");
+}
+
+/// Refuses without saying how big the window is.
+struct Mute {
+    fits: usize,
+}
+
+#[async_trait]
+impl Transport for Mute {
+    fn name(&self) -> &'static str {
+        "anthropic"
+    }
+    async fn stream(
+        &self,
+        _: &ModelSpec,
+        req: &Request,
+    ) -> brain::Result<BoxStream<'static, brain::Result<StreamEvent>>> {
+        if brain::estimate::tokens(&req.messages) > self.fits {
+            return Err(brain::BrainError::Api {
+                transport: "anthropic",
+                status: 413,
+                body: "Request exceeds the maximum size".into(),
+            });
+        }
+        Ok(futures::stream::iter(text_turn("ok").into_iter().map(Ok)).boxed())
+    }
+}
+
+#[tokio::test]
+async fn an_overflow_with_no_number_falls_back_to_squeezing() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
+
+    let mut history = vec![Message::user("the task")];
+    for i in 0..3 {
+        history.push(call_message(&format!("h{i}")));
+        history.push(Message::tool_results(vec![
+            brain::message::ToolResult::text(
+                brain::message::ToolCallId(format!("h{i}")),
+                "read",
+                "z".repeat(12_000),
+            ),
+        ]));
+    }
+
+    // Squeezing blindly only corrects a modest error — three passes at 60% —
+    // which is the realistic case: an estimate off by a third, not by 30x.
+    let mut spec = spec();
+    spec.context_window = 60_000;
+    let mut a = Agent::new(Arc::new(Mute { fits: 8_000 }), spec);
+    fast_retry(&mut a);
+    let mut session = Session {
+        log: agent::log::Log::from_messages(history),
+    };
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let out = a.run(&mut session, &ctx, &tx).await;
+    drop(tx);
+    let mut events = Vec::new();
+    while let Some(e) = rx.recv().await {
+        events.push(e);
+    }
+
+    out.unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::Warning(w) if w.contains("named no limit"))),
+        "{events:?}"
+    );
+}

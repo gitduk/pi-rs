@@ -85,6 +85,26 @@ impl Renderer {
                 self.settle();
                 eprintln!("{}", self.paint(DIM, &compaction_line(&r)));
             }
+            Event::Retrying {
+                attempt,
+                delay_ms,
+                reason,
+            } if !self.quiet => {
+                self.end_thinking();
+                self.settle();
+                eprintln!(
+                    "{}",
+                    self.paint(
+                        DIM,
+                        &format!("retry {attempt} in {delay_ms}ms · {}", clip(&reason, 90))
+                    )
+                );
+            }
+            Event::Warning(w) => {
+                self.end_thinking();
+                self.settle();
+                eprintln!("{} {}", self.paint(RED, "!"), self.paint(DIM, &w));
+            }
             Event::ToolDenied { name, reason, .. } => {
                 self.settle();
                 eprintln!(

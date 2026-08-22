@@ -27,6 +27,14 @@ pub enum Event {
     },
     /// The transcript was shrunk to fit before this turn was sent.
     Compacted(crate::compact::Report),
+    /// The request failed in a way worth another attempt.
+    Retrying {
+        attempt: usize,
+        delay_ms: u64,
+        reason: String,
+    },
+    /// Something the run recovered from but the user should know about.
+    Warning(String),
     TurnEnd {
         usage: Usage,
         cost: f64,

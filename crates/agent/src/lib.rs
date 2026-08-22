@@ -29,6 +29,53 @@ pub const DEFAULT_SYSTEM: &str = include_str!("../prompts/system.md");
 /// costs a little quality; compacting late costs the whole turn.
 const SAFETY_MARGIN: usize = 2_000;
 
+/// How hard to squeeze after the provider says the request did not fit. Our
+/// estimate was wrong by an unknown amount, so the correction is blunt.
+const SQUEEZE: f64 = 0.6;
+
+/// Attempts to shrink one turn before giving up on it.
+const MAX_SQUEEZE: usize = 3;
+
+/// Retry schedule for a request the provider could not serve right now.
+#[derive(Debug, Clone, Copy)]
+pub struct Retry {
+    pub attempts: usize,
+    pub base: std::time::Duration,
+    pub max: std::time::Duration,
+    /// No data for this long means the stream is wedged. Generous, because a
+    /// reasoning model can legitimately think for minutes before its first
+    /// token.
+    pub idle: std::time::Duration,
+}
+
+impl Default for Retry {
+    fn default() -> Self {
+        Self {
+            attempts: 4,
+            base: std::time::Duration::from_millis(800),
+            max: std::time::Duration::from_secs(30),
+            idle: std::time::Duration::from_secs(300),
+        }
+    }
+}
+
+impl Retry {
+    /// Exponential, capped, with jitter so concurrent agents do not retry in
+    /// lockstep against a provider that is already struggling.
+    fn delay(&self, attempt: usize) -> std::time::Duration {
+        let grown = self.base.saturating_mul(1u32 << attempt.min(10));
+        let capped = grown.min(self.max);
+        // Nanos from the clock are a good enough jitter source for a backoff,
+        // and cheaper than taking on a rng dependency.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0) as u64;
+        let jitter = capped.as_millis() as u64 / 4;
+        capped + std::time::Duration::from_millis(if jitter == 0 { 0 } else { nanos % jitter })
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
     #[error(transparent)]
@@ -80,6 +127,7 @@ pub struct Agent {
     /// Ask the model to summarize the history compaction is about to drop.
     /// False drops it outright, which is faster and loses more.
     pub summarize: bool,
+    pub retry: Retry,
 }
 
 /// What a streamed call resolves to before anything runs. Deciding first keeps
@@ -101,6 +149,7 @@ impl Agent {
             max_turns: 50,
             compaction: Some(Policy::default()),
             summarize: true,
+            retry: Retry::default(),
         }
     }
 
@@ -112,44 +161,83 @@ impl Agent {
     ) -> Result<Totals, AgentError> {
         let mut totals = Totals::default();
 
+        // Our token estimate is a bound, not a measurement. When the provider
+        // says otherwise, this is what carries the correction forward.
+        let mut scale = 1.0f64;
+        // A window the provider named, which outranks whatever the catalog says.
+        let mut hard: Option<usize> = None;
+
         for turn in 1..=self.max_turns {
             let _ = tx.send(Event::TurnStart { turn });
+            let mut squeezes = 0usize;
 
-            if let Some(policy) = &self.compaction {
-                let budget = self.budget();
-                if brain::estimate::tokens(&session.context()) > budget {
-                    let (mut record, mut report) = compact::plan(&session.log, budget, policy);
-                    if !record.dropped.is_empty() && self.summarize {
-                        let cost = self.write_summary(&session.log, &mut record).await;
-                        report.summarized = record.summary.is_some();
-                        totals.add(&cost, self.spec.cost(&cost));
+            let done = loop {
+                let budget = ((hard.unwrap_or_else(|| self.budget()) as f64) * scale) as usize;
+                self.maybe_compact(session, budget, squeezes > 0, &mut totals, tx)
+                    .await;
+
+                let req = Request {
+                    system: Some(self.system.clone()),
+                    messages: session.context(),
+                    tools: self.registry.defs(),
+                    max_output_tokens: None,
+                    temperature: None,
+                    effort: self.effort,
+                    tool_choice: Default::default(),
+                };
+
+                match self.stream_turn(&req, ctx, tx).await {
+                    Ok(done) => break done,
+                    Err(AgentError::Brain(e))
+                        if brain::classify(&e) == brain::Fault::Overflow
+                            && squeezes < MAX_SQUEEZE =>
+                    {
+                        squeezes += 1;
+                        // The refusal usually names the real window. Reading it
+                        // beats guessing when the estimate was wrong by an
+                        // unknown amount.
+                        match brain::fault::overflow_limit(&e) {
+                            Some(limit) => {
+                                hard = Some(self.budget_within(limit));
+                                let _ = tx.send(Event::Warning(format!(
+                                    "the provider reports a {limit}-token window; refitting to it"
+                                )));
+                            }
+                            None => {
+                                scale *= SQUEEZE;
+                                let _ = tx.send(Event::Warning(format!(
+                                    "the request did not fit and named no limit; \
+                                     retrying at {}% of the estimated budget",
+                                    (scale * 100.0).round()
+                                )));
+                            }
+                        }
                     }
-                    // A pass that reclaimed nothing is not news; reporting it
-                    // every turn buries the ones that did.
-                    if report.touched() {
-                        session.log.record(record);
-                        let _ = tx.send(Event::Compacted(report));
-                    }
+                    Err(e) => return Err(e),
                 }
-            }
-
-            let req = Request {
-                system: Some(self.system.clone()),
-                messages: session.context(),
-                tools: self.registry.defs(),
-                max_output_tokens: None,
-                temperature: None,
-                effort: self.effort,
-                tool_choice: Default::default(),
             };
 
-            let done = self.stream_turn(&req, ctx, tx).await?;
             let cost = self.spec.cost(&done.usage);
             totals.add(&done.usage, cost);
             let _ = tx.send(Event::TurnEnd {
                 usage: done.usage,
                 cost,
             });
+
+            // Two providers accept an oversized request instead of refusing it:
+            // one silently, one by truncating and then having no room to answer.
+            // Both look like success and neither can be caught before the fact.
+            let window = self.spec.context_window as usize;
+            let silently_truncated = done.usage.input as usize > window
+                || (done.stop == brain::StopReason::MaxTokens && done.usage.output == 0);
+            if silently_truncated && scale > SQUEEZE.powi(MAX_SQUEEZE as i32) {
+                scale *= SQUEEZE;
+                let _ = tx.send(Event::Warning(format!(
+                    "the provider took {} input tokens against a {window}-token window and \
+                     answered from a truncated prompt; tightening the budget",
+                    done.usage.input
+                )));
+            }
 
             let calls: Vec<ToolCall> = done.message.tool_calls().cloned().collect();
             session.log.push(done.message);
@@ -173,6 +261,42 @@ impl Agent {
         }
 
         Err(AgentError::TurnLimit(self.max_turns))
+    }
+
+    /// Shrink the transcript to `budget` if it is over, recording what went.
+    async fn maybe_compact(
+        &self,
+        session: &mut Session,
+        budget: usize,
+        urgent: bool,
+        totals: &mut Totals,
+        tx: &UnboundedSender<Event>,
+    ) {
+        let Some(policy) = &self.compaction else {
+            return;
+        };
+        if brain::estimate::tokens(&session.context()) <= budget {
+            return;
+        }
+        // Holding the working tail back is a preference; fitting at all is not.
+        // Once the provider has refused the request, the tail yields.
+        let policy = if urgent {
+            compact::Policy { protect_tail: 0 }
+        } else {
+            *policy
+        };
+        let (mut record, mut report) = compact::plan(&session.log, budget, &policy);
+        if !record.dropped.is_empty() && self.summarize {
+            let cost = self.write_summary(&session.log, &mut record).await;
+            report.summarized = record.summary.is_some();
+            totals.add(&cost, self.spec.cost(&cost));
+        }
+        // A pass that reclaimed nothing is not news; reporting it every turn
+        // buries the ones that did.
+        if report.touched() {
+            session.log.record(record);
+            let _ = tx.send(Event::Compacted(report));
+        }
     }
 
     /// Summarize what is about to be dropped, folding in any summary already in
@@ -201,7 +325,12 @@ impl Agent {
     /// tool schemas all share the window with it, so each is subtracted before
     /// the transcript gets to claim what is left.
     pub fn budget(&self) -> usize {
-        let window = self.spec.context_window as usize;
+        self.budget_within(self.spec.context_window as usize)
+    }
+
+    /// The same accounting against a window the provider named instead of the
+    /// one the catalog claims.
+    fn budget_within(&self, window: usize) -> usize {
         // A spec may declare an output cap larger than the window it is being
         // used against — an overridden window, a proxy, a stale entry. Reserving
         // it verbatim would leave the transcript nothing at all.
@@ -215,21 +344,70 @@ impl Agent {
         window.saturating_sub(fixed).max(window / 4)
     }
 
+    /// Run one request, retrying while the provider says it is a passing problem.
     async fn stream_turn(
         &self,
         req: &Request,
         ctx: &Ctx,
         tx: &UnboundedSender<Event>,
     ) -> Result<brain::stream::Completion, AgentError> {
+        let mut attempt = 0usize;
+        loop {
+            let err = match self.attempt(req, ctx, tx).await {
+                Ok(done) => return Ok(done),
+                Err(AgentError::Brain(e)) => e,
+                Err(other) => return Err(other),
+            };
+
+            // A spent quota arrives as a 429 like any throttle; retrying that
+            // one only costs money.
+            if attempt >= self.retry.attempts || brain::classify(&err) != brain::Fault::Transient {
+                return Err(AgentError::Brain(err));
+            }
+
+            attempt += 1;
+            let delay = self.retry.delay(attempt);
+            let _ = tx.send(Event::Retrying {
+                attempt,
+                delay_ms: delay.as_millis() as u64,
+                reason: err.to_string(),
+            });
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => {}
+                _ = ctx.cancel.cancelled() => return Err(AgentError::Cancelled),
+            }
+        }
+    }
+
+    /// One attempt. Deltas reach the renderer as they arrive, so a retry shows
+    /// as a false start — which the Retrying event is there to explain.
+    async fn attempt(
+        &self,
+        req: &Request,
+        ctx: &Ctx,
+        tx: &UnboundedSender<Event>,
+    ) -> Result<brain::stream::Completion, AgentError> {
+        // A fresh accumulator per attempt: half a stream must not bleed into
+        // the message the retry produces.
         let mut acc = Accumulator::new(self.transport.name(), &self.spec.wire_id);
+        let idle = self.retry.idle;
+
         let mut stream = tokio::select! {
-            r = self.transport.stream(&self.spec, req) => r?,
+            r = tokio::time::timeout(idle, self.transport.stream(&self.spec, req)) => match r {
+                Ok(r) => r?,
+                Err(_) => return Err(wedged(idle)),
+            },
             _ = ctx.cancel.cancelled() => return Err(AgentError::Cancelled),
         };
 
         loop {
             let next = tokio::select! {
-                n = stream.next() => n,
+                n = tokio::time::timeout(idle, stream.next()) => match n {
+                    Ok(n) => n,
+                    // A provider that stops sending mid-stream would otherwise
+                    // hold the turn open until the user gives up.
+                    Err(_) => return Err(wedged(idle)),
+                },
                 _ = ctx.cancel.cancelled() => return Err(AgentError::Cancelled),
             };
             let Some(ev) = next else { break };
@@ -366,6 +544,13 @@ impl Agent {
 
         Ok(results)
     }
+}
+
+fn wedged(idle: std::time::Duration) -> AgentError {
+    AgentError::Brain(brain::BrainError::Stream(format!(
+        "the stream sent nothing for {}s",
+        idle.as_secs()
+    )))
 }
 
 /// Cancels on the first Ctrl-C so a runaway turn stops without killing the

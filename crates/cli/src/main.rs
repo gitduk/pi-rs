@@ -96,6 +96,14 @@ struct Args {
     #[arg(long)]
     no_summary: bool,
 
+    /// How many times to retry a request the provider could not serve.
+    #[arg(long, default_value_t = 4)]
+    retries: usize,
+
+    /// Give up on a stream that has sent nothing for this long.
+    #[arg(long, value_name = "SECONDS", default_value_t = 300)]
+    idle_timeout: u64,
+
     /// Replace the built-in system prompt.
     #[arg(long)]
     system: Option<String>,
@@ -257,6 +265,8 @@ async fn main() -> Result<()> {
         ag.compaction = None;
     }
     ag.summarize = !args.no_summary;
+    ag.retry.attempts = args.retries;
+    ag.retry.idle = std::time::Duration::from_secs(args.idle_timeout.max(1));
 
     let ctx = tools::Ctx {
         workspace,
