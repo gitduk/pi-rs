@@ -76,23 +76,38 @@ pub fn outline(lang: Lang, content: &str) -> Vec<Item> {
     };
     let lines: Vec<&str> = content.lines().collect();
     let mut out = Vec::new();
-    visit(tree.root_node(), lang, &lines, 0, &mut out);
+    visit(tree.root_node(), lang, &lines, 0, None, &mut out);
     out
 }
 
-fn visit(node: Node, lang: Lang, lines: &[&str], depth: usize, out: &mut Vec<Item>) {
+/// `shown` is the span of the nearest declaration already listed, so a wrapper
+/// and the thing it wraps are not listed twice.
+///
+/// `export class C {…}` is two declared nodes opening and closing on the same
+/// rows — the export and the class — and the reader wants one line, not two.
+/// Suppressing by span rather than by node kind keeps the language tables
+/// honest: `export_statement` really is the declaration when it wraps something
+/// anonymous, and says so by being the only node with that span.
+fn visit(
+    node: Node,
+    lang: Lang,
+    lines: &[&str],
+    depth: usize,
+    shown: Option<(usize, usize)>,
+    out: &mut Vec<Item>,
+) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         if !child.is_named() {
             continue;
         }
         let kind = child.kind();
-        let declared = lang.declarations().contains(&kind);
         let container = lang.containers().contains(&kind);
+        let line = child.start_position().row + 1;
+        let end = child.end_position().row + 1;
+        let declared = lang.declarations().contains(&kind) && shown != Some((line, end));
 
         if declared {
-            let line = child.start_position().row + 1;
-            let end = child.end_position().row + 1;
             let text = lines
                 .get(line - 1)
                 .map(|l| l.trim_end())
@@ -104,10 +119,21 @@ fn visit(node: Node, lang: Lang, lines: &[&str], depth: usize, out: &mut Vec<Ite
                 text: text.to_string(),
             });
         }
-        if container || !declared {
+        if container || !lang.declarations().contains(&kind) {
             // Undeclared nodes are still walked: a declaration often sits inside
             // a wrapper the outline itself has no reason to show.
-            visit(child, lang, lines, depth + usize::from(declared), out);
+            // Only a span that was actually listed can suppress a duplicate of
+            // itself. Carrying every span walked through would let a class's
+            // body suppress the one method that shares its extent.
+            let shown = if declared { Some((line, end)) } else { shown };
+            visit(
+                child,
+                lang,
+                lines,
+                depth + usize::from(declared),
+                shown,
+                out,
+            );
         }
     }
 }
@@ -156,6 +182,50 @@ impl Point {
                 (12, 12, 1, "fn hidden(&self) {}"),
             ]
         );
+    }
+
+    const TS: &str = "\
+export interface Cfg {
+  host: string;
+}
+
+export class Server {
+  start(): void {}
+}
+
+export default { port: 8080 };
+";
+
+    #[test]
+    fn a_wrapper_and_what_it_wraps_are_listed_once() {
+        // `export class C` is two declared nodes over the same rows, and the
+        // reader wants one line. The last of them still counts when it wraps
+        // nothing nameable, which is the only way `export default { … }` gets
+        // listed at all.
+        let items = outline(Lang::TypeScript, TS);
+        let got: Vec<_> = items
+            .iter()
+            .map(|i| (i.line, i.end, i.depth, i.text.trim()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (1, 3, 0, "export interface Cfg {"),
+                (5, 7, 0, "export class Server {"),
+                (6, 6, 1, "start(): void {}"),
+                (9, 9, 0, "export default { port: 8080 };"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_method_sharing_its_parents_last_line_survives() {
+        // The suppression key is the span actually listed, not every span
+        // walked through: a class body has the same extent as its one method.
+        let src = "class Dog:\n    def bark(self):\n        return 1\n";
+        let items = outline(Lang::Python, src);
+        let got: Vec<_> = items.iter().map(|i| (i.line, i.depth)).collect();
+        assert_eq!(got, vec![(1, 0), (2, 1)]);
     }
 
     #[test]
