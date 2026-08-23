@@ -358,6 +358,10 @@ pub struct Resolved {
     pub effort: Effort,
     pub max_turns: usize,
     pub keys: keys::Keys,
+    /// The built-ins plus one command per skill. Here rather than in the Repl
+    /// because a skill discovered at reload has to reach the prompt the same
+    /// way everything else the config decides does.
+    pub commands: Vec<repl::Command>,
     /// Worth saying once, at startup and at each reload.
     pub notes: Vec<String>,
 }
@@ -381,7 +385,9 @@ pub fn resolve(
             )
         })?;
     }
-    if !args.no_skills {
+    let skills = if args.no_skills {
+        Vec::new()
+    } else {
         let found = tools::skills::discover(root);
         // A skill that silently fails to appear is one the user goes looking
         // for in the wrong place.
@@ -391,10 +397,14 @@ pub fn resolve(
                 .iter()
                 .map(|p| format!("skill skipped — {p}")),
         );
-        let tool = tools::skill::SkillTool::new(found.skills);
-        if !tool.is_empty() {
-            registry = registry.with(tool);
-        }
+        found.skills
+    };
+    // Before the move: a skill is two things at once, a command the user can
+    // type and a body the model can load, and both read the same list.
+    let commands = repl::commands(&skills, &mut notes);
+    let tool = tools::skill::SkillTool::new(skills);
+    if !tool.is_empty() {
+        registry = registry.with(tool);
     }
     if let Some(path) = &args.schema {
         let body =
@@ -458,6 +468,7 @@ pub fn resolve(
         effort,
         max_turns: settled.max_turns,
         keys: config.key_map()?,
+        commands,
         notes,
     })
 }
@@ -580,6 +591,7 @@ async fn main() -> Result<()> {
             keys: key_map.clone(),
             config: config.clone(),
             args: args.clone(),
+            commands: std::sync::Arc::new(resolved.commands),
             ctx: tools::Ctx::new(workspace),
         };
         // The live region needs the terminal at both ends: keys come in one
@@ -592,6 +604,15 @@ async fn main() -> Result<()> {
         let out = line::run(core, tx).await;
         let _ = painter.await;
         return out;
+    };
+
+    // A skill command is a prompt, so it means here what it means at the
+    // terminal. The built-ins are not: they operate on a session, and a run
+    // that answers once has none to operate on.
+    let prompt = match repl::expand(&resolved.commands, &prompt) {
+        Some(Ok(instructions)) => instructions,
+        Some(Err(why)) => bail!("{why}"),
+        None => prompt,
     };
 
     let painter = paint(rx, quiet, structured);

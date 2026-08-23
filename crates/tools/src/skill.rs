@@ -59,16 +59,26 @@ impl SkillTool {
     }
 }
 
+/// How many of a skill's own files are worth naming. Past this the list stops
+/// being a way in and starts being the message.
+const CAP: usize = 40;
+
 /// Paths under `dir`, relative to it, excluding `SKILL.md` itself.
 fn sibling_files(dir: &std::path::Path) -> Vec<String> {
     fn walk(dir: &std::path::Path, base: &std::path::Path, out: &mut Vec<String>, depth: usize) {
-        if depth > 3 || out.len() > 40 {
+        if depth > 3 {
             return;
         }
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
         for entry in entries.flatten() {
+            // Inside the loop, not only at each descent: a directory holding a
+            // thousand files at its own level would otherwise name every one of
+            // them in a message that goes to the provider.
+            if out.len() >= CAP {
+                return;
+            }
             let path = entry.path();
             if entry.file_type().is_ok_and(|t| t.is_dir()) {
                 walk(&path, base, out, depth + 1);
@@ -82,6 +92,28 @@ fn sibling_files(dir: &std::path::Path) -> Vec<String> {
     let mut out = Vec::new();
     walk(dir, dir, &mut out, 0);
     out.sort();
+    out
+}
+
+/// A skill's body, with the way to reach the files it points at.
+///
+/// Shared with the surface that runs a skill as a slash command: the model is
+/// given the same instructions either way, and either way `read` cannot see a
+/// skill's own directory.
+pub fn instructions(skill: &Skill, text: &str) -> String {
+    let mut out = body(text).to_string();
+    // Skills usually live outside the workspace, where `read` cannot reach.
+    // Instructions that point at a sibling file are useless unless the way to
+    // fetch it arrives with them.
+    let siblings = sibling_files(&skill.dir);
+    if !siblings.is_empty() {
+        out.push_str(&format!(
+            "\n---\nFiles in this skill: {}\nFetch one with \
+             `skill(name: \"{}\", file: \"<path>\")` — `read` cannot reach them.\n",
+            siblings.join(", "),
+            skill.name
+        ));
+    }
     out
 }
 
@@ -123,18 +155,7 @@ impl Tool for SkillTool {
             let text = tokio::fs::read_to_string(skill.dir.join("SKILL.md"))
                 .await
                 .map_err(|e| ToolError::Invalid(format!("{}: {e}", args.name)))?;
-            let mut out = body(&text).to_string();
-            // Skills usually live outside the workspace, where `read` cannot
-            // reach. Instructions that point at a sibling file are useless
-            // unless the way to fetch it arrives with them.
-            let siblings = sibling_files(&skill.dir);
-            if !siblings.is_empty() {
-                out.push_str(&format!(
-                    "\n---\nFiles in this skill: {}\nFetch one with                      `skill(name: \"{}\", file: \"<path>\")` — `read` cannot reach them.\n",
-                    siblings.join(", "),
-                    skill.name
-                ));
-            }
+            let out = instructions(skill, &text);
             return Ok(ToolOutput::text(out).with_preview(format!("skill {}", skill.name)));
         };
 

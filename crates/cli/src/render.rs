@@ -239,12 +239,22 @@ fn compaction_line(r: &agent::compact::Report) -> String {
     format!("compacted {} → {} tokens{detail}{warn}", r.before, r.after)
 }
 
+/// One line, cut to `max` columns.
+///
+/// Columns rather than characters: what overflows a terminal is columns, and a
+/// line of Chinese fits half as many characters in the same width. Counting
+/// characters let a `grep` pattern or a refusal written in Chinese run to twice
+/// the intended width and wrap.
 pub fn clip(s: &str, max: usize) -> String {
     let one = s.replace('\n', " ");
-    match one.char_indices().nth(max) {
-        Some((i, _)) => format!("{}…", &one[..i]),
-        None => one,
+    let mut used = 0;
+    for (i, c) in one.char_indices() {
+        used += unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if used > max {
+            return format!("{}…", one[..i].trim_end());
+        }
     }
+    one
 }
 
 /// The one argument worth showing in a progress line.

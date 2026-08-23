@@ -688,6 +688,9 @@ mod tests {
         assert_eq!(out[1]["ev"], "pi::span");
         assert_eq!(out[1]["msg"], "turn done");
         assert!(out[1]["dur_ms"].is_number());
+        // Its own fields too, which is what lets a tool's close record name
+        // the tool rather than only the kind of span it was.
+        assert_eq!(out[1]["turn"], 3);
     }
 
     #[test]

@@ -94,11 +94,11 @@ key when they are never live together, which is how `up` is `menu.previous`
 with the list open and `history.older` without it. Sharing one *within* a
 context is refused at load, along with an unknown id or an unreadable binding.
 
-`/help` `/new` `/name` `/model` `/compact` `/reload` `/keys` `/log` `/todo` `/cost` `/exit`. Typing `/`
-opens a list of what the line could still become; `↑` `↓` pick, `Tab` accepts,
-`Esc` dismisses it until the next keystroke. `/model` is the one command whose
-argument completes too, because the name is the tedious part and the config
-already knows it.
+`/help` `/new` `/name` `/model` `/compact` `/reload` `/keys` `/log` `/todo` `/cost` `/exit`, and one
+more for every skill on disk. Typing `/` opens a list of what the line could
+still become; `↑` `↓` pick, `Tab` accepts, `Esc` dismisses it until the next
+keystroke. `/model` is the one command whose argument completes too, because
+the name is the tedious part and the config already knows it.
 
 `/compact [what to keep in view]` summarizes everything outside the tail
 you are working from — for when a phase has ended and no budget can tell.
@@ -135,18 +135,20 @@ two together rather than reproduced.
 One JSON object per line, so `jq` is the reader:
 
 ```bash
-J=~/.local/state/pi/logs/<session>.jsonl        # /log prints the path
-jq -c 'select(.lvl!="INFO")' $J                 # only what went wrong
-jq -c 'select(.ev=="pi::span")|{in,name,dur_ms}' $J   # what took the time
-jq -r 'select(.ev=="pi::edit")|.patch' $J       # what the model actually wrote
+J=~/.local/state/pi/logs/<session>.jsonl              # /log prints the path
+jq -c 'select(.lvl=="WARN" or .lvl=="ERROR")' $J      # only what went wrong
+jq -c 'select(.ev=="pi::span")|{msg,name,dur_ms}' $J  # what took the time
+jq -r 'select(.ev=="pi::edit")|.patch' $J             # what the model actually wrote
 ```
 
 `ms` is milliseconds since the run began, `in` is the span a record sits under
 (`turn>tool`), and `ev` says which part spoke: `pi::session` `pi::loop`
 `pi::wire` `pi::tool` `pi::edit` `pi::bash` `pi::compact` `pi::keys`, plus
-`pi::span` for the record that closes a span and carries its `dur_ms`. `--log debug` adds the payloads: request bodies, patches
-and tool arguments in full rather than clipped to a kilobyte. `--log trace`
-adds the dependencies' own accounts, which is a lot of hyper. `--log off`
+`pi::span` for the record that closes a span and carries its `dur_ms`. `--log debug` widens the fields, so
+patches and tool arguments arrive whole rather than clipped to a kilobyte.
+`--log trace` adds the request bodies themselves — hundreds of kilobytes a
+turn, which is why they sit a level below everything else — and the
+dependencies' own accounts, which is a lot of hyper. `--log off`
 writes nothing; `PI_LOG` sets it for good.
 
 Journals are as sensitive as transcripts — prompts, paths, file contents — and
@@ -172,6 +174,23 @@ under some other name reaches the list by being symlinked into this one.
 A skill is a directory with a `SKILL.md` carrying `name` and `description`.
 Only descriptions are always in context; the body loads when the model asks for
 it. Anything unreadable is reported at startup rather than vanishing.
+
+**A skill is also a command.** `/commit` runs the one called `commit` — no
+prefix, because the name is what you know it by and a namespace only earns its
+keep when something else wants the word. The instructions arrive as a message
+you could have typed, so the model has them without spending a turn fetching
+them, and anything after the word goes in below as what they are being applied
+to. A built-in wins the collision: a repository contributes skills, and one
+that could take `/new` away from the session it would otherwise start is a
+checkout redefining the terminal — the skill stays loadable by name and the
+startup notice says so. `/help` lists the two halves apart, since with no
+prefix the word alone does not say which it is.
+
+It reads the same one-shot: `pi "/commit fix the tests"` hands over the same
+instructions to a run that answers once. Only the skills do — `/new` and the
+rest operate on a session and there is none here, and any other word starting
+with a slash is left as prose, because `pi "/usr/bin is missing"` is a prompt
+and refusing it to catch a typo is the worse trade.
 
 ### Structured output
 
@@ -233,12 +252,12 @@ derived from it is not a bill.
 |---|---|---|
 | `brain` | 2.7k | messages, wires, streams, faults, estimates |
 | `agent` | 3.9k | the turn loop, compaction, the session log |
-| `tools` | 3.7k | the tool set and the workspace gate |
-| `cli` | 5.9k | terminal, config, sessions, the journal |
+| `tools` | 3.8k | the tool set and the workspace gate |
+| `cli` | 6.2k | terminal, config, sessions, the journal |
 | `hashline` | 1.2k | the patch format — pure, no IO |
 | `syntax` | 0.4k | tree-sitter outlines for eight languages |
 
-~18k lines, 331 tests. `cargo test` runs everything; `cargo clippy
+~18k lines, 339 tests. `cargo test` runs everything; `cargo clippy
 --all-targets` is expected to be silent.
 
 ## Not built

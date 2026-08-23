@@ -1,91 +1,164 @@
+use std::borrow::Cow;
+
 use agent::{Agent, Session, Totals};
 use tools::Ctx;
+use tools::skills::Skill;
 
 use crate::session::Store;
 
-/// One command: the word, what it takes, and what it does.
+/// Where a command came from, and so what running it means.
+#[derive(Clone)]
+pub enum Source {
+    /// A word `parse` knows and `command` answers itself.
+    Builtin,
+    /// A `SKILL.md` to read and hand to the model as if the user had typed it.
+    Skill(Skill),
+}
+
+/// One command: the word, what it takes, what it does, and what it is.
+#[derive(Clone)]
 pub struct Command {
-    pub word: &'static str,
+    /// With the leading slash.
+    pub word: Cow<'static, str>,
     /// Shown in completion, in the shape prompt templates use elsewhere:
     /// angle brackets required, square brackets optional.
     pub args: &'static str,
-    pub help: &'static str,
+    /// One line of it. A skill's description is written for the model and is
+    /// routinely longer than a line, so it arrives here already cut down.
+    pub help: Cow<'static, str>,
+    pub source: Source,
 }
 
-/// Every command, once. `parse` still maps words to typed variants, but the
-/// help text and the completion list are generated from here — a new command
-/// that reached only one of the three was the bug this table prevents.
-pub const COMMANDS: &[Command] = &[
-    Command {
-        word: "/new",
-        args: "",
-        help: "start a fresh session, keeping this one on disk",
-    },
-    Command {
-        word: "/name",
-        args: "[text]",
-        help: "call this session something you will recognise",
-    },
-    Command {
-        word: "/model",
-        args: "[name]",
-        help: "list the models in ~/.pi.toml, or move this session to one",
-    },
-    Command {
-        word: "/compact",
-        args: "[focus]",
-        help: "summarize everything but what you are working on now",
-    },
-    Command {
-        word: "/todo",
-        args: "",
-        help: "show the current plan",
-    },
-    Command {
-        word: "/cost",
-        args: "",
-        help: "what this session has spent so far",
-    },
-    Command {
-        word: "/reload",
-        args: "",
-        help: "re-read ~/.pi.toml, the instructions and the skills",
-    },
-    Command {
-        word: "/log",
-        args: "",
-        help: "where this run is writing its journal",
-    },
-    Command {
-        word: "/keys",
-        args: "",
-        help: "what every key does, and the id to rebind it under",
-    },
-    Command {
-        word: "/help",
-        args: "",
-        help: "this list",
-    },
-    Command {
-        word: "/exit",
-        args: "",
-        help: "leave (Ctrl-D does the same)",
-    },
+impl Command {
+    const fn builtin(word: &'static str, args: &'static str, help: &'static str) -> Self {
+        Self {
+            word: Cow::Borrowed(word),
+            args,
+            help: Cow::Borrowed(help),
+            source: Source::Builtin,
+        }
+    }
+}
+
+/// Every built-in command, once. `parse` still maps words to typed variants,
+/// but the help text and the completion list are generated from here — a new
+/// command that reached only one of the three was the bug this table prevents.
+///
+/// Nothing reads this directly except `commands`, which appends the skills to
+/// it. What a run answers to is settled when the workspace is known, not when
+/// the binary is built.
+const BUILTIN: &[Command] = &[
+    Command::builtin(
+        "/new",
+        "",
+        "start a fresh session, keeping this one on disk",
+    ),
+    Command::builtin(
+        "/name",
+        "[text]",
+        "call this session something you will recognise",
+    ),
+    Command::builtin(
+        "/model",
+        "[name]",
+        "list the models in ~/.pi.toml, or move this session to one",
+    ),
+    Command::builtin(
+        "/compact",
+        "[focus]",
+        "summarize everything but what you are working on now",
+    ),
+    Command::builtin("/todo", "", "show the current plan"),
+    Command::builtin("/cost", "", "what this session has spent so far"),
+    Command::builtin(
+        "/reload",
+        "",
+        "re-read ~/.pi.toml, the instructions and the skills",
+    ),
+    Command::builtin("/log", "", "where this run is writing its journal"),
+    Command::builtin(
+        "/keys",
+        "",
+        "what every key does, and the id to rebind it under",
+    ),
+    Command::builtin("/help", "", "this list"),
+    Command::builtin("/exit", "", "leave (Ctrl-D does the same)"),
 ];
 
-fn help() -> Vec<String> {
-    let width = COMMANDS
+/// How wide a one-line description may be before it is cut.
+const GIST: usize = 60;
+
+/// A description written for the model, cut down to a line for a list.
+///
+/// Two cuts, because they answer different questions: the first sentence is
+/// where the description stops being a summary, and the column is where the
+/// terminal stops having room.
+fn gist(description: &str) -> String {
+    let first = description
+        .split_once(". ")
+        .map_or(description, |(head, _)| head);
+    crate::render::clip(first.trim().trim_end_matches('.'), GIST)
+}
+
+/// What a slash answers to: the built-ins, then one command per skill.
+///
+/// No prefix. A skill is `/commit`, not `/skill:commit`, because the name is
+/// what it is known by and a namespace only earns its keep when something else
+/// is competing for the word. What does compete is a built-in, and the built-in
+/// wins: a repository contributes skills, and one that could take `/new` away
+/// from the session it would otherwise start is a checkout redefining the
+/// terminal. The skill itself is untouched — the model can still load it by
+/// name — and the note says which of the two happened, because a command that
+/// silently is not there is one the user goes looking for in the wrong place.
+pub fn commands(skills: &[Skill], notes: &mut Vec<String>) -> Vec<Command> {
+    let mut out = BUILTIN.to_vec();
+    for skill in skills {
+        let word = format!("/{}", skill.name);
+        if out.iter().any(|c| c.word.as_ref() == word) {
+            notes.push(format!(
+                "skill `{}` has no {word} — that word is a built-in command; \
+                 the model can still load the skill by name",
+                skill.name
+            ));
+            continue;
+        }
+        out.push(Command {
+            word: Cow::Owned(word),
+            args: "[text]",
+            help: Cow::Owned(gist(&skill.description)),
+            source: Source::Skill(skill.clone()),
+        });
+    }
+    out
+}
+
+fn help(commands: &[Command]) -> Vec<String> {
+    let width = commands
         .iter()
         .map(|c| c.word.len() + c.args.len() + 1)
         .max()
         .unwrap_or(0);
-    COMMANDS
+    let row = |c: &Command| {
+        let head = format!("{} {}", c.word, c.args);
+        format!("{head:width$}  {}", c.help)
+    };
+    // The break is where the built-ins end, not where the skills begin: a third
+    // source would otherwise land silently in the half that looks built in.
+    // `commands` keeps the built-ins first and contiguous, so one position
+    // settles it.
+    let Some(split) = commands
         .iter()
-        .map(|c| {
-            let head = format!("{} {}", c.word, c.args);
-            format!("{head:width$}  {}", c.help)
-        })
-        .collect()
+        .position(|c| !matches!(c.source, Source::Builtin))
+    else {
+        return commands.iter().map(row).collect();
+    };
+    let mut out: Vec<String> = commands[..split].iter().map(row).collect();
+    // Without a prefix there is nothing in the word itself to say which half it
+    // came from, so the list says it once.
+    out.push(String::new());
+    out.push("skills — the instructions load when you run one:".into());
+    out.extend(commands[split..].iter().map(row));
+    out
 }
 
 /// A model the prompt can complete to, and what tells it apart from the others.
@@ -116,16 +189,16 @@ pub struct Candidate {
 ///
 /// Only `/model` has an argument worth completing. A prompt is prose and a
 /// focus phrase is prose; guessing at either is worse than leaving it alone.
-pub fn complete(line: &str, models: &[Choice]) -> Vec<Candidate> {
+pub fn complete(line: &str, commands: &[Command], models: &[Choice]) -> Vec<Candidate> {
     if !line.starts_with('/') {
         return Vec::new();
     }
     let Some((word, rest)) = line.split_once(char::is_whitespace) else {
-        return COMMANDS
+        return commands
             .iter()
             .filter(|c| c.word.starts_with(line))
             // An exact and only match is already typed; offering it is noise.
-            .filter(|c| c.word != line)
+            .filter(|c| c.word.as_ref() != line)
             .map(|c| Candidate {
                 show: format!("{} {}", c.word, c.args).trim_end().to_string(),
                 line: c.word.to_string(),
@@ -174,6 +247,13 @@ pub struct Repl {
     /// The command line, kept because it outranks the config and so has to be
     /// re-applied over every reload.
     pub args: std::sync::Arc<crate::Args>,
+    /// What a slash answers to, built-ins and skills together. Rebuilt by
+    /// `/reload`, because a skill can appear between one turn and the next.
+    ///
+    /// Shared rather than copied, like the key map beside it: the terminal
+    /// holds the same table to complete against and re-reads it whenever this
+    /// one is replaced.
+    pub commands: std::sync::Arc<Vec<Command>>,
     /// Carried across turns: the plan and the file locks outlive any one run.
     pub ctx: Ctx,
 }
@@ -213,6 +293,9 @@ impl Repl {
         self.agent.effort = resolved.effort;
         self.agent.max_turns = resolved.max_turns;
         self.keys = std::sync::Arc::new(resolved.keys);
+        // A skill can appear between one turn and the next, so the table of
+        // what a slash answers to is recomputed like everything else here.
+        self.commands = std::sync::Arc::new(resolved.commands);
         // The running model is deliberately not re-dialled: a reload re-reads
         // preferences, and which model this session is on was a decision, not a
         // preference. `/model` is how that one changes.
@@ -222,6 +305,7 @@ impl Repl {
             target: "pi::session",
             models = self.config.models.len(),
             rebound_keys = self.config.keys.len(),
+            commands = self.commands.len(),
             max_turns = self.agent.max_turns,
             effort = ?self.agent.effort,
             system_bytes = self.agent.system.len(),
@@ -425,7 +509,12 @@ pub enum Cmd {
     Compact(String),
     /// The name to move to, or empty to list what there is.
     Model(String),
-    Unknown(String),
+    /// Not a built-in word. It may name a skill and it may name nothing; the
+    /// command table settles that, and `parse` does not have it.
+    Other {
+        word: String,
+        args: String,
+    },
 }
 
 /// Slash commands are recognized before anything reaches the model, so a line
@@ -437,6 +526,78 @@ fn refused(what: &str, e: anyhow::Error) -> String {
     let detail = format!("{e:#}");
     tracing::warn!(target: "pi::session", command = what, error = %detail, "refused");
     detail
+}
+
+/// A skill command as a message the user could have typed, or why it could not
+/// be read.
+///
+/// The body goes in whole rather than as an instruction to go and fetch it:
+/// `/commit` says the user has already chosen those instructions, and a model
+/// that must call the `skill` tool to learn what it just agreed to has spent a
+/// turn on a decision that was made before it was asked.
+fn expanded(skill: &Skill, args: &str) -> Result<String, String> {
+    let text = std::fs::read_to_string(skill.dir.join("SKILL.md")).map_err(|e| {
+        let why = refused(&skill.name, anyhow::anyhow!("{}: {e}", skill.dir.display()));
+        format!("cannot run {} — {why}", skill.name)
+    })?;
+    let mut out = format!(
+        "Run the `{}` skill. Its instructions follow.\n\n{}",
+        skill.name,
+        tools::skill::instructions(skill, &text)
+    );
+    if !args.is_empty() {
+        // Below the instructions, so the skill is read as the standing order
+        // and this as what it is being applied to.
+        out.push_str(&format!("\n---\n{args}\n"));
+    }
+    tracing::info!(
+        target: "pi::session",
+        skill = %skill.name,
+        bytes = out.len(),
+        args = !args.is_empty(),
+        "skill invoked"
+    );
+    Ok(out)
+}
+
+/// The skill a word names, if it names one. A built-in never reaches here —
+/// `parse` has already turned those into their own variants.
+fn skill_for<'a>(commands: &'a [Command], word: &str) -> Option<&'a Skill> {
+    match &commands.iter().find(|c| c.word.as_ref() == word)?.source {
+        Source::Skill(skill) => Some(skill),
+        Source::Builtin => None,
+    }
+}
+
+/// A word `parse` did not know: a skill to run, or a typo to name.
+fn dispatch(commands: &[Command], word: &str, args: &str) -> Step {
+    let Some(skill) = skill_for(commands, word) else {
+        return lines(format!("unknown command {word} — /help lists them"));
+    };
+    match expanded(skill, args) {
+        Ok(text) => Step::Prompt(text),
+        Err(why) => lines(why),
+    }
+}
+
+/// What a one-shot prompt turns into when it names a skill.
+///
+/// `pi "/commit fix the tests"` means at the command line what it means at the
+/// terminal. That is the whole guarantee, and it is deliberately narrower than
+/// the terminal's: everything else that starts with a slash is left alone.
+///
+/// The built-ins are operations on a session, and a run that answers once has
+/// no session for them to operate on. A word that names nothing is not a typo
+/// to be refused either, because here the argument is a prompt rather than a
+/// line at a prompt — `pi "/usr/bin is missing"` and `pi "/2 of the tests
+/// fail"` are prose, and refusing them to catch `/comit` trades a recoverable
+/// mistake for an unrecoverable one. The model can ask what `/comit` meant; a
+/// user whose sentence was rejected has to reword it.
+pub fn expand(commands: &[Command], line: &str) -> Option<Result<String, String>> {
+    let Cmd::Other { word, args } = parse(line)? else {
+        return None;
+    };
+    Some(expanded(skill_for(commands, &word)?, &args))
 }
 
 pub fn parse(line: &str) -> Option<Cmd> {
@@ -456,7 +617,10 @@ pub fn parse(line: &str) -> Option<Cmd> {
         "/name" => Cmd::Name(rest(line)),
         "/compact" => Cmd::Compact(rest(line)),
         "/model" => Cmd::Model(rest(line)),
-        other => Cmd::Unknown(other.to_string()),
+        other => Cmd::Other {
+            word: other.to_string(),
+            args: rest(line),
+        },
     })
 }
 
@@ -488,7 +652,7 @@ impl Repl {
         };
         match cmd {
             Cmd::Exit => Step::Quit,
-            Cmd::Help => Step::Handled(help()),
+            Cmd::Help => Step::Handled(help(&self.commands)),
             Cmd::Keys => Step::Handled(self.keys.listing()),
             Cmd::Reload => Step::Handled(self.reload()),
             Cmd::Log => lines(match crate::journal::path() {
@@ -534,22 +698,26 @@ impl Repl {
             } else {
                 self.switch(&name)
             }),
-            Cmd::Unknown(other) => lines(format!("unknown command {other} — /help lists them")),
+            Cmd::Other { word, args } => dispatch(&self.commands, &word, &args),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{COMMANDS, Candidate, Choice, Cmd, complete, parse};
+    use super::{
+        BUILTIN, Candidate, Choice, Cmd, Command, Source, Step, commands, complete, dispatch,
+        expand, gist, help, parse,
+    };
+    use tools::skills::Skill;
 
     #[test]
     fn every_listed_command_actually_parses() {
         // The table drives help and completion; a word that reached the list
         // without reaching `parse` would offer to complete into nothing.
-        for c in COMMANDS {
+        for c in BUILTIN {
             assert!(
-                !matches!(parse(c.word), Some(Cmd::Unknown(_)) | None),
+                !matches!(parse(&c.word), Some(Cmd::Other { .. }) | None),
                 "{} is listed but does not parse",
                 c.word
             );
@@ -566,11 +734,27 @@ mod tests {
             .collect()
     }
 
-    fn offered(line: &str) -> Vec<String> {
-        complete(line, &choices())
+    fn skill(name: &str, description: &str) -> Skill {
+        Skill {
+            name: name.to_string(),
+            description: description.to_string(),
+            dir: std::path::PathBuf::from("/nowhere").join(name),
+        }
+    }
+
+    fn table() -> Vec<Command> {
+        commands(&[], &mut Vec::new())
+    }
+
+    fn offered_from(line: &str, table: &[Command]) -> Vec<String> {
+        complete(line, table, &choices())
             .into_iter()
             .map(|c| c.show)
             .collect()
+    }
+
+    fn offered(line: &str) -> Vec<String> {
+        offered_from(line, &table())
     }
 
     #[test]
@@ -588,7 +772,7 @@ mod tests {
 
     #[test]
     fn accepting_a_command_that_wants_an_argument_leaves_room_for_one() {
-        let of = |line: &str| -> Candidate { complete(line, &choices()).swap_remove(0) };
+        let of = |line: &str| -> Candidate { complete(line, &table(), &choices()).swap_remove(0) };
         let name = of("/nam");
         assert_eq!((name.line.as_str(), name.more), ("/name", true));
         // Nothing follows /todo, so the caret should not be pushed past a space
@@ -609,14 +793,177 @@ mod tests {
         assert!(offered("/model flash").is_empty());
         assert!(offered("/model flash and").is_empty());
         // Accepting one replaces the line, not just the word.
-        assert_eq!(complete("/model fla", &choices())[0].line, "/model flash");
+        assert_eq!(
+            complete("/model fla", &table(), &choices())[0].line,
+            "/model flash"
+        );
     }
 
     #[test]
     fn a_config_with_no_models_offers_nothing_rather_than_every_command() {
         // The `--wire` case: choices() is empty there, and the argument branch
         // must not fall back to completing command words again.
-        assert!(complete("/model fl", &[]).is_empty());
+        assert!(complete("/model fl", &table(), &[]).is_empty());
+    }
+
+    #[test]
+    fn a_skill_is_a_command_under_its_own_name() {
+        // No prefix: the name is what the user knows the skill by.
+        let found = [skill("commit", "Use when ready to commit changes")];
+        let table = commands(&found, &mut Vec::new());
+        assert_eq!(
+            offered_from("/com", &table),
+            ["/compact [focus]", "/commit [text]"]
+        );
+        assert!(matches!(
+            table
+                .iter()
+                .find(|c| c.word == "/commit")
+                .map(|c| &c.source),
+            Some(Source::Skill(_))
+        ));
+    }
+
+    #[test]
+    fn a_skill_cannot_take_a_built_in_word() {
+        // A repository contributes skills, and one that could redefine /new
+        // would be a checkout taking the session over.
+        let found = [skill("new", "not this one"), skill("archify", "diagrams")];
+        let mut notes = Vec::new();
+        let table = commands(&found, &mut notes);
+        let new = table.iter().find(|c| c.word == "/new").unwrap();
+        assert!(matches!(new.source, Source::Builtin));
+        assert_eq!(table.iter().filter(|c| c.word == "/new").count(), 1);
+        assert!(table.iter().any(|c| c.word == "/archify"));
+        // Silently absent is how a user goes looking in the wrong place.
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("/new"), "{}", notes[0]);
+    }
+
+    #[test]
+    fn a_skill_command_keeps_what_follows_it() {
+        // `parse` has no table, so a skill and a typo are the same shape here
+        // and only the caller can tell them apart.
+        assert_eq!(
+            parse("/commit fix the flaky test"),
+            Some(Cmd::Other {
+                word: "/commit".into(),
+                args: "fix the flaky test".into()
+            })
+        );
+    }
+
+    #[test]
+    fn a_typo_is_named_rather_than_sent_to_the_model() {
+        // Otherwise `/tood` becomes a prompt and the model has to guess.
+        assert_eq!(
+            parse("/tood"),
+            Some(Cmd::Other {
+                word: "/tood".into(),
+                args: String::new()
+            })
+        );
+    }
+
+    #[test]
+    fn a_description_written_for_the_model_is_cut_to_a_line() {
+        // Skill descriptions run to paragraphs; the list has one column.
+        assert_eq!(gist("Write a commit."), "Write a commit");
+        assert_eq!(
+            gist("Draw diagrams. Also validates them, and much more besides."),
+            "Draw diagrams"
+        );
+        let long = "a".repeat(200);
+        assert_eq!(
+            gist(&long).chars().count(),
+            61,
+            "60 columns and the ellipsis"
+        );
+        // Width, not characters: these cost two columns each.
+        let wide = "从固定信源拉取上次运行之后的增量信息，生成每日精选摘要，并按重要性排序";
+        assert!(gist(wide).ends_with('…'));
+        assert_eq!(gist(wide).chars().count(), 31);
+    }
+
+    #[test]
+    fn help_says_which_half_of_the_list_a_word_came_from() {
+        // Without a prefix there is nothing in `/commit` itself to say it is
+        // not built in.
+        let plain = help(&table());
+        assert!(plain.iter().all(|l| !l.is_empty()));
+        let with = help(&commands(
+            &[skill("commit", "Write a commit")],
+            &mut Vec::new(),
+        ));
+        let split = with.iter().position(String::is_empty).expect("a break");
+        assert!(with[split + 1].starts_with("skills"));
+        assert!(with[split + 2].starts_with("/commit"));
+    }
+
+    #[test]
+    fn a_skill_arrives_as_a_message_the_user_could_have_typed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("commit");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: commit\ndescription: Write a commit.\n---\nStage, then write it.\n",
+        )
+        .unwrap();
+        let mut s = skill("commit", "Write a commit.");
+        s.dir = dir;
+
+        let table = commands(std::slice::from_ref(&s), &mut Vec::new());
+        let Step::Prompt(text) = dispatch(&table, "/commit", "the parser work") else {
+            panic!("a skill runs a turn; it is not handled here");
+        };
+        assert!(text.starts_with("Run the `commit` skill."), "{text}");
+        assert!(text.contains("Stage, then write it."));
+        // The frontmatter is metadata, not instructions.
+        assert!(!text.contains("description:"), "{text}");
+        // Arguments below the body, so the skill reads as the standing order.
+        let body = text.find("Stage, then").unwrap();
+        assert!(text.find("the parser work").unwrap() > body, "{text}");
+    }
+
+    #[test]
+    fn a_skill_whose_file_has_gone_says_so_rather_than_prompting() {
+        // Discovery ran at startup; the directory can be gone by now, and an
+        // empty prompt reaching the model is the worst of the answers.
+        let ghost = skill("ghost", "x");
+        let table = commands(std::slice::from_ref(&ghost), &mut Vec::new());
+        let Step::Handled(said) = dispatch(&table, "/ghost", "") else {
+            panic!("nothing should reach the model");
+        };
+        assert!(said[0].starts_with("cannot run ghost"), "{said:?}");
+        // And a one-shot run refuses rather than sending the word itself.
+        assert!(expand(&table, "/ghost").unwrap().is_err());
+    }
+
+    #[test]
+    fn a_one_shot_prompt_expands_a_skill_and_leaves_everything_else_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("commit");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\ndescription: x\n---\nStage it.\n",
+        )
+        .unwrap();
+        let mut s = skill("commit", "x");
+        s.dir = dir;
+        let table = commands(std::slice::from_ref(&s), &mut Vec::new());
+
+        let got = expand(&table, "/commit the parser work").expect("a skill");
+        assert!(got.unwrap().contains("Stage it."));
+
+        // A built-in is a session operation and there is no session here.
+        assert!(expand(&table, "/help").is_none());
+        // And a word that names nothing is prose, not a typo to refuse: the
+        // argument is a whole prompt, and prompts start with slashes.
+        assert!(expand(&table, "/comit the parser work").is_none());
+        assert!(expand(&table, "/usr/bin is missing").is_none());
+        assert!(expand(&table, "fix the flaky test").is_none());
     }
 
     #[test]
@@ -626,12 +973,6 @@ mod tests {
         assert_eq!(parse("/todo"), Some(Cmd::Todo));
         assert_eq!(parse("fix the bug"), None);
         assert_eq!(parse(""), None);
-    }
-
-    #[test]
-    fn a_typo_is_named_rather_than_sent_to_the_model() {
-        // Otherwise `/tood` becomes a prompt and the model has to guess.
-        assert_eq!(parse("/tood"), Some(Cmd::Unknown("/tood".into())));
     }
 
     #[test]

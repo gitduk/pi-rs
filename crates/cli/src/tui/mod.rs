@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::keys::{Action, Keys, Press};
 use crate::render::{self, Paint};
-use crate::repl::{self, Candidate, Choice, Repl, Step};
+use crate::repl::{self, Candidate, Choice, Command, Repl, Step};
 use editor::Editor;
 use screen::{Caret, Screen};
 use std::sync::Arc;
@@ -77,6 +77,8 @@ struct Ui {
     /// What `/model` can complete to. A copy rather than a borrow of the
     /// config: the loop holds the session mutably while it draws.
     choices: Vec<Choice>,
+    /// The same copy, of the same list `/help` prints.
+    commands: Arc<Vec<Command>>,
     last_interrupt: Option<Instant>,
     started: Option<Instant>,
     spinner: usize,
@@ -94,11 +96,17 @@ struct Ui {
 }
 
 impl Ui {
-    fn new(screen: Screen, keys: Arc<Keys>, choices: Vec<Choice>) -> Self {
+    fn new(
+        screen: Screen,
+        keys: Arc<Keys>,
+        choices: Vec<Choice>,
+        commands: Arc<Vec<Command>>,
+    ) -> Self {
         Self {
             screen,
             keys,
             choices,
+            commands,
             editor: Editor::default(),
             paint: Paint { color: true },
             open: String::new(),
@@ -193,7 +201,7 @@ impl Ui {
         if self.started.is_some() || self.dismissed_at.as_deref() == Some(self.editor.text()) {
             return Vec::new();
         }
-        repl::complete(self.editor.text(), &self.choices)
+        repl::complete(self.editor.text(), &self.commands, &self.choices)
     }
 
     /// The highlighted completion, clamped: the list shrinks as the word grows.
@@ -471,7 +479,7 @@ const HISTORY_KEEP: usize = 1_000;
 
 impl Tui {
     pub fn new(core: Repl, keys: Arc<Keys>) -> Result<Self> {
-        let mut ui = Ui::new(Screen::new()?, keys, core.choices());
+        let mut ui = Ui::new(Screen::new()?, keys, core.choices(), core.commands.clone());
         if let Some(prior) = history_path().and_then(|p| std::fs::read_to_string(p).ok()) {
             ui.editor.seed_history(editor::decode(&prior));
         }
@@ -523,8 +531,11 @@ impl Tui {
                         self.ui.keys = self.core.keys.clone();
                     }
                     // Likewise the completion list: /reload is allowed to
-                    // define models the last one did not.
+                    // define models — and skills — the last one did not.
                     self.ui.choices = self.core.choices();
+                    if !Arc::ptr_eq(&self.ui.commands, &self.core.commands) {
+                        self.ui.commands = self.core.commands.clone();
+                    }
                 }
                 Step::Compact(focus) => {
                     // Long enough to want the spinner, so it borrows the run's.
