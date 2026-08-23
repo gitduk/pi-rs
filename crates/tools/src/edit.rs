@@ -92,6 +92,47 @@ fn echo(path: &str, before: &str, content: &str, landed: &[Landed]) -> String {
     out
 }
 
+/// Refuse a patch that leaves a file the parser can no longer read.
+///
+/// Only "parsed before, does not now" — never "does not parse". A file that is
+/// already broken is usually the reason an edit is happening, and refusing to
+/// touch it would strand the model with no way to repair it.
+///
+/// This is what a line range costs and `N*` does not: the model resolves the
+/// closing line itself, and one off leaves an orphaned brace that applies
+/// cleanly. Nothing is written when it fires, so the whole patch stays undone.
+fn broke_syntax(plan: &hashline::Plan, loaded: &HashMap<String, String>) -> Option<String> {
+    for change in &plan.changes {
+        let (path, before, after) = match change {
+            Change::Write { path, content, .. } => (path, loaded.get(path), content),
+            Change::Rename {
+                from, to, content, ..
+            } => (to, loaded.get(from), content),
+            Change::Remove { .. } => continue,
+        };
+        let Some(lang) = syntax::Lang::of(path) else {
+            continue;
+        };
+        // The result first: a patch that parses needs nothing said about what
+        // came before it, which is every patch on the ordinary path.
+        if let Some(row) = syntax::first_error(lang, after) {
+            if before.is_some_and(|b| syntax::first_error(lang, b).is_some()) {
+                continue;
+            }
+            // The row's own text, because a bare line number invites a story
+            // about why the parser is wrong instead of a look at the line.
+            let text = after.lines().nth(row - 1).unwrap_or("").trim();
+            return Some(format!(
+                "{path} would not parse: line {row} is `{text}`, and it did \
+                 parse before this patch. A range that covers one line too few \
+                 or too many does exactly this. Re-read and check where the \
+                 construct actually ends. Nothing was written."
+            ));
+        }
+    }
+    None
+}
+
 /// What each file's tag is right now, for a refusal that turned on one.
 fn tags(loaded: &HashMap<String, String>) -> String {
     let mut out: Vec<String> = loaded
@@ -179,6 +220,17 @@ impl Tool for Edit {
             );
             ToolError::Invalid(e.to_string())
         })?;
+
+        if let Some(why) = broke_syntax(&plan, &loaded) {
+            tracing::warn!(
+                target: "pi::edit",
+                stage = "syntax",
+                error = %why,
+                patch = %args.patch,
+                "patch rejected"
+            );
+            return Err(ToolError::Invalid(why));
+        }
 
         let mut report = String::new();
         for change in &plan.changes {

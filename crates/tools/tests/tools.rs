@@ -253,6 +253,84 @@ async fn edit_applies_a_patch_anchored_to_the_tag_read_returned() {
     assert!(report.contains("2:TWO"), "{report}");
 }
 
+const THREE_FNS: &str = "\
+pub fn keep() -> i32 {
+    1
+}
+
+pub fn target() -> i32 {
+    2
+}
+";
+
+#[tokio::test]
+async fn a_range_one_line_short_is_refused_rather_than_applied() {
+    // `target` runs 5..=7. The model writes the whole function, brace and all,
+    // but names 5..=6 — so the original line 7 survives and the file has one
+    // brace too many. The patch itself is perfectly well formed; nothing before
+    // this check could tell that the end was resolved wrong. That is the cost
+    // of writing ranges by hand instead of letting `N*` find the boundary.
+    let (_d, c) = ctx();
+    let path = c.workspace.root().join("a.rs");
+    std::fs::write(&path, THREE_FNS).unwrap();
+
+    let err = read_then_edit(
+        &c,
+        "a.rs",
+        "PUT 5.=6:\n+pub fn target() -> i32 {\n+    99\n+}\n",
+    )
+    .await
+    .unwrap_err();
+    let said = err.to_string();
+    // The row's own text: a bare line number invites a story about the parser.
+    assert!(said.contains("line 8 is `}`"), "{said}");
+    assert!(said.contains("Nothing was written"), "{said}");
+
+    // Refused means refused: the file on disk is untouched.
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), THREE_FNS);
+}
+
+#[tokio::test]
+async fn the_same_range_named_correctly_still_applies() {
+    let (_d, c) = ctx();
+    std::fs::write(c.workspace.root().join("a.rs"), THREE_FNS).unwrap();
+
+    let out = read_then_edit(
+        &c,
+        "a.rs",
+        "PUT 5.=7:\n+pub fn target() -> i32 {\n+    99\n+}\n",
+    )
+    .await
+    .unwrap();
+    assert!(out.contains("99"), "{out}");
+}
+
+#[tokio::test]
+async fn a_file_that_was_already_broken_stays_editable() {
+    // The check is "parsed before, does not now". A file that never parsed is
+    // usually the reason an edit is happening; refusing it would strand the
+    // model with no way to repair it.
+    let (_d, c) = ctx();
+    let broken = "pub fn a() -> i32 {\n    1\n";
+    std::fs::write(c.workspace.root().join("a.rs"), broken).unwrap();
+
+    let out = read_then_edit(&c, "a.rs", "PUT 2.=2:\n+    2\n")
+        .await
+        .unwrap();
+    assert!(out.contains("2"), "{out}");
+}
+
+#[tokio::test]
+async fn a_language_the_parser_does_not_know_is_not_gated() {
+    let (_d, c) = ctx();
+    std::fs::write(c.workspace.root().join("a.toml"), "[a]\nb = 1\n").unwrap();
+
+    let out = read_then_edit(&c, "a.toml", "PUT 2.=2:\n+b = 2\n")
+        .await
+        .unwrap();
+    assert!(out.contains("b = 2"), "{out}");
+}
+
 #[tokio::test]
 async fn two_edits_in_a_row_need_no_re_read() {
     let (_d, c) = ctx();

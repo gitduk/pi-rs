@@ -169,6 +169,34 @@ pub fn block(lang: Lang, content: &str, line: usize) -> Option<(usize, usize)> {
     Some((e.start, e.end))
 }
 
+/// The first row tree-sitter could not parse, 1-based, if any.
+///
+/// Every grammar accepts every input — a file it cannot read comes back as a
+/// tree with error and missing nodes rather than no tree at all — so this asks
+/// the tree, not the parser.
+pub fn first_error(lang: Lang, content: &str) -> Option<usize> {
+    let tree = parse(lang, content)?;
+    let root = tree.root_node();
+    // The common answer is "none", and that one is a flag read, not a walk.
+    if !root.has_error() {
+        return None;
+    }
+    let mut cursor = root.walk();
+    let mut stack = vec![root];
+    let mut first: Option<usize> = None;
+    while let Some(node) = stack.pop() {
+        if node.is_error() || node.is_missing() {
+            let row = node.start_position().row + 1;
+            first = Some(first.map_or(row, |f: usize| f.min(row)));
+            continue;
+        }
+        if node.has_error() {
+            stack.extend(node.children(&mut cursor));
+        }
+    }
+    first
+}
+
 /// The file's declarations, in source order, nested by container.
 pub fn outline(lang: Lang, content: &str) -> Vec<Item> {
     let Some(tree) = parse(lang, content) else {
