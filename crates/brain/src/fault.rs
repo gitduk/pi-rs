@@ -23,6 +23,7 @@ const SPENT: &[&str] = &[
     "insufficient_quota",
     "out of budget",
     "quota exceeded",
+    "quota exhausted",
     "billing",
     "credit balance is too low",
 ];
@@ -165,6 +166,15 @@ mod tests {
         );
         assert_eq!(
             classify(&api(400, "Your credit balance is too low")),
+            Fault::Permanent
+        );
+        // Seen from a routing proxy, typed `rate_limit_error` and coded
+        // `rate_limit_exceeded`, and four retries over 34s changed nothing.
+        assert_eq!(
+            classify(&api(
+                429,
+                r#"{"error":{"message":"AI Chat quota exhausted","type":"rate_limit_error","code":"rate_limit_exceeded"}}"#
+            )),
             Fault::Permanent
         );
     }

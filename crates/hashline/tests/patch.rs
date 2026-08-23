@@ -314,6 +314,36 @@ fn a_caller_with_no_parser_reports_that_rather_than_guessing() {
 }
 
 #[test]
+fn crossing_the_two_target_forms_is_named_as_the_stray_dot_it_is() {
+    // A model that has just written `N.=M` reaches for `N.*`. Complaining that
+    // the line number is missing points it at the part it got right.
+    let err = parse("[f.rs#AAAA]\nCUT 50.*\n").unwrap_err();
+    let said = err.to_string();
+    assert!(said.contains("stray `.`"), "{said}");
+    assert!(said.contains("`50*`"), "{said}");
+
+    // The complaint it replaces still fires where it is true.
+    let err = parse("[f.rs#AAAA]\nCUT abc*\n").unwrap_err();
+    assert!(
+        err.to_string().contains("needs a line number before `*`"),
+        "{err}"
+    );
+    let err = parse("[f.rs#AAAA]\nCUT 0*\n").unwrap_err();
+    assert!(err.to_string().contains("numbered from 1"), "{err}");
+
+    // `>N*` carried its own copy of the same complaint, and its fix is `>50*`.
+    let err = parse("[f.rs#AAAA]\nPUT >50.*:\n+x\n").unwrap_err();
+    assert!(err.to_string().contains("`>50*`"), "{err}");
+
+    // A bare zero is the one-line form, not a malformed range; the old wording
+    // told the model to write what it had just written.
+    for spec in ["CUT 0", "CUT 00"] {
+        let err = parse(&format!("[f.rs#AAAA]\n{spec}\n")).unwrap_err();
+        assert!(err.to_string().contains("numbered from 1"), "{err}");
+    }
+}
+
+#[test]
 fn a_missing_section_header_is_reported_with_its_line() {
     let err = parse("PUT 1.=1:\n+x\n").unwrap_err();
     assert!(matches!(err, Error::Syntax { line: 1, .. }), "{err}");

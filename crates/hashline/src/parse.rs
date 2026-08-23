@@ -23,14 +23,17 @@ fn strip_quotes(s: &str) -> &str {
 /// can see says the fix landed.
 fn range(spec: &str, line: usize, verb: &str) -> Result<(usize, usize), Error> {
     let Some((a, b)) = spec.split_once(".=") else {
-        let n = number(
-            spec,
-            line,
-            &format!(
+        // Zero parses; it just is not a line. Telling the model to write the
+        // form it already wrote sends it looking in the wrong place.
+        let what = if spec.trim().parse::<usize>() == Ok(0) {
+            format!("`{verb} {}`: lines are numbered from 1", spec.trim())
+        } else {
+            format!(
                 "`{verb} {spec}` is not a range; write `{verb} N.=M`, \
                  or `{verb} N` for one line"
-            ),
-        )?;
+            )
+        };
+        let n = number(spec, line, &what)?;
         return Ok((n, n));
     };
     let parse = |t: &str| -> Result<usize, Error> {
@@ -67,6 +70,24 @@ fn register(rest: &str, line: usize) -> Result<Option<String>, Error> {
     }
 }
 
+/// Why the text before `*` is not a line number.
+///
+/// Said in the model's own terms where it can be: `N.*` is the two target forms
+/// crossed, and a complaint that the line number is missing sends the model
+/// looking at the one part it got right.
+fn not_a_block(prefix: &str, spec: &str) -> String {
+    let head = spec.trim_end_matches('*').trim();
+    let bare = head.trim_end_matches('.');
+    match bare.parse::<usize>() {
+        Ok(0) => format!("`{prefix}{spec}`: lines are numbered from 1"),
+        Ok(_) if bare != head => format!(
+            "`{prefix}{spec}` has a stray `.`: a whole construct is \
+             `{prefix}{bare}*`, and `.` only separates the ends of an `N.=M` range"
+        ),
+        _ => format!("`{prefix}{spec}` needs a line number before `*`"),
+    }
+}
+
 /// `N*` or `N.=M`.
 fn target(spec: &str, line: usize, verb: &str) -> Result<Target, Error> {
     match spec.strip_suffix('*') {
@@ -78,7 +99,7 @@ fn target(spec: &str, line: usize, verb: &str) -> Result<Target, Error> {
                 .filter(|n| *n > 0)
                 .ok_or_else(|| Error::Syntax {
                     line,
-                    what: format!("`{spec}` needs a line number before `*`"),
+                    what: not_a_block("", spec),
                 })?;
             Ok(Target::Block { line: n })
         }
@@ -329,7 +350,7 @@ fn parse_put(rest: &str, no: usize) -> Result<Op, Error> {
         let at = if t == "$" {
             LinePos::Tail
         } else if let Some(n) = t.strip_suffix('*') {
-            LinePos::AfterBlock(number(n, no, "`>N*` needs a line number before `*`")?)
+            LinePos::AfterBlock(number(n, no, &not_a_block(">", t))?)
         } else {
             LinePos::At(number(
                 t,
