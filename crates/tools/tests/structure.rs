@@ -33,8 +33,18 @@ async fn a_long_file_comes_back_as_a_skeleton() {
         )),
         "{out}"
     );
-    assert!(out.contains("321:pub struct Point {"), "{out}");
-    assert!(out.contains("326:    pub fn new() -> Self {"), "{out}");
+    // The span, so the model can replace one whole without a second read, and
+    // the indent, so a method does not read like a top-level item.
+    assert!(out.contains("321.=323:pub struct Point {"), "{out}");
+    // The address grammar belongs to hashline, and a skeleton row the model
+    // cannot paste into a patch is worse than no skeleton. Every one parses.
+    for row in out.lines().filter(|l| l.contains(".=")) {
+        let addr = row.split(':').next().unwrap();
+        let patch = format!("[big.rs#{}]\nCUT {addr}\n", hashline::tag(&body));
+        assert!(hashline::parse(&patch).is_ok(), "{addr} does not parse");
+    }
+    assert!(out.contains("325.=329:impl Point {"), "{out}");
+    assert!(out.contains("326.=328:  pub fn new() -> Self {"), "{out}");
     // 329 lines of source must not come back as 329 lines of output.
     assert!(out.lines().count() < 10, "{out}");
     assert!(!out.contains("// filler"), "{out}");

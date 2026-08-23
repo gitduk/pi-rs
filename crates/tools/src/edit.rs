@@ -27,8 +27,8 @@ shift later ones. A header ending in `:` takes `+` body rows; CUT, MV, REM and
 the register pastes take none.
   PUT N.=M:   replace original lines N through M, inclusive, with the body
   PUT N*:     replace the whole construct opening at line N; its closing line is
-              resolved for you. Point N at the first decorator or attribute to
-              take those with it.
+              resolved for you. Any decorator, attribute or doc comment above
+              it belongs to it: naming either their rows or N covers them all.
   PUT <N:     insert the body before line N (`<1` is the file head)
   PUT >N:     insert the body after line N (`>$` is the file tail)
   PUT >N*:    insert the body after the construct at N closes

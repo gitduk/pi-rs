@@ -31,6 +31,15 @@ fn looks_binary(bytes: &[u8]) -> bool {
 
 pub struct Read;
 
+/// One skeleton row's address, in the spelling `edit` parses.
+///
+/// Named rather than inlined so the round-trip test has something to hold: the
+/// grammar belongs to `hashline`, and a skeleton the model cannot paste into a
+/// patch is worse than no skeleton.
+fn range(line: usize, end: usize) -> String {
+    format!("{line}.={end}:")
+}
+
 #[async_trait]
 impl Tool for Read {
     fn name(&self) -> &str {
@@ -135,11 +144,19 @@ impl Tool for Read {
             if !items.is_empty() {
                 let mut out = format!("[{rel}#{tag}] {} lines · outline\n", all.len());
                 for item in &items {
-                    out.push_str(&format!("{}:{}\n", item.line, item.text));
+                    // The span, not just the opening row: it is what an edit
+                    // names, and a skeleton is the only view of a long file
+                    // that shows where anything ends.
+                    out.push_str(&range(item.line, item.end));
+                    for _ in 0..item.depth {
+                        out.push_str("  ");
+                    }
+                    out.push_str(&item.text);
+                    out.push('\n');
                 }
                 out.push_str(
-                    "… declarations only. Read a range with offset and limit, or \
-                     replace one whole with edit's `PUT N*:`.\n",
+                    "… declarations only, each with the range that replaces it whole. \
+                     Read a range with offset and limit.\n",
                 );
                 return Ok(ToolOutput::text(out));
             }

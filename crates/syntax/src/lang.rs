@@ -1,5 +1,22 @@
 use std::path::Path;
 
+/// What makes a node an annotation of what follows it.
+///
+/// Three cases because the grammars offer three different signals, and taking
+/// the strongest one each offers is the difference between right and nearly
+/// right: tree-sitter-rust tags its own doc comments, and knows that `////` is
+/// not one — a check on the `///` prefix does not.
+pub(crate) enum Mark {
+    /// Any node of this kind: an attribute, a decorator.
+    Kind(&'static str),
+    /// A comment the grammar itself marks as documentation *of what follows*.
+    /// Rust's `//!` and `/*!` document the enclosing module instead, and are
+    /// the same node kind carrying the same `doc` field.
+    Outer(&'static str),
+    /// A comment whose opener says so, where the grammar draws no line.
+    Opener(&'static str, &'static str),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lang {
     Rust,
@@ -87,18 +104,31 @@ impl Lang {
         }
     }
 
-    /// Kinds that sit *beside* the thing they annotate rather than inside it.
-    /// Pointing a block op at one has to reach the declaration that follows, or
-    /// the op replaces a bare `#[inline]` and orphans its function.
+    /// How a node says it annotates whatever it touches.
     ///
-    /// Plain comments are deliberately absent: a standalone comment is its own
-    /// line, and sweeping the next declaration into it would surprise.
-    pub(crate) fn attributes(self) -> &'static [&'static str] {
+    /// A construct owns the annotations directly above it, so replacing a
+    /// function replaces its `#[inline]` and its `///` with it — orphaning
+    /// either is what a reader would call a bug. Only adjacency binds them: a
+    /// blank line between a comment and the next declaration means the comment
+    /// was talking about something else.
+    pub(crate) fn annotations(self) -> &'static [Mark] {
         match self {
-            Lang::Rust => &["attribute_item"],
-            Lang::Go | Lang::JavaScript | Lang::TypeScript | Lang::Tsx => &["decorator"],
-            // Python wraps both in `decorated_definition`; nothing to absorb.
-            Lang::Python | Lang::Json | Lang::Markdown => &[],
+            Lang::Rust => &[
+                Mark::Kind("attribute_item"),
+                Mark::Outer("line_comment"),
+                Mark::Outer("block_comment"),
+            ],
+            // godoc reads the plain comment above a declaration as its
+            // documentation, and the grammar draws no line for us.
+            Lang::Go => &[Mark::Opener("comment", "//")],
+            Lang::JavaScript | Lang::TypeScript | Lang::Tsx => {
+                &[Mark::Kind("decorator"), Mark::Opener("comment", "/**")]
+            }
+            // A docstring sits inside the body; nothing above a `def` attaches.
+            Lang::Python => &[Mark::Kind("decorator")],
+            // A markdown heading annotates nothing above it, and a comment is
+            // not JSON.
+            Lang::Json | Lang::Markdown => &[],
         }
     }
 

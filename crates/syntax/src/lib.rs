@@ -2,9 +2,14 @@ use tree_sitter::{Node, Parser};
 
 mod lang;
 pub use lang::Lang;
+use lang::Mark;
 
-/// One entry in a file's skeleton: where the construct starts, where it ends,
-/// and the single line a reader needs to recognize it.
+/// One entry in a file's skeleton.
+///
+/// `line..=end` is what a patch names to replace the whole thing, annotations
+/// included. `text` is the row that identifies it — a later row than `line`
+/// whenever something annotates it — trimmed, because `depth` is the structural
+/// nesting and source indentation would double it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
     pub line: usize,
@@ -13,17 +18,128 @@ pub struct Item {
     pub text: String,
 }
 
+/// The rows one construct occupies, and the row that names it.
+///
+/// The single answer to "what is the thing at this row", so that `block` and
+/// `outline` cannot drift: both are this function, reached from a row and from
+/// a node respectively.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Extent {
+    start: usize,
+    end: usize,
+    name: usize,
+}
+
 fn parse(lang: Lang, content: &str) -> Option<tree_sitter::Tree> {
     let mut p = Parser::new();
     p.set_language(&lang.grammar()).ok()?;
     p.parse(content, None)
 }
 
+/// The last row holding any of `node`, 0-based.
+///
+/// A node stopping at column 0 stopped *at* that row's boundary, not inside it:
+/// a line comment swallows its own newline, and a markdown section closes where
+/// the next heading begins.
+fn last_row(node: Node) -> usize {
+    let end = node.end_position();
+    if end.column == 0 && end.row > node.start_position().row {
+        end.row - 1
+    } else {
+        end.row
+    }
+}
+
+/// Adjacent rows: an annotation binds to what starts on the row after it ends.
+fn touches(a: Node, b: Node) -> bool {
+    last_row(a) + 1 >= b.start_position().row
+}
+
+/// Whether `node` documents or decorates whatever it touches.
+fn annotates(lang: Lang, node: Node, src: &str) -> bool {
+    lang.annotations().iter().any(|mark| match mark {
+        Mark::Kind(kind) => node.kind() == *kind,
+        // `outer`, not `doc`: a `//!` header carries `doc` too and belongs to
+        // the module around it, so absorbing it into the first item below
+        // would delete the crate's own documentation on the first edit.
+        Mark::Outer(kind) => node.kind() == *kind && node.child_by_field_name("outer").is_some(),
+        Mark::Opener(kind, opener) => {
+            node.kind() == *kind
+                && node
+                    .utf8_text(src.as_bytes())
+                    .is_ok_and(|text| text.starts_with(opener))
+        }
+    })
+}
+
+/// Past the annotations to the thing they are about.
+///
+/// Two shapes, one walk each: Rust's attributes precede the item as siblings,
+/// Python's decorators are the leading children of a wrapper node.
+fn subject<'t>(lang: Lang, node: Node<'t>, src: &str) -> Node<'t> {
+    let mut n = node;
+    while annotates(lang, n, src) {
+        match n.next_named_sibling().filter(|next| touches(n, *next)) {
+            Some(next) => n = next,
+            None => break,
+        }
+    }
+    loop {
+        // Led by an annotation, or it is not a wrapper; the same iterator
+        // carries on from there rather than rescanning what already failed.
+        let mut cursor = n.walk();
+        let mut kids = n.named_children(&mut cursor);
+        let inner = kids
+            .next()
+            .filter(|first| annotates(lang, *first, src))
+            .and_then(|_| kids.find(|k| !annotates(lang, *k, src)));
+        match inner {
+            Some(inner) => n = inner,
+            None => return n,
+        }
+    }
+}
+
+/// Out to the outermost node opening on the same row: `## Section` is a heading
+/// inside a section, and the section is what a reader means by it.
+fn widen(node: Node) -> Node {
+    let mut n = node;
+    // The root opens on row 0, so climbing into it would make every line-1
+    // construct the whole file.
+    while let Some(p) = n.parent().filter(|p| p.parent().is_some()) {
+        if p.start_position().row != n.start_position().row {
+            break;
+        }
+        n = p;
+    }
+    n
+}
+
+fn extent(lang: Lang, node: Node, src: &str) -> Extent {
+    let subject = widen(subject(lang, node, src));
+    let mut first = subject;
+    while let Some(prev) = annotation_above(lang, first, src) {
+        first = prev;
+    }
+    Extent {
+        start: first.start_position().row + 1,
+        end: last_row(subject) + 1,
+        name: subject.start_position().row + 1,
+    }
+}
+
+/// The annotation immediately above `node`, if one is touching it.
+fn annotation_above<'t>(lang: Lang, node: Node<'t>, src: &str) -> Option<Node<'t>> {
+    let prev = node.prev_named_sibling()?;
+    (annotates(lang, prev, src) && touches(prev, node)).then_some(prev)
+}
+
 /// The construct that opens at `line`, as an inclusive 1-based range.
 ///
 /// Resolves to the *largest* node starting on that row: `fn foo() {` belongs to
 /// the whole function, not to its name. A row that opens nothing — a lone `}`,
-/// a blank line — yields None rather than a guess.
+/// a blank line — yields None rather than a guess. Annotations count as part of
+/// what they annotate, so the range covers them whichever row is named.
 pub fn block(lang: Lang, content: &str, line: usize) -> Option<(usize, usize)> {
     let tree = parse(lang, content)?;
     let row = line.checked_sub(1)?;
@@ -49,24 +165,8 @@ pub fn block(lang: Lang, content: &str, line: usize) -> Option<(usize, usize)> {
         }
     }
 
-    let mut node = best?;
-    // An attribute is a sibling of what it annotates, so the range has to run
-    // through the declaration that follows it.
-    while lang.attributes().contains(&node.kind()) {
-        match node.next_named_sibling() {
-            Some(next) => node = next,
-            None => break,
-        }
-    }
-    let end = node.end_position();
-    // A node that stops at column 0 ends *at* that row's boundary, not inside
-    // it: markdown sections close where the next heading begins.
-    let end_line = if end.column == 0 && end.row > node.start_position().row {
-        end.row
-    } else {
-        end.row + 1
-    };
-    Some((best?.start_position().row + 1, end_line))
+    let e = extent(lang, best?, content);
+    Some((e.start, e.end))
 }
 
 /// The file's declarations, in source order, nested by container.
@@ -76,7 +176,7 @@ pub fn outline(lang: Lang, content: &str) -> Vec<Item> {
     };
     let lines: Vec<&str> = content.lines().collect();
     let mut out = Vec::new();
-    visit(tree.root_node(), lang, &lines, 0, None, &mut out);
+    visit(tree.root_node(), lang, content, &lines, 0, None, &mut out);
     out
 }
 
@@ -91,6 +191,7 @@ pub fn outline(lang: Lang, content: &str) -> Vec<Item> {
 fn visit(
     node: Node,
     lang: Lang,
+    src: &str,
     lines: &[&str],
     depth: usize,
     shown: Option<(usize, usize)>,
@@ -103,37 +204,32 @@ fn visit(
         }
         let kind = child.kind();
         let container = lang.containers().contains(&kind);
-        let line = child.start_position().row + 1;
-        let end = child.end_position().row + 1;
-        let declared = lang.declarations().contains(&kind) && shown != Some((line, end));
+        // The same answer `block` gives for this row, so a skeleton entry and
+        // the patch that acts on it can never name different things. Computed
+        // only where it can be used: the walk passes through far more nodes
+        // than it lists.
+        let candidate = lang.declarations().contains(&kind);
+        let span = candidate.then(|| extent(lang, child, src));
+        let listed = span.filter(|e| shown != Some((e.start, e.end)));
 
-        if declared {
-            let text = lines
-                .get(line - 1)
-                .map(|l| l.trim_end())
-                .unwrap_or_default();
+        if let Some(Extent { start, end, name }) = listed {
+            let text = lines.get(name - 1).map(|l| l.trim()).unwrap_or_default();
             out.push(Item {
-                line,
+                line: start,
                 end,
                 depth,
                 text: text.to_string(),
             });
         }
-        if container || !lang.declarations().contains(&kind) {
+        if container || !candidate {
             // Undeclared nodes are still walked: a declaration often sits inside
             // a wrapper the outline itself has no reason to show.
             // Only a span that was actually listed can suppress a duplicate of
             // itself. Carrying every span walked through would let a class's
             // body suppress the one method that shares its extent.
-            let shown = if declared { Some((line, end)) } else { shown };
-            visit(
-                child,
-                lang,
-                lines,
-                depth + usize::from(declared),
-                shown,
-                out,
-            );
+            let shown = listed.map(|e| (e.start, e.end)).or(shown);
+            let deeper = depth + usize::from(listed.is_some());
+            visit(child, lang, src, lines, deeper, shown, out);
         }
     }
 }
@@ -246,6 +342,7 @@ export default { port: 8080 };
     #[test]
     fn python_decorators_and_classes_resolve_as_one_construct() {
         let src = "\
+@retry
 @cache
 def slow(n):
     return n
@@ -254,9 +351,16 @@ class A:
     def m(self):
         pass
 ";
-        assert_eq!(block(Lang::Python, src, 1), Some((1, 3)));
+        // Every row of the construct answers with the same range, and the row
+        // that names it is the `def`, not whichever decorator came first.
+        for row in 1..=3 {
+            assert_eq!(block(Lang::Python, src, row), Some((1, 4)), "row {row}");
+        }
         let items = outline(Lang::Python, src);
-        assert_eq!(items[0].text, "@cache");
+        // The listed range covers both decorators; the row that names it is the
+        // `def`, which is what `text` comes from.
+        assert_eq!((items[0].line, items[0].end), (1, 4));
+        assert_eq!(items[0].text, "def slow(n):");
         assert!(items.iter().any(|i| i.text.trim() == "def m(self):"));
     }
 
@@ -270,30 +374,129 @@ class A:
 }
 
 #[cfg(test)]
+mod agreement {
+    use super::*;
+
+    /// The one property that made `block` and `outline` two implementations of
+    /// the same idea worth unifying: every row a skeleton offers must resolve,
+    /// through the other entry point, to exactly the range the skeleton showed.
+    ///
+    /// Run over this crate's own source, which carries doc comments, attributes
+    /// and nesting, plus one fixture per remaining shape.
+    #[test]
+    fn every_listed_row_resolves_to_the_range_it_was_listed_with() {
+        let cases: &[(Lang, &str)] = &[
+            (Lang::Rust, include_str!("lib.rs")),
+            (Lang::Rust, include_str!("lang.rs")),
+            (
+                Lang::Markdown,
+                "# Top\n\nintro\n\n## A\n\nbody\n\n## B\n\ntail\n",
+            ),
+            (
+                Lang::Python,
+                "@a\n@b\ndef f():\n    pass\n\nclass C:\n    @property\n    def g(self):\n        return 1\n",
+            ),
+            (
+                Lang::TypeScript,
+                "/** doc */\nexport class S {\n  m(): void {}\n}\n\nexport default { a: 1 };\n",
+            ),
+            (
+                Lang::Json,
+                "{\n  \"a\": {\n    \"b\": 1\n  },\n  \"c\": 2\n}\n",
+            ),
+        ];
+        let mut listed = 0;
+        for (lang, src) in cases {
+            for item in outline(*lang, src) {
+                listed += 1;
+                // Every row the skeleton offers, and every row it covers that
+                // opens anything at all: none of them may resolve to a range
+                // the skeleton did not show, or a patch written from the
+                // skeleton acts on something else.
+                for row in item.line..=item.end {
+                    // A blank line or a lone brace opens nothing, which is an
+                    // answer. Opening something outside the range is not.
+                    if let Some((s, e)) = block(*lang, src, row) {
+                        assert!(
+                            s >= item.line && e <= item.end,
+                            "{lang:?} row {row} of {:?} escaped to {s}-{e}",
+                            item.text
+                        );
+                    }
+                }
+                assert_eq!(
+                    block(*lang, src, item.line),
+                    Some((item.line, item.end)),
+                    "{lang:?} {:?}",
+                    item.text
+                );
+            }
+        }
+        assert!(
+            listed > 30,
+            "the corpus stopped covering anything: {listed}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod attribute_tests {
     use super::*;
 
     const SRC: &str = "\
+/// What f does.
 #[inline]
 #[must_use]
 pub fn f() -> i32 {
     1
 }
-
-// a standalone comment
-pub fn g() {}
 ";
 
     #[test]
-    fn a_block_pointed_at_an_attribute_runs_through_its_declaration() {
-        assert_eq!(block(Lang::Rust, SRC, 1), Some((1, 5)));
-        assert_eq!(block(Lang::Rust, SRC, 2), Some((2, 5)));
-        assert_eq!(block(Lang::Rust, SRC, 3), Some((3, 5)));
+    fn every_row_of_a_construct_answers_with_the_same_range() {
+        // Doc comment, both attributes, and the item itself: naming any of them
+        // names the whole thing, so replacing f cannot orphan its own doc. Rows
+        // inside the body open constructs of their own and are not this.
+        for row in 1..=4 {
+            assert_eq!(block(Lang::Rust, SRC, row), Some((1, 6)), "row {row}");
+        }
     }
 
     #[test]
-    fn a_standalone_comment_never_sweeps_the_declaration_below_it() {
-        assert_eq!(block(Lang::Rust, SRC, 7), Some((7, 7)));
+    fn the_doc_marker_is_what_attaches_a_comment_not_adjacency() {
+        // A plain `//` touching a declaration is still a remark beside it.
+        // Otherwise three hundred adjacent `// filler` lines would become part
+        // of whatever they happen to sit above.
+        let plain = "// about g\npub fn g() {}\n";
+        assert_eq!(block(Lang::Rust, plain, 1), Some((1, 1)));
+        assert_eq!(block(Lang::Rust, plain, 2), Some((2, 2)));
+
+        // `///` is the language saying it documents what follows.
+        let doc = "/// About g.\npub fn g() {}\n";
+        assert_eq!(block(Lang::Rust, doc, 1), Some((1, 2)));
+        assert_eq!(block(Lang::Rust, doc, 2), Some((1, 2)));
+
+        // And a blank line detaches it again.
+        let spaced = "/// Not about g.\n\npub fn g() {}\n";
+        assert_eq!(block(Lang::Rust, spaced, 3), Some((3, 3)));
+    }
+
+    #[test]
+    fn an_inner_doc_comment_belongs_to_the_module_not_the_item_below() {
+        // `//!` and `/*!` carry the grammar's `doc` field like `///` does, and
+        // document the thing around them. Folding a crate header into the first
+        // declaration means the first edit to that declaration deletes it.
+        for header in ["//! Crate docs.", "/*! Crate docs. */"] {
+            let src = format!("{header}\npub fn bake() -> i32 {{\n    1\n}}\n");
+            assert_eq!(block(Lang::Rust, &src, 2), Some((2, 4)), "{header}");
+            assert_eq!(block(Lang::Rust, &src, 1), Some((1, 1)), "{header}");
+            let items = outline(Lang::Rust, &src);
+            assert_eq!((items[0].line, items[0].end), (2, 4), "{header}");
+        }
+
+        // `////` is not a doc comment to rustc and must not be one here.
+        let four = "//// not a doc\npub fn f() {}\n";
+        assert_eq!(block(Lang::Rust, four, 2), Some((2, 2)));
     }
 }
 
