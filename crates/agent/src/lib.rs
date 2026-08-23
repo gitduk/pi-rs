@@ -27,9 +27,16 @@ pub use event::{Estimated, Event, Totals};
 
 pub const DEFAULT_SYSTEM: &str = include_str!("../prompts/system.md");
 
-/// Identical calls before the loop is named. Two is not enough: a re-read
+/// Identical answers before the loop is named. Two is not enough: a re-read
 /// after compaction is legitimate, and the content really is the same.
 const REPEAT_LIMIT: usize = 2;
+
+/// Identical failures before the same is said. Lower, because none of that
+/// leeway applies: nothing legitimate re-sends, byte for byte, a call that just
+/// came back refused. Waiting for a third spends a turn learning what the
+/// second already showed — which is how a model that cannot get a tool's format
+/// right rides the turn limit all the way down.
+const FAILURE_LIMIT: usize = 1;
 
 /// Headroom for framing the estimate does not model. Compacting slightly early
 /// costs a little quality; compacting late costs the whole turn.
@@ -41,6 +48,14 @@ const SQUEEZE: f64 = 0.6;
 
 /// Attempts to shrink one turn before giving up on it.
 const MAX_SQUEEZE: usize = 3;
+
+/// How far below our own count a reported input figure may sit before it stops
+/// being a measurement. Deliberately generous: tokenizers disagree by tens of
+/// percent, our own count is a bound rather than a reading, and a host may
+/// exclude cached input under a name we do not parse. An order of magnitude is
+/// none of those — a proxy reporting two hundred tokens for a transcript we
+/// count in tens of thousands is not tokenizing differently, it is wrong.
+const IMPLAUSIBLE: u64 = 10;
 
 /// Retry schedule for a request the provider could not serve right now.
 #[derive(Debug, Clone, Copy)]
@@ -150,6 +165,10 @@ pub struct Agent {
     pub finish_tool: Option<String>,
 }
 
+/// What each call last returned and how many times running, keyed by the call
+/// itself — its name and the arguments it was given.
+type Echoes = HashMap<(String, String), (String, usize)>;
+
 /// What a streamed call resolves to before anything runs. Deciding first keeps
 /// the result list aligned with the call list even when nothing executes.
 enum Action {
@@ -184,7 +203,7 @@ impl Agent {
         let mut nudged = false;
         // What each call last returned, so a loop can be named rather than run
         // until the turn limit stops it.
-        let mut echoes: HashMap<(String, String), (String, usize)> = HashMap::new();
+        let mut echoes = Echoes::new();
 
         // A resumed session brings its plan back; the tool sees it as the list
         // it left behind rather than an empty one.
@@ -357,7 +376,12 @@ impl Agent {
                 .run_calls(&calls, &bad, ctx, tx, &mut echoes)
                 .instrument(span.clone())
                 .await?;
-            session.log.push(Message::tool_results(results));
+            let answered = session.log.push(Message::tool_results(results));
+            if let Some(note) = turns_left(turn, self.max_turns) {
+                // Amended onto the results rather than pushed after them: two
+                // user messages running break the alternation both wires want.
+                session.log.amend(answered, note);
+            }
             self.record_todos(session, ctx);
 
             if let Some(value) = self.yielded(ctx) {
@@ -529,11 +553,30 @@ impl Agent {
     ) -> (brain::stream::Usage, Estimated) {
         let mut usage = reported;
         let mut estimated = Estimated::default();
-        if usage.input == 0 {
-            usage.input = (brain::estimate::tokens(sent)
-                + brain::estimate::text(&self.system)
-                + brain::estimate::tool_defs(&self.registry.defs()))
-                as u64;
+        let ours = (brain::estimate::tokens(sent)
+            + brain::estimate::text(&self.system)
+            + brain::estimate::tool_defs(&self.registry.defs())) as u64;
+        // A host that reports nothing and a host that reports a number that
+        // cannot be true are the same case: what it says is not what went.
+        //
+        // Any reported caching exempts it, writes as well as reads. A cached
+        // prompt's `input` counts only the uncached remainder, so a small
+        // figure beside a large one is exactly right — and the first turn of a
+        // cached session is the sharpest version of that, where everything went
+        // to `cache_write` and nothing has been read back yet. Checking reads
+        // alone would call that turn a lie on every cached session there is.
+        let uncached = usage.cache_read + usage.cache_write == 0;
+        let cannot_be = uncached && usage.input < ours / IMPLAUSIBLE;
+        if usage.input == 0 || cannot_be {
+            if cannot_be {
+                tracing::warn!(
+                    target: "pi::wire",
+                    reported = usage.input,
+                    ours,
+                    "the host's input count cannot be true; counting it ourselves"
+                );
+            }
+            usage.input = ours;
             estimated.input = true;
         }
         if usage.output == 0 {
@@ -665,7 +708,7 @@ impl Agent {
         bad: &HashMap<brain::message::ToolCallId, String>,
         ctx: &Ctx,
         tx: &UnboundedSender<Event>,
-        echoes: &mut HashMap<(String, String), (String, usize)>,
+        echoes: &mut Echoes,
     ) -> Result<Vec<ToolResult>, AgentError> {
         let actions: Vec<Action> = calls
             .iter()
@@ -753,7 +796,7 @@ impl Agent {
         let mut results = Vec::with_capacity(calls.len());
         for ((call, action), output) in calls.iter().zip(&actions).zip(outputs) {
             let result = match (action, output) {
-                (Action::Reject(why), _) => ToolResult::error(call.id.clone(), &call.name, why),
+                (Action::Reject(why), _) => failed(call, why.clone(), echoes),
                 (_, Some(Err(ToolError::Cancelled))) => return Err(AgentError::Cancelled),
                 (_, Some(Err(e))) => {
                     let body = e.to_string();
@@ -766,7 +809,7 @@ impl Agent {
                             preview: body.clone(),
                         },
                     );
-                    ToolResult::error(call.id.clone(), &call.name, body)
+                    failed(call, body, echoes)
                 }
                 (_, Some(Ok(out))) => {
                     say(
@@ -780,7 +823,7 @@ impl Agent {
                     );
                     let body = out.flatten();
                     let mut content = out.content;
-                    if let Some(notice) = repeat_notice(echoes, call, &body) {
+                    if let Some(notice) = repeat_notice(echoes, call, &body, Answer::Given) {
                         content.push(ToolResultContent::Text(brain::message::Text {
                             text: notice,
                         }));
@@ -803,21 +846,64 @@ impl Agent {
     }
 }
 
+/// How many turns are left, said at two points on the way down.
+///
+/// A run that stops at the limit stops mid-work, and the model never saw it
+/// coming: the budget belongs to the caller and is stated nowhere the model can
+/// read. One that knows batches what is left instead of spending a turn per
+/// fix — which is how fifty turns go on eight rebuilds and no finished task.
+fn turns_left(turn: usize, max: usize) -> Option<String> {
+    match max.checked_sub(turn)? {
+        10 => Some(format!(
+            "[10 of {max} turns left. Batch what you can from here — \
+             one fix per turn will not fit in what remains.]"
+        )),
+        3 => Some("[3 turns left. Finish and answer now; the run stops after that.]".into()),
+        _ => None,
+    }
+}
+
 /// The scope a tool's own records land in, and what times it.
 fn ran(call: &ToolCall) -> tracing::Span {
     tracing::info_span!(target: "pi::tool", "tool", name = %call.name, call = %call.id.0)
 }
 
+/// Which way one call came back. The detection is the same either way; only the
+/// patience and the wording differ.
+#[derive(Clone, Copy, PartialEq)]
+enum Answer {
+    Given,
+    Failed,
+}
+
+/// A call that did not run, or ran and failed.
+///
+/// The notice goes inside the error body rather than beside it: a failure has
+/// no content blocks to append one to, and the model reads the body.
+fn failed(call: &ToolCall, mut body: String, echoes: &mut Echoes) -> ToolResult {
+    if let Some(notice) = repeat_notice(echoes, call, &body, Answer::Failed) {
+        body.push_str(&notice);
+    }
+    ToolResult::error(call.id.clone(), &call.name, body)
+}
+
 /// Name a call that has come back identical too many times.
 ///
-/// A model that keeps making the same call and reading the same answer is
+/// A model that keeps making the same call and getting the same thing back is
 /// stuck, and it will keep going until the turn limit stops it. Saying so is
-/// what breaks the loop.
+/// what breaks the loop. Failures count the same as answers: a patch refused
+/// for the same reason three running is the commonest way a session dies, and
+/// counting only the answers left exactly that case unnamed.
 fn repeat_notice(
-    echoes: &mut HashMap<(String, String), (String, usize)>,
+    echoes: &mut Echoes,
     call: &ToolCall,
     body: &str,
+    answer: Answer,
 ) -> Option<String> {
+    // Arguments that would not parse arrive here as `{}` whatever they were, so
+    // a malformed call is told apart by the refusal it drew rather than by what
+    // it sent. That is the right grain: three calls that fail to parse the same
+    // way are one loop, whichever bytes produced them.
     let key = (call.name.clone(), call.args.to_string());
     // Explicit rather than `entry().or_insert()`: the first call must not be
     // counted as a repeat of itself.
@@ -832,13 +918,32 @@ fn repeat_notice(
     }
     slot.1 += 1;
     let seen = slot.1;
-    (seen >= REPEAT_LIMIT).then(|| {
-        format!(
-            "\n[this is the same `{}` call with the same result, {} times now. \
-             Nothing has changed — try something else.]",
-            call.name,
-            seen + 1
-        )
+    let limit = match answer {
+        Answer::Given => REPEAT_LIMIT,
+        Answer::Failed => FAILURE_LIMIT,
+    };
+    (seen >= limit).then(|| {
+        let times = seen + 1;
+        tracing::warn!(
+            target: "pi::tool",
+            tool = %call.name,
+            seen = times,
+            failed = answer == Answer::Failed,
+            "the same call keeps coming back the same way"
+        );
+        match answer {
+            Answer::Given => format!(
+                "\n[this is the same `{}` call with the same result, {times} times now. \
+                 Nothing has changed — try something else.]",
+                call.name
+            ),
+            Answer::Failed => format!(
+                "\n[the same `{}` call has now failed the same way {times} times. \
+                 Sending it again will not change the answer — change the call, \
+                 or reach the goal another way.]",
+                call.name
+            ),
+        }
     })
 }
 

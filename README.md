@@ -207,22 +207,38 @@ throttle both arrive as HTTP 429 and only the message text separates them —
 retrying the first burns money. An overflow refusal usually names the real
 window, so the correction is read out of it rather than guessed.
 
+**The turn budget is visible to the model**, at ten turns left and again at
+three. A run that stops at `--max-turns` stops mid-work, and the model never
+saw it coming — the budget is the caller's and is stated nowhere it can read.
+One that knows batches what is left instead of spending a turn per fix.
+
+**A stuck model is named rather than run into the turn limit.** A call that
+comes back byte-identical is told so — on the third for an answer, since a
+re-read after compaction is legitimate, and on the second for a refusal, since
+nothing legitimate re-sends a call that was just refused. Repeated refusals are
+how most sessions actually die: a model that cannot get a tool's arguments
+right will spend every remaining turn getting them wrong the same way.
+
 **Token counts** come from the provider where it reports them and from our own
-count where it does not, and a `~` marks which half is which. A count we made
-is not the provider's, and a cost derived from it is not a bill.
+count where it does not — or where what it reports cannot be true. A proxy that
+answers a thirty-thousand-token transcript with an input count of two hundred,
+and no caching of any kind to explain it, is not tokenizing differently; taking that
+figure at face value turns the running cost into fiction. A `~` marks which
+half of a count is ours. A count we made is not the provider's, and a cost
+derived from it is not a bill.
 
 ## Layout
 
 | crate | | |
 |---|---|---|
 | `brain` | 2.7k | messages, wires, streams, faults, estimates |
-| `agent` | 3.4k | the turn loop, compaction, the session log |
-| `tools` | 3.6k | the tool set and the workspace gate |
-| `cli` | 4.4k | terminal, config, sessions, the journal |
+| `agent` | 3.9k | the turn loop, compaction, the session log |
+| `tools` | 3.7k | the tool set and the workspace gate |
+| `cli` | 5.9k | terminal, config, sessions, the journal |
 | `hashline` | 1.2k | the patch format — pure, no IO |
 | `syntax` | 0.4k | tree-sitter outlines for eight languages |
 
-~15k lines, 307 tests. `cargo test` runs everything; `cargo clippy
+~18k lines, 331 tests. `cargo test` runs everything; `cargo clippy
 --all-targets` is expected to be silent.
 
 ## Not built

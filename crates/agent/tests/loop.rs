@@ -62,7 +62,7 @@ fn text_turn(body: &str) -> Vec<StreamEvent> {
         StreamEvent::Done {
             stop: StopReason::EndTurn,
             usage: Usage {
-                input: 10,
+                input: 3_000,
                 output: 5,
                 ..Default::default()
             },
@@ -158,8 +158,8 @@ async fn a_turn_without_tool_calls_ends_the_run() {
     let (session, out, events) = drive(&a, &ctx, "hi").await;
 
     let totals = out.unwrap().totals;
-    assert_eq!(totals.usage.input, 10);
-    assert_eq!(totals.cost, 10.0 / 1e6 + 5.0 * 2.0 / 1e6);
+    assert_eq!(totals.usage.input, 3_000);
+    assert_eq!(totals.cost, 3_000.0 / 1e6 + 5.0 * 2.0 / 1e6);
     assert_eq!(session.context().len(), 2);
     assert_eq!(session.context()[1].text(), "done");
     assert!(events.contains(&Event::TextDelta("done".into())));
@@ -223,10 +223,89 @@ async fn only_the_half_the_provider_withheld_is_filled_in() {
 }
 
 #[tokio::test]
+async fn a_reported_count_that_cannot_be_true_is_replaced_and_marked() {
+    // What a broken proxy does: a plausible-looking figure, two orders of
+    // magnitude under what was actually sent, with no cache read to explain it.
+    let reported = Usage {
+        input: 12,
+        output: 40,
+        ..Default::default()
+    };
+    let (_d, a, ctx) = harness(vec![turn_reporting("done", reported)]);
+    let totals = drive(&a, &ctx, "hi").await.1.unwrap().totals;
+
+    assert!(totals.usage.input > 1_000, "{}", totals.usage.input);
+    assert!(totals.estimated.input, "a count we made must travel marked");
+    // The half the host got right keeps its standing.
+    assert_eq!(totals.usage.output, 40);
+    assert!(!totals.estimated.output);
+}
+
+#[tokio::test]
+async fn a_small_count_beside_a_cached_prompt_is_left_alone() {
+    // Cached input is excluded from the count by design, so twelve fresh
+    // tokens beside a large cache figure is exactly right. Both halves of the
+    // cache count for this: the first turn of a cached session writes the whole
+    // prompt and reads none of it back, which is the case most easily mistaken
+    // for a host reporting nonsense.
+    for (read, write) in [(30_000, 0), (0, 30_000), (15_000, 15_000)] {
+        let reported = Usage {
+            input: 12,
+            output: 40,
+            cache_read: read,
+            cache_write: write,
+        };
+        let (_d, a, ctx) = harness(vec![turn_reporting("done", reported)]);
+        let totals = drive(&a, &ctx, "hi").await.1.unwrap().totals;
+
+        assert_eq!(totals.usage.input, 12, "read={read} write={write}");
+        assert!(!totals.estimated.input, "read={read} write={write}");
+    }
+}
+
+#[tokio::test]
+async fn the_model_is_told_how_many_turns_are_left() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "steady\n").unwrap();
+    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
+
+    // Thirteen turns of work against a budget of thirteen: the notice lands at
+    // ten left and again at three, and the run still ends on its own.
+    let mut script: Vec<_> = (0..12).map(|_| call_turn(&[("t", "todo", "{}")])).collect();
+    script.push(text_turn("done"));
+    let mut a = Agent::new(Scripted::new(script), spec());
+    a.max_turns = 13;
+
+    let (session, out, _) = drive(&a, &ctx, "work").await;
+    out.unwrap();
+
+    let said: Vec<String> = session
+        .context()
+        .iter()
+        .flat_map(|m| match m {
+            Message::User { content } => content
+                .iter()
+                .filter_map(|c| match c {
+                    UserContent::Text(t) => Some(t.text.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        })
+        .collect();
+
+    assert!(
+        said.iter().any(|t| t.contains("10 of 13 turns left")),
+        "{said:?}"
+    );
+    assert!(said.iter().any(|t| t.contains("3 turns left")), "{said:?}");
+}
+
+#[tokio::test]
 async fn a_fully_measured_turn_is_not_marked() {
     let (_d, a, ctx) = harness(vec![text_turn("done")]);
     let totals = drive(&a, &ctx, "hi").await.1.unwrap().totals;
-    assert_eq!((totals.usage.input, totals.usage.output), (10, 5));
+    assert_eq!((totals.usage.input, totals.usage.output), (3_000, 5));
     assert!(!totals.estimated.any());
 }
 
@@ -1110,6 +1189,50 @@ async fn a_call_that_keeps_returning_the_same_thing_is_named() {
         "{:?}",
         bodies[2]
     );
+}
+
+/// The shape a session actually dies in: a tool the model cannot get the
+/// arguments right for, refused identically until the turn limit.
+#[tokio::test]
+async fn a_call_that_keeps_failing_the_same_way_is_named_sooner() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "steady\n").unwrap();
+    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
+
+    let same = || call_turn(&[("t", "edit", r#"{"patch":"match code {"}"#)]);
+    let a = Agent::new(
+        Scripted::new(vec![same(), same(), same(), text_turn("gave up")]),
+        spec(),
+    );
+
+    let (session, out, _) = drive(&a, &ctx, "edit it forever").await;
+    out.unwrap();
+
+    let bodies: Vec<String> = session
+        .context()
+        .iter()
+        .flat_map(|m| match m {
+            Message::User { content } => content
+                .iter()
+                .filter_map(|c| match c {
+                    UserContent::ToolResult(r) => Some(r.flatten_text()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        })
+        .collect();
+
+    // No leeway for a refusal the way there is for a re-read: the second
+    // identical failure is already the whole story.
+    assert!(!bodies[0].contains("same `edit` call"), "{:?}", bodies[0]);
+    assert!(
+        bodies[1].contains("same `edit` call has now failed the same way 2 times"),
+        "{:?}",
+        bodies[1]
+    );
+    // And the notice rides inside the error the model reads, not beside it.
+    assert!(bodies[1].starts_with("patch line 1"), "{:?}", bodies[1]);
 }
 
 #[tokio::test]
