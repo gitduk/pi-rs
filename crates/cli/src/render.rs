@@ -23,6 +23,30 @@ impl Paint {
     }
 }
 
+/// What a run has cost, in the one wording every place that says it uses.
+///
+/// A tilde marks the part we counted ourselves, and only that part. The cost
+/// carries one whenever any part did, because a number derived from a guess is
+/// not a bill.
+pub fn spent(usage: &brain::stream::Usage, cost: f64, estimated: agent::Estimated) -> String {
+    let mark = agent::Estimated::mark;
+    format!(
+        "{}{} in / {}{} out · {}{} cached{}",
+        mark(estimated.input),
+        usage.input,
+        mark(estimated.output),
+        usage.output,
+        mark(estimated.cache_read),
+        usage.cache_read,
+        // An unpriced model reports no cost rather than $0.
+        if cost > 0.0 {
+            format!(" · {}${cost:.4}", mark(estimated.any()))
+        } else {
+            String::new()
+        },
+    )
+}
+
 /// The wording for every event that occupies a whole line.
 ///
 /// Both surfaces call this: a tool call has to read the same in a pipe as in
@@ -69,30 +93,10 @@ pub fn describe(event: &Event, p: Paint) -> Option<String> {
             usage,
             cost,
             estimated,
-        } => {
-            // A tilde marks the half we counted ourselves, and only that half.
-            // The cost carries one whenever either half did, because a number
-            // derived from a guess is not a bill.
-            let (i, o) = (
-                agent::Estimated::mark(estimated.input),
-                agent::Estimated::mark(estimated.output),
-            );
-            p.on(
-                DIM,
-                &format!(
-                    "{turns} turns · {i}{} in / {o}{} out · {} cached{}",
-                    usage.input,
-                    usage.output,
-                    usage.cache_read,
-                    // An unpriced model reports no cost rather than $0.
-                    if *cost > 0.0 {
-                        format!(" · {}${cost:.4}", agent::Estimated::mark(estimated.any()))
-                    } else {
-                        String::new()
-                    },
-                ),
-            )
-        }
+        } => p.on(
+            DIM,
+            &format!("{turns} turns · {}", spent(usage, *cost, *estimated)),
+        ),
         _ => return None,
     })
 }

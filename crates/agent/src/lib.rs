@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use brain::catalog::ModelSpec;
 use brain::message::{Message, ToolCall, ToolResult, ToolResultContent};
@@ -50,12 +51,12 @@ const SQUEEZE: f64 = 0.6;
 const MAX_SQUEEZE: usize = 3;
 
 /// How far below our own count a reported input figure may sit before it stops
-/// being a measurement. Deliberately generous: tokenizers disagree by tens of
-/// percent, our own count is a bound rather than a reading, and a host may
-/// exclude cached input under a name we do not parse. An order of magnitude is
-/// none of those — a proxy reporting two hundred tokens for a transcript we
-/// count in tens of thousands is not tokenizing differently, it is wrong.
-const IMPLAUSIBLE: u64 = 10;
+/// being a count of the whole prompt. Deliberately generous: tokenizers
+/// disagree by tens of percent and our own count is a bound rather than a
+/// reading. An order of magnitude is neither — a host reporting two hundred
+/// tokens for a transcript we count in tens of thousands is answering a
+/// different question, and `fill_usage` says which one.
+const SHORTFALL: u64 = 10;
 
 /// Retry schedule for a request the provider could not serve right now.
 #[derive(Debug, Clone, Copy)]
@@ -163,6 +164,8 @@ pub struct Agent {
     /// When set, the run must end by calling this tool, and its argument is the
     /// result. Set by adding a `yield` tool to the registry.
     pub finish_tool: Option<String>,
+    /// Whether this run has already said that the host under-counts its input.
+    short_input_said: AtomicBool,
 }
 
 /// What each call last returned and how many times running, keyed by the call
@@ -190,7 +193,18 @@ impl Agent {
             summarize: true,
             retry: Retry::default(),
             finish_tool: None,
+            short_input_said: AtomicBool::new(false),
         }
+    }
+
+    /// Point the same run at a different host.
+    ///
+    /// Anything learned about the old one goes with it: a new host gets its own
+    /// chance to be told about, having never been told about before.
+    pub fn retarget(&mut self, transport: Arc<dyn Transport>, spec: ModelSpec) {
+        self.transport = transport;
+        self.spec = spec;
+        self.short_input_said = AtomicBool::new(false);
     }
 
     pub async fn run(
@@ -532,8 +546,7 @@ impl Agent {
         self.budget_within(self.spec.context_window as usize)
     }
 
-    /// The same accounting against a window the provider named instead of the
-    /// Fill in whatever the provider left at zero, and say that we did.
+    /// Fill in whatever the provider left unstated, and say that we did.
     ///
     /// A real request never costs zero input tokens, and a turn that produced a
     /// reply never costs zero output tokens; a zero in either place means the
@@ -545,6 +558,16 @@ impl Agent {
     /// its own numbers reports the ones it is already steering by. It is the
     /// wrong bound for billing and the right one for noticing, which is why it
     /// travels marked.
+    ///
+    /// A positive figure an order of magnitude under that bound is a third
+    /// case, and it is not a zero: the host counted, and counted something
+    /// narrower than the prompt. The known cause is a prefix cache reported as
+    /// a miss with the hit left unnamed, so the gap is booked as a cache read
+    /// rather than dropped, which is what replacing the figure outright would
+    /// do. If the cause is instead a host that is simply wrong, this costs the
+    /// cache discount on one number; replacing it bills a cached prompt at full
+    /// price on every turn of a long run, which is the larger error and the one
+    /// that grows.
     fn fill_usage(
         &self,
         reported: brain::stream::Usage,
@@ -553,31 +576,41 @@ impl Agent {
     ) -> (brain::stream::Usage, Estimated) {
         let mut usage = reported;
         let mut estimated = Estimated::default();
-        let ours = (brain::estimate::tokens(sent)
-            + brain::estimate::text(&self.system)
-            + brain::estimate::tool_defs(&self.registry.defs())) as u64;
-        // A host that reports nothing and a host that reports a number that
-        // cannot be true are the same case: what it says is not what went.
-        //
-        // Any reported caching exempts it, writes as well as reads. A cached
-        // prompt's `input` counts only the uncached remainder, so a small
-        // figure beside a large one is exactly right — and the first turn of a
-        // cached session is the sharpest version of that, where everything went
-        // to `cache_write` and nothing has been read back yet. Checking reads
-        // alone would call that turn a lie on every cached session there is.
+        // Deferred: this walks the whole transcript and re-serializes every
+        // tool schema, and a host that states its own figures needs none of it.
+        let ours = || {
+            (brain::estimate::tokens(sent)
+                + brain::estimate::text(&self.system)
+                + brain::estimate::tool_defs(&self.registry.defs())) as u64
+        };
+        // Any reported caching exempts the check below, writes as well as
+        // reads. A cached prompt's `input` counts only the uncached remainder,
+        // so a small figure beside a large one is exactly right — and the first
+        // turn of a cached session is the sharpest version of that, where
+        // everything went to `cache_write` and nothing has been read back yet.
+        // Checking reads alone would call that turn a lie on every cached
+        // session there is.
         let uncached = usage.cache_read + usage.cache_write == 0;
-        let cannot_be = uncached && usage.input < ours / IMPLAUSIBLE;
-        if usage.input == 0 || cannot_be {
-            if cannot_be {
-                tracing::warn!(
-                    target: "pi::wire",
-                    reported = usage.input,
-                    ours,
-                    "the host's input count cannot be true; counting it ourselves"
-                );
-            }
-            usage.input = ours;
+        if usage.input == 0 {
+            usage.input = ours();
             estimated.input = true;
+        } else if uncached {
+            let ours = ours();
+            if usage.input < ours / SHORTFALL {
+                // Said once: the condition belongs to the host, so it holds
+                // for every turn of the run.
+                if !self.short_input_said.swap(true, Ordering::Relaxed) {
+                    tracing::warn!(
+                        target: "pi::wire",
+                        reported = usage.input,
+                        ours,
+                        "the host counted far less input than went; booking \
+                         the difference as a cache read it did not name"
+                    );
+                }
+                usage.cache_read = ours - usage.input;
+                estimated.cache_read = true;
+            }
         }
         if usage.output == 0 {
             usage.output = brain::estimate::message(reply) as u64;
@@ -586,6 +619,7 @@ impl Agent {
         (usage, estimated)
     }
 
+    /// The same accounting against a window the provider named instead of the
     /// one the catalog claims.
     fn budget_within(&self, window: usize) -> usize {
         // A spec may declare an output cap larger than the window it is being

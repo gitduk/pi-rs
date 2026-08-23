@@ -399,8 +399,7 @@ impl Repl {
             context_window = spec.context_window,
             "model switched"
         );
-        self.agent.spec = dialled.spec;
-        self.agent.transport = dialled.transport;
+        self.agent.retarget(dialled.transport, dialled.spec);
         said
     }
 
@@ -660,18 +659,11 @@ impl Repl {
                 None => "not recording — --log is off, or the file would not open".into(),
             }),
             Cmd::Todo => lines(tools::todo::render(self.session.log.todos())),
-            Cmd::Cost => {
-                let u = &totals.usage;
-                let cost = if totals.cost > 0.0 {
-                    format!(" · ${:.4}", totals.cost)
-                } else {
-                    String::new()
-                };
-                lines(format!(
-                    "{} in / {} out · {} cached{cost}",
-                    u.input, u.output, u.cache_read
-                ))
-            }
+            Cmd::Cost => lines(crate::render::spent(
+                &totals.usage,
+                totals.cost,
+                totals.estimated,
+            )),
             Cmd::New => {
                 // The old one stays on disk; only the thread of conversation ends.
                 self.session = Session::default();

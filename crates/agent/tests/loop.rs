@@ -193,7 +193,8 @@ async fn a_provider_that_reports_nothing_gets_our_own_count_instead() {
         totals.estimated,
         agent::Estimated {
             input: true,
-            output: true
+            output: true,
+            cache_read: false
         },
         "our own count must not pass as measured"
     );
@@ -223,9 +224,11 @@ async fn only_the_half_the_provider_withheld_is_filled_in() {
 }
 
 #[tokio::test]
-async fn a_reported_count_that_cannot_be_true_is_replaced_and_marked() {
-    // What a broken proxy does: a plausible-looking figure, two orders of
-    // magnitude under what was actually sent, with no cache read to explain it.
+async fn a_count_far_under_the_prompt_is_read_as_a_cache_miss() {
+    // What a caching proxy does: a plausible-looking figure two orders of
+    // magnitude under what was sent, with no cache field to explain it. The
+    // figure is a measurement of the miss, so it survives, and the gap it
+    // leaves is the hit the host declined to name.
     let reported = Usage {
         input: 12,
         output: 40,
@@ -234,11 +237,34 @@ async fn a_reported_count_that_cannot_be_true_is_replaced_and_marked() {
     let (_d, a, ctx) = harness(vec![turn_reporting("done", reported)]);
     let totals = drive(&a, &ctx, "hi").await.1.unwrap().totals;
 
-    assert!(totals.usage.input > 1_000, "{}", totals.usage.input);
-    assert!(totals.estimated.input, "a count we made must travel marked");
-    // The half the host got right keeps its standing.
+    assert_eq!(totals.usage.input, 12, "a measured count was overwritten");
+    assert!(!totals.estimated.input);
+    assert!(
+        totals.usage.cache_read > 1_000,
+        "{}",
+        totals.usage.cache_read
+    );
+    assert!(
+        totals.estimated.cache_read,
+        "a count we made must travel marked"
+    );
+    // The part the host got right keeps its standing.
     assert_eq!(totals.usage.output, 40);
     assert!(!totals.estimated.output);
+}
+
+#[tokio::test]
+async fn a_host_that_reports_nothing_is_counted_for() {
+    // Zero is not a small number here: it is the absence of one. Nothing was
+    // measured, so there is no miss to believe and no gap to attribute — the
+    // whole prompt is ours to count, and travels marked as such.
+    let (_d, a, ctx) = harness(vec![turn_reporting("done", Usage::default())]);
+    let totals = drive(&a, &ctx, "hi").await.1.unwrap().totals;
+
+    assert!(totals.usage.input > 1_000, "{}", totals.usage.input);
+    assert!(totals.estimated.input, "a count we made must travel marked");
+    assert_eq!(totals.usage.cache_read, 0, "nothing was said about a cache");
+    assert!(!totals.estimated.cache_read);
 }
 
 #[tokio::test]

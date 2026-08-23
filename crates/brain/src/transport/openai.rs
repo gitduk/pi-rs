@@ -296,11 +296,18 @@ impl Decoder {
         let mut out = Vec::new();
 
         if let Some(u) = data.get("usage").filter(|u| !u.is_null()) {
-            self.usage.input = u["prompt_tokens"].as_u64().unwrap_or(self.usage.input);
             self.usage.output = u["completion_tokens"].as_u64().unwrap_or(self.usage.output);
+            // OpenAI names the hit under `prompt_tokens_details`; DeepSeek and
+            // the hosts that copied it put the same number at the top level.
             self.usage.cache_read = u["prompt_tokens_details"]["cached_tokens"]
                 .as_u64()
+                .or_else(|| u["prompt_cache_hit_tokens"].as_u64())
                 .unwrap_or(self.usage.cache_read);
+            // `prompt_tokens` here counts the whole prompt, cache included;
+            // leaving the hit in bills it twice, at two different rates.
+            self.usage.input = u["prompt_tokens"].as_u64().map_or(self.usage.input, |all| {
+                all.saturating_sub(self.usage.cache_read)
+            });
         }
 
         // A usage-only terminal frame carries no choices.
@@ -679,6 +686,36 @@ mod tests {
                 delta: "1}".into()
             }]
         );
+    }
+
+    #[test]
+    fn the_cache_hit_is_taken_out_of_the_prompt_count() {
+        // `prompt_tokens` on this wire includes what the cache served, under
+        // either of the two names hosts give it. Leaving it in bills it twice.
+        for hit in [
+            json!({ "prompt_tokens_details": { "cached_tokens": 700 } }),
+            json!({ "prompt_cache_hit_tokens": 700 }),
+        ] {
+            let mut usage = hit.as_object().unwrap().clone();
+            usage.insert("prompt_tokens".into(), json!(1_000));
+            usage.insert("completion_tokens".into(), json!(20));
+
+            let mut dec = Decoder::default();
+            dec.frame(
+                &json!({ "choices": [], "usage": usage }),
+                &OpenAiCompat::default(),
+            );
+            assert_eq!(
+                dec.usage,
+                Usage {
+                    input: 300,
+                    output: 20,
+                    cache_read: 700,
+                    cache_write: 0,
+                },
+                "{hit}"
+            );
+        }
     }
 
     #[test]

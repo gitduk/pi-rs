@@ -49,7 +49,7 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
                 .await
             {
                 Some((report, spent)) => {
-                    totals.add(&spent.usage, spent.cost);
+                    totals.merge(&spent);
                     println!("compacted {} → {} tokens", report.before, report.after);
                     if let Err(e) = core.save() {
                         eprintln!("warning: the transcript was not saved: {e}");
@@ -65,7 +65,7 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
             },
             Step::Prompt(prompt) => {
                 let spent = turn(&mut core, prompt, &tx).await;
-                totals.add(&spent.usage, spent.cost);
+                totals.merge(&spent);
             }
         }
     }

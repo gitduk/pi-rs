@@ -175,8 +175,7 @@ impl Ui {
             Event::TurnEnd {
                 usage, estimated, ..
             } => {
-                self.estimated.input |= estimated.input;
-                self.estimated.output |= estimated.output;
+                self.estimated |= *estimated;
                 self.settled.input += usage.input;
                 self.settled.output += usage.output;
                 self.settled.cache_read += usage.cache_read;
@@ -548,7 +547,7 @@ impl Tui {
                     self.ui.started = None;
                     match done {
                         Some((report, spent)) => {
-                            self.totals.add(&spent.usage, spent.cost);
+                            self.totals.merge(&spent);
                             self.ui.on_event(Event::Compacted(report));
                             if let Err(e) = self.core.save() {
                                 self.ui
@@ -649,7 +648,7 @@ impl Tui {
         }
 
         match out {
-            Ok(o) => self.totals.add(&o.totals.usage, o.totals.cost),
+            Ok(o) => self.totals.merge(&o.totals),
             Err(AgentError::Cancelled) => self.ui.say(self.ui.paint.on(DIM, "stopped")),
             Err(e) => {
                 let text = format!("\x1b[31merror\x1b[0m {e}");
@@ -714,6 +713,7 @@ mod tests {
         let guessed = agent::Estimated {
             input: true,
             output: true,
+            ..Default::default()
         };
         assert!(!counts(&Usage::default(), &turn, 0, guessed).output_exact);
         assert!(!counts(&Usage::default(), &turn, 0, guessed).input_exact);
