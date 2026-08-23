@@ -222,8 +222,43 @@ fn an_empty_file_accepts_a_head_insert() {
 
 #[test]
 fn unified_diff_habits_are_named_rather_than_guessed_at() {
-    let err = edit(SRC, "PUT 1.=1:\n+new\n-one\n").unwrap_err();
-    assert!(err.to_string().contains("not a unified diff"), "{err}");
+    let err = edit(SRC, "PUT 1.=1:\n+new\n-one\n")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("`-` rows are not valid"), "{err}");
+    // Both ways out, because the row is written by a model that wants one of
+    // them: a deletion, or a literal line that begins with `-`.
+    assert!(err.contains("CUT N.=M"), "{err}");
+    assert!(err.contains("`+- item`"), "{err}");
+}
+
+#[test]
+fn a_bare_line_number_is_the_single_line_range() {
+    assert_eq!(edit(SRC, "PUT 2:\n+B\n").unwrap(), "one\nB\nthree\nfour\n");
+    assert_eq!(edit(SRC, "CUT 2\n").unwrap(), "one\nthree\nfour\n");
+    // The long form still means the same thing.
+    assert_eq!(edit(SRC, "CUT 2.=2\n").unwrap(), "one\nthree\nfour\n");
+}
+
+#[test]
+fn a_trailing_colon_on_a_bodyless_op_is_tolerated() {
+    // A `:` on a `CUT` is noise. Refusing it put the complaint on the colon and
+    // hid the row underneath, which is the mistake that actually matters.
+    assert_eq!(edit(SRC, "CUT 2:\n").unwrap(), "one\nthree\nfour\n");
+    assert_eq!(
+        edit(SRC, "CUT 2.=2 @held:\n").unwrap(),
+        "one\nthree\nfour\n"
+    );
+
+    let err = edit(SRC, "CUT 2:\n-  two\n").unwrap_err().to_string();
+    assert!(err.contains("take no body rows"), "{err}");
+    assert!(err.contains("PUT N.=M:"), "{err}");
+}
+
+#[test]
+fn a_plus_row_under_a_bodyless_op_says_which_op() {
+    let err = edit(SRC, "CUT 2\n+two\n").unwrap_err().to_string();
+    assert!(err.contains("take no body rows"), "{err}");
 }
 
 /// Apply `ops` with a resolver that knows the given start→end pairs.

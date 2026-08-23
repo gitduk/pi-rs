@@ -11,12 +11,28 @@ fn strip_quotes(s: &str) -> &str {
         .unwrap_or(s)
 }
 
-/// `N.=M` → (N, M). A single line is written `N.=N`.
-fn range(spec: &str, line: usize) -> Result<(usize, usize), Error> {
-    let (a, b) = spec.split_once(".=").ok_or_else(|| Error::Syntax {
-        line,
-        what: format!("`{spec}` is not a range; write `N.=M`, or `N.=N` for one line"),
-    })?;
+/// `N.=M` → (N, M), and a bare `N` → (N, N).
+///
+/// The short form is accepted because it has exactly one reading and models
+/// keep reaching for it. Refusing it taught nothing and cost a turn each time;
+/// `N.=N` stays the form the documentation gives.
+///
+/// `verb` is the op the range belongs to. Without it a patch whose `PUT` and
+/// `CUT` are both malformed draws the same complaint twice: the model corrects
+/// the first, the identical message comes back about the second, and nothing it
+/// can see says the fix landed.
+fn range(spec: &str, line: usize, verb: &str) -> Result<(usize, usize), Error> {
+    let Some((a, b)) = spec.split_once(".=") else {
+        let n = number(
+            spec,
+            line,
+            &format!(
+                "`{verb} {spec}` is not a range; write `{verb} N.=M`, \
+                 or `{verb} N` for one line"
+            ),
+        )?;
+        return Ok((n, n));
+    };
     let parse = |t: &str| -> Result<usize, Error> {
         t.trim()
             .parse::<usize>()
@@ -52,7 +68,7 @@ fn register(rest: &str, line: usize) -> Result<Option<String>, Error> {
 }
 
 /// `N*` or `N.=M`.
-fn target(spec: &str, line: usize) -> Result<Target, Error> {
+fn target(spec: &str, line: usize, verb: &str) -> Result<Target, Error> {
     match spec.strip_suffix('*') {
         Some(n) => {
             let n = n
@@ -67,13 +83,28 @@ fn target(spec: &str, line: usize) -> Result<Target, Error> {
             Ok(Target::Block { line: n })
         }
         None => {
-            let (start, end) = range(spec, line)?;
+            let (start, end) = range(spec, line, verb)?;
             Ok(Target::Range { start, end })
         }
     }
 }
 
 /// Split `PUT <target><rest>` into the target and whatever follows it.
+/// Said when a body row sits under an op that takes none. A row in the wrong
+/// place is a different mistake from a row of the wrong shape, and the model
+/// that wrote each needs a different sentence.
+const NO_BODY: &str = "`CUT`, `REM` and `MV` take no body rows: the range names what goes \
+                       and nothing arrives. To write new content, use `PUT N.=M:` with \
+                       `+` rows.";
+
+/// Whether the op just parsed is one of those.
+fn bodyless_before(sections: &[Section]) -> bool {
+    matches!(
+        sections.last().and_then(|s| s.ops.last()),
+        Some(Op::Cut { .. } | Op::Remove | Op::Move { .. })
+    )
+}
+
 fn split_target(spec: &str) -> (&str, &str) {
     match spec.find(|c: char| c.is_whitespace() || c == '@') {
         Some(i) => (&spec[..i], &spec[i..]),
@@ -92,7 +123,11 @@ pub fn parse(input: &str) -> Result<Patch, Error> {
             let Some((op_index, Body::Lines(lines))) = pending.as_mut() else {
                 return Err(Error::Syntax {
                     line: no,
-                    what: "a `+` row must follow a header ending in `:`".into(),
+                    what: if bodyless_before(&sections) {
+                        NO_BODY.into()
+                    } else {
+                        "a `+` row must follow a header ending in `:`".into()
+                    },
                 });
             };
             let _ = op_index;
@@ -147,9 +182,14 @@ pub fn parse(input: &str) -> Result<Patch, Error> {
         let op = if let Some(rest) = line.strip_prefix("PUT ") {
             parse_put(rest.trim(), no)?
         } else if let Some(rest) = line.strip_prefix("CUT ") {
-            let (spec, tail) = split_target(rest.trim());
+            // A `:` introduces a body and `CUT` has none, so one written here
+            // is noise rather than a second meaning. Tolerated, so that the
+            // complaint lands on the real mistake — which, whenever a `:`
+            // shows up on a `CUT`, is the body row the model wrote under it.
+            let rest = rest.trim();
+            let (spec, tail) = split_target(rest.strip_suffix(':').unwrap_or(rest));
             Op::Cut {
-                target: target(spec, no)?,
+                target: target(spec, no, "CUT")?,
                 register: register(tail, no)?,
             }
         } else if line == "REM" {
@@ -168,9 +208,19 @@ pub fn parse(input: &str) -> Result<Patch, Error> {
         } else if line.starts_with('-') {
             return Err(Error::Syntax {
                 line: no,
-                what: "this is not a unified diff: name the lines to delete in the range and \
-                       give only the replacement as `+` rows"
-                    .into(),
+                what: if bodyless_before(&sections) {
+                    NO_BODY.into()
+                } else {
+                    // The escape hatch matters as much as the rule: a Markdown
+                    // bullet is a literal line that starts with `-`, and a
+                    // model told only that `-` is invalid has nowhere to put
+                    // one.
+                    "`-` rows are not valid: the range already names the lines that go, \
+                     and the body is only what arrives. To delete lines and put nothing \
+                     back, use `CUT N.=M`. For a literal line that starts with `-`, \
+                     prefix it: `+- item`."
+                        .into()
+                },
             });
         } else {
             // A bare range or target is the verb-less slip a model makes most;
@@ -293,7 +343,7 @@ fn parse_put(rest: &str, no: usize) -> Result<Op, Error> {
         });
     }
     Ok(Op::Replace {
-        target: target(spec, no)?,
+        target: target(spec, no, "PUT")?,
         body: placeholder(),
     })
 }

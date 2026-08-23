@@ -23,7 +23,8 @@ PUT 2.=4:
 
 Ops. Every op line starts with a verb — PUT, CUT, MV or REM — and every line
 number is the ORIGINAL one from that read: earlier hunks in the same patch never
-shift later ones.
+shift later ones. A header ending in `:` takes `+` body rows; CUT, MV, REM and
+the register pastes take none.
   PUT N.=M:   replace original lines N through M, inclusive, with the body
   PUT N*:     replace the whole construct opening at line N; its closing line is
               resolved for you. Point N at the first decorator or attribute to
@@ -33,22 +34,38 @@ shift later ones.
   PUT >N*:    insert the body after the construct at N closes
   CUT N.=M    delete lines N through M, capturing them; add `@name` to label it
   CUT N*      the same, for a whole construct
+  One line is `PUT N.=N:` or `CUT N.=N`; a bare `PUT N:` / `CUT N` means the
+  same and is accepted.
   PUT <N @name / PUT >N @name / PUT N.=M @name   paste a captured register
   MV dest     rename; edits in this section land first, then the file moves
   REM         delete the file; may not share a section with other ops
 
 Body rows start with `+` and are copied verbatim, so `+` alone is a blank line
 and leading whitespace is preserved. Never write `-old` or bare context lines:
-the range says what goes, the body says what arrives. A body may be any length
-regardless of how many lines the range names.
+the range says what goes, the body says what arrives. To delete lines and put
+nothing back, use CUT — not a PUT with `-` rows. A literal line of your own that
+begins with `-` or `+` takes the prefix like any other: `- item` is written
+`+- item`. A body may be any length regardless of how many lines the range
+names.
 
 Rejected outright: a stale TAG, two hunks touching the same original line, a
 range past the end of the file. Nothing is written unless every section applies."#;
 
-fn echo(path: &str, content: &str, landed: &[Landed]) -> String {
+fn echo(path: &str, before: &str, content: &str, landed: &[Landed]) -> String {
     let mut out = format!("[{path}#{}]", hashline::tag(content));
     if landed.is_empty() {
-        out.push_str(" no lines added\n");
+        // A patch of pure CUTs lands nothing, and saying so describes what did
+        // not happen. What did is the deletion, which is the whole point of the
+        // patch and reads as failure when reported by its absence.
+        let gone = before
+            .lines()
+            .count()
+            .saturating_sub(content.lines().count());
+        out.push_str(&match gone {
+            0 => " nothing moved\n".to_string(),
+            1 => " removed 1 line\n".to_string(),
+            n => format!(" removed {n} lines\n"),
+        });
         return out;
     }
     let lines: Vec<&str> = content.lines().collect();
@@ -149,7 +166,8 @@ impl Tool for Edit {
                         continue;
                     }
                     tokio::fs::write(ctx.workspace.resolve(path)?, content).await?;
-                    report.push_str(&echo(path, content, landed));
+                    let before = loaded.get(path).map_or("", String::as_str);
+                    report.push_str(&echo(path, before, content, landed));
                 }
                 Change::Remove { path } => {
                     tokio::fs::remove_file(ctx.workspace.resolve(path)?).await?;
@@ -168,7 +186,8 @@ impl Tool for Edit {
                     tokio::fs::write(&dest, content).await?;
                     tokio::fs::remove_file(ctx.workspace.resolve(from)?).await?;
                     report.push_str(&format!("{from} → "));
-                    report.push_str(&echo(to, content, landed));
+                    let before = loaded.get(from).map_or("", String::as_str);
+                    report.push_str(&echo(to, before, content, landed));
                 }
             }
         }

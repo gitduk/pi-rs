@@ -511,6 +511,54 @@ async fn an_edit_that_changes_nothing_says_so() {
 }
 
 #[tokio::test]
+async fn a_deletion_is_reported_by_what_it_deleted() {
+    let (_d, c) = ctx();
+    let before = "one\ntwo\nthree\nfour\n";
+    std::fs::write(c.workspace.root().join("a.rs"), before).unwrap();
+    let tag = hashline::tag(before);
+
+    let out = run(
+        &tools::edit::Edit,
+        json!({ "patch": format!("[a.rs#{tag}]\nCUT 2.=3") }),
+        &c,
+    )
+    .await;
+
+    // "no lines added" is true of a pure CUT and reads as nothing happening.
+    assert!(out.contains("removed 2 lines"), "{out}");
+    assert!(!out.contains("no lines added"), "{out}");
+    assert_eq!(
+        std::fs::read_to_string(c.workspace.root().join("a.rs")).unwrap(),
+        "one\nfour\n"
+    );
+}
+
+#[tokio::test]
+async fn a_range_that_is_not_one_is_refused_by_the_op_that_wrote_it() {
+    let (_d, c) = ctx();
+    let before = "one\ntwo\nthree\n";
+    std::fs::write(c.workspace.root().join("a.rs"), before).unwrap();
+    let tag = hashline::tag(before);
+
+    let complaint = async |patch: String| {
+        tools::edit::Edit
+            .execute(json!({ "patch": patch }), &c)
+            .await
+            .unwrap_err()
+            .to_string()
+    };
+
+    // The same mistake under two verbs must not draw the same words: a model
+    // that fixes the PUT and sees the message again cannot tell it made
+    // progress. (A bare `N` is not the mistake — that one is accepted.)
+    let put = complaint(format!("[a.rs#{tag}]\nPUT two:\n+x")).await;
+    let cut = complaint(format!("[a.rs#{tag}]\nCUT two")).await;
+    assert!(put.contains("`PUT two` is not a range"), "{put}");
+    assert!(cut.contains("`CUT two` is not a range"), "{cut}");
+    assert_ne!(put, cut);
+}
+
+#[tokio::test]
 async fn text_that_is_not_utf8_is_refused_rather_than_mangled() {
     let (_d, c) = ctx();
     // Latin-1 prose: no NUL byte, so a NUL sniff calls it text, and a lossy
