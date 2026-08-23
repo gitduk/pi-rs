@@ -103,3 +103,76 @@ impl Totals {
         self.estimated.output |= estimated.output;
     }
 }
+
+/// Say it to the user, and to the journal, in that order and in one call.
+///
+/// The two answer different questions — a rendered line says what is happening
+/// now, a record says what happened — but every fact on this list is already
+/// stated here once, and stating them twice is how the two drift apart.
+///
+/// Called where the fact occurs rather than where the event is consumed: a
+/// renderer runs in its own task, so a tap there records a true set of facts in
+/// an order that never happened, under whichever span the renderer is in.
+pub(crate) fn say(tx: &tokio::sync::mpsc::UnboundedSender<Event>, event: Event) {
+    note(&event);
+    let _ = tx.send(event);
+}
+
+/// Deltas are the exception: they are the transcript, they arrive thousands at
+/// a time, and the transcript is saved beside the journal already.
+fn note(event: &Event) {
+    match event {
+        Event::TextDelta(_) | Event::ReasoningDelta(_) | Event::Usage(_) => {}
+        Event::TurnStart { turn } => tracing::info!(target: "pi::loop", turn, "turn start"),
+        Event::ToolStart { id, name, args } => {
+            tracing::info!(target: "pi::tool", call = %id, tool = %name, "call");
+            // One level down, and in its own record: the arguments are a whole
+            // patch or a whole file, the transcript already holds them, and a
+            // field on the record above would serialize all of it on every call
+            // only for the length cap to throw it away.
+            tracing::debug!(target: "pi::tool", call = %id, args = %args, "arguments");
+        }
+        Event::ToolEnd {
+            id,
+            name,
+            is_error,
+            preview,
+        } => {
+            if *is_error {
+                tracing::warn!(target: "pi::tool", call = %id, tool = %name, detail = %preview, "failed")
+            } else {
+                tracing::info!(target: "pi::tool", call = %id, tool = %name, preview = %preview, "ok")
+            }
+        }
+        Event::ToolDenied { id, name, reason } => {
+            tracing::warn!(target: "pi::tool", call = %id, tool = %name, reason = %reason, "denied")
+        }
+        Event::Compacted(r) => tracing::info!(
+            target: "pi::compact",
+            before = r.before,
+            after = r.after,
+            summarized = r.summarized,
+            "compacted"
+        ),
+        Event::Retrying {
+            attempt,
+            delay_ms,
+            reason,
+        } => tracing::warn!(target: "pi::wire", attempt, delay_ms, reason = %reason, "retrying"),
+        Event::Warning(w) => tracing::warn!(target: "pi::loop", "{w}"),
+        // Named for what it carries: the loop sends this before the turn's
+        // tool calls run, so "end" would put the record in the wrong place.
+        Event::TurnEnd { usage, cost, .. } => tracing::info!(
+            target: "pi::loop",
+            input = usage.input,
+            output = usage.output,
+            cache_read = usage.cache_read,
+            cache_write = usage.cache_write,
+            cost,
+            "priced"
+        ),
+        Event::Done { turns, cost, .. } => {
+            tracing::info!(target: "pi::loop", turns, cost, "done")
+        }
+    }
+}

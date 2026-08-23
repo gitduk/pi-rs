@@ -92,6 +92,16 @@ fn echo(path: &str, before: &str, content: &str, landed: &[Landed]) -> String {
     out
 }
 
+/// What each file's tag is right now, for a refusal that turned on one.
+fn tags(loaded: &HashMap<String, String>) -> String {
+    let mut out: Vec<String> = loaded
+        .iter()
+        .map(|(p, c)| format!("{p}#{}", hashline::tag(c)))
+        .collect();
+    out.sort();
+    out.join(" ")
+}
+
 pub struct Edit;
 
 #[async_trait]
@@ -121,7 +131,19 @@ impl Tool for Edit {
 
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
         let args: Args = serde_json::from_value(args)?;
-        let patch = hashline::parse(&args.patch).map_err(|e| ToolError::Invalid(e.to_string()))?;
+        // The rejected patch itself, because the message alone never says what
+        // the model actually wrote — and a model that gets the format wrong
+        // gets it wrong the same way for the rest of the session.
+        let patch = hashline::parse(&args.patch).map_err(|e| {
+            tracing::warn!(
+                target: "pi::edit",
+                stage = "parse",
+                error = %e,
+                patch = %args.patch,
+                "patch rejected"
+            );
+            ToolError::Invalid(e.to_string())
+        })?;
 
         // Held for the whole patch: two edits to one file in the same turn would
         // otherwise both read the same bytes, both pass their tag check, and
@@ -144,8 +166,19 @@ impl Tool for Edit {
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
         // Nothing has touched the disk yet: a rejected patch leaves no trace.
-        let plan = hashline::apply(&patch, &view, &crate::blocks::TreeSitter)
-            .map_err(|e| ToolError::Invalid(e.to_string()))?;
+        let plan = hashline::apply(&patch, &view, &crate::blocks::TreeSitter).map_err(|e| {
+            // With the tags the files actually have: a stale-tag refusal is
+            // unreadable without the number the patch should have carried.
+            tracing::warn!(
+                target: "pi::edit",
+                stage = "apply",
+                error = %e,
+                tags = %tags(&loaded),
+                patch = %args.patch,
+                "patch rejected"
+            );
+            ToolError::Invalid(e.to_string())
+        })?;
 
         let mut report = String::new();
         for change in &plan.changes {

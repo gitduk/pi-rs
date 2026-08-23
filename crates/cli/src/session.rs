@@ -67,6 +67,31 @@ impl Default for Store {
     }
 }
 
+/// An id as a filename, with everything that could leave the directory gone.
+///
+/// Ids are minted here and look like `1787426708-4135307`, so this changes
+/// nothing for a real one. It is not the mint they are read back from, though:
+/// `-c` takes the id out of a stored file's own body, and `--resume` takes it
+/// off the command line. Either could name `../../..`, and both the transcript
+/// and the journal are opened by it.
+pub fn file_stem(id: &str) -> String {
+    let cleaned: String = id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "unnamed".into()
+    } else {
+        cleaned
+    }
+}
+
 pub fn new_id() -> String {
     format!("{}-{}", now(), std::process::id())
 }
@@ -77,7 +102,7 @@ impl Store {
     }
 
     pub fn path(&self, id: &str) -> PathBuf {
-        self.root.join(format!("{id}.json"))
+        self.root.join(format!("{}.json", file_stem(id)))
     }
 
     pub fn save(
@@ -152,6 +177,15 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_id_cannot_walk_out_of_the_directory_it_names_a_file_in() {
+        use super::file_stem;
+        assert_eq!(file_stem("1787426708-4135307"), "1787426708-4135307");
+        assert_eq!(file_stem("../../etc/cron.d/x"), "______etc_cron_d_x");
+        assert_eq!(file_stem(".."), "__");
+        assert_eq!(file_stem(""), "unnamed");
+    }
+
     use super::*;
     use brain::message::{AssistantContent, ToolCall, ToolCallId};
     use serde_json::json;

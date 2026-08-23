@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 
 mod config;
 mod context;
+mod journal;
 mod keys;
 mod line;
 mod render;
@@ -166,6 +167,17 @@ pub struct Args {
     /// Answer only; no progress, no usage line.
     #[arg(short, long)]
     quiet: bool,
+
+    /// How much this run writes to its journal. `debug` adds the payloads —
+    /// request bodies, patches, tool arguments in full. `off` writes nothing.
+    #[arg(
+        long,
+        value_name = "LEVEL",
+        value_enum,
+        env = "PI_LOG",
+        default_value = "info"
+    )]
+    log: journal::LogLevel,
 }
 
 /// A model described entirely by flags. Endpoints that mimic a known wire are
@@ -483,6 +495,22 @@ async fn main() -> Result<()> {
         _ => None,
     };
 
+    // A resumed session keeps its journal too, so the whole of it reads as one
+    // file however many runs it took.
+    let id = prior
+        .as_ref()
+        .map(|p| p.id.clone())
+        .unwrap_or_else(session::new_id);
+    journal::install(&id, args.log);
+    journal::opening(
+        &id,
+        &args,
+        &config,
+        &project,
+        workspace.root(),
+        prior.as_ref(),
+    );
+
     let Some((named, named_by)) = config.model(
         &project,
         args.model.as_deref(),
@@ -534,10 +562,6 @@ async fn main() -> Result<()> {
     let quiet = args.quiet;
     let structured = args.schema.is_some();
 
-    let id = prior
-        .as_ref()
-        .map(|p| p.id.clone())
-        .unwrap_or_else(session::new_id);
     // An explicit --name renames a resumed session; otherwise it keeps its own.
     let name = args
         .name
@@ -610,6 +634,12 @@ async fn main() -> Result<()> {
         std::process::exit(130);
     }
 
+    // Said only when there is something to diagnose. A successful run that
+    // announced its journal would train everyone to stop reading the line.
+    if let (Err(e), Some(path)) = (&outcome, journal::path()) {
+        tracing::error!(target: "pi::loop", error = %e, "run failed");
+        eprintln!("\x1b[2mjournal: {}\x1b[0m", path.display());
+    }
     outcome?;
     Ok(())
 }

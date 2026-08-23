@@ -344,28 +344,14 @@ impl Transport for Anthropic {
     ) -> Result<BoxStream<'static, Result<StreamEvent>>> {
         let c = compat(spec)?;
         let body = build_body(spec, req, c);
-
-        let resp = self
+        let url = format!("{}/v1/messages", spec.base_url.trim_end_matches('/'));
+        let call = self
             .http
-            .post(format!(
-                "{}/v1/messages",
-                spec.base_url.trim_end_matches('/')
-            ))
+            .post(&url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", API_VERSION)
-            .json(&body)
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(BrainError::Api {
-                transport: "anthropic",
-                status,
-                body,
-            });
-        }
+            .json(&body);
+        let resp = super::exchange("anthropic", url, spec, req, &body, call).await?;
 
         let mut stop = StopReason::default();
         let mut usage = Usage::default();
@@ -377,6 +363,10 @@ impl Transport for Anthropic {
                     // `ping` and other bodyless frames carry no JSON.
                     Err(_) => None,
                     Ok(data) if data["type"] == "error" => {
+                        tracing::warn!(
+                            target: "pi::wire", wire = "anthropic",
+                            detail = %data["error"], "error frame"
+                        );
                         Some(Err(BrainError::Stream(data["error"].to_string())))
                     }
                     Ok(data) => decode_frame(&data, &mut stop, &mut usage).map(Ok),

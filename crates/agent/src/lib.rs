@@ -10,6 +10,7 @@ use futures::StreamExt;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 use tools::{Concurrency, Ctx, Registry, ToolError, ToolOutput};
+use tracing::Instrument as _;
 
 use crate::log::Log;
 
@@ -21,6 +22,7 @@ pub mod summarize;
 
 pub use approval::{Approver, Ceiling, Decision};
 pub use compact::Policy;
+use event::say;
 pub use event::{Estimated, Event, Totals};
 
 pub const DEFAULT_SYSTEM: &str = include_str!("../prompts/system.md");
@@ -197,7 +199,10 @@ impl Agent {
         let mut hard: Option<usize> = None;
 
         for turn in 1..=self.max_turns {
-            let _ = tx.send(Event::TurnStart { turn });
+            say(tx, Event::TurnStart { turn });
+            // Entered around each await rather than held across them: a guard
+            // spanning an await point labels whatever else the runtime polls.
+            let span = tracing::info_span!(target: "pi::loop", "turn", turn);
             let mut squeezes = 0usize;
             // Kept past the retry loop: the fallback below prices what was
             // actually sent, which a squeeze or a compaction may have changed.
@@ -206,9 +211,22 @@ impl Agent {
             let done = loop {
                 let budget = ((hard.unwrap_or_else(|| self.budget()) as f64) * scale) as usize;
                 self.maybe_compact(session, budget, squeezes > 0, &mut totals, tx)
+                    .instrument(span.clone())
                     .await;
 
                 sent = session.context();
+                tracing::debug!(
+                    target: "pi::loop",
+                    parent: &span,
+                    messages = sent.len(),
+                    estimated = brain::estimate::tokens(&sent),
+                    budget,
+                    squeezes,
+                    scale,
+                    hard = hard.unwrap_or(0),
+                    effort = ?self.effort,
+                    "sending"
+                );
                 let req = Request {
                     system: Some(self.system.clone()),
                     messages: sent.clone(),
@@ -219,7 +237,11 @@ impl Agent {
                     tool_choice: Default::default(),
                 };
 
-                match self.stream_turn(&req, ctx, tx).await {
+                match self
+                    .stream_turn(&req, ctx, tx)
+                    .instrument(span.clone())
+                    .await
+                {
                     Ok(done) => break done,
                     Err(AgentError::Brain(e))
                         if brain::classify(&e) == brain::Fault::Overflow
@@ -232,17 +254,23 @@ impl Agent {
                         match brain::fault::overflow_limit(&e) {
                             Some(limit) => {
                                 hard = Some(self.budget_within(limit));
-                                let _ = tx.send(Event::Warning(format!(
-                                    "the provider reports a {limit}-token window; refitting to it"
-                                )));
+                                say(
+                                    tx,
+                                    Event::Warning(format!(
+                                        "the provider reports a {limit}-token window; refitting to it"
+                                    )),
+                                );
                             }
                             None => {
                                 scale *= SQUEEZE;
-                                let _ = tx.send(Event::Warning(format!(
-                                    "the request did not fit and named no limit; \
+                                say(
+                                    tx,
+                                    Event::Warning(format!(
+                                        "the request did not fit and named no limit; \
                                      retrying at {}% of the estimated budget",
-                                    (scale * 100.0).round()
-                                )));
+                                        (scale * 100.0).round()
+                                    )),
+                                );
                             }
                         }
                     }
@@ -253,11 +281,14 @@ impl Agent {
             let (usage, estimated) = self.fill_usage(done.usage, &sent, &done.message);
             let cost = self.spec.cost(&usage);
             totals.add_estimated(&usage, cost, estimated);
-            let _ = tx.send(Event::TurnEnd {
-                usage,
-                cost,
-                estimated,
-            });
+            say(
+                tx,
+                Event::TurnEnd {
+                    usage,
+                    cost,
+                    estimated,
+                },
+            );
 
             // Two providers accept an oversized request instead of refusing it:
             // one silently, one by truncating and then having no room to answer.
@@ -267,12 +298,24 @@ impl Agent {
                 || (done.stop == brain::StopReason::MaxTokens && done.usage.output == 0);
             if silently_truncated && scale > SQUEEZE.powi(MAX_SQUEEZE as i32) {
                 scale *= SQUEEZE;
-                let _ = tx.send(Event::Warning(format!(
-                    "the provider took {} input tokens against a {window}-token window and \
+                say(
+                    tx,
+                    Event::Warning(format!(
+                        "the provider took {} input tokens against a {window}-token window and \
                      answered from a truncated prompt; tightening the budget",
-                    done.usage.input
-                )));
+                        done.usage.input
+                    )),
+                );
             }
+
+            tracing::debug!(
+                target: "pi::loop",
+                parent: &span,
+                stop = ?done.stop,
+                calls = done.message.tool_calls().count(),
+                invalid = done.invalid.len(),
+                "replied"
+            );
 
             let calls: Vec<ToolCall> = done.message.tool_calls().cloned().collect();
             session.log.push(done.message);
@@ -290,12 +333,15 @@ impl Agent {
                     ));
                     continue;
                 }
-                let _ = tx.send(Event::Done {
-                    turns: turn,
-                    usage: totals.usage,
-                    cost: totals.cost,
-                    estimated: totals.estimated,
-                });
+                say(
+                    tx,
+                    Event::Done {
+                        turns: turn,
+                        usage: totals.usage,
+                        cost: totals.cost,
+                        estimated: totals.estimated,
+                    },
+                );
                 return Ok(Outcome {
                     totals,
                     yielded: self.yielded(ctx),
@@ -307,17 +353,23 @@ impl Agent {
                 .iter()
                 .map(|i| (i.call.clone(), i.error.clone()))
                 .collect();
-            let results = self.run_calls(&calls, &bad, ctx, tx, &mut echoes).await?;
+            let results = self
+                .run_calls(&calls, &bad, ctx, tx, &mut echoes)
+                .instrument(span.clone())
+                .await?;
             session.log.push(Message::tool_results(results));
             self.record_todos(session, ctx);
 
             if let Some(value) = self.yielded(ctx) {
-                let _ = tx.send(Event::Done {
-                    turns: turn,
-                    usage: totals.usage,
-                    cost: totals.cost,
-                    estimated: totals.estimated,
-                });
+                say(
+                    tx,
+                    Event::Done {
+                        turns: turn,
+                        usage: totals.usage,
+                        cost: totals.cost,
+                        estimated: totals.estimated,
+                    },
+                );
                 return Ok(Outcome {
                     totals,
                     yielded: Some(value),
@@ -325,6 +377,7 @@ impl Agent {
             }
         }
 
+        tracing::error!(target: "pi::loop", turns = self.max_turns, "turn limit");
         Err(AgentError::TurnLimit(self.max_turns))
     }
 
@@ -371,7 +424,10 @@ impl Agent {
         };
         let (mut record, mut report) = compact::plan(&session.log, budget, &policy);
         if !record.dropped.is_empty() && self.summarize {
-            let cost = self.write_summary(&session.log, &mut record, None).await;
+            let cost = self
+                .write_summary(&session.log, &mut record, None)
+                .instrument(tracing::info_span!(target: "pi::compact", "summarize"))
+                .await;
             report.summarized = record.summary.is_some();
             totals.add(&cost, self.spec.cost(&cost));
         }
@@ -379,7 +435,7 @@ impl Agent {
         // buries the ones that did.
         if report.touched() {
             session.log.record(record);
-            let _ = tx.send(Event::Compacted(report));
+            say(tx, Event::Compacted(report));
         }
     }
 
@@ -404,7 +460,10 @@ impl Agent {
         let (mut record, mut report) = compact::plan(&session.log, policy.protect_tail, &policy);
         let mut spent = Totals::default();
         if !record.dropped.is_empty() && self.summarize {
-            let cost = self.write_summary(&session.log, &mut record, focus).await;
+            let cost = self
+                .write_summary(&session.log, &mut record, focus)
+                .instrument(tracing::info_span!(target: "pi::compact", "summarize"))
+                .await;
             report.summarized = record.summary.is_some();
             spent.add(&cost, self.spec.cost(&cost));
         }
@@ -436,7 +495,7 @@ impl Agent {
                 usage
             }
             Err(e) => {
-                tracing::warn!("summarizing dropped history failed: {e}");
+                tracing::warn!(target: "pi::compact", error = %e, "summarizing dropped history failed");
                 brain::stream::Usage::default()
             }
         }
@@ -517,16 +576,28 @@ impl Agent {
             // A spent quota arrives as a 429 like any throttle; retrying that
             // one only costs money.
             if attempt >= self.retry.attempts || brain::classify(&err) != brain::Fault::Transient {
+                // The classification, not just the error: "why was this not
+                // retried" is answerable from the fault and from nothing else.
+                tracing::error!(
+                    target: "pi::wire",
+                    attempts = attempt,
+                    fault = ?brain::classify(&err),
+                    error = %err,
+                    "giving up"
+                );
                 return Err(AgentError::Brain(err));
             }
 
             attempt += 1;
             let delay = self.retry.delay(attempt);
-            let _ = tx.send(Event::Retrying {
-                attempt,
-                delay_ms: delay.as_millis() as u64,
-                reason: err.to_string(),
-            });
+            say(
+                tx,
+                Event::Retrying {
+                    attempt,
+                    delay_ms: delay.as_millis() as u64,
+                    reason: err.to_string(),
+                },
+            );
             tokio::select! {
                 _ = tokio::time::sleep(delay) => {}
                 _ = ctx.cancel.cancelled() => return Err(AgentError::Cancelled),
@@ -569,14 +640,14 @@ impl Agent {
             let ev = ev?;
             match &ev {
                 StreamEvent::TextDelta { delta, .. } => {
-                    let _ = tx.send(Event::TextDelta(delta.clone()));
+                    say(tx, Event::TextDelta(delta.clone()));
                 }
                 StreamEvent::ReasoningDelta { delta, .. } => {
-                    let _ = tx.send(Event::ReasoningDelta(delta.clone()));
+                    say(tx, Event::ReasoningDelta(delta.clone()));
                 }
                 // The one measured number that arrives before the answer does.
                 StreamEvent::MessageStart { usage, .. } => {
-                    let _ = tx.send(Event::Usage(*usage));
+                    say(tx, Event::Usage(*usage));
                 }
                 _ => {}
             }
@@ -621,18 +692,24 @@ impl Agent {
         for (call, action) in calls.iter().zip(&actions) {
             match action {
                 Action::Reject(why) => {
-                    let _ = tx.send(Event::ToolDenied {
-                        id: call.id.0.clone(),
-                        name: call.name.clone(),
-                        reason: why.clone(),
-                    });
+                    say(
+                        tx,
+                        Event::ToolDenied {
+                            id: call.id.0.clone(),
+                            name: call.name.clone(),
+                            reason: why.clone(),
+                        },
+                    );
                 }
                 Action::Run(_) => {
-                    let _ = tx.send(Event::ToolStart {
-                        id: call.id.0.clone(),
-                        name: call.name.clone(),
-                        args: call.args.clone(),
-                    });
+                    say(
+                        tx,
+                        Event::ToolStart {
+                            id: call.id.0.clone(),
+                            name: call.name.clone(),
+                            args: call.args.clone(),
+                        },
+                    );
                 }
             }
         }
@@ -649,18 +726,25 @@ impl Agent {
             for (call, action) in calls.iter().zip(&actions) {
                 outputs.push(match action {
                     Action::Reject(_) => None,
-                    Action::Run(t) => Some(t.execute(call.args.clone(), ctx).await),
+                    Action::Run(t) => Some(
+                        t.execute(call.args.clone(), ctx)
+                            .instrument(ran(call))
+                            .await,
+                    ),
                 });
             }
         } else {
             let futures: Vec<_> = calls
                 .iter()
                 .zip(&actions)
-                .map(|(call, action)| async move {
-                    match action {
-                        Action::Reject(_) => None,
-                        Action::Run(t) => Some(t.execute(call.args.clone(), ctx).await),
+                .map(|(call, action)| {
+                    async move {
+                        match action {
+                            Action::Reject(_) => None,
+                            Action::Run(t) => Some(t.execute(call.args.clone(), ctx).await),
+                        }
                     }
+                    .instrument(ran(call))
                 })
                 .collect();
             outputs = futures::future::join_all(futures).await;
@@ -673,21 +757,27 @@ impl Agent {
                 (_, Some(Err(ToolError::Cancelled))) => return Err(AgentError::Cancelled),
                 (_, Some(Err(e))) => {
                     let body = e.to_string();
-                    let _ = tx.send(Event::ToolEnd {
-                        id: call.id.0.clone(),
-                        name: call.name.clone(),
-                        is_error: true,
-                        preview: body.clone(),
-                    });
+                    say(
+                        tx,
+                        Event::ToolEnd {
+                            id: call.id.0.clone(),
+                            name: call.name.clone(),
+                            is_error: true,
+                            preview: body.clone(),
+                        },
+                    );
                     ToolResult::error(call.id.clone(), &call.name, body)
                 }
                 (_, Some(Ok(out))) => {
-                    let _ = tx.send(Event::ToolEnd {
-                        id: call.id.0.clone(),
-                        name: call.name.clone(),
-                        is_error: false,
-                        preview: out.preview(),
-                    });
+                    say(
+                        tx,
+                        Event::ToolEnd {
+                            id: call.id.0.clone(),
+                            name: call.name.clone(),
+                            is_error: false,
+                            preview: out.preview(),
+                        },
+                    );
                     let body = out.flatten();
                     let mut content = out.content;
                     if let Some(notice) = repeat_notice(echoes, call, &body) {
@@ -711,6 +801,11 @@ impl Agent {
 
         Ok(results)
     }
+}
+
+/// The scope a tool's own records land in, and what times it.
+fn ran(call: &ToolCall) -> tracing::Span {
+    tracing::info_span!(target: "pi::tool", "tool", name = %call.name, call = %call.id.0)
 }
 
 /// Name a call that has come back identical too many times.

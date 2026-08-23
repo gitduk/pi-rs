@@ -399,27 +399,9 @@ impl Transport for OpenAi {
     ) -> Result<BoxStream<'static, Result<StreamEvent>>> {
         let c = compat(spec)?.clone();
         let body = build_body(spec, req, &c);
-
-        let resp = self
-            .http
-            .post(format!(
-                "{}/chat/completions",
-                spec.base_url.trim_end_matches('/')
-            ))
-            .bearer_auth(&self.api_key)
-            .json(&body)
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(BrainError::Api {
-                transport: "openai",
-                status,
-                body,
-            });
-        }
+        let url = format!("{}/chat/completions", spec.base_url.trim_end_matches('/'));
+        let call = self.http.post(&url).bearer_auth(&self.api_key).json(&body);
+        let resp = super::exchange("openai", url, spec, req, &body, call).await?;
 
         let mut dec = Decoder::default();
 
@@ -434,6 +416,10 @@ impl Transport for OpenAi {
                     Ok(f) => match serde_json::from_str::<Value>(&f.data) {
                         Err(e) => vec![Err(BrainError::Stream(e.to_string()))],
                         Ok(data) if data.get("error").is_some_and(|e| !e.is_null()) => {
+                            tracing::warn!(
+                                target: "pi::wire", wire = "openai",
+                                detail = %data["error"], "error frame"
+                            );
                             vec![Err(BrainError::Stream(data["error"].to_string()))]
                         }
                         Ok(data) => dec.frame(&data, &c).into_iter().map(Ok).collect(),

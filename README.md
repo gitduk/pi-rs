@@ -94,7 +94,7 @@ key when they are never live together, which is how `up` is `menu.previous`
 with the list open and `history.older` without it. Sharing one *within* a
 context is refused at load, along with an unknown id or an unreadable binding.
 
-`/help` `/new` `/name` `/model` `/compact` `/reload` `/keys` `/todo` `/cost` `/exit`. Typing `/`
+`/help` `/new` `/name` `/model` `/compact` `/reload` `/keys` `/log` `/todo` `/cost` `/exit`. Typing `/`
 opens a list of what the line could still become; `↑` `↓` pick, `Tab` accepts,
 `Esc` dismisses it until the next keystroke. `/model` is the one command whose
 argument completes too, because the name is the tedious part and the config
@@ -121,6 +121,38 @@ model a session is on is a decision, not a preference, and `/model` is how it
 changes. There is no narrower `/reload keys` because there is nothing to save:
 an unchanged system prompt is the same string, so the provider's cache survives
 a reload that changed nothing.
+
+### The journal
+
+Every run writes one, at `~/.local/state/pi/logs/<session>.jsonl`, and `/log`
+says where. It is the other half of the transcript: the transcript holds every
+message, tool call and result, so the journal holds what never reaches a
+message — which config was read, what went on the wire and what came back, how
+long each turn and each tool took, why a patch was refused, what the loop
+decided when it compacted or retried or gave up. A bug is read back from the
+two together rather than reproduced.
+
+One JSON object per line, so `jq` is the reader:
+
+```bash
+J=~/.local/state/pi/logs/<session>.jsonl        # /log prints the path
+jq -c 'select(.lvl!="INFO")' $J                 # only what went wrong
+jq -c 'select(.ev=="pi::span")|{in,name,dur_ms}' $J   # what took the time
+jq -r 'select(.ev=="pi::edit")|.patch' $J       # what the model actually wrote
+```
+
+`ms` is milliseconds since the run began, `in` is the span a record sits under
+(`turn>tool`), and `ev` says which part spoke: `pi::session` `pi::loop`
+`pi::wire` `pi::tool` `pi::edit` `pi::bash` `pi::compact` `pi::keys`, plus
+`pi::span` for the record that closes a span and carries its `dur_ms`. `--log debug` adds the payloads: request bodies, patches
+and tool arguments in full rather than clipped to a kilobyte. `--log trace`
+adds the dependencies' own accounts, which is a lot of hyper. `--log off`
+writes nothing; `PI_LOG` sets it for good.
+
+Journals are as sensitive as transcripts — prompts, paths, file contents — and
+kept the same way: `0600`, outside the workspace, dropped after two weeks. No
+credential is written: keys travel in headers, which are never recorded, and a
+field named for one is replaced by a fingerprint of it.
 
 ### Standing instructions
 
@@ -186,7 +218,7 @@ is not the provider's, and a cost derived from it is not a bill.
 | `brain` | 2.7k | messages, wires, streams, faults, estimates |
 | `agent` | 3.4k | the turn loop, compaction, the session log |
 | `tools` | 3.6k | the tool set and the workspace gate |
-| `cli` | 3.7k | terminal, config, sessions |
+| `cli` | 4.4k | terminal, config, sessions, the journal |
 | `hashline` | 1.2k | the patch format — pure, no IO |
 | `syntax` | 0.4k | tree-sitter outlines for eight languages |
 

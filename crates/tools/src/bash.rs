@@ -157,6 +157,12 @@ impl Tool for Bash {
         };
 
         let Some(out) = waited else {
+            tracing::warn!(
+                target: "pi::bash",
+                command = %args.command,
+                timeout_ms = timeout.as_millis() as u64,
+                "timed out"
+            );
             reap(group).await;
             return Ok(ToolOutput::text(format!(
                 "timed out after {}ms; the command and everything it spawned were killed",
@@ -171,6 +177,18 @@ impl Tool for Bash {
         // Anything elided is written out first, so a build log the model needs
         // the middle of is one grep away rather than gone.
         let spilled = spill(&stdout, &stderr);
+
+        // The exit code and the command, always. What the command printed is
+        // in the transcript; what it was run against — the directory — is not.
+        tracing::info!(
+            target: "pi::bash",
+            command = %args.command,
+            cwd = %cwd.display(),
+            code,
+            stdout_bytes = stdout.len(),
+            stderr_bytes = stderr.len(),
+            "exited"
+        );
 
         let mut body = String::new();
         body.push_str(&clamp("stdout", stdout.trim_end()));

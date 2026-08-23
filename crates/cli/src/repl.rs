@@ -52,6 +52,11 @@ pub const COMMANDS: &[Command] = &[
         help: "re-read ~/.pi.toml, the instructions and the skills",
     },
     Command {
+        word: "/log",
+        args: "",
+        help: "where this run is writing its journal",
+    },
+    Command {
         word: "/keys",
         args: "",
         help: "what every key does, and the id to rebind it under",
@@ -189,16 +194,16 @@ impl Repl {
     pub fn reload(&mut self) -> Vec<String> {
         let config = match crate::config::load(self.args.config.as_deref()) {
             Ok(c) => c,
-            Err(e) => return vec![format!("nothing reloaded — {e:#}")],
+            Err(e) => return vec![format!("nothing reloaded — {}", refused("reload", e))],
         };
         let project = match crate::config::load_project(self.ctx.workspace.root()) {
             Ok(p) => p,
-            Err(e) => return vec![format!("nothing reloaded — {e:#}")],
+            Err(e) => return vec![format!("nothing reloaded — {}", refused("reload", e))],
         };
         let resolved =
             match crate::resolve(&self.args, self.ctx.workspace.root(), &config, &project) {
                 Ok(r) => r,
-                Err(e) => return vec![format!("nothing reloaded — {e:#}")],
+                Err(e) => return vec![format!("nothing reloaded — {}", refused("reload", e))],
             };
 
         let changed = resolved.system != self.agent.system;
@@ -212,6 +217,17 @@ impl Repl {
         // preferences, and which model this session is on was a decision, not a
         // preference. `/model` is how that one changes.
         self.config = std::sync::Arc::new(config);
+
+        tracing::info!(
+            target: "pi::session",
+            models = self.config.models.len(),
+            rebound_keys = self.config.keys.len(),
+            max_turns = self.agent.max_turns,
+            effort = ?self.agent.effort,
+            system_bytes = self.agent.system.len(),
+            prompt_changed = changed,
+            "reloaded"
+        );
 
         let mut said = resolved.notes;
         said.push(if changed {
@@ -268,7 +284,10 @@ impl Repl {
             crate::config::Origin::Command,
         ) {
             Ok(d) => d,
-            Err(e) => return vec![format!("still on {} — {e:#}", self.agent.spec.id)],
+            Err(e) => {
+                let held = self.agent.spec.id.clone();
+                return vec![format!("still on {held} — {}", refused("switch", e))];
+            }
         };
         // Compared after resolving, not before: `find` accepts a model's
         // `wire_id` as well as its table name, so the name typed and the id it
@@ -288,6 +307,14 @@ impl Repl {
         if carries_reasoning(&self.session.log) {
             said.push(demotion(spec.thinking_replay).into());
         }
+        tracing::info!(
+            target: "pi::session",
+            from = %self.agent.spec.id,
+            to = %spec.id,
+            wire = spec.transport_name(),
+            context_window = spec.context_window,
+            "model switched"
+        );
         self.agent.spec = dialled.spec;
         self.agent.transport = dialled.transport;
         said
@@ -391,6 +418,7 @@ pub enum Cmd {
     New,
     Keys,
     Reload,
+    Log,
     /// Everything after the word, or empty to clear.
     Name(String),
     /// Everything after the word focuses the summary.
@@ -402,6 +430,15 @@ pub enum Cmd {
 
 /// Slash commands are recognized before anything reaches the model, so a line
 /// that merely starts with a slash never becomes a prompt by accident.
+/// A command that changed nothing, said once to the user and once to the
+/// journal. Nothing-happened is the hardest kind of bug to read back: the
+/// terminal has scrolled and the config on disk is whatever it is now.
+fn refused(what: &str, e: anyhow::Error) -> String {
+    let detail = format!("{e:#}");
+    tracing::warn!(target: "pi::session", command = what, error = %detail, "refused");
+    detail
+}
+
 pub fn parse(line: &str) -> Option<Cmd> {
     let word = line.split_whitespace().next()?;
     if !word.starts_with('/') {
@@ -415,6 +452,7 @@ pub fn parse(line: &str) -> Option<Cmd> {
         "/new" => Cmd::New,
         "/keys" => Cmd::Keys,
         "/reload" => Cmd::Reload,
+        "/log" => Cmd::Log,
         "/name" => Cmd::Name(rest(line)),
         "/compact" => Cmd::Compact(rest(line)),
         "/model" => Cmd::Model(rest(line)),
@@ -453,6 +491,10 @@ impl Repl {
             Cmd::Help => Step::Handled(help()),
             Cmd::Keys => Step::Handled(self.keys.listing()),
             Cmd::Reload => Step::Handled(self.reload()),
+            Cmd::Log => lines(match crate::journal::path() {
+                Some(p) => format!("{}", p.display()),
+                None => "not recording — --log is off, or the file would not open".into(),
+            }),
             Cmd::Todo => lines(tools::todo::render(self.session.log.todos())),
             Cmd::Cost => {
                 let u = &totals.usage;
@@ -470,6 +512,7 @@ impl Repl {
                 // The old one stays on disk; only the thread of conversation ends.
                 self.session = Session::default();
                 self.id = crate::session::new_id();
+                crate::journal::now_recording(&self.id);
                 if let Ok(mut held) = self.ctx.todos.lock() {
                     held.clear();
                 }
