@@ -208,17 +208,14 @@ fn hunk_help(before: &str, after: &str, landed: &[Landed]) -> String {
             format!("{}-{}", l.start, l.end)
         };
         if i < 6 {
-            let cur = &old[l.start.saturating_sub(1).min(old.len())..l.end.min(old.len())];
+            let cur = hunk_rows(&old, l);
             let cur = cur.iter().map(|s| crop(s, 60)).collect::<Vec<_>>().join("\n    ");
             out.push_str(&format!("\n  {addr}: `{cur}`"));
         } else if i == 6 {
             out.push_str(&format!("\n  … {} more", landed.len() - i));
         }
         let took: isize = l.took.iter().map(|s| brace_net(s)).sum();
-        let gave: isize = new[l.start.saturating_sub(1).min(new.len())..l.end.min(new.len())]
-            .iter()
-            .map(|s| brace_net(s))
-            .sum();
+        let gave: isize = hunk_rows(&new, l).iter().map(|s| brace_net(s)).sum();
         if took != gave {
             off.push_str(&format!(
                 "\n  {addr}: its body nets {gave}, the lines it displaces net {took}"
@@ -232,6 +229,11 @@ fn hunk_help(before: &str, after: &str, landed: &[Landed]) -> String {
     out
 }
 
+/// Clamped to whatever `lines` actually holds: a range that reaches past the
+/// end, or starts at zero, shows what there is rather than panicking.
+fn hunk_rows<'a, 'b>(lines: &'a [&'b str], l: &Landed) -> &'a [&'b str] {
+    &lines[l.start.saturating_sub(1).min(lines.len())..l.end.min(lines.len())]
+}
 fn brace_net(s: &str) -> isize {
     s.chars().fold(0, |n, c| match c {
         '{' => n + 1,
@@ -241,8 +243,9 @@ fn brace_net(s: &str) -> isize {
 }
 
 fn crop(s: &str, max: usize) -> String {
-    let mut t: String = s.chars().take(max).collect();
-    if s.chars().count() > max {
+    let mut chars = s.chars();
+    let mut t: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
         t.push('…');
     }
     t
@@ -291,7 +294,7 @@ fn sketch(changes: &[Change], loaded: &HashMap<String, String>) -> String {
         let lines: Vec<&str> = content.lines().collect();
         let mut rows = Vec::new();
         for l in landed {
-            let gave = &lines[(l.start - 1).min(lines.len())..l.end.min(lines.len())];
+            let gave = hunk_rows(&lines, l);
             // A hunk whose body already matched changed nothing, and a diff
             // that shows it says something happened that did not.
             if l.took == gave {
@@ -499,7 +502,7 @@ mod tests {
 
     #[test]
     fn a_body_with_one_brace_too_many_is_called_out() {
-        let before = "fn f() {\n}\n";
+        let before = "fn f() {\n}\n\n";
         let after = "fn f() {\n}\n}\n";
         let landed = vec![Landed {
             start: 3,
