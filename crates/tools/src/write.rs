@@ -115,7 +115,7 @@ impl Tool for Write {
     }
 
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
-        let args: Args = serde_json::from_value(args)?;
+        let args: Args = crate::parse_args(args)?;
         let path = ctx.workspace.resolve(&args.path)?;
         let rel = ctx.workspace.display(&path);
         let _guard = ctx.lock_file(&path).await;

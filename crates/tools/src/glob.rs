@@ -49,7 +49,7 @@ impl Tool for Glob {
     }
 
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
-        let args: Args = serde_json::from_value(args)?;
+        let args: Args = crate::parse_args(args)?;
         let root = root_of(&ctx.workspace, &args.path)?;
         let set = globs(std::slice::from_ref(&args.pattern))?
             .ok_or_else(|| ToolError::Invalid("empty pattern".into()))?;

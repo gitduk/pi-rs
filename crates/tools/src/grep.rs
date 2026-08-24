@@ -75,7 +75,7 @@ impl Tool for Grep {
     }
 
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
-        let args: Args = serde_json::from_value(args)?;
+        let args: Args = crate::parse_args(args)?;
         let root = root_of(&ctx.workspace, &args.path)?;
         let set = globs(&args.glob)?;
         let limit = args.limit.unwrap_or(DEFAULT_LIMIT).max(1);

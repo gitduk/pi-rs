@@ -107,7 +107,7 @@ pub fn render(items: &[Todo]) -> String {
     out
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct Args {
     items: Vec<Todo>,
 }
@@ -164,7 +164,7 @@ impl Tool for TodoTool {
     }
 
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
-        let args: Args = serde_json::from_value(args)?;
+        let args: Args = crate::parse_args(args)?;
         let mut items = args.items;
         normalize(&mut items);
 
@@ -173,5 +173,20 @@ impl Tool for TodoTool {
         *ctx.todos.lock().expect("todo list poisoned") = items;
 
         Ok(ToolOutput::text(body).with_preview(format!("{open} open")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Args;
+    use serde_json::json;
+
+    #[test]
+    fn a_missing_status_names_its_item() {
+        let e = crate::parse_args::<Args>(json!({ "items": [{ "task": "x" }] }))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("items[0]"), "{e}");
+        assert!(e.contains("status"), "{e}");
     }
 }

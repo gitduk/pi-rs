@@ -1,6 +1,18 @@
 use async_trait::async_trait;
 use brain::message::ToolResultContent;
-use serde_json::Value;
+use serde_json::{Deserializer, Value};
+
+/// Parse a tool's arguments with a serde path on any error, so a missing or
+/// misspelled field says which one (`items[1].status`) instead of a bare
+/// `missing field 'status'` that could be any of a hundred places.
+pub fn parse_args<T>(args: Value) -> Result<T, serde_json::Error>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let text = args.to_string();
+    let mut de = Deserializer::from_str(&text);
+    serde_path_to_error::deserialize(&mut de).map_err(|e| serde::de::Error::custom(e.to_string()))
+}
 
 pub mod bash;
 pub mod blocks;

@@ -153,25 +153,99 @@ fn echo(path: &str, before: &str, content: &str, landed: &[Landed]) -> String {
 /// This is what a line range costs and `N*` does not: the model resolves the
 /// closing line itself, and one off leaves an orphaned brace that applies
 /// cleanly. Nothing is written when it fires, so the whole patch stays undone.
+///
+/// The message carries the hunk addresses against the file as it stands, and
+/// any hunk whose body nets a different brace count from the lines it replaces
+/// — the first thing to look at when the parse broke.
 fn broke_syntax(plan: &hashline::Plan, loaded: &HashMap<String, String>) -> Option<String> {
     for change in &plan.changes {
-        let (path, before, after) = match change {
-            Change::Write { path, content, .. } => (path, loaded.get(path), content),
+        let (path, before, after, landed) = match change {
+            Change::Write {
+                path,
+                content,
+                landed,
+                ..
+            } => (path, loaded.get(path), content, Some(landed)),
             Change::Rename {
-                from, to, content, ..
-            } => (to, loaded.get(from), content),
+                from,
+                to,
+                content,
+                landed,
+                ..
+            } => (to, loaded.get(from), content, Some(landed)),
             Change::Remove { .. } => continue,
         };
         if let Some((row, text)) = crate::parses::broke(path, before.map(String::as_str), after) {
-            return Some(format!(
+            let mut why = format!(
                 "{path} would not parse: line {row} is `{text}`, and it did \
                  parse before this patch. A range that covers one line too few \
                  or too many does exactly this. Re-read and check where the \
                  construct actually ends. Nothing was written."
-            ));
+            );
+            if let (Some(before), Some(landed)) = (before, landed) {
+                why.push('\n');
+                why.push_str(&hunk_help(before, after, landed));
+            }
+            return Some(why);
         }
     }
     None
+}
+
+/// What the patch's own hunks point at, for a break that a bare "line N is
+/// `}`" leaves the model to hunt down by itself. Each hunk shows the lines it
+/// replaces as they stand now, and any whose body nets a different brace count
+/// from what it displaces — the shape an off-by-one range leaves behind.
+fn hunk_help(before: &str, after: &str, landed: &[Landed]) -> String {
+    let old: Vec<&str> = before.lines().collect();
+    let new: Vec<&str> = after.lines().collect();
+    let mut out = String::from("The hunks, against the file as it stands:");
+    let mut off = String::new();
+    for (i, l) in landed.iter().enumerate() {
+        let addr = if l.start == l.end {
+            format!("{}-{}", l.start, l.start)
+        } else {
+            format!("{}-{}", l.start, l.end)
+        };
+        if i < 6 {
+            let cur = &old[l.start.saturating_sub(1).min(old.len())..l.end.min(old.len())];
+            let cur = cur.iter().map(|s| crop(s, 60)).collect::<Vec<_>>().join("\n    ");
+            out.push_str(&format!("\n  {addr}: `{cur}`"));
+        } else if i == 6 {
+            out.push_str(&format!("\n  … {} more", landed.len() - i));
+        }
+        let took: isize = l.took.iter().map(|s| brace_net(s)).sum();
+        let gave: isize = new[l.start.saturating_sub(1).min(new.len())..l.end.min(new.len())]
+            .iter()
+            .map(|s| brace_net(s))
+            .sum();
+        if took != gave {
+            off.push_str(&format!(
+                "\n  {addr}: its body nets {gave}, the lines it displaces net {took}"
+            ));
+        }
+    }
+    if !off.is_empty() {
+        out.push_str("\nBrace balance:");
+        out.push_str(&off);
+    }
+    out
+}
+
+fn brace_net(s: &str) -> isize {
+    s.chars().fold(0, |n, c| match c {
+        '{' => n + 1,
+        '}' => n - 1,
+        _ => n,
+    })
+}
+
+fn crop(s: &str, max: usize) -> String {
+    let mut t: String = s.chars().take(max).collect();
+    if s.chars().count() > max {
+        t.push('…');
+    }
+    t
 }
 
 /// What a person watching sees: the lines that went, and the lines that came.
@@ -297,7 +371,7 @@ impl Tool for Edit {
     }
 
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
-        let args: Args = serde_json::from_value(args)?;
+        let args: Args = crate::parse_args(args)?;
         // The rejected patch itself, because the message alone never says what
         // the model actually wrote — and a model that gets the format wrong
         // gets it wrong the same way for the rest of the session.
@@ -403,5 +477,37 @@ impl Tool for Edit {
             }
         }
         Ok(ToolOutput::text(report).with_preview(sketch(&plan.changes, &loaded)))
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_parse_break_shows_the_hunk_addresses() {
+        let before = "fn f() {\n    a;\n}\n\nfn g() {";
+        let landed = vec![Landed {
+            start: 5,
+            end: 5,
+            took: vec!["fn g() {".into()],
+        }];
+        let help = hunk_help(before, before, &landed);
+        assert!(help.contains("5-5"), "{help}");
+        assert!(help.contains("fn g() {"), "{help}");
+        assert!(!help.contains("Brace balance"), "{help}");
+    }
+
+    #[test]
+    fn a_body_with_one_brace_too_many_is_called_out() {
+        let before = "fn f() {\n}\n";
+        let after = "fn f() {\n}\n}\n";
+        let landed = vec![Landed {
+            start: 3,
+            end: 3,
+            took: vec![String::new()],
+        }];
+        let help = hunk_help(before, after, &landed);
+        assert!(help.contains("Brace balance:"), "{help}");
+        assert!(help.contains("nets -1"), "{help}");
     }
 }

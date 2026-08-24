@@ -148,7 +148,7 @@ impl Tool for SkillTool {
     }
 
     async fn execute(&self, args: Value, _ctx: &Ctx) -> Result<ToolOutput, ToolError> {
-        let args: Args = serde_json::from_value(args)?;
+        let args: Args = crate::parse_args(args)?;
         let skill = self.find(&args.name)?;
 
         let Some(rel) = args.file else {

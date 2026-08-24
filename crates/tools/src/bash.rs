@@ -117,7 +117,7 @@ impl Tool for Bash {
     }
 
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
-        let args: Args = serde_json::from_value(args)?;
+        let args: Args = crate::parse_args(args)?;
         let cwd = match &args.cwd {
             Some(p) => ctx.workspace.resolve(p)?,
             None => ctx.workspace.root().to_path_buf(),
