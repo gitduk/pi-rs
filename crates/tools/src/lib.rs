@@ -10,6 +10,7 @@ pub mod glob;
 pub mod grep;
 pub mod read;
 pub mod registry;
+mod rows;
 pub mod skill;
 pub mod skills;
 pub mod todo;

@@ -31,15 +31,6 @@ fn looks_binary(bytes: &[u8]) -> bool {
 
 pub struct Read;
 
-/// One skeleton row's address, in the spelling `edit` parses.
-///
-/// Named rather than inlined so the round-trip test has something to hold: the
-/// grammar belongs to `hashline`, and a skeleton the model cannot paste into a
-/// patch is worse than no skeleton.
-fn range(line: usize, end: usize) -> String {
-    format!("{line}.={end}:")
-}
-
 #[async_trait]
 impl Tool for Read {
     fn name(&self) -> &str {
@@ -142,12 +133,15 @@ impl Tool for Read {
         if wants_outline && let Some(lang) = syntax::Lang::of(&rel) {
             let items = syntax::outline(lang, content);
             if !items.is_empty() {
+                // From the items already in hand: asking `rows::spans` here
+                // would parse the file a second time for the same answer.
+                let spans = crate::rows::of(&items);
                 let mut out = format!("[{rel}#{tag}] {} lines · outline\n", all.len());
                 for item in &items {
                     // The span, not just the opening row: it is what an edit
                     // names, and a skeleton is the only view of a long file
                     // that shows where anything ends.
-                    out.push_str(&range(item.line, item.end));
+                    out.push_str(&crate::rows::addr(item.line, &spans));
                     for _ in 0..item.depth {
                         out.push_str("  ");
                     }
@@ -175,13 +169,19 @@ impl Tool for Read {
 
         let end = (start + limit).min(all.len());
         let mut out = format!("[{rel}#{tag}]\n");
+        // A construct opening inside the window often closes outside it, and a
+        // row that says where it ends is the difference between one read and
+        // two.
+        let spans = crate::rows::spans(&rel, content);
         for (i, line) in all[start..end].iter().enumerate() {
             let n = start + i + 1;
+            out.push_str(&crate::rows::addr(n, &spans));
             if line.len() > MAX_LINE {
-                let cut = crate::bash::head(line, MAX_LINE);
-                out.push_str(&format!("{n}:{cut}… (line truncated)\n"));
+                out.push_str(crate::bash::head(line, MAX_LINE));
+                out.push_str("… (line truncated)\n");
             } else {
-                out.push_str(&format!("{n}:{line}\n"));
+                out.push_str(line);
+                out.push('\n');
             }
         }
         if end < all.len() {

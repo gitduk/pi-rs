@@ -82,10 +82,15 @@ fn echo(path: &str, before: &str, content: &str, landed: &[Landed]) -> String {
         }
         return out;
     }
+    // What just landed, addressed the way a second edit would name it: the
+    // numbering moved, and a construct that grew has a new end.
+    let spans = crate::rows::spans(path, content);
     for l in landed {
         for n in l.start..=l.end {
             if let Some(text) = lines.get(n - 1) {
-                out.push_str(&format!("{n}:{text}\n"));
+                out.push_str(&crate::rows::addr(n, &spans));
+                out.push_str(text);
+                out.push('\n');
             }
         }
     }

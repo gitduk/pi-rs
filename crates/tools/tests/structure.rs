@@ -62,9 +62,37 @@ async fn a_range_request_is_answered_with_lines_not_a_skeleton() {
         &c,
     )
     .await;
-    assert!(out.contains("321:pub struct Point {"), "{out}");
-    assert!(out.contains("322:    x: i32,"), "{out}");
+    // A declaration's row carries where it ends; an ordinary row stays bare,
+    // because `322.=322` is the number already in front of it.
+    assert!(out.contains("321.=323:pub struct Point {"), "{out}");
+    assert!(out.contains("\n322:    x: i32,"), "{out}");
     assert!(!out.contains("outline"), "{out}");
+}
+
+#[tokio::test]
+async fn a_construct_that_closes_past_the_window_still_says_where() {
+    // The whole reason the range view carries spans: `impl Point` opens at 325
+    // and closes at 329, and a three-line window shows neither the closing
+    // brace nor any way to count to it.
+    let (_d, c) = ctx();
+    let body = long_rust();
+    std::fs::write(c.workspace.root().join("big.rs"), &body).unwrap();
+
+    let out = run(
+        &tools::read::Read,
+        json!({ "path": "big.rs", "offset": 325, "limit": 3 }),
+        &c,
+    )
+    .await;
+    assert!(out.contains("325.=329:impl Point {"), "{out}");
+    assert!(
+        !out.contains("329:}"),
+        "the window must still end at 327: {out}"
+    );
+
+    // And what it says parses as the address it looks like.
+    let patch = format!("[big.rs#{}]\nCUT 325.=329\n", hashline::tag(&body));
+    assert!(hashline::parse(&patch).is_ok());
 }
 
 #[tokio::test]
