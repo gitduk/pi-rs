@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agent"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "brain",
@@ -115,7 +115,7 @@ checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 
 [[package]]
 name = "brain"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "eventsource-stream",
@@ -226,7 +226,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "agent",
  "anyhow",
@@ -581,7 +581,7 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "hashline"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "thiserror",
 ]
@@ -1491,7 +1491,7 @@ dependencies = [
 
 [[package]]
 name = "syntax"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "tree-sitter",
  "tree-sitter-go",
@@ -1661,7 +1661,7 @@ checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "tools"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "brain",
