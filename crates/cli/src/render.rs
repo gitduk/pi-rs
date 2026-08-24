@@ -476,7 +476,7 @@ impl Markdown {
             let codes = p.theme.heading.codes();
             return format!(
                 "{pad}{marker}\x1b[{codes}m{}{RESET}",
-                spans(&body[at..], &codes, 0, &p.theme)
+                spans(&body[at..], codes, 0, &p.theme)
             );
         }
         match bullet(body) {
