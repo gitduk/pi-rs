@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::io::{IsTerminal, Write};
 use std::sync::Arc;
 
@@ -5,7 +6,6 @@ use agent::Event;
 use anyhow::{Result, bail};
 use serde::de::{Error as _, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
-
 const RESET: &str = "\x1b[0m";
 
 /// One text attribute: bold, dim, italic — whatever SGR can set besides colour.
@@ -116,14 +116,6 @@ impl Color {
             }
         }
     }
-
-    fn code(&self) -> String {
-        match self {
-            Color::Basic(n) => n.to_string(),
-            Color::Indexed(n) => format!("38;5;{n}"),
-            Color::Rgb(r, g, b) => format!("38;2;{r};{g};{b}"),
-        }
-    }
 }
 
 impl<'de> Deserialize<'de> for Color {
@@ -160,6 +152,8 @@ impl Style {
 
     /// The SGR parameter list this style amounts to, as written between `\x1b[`
     /// and `m` — `"1;3;38;2;88;166;255"`. Empty when the style is bare.
+    /// The SGR parameter list this style amounts to, as written between `\x1b[`
+    /// and `m` — `"1;3;38;2;88;166;255"`. Empty when the style is bare.
     pub fn codes(&self) -> String {
         let mut out = String::new();
         for a in &self.sgr {
@@ -172,7 +166,11 @@ impl Style {
             if !out.is_empty() {
                 out.push(';');
             }
-            out.push_str(&c.code());
+            let _ = match c {
+                Color::Basic(n) => write!(out, "{n}"),
+                Color::Indexed(n) => write!(out, "38;5;{n}"),
+                Color::Rgb(r, g, b) => write!(out, "38;2;{r};{g};{b}"),
+            };
         }
         out
     }
@@ -512,11 +510,22 @@ fn bullet(body: &str) -> Option<usize> {
 const NESTING: u8 = 3;
 
 /// The inline spans of one line: code, bold, italic.
-///
 /// `under` is whatever styling is already open around `text`. A span closes
 /// with a reset — there is no escape for "bold off" that leaves the rest
 /// standing — so it has to re-open what it interrupted, or a code span inside
 /// bold ends the bold at the backtick and the sentence after it goes plain.
+///
+/// Whether a body is literal is a property of the mark, not of how the mark
+/// happens to be styled: a configured `emphasis` that matches `code` must not
+/// start swallowing the spans inside it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SpanKind {
+    /// Literal all the way down, no markup inside.
+    Code,
+    /// Emphasis — may hold deeper spans.
+    Markup,
+}
+
 fn spans(text: &str, under: &str, depth: u8, theme: &Theme) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -528,10 +537,9 @@ fn spans(text: &str, under: &str, depth: u8, theme: &Theme) -> String {
         let (before, from) = rest.split_at(at);
         out.push_str(before);
         match span(from, theme) {
-            Some((style, body, tail)) => {
+            Some((kind, style, body, tail)) => {
                 let code = style.codes();
-                // Code is literal all the way down; emphasis can hold more.
-                let inner = if style == &theme.code || depth == NESTING {
+                let inner = if kind == SpanKind::Code || depth == NESTING {
                     body.to_string()
                 } else {
                     let joined = if under.is_empty() {
@@ -566,11 +574,14 @@ fn spans(text: &str, under: &str, depth: u8, theme: &Theme) -> String {
 /// `_` is not a delimiter here. It is the word separator of every identifier in
 /// the tree, and a rule that italicises the middle of `saturating_sub` is worse
 /// than no italics at all.
-fn span<'a, 'b>(from: &'a str, theme: &'b Theme) -> Option<(&'b Style, &'a str, &'a str)> {
-    for (mark, style) in [
-        ("**", &theme.heading),
-        ("`", &theme.code),
-        ("*", &theme.emphasis),
+fn span<'a, 'b>(
+    from: &'a str,
+    theme: &'b Theme,
+) -> Option<(SpanKind, &'b Style, &'a str, &'a str)> {
+    for (mark, kind, style) in [
+        ("**", SpanKind::Markup, &theme.heading),
+        ("`", SpanKind::Code, &theme.code),
+        ("*", SpanKind::Markup, &theme.emphasis),
     ] {
         let Some(rest) = from.strip_prefix(mark) else {
             continue;
@@ -586,7 +597,7 @@ fn span<'a, 'b>(from: &'a str, theme: &'b Theme) -> Option<(&'b Style, &'a str, 
         if body.is_empty() || loose {
             continue;
         }
-        return Some((style, body, &rest[end + mark.len()..]));
+        return Some((kind, style, body, &rest[end + mark.len()..]));
     }
     None
 }

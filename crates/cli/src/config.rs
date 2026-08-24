@@ -402,7 +402,7 @@ pub fn load_project(workspace: &Path) -> Result<Project> {
 }
 
 fn parse(body: &str) -> Result<Config> {
-    let mut config: Config = toml::from_str(body)?;
+    let config: Config = toml::from_str(body)?;
     for (id, entry) in &config.models {
         // Rejected here rather than at use: a typo in a model you are not
         // running today is still a typo, and this is when it is cheap to see.
