@@ -51,6 +51,7 @@ pub enum Action {
     RunInterrupt,
     AppExit,
     AppClearScreen,
+    ThinkFold,
 }
 
 pub struct Binding {
@@ -230,6 +231,13 @@ pub const BINDINGS: &[Binding] = &[
         when: W::Editor,
         keys: &["ctrl+l"],
         note: "",
+    },
+    Binding {
+        id: "think.fold",
+        action: A::ThinkFold,
+        when: W::Editor,
+        keys: &["ctrl+t"],
+        note: "reasoning scrolls in three rows, or runs whole",
     },
 ];
 
@@ -430,6 +438,21 @@ impl Keys {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn folding_the_reasoning_is_reachable_while_a_run_is_in_flight() {
+        // The window is only worth having while the reasoning is arriving, so
+        // a binding that resolved between turns and not during them would be
+        // the one context it is useless in.
+        let keys = Keys::resolve(&BTreeMap::new()).unwrap();
+        for (menu, running) in [(false, false), (false, true), (true, true)] {
+            assert_eq!(
+                keys.action(press("ctrl+t"), menu, running),
+                Some(Action::ThinkFold),
+                "menu={menu} running={running}"
+            );
+        }
+    }
     use super::*;
 
     fn press(s: &str) -> Press {
