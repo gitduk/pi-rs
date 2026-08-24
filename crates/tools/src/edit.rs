@@ -182,9 +182,9 @@ fn broke_syntax(plan: &hashline::Plan, loaded: &HashMap<String, String>) -> Opti
                  or too many does exactly this. Re-read and check where the \
                  construct actually ends. Nothing was written."
             );
-            if let (Some(before), Some(landed)) = (before, landed) {
+            if let Some(landed) = landed {
                 why.push('\n');
-                why.push_str(&hunk_help(before, after, landed));
+                why.push_str(&hunk_help(after, landed));
             }
             return Some(why);
         }
@@ -194,23 +194,33 @@ fn broke_syntax(plan: &hashline::Plan, loaded: &HashMap<String, String>) -> Opti
 
 /// What the patch's own hunks point at, for a break that a bare "line N is
 /// `}`" leaves the model to hunt down by itself. Each hunk shows the lines it
-/// replaces as they stand now, and any whose body nets a different brace count
-/// from what it displaces — the shape an off-by-one range leaves behind.
-fn hunk_help(before: &str, after: &str, landed: &[Landed]) -> String {
-    let old: Vec<&str> = before.lines().collect();
+/// displaces (`took` — the file as it stands, since nothing has been written)
+/// and any whose body nets a different brace count from what it displaces —
+/// the shape an off-by-one range leaves behind.
+fn hunk_help(after: &str, landed: &[Landed]) -> String {
     let new: Vec<&str> = after.lines().collect();
     let mut out = String::from("The hunks, against the file as it stands:");
     let mut off = String::new();
     for (i, l) in landed.iter().enumerate() {
-        let addr = if l.start == l.end {
+        let addr = if l.took.is_empty() {
+            format!("{}", l.start)
+        } else if l.took.len() == 1 {
             format!("{}-{}", l.start, l.start)
         } else {
-            format!("{}-{}", l.start, l.end)
+            format!("{}-{}", l.start, l.start + l.took.len() - 1)
         };
         if i < 6 {
-            let cur = hunk_rows(&old, l);
-            let cur = cur.iter().map(|s| crop(s, 60)).collect::<Vec<_>>().join("\n    ");
-            out.push_str(&format!("\n  {addr}: `{cur}`"));
+            if l.took.is_empty() {
+                out.push_str(&format!("\n  {addr}(insertion)"));
+            } else {
+                let cur = l
+                    .took
+                    .iter()
+                    .map(|s| crop(s, 60))
+                    .collect::<Vec<_>>()
+                    .join("\n    ");
+                out.push_str(&format!("\n  {addr}: `{cur}`"));
+            }
         } else if i == 6 {
             out.push_str(&format!("\n  … {} more", landed.len() - i));
         }
@@ -228,7 +238,6 @@ fn hunk_help(before: &str, after: &str, landed: &[Landed]) -> String {
     }
     out
 }
-
 /// Clamped to whatever `lines` actually holds: a range that reaches past the
 /// end, or starts at zero, shows what there is rather than panicking.
 fn hunk_rows<'a, 'b>(lines: &'a [&'b str], l: &Landed) -> &'a [&'b str] {
@@ -494,7 +503,7 @@ mod tests {
             end: 5,
             took: vec!["fn g() {".into()],
         }];
-        let help = hunk_help(before, before, &landed);
+        let help = hunk_help(before, &landed);
         assert!(help.contains("5-5"), "{help}");
         assert!(help.contains("fn g() {"), "{help}");
         assert!(!help.contains("Brace balance"), "{help}");
@@ -502,14 +511,13 @@ mod tests {
 
     #[test]
     fn a_body_with_one_brace_too_many_is_called_out() {
-        let before = "fn f() {\n}\n\n";
         let after = "fn f() {\n}\n}\n";
         let landed = vec![Landed {
             start: 3,
             end: 3,
             took: vec![String::new()],
         }];
-        let help = hunk_help(before, after, &landed);
+        let help = hunk_help(after, &landed);
         assert!(help.contains("Brace balance:"), "{help}");
         assert!(help.contains("nets -1"), "{help}");
     }
