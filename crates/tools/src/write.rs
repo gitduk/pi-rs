@@ -93,7 +93,9 @@ impl Tool for Write {
 
     fn description(&self) -> &str {
         "Create a file or replace its entire contents. Missing parent directories \
-         are created. To change part of an existing file, use edit."
+         are created. To change part of an existing file, use edit. Replacing a \
+         file that parses with content that does not is refused, and nothing is \
+         written."
     }
 
     fn schema(&self) -> Value {
@@ -122,6 +124,20 @@ impl Tool for Write {
 
         if tokio::fs::metadata(&path).await.is_ok_and(|m| m.is_dir()) {
             return Err(ToolError::Invalid(format!("{rel} is a directory")));
+        }
+        // Only an overwrite is gated. A new file that does not parse is a stub
+        // or a scaffold, and there is nothing behind it to lose; an overwrite
+        // that does not parse is most often content that ran short, and the
+        // tail of a working file goes with it, unmentioned by either side.
+        if let Ok(old) = tokio::fs::read_to_string(&path).await
+            && let Some((row, text)) = crate::parses::broke(&rel, Some(&old), &content)
+        {
+            return Err(ToolError::Invalid(format!(
+                "{rel} would not parse: line {row} is `{text}`, and it did \
+                 parse before this write. Content that ran short does exactly \
+                 this — check that the end of what you sent is the end of the \
+                 file. Nothing was written."
+            )));
         }
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;

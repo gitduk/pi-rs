@@ -8,6 +8,7 @@ pub mod edit;
 pub mod finish;
 pub mod glob;
 pub mod grep;
+mod parses;
 pub mod read;
 pub mod registry;
 mod rows;

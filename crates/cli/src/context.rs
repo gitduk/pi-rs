@@ -67,8 +67,17 @@ pub fn paths(workspace: &Path, home: Option<&Path>) -> Vec<PathBuf> {
 }
 
 pub fn load(workspace: &Path) -> Loaded {
+    from(workspace, home().as_deref())
+}
+
+/// The same, against a stated home rather than this process's.
+///
+/// A test that reads the real `$HOME` passes or fails on whether whoever runs
+/// it happens to keep a `.pi.md` — which is a property of the machine, not of
+/// the code under test.
+fn from(workspace: &Path, home: Option<&Path>) -> Loaded {
     let mut loaded = Loaded::default();
-    for path in paths(workspace, home().as_deref()) {
+    for path in paths(workspace, home) {
         let Ok(body) = std::fs::read_to_string(&path) else {
             continue;
         };
@@ -90,7 +99,7 @@ pub fn load(workspace: &Path) -> Loaded {
 
 #[cfg(test)]
 mod tests {
-    use super::{load, paths};
+    use super::{from, paths};
     use std::path::Path;
 
     fn write(path: &Path, body: &str) {
@@ -165,7 +174,7 @@ mod tests {
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         write(&repo.join("AGENTS.md"), "  Use tabs.\n\n");
-        let got = load(&repo);
+        let got = from(&repo, None);
         assert!(got.text.contains("<instructions path="));
         assert!(got.text.contains("Use tabs."));
         assert!(got.text.ends_with("</instructions>"), "{}", got.text);
@@ -180,7 +189,7 @@ mod tests {
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         write(&repo.join("AGENTS.md"), "\n  \n");
-        let got = load(&repo);
+        let got = from(&repo, None);
         assert!(got.text.is_empty());
         assert!(got.files.is_empty());
     }

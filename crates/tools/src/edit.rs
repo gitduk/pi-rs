@@ -160,18 +160,7 @@ fn broke_syntax(plan: &hashline::Plan, loaded: &HashMap<String, String>) -> Opti
             } => (to, loaded.get(from), content),
             Change::Remove { .. } => continue,
         };
-        let Some(lang) = syntax::Lang::of(path) else {
-            continue;
-        };
-        // The result first: a patch that parses needs nothing said about what
-        // came before it, which is every patch on the ordinary path.
-        if let Some(row) = syntax::first_error(lang, after) {
-            if before.is_some_and(|b| syntax::first_error(lang, b).is_some()) {
-                continue;
-            }
-            // The row's own text, because a bare line number invites a story
-            // about why the parser is wrong instead of a look at the line.
-            let text = after.lines().nth(row - 1).unwrap_or("").trim();
+        if let Some((row, text)) = crate::parses::broke(path, before.map(String::as_str), after) {
             return Some(format!(
                 "{path} would not parse: line {row} is `{text}`, and it did \
                  parse before this patch. A range that covers one line too few \

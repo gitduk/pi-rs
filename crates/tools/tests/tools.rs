@@ -332,6 +332,93 @@ async fn a_language_the_parser_does_not_know_is_not_gated() {
 }
 
 #[tokio::test]
+async fn an_overwrite_that_would_not_parse_is_refused() {
+    // The whole-file counterpart of a range that stops one line short: content
+    // that ran out mid-file. The tool cannot tell a short answer from a short
+    // file, but the parser can, and the tail of a working file is what is lost.
+    let (_d, c) = ctx();
+    let path = c.workspace.root().join("a.rs");
+    std::fs::write(&path, THREE_FNS).unwrap();
+
+    let err = tools::write::Write
+        .execute(
+            json!({ "path": "a.rs", "content": "pub fn a() -> i32 {\n    1\n" }),
+            &c,
+        )
+        .await
+        .unwrap_err();
+    let said = err.to_string();
+    // The construct that never closed, not the line the content stopped on:
+    // that is the one the model has to look at to see what it left out.
+    assert!(said.contains("line 1 is `pub fn a() -> i32 {`"), "{said}");
+    assert!(said.contains("Nothing was written"), "{said}");
+
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), THREE_FNS);
+}
+
+#[tokio::test]
+async fn emptying_a_file_is_not_breaking_it() {
+    // The gate's one plausible false refusal, and the parsers all disagree
+    // with it: empty content is valid in every language the tree knows.
+    let (_d, c) = ctx();
+    std::fs::write(c.workspace.root().join("a.rs"), THREE_FNS).unwrap();
+
+    let out = run(
+        &tools::write::Write,
+        json!({ "path": "a.rs", "content": "" }),
+        &c,
+    )
+    .await;
+    assert!(out.contains("wrote 0 lines"), "{out}");
+}
+
+#[tokio::test]
+async fn a_new_file_is_never_gated() {
+    // A stub, a scaffold, half a file about to be finished: nothing behind it
+    // to lose, so the parser has no standing to refuse it.
+    let (_d, c) = ctx();
+    let out = run(
+        &tools::write::Write,
+        json!({ "path": "stub.rs", "content": "pub fn a() -> i32 {\n" }),
+        &c,
+    )
+    .await;
+    assert!(out.contains("wrote 1 line"), "{out}");
+}
+
+#[tokio::test]
+async fn a_file_that_was_already_broken_stays_writable() {
+    // Same rule as edit's: a file the write found broken is not the write's
+    // doing, and refusing there is how the model ends up with no way back.
+    let (_d, c) = ctx();
+    let path = c.workspace.root().join("a.rs");
+    std::fs::write(&path, "pub fn a() -> i32 {\n    1\n").unwrap();
+
+    let out = run(
+        &tools::write::Write,
+        json!({ "path": "a.rs", "content": "pub fn a() -> i32 {\n    2\n" }),
+        &c,
+    )
+    .await;
+    assert!(out.contains("wrote 2 lines"), "{out}");
+    assert!(std::fs::read_to_string(&path).unwrap().contains("2"));
+}
+
+#[tokio::test]
+async fn a_write_in_a_language_the_parser_does_not_know_is_not_gated() {
+    let (_d, c) = ctx();
+    std::fs::write(c.workspace.root().join("a.toml"), "[a]\nb = 1\n").unwrap();
+
+    let out = run(
+        &tools::write::Write,
+        json!({ "path": "a.toml", "content": "[a\n" }),
+        &c,
+    )
+    .await;
+    assert!(out.contains("wrote 1 line"), "{out}");
+}
+
+#[tokio::test]
 async fn two_edits_in_a_row_need_no_re_read() {
     let (_d, c) = ctx();
     let path = c.workspace.root().join("a.rs");
