@@ -39,6 +39,9 @@ pub struct Config {
     /// replaces that action's defaults rather than adding to them.
     #[serde(default)]
     pub keys: BTreeMap<String, Binds>,
+    /// The SGR codes behind every colour the terminal uses.
+    #[serde(default)]
+    pub theme: crate::render::Theme,
 }
 
 /// One key or several — `"ctrl+g"` and `["ctrl+g", "f5"]` both mean the same
@@ -399,7 +402,7 @@ pub fn load_project(workspace: &Path) -> Result<Project> {
 }
 
 fn parse(body: &str) -> Result<Config> {
-    let config: Config = toml::from_str(body)?;
+    let mut config: Config = toml::from_str(body)?;
     for (id, entry) in &config.models {
         // Rejected here rather than at use: a typo in a model you are not
         // running today is still a typo, and this is when it is cheap to see.
@@ -690,6 +693,46 @@ usage_in_streaming = false
         );
         // Replaced, so the default it displaced is gone.
         assert_eq!(k.action(press("ctrl+l").unwrap(), false, false), None);
+    }
+
+    #[test]
+    fn a_theme_defaults_when_not_named() {
+        let c = parse("").unwrap();
+        assert_eq!(c.theme.muted.codes(), "2");
+        assert_eq!(c.theme.code.codes(), "38;2;88;166;255");
+        assert_eq!(c.theme.menu.selected.codes(), "7");
+        assert_eq!(c.theme.prompt.icon, "›");
+    }
+
+    #[test]
+    fn a_theme_reads_hex_colours_into_truecolour_sgr() {
+        let c = parse("[theme]\ncode = \"#dd80ff\"\nprompt.color = \"#f80\"\n").unwrap();
+        assert_eq!(c.theme.code.codes(), "38;2;221;128;255");
+        assert_eq!(c.theme.prompt.color.codes(), "38;2;255;136;0");
+    }
+
+    #[test]
+    fn a_theme_rejects_a_colour_that_is_neither_hex_nor_ansi() {
+        let e = parse("[theme]\ncode = \"#ddxxff\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("#ddxxff"), "{e}");
+        let e = parse("[theme]\nmuted = \"hotpink\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("hotpink"), "{e}");
+        let e = parse("[theme]\ncode = { color = \"141\", sgr = [] }\n")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("141"), "{e}");
+    }
+
+    #[test]
+    fn a_theme_combines_attributes_with_a_colour() {
+        let c =
+            parse("[theme]\ncode = { color = \"#f80\", sgr = [\"bold\", \"italic\", \"8\"] }\n")
+                .unwrap();
+        assert_eq!(c.theme.code.codes(), "1;3;8;38;2;255;136;0");
     }
 
     #[test]

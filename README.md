@@ -94,6 +94,18 @@ key when they are never live together, which is how `up` is `menu.previous`
 with the list open and `history.older` without it. Sharing one *within* a
 context is refused at load, along with an unknown id or an unreadable binding.
 
+Colours are configurable the same way, under `[theme]` in `~/.pi.toml`. Every
+key is a Style: a colour, text attributes, or both. `muted` `heading`
+`emphasis` `code`, plus `diff.add` `diff.del`, `status.ok` `status.err`,
+`menu.selected` and `prompt.color` `prompt.icon`. A plain string is shorthand
+for a colour alone — `code = "#dd80ff"` (or the short `#f80`, same as
+`"38;2;221;128;255"`); a table takes the full form
+`{ color = …, sgr = ["bold", "italic"] }`. Attributes are names (bold, dim,
+italic, underline, blink, reverse, strike) or any SGR parameter list passed
+through. `prompt.icon` is the one value that is neither colour nor attribute.
+A key that is not one of those is refused at load, like a misspelled compat
+key.
+
 `/help` `/new` `/name` `/model` `/compact` `/reload` `/keys` `/log` `/todo` `/cost` `/exit`, and one
 more for every skill on disk. Typing `/` opens a list of what the line could
 still become; `↑` `↓` pick, `Tab` accepts, `Esc` dismisses it until the next

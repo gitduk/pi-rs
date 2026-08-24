@@ -5,7 +5,6 @@ use unicode_width::UnicodeWidthChar;
 /// Columns the prompt marker occupies. Continuation rows are indented to match
 /// so a wrapped line stays aligned under the first.
 const GUTTER: usize = 2;
-const PROMPT: &str = "\x1b[36m›\x1b[0m ";
 const CONT: &str = "  ";
 
 #[derive(Default)]
@@ -18,9 +17,15 @@ pub struct Editor {
     at: usize,
     /// The line being typed, parked while history is being browsed.
     draft: String,
+    /// The painted first-row gutter, so the theme can restyle it.
+    prompt: String,
 }
 
 impl Editor {
+    pub fn set_prompt(&mut self, prompt: String) {
+        self.prompt = prompt;
+    }
+
     pub fn is_empty(&self) -> bool {
         self.text.is_empty()
     }
@@ -249,10 +254,11 @@ impl Editor {
         let caret = caret.unwrap_or((rows.len() as u16, (GUTTER + used) as u16));
         rows.push(row);
 
+        let prompt = self.prompt.as_str();
         let painted = rows
             .into_iter()
             .enumerate()
-            .map(|(i, r)| if i == 0 { PROMPT } else { CONT }.to_string() + &r)
+            .map(|(i, r)| if i == 0 { prompt } else { CONT }.to_string() + &r)
             .collect();
         (painted, caret)
     }

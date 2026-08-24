@@ -27,12 +27,11 @@ use editor::Editor;
 use screen::{Caret, Screen};
 use std::sync::Arc;
 
-const DIM: &str = "\x1b[2m";
 /// What a folded run shows instead of what it is thinking.
 const THINKING: &str = "thinking...";
 
-const BANNER: &str = "\x1b[2m/help for commands · esc stops a run · ctrl-c clears the line, twice \
-                      quickly to quit · ctrl-d exits\x1b[0m";
+const BANNER: &str = "/help for commands · esc stops a run · ctrl-c clears the line, twice \
+                      quickly to quit · ctrl-d exits";
 
 /// How close two Ctrl-C presses must be to read as one deliberate quit.
 ///
@@ -140,15 +139,15 @@ fn body(
 ) -> Vec<String> {
     // One row stands for all of it, the unfinished line included.
     if thinking.holds(dim) {
-        return vec![paint.on(DIM, THINKING)];
+        return vec![paint.on(&paint.theme.muted, THINKING)];
     }
     if open.is_empty() {
         return Vec::new();
     }
     let painted = if dim {
-        paint.on(DIM, open)
+        paint.on(&paint.theme.muted, open)
     } else {
-        md.line(open, *paint)
+        md.line(open, paint)
     };
     let mut rows = screen::fit(&painted, width);
     // A paragraph can outgrow the screen; the tail is the part still being
@@ -165,6 +164,8 @@ struct Ui {
     keys: Arc<Keys>,
     editor: Editor,
     paint: Paint,
+    /// The painted prompt gutter, shared by the editor and the echoed lines.
+    prompt: String,
     /// Model output with no newline after it yet. Kept live because it is still
     /// being written; a completed line goes straight to scrollback.
     open: String,
@@ -213,19 +214,25 @@ impl Ui {
         keys: Arc<Keys>,
         choices: Vec<Choice>,
         commands: Arc<Vec<Command>>,
+        paint: Paint,
     ) -> Self {
+        let prompt = Self::paint_prompt(&paint);
+        let banner = paint.on(&paint.theme.muted, BANNER);
+        let mut editor = Editor::default();
+        editor.set_prompt(prompt.clone());
         Self {
             screen,
             keys,
             choices,
             commands,
-            editor: Editor::default(),
-            paint: Paint { color: true },
+            editor,
+            paint,
+            prompt,
             open: String::new(),
             dim: false,
             md: Markdown::default(),
             thinking: Thinking::default(),
-            above: vec![BANNER.to_string()],
+            above: vec![banner],
             queued: Vec::new(),
             picked: 0,
             dismissed_at: None,
@@ -240,6 +247,13 @@ impl Ui {
         }
     }
 
+    /// The prompt gutter as the terminal shows it, colour and all.
+    fn paint_prompt(paint: &Paint) -> String {
+        format!(
+            "{} ",
+            paint.on(&paint.theme.prompt.color, &paint.theme.prompt.icon)
+        )
+    }
     fn say(&mut self, line: impl Into<String>) {
         self.above.push(line.into());
     }
@@ -259,9 +273,9 @@ impl Ui {
     /// markdown. The one place either decision is made.
     fn paint_row(&mut self, line: &str, dim: bool) -> String {
         if dim {
-            return self.paint.on(DIM, line);
+            return self.paint.on(&self.paint.theme.muted, line);
         }
-        let painted = self.md.line(line, self.paint);
+        let painted = self.md.line(line, &self.paint);
         self.md.advance(line);
         painted
     }
@@ -307,7 +321,8 @@ impl Ui {
     /// What the scrollback keeps once a block of reasoning is over.
     fn close_thinking(&mut self) {
         if let Some(note) = self.thinking.close() {
-            self.above.push(self.paint.on(DIM, &note));
+            self.above
+                .push(self.paint.on(&self.paint.theme.muted, &note));
         }
     }
 
@@ -336,7 +351,7 @@ impl Ui {
             Event::TurnStart { .. } => {}
             _ => {
                 self.close();
-                if let Some(said) = render::describe(&event, self.paint, self.screen.usable()) {
+                if let Some(said) = render::describe(&event, &self.paint, self.screen.usable()) {
                     // Row by row: a scrollback line is written with a carriage
                     // return of its own, and an embedded newline would stair-
                     // step down the screen without one.
@@ -377,9 +392,9 @@ impl Ui {
             .map(|(i, c)| {
                 let line = format!("  {:head$}  {}", c.show, c.help);
                 let painted = if i == picked {
-                    format!("\x1b[7m{line}\x1b[0m")
+                    self.paint.on(&self.paint.theme.menu.selected, &line)
                 } else {
-                    self.paint.on(DIM, &line)
+                    self.paint.on(&self.paint.theme.muted, &line)
                 };
                 screen::fit(&painted, width)
             })
@@ -411,7 +426,10 @@ impl Ui {
                 self.queued.len(),
                 self.stopping,
             );
-            rows.extend(screen::fit(&self.paint.on(DIM, &line), width));
+            rows.extend(screen::fit(
+                &self.paint.on(&self.paint.theme.muted, &line),
+                width,
+            ));
         }
 
         let (input, caret) = self.editor.view(width);
@@ -437,6 +455,12 @@ impl Ui {
         (rows, caret)
     }
 
+    fn set_theme(&mut self, theme: Arc<render::Theme>) {
+        self.paint.theme = theme;
+        self.prompt = Self::paint_prompt(&self.paint);
+        self.editor.set_prompt(self.prompt.clone());
+    }
+
     fn flush(&mut self) {
         let (live, caret) = self.live();
         let above = std::mem::take(&mut self.above);
@@ -446,7 +470,11 @@ impl Ui {
     /// Echo what was sent, so the prompt survives the editor being cleared.
     fn echo(&mut self, line: &str) {
         for (i, part) in line.split('\n').enumerate() {
-            let gutter = if i == 0 { "\x1b[36m›\x1b[0m " } else { "  " };
+            let gutter = if i == 0 {
+                self.prompt.clone()
+            } else {
+                "  ".to_string()
+            };
             self.say(format!("{gutter}{part}"));
         }
     }
@@ -509,7 +537,8 @@ impl Ui {
             Some(Action::AppClearScreen) => self.screen.clear(),
             Some(Action::ThinkFold) => {
                 let (said, mut held) = self.thinking.toggle();
-                self.above.push(self.paint.on(DIM, &said));
+                self.above
+                    .push(self.paint.on(&self.paint.theme.muted, &said));
                 self.above.append(&mut held);
             }
             Some(Action::MenuAccept) => {
@@ -563,7 +592,10 @@ impl Ui {
             return Act::Interrupt;
         }
         if self.editor.is_empty() {
-            self.say(self.paint.on(DIM, "press it again to quit"));
+            self.say(
+                self.paint
+                    .on(&self.paint.theme.muted, "press it again to quit"),
+            );
         } else {
             self.editor.clear();
         }
@@ -631,7 +663,14 @@ const HISTORY_KEEP: usize = 1_000;
 
 impl Tui {
     pub fn new(core: Repl, keys: Arc<Keys>) -> Result<Self> {
-        let mut ui = Ui::new(Screen::new()?, keys, core.choices(), core.commands.clone());
+        let paint = Paint::with_theme(true, Arc::new(core.config.theme.clone()));
+        let mut ui = Ui::new(
+            Screen::new()?,
+            keys,
+            core.choices(),
+            core.commands.clone(),
+            paint,
+        );
         if let Some(prior) = history_path().and_then(|p| std::fs::read_to_string(p).ok()) {
             ui.editor.seed_history(editor::decode(&prior));
         }
@@ -685,6 +724,9 @@ impl Tui {
                     // Likewise the completion list: /reload is allowed to
                     // define models — and skills — the last one did not.
                     self.ui.choices = self.core.choices();
+                    if self.ui.paint.theme.as_ref() != &self.core.config.theme {
+                        self.ui.set_theme(Arc::new(self.core.config.theme.clone()));
+                    }
                     if !Arc::ptr_eq(&self.ui.commands, &self.core.commands) {
                         self.ui.commands = self.core.commands.clone();
                     }
@@ -714,7 +756,8 @@ impl Tui {
                                 "nothing to compact — {now} tokens, all inside the {held} \
                                  kept as working context"
                             );
-                            self.ui.say(self.ui.paint.on(DIM, &why));
+                            self.ui
+                                .say(self.ui.paint.on(&self.ui.paint.theme.muted, &why));
                         }
                     }
                 }
@@ -802,9 +845,14 @@ impl Tui {
 
         match out {
             Ok(o) => self.totals.merge(&o.totals),
-            Err(AgentError::Cancelled) => self.ui.say(self.ui.paint.on(DIM, "stopped")),
+            Err(AgentError::Cancelled) => self
+                .ui
+                .say(self.ui.paint.on(&self.ui.paint.theme.muted, "stopped")),
             Err(e) => {
-                let text = format!("\x1b[31merror\x1b[0m {e}");
+                let text = format!(
+                    "{} {e}",
+                    self.ui.paint.on(&self.ui.paint.theme.status.err, "error")
+                );
                 self.ui.say(text);
             }
         }
@@ -835,7 +883,7 @@ mod tests {
             open,
             80,
             9,
-            &Paint { color: false },
+            &Paint::new(false),
         )
     }
 
@@ -882,7 +930,7 @@ mod tests {
             "hello",
             80,
             9,
-            &Paint { color: false },
+            &Paint::new(false),
         );
         assert_eq!(rows, vec!["hello"]);
     }
@@ -920,7 +968,7 @@ mod tests {
             &"x".repeat(500),
             80,
             3,
-            &Paint { color: false },
+            &Paint::new(false),
         );
         assert_eq!(rows.len(), 3);
     }

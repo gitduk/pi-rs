@@ -1,27 +1,411 @@
 use std::io::{IsTerminal, Write};
+use std::sync::Arc;
 
 use agent::Event;
+use anyhow::{Result, bail};
+use serde::de::{Error as _, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer};
 
-const BOLD: &str = "\x1b[1m";
-const DIM: &str = "\x1b[2m";
-const ITALIC: &str = "\x1b[3m";
-const CODE: &str = "\x1b[33m";
-const GREEN: &str = "\x1b[32m";
-const RED: &str = "\x1b[31m";
 const RESET: &str = "\x1b[0m";
 
-/// Whether the surface being written to can carry colour.
-#[derive(Debug, Clone, Copy)]
+/// One text attribute: bold, dim, italic — whatever SGR can set besides colour.
+///
+/// `Other` passes a custom parameter list through unchanged ("8" hidden, "21"
+/// double underline), for anything the fixed set does not name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Attr {
+    Bold,
+    Dim,
+    Italic,
+    Underline,
+    Blink,
+    Reverse,
+    Strike,
+    Other(String),
+}
+
+impl Attr {
+    /// A known name, or else any non-empty `;`-separated SGR parameter list.
+    fn parse(s: &str) -> Result<Self> {
+        Ok(match s {
+            "bold" => Attr::Bold,
+            "dim" => Attr::Dim,
+            "italic" => Attr::Italic,
+            "underline" => Attr::Underline,
+            "blink" => Attr::Blink,
+            "reverse" => Attr::Reverse,
+            "strike" => Attr::Strike,
+            _ => {
+                let ok = !s.is_empty()
+                    && s.split(';')
+                        .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+                if !ok {
+                    bail!(
+                        "`{s}` is not an attribute (bold, dim, italic, underline, blink, reverse, strike) or an SGR parameter list"
+                    );
+                }
+                Attr::Other(s.to_string())
+            }
+        })
+    }
+
+    fn code(&self) -> &str {
+        match self {
+            Attr::Bold => "1",
+            Attr::Dim => "2",
+            Attr::Italic => "3",
+            Attr::Underline => "4",
+            Attr::Blink => "5",
+            Attr::Reverse => "7",
+            Attr::Strike => "9",
+            Attr::Other(s) => s,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Attr {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        Attr::parse(&String::deserialize(d)?).map_err(D::Error::custom)
+    }
+}
+
+/// A colour in one of the three spaces terminals mean, kept in the form the
+/// user wrote so a 256-colour choice survives on a terminal that has truecolour
+/// and vice versa.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Color {
+    /// ANSI base colour: 30-37 fg, 40-47 bg, 39/49 defaults, 90-107 bright.
+    Basic(u8),
+    /// 256-colour palette index, `38;5;N`.
+    Indexed(u8),
+    /// Truecolour, `38;2;R;G;B`, usually from a `#hex`.
+    Rgb(u8, u8, u8),
+}
+
+impl Color {
+    fn parse(s: &str) -> Result<Self> {
+        if let Some(hex) = s.strip_prefix('#') {
+            let expanded: Vec<u8> = match hex.len() {
+                3 => hex.bytes().flat_map(|b| [b, b]).collect(),
+                6 => hex.bytes().collect(),
+                _ => bail!("`#{hex}` is not a 3- or 6-digit hex colour"),
+            };
+            let mut rgb = [0u8; 3];
+            for (i, pair) in expanded.chunks_exact(2).enumerate() {
+                let hi = hex_digit(pair[0])?;
+                let lo = hex_digit(pair[1])?;
+                rgb[i] = hi << 4 | lo;
+            }
+            return Ok(Color::Rgb(rgb[0], rgb[1], rgb[2]));
+        }
+        match s.split(';').collect::<Vec<_>>().as_slice() {
+            ["38", "2", r, g, b] => Ok(Color::Rgb(byte(r)?, byte(g)?, byte(b)?)),
+            ["38", "5", n] => Ok(Color::Indexed(byte(n)?)),
+            [one] => {
+                let n: u16 = one
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("`{s}` is not a colour"))?;
+                if matches!(n, 30..=37 | 39 | 40..=47 | 49 | 90..=97 | 100..=107) {
+                    Ok(Color::Basic(n as u8))
+                } else {
+                    bail!("`{s}` is not an ANSI base colour (30-37, 40-47, 39/49, 90-97, 100-107)")
+                }
+            }
+            _ => {
+                bail!("`{s}` is not a colour: `#hex`, an ANSI base code, `38;5;N` or `38;2;R;G;B`")
+            }
+        }
+    }
+
+    fn code(&self) -> String {
+        match self {
+            Color::Basic(n) => n.to_string(),
+            Color::Indexed(n) => format!("38;5;{n}"),
+            Color::Rgb(r, g, b) => format!("38;2;{r};{g};{b}"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Color {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        Color::parse(&String::deserialize(d)?).map_err(D::Error::custom)
+    }
+}
+
+/// One styled thing: an optional colour plus any number of text attributes.
+///
+/// A TOML string is shorthand for a colour alone (`code = "#58a6ff"`); a table
+/// is the full form `{ color = …, sgr = ["bold", "italic"] }`, either half
+/// optional. It renders as one SGR sequence, attributes first then colour.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Style {
+    pub color: Option<Color>,
+    pub sgr: Vec<Attr>,
+}
+
+impl Style {
+    fn color(c: Color) -> Self {
+        Self {
+            color: Some(c),
+            sgr: Vec::new(),
+        }
+    }
+
+    fn attrs(a: &[Attr]) -> Self {
+        Self {
+            color: None,
+            sgr: a.to_vec(),
+        }
+    }
+
+    /// The SGR parameter list this style amounts to, as written between `\x1b[`
+    /// and `m` — `"1;3;38;2;88;166;255"`. Empty when the style is bare.
+    pub fn codes(&self) -> String {
+        let mut out = String::new();
+        for a in &self.sgr {
+            if !out.is_empty() {
+                out.push(';');
+            }
+            out.push_str(a.code());
+        }
+        if let Some(c) = &self.color {
+            if !out.is_empty() {
+                out.push(';');
+            }
+            out.push_str(&c.code());
+        }
+        out
+    }
+}
+
+impl<'de> Deserialize<'de> for Style {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = Style;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a colour string or a table of `color` and `sgr`")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> std::result::Result<Style, E> {
+                Ok(Style {
+                    color: Some(Color::parse(s).map_err(E::custom)?),
+                    sgr: Vec::new(),
+                })
+            }
+
+            fn visit_map<A: MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> std::result::Result<Style, A::Error> {
+                let mut color: Option<Color> = None;
+                let mut sgr: Vec<Attr> = Vec::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "color" => color = Some(map.next_value()?),
+                        "sgr" => sgr = map.next_value()?,
+                        other => return Err(A::Error::unknown_field(other, &["color", "sgr"])),
+                    }
+                }
+                Ok(Style { color, sgr })
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+/// The SGR behind every Style the terminal uses.
+///
+/// Keys are grouped by what they style, not by colour: `diff.add` and
+/// `status.ok` share a code by default but stay separate so one can change
+/// without dragging the other along. `muted`, `heading` and `emphasis` are the
+/// text attributes markdown rendering opens; everything else is one Style each.
+/// `prompt.icon` is the single value that is neither colour nor attribute.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Theme {
+    #[serde(default = "default_muted")]
+    pub muted: Style,
+    #[serde(default = "default_heading")]
+    pub heading: Style,
+    #[serde(default = "default_emphasis")]
+    pub emphasis: Style,
+    #[serde(default = "default_code")]
+    pub code: Style,
+    #[serde(default)]
+    pub diff: Diff,
+    #[serde(default)]
+    pub status: Status,
+    #[serde(default)]
+    pub menu: Menu,
+    #[serde(default)]
+    pub prompt: Prompt,
+}
+
+const GREEN: Color = Color::Rgb(137, 210, 129);
+const RED: Color = Color::Rgb(252, 58, 75);
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Diff {
+    #[serde(default = "default_add")]
+    pub add: Style,
+    #[serde(default = "default_del")]
+    pub del: Style,
+}
+
+impl Default for Diff {
+    fn default() -> Self {
+        Self {
+            add: default_add(),
+            del: default_del(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Status {
+    #[serde(default = "default_ok")]
+    pub ok: Style,
+    #[serde(default = "default_err")]
+    pub err: Style,
+}
+
+impl Default for Status {
+    fn default() -> Self {
+        Self {
+            ok: default_ok(),
+            err: default_err(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Menu {
+    #[serde(default = "default_selected")]
+    pub selected: Style,
+}
+
+impl Default for Menu {
+    fn default() -> Self {
+        Self {
+            selected: default_selected(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Prompt {
+    #[serde(default = "default_prompt_color")]
+    pub color: Style,
+    #[serde(default = "default_icon")]
+    pub icon: String,
+}
+
+impl Default for Prompt {
+    fn default() -> Self {
+        Self {
+            color: default_prompt_color(),
+            icon: default_icon(),
+        }
+    }
+}
+
+fn default_muted() -> Style {
+    Style::attrs(&[Attr::Dim])
+}
+fn default_heading() -> Style {
+    Style::attrs(&[Attr::Bold])
+}
+fn default_emphasis() -> Style {
+    Style::attrs(&[Attr::Italic])
+}
+fn default_code() -> Style {
+    Style::color(Color::Rgb(88, 166, 255))
+}
+fn default_add() -> Style {
+    Style::color(GREEN)
+}
+fn default_del() -> Style {
+    Style::color(RED)
+}
+fn default_ok() -> Style {
+    Style::color(GREEN)
+}
+fn default_err() -> Style {
+    Style::color(RED)
+}
+fn default_selected() -> Style {
+    Style::attrs(&[Attr::Reverse])
+}
+fn default_prompt_color() -> Style {
+    Style::color(Color::Basic(36))
+}
+fn default_icon() -> String {
+    "›".into()
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Self {
+            muted: default_muted(),
+            heading: default_heading(),
+            emphasis: default_emphasis(),
+            code: default_code(),
+            diff: Diff::default(),
+            status: Status::default(),
+            menu: Menu::default(),
+            prompt: Prompt::default(),
+        }
+    }
+}
+
+fn byte(v: &str) -> Result<u8> {
+    v.parse()
+        .map_err(|_| anyhow::anyhow!("`{v}` is not a byte (0-255)"))
+}
+
+fn hex_digit(b: u8) -> Result<u8> {
+    (b as char)
+        .to_digit(16)
+        .map(|n| n as u8)
+        .ok_or_else(|| anyhow::anyhow!("`{}` is not a hex digit", b as char))
+}
+
+/// Whether the surface being written to can carry colour, and the theme behind
+/// the codes it uses.
+#[derive(Debug)]
 pub struct Paint {
     pub color: bool,
+    pub theme: Arc<Theme>,
 }
 
 impl Paint {
-    pub fn on(&self, code: &str, body: &str) -> String {
-        if self.color {
-            format!("{code}{body}{RESET}")
-        } else {
+    #[cfg(test)]
+    pub fn new(color: bool) -> Self {
+        Self {
+            color,
+            theme: Arc::new(Theme::default()),
+        }
+    }
+
+    pub fn with_theme(color: bool, theme: Arc<Theme>) -> Self {
+        Self { color, theme }
+    }
+
+    pub fn on(&self, style: &Style, body: &str) -> String {
+        if !self.color {
+            return body.to_string();
+        }
+        let codes = style.codes();
+        if codes.is_empty() {
             body.to_string()
+        } else {
+            format!("\x1b[{codes}m{body}{RESET}")
         }
     }
 }
@@ -46,36 +430,40 @@ impl Markdown {
     /// Takes `&self`, not `&mut`: the row still being written is styled again
     /// on every frame, and only a line that has ended may decide what the one
     /// after it means.
-    pub fn line(&self, text: &str, p: Paint) -> String {
+    pub fn line(&self, text: &str, p: &Paint) -> String {
         if !p.color {
             return text.to_string();
         }
         if fence(text) {
-            return p.on(DIM, text);
+            return p.on(&p.theme.muted, text);
         }
         if self.fenced {
             // A gutter rather than a colour: code has to stay the most legible
             // thing on the screen, and thirty yellow rows is the opposite.
-            return format!("{}{text}", p.on(DIM, "│ "));
+            return format!("{}{text}", p.on(&p.theme.muted, "│ "));
         }
         let body = text.trim_start();
         let pad = &text[..text.len() - body.len()];
         if body.starts_with("> ") {
             // Whole-line, no spans inside: a quote is an aside, and dimming it
             // is the whole of what it needs said.
-            return p.on(DIM, text);
+            return p.on(&p.theme.muted, text);
         }
         if let Some(at) = heading(body) {
-            let marker = p.on(DIM, &body[..at]);
-            return format!("{pad}{marker}{BOLD}{}{RESET}", spans(&body[at..], BOLD, 0));
+            let marker = p.on(&p.theme.muted, &body[..at]);
+            let codes = p.theme.heading.codes();
+            return format!(
+                "{pad}{marker}\x1b[{codes}m{}{RESET}",
+                spans(&body[at..], &codes, 0, &p.theme)
+            );
         }
         match bullet(body) {
             Some(at) => format!(
                 "{pad}{}{}",
-                p.on(DIM, &body[..at]),
-                spans(&body[at..], "", 0)
+                p.on(&p.theme.muted, &body[..at]),
+                spans(&body[at..], "", 0, &p.theme)
             ),
-            None => format!("{pad}{}", spans(body, "", 0)),
+            None => format!("{pad}{}", spans(body, "", 0, &p.theme)),
         }
     }
 
@@ -129,7 +517,7 @@ const NESTING: u8 = 3;
 /// with a reset — there is no escape for "bold off" that leaves the rest
 /// standing — so it has to re-open what it interrupted, or a code span inside
 /// bold ends the bold at the backtick and the sentence after it goes plain.
-fn spans(text: &str, under: &str, depth: u8) -> String {
+fn spans(text: &str, under: &str, depth: u8, theme: &Theme) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while !rest.is_empty() {
@@ -139,15 +527,26 @@ fn spans(text: &str, under: &str, depth: u8) -> String {
         };
         let (before, from) = rest.split_at(at);
         out.push_str(before);
-        match span(from) {
-            Some((code, body, tail)) => {
+        match span(from, theme) {
+            Some((style, body, tail)) => {
+                let code = style.codes();
                 // Code is literal all the way down; emphasis can hold more.
-                let inner = if code == CODE || depth == NESTING {
+                let inner = if style == &theme.code || depth == NESTING {
                     body.to_string()
                 } else {
-                    spans(body, &format!("{under}{code}"), depth + 1)
+                    let joined = if under.is_empty() {
+                        code.clone()
+                    } else {
+                        format!("{under};{code}")
+                    };
+                    spans(body, &joined, depth + 1, theme)
                 };
-                out.push_str(&format!("{code}{inner}{RESET}{under}"));
+                let reopen = if under.is_empty() {
+                    String::new()
+                } else {
+                    format!("\x1b[{under}m")
+                };
+                out.push_str(&format!("\x1b[{code}m{inner}{RESET}{reopen}"));
                 rest = tail;
             }
             // An opener with no closer is text: the line is still arriving, or
@@ -167,8 +566,12 @@ fn spans(text: &str, under: &str, depth: u8) -> String {
 /// `_` is not a delimiter here. It is the word separator of every identifier in
 /// the tree, and a rule that italicises the middle of `saturating_sub` is worse
 /// than no italics at all.
-fn span(from: &str) -> Option<(&'static str, &str, &str)> {
-    for (mark, code) in [("**", BOLD), ("`", CODE), ("*", ITALIC)] {
+fn span<'a, 'b>(from: &'a str, theme: &'b Theme) -> Option<(&'b Style, &'a str, &'a str)> {
+    for (mark, style) in [
+        ("**", &theme.heading),
+        ("`", &theme.code),
+        ("*", &theme.emphasis),
+    ] {
         let Some(rest) = from.strip_prefix(mark) else {
             continue;
         };
@@ -183,7 +586,7 @@ fn span(from: &str) -> Option<(&'static str, &str, &str)> {
         if body.is_empty() || loose {
             continue;
         }
-        return Some((code, body, &rest[end + mark.len()..]));
+        return Some((style, body, &rest[end + mark.len()..]));
     }
     None
 }
@@ -223,11 +626,15 @@ pub fn spent(usage: &brain::stream::Usage, cost: f64, estimated: agent::Estimate
 ///
 /// Newline-separated, because the caller decides what a row is: the interactive
 /// surface repaints a region and has to hand them over one at a time.
-pub fn describe(event: &Event, p: Paint, width: usize) -> Option<String> {
+pub fn describe(event: &Event, p: &Paint, width: usize) -> Option<String> {
     let room = width.saturating_sub(2).max(20);
     Some(match event {
         Event::ToolStart { name, args, .. } => {
-            format!("{} {name} {}", p.on(DIM, "→"), p.on(DIM, &summarize(args)))
+            format!(
+                "{} {name} {}",
+                p.on(&p.theme.muted, "→"),
+                p.on(&p.theme.muted, &summarize(args))
+            )
         }
         Event::ToolEnd {
             name,
@@ -236,49 +643,53 @@ pub fn describe(event: &Event, p: Paint, width: usize) -> Option<String> {
             ..
         } => {
             let mark = if *is_error {
-                p.on(RED, "✗")
+                p.on(&p.theme.status.err, "✗")
             } else {
-                p.on(GREEN, "✓")
+                p.on(&p.theme.status.ok, "✓")
             };
             let (head, rest) = preview.split_once('\n').unwrap_or((preview, ""));
-            let mut out = format!("{mark} {name} {}", p.on(DIM, &clip(head, room)));
+            let mut out = format!("{mark} {name} {}", p.on(&p.theme.muted, &clip(head, room)));
             for row in rest.lines() {
                 // The mark is the whole of what a diff row means, and colour
                 // says it faster than reading the first character does.
-                let code = match row.as_bytes().first() {
-                    Some(b'+') => GREEN,
-                    Some(b'-') => RED,
-                    _ => DIM,
+                let style = match row.as_bytes().first() {
+                    Some(b'+') => &p.theme.diff.add,
+                    Some(b'-') => &p.theme.diff.del,
+                    _ => &p.theme.muted,
                 };
                 out.push('\n');
-                out.push_str(&p.on(code, &format!("  {}", clip(row, room))));
+                out.push_str(&p.on(style, &format!("  {}", clip(row, room))));
             }
             out
         }
         Event::ToolDenied { name, reason, .. } => {
             format!(
                 "{} {name} {}",
-                p.on(RED, "✗"),
-                p.on(DIM, &clip(reason, room))
+                p.on(&p.theme.status.err, "✗"),
+                p.on(&p.theme.muted, &clip(reason, room))
             )
         }
-        Event::Compacted(r) => p.on(DIM, &compaction_line(r)),
+        Event::Compacted(r) => p.on(&p.theme.muted, &compaction_line(r)),
         Event::Retrying {
             attempt,
             delay_ms,
             reason,
         } => p.on(
-            DIM,
+            &p.theme.muted,
             &format!("retry {attempt} in {delay_ms}ms · {}", clip(reason, room)),
         ),
-        Event::Warning(w) => format!("{} {}", p.on(RED, "!"), p.on(DIM, w)),
+        Event::Warning(w) => format!(
+            "{} {}",
+            p.on(&p.theme.status.err, "!"),
+            p.on(&p.theme.muted, w)
+        ),
         Event::Done {
             turns,
             usage,
             cost,
             estimated,
         } => p.on(
-            DIM,
+            &p.theme.muted,
             &format!("{turns} turns · {}", spent(usage, *cost, *estimated)),
         ),
         _ => return None,
@@ -299,11 +710,9 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(quiet: bool, structured: bool) -> Self {
+    pub fn new(quiet: bool, structured: bool, theme: Arc<Theme>) -> Self {
         Self {
-            paint: Paint {
-                color: std::io::stderr().is_terminal(),
-            },
+            paint: Paint::with_theme(std::io::stderr().is_terminal(), theme),
             quiet,
             structured,
             thinking: false,
@@ -319,10 +728,10 @@ impl Renderer {
             Event::ReasoningDelta(d) if !self.quiet => {
                 if !self.thinking {
                     self.settle_out();
-                    eprint!("{}", self.paint.on(DIM, "thinking "));
+                    eprint!("{}", self.paint.on(&self.paint.theme.muted, "thinking "));
                     self.thinking = true;
                 }
-                eprint!("{}", self.paint.on(DIM, d));
+                eprint!("{}", self.paint.on(&self.paint.theme.muted, d));
                 self.err_dirty = true;
                 let _ = std::io::stderr().flush();
             }
@@ -332,7 +741,7 @@ impl Renderer {
                 }
                 self.end_thinking();
                 self.settle_out();
-                eprint!("{}", self.paint.on(DIM, d));
+                eprint!("{}", self.paint.on(&self.paint.theme.muted, d));
                 self.err_dirty = !d.ends_with('\n');
                 let _ = std::io::stderr().flush();
             }
@@ -346,13 +755,13 @@ impl Renderer {
             // Worth seeing even under --quiet: the run did less than it was asked.
             Event::ToolDenied { .. } => {
                 self.settle();
-                if let Some(line) = describe(&event, self.paint, 100) {
+                if let Some(line) = describe(&event, &self.paint, 100) {
                     eprintln!("{line}");
                 }
             }
             _ if self.quiet => {}
             _ => {
-                if let Some(line) = describe(&event, self.paint, 100) {
+                if let Some(line) = describe(&event, &self.paint, 100) {
                     self.end_thinking();
                     self.settle();
                     eprintln!("{line}");
@@ -484,7 +893,7 @@ mod tests {
 
     #[test]
     fn a_schema_keeps_prose_off_stdout() {
-        let mut r = super::Renderer::new(false, true);
+        let mut r = super::Renderer::new(false, true, std::sync::Arc::new(super::Theme::default()));
         r.on(agent::Event::TextDelta("thinking out loud".into()));
         // stdout carries the result and nothing else, so it pipes into jq.
         assert!(!r.out_dirty, "prose must not reach stdout under a schema");
@@ -493,7 +902,8 @@ mod tests {
 
     #[test]
     fn consecutive_text_deltas_stay_on_one_line() {
-        let mut r = super::Renderer::new(false, false);
+        let mut r =
+            super::Renderer::new(false, false, std::sync::Arc::new(super::Theme::default()));
         r.on(agent::Event::TextDelta("There".into()));
         assert!(r.out_dirty, "an unterminated delta leaves the line open");
         r.on(agent::Event::TextDelta("'s a bug".into()));
@@ -555,14 +965,14 @@ mod tests {
     /// terminal receives.
     fn md(text: &str) -> String {
         Markdown::default()
-            .line(text, Paint { color: true })
+            .line(text, &Paint::new(true))
             .replace('\x1b', "^")
     }
 
     #[test]
     fn emphasis_and_code_are_marked_and_the_delimiters_go() {
         assert_eq!(md("a **b** c"), "a ^[1mb^[0m c");
-        assert_eq!(md("a `b` c"), "a ^[33mb^[0m c");
+        assert_eq!(md("a `b` c"), "a ^[38;2;88;166;255mb^[0m c");
         assert_eq!(md("a *b* c"), "a ^[3mb^[0m c");
     }
 
@@ -595,7 +1005,17 @@ mod tests {
         // at the backtick and everything after it goes plain.
         assert_eq!(
             md("- **`unwrap()`**：取出"),
-            "^[2m- ^[0m^[1m^[33munwrap()^[0m^[1m^[0m：取出"
+            "^[2m- ^[0m^[1m^[38;2;88;166;255munwrap()^[0m^[1m^[0m：取出"
+        );
+    }
+
+    #[test]
+    fn a_deeper_span_joins_the_open_styles_with_semicolons() {
+        // Bold holds italic holds code: the reopen after the code span must
+        // carry both open attributes, as one `;`-joined parameter list.
+        assert_eq!(
+            md("**a *b `c`* d**"),
+            "^[1ma ^[3mb ^[38;2;88;166;255mc^[0m^[1;3m^[0m^[1m d^[0m"
         );
     }
 
@@ -610,24 +1030,24 @@ mod tests {
         // A span recurses on its own body; without a bound a long enough line
         // of `**`*` would put the stack in the hands of whatever was written.
         let line = "**".to_string() + &"*a*".repeat(4000) + "**";
-        assert!(Markdown::default().line(&line, Paint { color: true }).len() > line.len());
+        assert!(Markdown::default().line(&line, &Paint::new(true)).len() > line.len());
     }
 
     #[test]
     fn a_fence_holds_until_the_next_one() {
         let mut m = Markdown::default();
-        let p = Paint { color: true };
-        assert!(!m.line("fn f() {}", p).contains('\x1b'), "prose is prose");
+        let p = Paint::new(true);
+        assert!(!m.line("fn f() {}", &p).contains('\x1b'), "prose is prose");
         m.advance("```rust");
         // Inside, nothing is markup: a gutter, and the text as written.
         assert_eq!(
-            m.line("let a = *b;", p).replace('\x1b', "^"),
+            m.line("let a = *b;", &p).replace('\x1b', "^"),
             "^[2m│ ^[0mlet a = *b;"
         );
         m.advance("let a = *b;");
         m.advance("```");
         assert_eq!(
-            m.line("done **now**", p).replace('\x1b', "^"),
+            m.line("done **now**", &p).replace('\x1b', "^"),
             "done ^[1mnow^[0m"
         );
     }
@@ -635,7 +1055,7 @@ mod tests {
     #[test]
     fn a_plain_surface_is_left_alone() {
         // Piped output is read by something that does not want escapes.
-        let out = Markdown::default().line("a **b** `c`", Paint { color: false });
+        let out = Markdown::default().line("a **b** `c`", &Paint::new(false));
         assert_eq!(out, "a **b** `c`");
     }
 

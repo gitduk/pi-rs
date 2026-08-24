@@ -479,9 +479,10 @@ fn paint(
     mut rx: mpsc::UnboundedReceiver<agent::Event>,
     quiet: bool,
     structured: bool,
+    theme: std::sync::Arc<render::Theme>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut r = render::Renderer::new(quiet, structured);
+        let mut r = render::Renderer::new(quiet, structured, theme);
         while let Some(event) = rx.recv().await {
             r.on(event);
         }
@@ -540,11 +541,11 @@ async fn main() -> Result<()> {
     let resolved = resolve(&args, workspace.root(), &config, &project)?;
     // Ahead of the quiet check on purpose: see `Dialled::warning`.
     if let Some(warning) = &dialled.warning {
-        eprintln!("\x1b[2m{warning}\x1b[0m");
+        eprintln!("\x1b[{}m{warning}\x1b[0m", config.theme.muted.codes());
     }
     if !args.quiet {
         for note in dialled.notes.iter().chain(&resolved.notes) {
-            eprintln!("\x1b[2m{note}\x1b[0m");
+            eprintln!("\x1b[{}m{note}\x1b[0m", config.theme.muted.codes());
         }
     }
     let key_map = std::sync::Arc::new(resolved.keys);
@@ -600,7 +601,12 @@ async fn main() -> Result<()> {
         if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
             return tui::Tui::new(core, key_map)?.run(tx, rx).await;
         }
-        let painter = paint(rx, quiet, structured);
+        let painter = paint(
+            rx,
+            quiet,
+            structured,
+            std::sync::Arc::new(config.theme.clone()),
+        );
         let out = line::run(core, tx).await;
         let _ = painter.await;
         return out;
@@ -615,7 +621,12 @@ async fn main() -> Result<()> {
         None => prompt,
     };
 
-    let painter = paint(rx, quiet, structured);
+    let painter = paint(
+        rx,
+        quiet,
+        structured,
+        std::sync::Arc::new(config.theme.clone()),
+    );
     let ctx = tools::Ctx::new(workspace).with_cancel(agent::cancel_on_interrupt());
 
     // Always through the log: a loaded session whose view happens to be empty
@@ -659,7 +670,11 @@ async fn main() -> Result<()> {
     // announced its journal would train everyone to stop reading the line.
     if let (Err(e), Some(path)) = (&outcome, journal::path()) {
         tracing::error!(target: "pi::loop", error = %e, "run failed");
-        eprintln!("\x1b[2mjournal: {}\x1b[0m", path.display());
+        eprintln!(
+            "\x1b[{}mjournal: {}\x1b[0m",
+            config.theme.muted.codes(),
+            path.display()
+        );
     }
     outcome?;
     Ok(())

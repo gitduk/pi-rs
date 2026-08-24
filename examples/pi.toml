@@ -99,7 +99,35 @@ long_cache_retention = false
 # much later, pointing at nothing.
 # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
+# Theme. Every key is a Style: a colour, some text attributes, or both. A
+# plain string is shorthand for a colour alone; a table is the full form
+# { color = …, sgr = ["bold", "italic"] }, either half optional. Colours are
+# `#hex` (3 or 6 digits), an ANSI base code ("36") or `38;5;N`; attributes are
+# names — bold, dim, italic, underline, blink, reverse, strike — or any SGR
+# parameter list ("8") passed through unchanged. Anything not given keeps the
+# default shown; unknown keys and attributes are refused at load.
+# `prompt.icon` is the one value that is neither colour nor attribute.
+# [theme]
+# muted = { sgr = ["dim"] }
+# heading = { sgr = ["bold"] }
+# emphasis = { sgr = ["italic"] }
+# code = "#58a6ff"
+#
+# [theme.diff]
+# add = "#89d281"
+# del = "#fc3a4b"
+#
+# [theme.status]
+# ok = "#89d281"
+# err = "#fc3a4b"
+#
+# [theme.menu]
+# selected = { sgr = ["reverse"] }
+#
+# [theme.prompt]
+# color = "36"
+# icon = "›"
+
 # Keys. An id here replaces that action's defaults rather than adding to them,
 # because a default that could only be buried and never removed is not really
 # configurable. `/keys` lists every id with what it is bound to.
