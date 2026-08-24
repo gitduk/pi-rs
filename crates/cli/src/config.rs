@@ -402,7 +402,8 @@ pub fn load_project(workspace: &Path) -> Result<Project> {
 }
 
 fn parse(body: &str) -> Result<Config> {
-    let config: Config = toml::from_str(body)?;
+    let de = toml::de::Deserializer::parse(body)?;
+    let config: Config = serde_path_to_error::deserialize(de)?;
     for (id, entry) in &config.models {
         // Rejected here rather than at use: a typo in a model you are not
         // running today is still a typo, and this is when it is cheap to see.
@@ -716,17 +717,20 @@ usage_in_streaming = false
         let e = parse("[theme]\ncode = \"#ddxxff\"\n")
             .unwrap_err()
             .to_string();
-        assert!(e.contains("#ddxxff"), "{e}");
+        assert!(e.contains("theme.code"), "{e}");
         let e = parse("[theme]\nmuted = \"hotpink\"\n")
             .unwrap_err()
             .to_string();
-        assert!(e.contains("hotpink"), "{e}");
-        let e = parse("[theme]\ncode = { color = \"141\", sgr = [] }\n")
+        assert!(e.contains("theme.muted"), "{e}");
+        let e = parse("[theme]\ncode = { color = \"48;5;208\", sgr = [] }\n")
             .unwrap_err()
             .to_string();
-        assert!(e.contains("141"), "{e}");
+        assert!(e.contains("theme.code.color"), "{e}");
+        let e = parse("[theme]\ncode = { color = \"999\", sgr = [] }\n")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("theme.code.color"), "{e}");
     }
-
     #[test]
     fn a_theme_combines_attributes_with_a_colour() {
         let c =

@@ -1,6 +1,6 @@
 use std::fmt::Write as _;
 use std::io::{IsTerminal, Write};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use agent::Event;
 use anyhow::{Result, bail};
@@ -24,41 +24,43 @@ pub enum Attr {
     Other(String),
 }
 
+/// Name in config, variant, SGR code — one row per named attribute, so adding
+/// one touches a single place instead of two parallel matches.
+const NAMED_ATTRS: &[(&str, Attr, &str)] = &[
+    ("bold", Attr::Bold, "1"),
+    ("dim", Attr::Dim, "2"),
+    ("italic", Attr::Italic, "3"),
+    ("underline", Attr::Underline, "4"),
+    ("blink", Attr::Blink, "5"),
+    ("reverse", Attr::Reverse, "7"),
+    ("strike", Attr::Strike, "9"),
+];
+
 impl Attr {
     /// A known name, or else any non-empty `;`-separated SGR parameter list.
     fn parse(s: &str) -> Result<Self> {
-        Ok(match s {
-            "bold" => Attr::Bold,
-            "dim" => Attr::Dim,
-            "italic" => Attr::Italic,
-            "underline" => Attr::Underline,
-            "blink" => Attr::Blink,
-            "reverse" => Attr::Reverse,
-            "strike" => Attr::Strike,
-            _ => {
-                let ok = !s.is_empty()
-                    && s.split(';')
-                        .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
-                if !ok {
-                    bail!(
-                        "`{s}` is not an attribute (bold, dim, italic, underline, blink, reverse, strike) or an SGR parameter list"
-                    );
-                }
-                Attr::Other(s.to_string())
-            }
-        })
+        if let Some((_, attr, _)) = NAMED_ATTRS.iter().find(|(name, _, _)| *name == s) {
+            return Ok(attr.clone());
+        }
+        let ok = !s.is_empty()
+            && s.split(';')
+                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+        if !ok {
+            bail!(
+                "`{s}` is not an attribute (bold, dim, italic, underline, blink, reverse, strike) or an SGR parameter list"
+            );
+        }
+        Ok(Attr::Other(s.to_string()))
     }
 
     fn code(&self) -> &str {
         match self {
-            Attr::Bold => "1",
-            Attr::Dim => "2",
-            Attr::Italic => "3",
-            Attr::Underline => "4",
-            Attr::Blink => "5",
-            Attr::Reverse => "7",
-            Attr::Strike => "9",
             Attr::Other(s) => s,
+            named => NAMED_ATTRS
+                .iter()
+                .find(|(_, attr, _)| attr == named)
+                .map(|(_, _, code)| *code)
+                .unwrap_or(""),
         }
     }
 }
@@ -74,7 +76,9 @@ impl<'de> Deserialize<'de> for Attr {
 /// and vice versa.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Color {
-    /// ANSI base colour: 30-37 fg, 40-47 bg, 39/49 defaults, 90-107 bright.
+    /// A bare SGR parameter, 0-255, passed through exactly as written: the
+    /// ANSI base colours are 30-37/40-47 and 90-107, whatever the terminal does
+    /// with the rest is its business.
     Basic(u8),
     /// 256-colour palette index, `38;5;N`.
     Indexed(u8),
@@ -102,14 +106,12 @@ impl Color {
             ["38", "2", r, g, b] => Ok(Color::Rgb(byte(r)?, byte(g)?, byte(b)?)),
             ["38", "5", n] => Ok(Color::Indexed(byte(n)?)),
             [one] => {
-                let n: u16 = one
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("`{s}` is not a colour"))?;
-                if matches!(n, 30..=37 | 39 | 40..=47 | 49 | 90..=97 | 100..=107) {
-                    Ok(Color::Basic(n as u8))
-                } else {
-                    bail!("`{s}` is not an ANSI base colour (30-37, 40-47, 39/49, 90-97, 100-107)")
-                }
+                let n: u8 = one.parse().map_err(|_| {
+                    anyhow::anyhow!(
+                        "`{s}` is not a colour (0-255, `38;5;N`, `38;2;R;G;B` or `#hex`)"
+                    )
+                })?;
+                Ok(Color::Basic(n))
             }
             _ => {
                 bail!("`{s}` is not a colour: `#hex`, an ANSI base code, `38;5;N` or `38;2;R;G;B`")
@@ -128,18 +130,32 @@ impl<'de> Deserialize<'de> for Color {
 ///
 /// A TOML string is shorthand for a colour alone (`code = "#58a6ff"`); a table
 /// is the full form `{ color = …, sgr = ["bold", "italic"] }`, either half
-/// optional. It renders as one SGR sequence, attributes first then colour.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Style {
     pub color: Option<Color>,
     pub sgr: Vec<Attr>,
+    /// The one rendered SGR list behind `codes()`. A Style is immutable once
+    /// loaded, while the painted rows re-read it on every frame, so the
+    /// rendering is computed once rather than once per use.
+    rendered: OnceLock<String>,
 }
+
+// `rendered` is a memo of `color`/`sgr` and always agrees with them, so
+// equality reads the two fields and leaves the cache out.
+impl PartialEq for Style {
+    fn eq(&self, other: &Self) -> bool {
+        self.color == other.color && self.sgr == other.sgr
+    }
+}
+
+impl Eq for Style {}
 
 impl Style {
     fn color(c: Color) -> Self {
         Self {
             color: Some(c),
             sgr: Vec::new(),
+            rendered: OnceLock::new(),
         }
     }
 
@@ -147,32 +163,35 @@ impl Style {
         Self {
             color: None,
             sgr: a.to_vec(),
+            rendered: OnceLock::new(),
         }
     }
 
     /// The SGR parameter list this style amounts to, as written between `\x1b[`
     /// and `m` — `"1;3;38;2;88;166;255"`. Empty when the style is bare.
-    /// The SGR parameter list this style amounts to, as written between `\x1b[`
-    /// and `m` — `"1;3;38;2;88;166;255"`. Empty when the style is bare.
-    pub fn codes(&self) -> String {
-        let mut out = String::new();
-        for a in &self.sgr {
-            if !out.is_empty() {
-                out.push(';');
+    pub fn codes(&self) -> &str {
+        self.rendered.get_or_init(|| {
+            let mut out = String::new();
+            for a in &self.sgr {
+                push_sep(&mut out);
+                out.push_str(a.code());
             }
-            out.push_str(a.code());
-        }
-        if let Some(c) = &self.color {
-            if !out.is_empty() {
-                out.push(';');
+            if let Some(c) = &self.color {
+                push_sep(&mut out);
+                let _ = match c {
+                    Color::Basic(n) => write!(out, "{n}"),
+                    Color::Indexed(n) => write!(out, "38;5;{n}"),
+                    Color::Rgb(r, g, b) => write!(out, "38;2;{r};{g};{b}"),
+                };
             }
-            let _ = match c {
-                Color::Basic(n) => write!(out, "{n}"),
-                Color::Indexed(n) => write!(out, "38;5;{n}"),
-                Color::Rgb(r, g, b) => write!(out, "38;2;{r};{g};{b}"),
-            };
-        }
-        out
+            out
+        })
+    }
+}
+
+fn push_sep(out: &mut String) {
+    if !out.is_empty() {
+        out.push(';');
     }
 }
 
@@ -190,6 +209,7 @@ impl<'de> Deserialize<'de> for Style {
                 Ok(Style {
                     color: Some(Color::parse(s).map_err(E::custom)?),
                     sgr: Vec::new(),
+                    rendered: OnceLock::new(),
                 })
             }
 
@@ -206,7 +226,11 @@ impl<'de> Deserialize<'de> for Style {
                         other => return Err(A::Error::unknown_field(other, &["color", "sgr"])),
                     }
                 }
-                Ok(Style { color, sgr })
+                Ok(Style {
+                    color,
+                    sgr,
+                    rendered: OnceLock::new(),
+                })
             }
         }
         d.deserialize_any(V)
@@ -543,7 +567,7 @@ fn spans(text: &str, under: &str, depth: u8, theme: &Theme) -> String {
                     body.to_string()
                 } else {
                     let joined = if under.is_empty() {
-                        code.clone()
+                        code.to_string()
                     } else {
                         format!("{under};{code}")
                     };

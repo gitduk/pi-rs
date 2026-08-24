@@ -459,6 +459,11 @@ impl Ui {
         self.paint.theme = theme;
         self.prompt = Self::paint_prompt(&self.paint);
         self.editor.set_prompt(self.prompt.clone());
+        // above[0] is the banner, painted once at construction; restyle it so
+        // a /reload lands on the new theme instead of the old.
+        if let Some(first) = self.above.first_mut() {
+            *first = self.paint.on(&self.paint.theme.muted, BANNER);
+        }
     }
 
     fn flush(&mut self) {
