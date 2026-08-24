@@ -28,8 +28,8 @@ use screen::{Caret, Screen};
 use std::sync::Arc;
 
 const DIM: &str = "\x1b[2m";
-/// Rows of reasoning shown while folded.
-const FOLD: usize = 3;
+/// What a folded run shows instead of what it is thinking.
+const THINKING: &str = "thinking...";
 
 const BANNER: &str = "\x1b[2m/help for commands · esc stops a run · ctrl-c clears the line, twice \
                       quickly to quit · ctrl-d exits\x1b[0m";
@@ -54,90 +54,82 @@ enum Act {
     Quit,
 }
 
-/// The reasoning window: what it is holding back, and how much of it shows.
+/// What the reasoning window is holding back, and whether it is holding.
 ///
 /// A finished line cannot be retracted from a terminal, so folding has to
 /// happen where the line is written rather than where it is displayed. That is
 /// the whole reason this holds anything at all — everything else the run prints
 /// goes straight to scrollback and stays there.
 struct Thinking {
-    /// Reasoning lines kept out of scrollback while folded.
+    /// Reasoning lines kept out of scrollback while folded, and kept after the
+    /// reasoning ends: a run is over long before its reader decides they want
+    /// to see what it thought.
     held: Vec<String>,
-    /// Rows to show. `None` lets reasoning run into scrollback whole, which is
-    /// what it did before there was a key for this.
-    fold: Option<usize>,
+    /// How many of them a note already stands for. Each note counts its own
+    /// block, while the lines behind every note stay for one Ctrl-T.
+    noted: usize,
+    /// Whether reasoning is held back at all. Off lets it run into scrollback
+    /// whole, which is what it did before there was a key for this.
+    folded: bool,
 }
 
 /// Folded: the reasoning is worth a glance while it runs and almost never
 /// worth the scrollback it costs afterwards.
 ///
-/// The only constructor, because a derived one would answer `None` here — the
+/// The only constructor, because a derived one would answer `false` here — the
 /// opposite of what the type says two lines up, in the one place nobody would
 /// think to look.
 impl Default for Thinking {
     fn default() -> Self {
         Self {
             held: Vec::new(),
-            fold: Some(FOLD),
+            noted: 0,
+            folded: true,
         }
     }
 }
 
 impl Thinking {
-    /// Whether a finished row stays where it can still be redrawn.
+    /// Whether a finished row stays where it can still be retracted.
     fn holds(&self, dim: bool) -> bool {
-        self.fold.is_some() && dim
+        self.folded && dim
+    }
+
+    /// A new run is starting, and what the last one thought is no longer what
+    /// Ctrl-T is being asked for.
+    fn forget(&mut self) {
+        self.held.clear();
+        self.noted = 0;
     }
 
     /// Turn the window on or off, mid-stream or between turns, and say what
     /// must reach scrollback for it.
     ///
-    /// Unfolding hands over everything held, so nothing seen in the window is
-    /// lost by opening it. Folding cannot take back what already went and does
-    /// not try: it starts at the next line, because the terminal owns what it
-    /// has printed and the alternative is never printing at all.
+    /// Unfolding hands over everything held — this run's reasoning, including
+    /// blocks that have already closed, which is the only way to read them at
+    /// all. Folding cannot take back what already went and does not try: it
+    /// starts at the next line, because the terminal owns what it has printed
+    /// and the alternative is never printing at all.
     fn toggle(&mut self) -> Vec<String> {
-        match self.fold.take() {
-            Some(_) => std::mem::take(&mut self.held),
-            None => {
-                self.fold = Some(FOLD);
-                Vec::new()
-            }
+        self.folded = !self.folded;
+        if self.folded {
+            return Vec::new();
         }
+        self.noted = 0;
+        std::mem::take(&mut self.held)
     }
 
-    /// The reasoning is over. One line is left behind, because the point of
-    /// folding is that the scrollback does not keep the rest — with the count,
-    /// so a run that thought for a long time still says so.
+    /// This block of reasoning is over. One line is left behind, because the
+    /// point of folding is that the scrollback does not keep the rest — with
+    /// the count, so a run that thought for a long time still says so.
     fn close(&mut self) -> Option<String> {
-        let n = std::mem::take(&mut self.held).len();
-        if self.fold.is_none() || n == 0 {
+        let n = self.held.len() - self.noted;
+        self.noted = self.held.len();
+        if !self.folded || n == 0 {
             return None;
         }
         let s = if n == 1 { "" } else { "s" };
         Some(format!("thinking · {n} line{s}"))
-    }
-
-    /// The last rows of what is held, wrapped to `width`.
-    ///
-    /// Wrapped before the window is taken, so one long line fills the window
-    /// rather than pushing three short ones off the bottom of it.
-    fn window(&self, width: usize) -> Vec<String> {
-        let Some(n) = self.fold.filter(|_| !self.held.is_empty()) else {
-            return Vec::new();
-        };
-        let mut rows: Vec<String> = self
-            .held
-            .iter()
-            .rev()
-            .take(n)
-            .rev()
-            .flat_map(|line| screen::fit(line, width))
-            .collect();
-        if rows.len() > n {
-            rows.drain(..rows.len() - n);
-        }
-        rows
     }
 }
 
@@ -369,11 +361,12 @@ impl Ui {
         let width = self.screen.usable();
         let mut rows = Vec::new();
 
-        // The last few finished lines of reasoning, scrolling in place. `open`
-        // follows, so the row still being written is the bottom one.
-        rows.extend(self.thinking.window(width));
-
-        if !self.open.is_empty() {
+        // Folded reasoning shows as one steady row and nothing else: the tail
+        // still being written is reasoning too, and putting it here would be
+        // the window this row exists to replace.
+        if self.thinking.holds(self.dim) {
+            rows.push(self.paint.on(DIM, THINKING));
+        } else if !self.open.is_empty() {
             let painted = if self.dim {
                 self.paint.on(DIM, &self.open)
             } else {
@@ -740,6 +733,7 @@ impl Tui {
         self.ui.turn = Usage::default();
         self.ui.produced = 0;
         self.ui.estimated = agent::Estimated::default();
+        self.ui.thinking.forget();
 
         let out = {
             // Disjoint borrows: the run holds the session while the loop keeps
@@ -795,7 +789,7 @@ impl Tui {
 
 #[cfg(test)]
 mod tests {
-    use super::{FOLD, Thinking, counts};
+    use super::{Thinking, counts};
     use brain::stream::Usage;
 
     fn thought(n: usize) -> Thinking {
@@ -807,29 +801,41 @@ mod tests {
     }
 
     #[test]
-    fn the_window_shows_the_last_rows_and_nothing_earlier() {
-        let rows = thought(7).window(80);
-        assert_eq!(rows, vec!["line 5", "line 6", "line 7"]);
-        assert_eq!(rows.len(), FOLD);
-    }
-
-    #[test]
-    fn one_long_line_fills_the_window_rather_than_emptying_it() {
-        // Wrapped first, then windowed. The other order takes three lines and
-        // hands back nine rows, which is not a three-row window.
-        let mut t = Thinking::default();
-        t.held.push("x".repeat(100));
-        assert_eq!(t.window(20).len(), FOLD);
-    }
-
-    #[test]
     fn unfolding_hands_back_everything_it_was_holding() {
-        // Nothing seen in the window is lost by opening it.
+        // Nothing held back is lost by opening the window.
         let mut t = thought(5);
         assert_eq!(t.toggle().len(), 5);
         assert!(t.held.is_empty());
-        assert!(t.window(80).is_empty(), "unfolded, nothing is held back");
         assert!(!t.holds(true), "unfolded, reasoning goes straight out");
+    }
+
+    #[test]
+    fn closed_reasoning_is_still_there_to_be_opened() {
+        // The whole bug this replaced: the note went out and took the lines
+        // with it, so the key that says "show me" had nothing left to show.
+        let mut t = thought(3);
+        assert_eq!(t.close().as_deref(), Some("thinking · 3 lines"));
+        assert_eq!(t.toggle().len(), 3, "the run is over, the lines are not");
+    }
+
+    #[test]
+    fn each_note_counts_its_own_block_and_leaves_the_rest_held() {
+        let mut t = thought(3);
+        assert_eq!(t.close().as_deref(), Some("thinking · 3 lines"));
+        for i in 4..=6 {
+            t.held.push(format!("line {i}"));
+        }
+        assert_eq!(t.close().as_deref(), Some("thinking · 3 lines"));
+        assert_eq!(t.close(), None, "nothing new held, nothing said");
+        assert_eq!(t.toggle().len(), 6, "one key, the whole run's reasoning");
+    }
+
+    #[test]
+    fn a_new_run_is_not_the_last_one_s_reasoning() {
+        let mut t = thought(4);
+        t.close();
+        t.forget();
+        assert!(t.toggle().is_empty());
     }
 
     #[test]
@@ -840,7 +846,6 @@ mod tests {
         t.toggle();
         assert!(t.toggle().is_empty());
         assert!(t.holds(true));
-        assert!(t.window(80).is_empty());
     }
 
     #[test]
@@ -851,12 +856,7 @@ mod tests {
     }
 
     #[test]
-    fn the_window_leaves_one_line_behind_and_only_when_it_held_something() {
-        let mut t = thought(13);
-        assert_eq!(t.close().as_deref(), Some("thinking · 13 lines"));
-        assert!(t.held.is_empty());
-        assert_eq!(t.close(), None, "nothing held, nothing said");
-
+    fn the_note_is_left_only_when_something_was_held() {
         let mut one = thought(1);
         assert_eq!(one.close().as_deref(), Some("thinking · 1 line"));
 

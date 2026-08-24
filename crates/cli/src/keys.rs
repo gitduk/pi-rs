@@ -237,7 +237,7 @@ pub const BINDINGS: &[Binding] = &[
         action: A::ThinkFold,
         when: W::Editor,
         keys: &["ctrl+t"],
-        note: "reasoning scrolls in three rows, or runs whole",
+        note: "show what it thought, or fold it away",
     },
 ];
 
