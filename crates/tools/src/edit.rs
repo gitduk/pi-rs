@@ -8,6 +8,8 @@ use crate::{Ctx, Tier, Tool, ToolError, ToolOutput};
 
 /// How many landed lines to echo back per file before summarizing instead.
 const ECHO_LIMIT: usize = 40;
+/// Diff rows a run's display carries for one patch.
+const SKETCH_LIMIT: usize = 24;
 
 #[derive(Deserialize)]
 struct Args {
@@ -98,7 +100,7 @@ fn format() -> &'static str {
 
 fn echo(path: &str, before: &str, content: &str, landed: &[Landed]) -> String {
     let mut out = format!("[{path}#{}]", hashline::tag(content));
-    if landed.is_empty() {
+    if landed.iter().all(|l| l.gave() == 0) {
         // A patch of pure CUTs lands nothing, and saying so describes what did
         // not happen. What did is the deletion, which is the whole point of the
         // patch and reads as failure when reported by its absence.
@@ -114,13 +116,13 @@ fn echo(path: &str, before: &str, content: &str, landed: &[Landed]) -> String {
         return out;
     }
     let lines: Vec<&str> = content.lines().collect();
-    let total: usize = landed.iter().map(|l| l.end - l.start + 1).sum();
+    let total: usize = landed.iter().map(hashline::Landed::gave).sum();
     out.push('\n');
     if total > ECHO_LIMIT {
-        for l in landed {
+        for l in landed.iter().filter(|l| l.gave() > 0) {
             out.push_str(&format!(
                 "… {} lines now at {}-{}\n",
-                l.end - l.start + 1,
+                l.gave(),
                 l.start,
                 l.end
             ));
@@ -170,6 +172,91 @@ fn broke_syntax(plan: &hashline::Plan, loaded: &HashMap<String, String>) -> Opti
         }
     }
     None
+}
+
+/// What a person watching sees: the lines that went, and the lines that came.
+///
+/// Separate from the report the model reads, which is a set of addresses it can
+/// edit against. "Where can I edit next" and "what just changed" are different
+/// questions, and only the second one has a reader.
+///
+/// The first line rides beside the tool's name, so it carries the counts; the
+/// rest are the diff itself, capped, because a display is not a transcript.
+fn sketch(changes: &[Change], loaded: &HashMap<String, String>) -> String {
+    let (mut plus, mut minus) = (0usize, 0usize);
+    let mut files: Vec<(&str, Vec<String>)> = Vec::new();
+    for change in changes {
+        let (path, content, landed) = match change {
+            Change::Write {
+                path,
+                content,
+                landed,
+            } => {
+                // The same skip the report makes: a body that already matched
+                // wrote nothing, and counting the file says it did.
+                if loaded.get(path).is_some_and(|before| before == content) {
+                    continue;
+                }
+                (path, content, landed)
+            }
+            Change::Rename {
+                to,
+                content,
+                landed,
+                ..
+            } => (to, content, landed),
+            Change::Remove { path } => {
+                // Counted, not listed: deleting a file removes every line in
+                // it, and `+0 -0` would read as nothing having happened. What
+                // those lines said is not what a reader needs here.
+                minus += loaded.get(path).map_or(0, |c| c.lines().count());
+                files.push((path.as_str(), Vec::new()));
+                continue;
+            }
+        };
+        let lines: Vec<&str> = content.lines().collect();
+        let mut rows = Vec::new();
+        for l in landed {
+            let gave = &lines[(l.start - 1).min(lines.len())..l.end.min(lines.len())];
+            // A hunk whose body already matched changed nothing, and a diff
+            // that shows it says something happened that did not.
+            if l.took == gave {
+                continue;
+            }
+            minus += l.took.len();
+            plus += gave.len();
+            rows.extend(l.took.iter().map(|old| format!("-{old}")));
+            rows.extend(gave.iter().map(|new| format!("+{new}")));
+        }
+        files.push((path.as_str(), rows));
+    }
+
+    let head = match files.as_slice() {
+        [(one, _)] => format!("{one} +{plus} -{minus}"),
+        many => format!("{} files +{plus} -{minus}", many.len()),
+    };
+    // A path before each file's hunks, but only once there is more than one
+    // file to tell apart: with a single one the head already said which.
+    let named = files.iter().filter(|(_, r)| !r.is_empty()).count() > 1;
+    let mut rows = Vec::new();
+    for (path, mut own) in files {
+        if own.is_empty() {
+            continue;
+        }
+        if named {
+            rows.push(path.to_string());
+        }
+        rows.append(&mut own);
+    }
+    if rows.len() > SKETCH_LIMIT {
+        let more = rows.len() - SKETCH_LIMIT;
+        rows.truncate(SKETCH_LIMIT);
+        rows.push(format!("… {more} more"));
+    }
+    std::iter::once(head)
+        .chain(rows)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// What each file's tag is right now, for a refusal that turned on one.
@@ -315,6 +402,6 @@ impl Tool for Edit {
                 }
             }
         }
-        Ok(ToolOutput::text(report))
+        Ok(ToolOutput::text(report).with_preview(sketch(&plan.changes, &loaded)))
     }
 }

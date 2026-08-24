@@ -2,10 +2,27 @@ use std::collections::HashMap;
 
 use crate::{Blocks, Body, Error, Files, LinePos, Op, Patch, Section, Target, tag};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Landed {
+    /// Where the new lines sit in the file now.
     pub start: usize,
     pub end: usize,
+    /// The original lines it displaced, in order. Empty for an insertion.
+    ///
+    /// Carried rather than left to the caller to work out: what a range
+    /// replaced is known here and nowhere after, since the file it was in has
+    /// already been rewritten by the time anyone reads this.
+    pub took: Vec<String>,
+}
+
+impl Landed {
+    /// How many lines this put in the file.
+    ///
+    /// Zero for a hunk that only removed, which is the one case where `end`
+    /// sits below `start` — there is no row for it to name.
+    pub fn gave(&self) -> usize {
+        (self.end + 1).saturating_sub(self.start)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -289,41 +306,74 @@ fn build(
 
     let mut out: Vec<String> = Vec::with_capacity(len);
     let mut landed: Vec<Landed> = Vec::new();
-    let record = |out: &mut Vec<String>, body: Vec<String>, landed: &mut Vec<Landed>| {
-        if body.is_empty() {
-            return;
-        }
-        let start = out.len() + 1;
-        out.extend(body);
-        landed.push(Landed {
-            start,
-            end: out.len(),
-        });
-    };
+    let record =
+        |out: &mut Vec<String>, body: Vec<String>, took: Vec<String>, landed: &mut Vec<Landed>| {
+            if body.is_empty() && took.is_empty() {
+                return;
+            }
+            let start = out.len() + 1;
+            out.extend(body);
+            landed.push(Landed {
+                start,
+                end: out.len(),
+                took,
+            });
+        };
 
     if len == 0 {
-        record(&mut out, before.remove(&1).unwrap_or_default(), &mut landed);
+        record(
+            &mut out,
+            before.remove(&1).unwrap_or_default(),
+            Vec::new(),
+            &mut landed,
+        );
     }
     let mut i = 1;
     while i <= len {
-        record(&mut out, before.remove(&i).unwrap_or_default(), &mut landed);
+        record(
+            &mut out,
+            before.remove(&i).unwrap_or_default(),
+            Vec::new(),
+            &mut landed,
+        );
         // Ranges name original lines, so the cursor jumps past the whole span
         // and later hunks keep their pre-patch numbering.
         match spans.iter().find(|(start, _, _)| *start == i) {
             Some((_, end, body)) => {
-                record(&mut out, body.clone(), &mut landed);
-                record(&mut out, after.remove(end).unwrap_or_default(), &mut landed);
+                let took = lines
+                    .get(i - 1..*end)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|l| l.to_string())
+                    .collect();
+                record(&mut out, body.clone(), took, &mut landed);
+                record(
+                    &mut out,
+                    after.remove(end).unwrap_or_default(),
+                    Vec::new(),
+                    &mut landed,
+                );
                 i = end + 1;
             }
             None => {
                 out.push(lines[i - 1].to_string());
-                record(&mut out, after.remove(&i).unwrap_or_default(), &mut landed);
+                record(
+                    &mut out,
+                    after.remove(&i).unwrap_or_default(),
+                    Vec::new(),
+                    &mut landed,
+                );
                 i += 1;
             }
         }
     }
     if len == 0 {
-        record(&mut out, after.remove(&0).unwrap_or_default(), &mut landed);
+        record(
+            &mut out,
+            after.remove(&0).unwrap_or_default(),
+            Vec::new(),
+            &mut landed,
+        );
     }
 
     let content = join(&out, trailing);

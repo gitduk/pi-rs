@@ -332,6 +332,120 @@ async fn a_language_the_parser_does_not_know_is_not_gated() {
 }
 
 #[tokio::test]
+async fn an_edit_shows_what_went_and_what_came() {
+    // The report the model reads is a set of addresses it can edit against.
+    // The display answers the other question — what changed — and only that
+    // one has a reader.
+    let (_d, c) = ctx();
+    std::fs::write(c.workspace.root().join("a.rs"), THREE_FNS).unwrap();
+    let tag = hashline::tag(THREE_FNS);
+
+    let out = tools::edit::Edit
+        .execute(
+            json!({ "patch": format!("[a.rs#{tag}]\nPUT 5-7:\n+pub fn target() -> i32 {{\n+    99\n+}}\n") }),
+            &c,
+        )
+        .await
+        .unwrap();
+
+    let sketch = out.preview.unwrap();
+    let (head, rows) = sketch.split_once('\n').unwrap();
+    assert_eq!(head, "a.rs +3 -3");
+    assert!(rows.contains("\n+    99"), "{rows}");
+    assert!(
+        rows.lines().filter(|l| l.starts_with('-')).count() == 3,
+        "{rows}"
+    );
+    // The addresses stay where the model reads them, not here.
+    assert!(!sketch.contains("5-7:"), "{sketch}");
+}
+
+#[tokio::test]
+async fn a_cut_reports_the_lines_it_took() {
+    // A hunk that gives nothing has no row in the new file to name, and is
+    // exactly the one a reader most wants shown.
+    let (_d, c) = ctx();
+    std::fs::write(c.workspace.root().join("a.rs"), THREE_FNS).unwrap();
+    let tag = hashline::tag(THREE_FNS);
+
+    let out = tools::edit::Edit
+        .execute(json!({ "patch": format!("[a.rs#{tag}]\nCUT 5-7\n") }), &c)
+        .await
+        .unwrap();
+
+    let sketch = out.preview.unwrap();
+    assert!(sketch.starts_with("a.rs +0 -3"), "{sketch}");
+    assert_eq!(sketch.lines().filter(|l| l.starts_with('-')).count(), 3);
+}
+
+#[tokio::test]
+async fn a_file_the_patch_did_not_change_is_not_counted_as_one_that_did() {
+    // The report says "unchanged" and nothing is written; a head reading
+    // "2 files" tells whoever only sees the display the opposite.
+    let (_d, c) = ctx();
+    let root = c.workspace.root();
+    std::fs::write(root.join("a.rs"), THREE_FNS).unwrap();
+    std::fs::write(root.join("b.rs"), "fn b() {}\n").unwrap();
+
+    let patch = format!(
+        "[a.rs#{}]\nPUT 5-7:\n+pub fn target() -> i32 {{\n+    99\n+}}\n[b.rs#{}]\nPUT 1-1:\n+fn b() {{}}\n",
+        hashline::tag(THREE_FNS),
+        hashline::tag("fn b() {}\n"),
+    );
+    let out = tools::edit::Edit
+        .execute(json!({ "patch": patch }), &c)
+        .await
+        .unwrap();
+
+    let sketch = out.preview.unwrap();
+    assert!(sketch.starts_with("a.rs +3 -3"), "{sketch}");
+    assert!(!sketch.contains("b.rs"), "{sketch}");
+    // One file left standing, so nothing has to be told apart by name.
+    assert!(!sketch.lines().any(|l| l == "a.rs"), "{sketch}");
+}
+
+#[tokio::test]
+async fn two_files_each_say_which_hunks_are_theirs() {
+    let (_d, c) = ctx();
+    let root = c.workspace.root();
+    std::fs::write(root.join("a.rs"), THREE_FNS).unwrap();
+    std::fs::write(root.join("b.rs"), "fn b() {}\n").unwrap();
+
+    let patch = format!(
+        "[a.rs#{}]\nPUT 2-2:\n+    11\n[b.rs#{}]\nPUT 1-1:\n+fn b() -> i32 {{ 2 }}\n",
+        hashline::tag(THREE_FNS),
+        hashline::tag("fn b() {}\n"),
+    );
+    let out = tools::edit::Edit
+        .execute(json!({ "patch": patch }), &c)
+        .await
+        .unwrap();
+
+    let sketch = out.preview.unwrap();
+    assert!(sketch.starts_with("2 files +2 -2"), "{sketch}");
+    let named: Vec<&str> = sketch
+        .lines()
+        .filter(|l| !l.starts_with(['+', '-']))
+        .collect();
+    assert_eq!(named, vec!["2 files +2 -2", "a.rs", "b.rs"], "{sketch}");
+}
+
+#[tokio::test]
+async fn a_removed_file_counts_the_lines_that_went_with_it() {
+    // `+0 -0` on a delete reads as nothing having happened.
+    let (_d, c) = ctx();
+    std::fs::write(c.workspace.root().join("a.rs"), THREE_FNS).unwrap();
+    let tag = hashline::tag(THREE_FNS);
+
+    let out = tools::edit::Edit
+        .execute(json!({ "patch": format!("[a.rs#{tag}]\nREM\n") }), &c)
+        .await
+        .unwrap();
+    let n = THREE_FNS.lines().count();
+    assert_eq!(out.preview.unwrap(), format!("a.rs +0 -{n}"));
+}
+
+#[tokio::test]
 async fn an_overwrite_that_would_not_parse_is_refused() {
     // The whole-file counterpart of a range that stops one line short: content
     // that ran out mid-file. The tool cannot tell a short answer from a short

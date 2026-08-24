@@ -160,7 +160,13 @@ fn a_register_flows_between_files() {
         Change::Write {
             path: "a.rs".into(),
             content: "keep\n".into(),
-            landed: vec![]
+            // A cut gives nothing, so `end` sits below `start`. What it took
+            // is the whole of what happened, and is reported as such.
+            landed: vec![hashline::Landed {
+                start: 2,
+                end: 1,
+                took: vec!["moveme".into()]
+            }]
         }
     );
     assert_eq!(
@@ -168,7 +174,11 @@ fn a_register_flows_between_files() {
         Change::Write {
             path: "b.rs".into(),
             content: "moveme\ntarget\n".into(),
-            landed: vec![hashline::Landed { start: 1, end: 1 }],
+            landed: vec![hashline::Landed {
+                start: 1,
+                end: 1,
+                took: vec![]
+            }],
         }
     );
 }
@@ -205,7 +215,11 @@ fn mv_carries_the_edited_content_to_the_destination() {
             from: "a.rs".into(),
             to: "lib/a.rs".into(),
             content: "ONE\ntwo\nthree\nfour\n".into(),
-            landed: vec![hashline::Landed { start: 1, end: 1 }],
+            landed: vec![hashline::Landed {
+                start: 1,
+                end: 1,
+                took: vec!["one".into()]
+            }],
         }
     );
 }
@@ -475,8 +489,16 @@ fn landed_reports_new_numbering_so_a_second_edit_needs_no_re_read() {
     assert_eq!(
         landed,
         &vec![
-            hashline::Landed { start: 1, end: 3 },
-            hashline::Landed { start: 7, end: 7 }
+            hashline::Landed {
+                start: 1,
+                end: 3,
+                took: vec!["one".into()]
+            },
+            hashline::Landed {
+                start: 7,
+                end: 7,
+                took: vec![]
+            }
         ]
     );
 }

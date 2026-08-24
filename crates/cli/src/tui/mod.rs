@@ -21,7 +21,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
 use crate::keys::{Action, Keys, Press};
-use crate::render::{self, Paint};
+use crate::render::{self, Markdown, Paint};
 use crate::repl::{self, Candidate, Choice, Command, Repl, Step};
 use editor::Editor;
 use screen::{Caret, Screen};
@@ -131,6 +131,7 @@ impl Thinking {
 /// one that gets its second chance in front of the user.
 fn body(
     thinking: &Thinking,
+    md: &Markdown,
     dim: bool,
     open: &str,
     width: usize,
@@ -147,7 +148,7 @@ fn body(
     let painted = if dim {
         paint.on(DIM, open)
     } else {
-        open.to_string()
+        md.line(open, *paint)
     };
     let mut rows = screen::fit(&painted, width);
     // A paragraph can outgrow the screen; the tail is the part still being
@@ -169,6 +170,9 @@ struct Ui {
     open: String,
     /// Whether `open` is reasoning rather than the answer.
     dim: bool,
+    /// Where the answer's markdown stands: what a row means depends on the
+    /// rows before it, and only a fence carries that far.
+    md: Markdown,
     thinking: Thinking,
     /// Finished lines waiting to be pushed above on the next render.
     above: Vec<String>,
@@ -219,6 +223,7 @@ impl Ui {
             paint: Paint { color: true },
             open: String::new(),
             dim: false,
+            md: Markdown::default(),
             thinking: Thinking::default(),
             above: vec![BANNER.to_string()],
             queued: Vec::new(),
@@ -250,20 +255,32 @@ impl Ui {
     }
 
     /// End the open paragraph and send it up into scrollback.
+    /// A finished row, styled for what it is: reasoning, or the answer's
+    /// markdown. The one place either decision is made.
+    fn paint_row(&mut self, line: &str, dim: bool) -> String {
+        if dim {
+            return self.paint.on(DIM, line);
+        }
+        let painted = self.md.line(line, self.paint);
+        self.md.advance(line);
+        painted
+    }
+
     fn close(&mut self) {
         if !self.open.is_empty() {
             let text = std::mem::take(&mut self.open);
-            let painted = if self.dim {
-                self.paint.on(DIM, &text)
-            } else {
-                text
-            };
+            let painted = self.paint_row(&text, self.dim);
             self.land(painted, self.dim);
         }
         if self.dim {
             // The reasoning is over, so the scrollback finally gets its say in
             // it: the lines if the window was open, a count of them if not.
             self.close_thinking();
+        } else {
+            // A fence the answer left open stays open only within the answer.
+            // A tool call ends the block, and the block is as far as markdown
+            // state can honestly reach.
+            self.md.reset();
         }
         self.dim = false;
     }
@@ -282,7 +299,7 @@ impl Ui {
         while let Some(i) = self.open.find('\n') {
             let line: String = self.open.drain(..=i).collect();
             let line = line.trim_end_matches('\n').to_string();
-            let painted = if dim { self.paint.on(DIM, &line) } else { line };
+            let painted = self.paint_row(&line, dim);
             self.land(painted, dim);
         }
     }
@@ -319,8 +336,11 @@ impl Ui {
             Event::TurnStart { .. } => {}
             _ => {
                 self.close();
-                if let Some(line) = render::describe(&event, self.paint) {
-                    self.above.push(line);
+                if let Some(said) = render::describe(&event, self.paint, self.screen.usable()) {
+                    // Row by row: a scrollback line is written with a carriage
+                    // return of its own, and an embedded newline would stair-
+                    // step down the screen without one.
+                    self.above.extend(said.lines().map(str::to_string));
                 }
             }
         }
@@ -375,6 +395,7 @@ impl Ui {
         let room = (self.screen.height as usize).saturating_sub(4).max(1);
         rows.extend(body(
             &self.thinking,
+            &self.md,
             self.dim,
             &self.open,
             width,
@@ -793,6 +814,7 @@ impl Tui {
 #[cfg(test)]
 mod tests {
     use super::{Thinking, body, counts};
+    use crate::render::Markdown;
     use crate::render::Paint;
     use brain::stream::Usage;
 
@@ -806,7 +828,15 @@ mod tests {
 
     /// What the screen shows for a run in the middle of reasoning.
     fn shown(t: &Thinking, open: &str) -> Vec<String> {
-        body(t, true, open, 80, 9, &Paint { color: false })
+        body(
+            t,
+            &Markdown::default(),
+            true,
+            open,
+            80,
+            9,
+            &Paint { color: false },
+        )
     }
 
     #[test]
@@ -845,7 +875,15 @@ mod tests {
     fn the_answer_is_never_held() {
         let t = thought(3);
         assert!(!t.holds(false));
-        let rows = body(&t, false, "hello", 80, 9, &Paint { color: false });
+        let rows = body(
+            &t,
+            &Markdown::default(),
+            false,
+            "hello",
+            80,
+            9,
+            &Paint { color: false },
+        );
         assert_eq!(rows, vec!["hello"]);
     }
 
@@ -875,7 +913,15 @@ mod tests {
     #[test]
     fn a_long_paragraph_is_trimmed_to_the_room_it_is_given() {
         let t = Thinking::default();
-        let rows = body(&t, false, &"x".repeat(500), 80, 3, &Paint { color: false });
+        let rows = body(
+            &t,
+            &Markdown::default(),
+            false,
+            &"x".repeat(500),
+            80,
+            3,
+            &Paint { color: false },
+        );
         assert_eq!(rows.len(), 3);
     }
 
