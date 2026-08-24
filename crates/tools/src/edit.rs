@@ -14,42 +14,87 @@ struct Args {
     patch: String,
 }
 
-const FORMAT: &str = r#"Line-anchored patch. Sections name a file and the TAG from your last read of it:
+const SHAPE: &str = r#"Line-anchored patch. Sections name a file and the TAG from your last read of it:
 
 [path/to/file.rs#A1B2]
-PUT 2.=4:
+PUT 2-4:
 +replacement line one
 +replacement line two
 
-Ops. Every op line starts with a verb — PUT, CUT, MV or REM — and every line
+Addresses. Every one is a line number and a suffix, in that order, and every
 number is the ORIGINAL one from that read: earlier hunks in the same patch never
-shift later ones. A header ending in `:` takes `+` body rows; CUT, MV, REM and
-the register pastes take none.
-  PUT N.=M:   replace original lines N through M, inclusive, with the body
-  PUT N*:     replace the whole construct opening at line N; its closing line is
-              resolved for you. Any decorator, attribute or doc comment above
-              it belongs to it: naming either their rows or N covers them all.
-  PUT <N:     insert the body before line N (`<1` is the file head)
-  PUT >N:     insert the body after line N (`>$` is the file tail)
-  PUT >N*:    insert the body after the construct at N closes
-  CUT N.=M    delete lines N through M, capturing them; add `@name` to label it
-  CUT N*      the same, for a whole construct
-  One line is `PUT N.=N:` or `CUT N.=N`; a bare `PUT N:` / `CUT N` means the
-  same and is accepted.
-  PUT <N @name / PUT >N @name / PUT N.=M @name   paste a captured register
-  MV dest     rename; edits in this section land first, then the file moves
-  REM         delete the file; may not share a section with other ops
+shift later ones. A bare number is not an address.
+{addresses}
+
+Ops. Every op line starts with a verb — PUT, CUT, MV or REM. A header ending in
+`:` takes `+` body rows; CUT, MV, REM and the register pastes take none.
+  PUT <addr>:  put the body there. A gap address inserts, a line address replaces.
+  CUT N-M      delete those lines, capturing them; add `@name` to label it
+  CUT N*       the same, for a whole construct
+  PUT N< @name / PUT N> @name / PUT N-M @name   paste a captured register
+  MV dest      rename; edits in this section land first, then the file moves
+  REM          delete the file; may not share a section with other ops
 
 Body rows start with `+` and are copied verbatim, so `+` alone is a blank line
 and leading whitespace is preserved. Never write `-old` or bare context lines:
-the range says what goes, the body says what arrives. To delete lines and put
+the address says what goes, the body says what arrives. To delete lines and put
 nothing back, use CUT — not a PUT with `-` rows. A literal line of your own that
 begins with `-` or `+` takes the prefix like any other: `- item` is written
-`+- item`. A body may be any length regardless of how many lines the range
+`+- item`. A body may be any length regardless of how many lines the address
 names.
 
-Rejected outright: a stale TAG, two hunks touching the same original line, a
-range past the end of the file. Nothing is written unless every section applies."#;
+Rejected outright: a stale TAG, two hunks touching the same original line, an
+address past the end of the file, and a patch that would leave the file
+unparseable when it parsed before. Nothing is written unless every section
+applies."#;
+
+/// One table row, wrapped under its own label rather than running off the side.
+///
+/// The description is read by a model on every request; a paragraph that used
+/// to wrap and now does not is a real cost of generating prose instead of
+/// writing it.
+fn wrapped(label: &str, width: usize, text: &str) -> String {
+    const RIGHT: usize = 78;
+    let pad = 2 + width + 2;
+    let mut out = format!("  {label:<width$}  ");
+    let mut col = pad;
+    for (i, word) in text.split_whitespace().enumerate() {
+        if i > 0 && col + 1 + word.len() > RIGHT {
+            out.push('\n');
+            out.push_str(&" ".repeat(pad));
+            col = pad;
+        } else if i > 0 {
+            out.push(' ');
+            col += 1;
+        }
+        out.push_str(word);
+        col += word.len();
+    }
+    out
+}
+
+/// The description the model reads, with the address forms filled in from the
+/// table that defines them.
+///
+/// Built rather than written out: this prose and the parser disagreeing is not
+/// hypothetical — it happened inside the commit that moved the grammar, and the
+/// stale line sat two functions away from the rewrite.
+fn format() -> &'static str {
+    static TEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TEXT.get_or_init(|| {
+        let width = hashline::FORMS
+            .iter()
+            .map(|f| f.suffix.len())
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let addresses: Vec<String> = hashline::FORMS
+            .iter()
+            .map(|f| wrapped(&format!("N{}", f.suffix), width, f.means))
+            .collect();
+        SHAPE.replace("{addresses}", &addresses.join("\n"))
+    })
+}
 
 fn echo(path: &str, before: &str, content: &str, landed: &[Landed]) -> String {
     let mut out = format!("[{path}#{}]", hashline::tag(content));
@@ -157,7 +202,7 @@ impl Tool for Edit {
     }
 
     fn description(&self) -> &str {
-        FORMAT
+        format()
     }
 
     fn schema(&self) -> Value {

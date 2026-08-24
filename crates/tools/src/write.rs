@@ -34,10 +34,14 @@ fn numbered_throughout(text: &str) -> bool {
         if line.is_empty() {
             continue;
         }
+        // Through hashline, because what a prefix looks like is that crate's
+        // grammar and this is the third place in the tree that has to agree
+        // with it. A local "all digits" test was right until addresses grew a
+        // range, and then it silently stopped recognising read's own output.
         let Some((n, _)) = line.split_once(':') else {
             return false;
         };
-        if n.is_empty() || !n.chars().all(|c| c.is_ascii_digit()) {
+        if hashline::Addr::read(n).is_none() {
             return false;
         }
         any = true;

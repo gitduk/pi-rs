@@ -241,7 +241,6 @@ fn build(
             }
             Op::InsertAfter { at, body } => {
                 let n = match at {
-                    LinePos::Tail => len,
                     LinePos::At(n) => {
                         bounds(section, *n, *n, len)?;
                         *n

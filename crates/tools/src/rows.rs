@@ -9,9 +9,9 @@ use std::collections::HashMap;
 
 /// Where each construct that opens on a row ends, keyed by the row it opens on.
 ///
-/// Only the constructs spanning more than one row: a single-line item's range
-/// is the number already in front of it, and `5.=5` on every `const` is noise.
-/// An unknown language has no constructs and every row prints bare.
+/// Only the constructs spanning more than one row. A single-line item needs no
+/// entry: `addr` renders `N-N` for any row it does not find here, so a row
+/// carries a span exactly when the span says something the row does not.
 pub(crate) fn spans(path: &str, content: &str) -> HashMap<usize, usize> {
     let Some(lang) = syntax::Lang::of(path) else {
         return HashMap::new();
@@ -29,9 +29,18 @@ pub(crate) fn of(items: &[syntax::Item]) -> HashMap<usize, usize> {
 }
 
 /// A row's address and its colon, ready for the text of the row to follow.
+///
+/// Rendered by `hashline`, which is the crate that parses it back: two
+/// `format!`s pointing opposite ways is how a view starts printing an address
+/// its own parser rejects.
 pub(crate) fn addr(n: usize, spans: &HashMap<usize, usize>) -> String {
-    match spans.get(&n) {
-        Some(end) => format!("{n}.={end}:"),
-        None => format!("{n}:"),
-    }
+    // Never a bare number, even for a row that spans only itself. A prefix the
+    // model cannot paste back is the tool teaching it a form its own parser
+    // refuses, and the prefix in front of every line is where line addressing
+    // is actually learned.
+    let end = spans.get(&n).copied().unwrap_or(n);
+    format!(
+        "{}:",
+        hashline::Addr::Target(hashline::Target::Range { start: n, end })
+    )
 }

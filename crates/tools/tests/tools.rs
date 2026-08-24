@@ -21,7 +21,7 @@ async fn read_numbers_lines_under_a_content_tag() {
         out.lines().next().unwrap(),
         format!("[a.rs#{}]", hashline::tag("one\ntwo\nthree\n"))
     );
-    assert!(out.contains("\n1:one\n2:two\n3:three\n"), "{out}");
+    assert!(out.contains("\n1-1:one\n2-2:two\n3-3:three\n"), "{out}");
 }
 
 #[test]
@@ -44,7 +44,7 @@ async fn read_honors_offset_and_limit_and_reports_the_remainder() {
         &c,
     )
     .await;
-    assert!(out.contains("3:l3\n4:l4\n"), "{out}");
+    assert!(out.contains("3-3:l3\n4-4:l4\n"), "{out}");
     assert!(!out.contains("5:l5"), "{out}");
     assert!(out.contains("6 more lines; re-read from 5"), "{out}");
 }
@@ -240,7 +240,7 @@ async fn edit_applies_a_patch_anchored_to_the_tag_read_returned() {
     let path = c.workspace.root().join("a.rs");
     std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
 
-    let report = read_then_edit(&c, "a.rs", "PUT 2.=2:\n+TWO\n")
+    let report = read_then_edit(&c, "a.rs", "PUT 2-2:\n+TWO\n")
         .await
         .unwrap();
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\nTWO\nthree\n");
@@ -277,7 +277,7 @@ async fn a_range_one_line_short_is_refused_rather_than_applied() {
     let err = read_then_edit(
         &c,
         "a.rs",
-        "PUT 5.=6:\n+pub fn target() -> i32 {\n+    99\n+}\n",
+        "PUT 5-6:\n+pub fn target() -> i32 {\n+    99\n+}\n",
     )
     .await
     .unwrap_err();
@@ -298,7 +298,7 @@ async fn the_same_range_named_correctly_still_applies() {
     let out = read_then_edit(
         &c,
         "a.rs",
-        "PUT 5.=7:\n+pub fn target() -> i32 {\n+    99\n+}\n",
+        "PUT 5-7:\n+pub fn target() -> i32 {\n+    99\n+}\n",
     )
     .await
     .unwrap();
@@ -314,7 +314,7 @@ async fn a_file_that_was_already_broken_stays_editable() {
     let broken = "pub fn a() -> i32 {\n    1\n";
     std::fs::write(c.workspace.root().join("a.rs"), broken).unwrap();
 
-    let out = read_then_edit(&c, "a.rs", "PUT 2.=2:\n+    2\n")
+    let out = read_then_edit(&c, "a.rs", "PUT 2-2:\n+    2\n")
         .await
         .unwrap();
     assert!(out.contains("2"), "{out}");
@@ -325,7 +325,7 @@ async fn a_language_the_parser_does_not_know_is_not_gated() {
     let (_d, c) = ctx();
     std::fs::write(c.workspace.root().join("a.toml"), "[a]\nb = 1\n").unwrap();
 
-    let out = read_then_edit(&c, "a.toml", "PUT 2.=2:\n+b = 2\n")
+    let out = read_then_edit(&c, "a.toml", "PUT 2-2:\n+b = 2\n")
         .await
         .unwrap();
     assert!(out.contains("b = 2"), "{out}");
@@ -337,11 +337,11 @@ async fn two_edits_in_a_row_need_no_re_read() {
     let path = c.workspace.root().join("a.rs");
     std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
 
-    let first = read_then_edit(&c, "a.rs", "PUT 1.=1:\n+a\n+b\n")
+    let first = read_then_edit(&c, "a.rs", "PUT 1-1:\n+a\n+b\n")
         .await
         .unwrap();
     let tag = first.split('#').nth(1).unwrap().split(']').next().unwrap();
-    let second = format!("[a.rs#{tag}]\nPUT 4.=4:\n+THREE\n");
+    let second = format!("[a.rs#{tag}]\nPUT 4-4:\n+THREE\n");
     tools::edit::Edit
         .execute(json!({ "patch": second }), &c)
         .await
@@ -360,7 +360,7 @@ async fn a_stale_tag_leaves_the_file_untouched() {
     std::fs::write(&path, "one\ntwo\n").unwrap();
 
     let err = tools::edit::Edit
-        .execute(json!({ "patch": "[a.rs#0000]\nPUT 1.=1:\n+X\n" }), &c)
+        .execute(json!({ "patch": "[a.rs#0000]\nPUT 1-1:\n+X\n" }), &c)
         .await
         .unwrap_err()
         .to_string();
@@ -379,7 +379,7 @@ async fn a_multi_file_patch_is_all_or_nothing_on_disk() {
     std::fs::write(c.workspace.root().join("b.rs"), "b\n").unwrap();
 
     let patch = format!(
-        "[a.rs#{}]\nPUT 1.=1:\n+A\n[b.rs#0000]\nPUT 1.=1:\n+B\n",
+        "[a.rs#{}]\nPUT 1-1:\n+A\n[b.rs#0000]\nPUT 1-1:\n+B\n",
         hashline::tag("a\n")
     );
     assert!(
@@ -400,7 +400,7 @@ async fn edit_moves_a_file_and_reports_the_destination() {
     let (_d, c) = ctx();
     std::fs::write(c.workspace.root().join("a.rs"), "one\n").unwrap();
 
-    let report = read_then_edit(&c, "a.rs", "PUT 1.=1:\n+ONE\nMV lib/a.rs\n")
+    let report = read_then_edit(&c, "a.rs", "PUT 1-1:\n+ONE\nMV lib/a.rs\n")
         .await
         .unwrap();
     assert!(report.starts_with("a.rs → [lib/a.rs#"), "{report}");
@@ -415,7 +415,7 @@ async fn edit_moves_a_file_and_reports_the_destination() {
 async fn edit_refuses_a_file_it_cannot_read_and_says_to_use_write() {
     let (_d, c) = ctx();
     let err = tools::edit::Edit
-        .execute(json!({ "patch": "[new.rs#0000]\nPUT 1.=1:\n+x\n" }), &c)
+        .execute(json!({ "patch": "[new.rs#0000]\nPUT 1-1:\n+x\n" }), &c)
         .await
         .unwrap_err()
         .to_string();
@@ -475,11 +475,11 @@ async fn two_edits_to_one_file_in_the_same_turn_do_not_clobber_each_other() {
     // Both patches are valid against the same read, and the loop runs shared
     // tools concurrently.
     let first = tools::edit::Edit.execute(
-        json!({ "patch": format!("[a.rs#{tag}]\nPUT 1.=1:\n+ONE\n") }),
+        json!({ "patch": format!("[a.rs#{tag}]\nPUT 1-1:\n+ONE\n") }),
         &c,
     );
     let second = tools::edit::Edit.execute(
-        json!({ "patch": format!("[a.rs#{tag}]\nPUT 3.=3:\n+THREE\n") }),
+        json!({ "patch": format!("[a.rs#{tag}]\nPUT 3-3:\n+THREE\n") }),
         &c,
     );
     let (a, b) = tokio::join!(first, second);
@@ -579,7 +579,7 @@ async fn an_edit_that_changes_nothing_says_so() {
 
     // A patch whose body already matches. It "succeeds", and the model has no
     // way to tell its fix did not land.
-    let patch = format!("[a.rs#{}]\nPUT 1.=1:\n+one\n", hashline::tag(src));
+    let patch = format!("[a.rs#{}]\nPUT 1-1:\n+one\n", hashline::tag(src));
     let out = tools::edit::Edit
         .execute(json!({ "patch": patch }), &c)
         .await
@@ -597,7 +597,7 @@ async fn a_deletion_is_reported_by_what_it_deleted() {
 
     let out = run(
         &tools::edit::Edit,
-        json!({ "patch": format!("[a.rs#{tag}]\nCUT 2.=3") }),
+        json!({ "patch": format!("[a.rs#{tag}]\nCUT 2-3") }),
         &c,
     )
     .await;
@@ -609,6 +609,40 @@ async fn a_deletion_is_reported_by_what_it_deleted() {
         std::fs::read_to_string(c.workspace.root().join("a.rs")).unwrap(),
         "one\nfour\n"
     );
+}
+
+#[tokio::test]
+async fn every_form_the_table_lists_is_one_the_parser_takes() {
+    // The FORMAT string is prose sent to the model on every request, and the
+    // parser is what reads back what the model writes from it. They were kept
+    // in step by hand through the last grammar change, and a stale hint two
+    // lines from the rewrite is what that costs.
+    let (_d, c) = ctx();
+    let before = "one\ntwo\nthree\nfour\n";
+    std::fs::write(c.workspace.root().join("a.rs"), before).unwrap();
+    let tag = hashline::tag(before);
+
+    let described = tools::edit::Edit.description();
+    for form in hashline::FORMS {
+        let named = format!("N{}", form.suffix);
+        assert!(
+            described.contains(&named),
+            "the description omits `{named}`"
+        );
+        assert!(
+            described.contains(form.means.split(". ").next().unwrap_or(form.means)),
+            "the description omits what `{named}` means"
+        );
+        // Concrete numbers on one line, so the patch stays applicable.
+        let spec = named.replace('N', "2").replace('M', "3");
+        let patch = format!("[a.rs#{tag}]\nPUT {spec}:\n+x\n");
+        let err = hashline::parse(&patch).err();
+        assert!(
+            err.is_none(),
+            "the table lists `{named}`, parser says {err:?}"
+        );
+    }
+    assert!(hashline::FORMS.len() >= 5, "the table emptied out");
 }
 
 #[tokio::test]
@@ -628,11 +662,11 @@ async fn a_range_that_is_not_one_is_refused_by_the_op_that_wrote_it() {
 
     // The same mistake under two verbs must not draw the same words: a model
     // that fixes the PUT and sees the message again cannot tell it made
-    // progress. (A bare `N` is not the mistake — that one is accepted.)
+    // progress.
     let put = complaint(format!("[a.rs#{tag}]\nPUT two:\n+x")).await;
     let cut = complaint(format!("[a.rs#{tag}]\nCUT two")).await;
-    assert!(put.contains("`PUT two` is not a range"), "{put}");
-    assert!(cut.contains("`CUT two` is not a range"), "{cut}");
+    assert!(put.contains("`PUT two`: an address is a line"), "{put}");
+    assert!(cut.contains("`CUT two`: an address is a line"), "{cut}");
     assert_ne!(put, cut);
 }
 

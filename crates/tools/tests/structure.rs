@@ -19,6 +19,9 @@ fn long_rust() -> String {
     )
 }
 
+mod common;
+use common::every_address_parses;
+
 #[tokio::test]
 async fn a_long_file_comes_back_as_a_skeleton() {
     let (_d, c) = ctx();
@@ -35,16 +38,10 @@ async fn a_long_file_comes_back_as_a_skeleton() {
     );
     // The span, so the model can replace one whole without a second read, and
     // the indent, so a method does not read like a top-level item.
-    assert!(out.contains("321.=323:pub struct Point {"), "{out}");
-    // The address grammar belongs to hashline, and a skeleton row the model
-    // cannot paste into a patch is worse than no skeleton. Every one parses.
-    for row in out.lines().filter(|l| l.contains(".=")) {
-        let addr = row.split(':').next().unwrap();
-        let patch = format!("[big.rs#{}]\nCUT {addr}\n", hashline::tag(&body));
-        assert!(hashline::parse(&patch).is_ok(), "{addr} does not parse");
-    }
-    assert!(out.contains("325.=329:impl Point {"), "{out}");
-    assert!(out.contains("326.=328:  pub fn new() -> Self {"), "{out}");
+    assert!(out.contains("321-323:pub struct Point {"), "{out}");
+    every_address_parses(&out, "big.rs", &body, 3);
+    assert!(out.contains("325-329:impl Point {"), "{out}");
+    assert!(out.contains("326-328:  pub fn new() -> Self {"), "{out}");
     // 329 lines of source must not come back as 329 lines of output.
     assert!(out.lines().count() < 10, "{out}");
     assert!(!out.contains("// filler"), "{out}");
@@ -53,7 +50,8 @@ async fn a_long_file_comes_back_as_a_skeleton() {
 #[tokio::test]
 async fn a_range_request_is_answered_with_lines_not_a_skeleton() {
     let (_d, c) = ctx();
-    std::fs::write(c.workspace.root().join("big.rs"), long_rust()).unwrap();
+    let body = long_rust();
+    std::fs::write(c.workspace.root().join("big.rs"), &body).unwrap();
 
     // Asking for a range is an explicit ask for lines.
     let out = run(
@@ -62,11 +60,13 @@ async fn a_range_request_is_answered_with_lines_not_a_skeleton() {
         &c,
     )
     .await;
-    // A declaration's row carries where it ends; an ordinary row stays bare,
-    // because `322.=322` is the number already in front of it.
-    assert!(out.contains("321.=323:pub struct Point {"), "{out}");
-    assert!(out.contains("\n322:    x: i32,"), "{out}");
+    // A declaration's row says where it ends; an ordinary row says only itself.
+    // Both are addresses the model can paste: a prefix it cannot is the tool
+    // teaching a form its own parser refuses.
+    assert!(out.contains("321-323:pub struct Point {"), "{out}");
+    assert!(out.contains("\n322-322:    x: i32,"), "{out}");
     assert!(!out.contains("outline"), "{out}");
+    every_address_parses(&out, "big.rs", &body, 3);
 }
 
 #[tokio::test]
@@ -84,15 +84,15 @@ async fn a_construct_that_closes_past_the_window_still_says_where() {
         &c,
     )
     .await;
-    assert!(out.contains("325.=329:impl Point {"), "{out}");
+    assert!(out.contains("325-329:impl Point {"), "{out}");
     assert!(
-        !out.contains("329:}"),
+        !out.contains("\n329-329:}"),
         "the window must still end at 327: {out}"
     );
 
     // And what it says parses as the address it looks like.
-    let patch = format!("[big.rs#{}]\nCUT 325.=329\n", hashline::tag(&body));
-    assert!(hashline::parse(&patch).is_ok());
+    // Ordinary rows too: those are the ones a bare number used to be printed for.
+    every_address_parses(&out, "big.rs", &body, 3);
 }
 
 #[tokio::test]
@@ -201,7 +201,7 @@ async fn a_block_op_in_an_unparsed_language_says_so() {
         .await
         .unwrap_err();
     assert!(
-        err.to_string().contains("Name the lines with `N.=M`"),
+        err.to_string().contains("Name the lines with `N-M`"),
         "{err}"
     );
 }

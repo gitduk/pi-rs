@@ -4,7 +4,7 @@ mod apply;
 mod parse;
 
 pub use apply::{Change, Landed, Plan, apply};
-pub use parse::parse;
+pub use parse::{Addr, FORMS, Form, parse};
 
 /// Content hash shown as `[path#TAG]`. Recomputing it beats storing a snapshot
 /// per read: a file that changed underneath the model no longer matches.
@@ -20,8 +20,6 @@ pub fn tag(content: &str) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinePos {
     At(usize),
-    /// `$` — after the last line, whatever it turns out to be.
-    Tail,
     /// `>N*` — after the construct opening at N, wherever it closes.
     AfterBlock(usize),
 }
@@ -133,7 +131,7 @@ pub enum Error {
     #[error("{path} was not loaded; read it before editing it")]
     Missing { path: String },
 
-    #[error("{path} has {len} lines, so {start}.={end} names lines that do not exist")]
+    #[error("{path} has {len} lines, so {start}-{end} names lines that do not exist")]
     OutOfRange {
         path: String,
         start: usize,
@@ -142,7 +140,7 @@ pub enum Error {
     },
 
     #[error(
-        "in {path}, {a_start}.={a_end} and {b_start}.={b_end} both claim line {overlap}. \
+        "in {path}, {a_start}-{a_end} and {b_start}-{b_end} both claim line {overlap}. \
          Ranges name original lines, so two hunks may never touch the same one."
     )]
     Overlap {
@@ -157,7 +155,7 @@ pub enum Error {
     #[error(
         "{path} line {line} opens no construct a block op can resolve — a closing \
          brace, a blank line, or a language with no parser. Name the lines with \
-         `N.=M` instead."
+         `N-M` instead."
     )]
     NoBlockAt { path: String, line: usize },
 
