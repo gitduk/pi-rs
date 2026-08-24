@@ -54,27 +54,22 @@ enum Act {
     Quit,
 }
 
-/// What the reasoning window is holding back, and whether it is holding.
+/// Whether reasoning reaches the scrollback, and what it holds back while it
+/// does not.
 ///
-/// A finished line cannot be retracted from a terminal, so folding has to
-/// happen where the line is written rather than where it is displayed. That is
-/// the whole reason this holds anything at all — everything else the run prints
-/// goes straight to scrollback and stays there.
+/// A switch, set before or during a block and never after: a line handed to the
+/// terminal cannot be taken back, and a key that pretended otherwise would put
+/// reasoning below the answer it came before. Shut, the block leaves a count
+/// and the lines are dropped; open, they are ordinary output.
 struct Thinking {
-    /// Reasoning lines kept out of scrollback while folded, and kept after the
-    /// reasoning ends: a run is over long before its reader decides they want
-    /// to see what it thought.
+    /// Reasoning lines the shut window has kept out of scrollback.
     held: Vec<String>,
-    /// How many of them a note already stands for. Each note counts its own
-    /// block, while the lines behind every note stay for one Ctrl-T.
-    noted: usize,
-    /// Whether reasoning is held back at all. Off lets it run into scrollback
-    /// whole, which is what it did before there was a key for this.
+    /// Whether reasoning is kept back at all.
     folded: bool,
 }
 
-/// Folded: the reasoning is worth a glance while it runs and almost never
-/// worth the scrollback it costs afterwards.
+/// Shut: the reasoning is worth a glance while it runs and almost never worth
+/// the scrollback it costs afterwards.
 ///
 /// The only constructor, because a derived one would answer `false` here — the
 /// opposite of what the type says two lines up, in the one place nobody would
@@ -83,54 +78,84 @@ impl Default for Thinking {
     fn default() -> Self {
         Self {
             held: Vec::new(),
-            noted: 0,
             folded: true,
         }
     }
 }
 
 impl Thinking {
-    /// Whether a finished row stays where it can still be retracted.
+    /// Whether a finished row waits here instead of going to scrollback.
     fn holds(&self, dim: bool) -> bool {
         self.folded && dim
     }
 
-    /// A new run is starting, and what the last one thought is no longer what
-    /// Ctrl-T is being asked for.
-    fn forget(&mut self) {
-        self.held.clear();
-        self.noted = 0;
-    }
-
-    /// Turn the window on or off, mid-stream or between turns, and say what
-    /// must reach scrollback for it.
+    /// Open the window or shut it, and say what the scrollback gets for it.
     ///
-    /// Unfolding hands over everything held — this run's reasoning, including
-    /// blocks that have already closed, which is the only way to read them at
-    /// all. Folding cannot take back what already went and does not try: it
-    /// starts at the next line, because the terminal owns what it has printed
-    /// and the alternative is never printing at all.
-    fn toggle(&mut self) -> Vec<String> {
+    /// A line naming the new state, always: pressed between runs the switch has
+    /// nothing to hand over and only governs the next block, so without one the
+    /// key would answer nothing at all. Then what was held — the answer has not
+    /// started, so those lines still land where they belong, before it.
+    /// Shutting takes nothing back, and starts at the next line: the terminal
+    /// owns what it has printed, which is why this is a switch and not a view.
+    fn toggle(&mut self) -> (String, Vec<String>) {
         self.folded = !self.folded;
         if self.folded {
-            return Vec::new();
+            ("thinking · folded".to_string(), Vec::new())
+        } else {
+            (
+                "thinking · shown".to_string(),
+                std::mem::take(&mut self.held),
+            )
         }
-        self.noted = 0;
-        std::mem::take(&mut self.held)
     }
 
-    /// This block of reasoning is over. One line is left behind, because the
-    /// point of folding is that the scrollback does not keep the rest — with
-    /// the count, so a run that thought for a long time still says so.
+    /// This block of reasoning is over. A count is what the shut window leaves,
+    /// because the point of shutting it is that the scrollback does not keep
+    /// the rest — and the lines go, so nothing outlives the count that stands
+    /// for it.
     fn close(&mut self) -> Option<String> {
-        let n = self.held.len() - self.noted;
-        self.noted = self.held.len();
+        let n = std::mem::take(&mut self.held).len();
         if !self.folded || n == 0 {
             return None;
         }
         let s = if n == 1 { "" } else { "s" };
         Some(format!("thinking · {n} line{s}"))
     }
+}
+
+/// The rows between the scrollback and the status line: the reasoning window,
+/// and the paragraph still being written.
+///
+/// A free function because it is where both of this feature's bugs lived and
+/// `Ui` cannot be built without a terminal — a decision no test can reach is
+/// one that gets its second chance in front of the user.
+fn body(
+    thinking: &Thinking,
+    dim: bool,
+    open: &str,
+    width: usize,
+    room: usize,
+    paint: &Paint,
+) -> Vec<String> {
+    // One row stands for all of it, the unfinished line included.
+    if thinking.holds(dim) {
+        return vec![paint.on(DIM, THINKING)];
+    }
+    if open.is_empty() {
+        return Vec::new();
+    }
+    let painted = if dim {
+        paint.on(DIM, open)
+    } else {
+        open.to_string()
+    };
+    let mut rows = screen::fit(&painted, width);
+    // A paragraph can outgrow the screen; the tail is the part still being
+    // written, and the rest reaches scrollback when it closes.
+    if rows.len() > room {
+        rows.drain(..rows.len() - room);
+    }
+    rows
 }
 
 /// Everything the terminal shows, and nothing the session knows.
@@ -215,7 +240,7 @@ impl Ui {
     }
 
     /// Where a finished row goes: the terminal's scrollback, or the window that
-    /// can still be redrawn. The only rows that stay are folded reasoning.
+    /// can still be redrawn. The only rows that wait are held-back reasoning.
     fn land(&mut self, painted: String, dim: bool) {
         if self.thinking.holds(dim) {
             self.thinking.held.push(painted);
@@ -236,8 +261,8 @@ impl Ui {
             self.land(painted, self.dim);
         }
         if self.dim {
-            // The reasoning is over: whatever the window was holding is the
-            // whole of it, and one line says so.
+            // The reasoning is over, so the scrollback finally gets its say in
+            // it: the lines if the window was open, a count of them if not.
             self.close_thinking();
         }
         self.dim = false;
@@ -252,8 +277,8 @@ impl Ui {
         self.open.push_str(delta);
         // A finished line is no longer changing, so it belongs in the
         // terminal's own scrollback rather than in the region we repaint —
-        // unless it is reasoning and folded, which is the one thing that has to
-        // stay where it can still be redrawn.
+        // unless it is reasoning, which waits until its block ends for a key
+        // that can still decide where it goes.
         while let Some(i) = self.open.find('\n') {
             let line: String = self.open.drain(..=i).collect();
             let line = line.trim_end_matches('\n').to_string();
@@ -262,21 +287,7 @@ impl Ui {
         }
     }
 
-    /// Turn the reasoning window on or off, mid-stream or between turns.
-    ///
-    /// Unfolding hands the held lines to scrollback, so nothing seen in the
-    /// window is lost by opening it. Folding cannot take back what already
-    /// went, so it starts from the next line — the terminal owns what it has
-    /// printed, and pretending otherwise would mean never printing at all.
-    fn fold_thinking(&mut self) {
-        self.above.append(&mut self.thinking.toggle());
-    }
-
-    /// What the window leaves behind once the reasoning is over.
-    ///
-    /// One line, because the point of folding is that the scrollback does not
-    /// keep it. The count is there so a run that thought for a long time still
-    /// says so.
+    /// What the scrollback keeps once a block of reasoning is over.
     fn close_thinking(&mut self) {
         if let Some(note) = self.thinking.close() {
             self.above.push(self.paint.on(DIM, &note));
@@ -361,26 +372,15 @@ impl Ui {
         let width = self.screen.usable();
         let mut rows = Vec::new();
 
-        // Folded reasoning shows as one steady row and nothing else: the tail
-        // still being written is reasoning too, and putting it here would be
-        // the window this row exists to replace.
-        if self.thinking.holds(self.dim) {
-            rows.push(self.paint.on(DIM, THINKING));
-        } else if !self.open.is_empty() {
-            let painted = if self.dim {
-                self.paint.on(DIM, &self.open)
-            } else {
-                self.open.clone()
-            };
-            let mut wrapped = screen::fit(&painted, width);
-            // A paragraph can outgrow the screen; the tail is the part still
-            // being written, and the rest reaches scrollback when it closes.
-            let room = (self.screen.height as usize).saturating_sub(4).max(1);
-            if wrapped.len() > room {
-                wrapped.drain(..wrapped.len() - room);
-            }
-            rows.extend(wrapped);
-        }
+        let room = (self.screen.height as usize).saturating_sub(4).max(1);
+        rows.extend(body(
+            &self.thinking,
+            self.dim,
+            &self.open,
+            width,
+            room,
+            &self.paint,
+        ));
 
         if let Some(since) = self.started {
             let line = status::line(
@@ -486,7 +486,11 @@ impl Ui {
             Some(Action::HistoryOlder) => self.editor.up(),
             Some(Action::HistoryNewer) => self.editor.down(),
             Some(Action::AppClearScreen) => self.screen.clear(),
-            Some(Action::ThinkFold) => self.fold_thinking(),
+            Some(Action::ThinkFold) => {
+                let (said, mut held) = self.thinking.toggle();
+                self.above.push(self.paint.on(DIM, &said));
+                self.above.append(&mut held);
+            }
             Some(Action::MenuAccept) => {
                 if let Some(c) = self.highlighted() {
                     self.editor.set_line(&c.line);
@@ -733,7 +737,6 @@ impl Tui {
         self.ui.turn = Usage::default();
         self.ui.produced = 0;
         self.ui.estimated = agent::Estimated::default();
-        self.ui.thinking.forget();
 
         let out = {
             // Disjoint borrows: the run holds the session while the loop keeps
@@ -789,7 +792,8 @@ impl Tui {
 
 #[cfg(test)]
 mod tests {
-    use super::{Thinking, counts};
+    use super::{Thinking, body, counts};
+    use crate::render::Paint;
     use brain::stream::Usage;
 
     fn thought(n: usize) -> Thinking {
@@ -800,73 +804,79 @@ mod tests {
         t
     }
 
+    /// What the screen shows for a run in the middle of reasoning.
+    fn shown(t: &Thinking, open: &str) -> Vec<String> {
+        body(t, true, open, 80, 9, &Paint { color: false })
+    }
+
     #[test]
-    fn unfolding_hands_back_everything_it_was_holding() {
-        // Nothing held back is lost by opening the window.
+    fn a_shut_window_is_one_row_whatever_it_holds() {
+        // Including the line still arriving: it is reasoning too, and putting
+        // it on screen is the window this row exists to replace.
+        let t = thought(30);
+        assert_eq!(shown(&t, "half a sentence"), vec!["thinking..."]);
+    }
+
+    #[test]
+    fn opening_it_hands_the_scrollback_what_was_held() {
+        // The answer has not started, so they still land where they belong.
         let mut t = thought(5);
-        assert_eq!(t.toggle().len(), 5);
+        let (said, held) = t.toggle();
+        assert_eq!(said, "thinking · shown");
+        assert_eq!(held.len(), 5);
         assert!(t.held.is_empty());
-        assert!(!t.holds(true), "unfolded, reasoning goes straight out");
+        assert!(!t.holds(true), "open, reasoning is ordinary output");
+        assert_eq!(shown(&t, "half a sentence"), vec!["half a sentence"]);
     }
 
     #[test]
-    fn closed_reasoning_is_still_there_to_be_opened() {
-        // The whole bug this replaced: the note went out and took the lines
-        // with it, so the key that says "show me" had nothing left to show.
-        let mut t = thought(3);
-        assert_eq!(t.close().as_deref(), Some("thinking · 3 lines"));
-        assert_eq!(t.toggle().len(), 3, "the run is over, the lines are not");
-    }
-
-    #[test]
-    fn each_note_counts_its_own_block_and_leaves_the_rest_held() {
-        let mut t = thought(3);
-        assert_eq!(t.close().as_deref(), Some("thinking · 3 lines"));
-        for i in 4..=6 {
-            t.held.push(format!("line {i}"));
-        }
-        assert_eq!(t.close().as_deref(), Some("thinking · 3 lines"));
-        assert_eq!(t.close(), None, "nothing new held, nothing said");
-        assert_eq!(t.toggle().len(), 6, "one key, the whole run's reasoning");
-    }
-
-    #[test]
-    fn a_new_run_is_not_the_last_one_s_reasoning() {
-        let mut t = thought(4);
-        t.close();
-        t.forget();
-        assert!(t.toggle().is_empty());
-    }
-
-    #[test]
-    fn folding_again_starts_from_the_next_line() {
-        // What already reached the terminal stays there; a fold that pretended
-        // otherwise would have to never print in the first place.
+    fn shutting_it_again_starts_from_the_next_line() {
+        // What already reached the terminal stays there; a switch that
+        // pretended otherwise would have to never print in the first place.
         let mut t = thought(5);
         t.toggle();
-        assert!(t.toggle().is_empty());
+        let (said, held) = t.toggle();
+        assert_eq!(said, "thinking · folded");
+        assert!(held.is_empty());
         assert!(t.holds(true));
     }
 
     #[test]
-    fn only_folded_reasoning_is_held_back() {
-        let t = thought(1);
-        assert!(t.holds(true));
-        assert!(!t.holds(false), "the answer is never held");
+    fn the_answer_is_never_held() {
+        let t = thought(3);
+        assert!(!t.holds(false));
+        let rows = body(&t, false, "hello", 80, 9, &Paint { color: false });
+        assert_eq!(rows, vec!["hello"]);
     }
 
     #[test]
-    fn the_note_is_left_only_when_something_was_held() {
+    fn a_shut_window_leaves_a_count_and_nothing_behind_it() {
+        // Nothing outlives the count that stands for it: a line kept back here
+        // could only ever be printed below the answer it came before.
+        let mut t = thought(13);
+        assert_eq!(t.close().as_deref(), Some("thinking · 13 lines"));
+        assert!(t.held.is_empty());
+        assert_eq!(t.close(), None, "nothing held, nothing said");
+        assert!(t.toggle().1.is_empty(), "and nothing left to open");
+
         let mut one = thought(1);
         assert_eq!(one.close().as_deref(), Some("thinking · 1 line"));
+    }
 
+    #[test]
+    fn an_open_window_leaves_no_count() {
+        // It was printed as it arrived; a count would be describing what the
+        // reader is already looking at.
         let mut open = thought(4);
         open.toggle();
-        assert_eq!(
-            open.close(),
-            None,
-            "unfolded, the lines are their own record"
-        );
+        assert_eq!(open.close(), None);
+    }
+
+    #[test]
+    fn a_long_paragraph_is_trimmed_to_the_room_it_is_given() {
+        let t = Thinking::default();
+        let rows = body(&t, false, &"x".repeat(500), 80, 3, &Paint { color: false });
+        assert_eq!(rows.len(), 3);
     }
 
     #[test]

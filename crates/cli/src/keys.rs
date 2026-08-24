@@ -237,7 +237,7 @@ pub const BINDINGS: &[Binding] = &[
         action: A::ThinkFold,
         when: W::Editor,
         keys: &["ctrl+t"],
-        note: "show what it thought, or fold it away",
+        note: "reasoning in full, or a count of it",
     },
 ];
 
