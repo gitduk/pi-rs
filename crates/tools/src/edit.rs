@@ -239,9 +239,19 @@ fn hunk_help(after: &str, landed: &[Landed]) -> String {
             // got wrong, stated instead of left to re-derive.
             if let Some(e) = balanced_end(&new, l.start) {
                 let s = l.start;
-                line.push_str(&format!(
-                    "; it opens at {s} and balances at line {e} — cover to {e} or use `{s}*`"
-                ));
+                if e > s {
+                    line.push_str(&format!(
+                        "; it opens at {s} and balances at line {e} — cover to {e} or use `{s}*`"
+                    ));
+                } else {
+                    // The displaced lines never opened a brace the body fails
+                    // to close: the hunk itself is the problem, and naming
+                    // the line as both open and close would read as a
+                    // contradiction.
+                    line.push_str(&format!(
+                        "; the imbalance sits at line {e} — replace or cut it, or use `{e}*`"
+                    ));
+                }
             }
             off.push_str(&line);
         }
@@ -265,8 +275,8 @@ fn brace_net(s: &str) -> isize {
     })
 }
 
-/// The first line at or after `start` where the running brace count returns
-/// to zero — where the construct that opens there actually ends.
+/// The first line at or after `start` where the running brace count stops
+/// being positive — where the construct that opens there actually ends.
 fn balanced_end(lines: &[&str], start: usize) -> Option<usize> {
     let mut net = 0isize;
     for (i, l) in lines.iter().enumerate().skip(start.saturating_sub(1)) {
@@ -567,7 +577,7 @@ mod tests {
         let help = hunk_help(after, &landed);
         assert!(help.contains("Brace balance:"), "{help}");
         assert!(help.contains("nets -1"), "{help}");
-        assert!(help.contains("balances at line 3"), "{help}");
+        assert!(help.contains("the imbalance sits at line 3"), "{help}");
         assert!(help.contains("use `3*`"), "{help}");
     }
 
