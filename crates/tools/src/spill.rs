@@ -87,15 +87,19 @@ pub fn write(ctx: &Ctx, body: &str) -> Result<Option<SpillRef>, ToolError> {
     let path = dir.join(format!("{name}.log"));
     std::fs::create_dir_all(&dir)
         .map_err(|e| ToolError::Spill(format!("{}: {e}", dir.display())))?;
-    std::fs::write(&path, body)
-        .map_err(|e| ToolError::Spill(format!("{}: {e}", path.display())))?;
+    // Write under a temp name and rename, so the final path never carries the
+    // wrong permissions: a crash between write and chmod would leave the
+    // file's contents world-readable beside a 0600 transcript.
+    let tmp = path.with_extension("log.tmp");
+    std::fs::write(&tmp, body)
+        .map_err(|e| ToolError::Spill(format!("{}: {e}", tmp.display())))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        // Spilled outputs carry file contents; keep them as private as the
-        // transcript that points at them.
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
     }
+    std::fs::rename(&tmp, &path)
+        .map_err(|e| ToolError::Spill(format!("{}: {e}", path.display())))?;
     Ok(Some(SpillRef {
         bytes: body.len(),
         locator: format!("spill:{}/{}", ctx.spill_namespace(), name),
@@ -103,8 +107,11 @@ pub fn write(ctx: &Ctx, body: &str) -> Result<Option<SpillRef>, ToolError> {
 }
 
 /// Keep both ends of an over-long body: the head says what it was about, the
-/// tail how it ended.
+/// tail how it ended. Under the threshold the body comes back untouched.
 pub fn prune(body: &str) -> String {
+    if body.len() <= MAX_OUTPUT {
+        return body.to_string();
+    }
     let half = MAX_OUTPUT / 2;
     let (h, t) = (head_bytes(body, half), tail_bytes(body, half));
     let dropped = body.len() - h.len() - t.len();
@@ -155,6 +162,12 @@ mod tests {
                 "{bad} must be refused"
             );
         }
+    }
+
+    #[test]
+    fn prune_leaves_a_small_body_untouched() {
+        let body = "small";
+        assert_eq!(prune(body), body);
     }
 
     #[test]

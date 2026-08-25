@@ -86,6 +86,7 @@ impl Tool for Read {
         // A `spill:` path names a file in the session's spill directory, which
         // the workspace gate would refuse. Only locators our own writer mints
         // resolve; anything else is refused before the filesystem is touched.
+        let is_spill = args.path.starts_with("spill:");
         let (path, rel) = match args.path.strip_prefix("spill:") {
             Some(_) => {
                 let path = ctx.spill_path(&args.path)?;
@@ -119,8 +120,11 @@ impl Tool for Read {
             return Ok(ToolOutput::text(format!("{rel}/\n{}", names.join("\n"))));
         }
 
-        if meta.len() > MAX_BYTES {
-            // Sniffing needs the whole file in memory, so the guard precedes the read.
+        // Sniffing needs the whole file in memory, so the guard precedes the
+        // read. A spill locator names a file this very session wrote — the
+        // model asked for it by locator, and the retrieval hint promised read
+        // would serve it — so the cap does not apply there.
+        if meta.len() > MAX_BYTES && !is_spill {
             return Ok(ToolOutput::useless(format!(
                 "{rel} is {} bytes, over the {MAX_BYTES}-byte read limit; use bash to slice it",
                 meta.len()

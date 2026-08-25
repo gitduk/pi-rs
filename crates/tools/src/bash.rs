@@ -129,9 +129,15 @@ impl Tool for Bash {
         let code = out.status.code().unwrap_or(-1);
 
         // Anything elided is written out first, so a build log the model needs
-        // the middle of is one grep away rather than gone.
-        let whole = format!("<stdout>\n{stdout}\n</stdout>\n<stderr>\n{stderr}\n</stderr>\n");
-        let spilled = spill::write(ctx, &whole)?;
+        // the middle of is one grep away rather than gone. The combined whole
+        // is only assembled once either stream is known to be over the
+        // threshold — a normal output must not pay for a full copy it drops.
+        let spilled = if stdout.len() > spill::MAX_OUTPUT || stderr.len() > spill::MAX_OUTPUT {
+            let whole = format!("<stdout>\n{stdout}\n</stdout>\n<stderr>\n{stderr}\n</stderr>\n");
+            spill::write(ctx, &whole)?
+        } else {
+            None
+        };
 
         // The exit code and the command, always. What the command printed is
         // in the transcript; what it was run against — the directory — is not.
