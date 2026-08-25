@@ -154,7 +154,8 @@ pub struct Agent {
     pub approver: Arc<dyn Approver>,
     pub system: String,
     pub effort: Effort,
-    pub max_turns: usize,
+    /// None runs without a turn limit; Some caps the run at that many turns.
+    pub max_turns: Option<usize>,
     /// None leaves the transcript alone and lets the provider refuse it.
     pub compaction: Option<Policy>,
     /// Ask the model to summarize the history compaction is about to drop.
@@ -188,7 +189,7 @@ impl Agent {
             approver: Arc::new(Ceiling(tools::Tier::Exec)),
             system: DEFAULT_SYSTEM.to_string(),
             effort: Effort::Off,
-            max_turns: 100,
+            max_turns: None,
             compaction: Some(Policy::default()),
             summarize: true,
             retry: Retry::default(),
@@ -231,7 +232,13 @@ impl Agent {
         // A window the provider named, which outranks whatever the catalog says.
         let mut hard: Option<usize> = None;
 
-        for turn in 1..=self.max_turns {
+        for turn in 1.. {
+            if let Some(max) = self.max_turns
+                && turn > max
+            {
+                tracing::error!(target: "pi::loop", turns = max, "turn limit");
+                return Err(AgentError::TurnLimit(max));
+            }
             say(tx, Event::TurnStart { turn });
             // Entered around each await rather than held across them: a guard
             // spanning an await point labels whatever else the runtime polls.
@@ -415,8 +422,7 @@ impl Agent {
             }
         }
 
-        tracing::error!(target: "pi::loop", turns = self.max_turns, "turn limit");
-        Err(AgentError::TurnLimit(self.max_turns))
+        unreachable!("an unlimited run can only leave by returning inside the loop")
     }
 
     fn yielded(&self, ctx: &Ctx) -> Option<serde_json::Value> {
@@ -890,8 +896,9 @@ impl Agent {
 /// A run that stops at the limit stops mid-work, and the model never saw it
 /// coming: the budget belongs to the caller and is stated nowhere the model can
 /// read. One that knows batches what is left instead of spending a turn per
-/// fix — which is how fifty turns go on eight rebuilds and no finished task.
-fn turns_left(turn: usize, max: usize) -> Option<String> {
+/// fix — which is how a run's whole budget goes on eight rebuilds and no finished task.
+fn turns_left(turn: usize, max: Option<usize>) -> Option<String> {
+    let max = max?;
     match max.checked_sub(turn)? {
         10 => Some(format!(
             "[10 of {max} turns left. Batch what you can from here — \
@@ -929,7 +936,7 @@ fn failed(call: &ToolCall, mut body: String, echoes: &mut Echoes) -> ToolResult 
 /// Name a call that has come back identical too many times.
 ///
 /// A model that keeps making the same call and getting the same thing back is
-/// stuck, and it will keep going until the turn limit stops it. Saying so is
+/// stuck, and without a turn limit it keeps going until being told so. Saying so is
 /// what breaks the loop. Failures count the same as answers: a patch refused
 /// for the same reason three running is the commonest way a session dies, and
 /// counting only the answers left exactly that case unnamed.

@@ -256,7 +256,7 @@ pub struct Flags {
 pub struct Settled {
     pub effort: EffortArg,
     pub tier: TierArg,
-    pub max_turns: usize,
+    pub max_turns: Option<usize>,
 }
 
 impl Config {
@@ -297,8 +297,7 @@ impl Config {
             max_turns: flags
                 .max_turns
                 .or(project.defaults.max_turns)
-                .or(self.defaults.max_turns)
-                .unwrap_or(50),
+                .or(self.defaults.max_turns),
         }
     }
 
@@ -553,7 +552,14 @@ usage_in_streaming = false
         let p = parse_project("[defaults]\nmodel = \"flash\"\nmax_turns = 10\n").unwrap();
         let c = Config::default();
         assert_eq!(c.model(&p, None, None).unwrap().0, "flash");
-        assert_eq!(c.settle(&p, Flags::default()).max_turns, 10);
+        assert_eq!(c.settle(&p, Flags::default()).max_turns, Some(10));
+    }
+
+    #[test]
+    fn max_turns_defaults_to_unlimited() {
+        let c = Config::default();
+        let p = parse_project("[defaults]\nmodel = \"flash\"\n").unwrap();
+        assert_eq!(c.settle(&p, Flags::default()).max_turns, None);
     }
 
     #[test]

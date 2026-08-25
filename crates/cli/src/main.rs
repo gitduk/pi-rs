@@ -117,7 +117,7 @@ pub struct Args {
     #[arg(long, value_enum)]
     effort: Option<EffortArg>,
 
-    /// Defaults to 100.
+    /// Cap the run at this many turns; the default is no limit.
     #[arg(long)]
     max_turns: Option<usize>,
 
@@ -356,7 +356,7 @@ pub struct Resolved {
     pub system: String,
     pub tier: tools::Tier,
     pub effort: Effort,
-    pub max_turns: usize,
+    pub max_turns: Option<usize>,
     pub keys: keys::Keys,
     /// The built-ins plus one command per skill. Here rather than in the Repl
     /// because a skill discovered at reload has to reach the prompt the same

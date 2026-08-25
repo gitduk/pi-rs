@@ -152,6 +152,23 @@ fn tool_results(msg: &Message) -> Vec<&brain::message::ToolResult> {
     }
 }
 
+fn user_texts(session: &Session) -> Vec<String> {
+    session
+        .context()
+        .iter()
+        .flat_map(|m| match m {
+            Message::User { content } => content
+                .iter()
+                .filter_map(|c| match c {
+                    UserContent::Text(t) => Some(t.text.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn a_turn_without_tool_calls_ends_the_run() {
     let (_d, a, ctx) = harness(vec![text_turn("done")]);
@@ -300,31 +317,35 @@ async fn the_model_is_told_how_many_turns_are_left() {
     let mut script: Vec<_> = (0..12).map(|_| call_turn(&[("t", "todo", "{}")])).collect();
     script.push(text_turn("done"));
     let mut a = Agent::new(Scripted::new(script), spec());
-    a.max_turns = 13;
+    a.max_turns = Some(13);
 
     let (session, out, _) = drive(&a, &ctx, "work").await;
     out.unwrap();
 
-    let said: Vec<String> = session
-        .context()
-        .iter()
-        .flat_map(|m| match m {
-            Message::User { content } => content
-                .iter()
-                .filter_map(|c| match c {
-                    UserContent::Text(t) => Some(t.text.clone()),
-                    _ => None,
-                })
-                .collect(),
-            _ => Vec::new(),
-        })
-        .collect();
+    let said = user_texts(&session);
 
     assert!(
         said.iter().any(|t| t.contains("10 of 13 turns left")),
         "{said:?}"
     );
     assert!(said.iter().any(|t| t.contains("3 turns left")), "{said:?}");
+}
+
+#[tokio::test]
+async fn an_unlimited_run_completes_without_saying_turns_are_left() {
+    // The default is no limit: the script that is told twice about what
+    // remains against a budget of thirteen here runs to the end in silence.
+    let mut script: Vec<_> = (0..12).map(|_| call_turn(&[("t", "todo", "{}")])).collect();
+    script.push(text_turn("done"));
+    let (_d, a, ctx) = harness(script);
+    let (session, out, _) = drive(&a, &ctx, "work").await;
+    out.unwrap();
+
+    let said = user_texts(&session);
+    assert!(
+        !said.iter().any(|t| t.contains("turns left")),
+        "{said:?}"
+    );
 }
 
 #[tokio::test]
@@ -522,7 +543,7 @@ async fn the_turn_limit_stops_a_runaway_loop_but_keeps_the_transcript() {
         call_turn(&[("t2", "read", r#"{"path":"x"}"#)]),
         call_turn(&[("t3", "read", r#"{"path":"x"}"#)]),
     ]);
-    a.max_turns = 2;
+    a.max_turns = Some(2);
     let (session, out, _) = drive(&a, &ctx, "loop forever").await;
 
     assert!(matches!(out, Err(AgentError::TurnLimit(2))), "{out:?}");
@@ -672,7 +693,7 @@ async fn dropped_history_comes_back_as_a_summary_on_the_opening_turn() {
     spec.max_output_tokens = 2_000;
 
     let mut a = Agent::new(transport.clone(), spec);
-    a.max_turns = 6;
+    a.max_turns = Some(6);
 
     let (session, out, events) = drive(&a, &ctx, "read it repeatedly").await;
     out.unwrap();
@@ -739,7 +760,7 @@ async fn a_summarizer_that_fails_drops_the_history_without_failing_the_turn() {
     spec.context_window = 24_000;
     spec.max_output_tokens = 2_000;
     let mut a = Agent::new(Arc::new(Broken(AtomicUsize::new(0))), spec);
-    a.max_turns = 6;
+    a.max_turns = Some(6);
 
     let (_session, out, events) = drive(&a, &ctx, "read it repeatedly").await;
     // Losing the summary costs context; failing the turn costs the whole run.
