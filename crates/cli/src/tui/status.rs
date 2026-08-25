@@ -1,7 +1,8 @@
 //! The one line that says the run is still alive and what it has spent.
 
-use crate::render::short;
 use std::time::Duration;
+
+use crate::render::short;
 
 pub const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 pub const SPIN: Duration = Duration::from_millis(90);

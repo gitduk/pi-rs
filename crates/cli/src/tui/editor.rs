@@ -7,6 +7,7 @@ use unicode_width::UnicodeWidthChar;
 const GUTTER: usize = 2;
 const CONT: &str = "  ";
 
+#[derive(Default)]
 pub struct Editor {
     text: String,
     /// Byte offset of the caret. Always on a char boundary.
@@ -21,20 +22,6 @@ pub struct Editor {
     /// The same gutter for a `!` line: the bang takes the prompt's place, so
     /// `!cmd` reads as a command rather than `› !cmd`.
     prompt_bang: String,
-}
-
-impl Default for Editor {
-    fn default() -> Self {
-        Self {
-            prompt_bang: "! ".into(),
-            text: String::new(),
-            cursor: 0,
-            history: Vec::new(),
-            at: 0,
-            draft: String::new(),
-            prompt: String::new(),
-        }
-    }
 }
 
 impl Editor {
@@ -341,8 +328,11 @@ fn floor_boundary(s: &str, mut i: usize) -> usize {
 mod tests {
     use super::Editor;
 
+    /// An editor with the two painted gutters a real Ui would set, so view
+    /// tests see the prompt a user would.
     fn typed(s: &str) -> Editor {
         let mut e = Editor::default();
+        e.set_prompts("› ".into(), "! ".into());
         e.insert_str(s);
         e
     }
@@ -397,21 +387,18 @@ mod tests {
 
     #[test]
     fn a_bang_line_puts_the_bang_in_the_prompt() {
-        let mut e = typed("!git status");
-        e.set_prompts("› ".into(), "! ".into());
+        let e = typed("!git status");
         let (rows, caret) = e.view(40);
         assert_eq!(rows[0], "! git status", "the bang takes the icon's place");
         assert_eq!(caret, (0, 12), "GUTTER 2 + the ten characters of `git status`");
 
-        let mut plain = typed("git status");
-        plain.set_prompts("› ".into(), "! ".into());
+        let plain = typed("git status");
         assert_eq!(plain.view(40).0[0], "› git status");
     }
 
     #[test]
     fn deleting_the_bang_returns_the_plain_prompt() {
         let mut e = typed("!git");
-        e.set_prompts("› ".into(), "! ".into());
         e.home();
         e.delete();
         assert_eq!(e.view(40).0[0], "› git");
@@ -419,8 +406,7 @@ mod tests {
 
     #[test]
     fn a_bang_line_wraps_with_the_bang_in_the_gutter() {
-        let mut e = typed("!abcdefgh");
-        e.set_prompts("› ".into(), "! ".into());
+        let e = typed("!abcdefgh");
         // Width 6 leaves 4 columns after the gutter, as in the plain case;
         // the bang does not eat a column of the body.
         let (rows, caret) = e.view(6);
