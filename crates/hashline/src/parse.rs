@@ -355,33 +355,50 @@ enum PutSite {
     After(LinePos),
 }
 
-/// Where a `PUT` lands once its direction is known: the address alone is a
-/// replacement; `:UP` and `:DOWN` turn it into an insertion point — a bare
-/// number into one at that line, a range into one past either edge, a block
-/// into one above it or past where it closes.
-fn put_site(spec: &str, dir: &str, no: usize) -> Result<PutSite, Error> {
-    let bad = |what: String| Error::Syntax { line: no, what };
-    let bare = spec.trim().parse::<usize>().ok().filter(|n| *n > 0);
-    match dir {
-        "" => Ok(PutSite::Replace(addr(spec, no, "PUT")?)),
-        "UP" => Ok(match bare {
-            Some(n) => PutSite::Before(n),
-            None => match addr(spec, no, "PUT")? {
-                Target::Range { start, .. } => PutSite::Before(start),
-                Target::Block { line } => PutSite::Before(line),
-            },
-        }),
-        "DOWN" => Ok(match bare {
-            Some(n) => PutSite::After(LinePos::At(n)),
-            None => match addr(spec, no, "PUT")? {
-                Target::Range { end, .. } => PutSite::After(LinePos::At(end)),
-                Target::Block { line } => PutSite::After(LinePos::AfterBlock(line)),
-            },
-        }),
-        other => Err(bad(format!(
-            "`PUT {spec}:{other}`: after the colon, expected `UP`, `DOWN` or nothing"
-        ))),
+/// A bare number, when a direction makes one a position. `0` is not one:
+/// it falls through to `addr`, which names the real offence.
+fn bare(spec: &str) -> Option<usize> {
+    spec.trim().parse::<usize>().ok().filter(|n| *n > 0)
+}
+
+/// The line `:UP` inserts above: a bare number, a range's start, a block's.
+fn put_start(spec: &str, no: usize) -> Result<usize, Error> {
+    match bare(spec) {
+        Some(n) => Ok(n),
+        None => match addr(spec, no, "PUT")? {
+            Target::Range { start, .. } | Target::Block { line: start } => Ok(start),
+        },
     }
+}
+
+/// Where `:DOWN` inserts: a bare number, a range's end, or past a block's
+/// closing line — the one spot whose line number `addr` must find.
+fn put_end(spec: &str, no: usize) -> Result<LinePos, Error> {
+    match bare(spec) {
+        Some(n) => Ok(LinePos::At(n)),
+        None => match addr(spec, no, "PUT")? {
+            Target::Range { end, .. } => Ok(LinePos::At(end)),
+            Target::Block { line } => Ok(LinePos::AfterBlock(line)),
+        },
+    }
+}
+
+/// Where a `PUT` lands once its direction is known: the address alone is a
+/// replacement; `:UP` and `:DOWN` turn it into an insertion point.
+fn put_site(spec: &str, dir: &str, no: usize) -> Result<PutSite, Error> {
+    Ok(match dir {
+        "" => PutSite::Replace(addr(spec, no, "PUT")?),
+        "UP" => PutSite::Before(put_start(spec, no)?),
+        "DOWN" => PutSite::After(put_end(spec, no)?),
+        other => {
+            return Err(Error::Syntax {
+                line: no,
+                what: format!(
+                    "`PUT {spec}:{other}`: after the colon, expected `UP`, `DOWN` or nothing"
+                ),
+            })
+        }
+    })
 }
 
 fn parse_put(rest: &str, no: usize) -> Result<Op, Error> {
