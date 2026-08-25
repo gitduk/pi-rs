@@ -11,7 +11,7 @@
 model = "flash"
 effort = "medium"      # off | low | medium | high
 tier = "exec"          # read | write | exec
-max_turns = 50
+max_turns = 100
 
 # ---------------------------------------------------------------------------
 # A local proxy speaking the OpenAI wire.

@@ -188,7 +188,7 @@ impl Agent {
             approver: Arc::new(Ceiling(tools::Tier::Exec)),
             system: DEFAULT_SYSTEM.to_string(),
             effort: Effort::Off,
-            max_turns: 50,
+            max_turns: 100,
             compaction: Some(Policy::default()),
             summarize: true,
             retry: Retry::default(),

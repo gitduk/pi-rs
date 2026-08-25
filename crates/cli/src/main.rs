@@ -117,7 +117,7 @@ pub struct Args {
     #[arg(long, value_enum)]
     effort: Option<EffortArg>,
 
-    /// Defaults to 50.
+    /// Defaults to 100.
     #[arg(long)]
     max_turns: Option<usize>,
 
