@@ -1,19 +1,10 @@
 //! The one line that says the run is still alive and what it has spent.
 
+use crate::render::short;
 use std::time::Duration;
 
 pub const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 pub const SPIN: Duration = Duration::from_millis(90);
-
-/// Thousands, one decimal. Exact counts are noise at this size and the line has
-/// to hold still while they climb.
-fn short(n: u64) -> String {
-    match n {
-        0..=999 => n.to_string(),
-        1_000..=999_999 => format!("{:.1}k", n as f64 / 1_000.0),
-        _ => format!("{:.1}m", n as f64 / 1_000_000.0),
-    }
-}
 
 fn elapsed(d: Duration) -> String {
     let s = d.as_secs();
@@ -73,7 +64,8 @@ pub fn line(frame: usize, since: Duration, c: &Counts, queued: usize, stopping: 
 
 #[cfg(test)]
 mod tests {
-    use super::{Counts, line, short};
+    use super::{Counts, line};
+    use crate::render::short;
     use std::time::Duration;
 
     #[test]

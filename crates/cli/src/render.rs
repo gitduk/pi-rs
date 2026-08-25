@@ -626,6 +626,16 @@ fn span<'a, 'b>(
     None
 }
 
+/// Thousands, one decimal. Exact counts are noise at this size and the line has
+/// to hold still while they climb.
+pub(crate) fn short(n: u64) -> String {
+    match n {
+        0..=999 => n.to_string(),
+        1_000..=999_999 => format!("{:.1}k", n as f64 / 1_000.0),
+        _ => format!("{:.1}m", n as f64 / 1_000_000.0),
+    }
+}
+
 /// What a run has cost, in the one wording every place that says it uses.
 ///
 /// A tilde marks the part we counted ourselves, and only that part. The cost
@@ -636,11 +646,11 @@ pub fn spent(usage: &brain::stream::Usage, cost: f64, estimated: agent::Estimate
     format!(
         "{}{} in / {}{} out · {}{} cached{}",
         mark(estimated.input),
-        usage.input,
+        short(usage.input),
         mark(estimated.output),
-        usage.output,
+        short(usage.output),
         mark(estimated.cache_read),
-        usage.cache_read,
+        short(usage.cache_read),
         // An unpriced model reports no cost rather than $0.
         if cost > 0.0 {
             format!(" · {}${cost:.4}", mark(estimated.any()))
