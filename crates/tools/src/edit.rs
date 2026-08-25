@@ -231,9 +231,19 @@ fn hunk_help(after: &str, landed: &[Landed]) -> String {
         let took: isize = l.took.iter().map(|s| brace_net(s)).sum();
         let gave: isize = hunk_rows(&new, l).iter().map(|s| brace_net(s)).sum();
         if took != gave {
-            off.push_str(&format!(
+            let mut line = format!(
                 "\n  {addr}: its body nets {gave}, the lines it displaces net {took}"
-            ));
+            );
+            // The brace count crossing zero again says where the construct the
+            // range opened at `start` actually ends — the number the model
+            // got wrong, stated instead of left to re-derive.
+            if let Some(e) = balanced_end(&new, l.start) {
+                line.push_str(&format!(
+                    "; it opens at {} and balances at line {e} — cover to {e} or use `{}*`",
+                    l.start, l.start
+                ));
+            }
+            off.push_str(&line);
         }
     }
     if !off.is_empty() {
@@ -253,6 +263,19 @@ fn brace_net(s: &str) -> isize {
         '}' => n - 1,
         _ => n,
     })
+}
+
+/// The first line at or after `start` where the running brace count returns
+/// to zero — where the construct that opens there actually ends.
+fn balanced_end(lines: &[&str], start: usize) -> Option<usize> {
+    let mut net = 0isize;
+    for (i, l) in lines.iter().enumerate().skip(start.saturating_sub(1)) {
+        net += brace_net(l);
+        if net <= 0 {
+            return Some(i + 1);
+        }
+    }
+    None
 }
 
 fn crop(s: &str, max: usize) -> String {
@@ -544,5 +567,23 @@ mod tests {
         let help = hunk_help(after, &landed);
         assert!(help.contains("Brace balance:"), "{help}");
         assert!(help.contains("nets -1"), "{help}");
+        assert!(help.contains("balances at line 3"), "{help}");
+        assert!(help.contains("use `3*`"), "{help}");
+    }
+
+    #[test]
+    fn a_short_range_is_told_where_the_construct_actually_ends() {
+        let after = "fn a() {\n    1\n}\n\nfn b() {\n    2\n}\n";
+        // The body was dropped but the close stayed outside the range, so the
+        // displaced brace never balances; the help says where it does.
+        let landed = vec![Landed {
+            start: 5,
+            end: 4,
+            took: vec!["fn b() {".into()],
+            took_at: 5,
+        }];
+        let help = hunk_help(after, &landed);
+        assert!(help.contains("opens at 5"), "{help}");
+        assert!(help.contains("balances at line 7"), "{help}");
     }
 }
