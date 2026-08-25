@@ -723,8 +723,10 @@ impl Repl {
             Err(e) => return vec![format!("failed to run `{command}`: {e}")],
         };
         let body = out.flatten();
-        let mut text = format!("Ran `{command}`\n");
-        text.push_str(if body.is_empty() { "(no output)" } else { &body });
+        let text = format!(
+            "Ran `{command}`\n{}",
+            if body.is_empty() { "(no output)" } else { &body }
+        );
         self.session.log.push(brain::message::Message::user(text));
         let mut said: Vec<String> = body.lines().map(str::to_string).collect();
         if let Err(e) = self.save() {
