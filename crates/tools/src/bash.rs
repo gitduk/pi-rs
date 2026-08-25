@@ -38,7 +38,7 @@ async fn reap(group: Option<u32>) {
 /// Windows has no process group to signal: the direct child still dies with
 /// `kill_on_drop`, but its descendants outlive a timeout.
 #[cfg(not(unix))]
-async fn reap(_group: Option<u32>) {}
+#[cfg(not(unix))]
 async fn reap(_group: Option<u32>) {}
 
 #[async_trait]
