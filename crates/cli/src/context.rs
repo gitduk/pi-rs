@@ -8,23 +8,11 @@
 
 use std::path::{Path, PathBuf};
 
-/// Enough to notice. These ride in every request, so a repository that dumps
-/// its handbook here is paying for it on every turn.
-const LOUD: usize = 32 * 1024;
-
 #[derive(Debug, Default)]
 pub struct Loaded {
     /// Ready to append to the system prompt, or empty.
     pub text: String,
     pub files: Vec<PathBuf>,
-    pub bytes: usize,
-}
-
-impl Loaded {
-    /// Worth one line when the standing instructions have grown into a cost.
-    pub fn oversized(&self) -> bool {
-        self.bytes > LOUD
-    }
 }
 
 fn home() -> Option<PathBuf> {
@@ -84,7 +72,6 @@ fn from(workspace: &Path, home: Option<&Path>) -> Loaded {
         if body.trim().is_empty() {
             continue;
         }
-        loaded.bytes += body.len();
         // Tagged rather than headed: the content is arbitrary markdown with
         // headings of its own, so a `#` delimiter would not delimit anything.
         loaded.text.push_str(&format!(

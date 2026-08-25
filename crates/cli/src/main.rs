@@ -445,19 +445,6 @@ pub fn resolve(
     // request a provider will cache.
     if !args.no_context_files {
         let loaded = context::load(root);
-        if !loaded.files.is_empty() {
-            let names: Vec<String> = loaded
-                .files
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect();
-            let warn = if loaded.oversized() {
-                format!(" — {}KB on every request", loaded.bytes / 1024)
-            } else {
-                String::new()
-            };
-            notes.push(format!("instructions: {}{warn}", names.join(", ")));
-        }
         system.push_str(&loaded.text);
     }
 

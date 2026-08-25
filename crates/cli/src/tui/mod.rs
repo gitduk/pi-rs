@@ -30,8 +30,7 @@ use std::sync::Arc;
 /// What a folded run shows instead of what it is thinking.
 const THINKING: &str = "thinking...";
 
-const BANNER: &str = "/help for commands · esc stops a run · ctrl-c clears the line, twice \
-                      quickly to quit · ctrl-d exits";
+const BANNER: &str = concat!("π ", env!("CARGO_PKG_VERSION"));
 
 /// How close two Ctrl-C presses must be to read as one deliberate quit.
 ///
