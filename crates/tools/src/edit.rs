@@ -36,10 +36,14 @@ Ops. Every op line starts with a verb — PUT, CUT, MV or REM. A header ending i
 `:` takes `+` body rows; CUT, MV, REM and the register pastes take none.
   PUT <addr>:                  put the body there; the address alone replaces
   PUT <addr>:UP / <addr>:DOWN  insert the body above / below it
-  PUT <addr> @name             paste a captured register at the address
+  PUT <addr>:UP @name / <addr>:DOWN @name / <addr> @name   paste a captured register
   CUT N-M                      delete those lines, capturing them; `@name` labels it
   CUT N*                       the same, for a whole construct
   MV dest                      rename; edits in this section land first, then the file moves
+  REM                          delete the file; may not share a section with other ops
+
+  (`@` alone is the anonymous register, filled by whatever unlabeled CUT ran
+  before it.)
   REM                          delete the file; may not share a section with other ops
 
 Cheapest first: insert with `:UP` / `:DOWN` — `1:UP` is the file head, the last
