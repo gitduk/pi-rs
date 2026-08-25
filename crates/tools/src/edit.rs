@@ -37,6 +37,10 @@ Ops. Every op line starts with a verb — PUT, CUT, MV or REM. A header ending i
   MV dest      rename; edits in this section land first, then the file moves
   REM          delete the file; may not share a section with other ops
 
+Cheapest first: insert at a gap (N< / N>), delete with CUT, address only the
+lines that change, and leave unchanged lines out of the body. PUT N* is for a
+mostly-rewritten construct, not a one-line change.
+
 Body rows start with `+` and are copied verbatim, so `+` alone is a blank line
 and leading whitespace is preserved. Never write `-old` or bare context lines:
 the address says what goes, the body says what arrives. To delete lines and put
