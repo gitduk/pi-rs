@@ -158,6 +158,25 @@ fn body(
     rows
 }
 
+/// A tool call still running, shown as one animated row in the live region
+/// until its result lands and the row scrolls up as a check or cross.
+struct RunTool {
+    id: String,
+    name: String,
+    summary: String,
+}
+
+/// The one row a still-running tool occupies. The frame is the animation;
+/// `ToolEnd` and `abandon_tools` replace the row with a final line.
+fn tool_row(frame: usize, name: &str, summary: &str) -> String {
+    let arg = if summary.is_empty() {
+        String::new()
+    } else {
+        format!(" {summary}")
+    };
+    format!("{} {name}{arg}", status::FRAMES[frame % status::FRAMES.len()])
+}
+
 /// Everything the terminal shows, and nothing the session knows.
 struct Ui {
     screen: Screen,
@@ -177,6 +196,11 @@ struct Ui {
     thinking: Thinking,
     /// Finished lines waiting to be pushed above on the next render.
     above: Vec<String>,
+    /// Tool calls still running, one animated row each. A finished call
+    /// replaces its row with the ✓/✗ line in scrollback, so a call that never
+    /// answered would leave a spinning row behind; `abandon_tools` clears it.
+    tools: Vec<RunTool>,
+
     /// Lines submitted while the run was working.
     queued: Vec<String>,
     /// Which completion is highlighted. Kept rather than the list itself: the
@@ -233,6 +257,7 @@ impl Ui {
             md: Markdown::default(),
             thinking: Thinking::default(),
             above: vec![banner],
+            tools: Vec::new(),
             queued: Vec::new(),
             picked: 0,
             dismissed_at: None,
@@ -349,6 +374,28 @@ impl Ui {
                 self.produced = 0;
             }
             Event::TurnStart { .. } => {}
+            // A call's two events are one line here: the start takes a row in
+            // the live region (where the spinner can animate it), and the end
+            // scrolls that row up as its ✓/✗ line. Parallel calls each hold a
+            // row, matched back by id because they end out of order.
+            Event::ToolStart { id, name, args, .. } => {
+                self.close();
+                self.tools.push(RunTool {
+                    id: id.clone(),
+                    name: name.clone(),
+                    summary: render::summarize(args),
+                });
+            }
+            Event::ToolEnd { id, .. } => {
+                self.close();
+                self.tools.retain(|t| t.id != *id);
+                if let Some(said) = render::describe(&event, &self.paint, self.screen.usable()) {
+                    // Row by row: a scrollback line is written with a carriage
+                    // return of its own, and an embedded newline would stair-
+                    // step down the screen without one.
+                    self.above.extend(said.lines().map(str::to_string));
+                }
+            }
             _ => {
                 self.close();
                 if let Some(said) = render::describe(&event, &self.paint, self.screen.usable()) {
@@ -358,6 +405,22 @@ impl Ui {
                     self.above.extend(said.lines().map(str::to_string));
                 }
             }
+        }
+    }
+
+    /// A run that ended without answering a call leaves its animated row
+    /// dangling. The call's own end event is never sent — a cancelled run
+    /// returns before its results are reported — so give the scrollback the
+    /// start line the row stood for and clear the row.
+    fn abandon_tools(&mut self) {
+        for t in std::mem::take(&mut self.tools) {
+            let arg = if t.summary.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", t.summary)
+            };
+            let line = format!("→ {}{arg}", t.name);
+            self.say(self.paint.on(&self.paint.theme.muted, &line));
         }
     }
 
@@ -406,6 +469,14 @@ impl Ui {
     fn live(&self) -> (Vec<String>, Caret) {
         let width = self.screen.usable();
         let mut rows = Vec::new();
+
+        for t in &self.tools {
+            let line = tool_row(self.spinner, &t.name, &t.summary);
+            rows.extend(screen::fit(
+                &self.paint.on(&self.paint.theme.muted, &line),
+                width,
+            ));
+        }
 
         let room = (self.screen.height as usize).saturating_sub(4).max(1);
         rows.extend(body(
@@ -840,6 +911,10 @@ impl Tui {
             self.ui.on_event(event);
         }
         self.ui.close();
+        // A cancelled run's calls got no `ToolEnd`; their animated rows have
+        // to reach scrollback some other way before the next flush draws them
+        // as a frozen spinner.
+        self.ui.abandon_tools();
         self.ui.started = None;
 
         // Saved either way: an interrupted turn is exactly the one worth keeping.
@@ -866,7 +941,7 @@ impl Tui {
 
 #[cfg(test)]
 mod tests {
-    use super::{Thinking, body, counts};
+    use super::{Thinking, body, counts, tool_row};
     use crate::render::Markdown;
     use crate::render::Paint;
     use brain::stream::Usage;
@@ -890,6 +965,13 @@ mod tests {
             9,
             &Paint::new(false),
         )
+    }
+
+    #[test]
+    fn a_pending_tool_row_spins_and_names_its_argument() {
+        assert_eq!(tool_row(0, "read", "a.rs"), "⠋ read a.rs");
+        // A tool with nothing worth showing keeps the row to a name.
+        assert_eq!(tool_row(5, "spinner", ""), "⠴ spinner");
     }
 
     #[test]
