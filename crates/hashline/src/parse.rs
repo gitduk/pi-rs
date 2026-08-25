@@ -153,8 +153,7 @@ fn register(rest: &str, line: usize) -> Result<Option<String>, Error> {
 /// place is a different mistake from a row of the wrong shape, and the model
 /// that wrote each needs a different sentence.
 const NO_BODY: &str = "`CUT`, `RM` and `MV` take no body rows: the range names what goes \
-                       and nothing arrives. To write new content, use `PUT N:` or \
-                       `PUT N-M:` with `+` rows.
+                       and nothing arrives. To write new content, use `PUT N:` or `PUT N-M:` with \
                        `+` rows.";
 
 /// Whether the op just parsed is one of those.
@@ -295,10 +294,8 @@ pub fn parse(input: &str) -> Result<Patch, Error> {
                 // mistake is not accepting an address, and a recogniser tied to
                 // the grammar stops firing the next time the grammar moves —
                 // which is exactly what happened to the one this replaces.
-                " — that is a line from a read, not an op. Name it in a range \
-                 (`PUT N:` / `PUT N-M:`) or a block (`PUT N*:`), and put the \
-                 new text in `+` rows.
-                 `+` rows."
+                " — that is a line from a read, not an op. Name it as `PUT N:` / `PUT N-M:` \
+                 or a block (`PUT N*:`), and put the new text in `+` rows."
                     .into()
             } else {
                 String::new()

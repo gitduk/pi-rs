@@ -35,8 +35,6 @@ pub enum Target {
     /// `N*` — the construct opening at N, through wherever it closes, one of
     /// the three address forms (`N`, `N-M`, `N*`); `:UP`/`:DOWN` belong to
     /// `PUT`, not to an address.
-    /// only two address forms there are; `:UP`/`:DOWN` belong to `PUT`, not
-    /// to an address.
     Block {
         line: usize,
     },
@@ -137,11 +135,7 @@ pub enum Error {
 
     #[error(
         "{path} has {len} lines, so {range} names lines that do not exist",
-        range = if start == end {
-            start.to_string()
-        } else {
-            format!("{start}-{end}")
-        }
+        range = Target::Range { start: *start, end: *end }.to_string()
     )]
     OutOfRange {
         path: String,
