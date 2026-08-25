@@ -112,7 +112,7 @@ still become; `↑` `↓` pick, `Tab` accepts, `Esc` dismisses it until the next
 keystroke. `/model` is the one command whose argument completes too, because
 the name is the tedious part and the config already knows it.
 
-A line that starts with `!` is a shell command, not a prompt: `!git status`
+A line that starts with `!` is a shell command, not a prompt: `! git status`
 runs it and shows the output, and the command and its result are recorded in
 the transcript so the model answers with them in view. It runs in the same
 workspace, under the same timeout, with the same clamps as the model's own
