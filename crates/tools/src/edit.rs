@@ -23,14 +23,14 @@ PUT 2-4:
 +replacement line one
 +replacement line two
 
-Addresses. Every one is a line number and a suffix, in that order, and every
-number is the ORIGINAL one from that read: earlier hunks in the same patch never
-shift later ones. A bare number is not an address.
+Addresses. `N` is a single line, `N-M` two or more, `N*` a construct, and
+every number is the ORIGINAL one from that read: earlier hunks in the same
+patch never shift later ones. `N-N` is not an address — a single line is `N`.
 {addresses}
 
 Direction belongs to PUT, not to an address: `PUT 4:UP` inserts above line 4,
 `PUT 4:DOWN` below it, `PUT 3-5:DOWN` below the range, `PUT 2*:DOWN` past where
-the construct closes. A bare number is a position only in that direction form.
+the construct closes.
 
 Ops. Every op line starts with a verb — PUT, CUT, MV or RM. A header ending in
 `:` takes `+` body rows; CUT, MV, RM and the register pastes take none.

@@ -64,7 +64,7 @@ async fn a_range_request_is_answered_with_lines_not_a_skeleton() {
     // Both are addresses the model can paste: a prefix it cannot is the tool
     // teaching a form its own parser refuses.
     assert!(out.contains("321-323:pub struct Point {"), "{out}");
-    assert!(out.contains("\n322-322:    x: i32,"), "{out}");
+    assert!(out.contains("\n322:    x: i32,"), "{out}");
     assert!(!out.contains("outline"), "{out}");
     every_address_parses(&out, "big.rs", &body, 3);
 }
@@ -86,7 +86,7 @@ async fn a_construct_that_closes_past_the_window_still_says_where() {
     .await;
     assert!(out.contains("325-329:impl Point {"), "{out}");
     assert!(
-        !out.contains("\n329-329:}"),
+        !out.contains("\n329:}"),
         "the window must still end at 327: {out}"
     );
 

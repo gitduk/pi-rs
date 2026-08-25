@@ -32,15 +32,9 @@ pub(crate) fn of(items: &[syntax::Item]) -> HashMap<usize, usize> {
 ///
 /// Rendered by `hashline`, which is the crate that parses it back: two
 /// `format!`s pointing opposite ways is how a view starts printing an address
-/// its own parser rejects.
+/// its own parser rejects. A row that spans itself prints as the bare number,
+/// since that is the address `PUT N:` takes.
 pub(crate) fn addr(n: usize, spans: &HashMap<usize, usize>) -> String {
-    // Never a bare number, even for a row that spans only itself. A prefix the
-    // model cannot paste back is the tool teaching it a form its own parser
-    // refuses, and the prefix in front of every line is where line addressing
-    // is actually learned.
     let end = spans.get(&n).copied().unwrap_or(n);
-    format!(
-        "{}:",
-        hashline::Target::Range { start: n, end }
-    )
+    format!("{}:", hashline::Target::Range { start: n, end })
 }

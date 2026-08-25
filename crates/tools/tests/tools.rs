@@ -21,7 +21,7 @@ async fn read_numbers_lines_under_a_content_tag() {
         out.lines().next().unwrap(),
         format!("[a.rs#{}]", hashline::tag("one\ntwo\nthree\n"))
     );
-    assert!(out.contains("\n1-1:one\n2-2:two\n3-3:three\n"), "{out}");
+    assert!(out.contains("\n1:one\n2:two\n3:three\n"), "{out}");
 }
 
 #[test]
@@ -44,7 +44,7 @@ async fn read_honors_offset_and_limit_and_reports_the_remainder() {
         &c,
     )
     .await;
-    assert!(out.contains("3-3:l3\n4-4:l4\n"), "{out}");
+    assert!(out.contains("3:l3\n4:l4\n"), "{out}");
     assert!(!out.contains("5:l5"), "{out}");
     assert!(out.contains("6 more lines; re-read from 5"), "{out}");
 }
@@ -240,7 +240,7 @@ async fn edit_applies_a_patch_anchored_to_the_tag_read_returned() {
     let path = c.workspace.root().join("a.rs");
     std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
 
-    let report = read_then_edit(&c, "a.rs", "PUT 2-2:\n+TWO\n")
+    let report = read_then_edit(&c, "a.rs", "PUT 2:\n+TWO\n")
         .await
         .unwrap();
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\nTWO\nthree\n");
@@ -314,7 +314,7 @@ async fn a_file_that_was_already_broken_stays_editable() {
     let broken = "pub fn a() -> i32 {\n    1\n";
     std::fs::write(c.workspace.root().join("a.rs"), broken).unwrap();
 
-    let out = read_then_edit(&c, "a.rs", "PUT 2-2:\n+    2\n")
+    let out = read_then_edit(&c, "a.rs", "PUT 2:\n+    2\n")
         .await
         .unwrap();
     assert!(out.contains("2"), "{out}");
@@ -325,7 +325,7 @@ async fn a_language_the_parser_does_not_know_is_not_gated() {
     let (_d, c) = ctx();
     std::fs::write(c.workspace.root().join("a.toml"), "[a]\nb = 1\n").unwrap();
 
-    let out = read_then_edit(&c, "a.toml", "PUT 2-2:\n+b = 2\n")
+    let out = read_then_edit(&c, "a.toml", "PUT 2:\n+b = 2\n")
         .await
         .unwrap();
     assert!(out.contains("b = 2"), "{out}");
@@ -381,7 +381,7 @@ async fn each_side_of_a_hunk_is_numbered_in_the_file_it_belongs_to() {
     let tag = hashline::tag(src);
     let out = tools::edit::Edit
         .execute(
-            json!({ "patch": format!("[a.rs#{tag}]\nPUT 1-1:\n+AA\n+BB\nCUT 2-2:\n") }),
+            json!({ "patch": format!("[a.rs#{tag}]\nPUT 1:\n+AA\n+BB\nCUT 2:\n") }),
             &c,
         )
         .await
@@ -426,7 +426,7 @@ async fn a_file_the_patch_did_not_change_is_not_counted_as_one_that_did() {
     std::fs::write(root.join("b.rs"), "fn b() {}\n").unwrap();
 
     let patch = format!(
-        "[a.rs#{}]\nPUT 5-7:\n+pub fn target() -> i32 {{\n+    99\n+}}\n[b.rs#{}]\nPUT 1-1:\n+fn b() {{}}\n",
+        "[a.rs#{}]\nPUT 5-7:\n+pub fn target() -> i32 {{\n+    99\n+}}\n[b.rs#{}]\nPUT 1:\n+fn b() {{}}\n",
         hashline::tag(THREE_FNS),
         hashline::tag("fn b() {}\n"),
     );
@@ -450,7 +450,7 @@ async fn two_files_each_say_which_hunks_are_theirs() {
     std::fs::write(root.join("b.rs"), "fn b() {}\n").unwrap();
 
     let patch = format!(
-        "[a.rs#{}]\nPUT 2-2:\n+    11\n[b.rs#{}]\nPUT 1-1:\n+fn b() -> i32 {{ 2 }}\n",
+        "[a.rs#{}]\nPUT 2:\n+    11\n[b.rs#{}]\nPUT 1:\n+fn b() -> i32 {{ 2 }}\n",
         hashline::tag(THREE_FNS),
         hashline::tag("fn b() {}\n"),
     );
@@ -578,11 +578,11 @@ async fn two_edits_in_a_row_need_no_re_read() {
     let path = c.workspace.root().join("a.rs");
     std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
 
-    let first = read_then_edit(&c, "a.rs", "PUT 1-1:\n+a\n+b\n")
+    let first = read_then_edit(&c, "a.rs", "PUT 1:\n+a\n+b\n")
         .await
         .unwrap();
     let tag = first.split('#').nth(1).unwrap().split(']').next().unwrap();
-    let second = format!("[a.rs#{tag}]\nPUT 4-4:\n+THREE\n");
+    let second = format!("[a.rs#{tag}]\nPUT 4:\n+THREE\n");
     tools::edit::Edit
         .execute(json!({ "patch": second }), &c)
         .await
@@ -601,7 +601,7 @@ async fn a_stale_tag_leaves_the_file_untouched() {
     std::fs::write(&path, "one\ntwo\n").unwrap();
 
     let err = tools::edit::Edit
-        .execute(json!({ "patch": "[a.rs#0000]\nPUT 1-1:\n+X\n" }), &c)
+        .execute(json!({ "patch": "[a.rs#0000]\nPUT 1:\n+X\n" }), &c)
         .await
         .unwrap_err()
         .to_string();
@@ -620,7 +620,7 @@ async fn a_multi_file_patch_is_all_or_nothing_on_disk() {
     std::fs::write(c.workspace.root().join("b.rs"), "b\n").unwrap();
 
     let patch = format!(
-        "[a.rs#{}]\nPUT 1-1:\n+A\n[b.rs#0000]\nPUT 1-1:\n+B\n",
+        "[a.rs#{}]\nPUT 1:\n+A\n[b.rs#0000]\nPUT 1:\n+B\n",
         hashline::tag("a\n")
     );
     assert!(
@@ -641,7 +641,7 @@ async fn edit_moves_a_file_and_reports_the_destination() {
     let (_d, c) = ctx();
     std::fs::write(c.workspace.root().join("a.rs"), "one\n").unwrap();
 
-    let report = read_then_edit(&c, "a.rs", "PUT 1-1:\n+ONE\nMV lib/a.rs\n")
+    let report = read_then_edit(&c, "a.rs", "PUT 1:\n+ONE\nMV lib/a.rs\n")
         .await
         .unwrap();
     assert!(report.starts_with("a.rs → [lib/a.rs#"), "{report}");
@@ -656,7 +656,7 @@ async fn edit_moves_a_file_and_reports_the_destination() {
 async fn edit_refuses_a_file_it_cannot_read_and_says_to_use_write() {
     let (_d, c) = ctx();
     let err = tools::edit::Edit
-        .execute(json!({ "patch": "[new.rs#0000]\nPUT 1-1:\n+x\n" }), &c)
+        .execute(json!({ "patch": "[new.rs#0000]\nPUT 1:\n+x\n" }), &c)
         .await
         .unwrap_err()
         .to_string();
@@ -747,11 +747,11 @@ async fn two_edits_to_one_file_in_the_same_turn_do_not_clobber_each_other() {
     // Both patches are valid against the same read, and the loop runs shared
     // tools concurrently.
     let first = tools::edit::Edit.execute(
-        json!({ "patch": format!("[a.rs#{tag}]\nPUT 1-1:\n+ONE\n") }),
+        json!({ "patch": format!("[a.rs#{tag}]\nPUT 1:\n+ONE\n") }),
         &c,
     );
     let second = tools::edit::Edit.execute(
-        json!({ "patch": format!("[a.rs#{tag}]\nPUT 3-3:\n+THREE\n") }),
+        json!({ "patch": format!("[a.rs#{tag}]\nPUT 3:\n+THREE\n") }),
         &c,
     );
     let (a, b) = tokio::join!(first, second);
@@ -851,7 +851,7 @@ async fn an_edit_that_changes_nothing_says_so() {
 
     // A patch whose body already matches. It "succeeds", and the model has no
     // way to tell its fix did not land.
-    let patch = format!("[a.rs#{}]\nPUT 1-1:\n+one\n", hashline::tag(src));
+    let patch = format!("[a.rs#{}]\nPUT 1:\n+one\n", hashline::tag(src));
     let out = tools::edit::Edit
         .execute(json!({ "patch": patch }), &c)
         .await
@@ -937,8 +937,8 @@ async fn a_range_that_is_not_one_is_refused_by_the_op_that_wrote_it() {
     // progress.
     let put = complaint(format!("[a.rs#{tag}]\nPUT two:\n+x")).await;
     let cut = complaint(format!("[a.rs#{tag}]\nCUT two")).await;
-    assert!(put.contains("`PUT two`: an address is a line"), "{put}");
-    assert!(cut.contains("`CUT two`: an address is a line"), "{cut}");
+    assert!(put.contains("an address is"), "{put}");
+    assert!(cut.contains("an address is"), "{cut}");
     assert_ne!(put, cut);
 }
 

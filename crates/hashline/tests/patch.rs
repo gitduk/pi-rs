@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use hashline::{
-    Blocks, Change, Error, FORMS, LinePos, NoBlocks, Op, Target, apply, parse, tag,
+    Blocks, Change, Error, LinePos, NoBlocks, Op, Target, apply, parse, tag,
 };
 
 /// Explicit start→end pairs. hashline never parses source itself, so its own
@@ -39,7 +39,7 @@ fn replaces_an_inclusive_range() {
 #[test]
 fn a_single_line_is_written_n_to_n() {
     assert_eq!(
-        edit(SRC, "PUT 2-2:\n+2\n").unwrap(),
+        edit(SRC, "PUT 2:\n+2\n").unwrap(),
         "one\n2\nthree\nfour\n"
     );
 }
@@ -47,7 +47,7 @@ fn a_single_line_is_written_n_to_n() {
 #[test]
 fn body_length_is_independent_of_range_length() {
     assert_eq!(
-        edit(SRC, "PUT 2-2:\n+a\n+b\n+c\n").unwrap(),
+        edit(SRC, "PUT 2:\n+a\n+b\n+c\n").unwrap(),
         "one\na\nb\nc\nthree\nfour\n"
     );
     assert_eq!(edit(SRC, "PUT 2-3:\n").unwrap(), "one\nfour\n");
@@ -56,7 +56,7 @@ fn body_length_is_independent_of_range_length() {
 #[test]
 fn a_bare_plus_is_a_blank_line_and_whitespace_is_verbatim() {
     assert_eq!(
-        edit(SRC, "PUT 2-2:\n+\n+    indented\n").unwrap(),
+        edit(SRC, "PUT 2:\n+\n+    indented\n").unwrap(),
         "one\n\n    indented\nthree\nfour\n"
     );
 }
@@ -80,13 +80,13 @@ fn inserts_at_the_head_and_the_tail() {
 #[test]
 fn later_hunks_keep_their_original_numbering() {
     // If the first hunk shifted the rest, `4-4` would land on the wrong line.
-    let out = edit(SRC, "PUT 1-1:\n+a\n+b\n+c\nPUT 4-4:\n+FOUR\n").unwrap();
+    let out = edit(SRC, "PUT 1:\n+a\n+b\n+c\nPUT 4:\n+FOUR\n").unwrap();
     assert_eq!(out, "a\nb\nc\ntwo\nthree\nFOUR\n");
 }
 
 #[test]
 fn a_stale_tag_is_rejected_before_anything_is_built() {
-    let src = "[a.rs#0000]\nPUT 1-1:\n+x\n";
+    let src = "[a.rs#0000]\nPUT 1:\n+x\n";
     let patch = parse(src).unwrap();
     let err = apply(&patch, &files(&[("a.rs", SRC)]), &NoBlocks).unwrap_err();
     assert!(matches!(err, Error::StaleTag { .. }), "{err}");
@@ -96,7 +96,7 @@ fn a_stale_tag_is_rejected_before_anything_is_built() {
 #[test]
 fn one_stale_section_rejects_the_whole_patch() {
     let src = format!(
-        "[a.rs#{}]\nPUT 1-1:\n+A\n[b.rs#0000]\nPUT 1-1:\n+B\n",
+        "[a.rs#{}]\nPUT 1:\n+A\n[b.rs#0000]\nPUT 1:\n+B\n",
         tag(SRC)
     );
     let patch = parse(&src).unwrap();
@@ -122,23 +122,23 @@ fn an_insertion_buried_in_a_replaced_span_is_rejected() {
 
 #[test]
 fn out_of_range_names_the_real_length() {
-    let err = edit(SRC, "PUT 9-9:\n+x\n").unwrap_err();
+    let err = edit(SRC, "PUT 9:\n+x\n").unwrap_err();
     assert_eq!(
         err.to_string(),
-        "a.rs has 4 lines, so 9-9 names lines that do not exist"
+        "a.rs has 4 lines, so 9 names lines that do not exist"
     );
 }
 
 #[test]
 fn cut_and_paste_moves_lines_within_a_file() {
-    let out = edit(SRC, "CUT 1-1 @first\nPUT 4:DOWN @first\n").unwrap();
+    let out = edit(SRC, "CUT 1 @first\nPUT 4:DOWN @first\n").unwrap();
     assert_eq!(out, "two\nthree\nfour\none\n");
 }
 
 #[test]
 fn an_unlabeled_cut_feeds_the_anonymous_register() {
     assert_eq!(
-        edit(SRC, "CUT 1-1\nPUT 3:DOWN @\n").unwrap(),
+        edit(SRC, "CUT 1\nPUT 3:DOWN @\n").unwrap(),
         "two\nthree\none\nfour\n"
     );
 }
@@ -148,7 +148,7 @@ fn a_register_flows_between_files() {
     let a = "keep\nmoveme\n";
     let b = "target\n";
     let src = format!(
-        "[a.rs#{}]\nCUT 2-2 @fn\n[b.rs#{}]\nPUT 1:UP @fn\n",
+        "[a.rs#{}]\nCUT 2 @fn\n[b.rs#{}]\nPUT 1:UP @fn\n",
         tag(a),
         tag(b)
     );
@@ -202,14 +202,14 @@ fn rem_deletes_and_refuses_company() {
         }
     );
 
-    let src = format!("[a.rs#{}]\nRM\nPUT 1-1:\n+x\n", tag(SRC));
+    let src = format!("[a.rs#{}]\nRM\nPUT 1:\n+x\n", tag(SRC));
     let err = apply(&parse(&src).unwrap(), &files(&[("a.rs", SRC)]), &NoBlocks).unwrap_err();
     assert!(matches!(err, Error::RemoveWithOps { .. }), "{err}");
 }
 
 #[test]
 fn mv_carries_the_edited_content_to_the_destination() {
-    let src = format!("[a.rs#{}]\nPUT 1-1:\n+ONE\nMV lib/a.rs\n", tag(SRC));
+    let src = format!("[a.rs#{}]\nPUT 1:\n+ONE\nMV lib/a.rs\n", tag(SRC));
     let plan = apply(&parse(&src).unwrap(), &files(&[("a.rs", SRC)]), &NoBlocks).unwrap();
     assert_eq!(
         plan.changes[0],
@@ -229,8 +229,8 @@ fn mv_carries_the_edited_content_to_the_destination() {
 
 #[test]
 fn a_file_without_a_trailing_newline_keeps_it_that_way() {
-    assert_eq!(edit("a\nb", "PUT 1-1:\n+A\n").unwrap(), "A\nb");
-    assert_eq!(edit("a\nb\n", "PUT 1-1:\n+A\n").unwrap(), "A\nb\n");
+    assert_eq!(edit("a\nb", "PUT 1:\n+A\n").unwrap(), "A\nb");
+    assert_eq!(edit("a\nb\n", "PUT 1:\n+A\n").unwrap(), "A\nb\n");
 }
 
 #[test]
@@ -244,7 +244,7 @@ fn an_empty_file_accepts_a_head_insert() {
 
 #[test]
 fn unified_diff_habits_are_named_rather_than_guessed_at() {
-    let err = edit(SRC, "PUT 1-1:\n+new\n-one\n").unwrap_err().to_string();
+    let err = edit(SRC, "PUT 1:\n+new\n-one\n").unwrap_err().to_string();
     assert!(err.contains("is not a deletion"), "{err}");
     // Both ways out, because the row is written by a model that wants one of
     // them: a deletion, or a literal line that begins with `-`.
@@ -253,42 +253,33 @@ fn unified_diff_habits_are_named_rather_than_guessed_at() {
 }
 
 #[test]
-fn a_bare_line_number_is_not_an_address() {
-    // It is what each of the two forms looks like with its suffix left off,
-    // so accepting it would make an omission mean `N-N` instead of a complaint.
-    // The whole point of moving the position after the number.
-    for spec in ["PUT 2:\n+B\n", "CUT 2\n"] {
-        let err = edit(SRC, spec).unwrap_err().to_string();
-        assert!(err.contains("a line number and a suffix"), "{spec}: {err}");
-        // From the table, not restated: the refusal must name every form there
-        // is, including one added after this test was written.
-        for form in FORMS {
-            let named = format!("`N{}`", form.suffix);
-            assert!(err.contains(&named), "{spec} did not name {named}: {err}");
-        }
-    }
-    assert_eq!(
-        edit(SRC, "PUT 2-2:\n+B\n").unwrap(),
-        "one\nB\nthree\nfour\n"
-    );
-    assert_eq!(edit(SRC, "CUT 2-2\n").unwrap(), "one\nthree\nfour\n");
+fn a_single_line_is_written_without_suffix() {
+    // `N` is the one address that takes no suffix: `PUT 2:` replaces one
+    // line, and `N-N` — the old spelling of a single line — is refused with
+    // the shorter form named, so the model repairs it in one turn.
+    assert_eq!(edit(SRC, "PUT 2:\n+B\n").unwrap(), "one\nB\nthree\nfour\n");
+    assert_eq!(edit(SRC, "CUT 2\n").unwrap(), "one\nthree\nfour\n");
+
+    let err = edit(SRC, "PUT 2-2:\n+B\n").unwrap_err().to_string();
+    assert!(err.contains("a single line is `2`"), "{err}");
+    assert!(err.contains("`PUT 2-2`"), "{err}");
 }
 
 #[test]
 fn a_trailing_colon_on_a_bodyless_op_is_tolerated() {
     // A `:` on a `CUT` is noise. Refusing it put the complaint on the colon and
     // hid the row underneath, which is the mistake that actually matters.
-    assert_eq!(edit(SRC, "CUT 2-2:\n").unwrap(), "one\nthree\nfour\n");
-    assert_eq!(edit(SRC, "CUT 2-2 @held:\n").unwrap(), "one\nthree\nfour\n");
+    assert_eq!(edit(SRC, "CUT 2:\n").unwrap(), "one\nthree\nfour\n");
+    assert_eq!(edit(SRC, "CUT 2 @held:\n").unwrap(), "one\nthree\nfour\n");
 
-    let err = edit(SRC, "CUT 2-2:\n-  two\n").unwrap_err().to_string();
+    let err = edit(SRC, "CUT 2:\n-  two\n").unwrap_err().to_string();
     assert!(err.contains("take no body rows"), "{err}");
     assert!(err.contains("PUT N-M:"), "{err}");
 }
 
 #[test]
 fn a_plus_row_under_a_bodyless_op_says_which_op() {
-    let err = edit(SRC, "CUT 2-2\n+two\n").unwrap_err().to_string();
+    let err = edit(SRC, "CUT 2\n+two\n").unwrap_err().to_string();
     assert!(err.contains("take no body rows"), "{err}");
 }
 
@@ -323,7 +314,7 @@ fn an_insert_after_a_block_lands_past_its_closing_line() {
 
 #[test]
 fn a_block_and_a_range_still_may_not_overlap() {
-    let err = edit_blocks(SRC, "PUT 1*:\n+a\nPUT 2-2:\n+b\n", &[(1, 2)]).unwrap_err();
+    let err = edit_blocks(SRC, "PUT 1*:\n+a\nPUT 2:\n+b\n", &[(1, 2)]).unwrap_err();
     assert!(matches!(err, Error::Overlap { .. }), "{err}");
 }
 
@@ -360,7 +351,6 @@ fn a_spelling_this_grammar_dropped_is_simply_not_an_address() {
         "PUT >2:\n+x",
         "PUT >2*:\n+x",
         "PUT >$:\n+x", // the old file tail
-        "CUT 2",       // the old bare-number shorthand
         "CUT 2.*",     // the two old forms crossed
         "PUT 2<:\n+x", // the old gaps after the number
         "PUT 2>:\n+x",
@@ -369,7 +359,7 @@ fn a_spelling_this_grammar_dropped_is_simply_not_an_address() {
         "CUT abc",     // never valid under either
     ] {
         assert!(
-            says(ops).contains("a line number and a suffix"),
+            says(ops).contains("an address is"),
             "{ops}: {}",
             says(ops)
         );
@@ -447,12 +437,12 @@ fn a_direction_on_a_cut_is_refused() {
             .to_string()
     };
     assert!(
-        says("CUT 2:UP").contains("a line number and a suffix"),
+        says("CUT 2:UP").contains("an address is"),
         "{}",
         says("CUT 2:UP")
     );
     assert!(
-        says("CUT 2>").contains("a line number and a suffix"),
+        says("CUT 2>").contains("an address is"),
         "{}",
         says("CUT 2>")
     );
@@ -481,7 +471,7 @@ fn a_register_pastes_at_every_address_that_takes_a_body() {
     for spec in [
         "PUT 1:UP @h",
         "PUT 4:DOWN @h",
-        "PUT 1-1 @h",
+        "PUT 1 @h",
         "PUT 2*:DOWN @h",
         "PUT 2* @h",
     ] {
@@ -491,7 +481,7 @@ fn a_register_pastes_at_every_address_that_takes_a_body() {
 
 #[test]
 fn a_missing_section_header_is_reported_with_its_line() {
-    let err = parse("PUT 1-1:\n+x\n").unwrap_err();
+    let err = parse("PUT 1:\n+x\n").unwrap_err();
     assert!(matches!(err, Error::Syntax { line: 1, .. }), "{err}");
     assert!(err.to_string().contains("before any `[path#TAG]`"), "{err}");
 }
@@ -505,7 +495,7 @@ fn paths_lists_what_the_caller_must_load() {
 #[test]
 fn landed_reports_new_numbering_so_a_second_edit_needs_no_re_read() {
     let src = format!(
-        "[a.rs#{}]\nPUT 1-1:\n+a\n+b\n+c\nPUT 4:DOWN:\n+tail\n",
+        "[a.rs#{}]\nPUT 1:\n+a\n+b\n+c\nPUT 4:DOWN:\n+tail\n",
         tag(SRC)
     );
     let plan = apply(&parse(&src).unwrap(), &files(&[("a.rs", SRC)]), &NoBlocks).unwrap();
@@ -542,7 +532,7 @@ fn a_later_hunk_numbers_its_displaced_lines_in_the_original_file() {
     // The first hunk puts two lines where one stood, so the second hunk's
     // rows sit one line lower in the new file than they did in the old one.
     // `took_at` keeps the original numbering; `start` is where they are now.
-    let src = format!("[a.rs#{}]\nPUT 1-1:\n+a\n+b\nCUT 3-3:\n", tag(SRC));
+    let src = format!("[a.rs#{}]\nPUT 1:\n+a\n+b\nCUT 3:\n", tag(SRC));
     let plan = apply(&parse(&src).unwrap(), &files(&[("a.rs", SRC)]), &NoBlocks).unwrap();
     let Change::Write { landed, .. } = &plan.changes[0]
     else {

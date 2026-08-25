@@ -32,8 +32,14 @@ pub struct Form {
 
 pub const FORMS: &[Form] = &[
     Form {
+        suffix: "",
+        means: "a single line. The one address without a suffix, so `PUT 6:` \
+                replaces line 6 and `PUT 6:UP` inserts above it.",
+    },
+    Form {
         suffix: "-M",
-        means: "lines N through M, inclusive. `3-3` is one line.",
+        means: "two or more lines, through M. A single line is `N`; `N-N` is \
+                refused, not shrunk.",
     },
     Form {
         suffix: "*",
@@ -52,18 +58,14 @@ pub const FORMS: &[Form] = &[
 fn forms() -> String {
     let spelt: Vec<String> = FORMS.iter().map(|f| format!("`N{}`", f.suffix)).collect();
     let (last, rest) = spelt.split_last().map_or(("", &[][..]), |(l, r)| (l, r));
-    format!(
-        "an address is a line number and a suffix — {} or {last}",
-        rest.join(", ")
-    )
+    format!("an address is {} or {last}", rest.join(", "))
 }
 
 /// One address, whatever shape it has.
 ///
-/// Every form is a line number and a suffix, so the number is always first and
-/// the suffix always says what to do with it. A bare number is not an address:
-/// it is what each form looks like with the suffix left off, and accepting it
-/// would make an omission mean `N-N` — a range the model never wrote.
+/// `N` is a single line, `N-M` two or more, `N*` a construct. The one that
+/// takes no suffix is the commonest, so a bare number is an address: views
+/// print it and models write it without ceremony.
 impl Target {
     /// Read one back with no op and no patch line to blame it on.
     ///
@@ -79,6 +81,7 @@ impl std::fmt::Display for Target {
     /// that reads it back cannot drift into two grammars.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Target::Range { start, end } if start == end => write!(f, "{start}"),
             Target::Range { start, end } => write!(f, "{start}-{end}"),
             Target::Block { line } => write!(f, "{line}*"),
         }
@@ -105,17 +108,23 @@ fn addr(spec: &str, line: usize, verb: &str) -> Result<Target, Error> {
     };
 
     match rest {
+        "" => Ok(Target::Range { start: n, end: n }),
         "*" => Ok(Target::Block { line: n }),
         _ => match rest.strip_prefix('-') {
             None => Err(bad(format!("`{verb} {spec}`: {}", forms()))),
             Some(m) if m.trim().is_empty() => Err(bad(format!(
-                "`{verb} {spec}`: a range needs both ends, as in `{n}-{n}`"
+                "`{verb} {spec}`: a range needs both ends, as in `{n}-{m}`"
             ))),
             Some(m) => {
                 let what = format!("`{verb} {spec}`: `{m}` is not a line number");
                 let m = number(m, line, &what)?;
                 if n > m {
                     return Err(bad(format!("`{verb} {spec}` runs backwards")));
+                }
+                if n == m {
+                    return Err(bad(format!(
+                        "`{verb} {spec}` is one line; a single line is `{n}`"
+                    )));
                 }
                 Ok(Target::Range { start: n, end: m })
             }
@@ -144,7 +153,8 @@ fn register(rest: &str, line: usize) -> Result<Option<String>, Error> {
 /// place is a different mistake from a row of the wrong shape, and the model
 /// that wrote each needs a different sentence.
 const NO_BODY: &str = "`CUT`, `RM` and `MV` take no body rows: the range names what goes \
-                       and nothing arrives. To write new content, use `PUT N-M:` with \
+                       and nothing arrives. To write new content, use `PUT N:` or \
+                       `PUT N-M:` with `+` rows.
                        `+` rows.";
 
 /// Whether the op just parsed is one of those.
@@ -286,7 +296,8 @@ pub fn parse(input: &str) -> Result<Patch, Error> {
                 // the grammar stops firing the next time the grammar moves —
                 // which is exactly what happened to the one this replaces.
                 " — that is a line from a read, not an op. Name it in a range \
-                 (`PUT N-N:`) or a block (`PUT N*:`), and put the new text in \
+                 (`PUT N:` / `PUT N-M:`) or a block (`PUT N*:`), and put the \
+                 new text in `+` rows.
                  `+` rows."
                     .into()
             } else {
@@ -355,31 +366,19 @@ enum PutSite {
     After(LinePos),
 }
 
-/// A bare number, when a direction makes one a position. `0` is not one:
-/// it falls through to `addr`, which names the real offence.
-fn bare(spec: &str) -> Option<usize> {
-    spec.trim().parse::<usize>().ok().filter(|n| *n > 0)
-}
-
-/// The line `:UP` inserts above: a bare number, a range's start, a block's.
+/// The line `:UP` inserts above: a single line's, a range's start, a block's.
 fn put_start(spec: &str, no: usize) -> Result<usize, Error> {
-    match bare(spec) {
-        Some(n) => Ok(n),
-        None => match addr(spec, no, "PUT")? {
-            Target::Range { start, .. } | Target::Block { line: start } => Ok(start),
-        },
+    match addr(spec, no, "PUT")? {
+        Target::Range { start, .. } | Target::Block { line: start } => Ok(start),
     }
 }
 
-/// Where `:DOWN` inserts: a bare number, a range's end, or past a block's
+/// Where `:DOWN` inserts: a single line's, a range's end, or past a block's
 /// closing line — the one spot whose line number `addr` must find.
 fn put_end(spec: &str, no: usize) -> Result<LinePos, Error> {
-    match bare(spec) {
-        Some(n) => Ok(LinePos::At(n)),
-        None => match addr(spec, no, "PUT")? {
-            Target::Range { end, .. } => Ok(LinePos::At(end)),
-            Target::Block { line } => Ok(LinePos::AfterBlock(line)),
-        },
+    match addr(spec, no, "PUT")? {
+        Target::Range { end, .. } => Ok(LinePos::At(end)),
+        Target::Block { line } => Ok(LinePos::AfterBlock(line)),
     }
 }
 

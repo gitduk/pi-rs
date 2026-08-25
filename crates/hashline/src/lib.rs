@@ -32,7 +32,9 @@ pub enum Target {
         start: usize,
         end: usize,
     },
-    /// `N*` — the construct opening at N, through wherever it closes. The
+    /// `N*` — the construct opening at N, through wherever it closes, one of
+    /// the three address forms (`N`, `N-M`, `N*`); `:UP`/`:DOWN` belong to
+    /// `PUT`, not to an address.
     /// only two address forms there are; `:UP`/`:DOWN` belong to `PUT`, not
     /// to an address.
     Block {
@@ -133,7 +135,14 @@ pub enum Error {
     #[error("{path} was not loaded; read it before editing it")]
     Missing { path: String },
 
-    #[error("{path} has {len} lines, so {start}-{end} names lines that do not exist")]
+    #[error(
+        "{path} has {len} lines, so {range} names lines that do not exist",
+        range = if start == end {
+            start.to_string()
+        } else {
+            format!("{start}-{end}")
+        }
+    )]
     OutOfRange {
         path: String,
         start: usize,

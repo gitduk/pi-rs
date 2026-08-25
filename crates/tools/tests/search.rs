@@ -111,14 +111,13 @@ async fn grep_returns_sections_an_edit_can_anchor_on() {
         out.starts_with(&format!("[src/deep/util.rs#{expected}]")),
         "{out}"
     );
-    // The whole prefix: `2-2:…` contains `2:…`, so the looser form passed by
-    // accident through a grammar change that moved every address.
-    assert!(out.contains("\n2-2:// TODO: rename"), "{out}");
+    // The whole prefix: `2:…` is what a single line reads back as now.
+    assert!(out.contains("\n2:// TODO: rename"), "{out}");
     let body = std::fs::read_to_string(c.workspace.root().join("src/deep/util.rs")).unwrap();
     common::every_address_parses(&out, "src/deep/util.rs", &body, 1);
 
     // The whole point: the tag grep hands back is good enough to edit with.
-    let patch = format!("[src/deep/util.rs#{expected}]\nPUT 2-2:\n+// renamed\n");
+    let patch = format!("[src/deep/util.rs#{expected}]\nPUT 2:\n+// renamed\n");
     tools::edit::Edit
         .execute(json!({ "patch": patch }), &c)
         .await
