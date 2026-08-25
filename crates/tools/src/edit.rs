@@ -238,9 +238,9 @@ fn hunk_help(after: &str, landed: &[Landed]) -> String {
             // range opened at `start` actually ends — the number the model
             // got wrong, stated instead of left to re-derive.
             if let Some(e) = balanced_end(&new, l.start) {
+                let s = l.start;
                 line.push_str(&format!(
-                    "; it opens at {} and balances at line {e} — cover to {e} or use `{}*`",
-                    l.start, l.start
+                    "; it opens at {s} and balances at line {e} — cover to {e} or use `{s}*`"
                 ));
             }
             off.push_str(&line);
