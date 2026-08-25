@@ -38,6 +38,11 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
 
         match core.command(line, &totals) {
             Step::Quit => break,
+            Step::Bash(command) => {
+                for line in core.bash(&command).await {
+                    println!("{line}");
+                }
+            }
             Step::Handled(lines) => {
                 for line in lines {
                     println!("{line}");

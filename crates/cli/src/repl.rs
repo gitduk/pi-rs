@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use agent::{Agent, Session, Totals};
-use tools::Ctx;
+use tools::{Ctx, Tool};
 use tools::skills::Skill;
 
 use crate::session::Store;
@@ -600,6 +600,16 @@ pub fn expand(commands: &[Command], line: &str) -> Option<Result<String, String>
     Some(expanded(skill_for(commands, &word)?, &args))
 }
 
+/// What a line starting with `!` asks to run, when it names a command.
+///
+/// `!` alone is prose (a prompt, like any other line); `!cmd` runs `cmd`.
+/// `!!cmd` keeps its second bang: in shell grammar `! cmd` negates the exit
+/// code, which is what a non-interactive shell will do with it.
+fn bash_command(line: &str) -> Option<&str> {
+    let cmd = line.strip_prefix('!')?.trim();
+    (!cmd.is_empty()).then_some(cmd)
+}
+
 pub fn parse(line: &str) -> Option<Cmd> {
     let word = line.split_whitespace().next()?;
     if !word.starts_with('/') {
@@ -632,6 +642,9 @@ fn rest(line: &str) -> String {
 }
 
 pub enum Step {
+    /// A `!` command to run. The surface executes it and records the result,
+    /// because only it can await; `Repl::bash` does the actual work.
+    Bash(String),
     Prompt(String),
     /// Needs the network, so the surface runs it and reports.
     Compact(Option<String>),
@@ -647,6 +660,9 @@ fn lines(text: impl Into<String>) -> Step {
 
 impl Repl {
     pub fn command(&mut self, line: &str, totals: &Totals) -> Step {
+        if let Some(command) = bash_command(line) {
+            return Step::Bash(command.to_string());
+        }
         let Some(cmd) = parse(line) else {
             return Step::Prompt(line.to_string());
         };
@@ -694,13 +710,35 @@ impl Repl {
             Cmd::Other { word, args } => dispatch(&self.commands, &word, &args),
         }
     }
+
+    /// Run what `!` named: show the output, and record the command and its
+    /// result in the transcript so the model answers with it in view. Same
+    /// runner, workspace and timeout as the model's own `bash` tool.
+    pub async fn bash(&mut self, command: &str) -> Vec<String> {
+        let out = tools::bash::Bash
+            .execute(serde_json::json!({ "command": command }), &self.ctx)
+            .await;
+        let out = match out {
+            Ok(out) => out,
+            Err(e) => return vec![format!("failed to run `{command}`: {e}")],
+        };
+        let body = out.flatten();
+        let mut text = format!("Ran `{command}`\n");
+        text.push_str(if body.is_empty() { "(no output)" } else { &body });
+        self.session.log.push(brain::message::Message::user(text));
+        let mut said: Vec<String> = body.lines().map(str::to_string).collect();
+        if let Err(e) = self.save() {
+            said.push(format!("warning: the transcript was not saved: {e}"));
+        }
+        said
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        BUILTIN, Candidate, Choice, Cmd, Command, Source, Step, commands, complete, dispatch,
-        expand, gist, help, parse,
+        BUILTIN, Candidate, Choice, Cmd, Command, Source, Step, bash_command, commands,
+        complete, dispatch, expand, gist, help, parse,
     };
     use tools::skills::Skill;
 
@@ -1001,5 +1039,16 @@ mod tests {
         // Bare, they mean clear and unfocused respectively.
         assert_eq!(parse("/name"), Some(Cmd::Name(String::new())));
         assert_eq!(parse("/compact"), Some(Cmd::Compact(String::new())));
+    }
+
+    #[test]
+    fn a_bang_runs_a_shell_command_and_a_bare_one_stays_prose() {
+        assert_eq!(bash_command("!ls"), Some("ls"));
+        assert_eq!(bash_command("! ls -la"), Some("ls -la"));
+        assert_eq!(bash_command("!"), None);
+        assert_eq!(bash_command("hello!"), None);
+        // `!!cmd` is shell `! cmd` (negate the exit code), not pi's
+        // excluded-from-context marker — that half of the feature is not here.
+        assert_eq!(bash_command("!!git status"), Some("!git status"));
     }
 }
