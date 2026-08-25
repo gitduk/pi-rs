@@ -32,11 +32,11 @@ fn looks_binary(bytes: &[u8]) -> bool {
 /// Deliver the assembled view. Anything over the threshold is spilled and the
 /// transcript keeps a bounded head and tail plus the locator.
 fn deliver(ctx: &Ctx, out: String) -> Result<ToolOutput, ToolError> {
-    match spill::write(ctx, ctx.spill_namespace(), &out)? {
+    match spill::write(ctx, &out)? {
         None => Ok(ToolOutput::text(out)),
         Some(s) => Ok(ToolOutput::text(format!(
             "{}\n{}",
-            spill::prune(&out, spill::MAX_OUTPUT),
+            spill::prune(&out),
             s.note()
         ))),
     }

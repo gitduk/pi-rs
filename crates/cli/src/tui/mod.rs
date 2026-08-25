@@ -744,7 +744,7 @@ fn reader() -> UnboundedReceiver<TermEvent> {
 
 /// Where recalled prompts are kept between sessions.
 fn history_path() -> Option<std::path::PathBuf> {
-    crate::session::state_dir().map(|d| d.join("history"))
+    tools::state::dir().map(|d| d.join("history"))
 }
 
 /// Enough to recall from without the file growing without bound.

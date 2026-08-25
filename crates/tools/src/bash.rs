@@ -131,7 +131,7 @@ impl Tool for Bash {
         // Anything elided is written out first, so a build log the model needs
         // the middle of is one grep away rather than gone.
         let whole = format!("<stdout>\n{stdout}\n</stdout>\n<stderr>\n{stderr}\n</stderr>\n");
-        let spilled = spill::write(ctx, ctx.spill_namespace(), &whole)?;
+        let spilled = spill::write(ctx, &whole)?;
 
         // The exit code and the command, always. What the command printed is
         // in the transcript; what it was run against — the directory — is not.

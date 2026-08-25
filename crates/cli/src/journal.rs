@@ -481,7 +481,7 @@ pub fn path() -> Option<&'static Path> {
 
 /// Where journals live, beside the transcripts they belong to.
 fn dir() -> Option<PathBuf> {
-    crate::session::state_dir().map(|d| d.join("logs"))
+    tools::state::dir().map(|d| d.join("logs"))
 }
 
 /// Drop journals nothing will be read back from. Failures are ignored: a full
@@ -518,7 +518,7 @@ pub fn install(id: &str, level: LogLevel) {
         return;
     }
     let Some(dir) = dir() else { return };
-    let path = dir.join(format!("{}.jsonl", crate::session::file_stem(id)));
+    let path = dir.join(format!("{}.jsonl", tools::state::file_stem(id)));
     let journal = match Journal::open(&path, level.field_cap()) {
         Ok(j) => std::sync::Arc::new(j),
         Err(e) => {

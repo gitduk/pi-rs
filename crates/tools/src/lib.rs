@@ -34,6 +34,7 @@ pub mod write;
 
 pub use registry::Registry;
 pub use workspace::Workspace;
+pub mod state;
 
 /// What a call is permitted to touch. The approval gate reads this; it is a
 /// static classification, not a guess about any particular argument.
@@ -208,7 +209,7 @@ impl Ctx {
     /// Name the session, and with it the directory spills are kept in. A
     /// resumed session keeps its id, so its new spills rejoin the old ones.
     pub fn with_session(mut self, id: impl Into<String>) -> Self {
-        let ns = spill::sanitize(&id.into());
+        let ns = state::file_stem(&id.into());
         self.session = Some(ns.clone());
         self.spill_root = spill::default_root(Some(&ns));
         self

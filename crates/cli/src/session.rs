@@ -47,48 +47,15 @@ pub struct Store {
     root: PathBuf,
 }
 
-/// Where pi keeps what it accumulates between runs.
-pub fn state_dir() -> Option<PathBuf> {
-    std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
-        .map(|b| b.join("pi"))
-}
-
 impl Default for Store {
     /// Outside the workspace: transcripts are the agent's state, not the
     /// project's, and a stray file in a repo is one the user has to clean up.
     fn default() -> Self {
         Self::new(
-            state_dir()
+            tools::state::dir()
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join("sessions"),
         )
-    }
-}
-
-/// An id as a filename, with everything that could leave the directory gone.
-///
-/// Ids are minted here and look like `1787426708-4135307`, so this changes
-/// nothing for a real one. It is not the mint they are read back from, though:
-/// `-c` takes the id out of a stored file's own body, and `--resume` takes it
-/// off the command line. Either could name `../../..`, and both the transcript
-/// and the journal are opened by it.
-pub fn file_stem(id: &str) -> String {
-    let cleaned: String = id
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if cleaned.is_empty() {
-        "unnamed".into()
-    } else {
-        cleaned
     }
 }
 
@@ -102,7 +69,7 @@ impl Store {
     }
 
     pub fn path(&self, id: &str) -> PathBuf {
-        self.root.join(format!("{}.json", file_stem(id)))
+        self.root.join(format!("{}.json", tools::state::file_stem(id)))
     }
 
     pub fn save(
@@ -179,11 +146,8 @@ impl Store {
 mod tests {
     #[test]
     fn an_id_cannot_walk_out_of_the_directory_it_names_a_file_in() {
-        use super::file_stem;
-        assert_eq!(file_stem("1787426708-4135307"), "1787426708-4135307");
-        assert_eq!(file_stem("../../etc/cron.d/x"), "______etc_cron_d_x");
-        assert_eq!(file_stem(".."), "__");
-        assert_eq!(file_stem(""), "unnamed");
+        assert_eq!(tools::state::file_stem("../../etc/cron.d/x"), "______etc_cron_d_x");
+        assert_eq!(tools::state::file_stem(".."), "__");
     }
 
     use super::*;
