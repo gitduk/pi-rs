@@ -41,6 +41,6 @@ pub(crate) fn addr(n: usize, spans: &HashMap<usize, usize>) -> String {
     let end = spans.get(&n).copied().unwrap_or(n);
     format!(
         "{}:",
-        hashline::Addr::Target(hashline::Target::Range { start: n, end })
+        hashline::Target::Range { start: n, end }
     )
 }

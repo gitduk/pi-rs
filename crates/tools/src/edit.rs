@@ -28,17 +28,23 @@ number is the ORIGINAL one from that read: earlier hunks in the same patch never
 shift later ones. A bare number is not an address.
 {addresses}
 
+Direction belongs to PUT, not to an address: `PUT 4:UP` inserts above line 4,
+`PUT 4:DOWN` below it, `PUT 3-5:DOWN` below the range, `PUT 2*:DOWN` past where
+the construct closes. A bare number is a position only in that direction form.
+
 Ops. Every op line starts with a verb — PUT, CUT, MV or REM. A header ending in
 `:` takes `+` body rows; CUT, MV, REM and the register pastes take none.
-  PUT <addr>:  put the body there. A gap address inserts, a line address replaces.
-  CUT N-M      delete those lines, capturing them; add `@name` to label it
-  CUT N*       the same, for a whole construct
-  PUT N< @name / PUT N> @name / PUT N-M @name   paste a captured register
-  MV dest      rename; edits in this section land first, then the file moves
-  REM          delete the file; may not share a section with other ops
+  PUT <addr>:                  put the body there; the address alone replaces
+  PUT <addr>:UP / <addr>:DOWN  insert the body above / below it
+  PUT <addr> @name             paste a captured register at the address
+  CUT N-M                      delete those lines, capturing them; `@name` labels it
+  CUT N*                       the same, for a whole construct
+  MV dest                      rename; edits in this section land first, then the file moves
+  REM                          delete the file; may not share a section with other ops
 
-Cheapest first: insert at a gap (N< / N>), delete with CUT, address only the
-lines that change, and leave unchanged lines out of the body. PUT N* is for a
+Cheapest first: insert with `:UP` / `:DOWN` — `1:UP` is the file head, the last
+line's `:DOWN` the file tail — delete with CUT, address only the lines that
+change, and leave unchanged lines out of the body. PUT N* is for a
 mostly-rewritten construct, not a one-line change.
 
 Body rows start with `+` and are copied verbatim, so `+` alone is a blank line

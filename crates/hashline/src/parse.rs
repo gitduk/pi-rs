@@ -36,22 +36,10 @@ pub const FORMS: &[Form] = &[
         means: "lines N through M, inclusive. `3-3` is one line.",
     },
     Form {
-        suffix: "<",
-        means: "the gap above N. `1<` is the file head.",
-    },
-    Form {
-        suffix: ">",
-        means: "the gap below N. The last line's is the file tail.",
-    },
-    Form {
         suffix: "*",
         means: "the whole construct opening at N; its closing line is resolved \
                 for you. Any decorator, attribute or doc comment above it \
                 belongs to it: naming either their rows or N covers them all.",
-    },
-    Form {
-        suffix: "*>",
-        means: "the gap below where that construct closes.",
     },
 ];
 
@@ -75,39 +63,24 @@ fn forms() -> String {
 /// Every form is a line number and a suffix, so the number is always first and
 /// the suffix always says what to do with it. A bare number is not an address:
 /// it is what each form looks like with the suffix left off, and accepting it
-/// would make an omission mean `N-N` — which for a dropped `<` or `>` replaces
-/// the line the model meant to insert beside.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Addr {
-    /// `N-M` or `N*` — lines that exist.
-    Target(Target),
-    /// `N<` — the gap above N. `1<` is the file head, and the only address an
-    /// empty file has.
-    Before(usize),
-    /// `N>` or `N*>` — the gap below a line, or below where a construct closes.
-    After(LinePos),
-}
-
-impl Addr {
+/// would make an omission mean `N-N` — a range the model never wrote.
+impl Target {
     /// Read one back with no op and no patch line to blame it on.
     ///
     /// For a caller asking only whether a string is an address — a view
     /// deciding whether a prefix it is looking at is one of its own.
-    pub fn read(spec: &str) -> Option<Addr> {
+    pub fn read(spec: &str) -> Option<Target> {
         addr(spec, 0, "").ok()
     }
 }
 
-impl std::fmt::Display for Addr {
+impl std::fmt::Display for Target {
     /// The inverse of `addr`, so a view that prints an address and the parser
     /// that reads it back cannot drift into two grammars.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Addr::Target(Target::Range { start, end }) => write!(f, "{start}-{end}"),
-            Addr::Target(Target::Block { line }) => write!(f, "{line}*"),
-            Addr::Before(n) => write!(f, "{n}<"),
-            Addr::After(LinePos::At(n)) => write!(f, "{n}>"),
-            Addr::After(LinePos::AfterBlock(n)) => write!(f, "{n}*>"),
+            Target::Range { start, end } => write!(f, "{start}-{end}"),
+            Target::Block { line } => write!(f, "{line}*"),
         }
     }
 }
@@ -116,7 +89,7 @@ impl std::fmt::Display for Addr {
 /// `CUT` are both malformed draws the same complaint twice: the model corrects
 /// the first, the identical message comes back about the second, and nothing it
 /// can see says the fix landed.
-fn addr(spec: &str, line: usize, verb: &str) -> Result<Addr, Error> {
+fn addr(spec: &str, line: usize, verb: &str) -> Result<Target, Error> {
     let spec = spec.trim();
     let bad = |what: String| Error::Syntax { line, what };
     // Digits are one byte each, so the first non-digit is a char boundary.
@@ -132,10 +105,7 @@ fn addr(spec: &str, line: usize, verb: &str) -> Result<Addr, Error> {
     };
 
     match rest {
-        "<" => Ok(Addr::Before(n)),
-        ">" => Ok(Addr::After(LinePos::At(n))),
-        "*" => Ok(Addr::Target(Target::Block { line: n })),
-        "*>" => Ok(Addr::After(LinePos::AfterBlock(n))),
+        "*" => Ok(Target::Block { line: n }),
         _ => match rest.strip_prefix('-') {
             None => Err(bad(format!("`{verb} {spec}`: {}", forms()))),
             Some(m) if m.trim().is_empty() => Err(bad(format!(
@@ -147,27 +117,10 @@ fn addr(spec: &str, line: usize, verb: &str) -> Result<Addr, Error> {
                 if n > m {
                     return Err(bad(format!("`{verb} {spec}` runs backwards")));
                 }
-                Ok(Addr::Target(Target::Range { start: n, end: m }))
+                Ok(Target::Range { start: n, end: m })
             }
         },
     }
-}
-
-/// The addresses that name existing lines. `CUT` takes only these: a gap holds
-/// nothing to cut.
-fn target(spec: &str, line: usize, verb: &str) -> Result<Target, Error> {
-    let instead = match addr(spec, line, verb)? {
-        Addr::Target(target) => return Ok(target),
-        Addr::Before(n) | Addr::After(LinePos::At(n)) => format!("{n}-{n}"),
-        Addr::After(LinePos::AfterBlock(n)) => format!("{n}*"),
-    };
-    Err(Error::Syntax {
-        line,
-        what: format!(
-            "`{verb} {spec}` names a gap between lines, and {verb} needs lines. \
-             Did you mean `{verb} {instead}`?"
-        ),
-    })
 }
 
 fn register(rest: &str, line: usize) -> Result<Option<String>, Error> {
@@ -176,7 +129,9 @@ fn register(rest: &str, line: usize) -> Result<Option<String>, Error> {
         return Ok(None);
     }
     match rest.strip_prefix('@') {
-        Some(name) if !name.is_empty() => Ok(Some(name.to_string())),
+        // `@` alone is the anonymous register; `@name` labels one.
+        Some("") => Ok(None),
+        Some(name) => Ok(Some(name.to_string())),
         _ => Err(Error::Syntax {
             line,
             what: format!("expected `@name` or nothing, got `{rest}`"),
@@ -284,7 +239,7 @@ pub fn parse(input: &str) -> Result<Patch, Error> {
             let rest = rest.trim();
             let (spec, tail) = split_target(rest.strip_suffix(':').unwrap_or(rest));
             Op::Cut {
-                target: target(spec, no, "CUT")?,
+                target: addr(spec, no, "CUT")?,
                 register: register(tail, no)?,
             }
         } else if line == "REM" {
@@ -323,7 +278,7 @@ pub fn parse(input: &str) -> Result<Patch, Error> {
             // its own is an op that lost its verb, an address with the line's
             // own text after it is a row pasted straight out of a view.
             let (head, after) = line.split_once(':').unwrap_or((line, ""));
-            let hint = if Addr::read(split_target(head).0).is_some() && after.trim().is_empty() {
+            let hint = if Target::read(split_target(head).0).is_some() && after.trim().is_empty() {
                 format!(" — did you mean `PUT {line}`?")
             } else if head.starts_with(|c: char| c.is_ascii_digit()) {
                 // Any digit, not this grammar's addresses: recognising a
@@ -394,22 +349,70 @@ fn number(text: &str, line: usize, what: &str) -> Result<usize, Error> {
         })
 }
 
+enum PutSite {
+    Replace(Target),
+    Before(usize),
+    After(LinePos),
+}
+
+/// Where a `PUT` lands once its direction is known: the address alone is a
+/// replacement; `:UP` and `:DOWN` turn it into an insertion point — a bare
+/// number into one at that line, a range into one past either edge, a block
+/// into one above it or past where it closes.
+fn put_site(spec: &str, dir: &str, no: usize) -> Result<PutSite, Error> {
+    let bad = |what: String| Error::Syntax { line: no, what };
+    let bare = spec.trim().parse::<usize>().ok().filter(|n| *n > 0);
+    match dir {
+        "" => Ok(PutSite::Replace(addr(spec, no, "PUT")?)),
+        "UP" => Ok(match bare {
+            Some(n) => PutSite::Before(n),
+            None => match addr(spec, no, "PUT")? {
+                Target::Range { start, .. } => PutSite::Before(start),
+                Target::Block { line } => PutSite::Before(line),
+            },
+        }),
+        "DOWN" => Ok(match bare {
+            Some(n) => PutSite::After(LinePos::At(n)),
+            None => match addr(spec, no, "PUT")? {
+                Target::Range { end, .. } => PutSite::After(LinePos::At(end)),
+                Target::Block { line } => PutSite::After(LinePos::AfterBlock(line)),
+            },
+        }),
+        other => Err(bad(format!(
+            "`PUT {spec}:{other}`: after the colon, expected `UP`, `DOWN` or nothing"
+        ))),
+    }
+}
+
 fn parse_put(rest: &str, no: usize) -> Result<Op, Error> {
-    // `:` marks a header whose content arrives as `+` rows; without it the
-    // content comes from a register.
-    let (spec, body) = match rest.strip_suffix(':') {
-        Some(spec) => (spec.trim(), None),
+    // `:` marks a header whose content arrives as `+` rows, with an optional
+    // direction after it; without the colon the content comes from a register.
+    let (spec, dir, tail) = match rest.find(':') {
+        Some(i) => {
+            let (spec, after) = rest.split_at(i);
+            let (dir, tail) = split_target(&after[1..]);
+            // A trailing `:` on a `PUT` is the old body-marking habit; on a
+            // direction it is noise, tolerated like the one on a `CUT`.
+            let dir = dir.strip_suffix(':').unwrap_or(dir);
+            (spec.trim(), Some(dir), tail)
+        }
         None => {
             let (spec, tail) = split_target(rest);
-            (spec, Some(Body::Register(register(tail, no)?)))
+            (spec, None, tail)
         }
     };
 
-    let body = body.unwrap_or(Body::Lines(Vec::new()));
+    let body = match (dir, tail) {
+        // No colon means no direction, so the body can only be a register;
+        // `@` alone is the anonymous one.
+        (None, _) => Body::Register(register(tail, no)?),
+        (Some(_), "") => Body::Lines(Vec::new()),
+        (Some(_), _) => Body::Register(register(tail, no)?),
+    };
 
-    Ok(match addr(spec, no, "PUT")? {
-        Addr::Before(line) => Op::InsertBefore { line, body },
-        Addr::After(at) => Op::InsertAfter { at, body },
-        Addr::Target(target) => Op::Replace { target, body },
+    Ok(match put_site(spec, dir.unwrap_or(""), no)? {
+        PutSite::Replace(target) => Op::Replace { target, body },
+        PutSite::Before(line) => Op::InsertBefore { line, body },
+        PutSite::After(at) => Op::InsertAfter { at, body },
     })
 }

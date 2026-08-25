@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use hashline::{
-    Addr, Blocks, Change, Error, FORMS, LinePos, NoBlocks, Op, Target, apply, parse, tag,
+    Blocks, Change, Error, FORMS, LinePos, NoBlocks, Op, Target, apply, parse, tag,
 };
 
 /// Explicit start→end pairs. hashline never parses source itself, so its own
@@ -64,15 +64,15 @@ fn a_bare_plus_is_a_blank_line_and_whitespace_is_verbatim() {
 #[test]
 fn inserts_at_the_head_and_the_tail() {
     assert_eq!(
-        edit(SRC, "PUT 1<:\n+zero\n").unwrap(),
+        edit(SRC, "PUT 1:UP:\n+zero\n").unwrap(),
         "zero\none\ntwo\nthree\nfour\n"
     );
     assert_eq!(
-        edit(SRC, "PUT 4>:\n+five\n").unwrap(),
+        edit(SRC, "PUT 4:DOWN:\n+five\n").unwrap(),
         "one\ntwo\nthree\nfour\nfive\n"
     );
     assert_eq!(
-        edit(SRC, "PUT 2>:\n+2.5\n").unwrap(),
+        edit(SRC, "PUT 2:DOWN:\n+2.5\n").unwrap(),
         "one\ntwo\n2.5\nthree\nfour\n"
     );
 }
@@ -116,7 +116,7 @@ fn overlapping_ranges_are_rejected() {
 
 #[test]
 fn an_insertion_buried_in_a_replaced_span_is_rejected() {
-    let err = edit(SRC, "PUT 1-3:\n+a\nPUT 2>:\n+stray\n").unwrap_err();
+    let err = edit(SRC, "PUT 1-3:\n+a\nPUT 2:DOWN:\n+stray\n").unwrap_err();
     assert!(matches!(err, Error::Overlap { .. }), "{err}");
 }
 
@@ -131,14 +131,14 @@ fn out_of_range_names_the_real_length() {
 
 #[test]
 fn cut_and_paste_moves_lines_within_a_file() {
-    let out = edit(SRC, "CUT 1-1 @first\nPUT 4> @first\n").unwrap();
+    let out = edit(SRC, "CUT 1-1 @first\nPUT 4:DOWN @first\n").unwrap();
     assert_eq!(out, "two\nthree\nfour\none\n");
 }
 
 #[test]
 fn an_unlabeled_cut_feeds_the_anonymous_register() {
     assert_eq!(
-        edit(SRC, "CUT 1-1\nPUT 3>\n").unwrap(),
+        edit(SRC, "CUT 1-1\nPUT 3:DOWN @\n").unwrap(),
         "two\nthree\none\nfour\n"
     );
 }
@@ -148,7 +148,7 @@ fn a_register_flows_between_files() {
     let a = "keep\nmoveme\n";
     let b = "target\n";
     let src = format!(
-        "[a.rs#{}]\nCUT 2-2 @fn\n[b.rs#{}]\nPUT 1< @fn\n",
+        "[a.rs#{}]\nCUT 2-2 @fn\n[b.rs#{}]\nPUT 1:UP @fn\n",
         tag(a),
         tag(b)
     );
@@ -187,7 +187,7 @@ fn a_register_flows_between_files() {
 
 #[test]
 fn pasting_an_unfilled_register_is_an_error() {
-    let err = edit(SRC, "PUT 1> @nope\n").unwrap_err();
+    let err = edit(SRC, "PUT 1:DOWN @nope\n").unwrap_err();
     assert!(matches!(err, Error::UnknownRegister { .. }), "{err}");
 }
 
@@ -235,10 +235,11 @@ fn a_file_without_a_trailing_newline_keeps_it_that_way() {
 
 #[test]
 fn an_empty_file_accepts_a_head_insert() {
-    // The one address a file with no lines has, and the reason `$` is not
-    // needed: every other position names a line, and there are none.
-    assert_eq!(edit("", "PUT 1<:\n+first\n").unwrap(), "first\n");
-    assert!(edit("", "PUT 1>:\n+first\n").is_err());
+    // `1:UP` is the one insertion a file with no lines has, and the reason
+    // `$` was never needed: every other position names a line, and there
+    // are none.
+    assert_eq!(edit("", "PUT 1:UP:\n+first\n").unwrap(), "first\n");
+    assert!(edit("", "PUT 1:DOWN:\n+first\n").is_err());
 }
 
 #[test]
@@ -253,7 +254,7 @@ fn unified_diff_habits_are_named_rather_than_guessed_at() {
 
 #[test]
 fn a_bare_line_number_is_not_an_address() {
-    // It is what each of the four forms looks like with its suffix left off,
+    // It is what each of the two forms looks like with its suffix left off,
     // so accepting it would make an omission mean `N-N` instead of a complaint.
     // The whole point of moving the position after the number.
     for spec in ["PUT 2:\n+B\n", "CUT 2\n"] {
@@ -316,7 +317,7 @@ fn a_block_op_replaces_through_the_construct_it_names() {
 
 #[test]
 fn an_insert_after_a_block_lands_past_its_closing_line() {
-    let out = edit_blocks(SRC, "PUT 2*>:\n+after\n", &[(2, 3)]).unwrap();
+    let out = edit_blocks(SRC, "PUT 2*:DOWN:\n+after\n", &[(2, 3)]).unwrap();
     assert_eq!(out, "one\ntwo\nthree\nafter\nfour\n");
 }
 
@@ -361,6 +362,10 @@ fn a_spelling_this_grammar_dropped_is_simply_not_an_address() {
         "PUT >$:\n+x", // the old file tail
         "CUT 2",       // the old bare-number shorthand
         "CUT 2.*",     // the two old forms crossed
+        "PUT 2<:\n+x", // the old gaps after the number
+        "PUT 2>:\n+x",
+        "PUT 2*>:\n+x",
+        "CUT 2>",
         "CUT abc",     // never valid under either
     ] {
         assert!(
@@ -385,58 +390,72 @@ fn a_spelling_this_grammar_dropped_is_simply_not_an_address() {
 
 #[test]
 fn what_the_grammar_prints_is_what_the_grammar_reads() {
-    // Every form, both directions. A view renders addresses through `Display`
-    // and the model hands them straight back to `parse`, so the two being
-    // inverse is the property, not a coincidence two files maintain.
+    // Every address form there is, and the direction forms PUT teaches on top.
+    // A view renders addresses through `Display` and the model hands them
+    // straight back to `parse`, so the two being inverse is the property, not
+    // a coincidence two files maintain.
     let cases = [
-        Addr::Target(Target::Range { start: 3, end: 7 }),
-        Addr::Target(Target::Range { start: 3, end: 3 }),
-        Addr::Target(Target::Block { line: 3 }),
-        Addr::Before(3),
-        Addr::After(LinePos::At(3)),
-        Addr::After(LinePos::AfterBlock(3)),
+        Target::Range { start: 3, end: 7 },
+        Target::Range { start: 3, end: 3 },
+        Target::Block { line: 3 },
     ];
     for want in cases {
         let shown = want.to_string();
         // The door a view uses to ask "is this one of mine".
-        assert_eq!(
-            Addr::read(&shown),
-            Some(want),
-            "`{shown}` did not read back"
-        );
-        let verb = if matches!(want, Addr::Target(_)) {
-            "CUT"
-        } else {
-            "PUT"
-        };
-        let ops = match verb {
-            "CUT" => format!("CUT {shown}"),
-            _ => format!("PUT {shown}:\n+x"),
-        };
-        let patch = parse(&format!("[f.rs#AAAA]\n{ops}\n"))
+        assert_eq!(Target::read(&shown), Some(want), "`{shown}` did not read back");
+        let patch = parse(&format!("[f.rs#AAAA]\nCUT {shown}\n"))
             .unwrap_or_else(|e| panic!("`{shown}` does not parse: {e}"));
         let got = match &patch.sections[0].ops[0] {
-            Op::Cut { target, .. } | Op::Replace { target, .. } => Addr::Target(*target),
-            Op::InsertBefore { line, .. } => Addr::Before(*line),
-            Op::InsertAfter { at, .. } => Addr::After(*at),
+            Op::Cut { target, .. } => *target,
             other => panic!("`{shown}` parsed as {other:?}"),
         };
         assert_eq!(got, want, "`{shown}` round-tripped to something else");
     }
+
+    // Direction reads back to the site it names: above/below a line, past
+    // either edge of a range, above a block or past where it closes.
+    for (spec, kind, n) in [
+        ("3:UP", "before", 3),
+        ("3:DOWN", "after", 3),
+        ("2-4:UP", "before", 2),
+        ("2-4:DOWN", "after", 4),
+        ("2*:UP", "before", 2),
+        ("4*:DOWN", "afterblock", 4),
+    ] {
+        let patch = parse(&format!("[f.rs#AAAA]\nPUT {spec}:\n+x\n")).unwrap();
+        let ok = match &patch.sections[0].ops[0] {
+            Op::InsertBefore { line, .. } => kind == "before" && *line == n,
+            Op::InsertAfter { at, .. } => match (kind, at) {
+                ("after", LinePos::At(m)) => *m == n,
+                ("afterblock", LinePos::AfterBlock(m)) => *m == n,
+                _ => false,
+            },
+            _ => false,
+        };
+        assert!(ok, "`PUT {spec}:` parsed to the wrong site");
+    }
 }
 
 #[test]
-fn a_gap_under_cut_is_told_which_lines_it_meant() {
-    // `CUT` takes lines; the three gap forms hold none. Naming the repair with
-    // the number the model already wrote is what keeps it to one turn.
+fn a_direction_on_a_cut_is_refused() {
+    // Direction lives on PUT; `CUT` takes lines or a block, and a `:UP` or
+    // `:DOWN` on one names a position nothing cuts from. The whole grammar is
+    // the answer, since the address forms it lists are all `CUT` takes.
     let says = |ops: &str| {
         parse(&format!("[f.rs#AAAA]\n{ops}\n"))
             .unwrap_err()
             .to_string()
     };
-    assert!(says("CUT 2<").contains("`CUT 2-2`"), "{}", says("CUT 2<"));
-    assert!(says("CUT 2>").contains("`CUT 2-2`"), "{}", says("CUT 2>"));
-    assert!(says("CUT 2*>").contains("`CUT 2*`"), "{}", says("CUT 2*>"));
+    assert!(
+        says("CUT 2:UP").contains("a line number and a suffix"),
+        "{}",
+        says("CUT 2:UP")
+    );
+    assert!(
+        says("CUT 2>").contains("a line number and a suffix"),
+        "{}",
+        says("CUT 2>")
+    );
 
     // A range missing its end says so, rather than quoting nothing at all.
     assert!(
@@ -447,13 +466,23 @@ fn a_gap_under_cut_is_told_which_lines_it_meant() {
 }
 
 #[test]
+fn a_put_direction_is_up_down_or_nothing() {
+    let err = edit(SRC, "PUT 2:LEFT:\n+x\n").unwrap_err().to_string();
+    assert!(
+        err.contains("after the colon, expected `UP`, `DOWN` or nothing"),
+        "{err}"
+    );
+    assert!(edit(SRC, "PUT 2:UP:\n+up\n").is_ok());
+    assert!(edit(SRC, "PUT 2:DOWN:\n+down\n").is_ok());
+}
+#[test]
 fn a_register_pastes_at_every_address_that_takes_a_body() {
     let says = |ops: &str| parse(&format!("[f.rs#AAAA]\n{ops}\n"));
     for spec in [
-        "PUT 1< @h",
-        "PUT 4> @h",
+        "PUT 1:UP @h",
+        "PUT 4:DOWN @h",
         "PUT 1-1 @h",
-        "PUT 2*> @h",
+        "PUT 2*:DOWN @h",
         "PUT 2* @h",
     ] {
         assert!(says(&format!("CUT 2-3 @h\n{spec}")).is_ok(), "{spec}");
@@ -476,7 +505,7 @@ fn paths_lists_what_the_caller_must_load() {
 #[test]
 fn landed_reports_new_numbering_so_a_second_edit_needs_no_re_read() {
     let src = format!(
-        "[a.rs#{}]\nPUT 1-1:\n+a\n+b\n+c\nPUT 4>:\n+tail\n",
+        "[a.rs#{}]\nPUT 1-1:\n+a\n+b\n+c\nPUT 4:DOWN:\n+tail\n",
         tag(SRC)
     );
     let plan = apply(&parse(&src).unwrap(), &files(&[("a.rs", SRC)]), &NoBlocks).unwrap();
@@ -533,8 +562,8 @@ fn a_verb_less_op_line_names_the_repair() {
     );
     assert!(err.contains("did you mean `PUT 1-2:`?"), "{err}");
 
-    let err = edit(SRC, "3>:\n+x\n").unwrap_err().to_string();
-    assert!(err.contains("did you mean `PUT 3>:`?"), "{err}");
+    let err = edit(SRC, "3*:\n+x\n").unwrap_err().to_string();
+    assert!(err.contains("did you mean `PUT 3*:`?"), "{err}");
 }
 
 #[test]

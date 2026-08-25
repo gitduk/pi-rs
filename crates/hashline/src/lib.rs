@@ -4,7 +4,7 @@ mod apply;
 mod parse;
 
 pub use apply::{Change, Landed, Plan, apply};
-pub use parse::{Addr, FORMS, Form, parse};
+pub use parse::{FORMS, Form, parse};
 
 /// Content hash shown as `[path#TAG]`. Recomputing it beats storing a snapshot
 /// per read: a file that changed underneath the model no longer matches.
@@ -20,7 +20,7 @@ pub fn tag(content: &str) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinePos {
     At(usize),
-    /// `>N*` — after the construct opening at N, wherever it closes.
+    /// From `N*:DOWN` — after the construct opening at N, wherever it closes.
     AfterBlock(usize),
 }
 
@@ -32,7 +32,9 @@ pub enum Target {
         start: usize,
         end: usize,
     },
-    /// `N*` — the construct opening at N, through wherever it closes.
+    /// `N*` — the construct opening at N, through wherever it closes. The
+    /// only two address forms there are; `:UP`/`:DOWN` belong to `PUT`, not
+    /// to an address.
     Block {
         line: usize,
     },

@@ -914,7 +914,7 @@ async fn every_form_the_table_lists_is_one_the_parser_takes() {
             "the table lists `{named}`, parser says {err:?}"
         );
     }
-    assert!(hashline::FORMS.len() >= 5, "the table emptied out");
+    assert!(hashline::FORMS.len() >= 2, "the table emptied out");
 }
 
 #[tokio::test]

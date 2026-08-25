@@ -41,7 +41,7 @@ fn numbered_throughout(text: &str) -> bool {
         let Some((n, _)) = line.split_once(':') else {
             return false;
         };
-        if hashline::Addr::read(n).is_none() {
+        if hashline::Target::read(n).is_none() {
             return false;
         }
         any = true;
