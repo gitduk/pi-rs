@@ -20,7 +20,7 @@ pub struct Editor {
     /// The painted first-row gutter, so the theme can restyle it.
     prompt: String,
     /// The same gutter for a `!` line: the bang takes the prompt's place, so
-    /// `!cmd` reads as a command rather than `› !cmd`.
+    /// `! cmd` reads as a command rather than `› ! cmd`.
     prompt_bang: String,
 }
 
@@ -228,9 +228,7 @@ impl Editor {
     /// its own is a row the count does not know about.
     pub fn view(&self, width: usize) -> (Vec<String>, (u16, u16)) {
         // A line starting with `!` is a shell command; the bang takes the
-        // prompt's place so the line reads `!cmd` rather than `› !cmd`. The
-        // bare bang is one column, where the plain prompt's icon takes two
-        // (icon plus space), so the gutter and continuation indent follow.
+        // prompt's place so the line reads `! cmd` rather than `› ! cmd`.
         let bang = self.text.starts_with('!');
         let body = if bang { &self.text[1..] } else { self.text.as_str() };
         let cursor = if bang {
@@ -238,9 +236,8 @@ impl Editor {
         } else {
             self.cursor
         };
-        let gutter = if bang { GUTTER - 1 } else { GUTTER };
 
-        let avail = width.saturating_sub(gutter).max(1);
+        let avail = width.saturating_sub(GUTTER).max(1);
         let mut rows: Vec<String> = Vec::new();
         let mut row = String::new();
         let mut used = 0usize;
@@ -249,7 +246,7 @@ impl Editor {
         for (i, ch) in body.char_indices() {
             if ch == '\n' {
                 if i == cursor {
-                    caret = Some((rows.len() as u16, (gutter + used) as u16));
+                    caret = Some((rows.len() as u16, (GUTTER + used) as u16));
                 }
                 rows.push(std::mem::take(&mut row));
                 used = 0;
@@ -263,12 +260,12 @@ impl Editor {
             // After the wrap, so a caret sitting exactly on the break lands at
             // the start of the new row rather than off the end of the old one.
             if i == cursor {
-                caret = Some((rows.len() as u16, (gutter + used) as u16));
+                caret = Some((rows.len() as u16, (GUTTER + used) as u16));
             }
             row.push(ch);
             used += w;
         }
-        let caret = caret.unwrap_or((rows.len() as u16, (gutter + used) as u16));
+        let caret = caret.unwrap_or((rows.len() as u16, (GUTTER + used) as u16));
         rows.push(row);
 
         let prompt = if bang {
@@ -276,14 +273,10 @@ impl Editor {
         } else {
             self.prompt.as_str()
         };
-        // The continuation indent is one column under a bare-bang gutter so a
-        // wrapped line stays aligned under the first, as the plain prompt's
-        // two-column gutter keeps it in line with its own continuation.
-        let cont = if bang { " " } else { CONT };
         let painted = rows
             .into_iter()
             .enumerate()
-            .map(|(i, r)| if i == 0 { prompt } else { cont }.to_string() + &r)
+            .map(|(i, r)| if i == 0 { prompt } else { CONT }.to_string() + &r)
             .collect();
         (painted, caret)
     }
@@ -334,11 +327,12 @@ fn floor_boundary(s: &str, mut i: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::Editor;
+
     /// An editor with the two painted gutters a real Ui would set, so view
     /// tests see the prompt a user would.
     fn typed(s: &str) -> Editor {
         let mut e = Editor::default();
-        e.set_prompts("› ".into(), "!".into());
+        e.set_prompts("› ".into(), "! ".into());
         e.insert_str(s);
         e
     }
@@ -395,8 +389,8 @@ mod tests {
     fn a_bang_line_puts_the_bang_in_the_prompt() {
         let e = typed("!git status");
         let (rows, caret) = e.view(40);
-        assert_eq!(rows[0], "!git status", "the bang takes the icon's place");
-        assert_eq!(caret, (0, 11), "the bang column plus the ten characters");
+        assert_eq!(rows[0], "! git status", "the bang takes the icon's place");
+        assert_eq!(caret, (0, 12), "GUTTER 2 + the ten characters of `git status`");
 
         let plain = typed("git status");
         assert_eq!(plain.view(40).0[0], "› git status");
@@ -409,14 +403,15 @@ mod tests {
         e.delete();
         assert_eq!(e.view(40).0[0], "› git");
     }
+
     #[test]
     fn a_bang_line_wraps_with_the_bang_in_the_gutter() {
         let e = typed("!abcdefgh");
-        // Width 6 leaves 5 columns after the one-column bang gutter, so the
-        // body wraps exactly as it would under the plain two-column gutter.
+        // Width 6 leaves 4 columns after the gutter, as in the plain case;
+        // the bang does not eat a column of the body.
         let (rows, caret) = e.view(6);
         assert_eq!(rows.len(), 2);
-        assert_eq!(caret, (1, 4), "one gutter column + the last row's 3 chars");
+        assert_eq!(caret, (1, 6));
     }
 
     #[test]

@@ -241,7 +241,7 @@ impl Ui {
         commands: Arc<Vec<Command>>,
         paint: Paint,
     ) -> Self {
-        let prompt = format!("{} ", Self::paint_prompt(&paint, &paint.theme.prompt.icon));
+        let prompt = Self::paint_prompt(&paint, &paint.theme.prompt.icon);
         let bang_prompt = Self::paint_prompt(&paint, "!");
         let banner = paint.on(&paint.theme.muted, BANNER);
         let mut editor = Editor::default();
@@ -275,11 +275,9 @@ impl Ui {
         }
     }
 
-    /// The prompt icon as the terminal paints it. The plain gutter adds the
-    /// space after it; the `!` gutter is the bare bang, so `!cmd` reads as
-    /// typed rather than `! cmd`.
+    /// The prompt gutter as the terminal shows it, colour and all.
     fn paint_prompt(paint: &Paint, icon: &str) -> String {
-        paint.on(&paint.theme.prompt.color, icon)
+        format!("{} ", paint.on(&paint.theme.prompt.color, icon))
     }
     fn say(&mut self, line: impl Into<String>) {
         self.above.push(line.into());
@@ -530,7 +528,7 @@ impl Ui {
 
     fn set_theme(&mut self, theme: Arc<render::Theme>) {
         self.paint.theme = theme;
-        self.prompt = format!("{} ", Self::paint_prompt(&self.paint, &self.paint.theme.prompt.icon));
+        self.prompt = Self::paint_prompt(&self.paint, &self.paint.theme.prompt.icon);
         self.bang_prompt = Self::paint_prompt(&self.paint, "!");
         self.editor
             .set_prompts(self.prompt.clone(), self.bang_prompt.clone());
@@ -552,7 +550,7 @@ impl Ui {
         for (i, part) in line.split('\n').enumerate() {
             let (gutter, body) = if i == 0 {
                 match part.strip_prefix('!') {
-                    Some(rest) => (self.bang_prompt.clone(), rest),
+                    Some(rest) => (self.bang_prompt.clone(), rest.trim_start()),
                     None => (self.prompt.clone(), part),
                 }
             } else {
