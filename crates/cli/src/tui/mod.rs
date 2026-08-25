@@ -798,6 +798,9 @@ impl Tui {
             self.save_history();
             match self.core.command(&line, &self.totals) {
                 Step::Quit => break,
+                Step::Bash(command) => {
+                    self.ui.above.extend(self.core.bash(&command).await);
+                }
                 Step::Handled(lines) => {
                     self.ui.above.extend(lines);
                     // The key map lives in two places; a reload has to reach
