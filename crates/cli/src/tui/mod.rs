@@ -799,7 +799,31 @@ impl Tui {
             match self.core.command(&line, &self.totals) {
                 Step::Quit => break,
                 Step::Bash(command) => {
-                    self.ui.above.extend(self.core.bash(&command).await);
+                    // The command runs off the key loop so Esc can stop it,
+                    // exactly as an agent turn can be interrupted.
+                    let cancel = CancellationToken::new();
+                    let lines = {
+                        let Self { core, ui, keys, .. } = &mut self;
+                        let run = core.bash(&command, cancel.clone());
+                        tokio::pin!(run);
+                        loop {
+                            ui.flush();
+                            tokio::select! {
+                                done = &mut run => break done,
+                                Some(key) = keys.recv() => match ui.key(key, true) {
+                                    Act::Interrupt => { cancel.cancel(); ui.stopping = true; }
+                                    Act::Submit(line) => ui.queued.push(line),
+                                    // Nothing else can stop a command that will not stop.
+                                    Act::Quit => {
+                                        ui.screen.leave();
+                                        std::process::exit(130)
+                                    }
+                                    Act::None => {}
+                                },
+                            }
+                        }
+                    };
+                    self.ui.above.extend(lines);
                 }
                 Step::Handled(lines) => {
                     self.ui.above.extend(lines);

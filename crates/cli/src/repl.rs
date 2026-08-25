@@ -1,7 +1,8 @@
 use std::borrow::Cow;
 
 use agent::{Agent, Session, Totals};
-use tools::{Ctx, Tool};
+use tokio_util::sync::CancellationToken;
+use tools::{Ctx, Tool, ToolError};
 use tools::skills::Skill;
 
 use crate::session::Store;
@@ -713,13 +714,17 @@ impl Repl {
 
     /// Run what `!` named: show the output, and record the command and its
     /// result in the transcript so the model answers with it in view. Same
-    /// runner, workspace and timeout as the model's own `bash` tool.
-    pub async fn bash(&mut self, command: &str) -> Vec<String> {
+    /// runner, workspace and timeout as the model's own `bash` tool. The
+    /// surface hands in a token so Ctrl-C (line mode) or Esc (terminal) can
+    /// stop the command instead of leaving the caller stuck for the timeout.
+    pub async fn bash(&mut self, command: &str, cancel: CancellationToken) -> Vec<String> {
+        let ctx = self.ctx.clone().with_cancel(cancel);
         let out = tools::bash::Bash
-            .execute(serde_json::json!({ "command": command }), &self.ctx)
+            .execute(serde_json::json!({ "command": command }), &ctx)
             .await;
         let out = match out {
             Ok(out) => out,
+            Err(ToolError::Cancelled) => return vec!["cancelled".into()],
             Err(e) => return vec![format!("failed to run `{command}`: {e}")],
         };
         let body = out.flatten();
@@ -727,8 +732,14 @@ impl Repl {
             "Ran `{command}`\n{}",
             if body.is_empty() { "(no output)" } else { &body }
         );
-        self.session.log.push(brain::message::Message::user(text));
-        let mut said: Vec<String> = body.lines().map(str::to_string).collect();
+        self.session.log.append_user(text);
+        let mut said: Vec<String> = body
+            .lines()
+            // The tags wrap the model's copy; the terminal shows the output
+            // itself.
+            .filter(|l| !matches!(*l, "<stdout>" | "</stdout>" | "<stderr>" | "</stderr>"))
+            .map(str::to_string)
+            .collect();
         if let Err(e) = self.save() {
             said.push(format!("warning: the transcript was not saved: {e}"));
         }

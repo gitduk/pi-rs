@@ -140,6 +140,17 @@ impl Log {
         id
     }
 
+    /// Append a user turn, folding it into the last user message when the
+    /// transcript already ends on one: both wires require the roles to
+    /// alternate, and a message that merely grows is one less history to
+    /// replay. This is the one way a caller adds a user turn.
+    pub fn append_user(&mut self, text: impl Into<String>) -> EntryId {
+        match self.live().last() {
+            Some((id, Message::User { .. })) => self.amend(*id, text),
+            _ => self.push(Message::user(text)),
+        }
+    }
+
     /// Graft a new prompt onto a session that may have died mid-turn.
     ///
     /// An assistant turn whose calls were never answered has to leave the view:
@@ -163,15 +174,7 @@ impl Log {
             });
         }
 
-        match self.live().last() {
-            Some((id, Message::User { .. })) => {
-                let id = *id;
-                self.amend(id, prompt);
-            }
-            _ => {
-                self.push(Message::user(prompt.into()));
-            }
-        }
+        self.append_user(prompt);
     }
 
     pub fn entries(&self) -> &[Entry] {
@@ -529,5 +532,18 @@ mod resume_tests {
         l.resume("first");
         assert_eq!(l.context().len(), 1);
         assert_eq!(l.context()[0].text(), "first");
+    }
+
+    #[test]
+    fn a_second_user_turn_folds_into_the_first_so_the_roles_keep_alternating() {
+        let mut l = Log::new();
+        l.append_user("first");
+        l.append_user("second");
+        l.append_user("third");
+        // The whole point: two user turns in a row are rejected by both wires.
+        assert_eq!(roles(&l), vec!["user"]);
+        assert_eq!(l.context()[0].text(), "firstsecondthird");
+        // The folds are records, not rewrites: each append is an entry.
+        assert_eq!(l.messages().count(), 1);
     }
 }
