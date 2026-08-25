@@ -833,7 +833,12 @@ impl Agent {
                 (Action::Reject(why), _) => failed(call, why.clone(), echoes),
                 (_, Some(Err(ToolError::Cancelled))) => return Err(AgentError::Cancelled),
                 (_, Some(Err(e))) => {
-                    let body = e.to_string();
+                    let mut body = e.to_string();
+                    if let Some(code) = e.code() {
+                        // A stable code lets the model branch on what happened
+                        // instead of parsing the prose; the prose still leads.
+                        body = format!("Error: {body} [code: {code}]");
+                    }
                     say(
                         tx,
                         Event::ToolEnd {

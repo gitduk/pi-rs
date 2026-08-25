@@ -26,6 +26,7 @@ pub mod registry;
 mod rows;
 pub mod skill;
 pub mod skills;
+pub mod spill;
 pub mod todo;
 pub mod walk;
 pub mod workspace;
@@ -68,6 +69,27 @@ pub enum ToolError {
 
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+
+    /// The command ran past its deadline and the process group was killed.
+    #[error("timed out after {ms}ms; the command and everything it spawned were killed")]
+    Timeout { ms: u64 },
+
+    /// An over-long output could not be persisted for later reading.
+    #[error("could not spill oversized output: {0}")]
+    Spill(String),
+}
+
+impl ToolError {
+    /// A stable code the model can branch on, where one exists. The loop
+    /// appends it to the result as `[code: {code}]`; codes never change for a
+    /// given failure, whatever the prose says.
+    pub fn code(&self) -> Option<&'static str> {
+        match self {
+            ToolError::Timeout { .. } => Some("TOOL_TIMEOUT"),
+            ToolError::Spill(_) => Some("SPILL_FAILED"),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -143,6 +165,11 @@ pub struct Ctx {
     /// writers to one path otherwise read the same bytes, both succeed, and
     /// one change vanishes without anyone being told.
     pub file_locks: FileLocks,
+    /// The session this context runs in. None in tests and for embedders;
+    /// spills then land in the process temp directory.
+    session: Option<String>,
+    /// Where over-long outputs land, `<root>/<session>/<n>.log`.
+    spill_root: std::path::PathBuf,
 }
 
 pub type FileLocks =
@@ -158,6 +185,8 @@ impl Ctx {
             todos: Default::default(),
             yielded: Default::default(),
             file_locks: Default::default(),
+            session: None,
+            spill_root: spill::default_root(None),
         }
     }
 }
@@ -174,6 +203,34 @@ impl Ctx {
     pub fn with_fresh_result(mut self) -> Self {
         self.yielded = Default::default();
         self
+    }
+
+    /// Name the session, and with it the directory spills are kept in. A
+    /// resumed session keeps its id, so its new spills rejoin the old ones.
+    pub fn with_session(mut self, id: impl Into<String>) -> Self {
+        let ns = spill::sanitize(&id.into());
+        self.session = Some(ns.clone());
+        self.spill_root = spill::default_root(Some(&ns));
+        self
+    }
+
+    /// Where spills land, overriding the session default. Tests and alternate
+    /// hosts point this at a directory of their own instead of the user's.
+    pub fn with_spill_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
+        self.spill_root = root.into();
+        self
+    }
+
+    /// The namespace new spills are filed under.
+    pub fn spill_namespace(&self) -> &str {
+        self.session.as_deref().unwrap_or("default")
+    }
+
+    /// Resolve a `spill:` locator to the file it names. The workspace gate is
+    /// deliberately not applied: spill files live outside the workspace, and
+    /// only locators of the shape our own writer mints are accepted.
+    pub fn spill_path(&self, locator: &str) -> Result<std::path::PathBuf, ToolError> {
+        spill::locate(&self.spill_root, locator)
     }
 
     /// Hold this while mutating `path`. Keyed on the resolved path, so two
