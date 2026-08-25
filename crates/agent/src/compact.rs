@@ -163,16 +163,16 @@ fn result_at(messages: &mut [Message], i: usize, j: usize) -> Option<&mut ToolRe
     }
 }
 
-/// The result an exchange that `k` (a tool call) opens carries — `k + 1` is
-/// its answering message. The drop tier consults it for the same protection
-/// that result elision applies.
-fn exchange_result(work: &[Message], k: usize) -> Option<&ToolResult> {
+/// Whether the exchange that `k` (a tool call) opens may be dropped whole —
+/// every result in its answering message must be one elision would take. The
+/// drop tier owes the skill body the same protection the elision tier does.
+fn exchange_droppable(work: &[Message], k: usize) -> bool {
     match &work[k + 1] {
-        Message::User { content } => content.iter().find_map(|c| match c {
-            UserContent::ToolResult(r) => Some(r),
-            _ => None,
+        Message::User { content } => content.iter().all(|c| match c {
+            UserContent::ToolResult(r) => !PROTECTED.contains(&r.name.as_str()),
+            _ => true,
         }),
-        _ => None,
+        _ => true,
     }
 }
 
@@ -293,12 +293,7 @@ pub fn plan(log: &Log, budget: usize, policy: &Policy) -> (Compaction, Report) {
     while estimate::tokens(&work) > budget && work.len() >= 4 {
         let Some(start) = (1..=work.len() - 2)
             .step_by(2)
-            .find(|&k| {
-                let Some(r) = exchange_result(&work, k) else {
-                    return true;
-                };
-                !PROTECTED.contains(&r.name.as_str())
-            })
+            .find(|&k| exchange_droppable(&work, k))
         else {
             break;
         };
