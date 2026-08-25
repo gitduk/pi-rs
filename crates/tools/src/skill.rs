@@ -156,7 +156,7 @@ impl Tool for SkillTool {
                 .await
                 .map_err(|e| ToolError::Invalid(format!("{}: {e}", args.name)))?;
             let out = instructions(skill, &text);
-            return Ok(ToolOutput::text(out).with_preview(format!("skill {}", skill.name)));
+            return Ok(ToolOutput::text(out).with_preview(skill.name.clone()));
         };
 
         // Skills live outside the workspace, so the workspace gate does not

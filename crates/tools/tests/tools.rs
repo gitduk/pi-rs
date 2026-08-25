@@ -673,25 +673,38 @@ async fn edit_cannot_reach_outside_the_workspace() {
 }
 
 #[tokio::test]
-async fn bash_previews_its_output_not_the_stdout_marker() {
+async fn bash_previews_the_command_that_ran() {
     let (_d, c) = ctx();
     let out = tools::bash::Bash
         .execute(json!({ "command": "echo first; echo second" }), &c)
         .await
         .unwrap();
-    // The result opens with `<stdout>`, which tells a progress line nothing.
+    // A progress line says what ran, not what it printed — the output is the
+    // result body, which opens with the `<stdout>` marker.
     assert!(out.flatten().starts_with("<stdout>"));
-    assert_eq!(out.preview(), "first");
+    assert_eq!(out.preview(), "echo first; echo second");
 }
 
 #[tokio::test]
-async fn a_failing_command_previews_the_error_and_the_code() {
+async fn a_multiline_command_previews_only_its_first_line() {
+    let (_d, c) = ctx();
+    let out = tools::bash::Bash
+        .execute(json!({ "command": "echo one\necho two" }), &c)
+        .await
+        .unwrap();
+    // The preview feeds a one-line progress row; a newline would leak the
+    // rest into the diff-row renderer as fake structure.
+    assert_eq!(out.preview(), "echo one");
+}
+
+#[tokio::test]
+async fn a_failing_command_previews_the_command_too() {
     let (_d, c) = ctx();
     let out = tools::bash::Bash
         .execute(json!({ "command": "echo boom >&2; exit 2" }), &c)
         .await
         .unwrap();
-    assert_eq!(out.preview(), "boom · exit 2");
+    assert_eq!(out.preview(), "echo boom >&2; exit 2");
 }
 
 #[tokio::test]
