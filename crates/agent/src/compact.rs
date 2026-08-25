@@ -24,12 +24,25 @@ pub struct Policy {
     /// Results within this many estimated tokens of the end are left alone —
     /// they are what the agent is working from right now.
     pub protect_tail: usize,
+    /// Text over this many chars is pruned to a bounded head and tail instead
+    /// of a one-line notice. The defaults keep both ends of a long output —
+    /// the part of a test run that says what broke — without the middle that
+    /// made it over budget. `prune_chars` is large enough for `head_chars`
+    /// plus the marker plus `tail_chars`, so one pass lands under the
+    /// threshold; a policy that breaks that still converges, because an
+    /// elided result is never elided twice.
+    pub prune_chars: usize,
+    pub head_chars: usize,
+    pub tail_chars: usize,
 }
 
 impl Default for Policy {
     fn default() -> Self {
         Self {
             protect_tail: 16_000,
+            prune_chars: 8_192,
+            head_chars: 4_096,
+            tail_chars: 1_024,
         }
     }
 }
@@ -54,22 +67,47 @@ impl Report {
     }
 }
 
-fn elide(result: &mut ToolResult, notice: &str) -> bool {
+/// Replace a result's content with a bounded stand-in. Over the prune
+/// threshold the notice leads a head and a tail; under it the notice alone
+/// stands for the whole, which is all a superseded or empty result is worth.
+/// Returns the replacement text, or nothing when the result must be left
+/// alone; the caller records it, and the view derives from the record, so
+/// plan's scratch copy never reaches the session.
+fn elide(result: &mut ToolResult, notice: &str, policy: &Policy) -> Option<String> {
     if PROTECTED.contains(&result.name.as_str()) {
-        return false;
+        return None;
     }
     let already = matches!(
         result.content.as_slice(),
         [ToolResultContent::Text(t)] if t.text.starts_with("[elided")
     );
     if already {
-        return false;
+        return None;
     }
+    let text = result.flatten_text();
+    let replacement = pruned(notice, &text, policy);
     result.content = vec![ToolResultContent::Text(Text {
-        text: notice.to_string(),
+        text: replacement.clone(),
     })];
     result.useless = false;
-    true
+    Some(replacement)
+}
+
+/// One text block standing in for a pruned result: the notice, a bounded
+/// head, a marker naming how much went, and a bounded tail. Chars are code
+/// points, so slicing never splits a surrogate pair.
+fn pruned(notice: &str, text: &str, policy: &Policy) -> String {
+    let c = text.chars().count();
+    if c <= policy.prune_chars {
+        return notice.to_string();
+    }
+    let head: String = text.chars().take(policy.head_chars).collect();
+    let tail: String = text
+        .chars()
+        .skip(c.saturating_sub(policy.tail_chars))
+        .collect();
+    let dropped = c.saturating_sub(policy.head_chars + policy.tail_chars);
+    format!("{notice}\n\n{head}\n\n[… {dropped} chars elided …]\n\n{tail}")
 }
 
 /// What makes two results interchangeable. A later result under the same key
@@ -125,6 +163,19 @@ fn result_at(messages: &mut [Message], i: usize, j: usize) -> Option<&mut ToolRe
     }
 }
 
+/// The result an exchange that `k` (a tool call) opens carries — `k + 1` is
+/// its answering message. The drop tier consults it for the same protection
+/// that result elision applies.
+fn exchange_result(work: &[Message], k: usize) -> Option<&ToolResult> {
+    match &work[k + 1] {
+        Message::User { content } => content.iter().find_map(|c| match c {
+            UserContent::ToolResult(r) => Some(r),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
 /// Decide how to shrink the log's context to fit `budget`, cheapest measure
 /// first.
 ///
@@ -166,12 +217,12 @@ pub fn plan(log: &Log, budget: usize, policy: &Policy) -> (Compaction, Report) {
         let Some(r) = result_at(work, i, j) else {
             return false;
         };
-        if !elide(r, &notice) {
+        let Some(replacement) = elide(r, &notice, policy) else {
             return false;
-        }
+        };
         record.elisions.push(Elision {
             call: r.call.clone(),
-            notice,
+            notice: replacement,
         });
         true
     };
@@ -228,7 +279,7 @@ pub fn plan(log: &Log, budget: usize, policy: &Policy) -> (Compaction, Report) {
             if estimate::tokens(&work) <= budget || *suffix < policy.protect_tail {
                 break;
             }
-            let notice = "[elided to fit the context window — read it again if you need it]";
+            let notice = "[elided to fit the context window]";
             if note(&mut record, &mut work, *i, *j, notice.into()) {
                 report.aged_out += 1;
             }
@@ -236,13 +287,26 @@ pub fn plan(log: &Log, budget: usize, policy: &Policy) -> (Compaction, Report) {
     }
 
     // Last resort: whole exchanges leave the view, oldest first. The opening
-    // message is the task itself and never goes.
+    // message is the task itself and never goes, and neither does an exchange
+    // whose result elision would refuse — the skill body is instructions the
+    // agent is in the middle of following, not spare context.
     while estimate::tokens(&work) > budget && work.len() >= 4 {
-        if std::mem::discriminant(&work[1]) == std::mem::discriminant(&work[2]) {
+        let Some(start) = (1..=work.len() - 2)
+            .step_by(2)
+            .find(|&k| {
+                let Some(r) = exchange_result(&work, k) else {
+                    return true;
+                };
+                !PROTECTED.contains(&r.name.as_str())
+            })
+        else {
+            break;
+        };
+        if std::mem::discriminant(&work[start]) == std::mem::discriminant(&work[start + 1]) {
             break;
         }
-        work.drain(1..=2);
-        record.dropped.extend(ids.drain(1..=2));
+        work.drain(start..=start + 1);
+        record.dropped.extend(ids.drain(start..=start + 1));
         report.dropped += 2;
     }
 

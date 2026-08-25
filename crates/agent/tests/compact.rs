@@ -98,15 +98,21 @@ fn an_older_read_of_the_same_path_is_superseded_and_the_newest_survives() {
         call("c2", "read", json!({ "path": "a.rs" })),
         result("c2", "read", &big(9_000)),
     ];
-    // Between the two sizes: superseding one read is enough, and the drop tier
-    // — which would move every index — is never reached.
-    let r = compact(&mut m, 4_000, &Policy::default());
+    // 9k chars sits over the prune threshold, so the superseded read keeps a
+    // bounded head and tail; once that lands, the drop tier — which would
+    // move every index — is never reached.
+    let r = compact(&mut m, 5_500, &Policy::default());
 
     assert_eq!(r.superseded, 1);
     assert_eq!(r.dropped, 0, "{r:?}");
     assert!(
         body_of(&m[2]).contains("superseded by a later read"),
         "{}",
+        body_of(&m[2])
+    );
+    assert!(
+        body_of(&m[2]).contains("chars elided"),
+        "head and tail kept, not a bare notice: {}",
         body_of(&m[2])
     );
     assert!(
@@ -193,9 +199,7 @@ fn the_working_tail_survives_while_older_results_age_out() {
     let r = compact(
         &mut m,
         before / 2,
-        &Policy {
-            protect_tail: 16_000,
-        },
+        &Policy::default(),
     );
 
     assert!(r.aged_out > 0, "{r:?}");
@@ -209,6 +213,53 @@ fn the_working_tail_survives_while_older_results_age_out() {
 }
 
 #[test]
+fn an_aged_out_result_keeps_its_head_and_tail() {
+    let mut m = vec![
+        Message::user("go"),
+        call("c1", "bash", json!({ "command": "cmd" })),
+        // The shape of a test run: a distinctive head, a long boring middle,
+        // and the failure summary at the tail.
+        result(
+            "c1",
+            "bash",
+            &format!("HEAD-BEGIN\n{}\nTAIL-END", big(30_000)),
+        ),
+    ];
+    let r = compact(
+        &mut m,
+        500,
+        &Policy { protect_tail: 0, ..Policy::default() },
+    );
+
+    assert_eq!(r.aged_out, 1, "{r:?}");
+    let body = body_of(&m[2]);
+    assert!(body.starts_with("[elided"), "{}", body);
+    assert!(body.contains("HEAD-BEGIN"), "{body}");
+    assert!(body.contains("TAIL-END"), "{body}");
+    assert!(body.contains("chars elided"), "{body}");
+    assert_balanced(&m);
+}
+
+#[test]
+fn a_result_under_the_prune_threshold_keeps_only_the_notice() {
+    let mut m = vec![
+        Message::user("go"),
+        call("c1", "bash", json!({ "command": "cmd" })),
+        result("c1", "bash", &big(200)),
+    ];
+    let r = compact(
+        &mut m,
+        100,
+        &Policy { protect_tail: 0, ..Policy::default() },
+    );
+
+    assert_eq!(r.aged_out, 1, "{r:?}");
+    let body = body_of(&m[2]);
+    assert_eq!(body, "[elided to fit the context window]", "{body}");
+    assert_balanced(&m);
+}
+
+#[test]
 fn dropping_history_keeps_the_task_and_stays_balanced() {
     // The weight sits in assistant prose, which no amount of result elision
     // reclaims — dropping whole exchanges is the only measure left.
@@ -217,7 +268,7 @@ fn dropping_history_keeps_the_task_and_stays_balanced() {
         m.push(Message::assistant_text(big(40_000)));
         m.push(Message::user(format!("next {i}")));
     }
-    let r = compact(&mut m, 20_000, &Policy { protect_tail: 0 });
+    let r = compact(&mut m, 20_000, &Policy { protect_tail: 0, ..Policy::default() });
 
     assert!(r.dropped > 0, "{r:?}");
     assert_eq!(
@@ -240,9 +291,9 @@ fn compaction_converges_instead_of_shrinking_forever() {
         ));
         m.push(result(&format!("c{i}"), "read", &big(20_000)));
     }
-    let first = compact(&mut m, 2_000, &Policy { protect_tail: 0 });
+    let first = compact(&mut m, 2_000, &Policy { protect_tail: 0, ..Policy::default() });
     let snapshot = m.clone();
-    let second = compact(&mut m, 2_000, &Policy { protect_tail: 0 });
+    let second = compact(&mut m, 2_000, &Policy { protect_tail: 0, ..Policy::default() });
 
     // A second pass over an already-compacted transcript must find nothing.
     assert_eq!(m, snapshot, "{second:?}");
@@ -269,7 +320,7 @@ fn an_already_elided_result_is_not_counted_twice() {
             provider: None,
             name: "read".into(),
             content: vec![ToolResultContent::Text(brain::message::Text {
-                text: "[elided to fit the context window — read it again if you need it]".into(),
+                text: "[elided to fit the context window]".into(),
             })],
             is_error: false,
             useless: false,
@@ -277,7 +328,7 @@ fn an_already_elided_result_is_not_counted_twice() {
         call("c2", "read", json!({ "path": "a.rs" })),
         result("c2", "read", &big(9_000)),
     ];
-    let r: Report = compact(&mut m, 1_000, &Policy { protect_tail: 0 });
+    let r: Report = compact(&mut m, 1_000, &Policy { protect_tail: 0, ..Policy::default() });
     assert_eq!(r.superseded, 0, "already elided, nothing to reclaim: {r:?}");
 }
 
@@ -413,7 +464,7 @@ fn a_skill_body_survives_a_compaction_that_takes_everything_else() {
         call("c3", "read", json!({ "path": "a.rs" })),
         result("c3", "read", &big(9_000)),
     ];
-    let r = compact(&mut m, 4_000, &Policy { protect_tail: 0 });
+    let r = compact(&mut m, 4_000, &Policy { protect_tail: 0, ..Policy::default() });
 
     // Instructions the agent is in the middle of following are not spare
     // context, whatever the budget says.

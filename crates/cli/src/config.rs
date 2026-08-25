@@ -298,7 +298,7 @@ impl Config {
                 .max_turns
                 .or(project.defaults.max_turns)
                 .or(self.defaults.max_turns)
-                .unwrap_or(50),
+                .unwrap_or(100),
         }
     }
 
