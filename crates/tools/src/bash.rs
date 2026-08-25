@@ -1,15 +1,13 @@
 use async_trait::async_trait;
-use brain::slice::{head_bytes, tail_bytes};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::process::Stdio;
 use tokio::process::Command;
 
-use crate::{Ctx, Tier, Tool, ToolError, ToolOutput};
+use crate::{Ctx, Tier, Tool, ToolError, ToolOutput, spill};
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
-const MAX_OUTPUT: usize = 30_000;
 
 #[derive(Deserialize)]
 struct Args {
@@ -20,35 +18,7 @@ struct Args {
     cwd: Option<String>,
 }
 
-
-/// Keep both ends: the head carries what the command set out to do, the tail
-/// carries how it failed.
-fn clamp(label: &str, body: &str) -> String {
-    if body.is_empty() {
-        return String::new();
-    }
-    if body.len() <= MAX_OUTPUT {
-        return format!("<{label}>\n{body}\n</{label}>\n");
-    }
-    let half = MAX_OUTPUT / 2;
-    let (h, t) = (head_bytes(body, half), tail_bytes(body, half));
-    let dropped = body.len() - h.len() - t.len();
-    format!("<{label}>\n{h}\n… {dropped} bytes elided …\n{t}\n</{label}>\n")
-}
-
-/// Write the whole of an over-long output somewhere the model can go back to.
-/// Returns the path when there was anything worth keeping.
-fn spill(stdout: &str, stderr: &str) -> Option<String> {
-    if stdout.len() <= MAX_OUTPUT && stderr.len() <= MAX_OUTPUT {
-        return None;
-    }
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("pi-bash-{}-{n}.log", std::process::id()));
-    let whole = format!("<stdout>\n{stdout}\n</stdout>\n<stderr>\n{stderr}\n</stderr>\n");
-    std::fs::write(&path, whole).ok()?;
-    Some(path.display().to_string())
-}
+pub struct Bash;
 
 /// SIGTERM the group, then SIGKILL whatever ignored it. A build killed outright
 /// can leave a corrupt output tree, so the polite signal goes first.
@@ -69,9 +39,9 @@ async fn reap(group: Option<u32>) {
 /// `kill_on_drop`, but its descendants outlive a timeout.
 #[cfg(not(unix))]
 async fn reap(_group: Option<u32>) {}
+async fn reap(_group: Option<u32>) {}
 
-pub struct Bash;
-
+#[async_trait]
 #[async_trait]
 impl Tool for Bash {
     fn name(&self) -> &str {
@@ -149,10 +119,9 @@ impl Tool for Bash {
                 "timed out"
             );
             reap(group).await;
-            return Ok(ToolOutput::text(format!(
-                "timed out after {}ms; the command and everything it spawned were killed",
-                timeout.as_millis()
-            )));
+            return Err(ToolError::Timeout {
+                ms: timeout.as_millis() as u64,
+            });
         };
 
         let stdout = String::from_utf8_lossy(&out.stdout);
@@ -161,7 +130,8 @@ impl Tool for Bash {
 
         // Anything elided is written out first, so a build log the model needs
         // the middle of is one grep away rather than gone.
-        let spilled = spill(&stdout, &stderr);
+        let whole = format!("<stdout>\n{stdout}\n</stdout>\n<stderr>\n{stderr}\n</stderr>\n");
+        let spilled = spill::write(ctx, ctx.spill_namespace(), &whole)?;
 
         // The exit code and the command, always. What the command printed is
         // in the transcript; what it was run against — the directory — is not.
@@ -176,10 +146,10 @@ impl Tool for Bash {
         );
 
         let mut body = String::new();
-        body.push_str(&clamp("stdout", stdout.trim_end()));
-        body.push_str(&clamp("stderr", stderr.trim_end()));
-        if let Some(path) = spilled {
-            body.push_str(&format!("full output: {path}\n"));
+        body.push_str(&spill::clamp("stdout", stdout.trim_end()));
+        body.push_str(&spill::clamp("stderr", stderr.trim_end()));
+        if let Some(s) = spilled {
+            body.push_str(&format!("{}\n", s.note()));
         }
         if code != 0 {
             body.push_str(&format!("exit {code}\n"));

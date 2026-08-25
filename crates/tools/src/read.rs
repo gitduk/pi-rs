@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 
 use hashline::tag;
 
-use crate::{Ctx, Tier, Tool, ToolError, ToolOutput};
+use crate::{Ctx, Tier, Tool, ToolError, ToolOutput, spill};
 
 const DEFAULT_LIMIT: usize = 2_000;
 const MAX_LINE: usize = 2_000;
@@ -27,6 +27,19 @@ struct Args {
 
 fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_SNIFF).any(|b| *b == 0)
+}
+
+/// Deliver the assembled view. Anything over the threshold is spilled and the
+/// transcript keeps a bounded head and tail plus the locator.
+fn deliver(ctx: &Ctx, out: String) -> Result<ToolOutput, ToolError> {
+    match spill::write(ctx, ctx.spill_namespace(), &out)? {
+        None => Ok(ToolOutput::text(out)),
+        Some(s) => Ok(ToolOutput::text(format!(
+            "{}\n{}",
+            spill::prune(&out, spill::MAX_OUTPUT),
+            s.note()
+        ))),
+    }
 }
 
 pub struct Read;
@@ -70,9 +83,20 @@ impl Tool for Read {
 
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
         let args: Args = crate::parse_args(args)?;
-        let path = ctx.workspace.resolve(&args.path)?;
-        let rel = ctx.workspace.display(&path);
-
+        // A `spill:` path names a file in the session's spill directory, which
+        // the workspace gate would refuse. Only locators our own writer mints
+        // resolve; anything else is refused before the filesystem is touched.
+        let (path, rel) = match args.path.strip_prefix("spill:") {
+            Some(_) => {
+                let path = ctx.spill_path(&args.path)?;
+                (path, args.path.clone())
+            }
+            None => {
+                let p = ctx.workspace.resolve(&args.path)?;
+                let rel = ctx.workspace.display(&p);
+                (p, rel)
+            }
+        };
         let meta = tokio::fs::metadata(&path)
             .await
             .map_err(|e| ToolError::Invalid(format!("{rel}: {e}")))?;
@@ -152,7 +176,7 @@ impl Tool for Read {
                     "… declarations only, each with the range that replaces it whole. \
                      Read a range with offset and limit.\n",
                 );
-                return Ok(ToolOutput::text(out));
+                return deliver(ctx, out);
             }
         }
 
@@ -193,7 +217,7 @@ impl Tool for Read {
         }
         // The progress line shows the rows that actually came back: offset
         // may have been clamped, and the file may have ended first.
-        let mut output = ToolOutput::text(out);
+        let mut output = deliver(ctx, out)?;
         if ranged {
             output = output.with_preview(format!("[{rel}#{tag} {}-{}]", start + 1, end));
         }

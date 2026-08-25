@@ -141,13 +141,12 @@ async fn bash_runs_in_the_workspace_and_can_be_redirected() {
 #[tokio::test]
 async fn bash_times_out_without_hanging_the_turn() {
     let (_d, c) = ctx();
-    let out = run(
-        &tools::bash::Bash,
-        json!({ "command": "sleep 5", "timeout_ms": 150 }),
-        &c,
-    )
-    .await;
-    assert!(out.contains("timed out after 150ms"), "{out}");
+    let err = tools::bash::Bash
+        .execute(json!({ "command": "sleep 5", "timeout_ms": 150 }), &c)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ToolError::Timeout { ms: 150 }), "{err}");
+    assert_eq!(err.code(), Some("TOOL_TIMEOUT"));
 }
 
 #[tokio::test]
@@ -824,16 +823,67 @@ async fn an_over_long_output_is_kept_somewhere_the_model_can_reach() {
         "{}",
         &out[..90.min(out.len())]
     );
-    let path = out
+    let locator = out
         .lines()
-        .find_map(|l| l.strip_prefix("full output: "))
+        .find_map(|l| l.strip_prefix("full output: ").and_then(|l| l.split(' ').next()))
         .expect("the elided middle must be recoverable");
-    let whole = std::fs::read_to_string(path).unwrap();
+    let whole = std::fs::read_to_string(c.spill_path(locator).unwrap()).unwrap();
     assert!(
         whole.contains("MIDDLE_MARKER"),
         "the spill must hold what the result dropped"
     );
-    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(c.spill_path(locator).unwrap());
+}
+
+#[tokio::test]
+async fn read_spills_an_over_long_view_and_reads_it_back_by_locator() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace::new(dir.path()).unwrap();
+    let c = Ctx::new(ws).with_spill_root(dir.path().join("spill"));
+    let big: String = (1..=30_000).map(|i| format!("line {i}\n")).collect();
+    std::fs::write(c.workspace.root().join("big.txt"), &big).unwrap();
+
+    let out = tools::read::Read
+        .execute(
+            json!({ "path": "big.txt", "limit": 30_000, "outline": false }),
+            &c,
+        )
+        .await
+        .unwrap()
+        .flatten();
+    assert!(out.contains("bytes elided"), "{out}");
+    let locator = out
+        .lines()
+        .find_map(|l| l.strip_prefix("full output: ").and_then(|l| l.split(' ').next()))
+        .expect("the read view must be recoverable");
+
+    // Reading the spill back re-numbers its lines: spill line 2 is `1:line 1`,
+    // so it comes back as row `2:1:line 1`.
+    let again = tools::read::Read
+        .execute(json!({ "path": locator, "limit": 5 }), &c)
+        .await
+        .unwrap()
+        .flatten();
+    assert!(again.contains("2:1:line 1\n3:2:line 2"), "{again}");
+    assert!(!again.contains("full output:"), "{again}");
+}
+
+#[tokio::test]
+async fn a_spill_that_cannot_be_written_fails_loudly() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace::new(dir.path()).unwrap();
+    let c = Ctx::new(ws).with_spill_root(dir.path().join("spill"));
+    // A file where the session directory would go: create_dir_all cannot.
+    std::fs::write(dir.path().join("spill"), "in the way").unwrap();
+    let err = tools::bash::Bash
+        .execute(
+            json!({ "command": "printf 'z%.0s' $(seq 1 40000)" }),
+            &c,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Some("SPILL_FAILED"));
+    assert!(err.to_string().contains("could not spill"), "{err}");
 }
 
 #[tokio::test]

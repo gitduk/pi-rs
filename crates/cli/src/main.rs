@@ -570,6 +570,9 @@ async fn main() -> Result<()> {
     let resumed = carried.context().len();
 
     let Some(prompt) = prompt else {
+        // Before `id` moves into the Repl: the context borrows it to name the
+        // session its spills belong to.
+        let ctx = tools::Ctx::new(workspace).with_session(&id);
         let core = repl::Repl {
             agent: ag,
             store,
@@ -580,7 +583,7 @@ async fn main() -> Result<()> {
             config: config.clone(),
             args: args.clone(),
             commands: std::sync::Arc::new(resolved.commands),
-            ctx: tools::Ctx::new(workspace),
+            ctx,
         };
         // The live region needs the terminal at both ends: keys come in one
         // side and the repaint goes out the other. Missing either, there is
@@ -614,7 +617,9 @@ async fn main() -> Result<()> {
         structured,
         std::sync::Arc::new(config.theme.clone()),
     );
-    let ctx = tools::Ctx::new(workspace).with_cancel(agent::cancel_on_interrupt());
+    let ctx = tools::Ctx::new(workspace)
+        .with_session(&id)
+        .with_cancel(agent::cancel_on_interrupt());
 
     // Always through the log: a loaded session whose view happens to be empty
     // still has history worth keeping, and `resume` handles an empty log.

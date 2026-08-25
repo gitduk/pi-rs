@@ -1296,3 +1296,49 @@ async fn a_call_whose_answer_changes_resets_the_count() {
     // Whether the race lands or not, a changed answer must never be flagged.
     assert!(!noticed || std::fs::read_to_string(&path).unwrap() == "first\n");
 }
+
+/// Fails every call with a coded timeout, so the loop's code plumbing can be
+/// observed end to end.
+struct Timeouter;
+
+#[async_trait]
+impl Tool for Timeouter {
+    fn name(&self) -> &str {
+        "timeouter"
+    }
+
+    fn description(&self) -> &str {
+        "test"
+    }
+
+    fn schema(&self) -> Value {
+        json!({ "type": "object", "properties": {} })
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::Read
+    }
+
+    async fn execute(&self, _args: Value, _ctx: &Ctx) -> Result<ToolOutput, ToolError> {
+        Err(ToolError::Timeout { ms: 42 })
+    }
+}
+
+#[tokio::test]
+async fn a_coded_tool_error_reaches_the_model_with_its_code() {
+    let (_d, mut a, ctx) = harness(vec![
+        call_turn(&[("t1", "timeouter", "{}")]),
+        text_turn("ok"),
+    ]);
+    a.registry = Registry::new().with(Timeouter);
+
+    let (session, out, _) = drive(&a, &ctx, "go").await;
+    out.unwrap();
+    let view = session.context();
+    let results = tool_results(&view[2]);
+    assert!(results[0].is_error);
+    let body = results[0].flatten_text();
+    assert!(body.starts_with("Error: timed out after 42ms"), "{body}");
+    assert!(body.ends_with("[code: TOOL_TIMEOUT]"), "{body}");
+
+}
