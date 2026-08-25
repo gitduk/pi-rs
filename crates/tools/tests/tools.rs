@@ -371,6 +371,27 @@ async fn an_edit_shows_what_went_and_what_came() {
 }
 
 #[tokio::test]
+async fn each_side_of_a_hunk_is_numbered_in_the_file_it_belongs_to() {
+    // The first hunk swaps one line for two, so the removed `b` was line 2
+    // before the patch but sits at line 3 after it. Removed rows must show
+    // the old number, added rows the new one.
+    let (_d, c) = ctx();
+    let src = "a\nb\nc\nd\ne\n";
+    std::fs::write(c.workspace.root().join("a.rs"), src).unwrap();
+    let tag = hashline::tag(src);
+    let out = tools::edit::Edit
+        .execute(
+            json!({ "patch": format!("[a.rs#{tag}]\nPUT 1-1:\n+AA\n+BB\nCUT 2-2:\n") }),
+            &c,
+        )
+        .await
+        .unwrap();
+    let sketch = out.preview.unwrap();
+    assert!(sketch.contains("2 - b"), "{sketch}");
+    assert!(sketch.contains("2 + BB"), "{sketch}");
+}
+
+#[tokio::test]
 async fn a_cut_reports_the_lines_it_took() {
     // A hunk that gives nothing has no row in the new file to name, and is
     // exactly the one a reader most wants shown.

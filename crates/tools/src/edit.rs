@@ -316,8 +316,11 @@ fn sketch(changes: &[Change], loaded: &HashMap<String, String>) -> String {
             }
             minus += l.took.len();
             plus += gave.len();
+            // Removed rows are numbered in the file they left, added rows in
+            // the one they joined: an earlier hunk's net change moves the two
+            // apart.
             for (i, old) in l.took.iter().enumerate() {
-                row_lines.push(('-', l.start + i, old));
+                row_lines.push(('-', l.took_at + i, old));
             }
             for (i, new) in gave.iter().enumerate() {
                 row_lines.push(('+', l.start + i, new));
@@ -521,6 +524,7 @@ mod tests {
             start: 5,
             end: 5,
             took: vec!["fn g() {".into()],
+            took_at: 5,
         }];
         let help = hunk_help(before, &landed);
         assert!(help.contains("5-5"), "{help}");
@@ -535,6 +539,7 @@ mod tests {
             start: 3,
             end: 3,
             took: vec![String::new()],
+            took_at: 3,
         }];
         let help = hunk_help(after, &landed);
         assert!(help.contains("Brace balance:"), "{help}");

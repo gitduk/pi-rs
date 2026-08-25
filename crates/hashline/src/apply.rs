@@ -13,6 +13,9 @@ pub struct Landed {
     /// replaced is known here and nowhere after, since the file it was in has
     /// already been rewritten by the time anyone reads this.
     pub took: Vec<String>,
+    /// The 1-based line the displaced lines started at in the original file.
+    /// Meaningful only when `took` is non-empty; insertions set it to `start`.
+    pub took_at: usize,
 }
 
 impl Landed {
@@ -307,7 +310,7 @@ fn build(
     let mut out: Vec<String> = Vec::with_capacity(len);
     let mut landed: Vec<Landed> = Vec::new();
     let record =
-        |out: &mut Vec<String>, body: Vec<String>, took: Vec<String>, landed: &mut Vec<Landed>| {
+        |out: &mut Vec<String>, body: Vec<String>, took: Vec<String>, took_at: usize, landed: &mut Vec<Landed>| {
             if body.is_empty() && took.is_empty() {
                 return;
             }
@@ -317,6 +320,7 @@ fn build(
                 start,
                 end: out.len(),
                 took,
+                took_at,
             });
         };
 
@@ -325,6 +329,7 @@ fn build(
             &mut out,
             before.remove(&1).unwrap_or_default(),
             Vec::new(),
+            1,
             &mut landed,
         );
     }
@@ -334,6 +339,7 @@ fn build(
             &mut out,
             before.remove(&i).unwrap_or_default(),
             Vec::new(),
+            i,
             &mut landed,
         );
         // Ranges name original lines, so the cursor jumps past the whole span
@@ -346,11 +352,12 @@ fn build(
                     .iter()
                     .map(|l| l.to_string())
                     .collect();
-                record(&mut out, body.clone(), took, &mut landed);
+                record(&mut out, body.clone(), took, i, &mut landed);
                 record(
                     &mut out,
                     after.remove(end).unwrap_or_default(),
                     Vec::new(),
+                    i,
                     &mut landed,
                 );
                 i = end + 1;
@@ -361,6 +368,7 @@ fn build(
                     &mut out,
                     after.remove(&i).unwrap_or_default(),
                     Vec::new(),
+                    i,
                     &mut landed,
                 );
                 i += 1;
@@ -372,6 +380,7 @@ fn build(
             &mut out,
             after.remove(&0).unwrap_or_default(),
             Vec::new(),
+            1,
             &mut landed,
         );
     }

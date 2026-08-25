@@ -165,7 +165,8 @@ fn a_register_flows_between_files() {
             landed: vec![hashline::Landed {
                 start: 2,
                 end: 1,
-                took: vec!["moveme".into()]
+                took: vec!["moveme".into()],
+                took_at: 2,
             }]
         }
     );
@@ -177,7 +178,8 @@ fn a_register_flows_between_files() {
             landed: vec![hashline::Landed {
                 start: 1,
                 end: 1,
-                took: vec![]
+                took: vec![],
+                took_at: 1,
             }],
         }
     );
@@ -218,7 +220,8 @@ fn mv_carries_the_edited_content_to_the_destination() {
             landed: vec![hashline::Landed {
                 start: 1,
                 end: 1,
-                took: vec!["one".into()]
+                took: vec!["one".into()],
+                took_at: 1,
             }],
         }
     );
@@ -492,15 +495,33 @@ fn landed_reports_new_numbering_so_a_second_edit_needs_no_re_read() {
             hashline::Landed {
                 start: 1,
                 end: 3,
-                took: vec!["one".into()]
+                took: vec!["one".into()],
+                took_at: 1,
             },
             hashline::Landed {
                 start: 7,
                 end: 7,
-                took: vec![]
+                took: vec![],
+                took_at: 4,
             }
         ]
     );
+}
+
+#[test]
+fn a_later_hunk_numbers_its_displaced_lines_in_the_original_file() {
+    // The first hunk puts two lines where one stood, so the second hunk's
+    // rows sit one line lower in the new file than they did in the old one.
+    // `took_at` keeps the original numbering; `start` is where they are now.
+    let src = format!("[a.rs#{}]\nPUT 1-1:\n+a\n+b\nCUT 3-3:\n", tag(SRC));
+    let plan = apply(&parse(&src).unwrap(), &files(&[("a.rs", SRC)]), &NoBlocks).unwrap();
+    let Change::Write { landed, .. } = &plan.changes[0]
+    else {
+        panic!()
+    };
+    assert_eq!(landed[1].took, vec!["three"]);
+    assert_eq!(landed[1].took_at, 3);
+    assert_eq!(landed[1].start, 4);
 }
 
 #[test]
