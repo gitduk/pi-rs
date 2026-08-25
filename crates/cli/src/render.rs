@@ -932,7 +932,7 @@ mod tests {
 
     #[test]
     fn a_patch_summarizes_to_the_files_it_touches() {
-        let patch = "[a.rs#A1B2]\nPUT 1.=1:\n+x\n[b.rs#C3D4]\nREM\n";
+        let patch = "[a.rs#A1B2]\nPUT 1.=1:\n+x\n[b.rs#C3D4]\nRM\n";
         assert_eq!(summarize(&json!({ "patch": patch })), "a.rs b.rs");
     }
 

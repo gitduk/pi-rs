@@ -167,7 +167,7 @@ pub enum Error {
     #[error("the anonymous register is empty; add an unlabeled CUT before this paste")]
     EmptyAnonymous,
 
-    #[error("{path}: REM deletes the file, so it cannot share a section with other ops")]
+    #[error("{path}: RM deletes the file, so it cannot share a section with other ops")]
     RemoveWithOps { path: String },
 }
 

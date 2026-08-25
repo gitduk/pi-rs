@@ -193,7 +193,7 @@ fn pasting_an_unfilled_register_is_an_error() {
 
 #[test]
 fn rem_deletes_and_refuses_company() {
-    let src = format!("[a.rs#{}]\nREM\n", tag(SRC));
+    let src = format!("[a.rs#{}]\nRM\n", tag(SRC));
     let plan = apply(&parse(&src).unwrap(), &files(&[("a.rs", SRC)]), &NoBlocks).unwrap();
     assert_eq!(
         plan.changes[0],
@@ -202,7 +202,7 @@ fn rem_deletes_and_refuses_company() {
         }
     );
 
-    let src = format!("[a.rs#{}]\nREM\nPUT 1-1:\n+x\n", tag(SRC));
+    let src = format!("[a.rs#{}]\nRM\nPUT 1-1:\n+x\n", tag(SRC));
     let err = apply(&parse(&src).unwrap(), &files(&[("a.rs", SRC)]), &NoBlocks).unwrap_err();
     assert!(matches!(err, Error::RemoveWithOps { .. }), "{err}");
 }
@@ -498,7 +498,7 @@ fn a_missing_section_header_is_reported_with_its_line() {
 
 #[test]
 fn paths_lists_what_the_caller_must_load() {
-    let src = "[a.rs#AAAA]\nREM\n[b.rs#BBBB]\nREM\n[a.rs#AAAA]\nREM\n";
+    let src = "[a.rs#AAAA]\nRM\n[b.rs#BBBB]\nRM\n[a.rs#AAAA]\nRM\n";
     assert_eq!(parse(src).unwrap().paths(), vec!["a.rs", "b.rs"]);
 }
 
@@ -557,13 +557,21 @@ fn a_later_hunk_numbers_its_displaced_lines_in_the_original_file() {
 fn a_verb_less_op_line_names_the_repair() {
     let err = edit(SRC, "1-2:\n+x\n").unwrap_err().to_string();
     assert!(
-        err.contains("every op line starts with PUT, CUT, MV or REM"),
+        err.contains("every op line starts with PUT, CUT, MV or RM"),
         "{err}"
     );
     assert!(err.contains("did you mean `PUT 1-2:`?"), "{err}");
 
     let err = edit(SRC, "3*:\n+x\n").unwrap_err().to_string();
     assert!(err.contains("did you mean `PUT 3*:`?"), "{err}");
+}
+#[test]
+fn the_old_rem_spelling_names_the_new_verb() {
+    let err = edit(SRC, "REM\n").unwrap_err().to_string();
+    assert!(
+        err.contains("every op line starts with PUT, CUT, MV or RM"),
+        "{err}"
+    );
 }
 
 #[test]

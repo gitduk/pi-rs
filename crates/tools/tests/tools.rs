@@ -478,7 +478,7 @@ async fn a_removed_file_counts_the_lines_that_went_with_it() {
     let tag = hashline::tag(THREE_FNS);
 
     let out = tools::edit::Edit
-        .execute(json!({ "patch": format!("[a.rs#{tag}]\nREM\n") }), &c)
+        .execute(json!({ "patch": format!("[a.rs#{tag}]\nRM\n") }), &c)
         .await
         .unwrap();
     let n = THREE_FNS.lines().count();
@@ -667,7 +667,7 @@ async fn edit_refuses_a_file_it_cannot_read_and_says_to_use_write() {
 async fn edit_cannot_reach_outside_the_workspace() {
     let (_d, c) = ctx();
     let r = tools::edit::Edit
-        .execute(json!({ "patch": "[../escape.rs#0000]\nREM\n" }), &c)
+        .execute(json!({ "patch": "[../escape.rs#0000]\nRM\n" }), &c)
         .await;
     assert!(matches!(r, Err(ToolError::Escape(_))), "{r:?}");
 }

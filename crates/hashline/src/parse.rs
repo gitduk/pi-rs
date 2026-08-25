@@ -143,7 +143,7 @@ fn register(rest: &str, line: usize) -> Result<Option<String>, Error> {
 /// Said when a body row sits under an op that takes none. A row in the wrong
 /// place is a different mistake from a row of the wrong shape, and the model
 /// that wrote each needs a different sentence.
-const NO_BODY: &str = "`CUT`, `REM` and `MV` take no body rows: the range names what goes \
+const NO_BODY: &str = "`CUT`, `RM` and `MV` take no body rows: the range names what goes \
                        and nothing arrives. To write new content, use `PUT N-M:` with \
                        `+` rows.";
 
@@ -242,7 +242,7 @@ pub fn parse(input: &str) -> Result<Patch, Error> {
                 target: addr(spec, no, "CUT")?,
                 register: register(tail, no)?,
             }
-        } else if line == "REM" {
+        } else if line == "RM" {
             Op::Remove
         } else if let Some(dest) = line.strip_prefix("MV ") {
             let dest = strip_quotes(dest);
@@ -295,7 +295,7 @@ pub fn parse(input: &str) -> Result<Patch, Error> {
             return Err(Error::Syntax {
                 line: no,
                 what: format!(
-                    "`{line}` is not an op; every op line starts with PUT, CUT, MV or REM{hint}"
+                    "`{line}` is not an op; every op line starts with PUT, CUT, MV or RM{hint}"
                 ),
             });
         };

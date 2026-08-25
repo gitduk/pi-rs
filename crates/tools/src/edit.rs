@@ -32,19 +32,18 @@ Direction belongs to PUT, not to an address: `PUT 4:UP` inserts above line 4,
 `PUT 4:DOWN` below it, `PUT 3-5:DOWN` below the range, `PUT 2*:DOWN` past where
 the construct closes. A bare number is a position only in that direction form.
 
-Ops. Every op line starts with a verb — PUT, CUT, MV or REM. A header ending in
-`:` takes `+` body rows; CUT, MV, REM and the register pastes take none.
+Ops. Every op line starts with a verb — PUT, CUT, MV or RM. A header ending in
+`:` takes `+` body rows; CUT, MV, RM and the register pastes take none.
   PUT <addr>:                  put the body there; the address alone replaces
   PUT <addr>:UP / <addr>:DOWN  insert the body above / below it
   PUT <addr>:UP @name / <addr>:DOWN @name / <addr> @name   paste a captured register
   CUT N-M                      delete those lines, capturing them; `@name` labels it
   CUT N*                       the same, for a whole construct
   MV dest                      rename; edits in this section land first, then the file moves
-  REM                          delete the file; may not share a section with other ops
+  RM                           delete the file; may not share a section with other ops
 
   (`@` alone is the anonymous register, filled by whatever unlabeled CUT ran
   before it.)
-  REM                          delete the file; may not share a section with other ops
 
 Cheapest first: insert with `:UP` / `:DOWN` — `1:UP` is the file head, the last
 line's `:DOWN` the file tail — delete with CUT, address only the lines that
