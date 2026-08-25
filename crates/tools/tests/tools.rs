@@ -351,9 +351,19 @@ async fn an_edit_shows_what_went_and_what_came() {
     let sketch = out.preview.unwrap();
     let (head, rows) = sketch.split_once('\n').unwrap();
     assert_eq!(head, "a.rs +3 -3");
-    assert!(rows.contains("\n+    99"), "{rows}");
+    // The diff rows carry the file line each one was or became, so a reader
+    // can locate the change without counting diff rows. The mark is the
+    // second word, after the row number.
     assert!(
-        rows.lines().filter(|l| l.starts_with('-')).count() == 3,
+        rows.contains(&format!("6 + {}{}", " ".repeat(4), "99")),
+        "{rows}"
+    );
+    assert!(rows.contains("5 - pub fn target() -> i32 {"), "{rows}");
+    assert!(
+        rows.lines()
+            .filter(|l| l.split_whitespace().nth(1) == Some("-"))
+            .count()
+            == 3,
         "{rows}"
     );
     // The addresses stay where the model reads them, not here.
@@ -375,7 +385,14 @@ async fn a_cut_reports_the_lines_it_took() {
 
     let sketch = out.preview.unwrap();
     assert!(sketch.starts_with("a.rs +0 -3"), "{sketch}");
-    assert_eq!(sketch.lines().filter(|l| l.starts_with('-')).count(), 3);
+    assert_eq!(
+        sketch
+            .lines()
+            .filter(|l| l.split_whitespace().nth(1) == Some("-"))
+            .count(),
+        3
+    );
+    assert!(sketch.contains("\n5 - "), "{sketch}");
 }
 
 #[tokio::test]
@@ -423,9 +440,11 @@ async fn two_files_each_say_which_hunks_are_theirs() {
 
     let sketch = out.preview.unwrap();
     assert!(sketch.starts_with("2 files +2 -2"), "{sketch}");
+    // Diff rows lead with their row number, so a name row is anything whose
+    // second word is not the `+`/`-` mark.
     let named: Vec<&str> = sketch
         .lines()
-        .filter(|l| !l.starts_with(['+', '-']))
+        .filter(|l| !matches!(l.split_whitespace().nth(1), Some("+") | Some("-")))
         .collect();
     assert_eq!(named, vec!["2 files +2 -2", "a.rs", "b.rs"], "{sketch}");
 }
@@ -663,6 +682,24 @@ async fn tools_whose_result_opens_with_content_need_no_explicit_preview() {
         .await
         .unwrap();
     assert_eq!(out.preview(), format!("[a.rs#{}]", hashline::tag("one\n")));
+}
+
+#[tokio::test]
+async fn a_ranged_read_previews_the_rows_that_came_back() {
+    // The progress line carries the real window, not the ask: the limit may
+    // reach past the end of the file, and the preview should say 2-3, not
+    // 2-12.
+    let (_d, c) = ctx();
+    let src = "one\ntwo\nthree\n";
+    std::fs::write(c.workspace.root().join("a.rs"), src).unwrap();
+    let out = tools::read::Read
+        .execute(json!({ "path": "a.rs", "offset": 2, "limit": 10 }), &c)
+        .await
+        .unwrap();
+    assert_eq!(
+        out.preview(),
+        format!("[a.rs#{} 2-3]", hashline::tag(src))
+    );
 }
 
 #[tokio::test]

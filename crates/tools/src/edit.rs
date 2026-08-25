@@ -271,7 +271,8 @@ fn crop(s: &str, max: usize) -> String {
 /// questions, and only the second one has a reader.
 ///
 /// The first line rides beside the tool's name, so it carries the counts; the
-/// rest are the diff itself, capped, because a display is not a transcript.
+/// rest are the diff itself, each row carrying the file line it was or became,
+/// capped, because a display is not a transcript.
 fn sketch(changes: &[Change], loaded: &HashMap<String, String>) -> String {
     let (mut plus, mut minus) = (0usize, 0usize);
     let mut files: Vec<(&str, Vec<String>)> = Vec::new();
@@ -305,7 +306,7 @@ fn sketch(changes: &[Change], loaded: &HashMap<String, String>) -> String {
             }
         };
         let lines: Vec<&str> = content.lines().collect();
-        let mut rows = Vec::new();
+        let mut row_lines: Vec<(char, usize, &str)> = Vec::new();
         for l in landed {
             let gave = hunk_rows(&lines, l);
             // A hunk whose body already matched changed nothing, and a diff
@@ -315,9 +316,23 @@ fn sketch(changes: &[Change], loaded: &HashMap<String, String>) -> String {
             }
             minus += l.took.len();
             plus += gave.len();
-            rows.extend(l.took.iter().map(|old| format!("-{old}")));
-            rows.extend(gave.iter().map(|new| format!("+{new}")));
+            for (i, old) in l.took.iter().enumerate() {
+                row_lines.push(('-', l.start + i, old));
+            }
+            for (i, new) in gave.iter().enumerate() {
+                row_lines.push(('+', l.start + i, new));
+            }
         }
+        // Right-aligned so a three-digit row lines up with a two-digit one.
+        let width = row_lines
+            .iter()
+            .map(|(_, n, _)| *n)
+            .max()
+            .map_or(1, |n| n.to_string().len());
+        let rows: Vec<String> = row_lines
+            .iter()
+            .map(|(sign, n, text)| format!("{n:>width$} {sign} {text}"))
+            .collect();
         files.push((path.as_str(), rows));
     }
 

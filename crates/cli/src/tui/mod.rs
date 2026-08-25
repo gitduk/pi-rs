@@ -576,7 +576,15 @@ impl Ui {
         match bound {
             Some(Action::LineClear) => return self.interrupt_or_clear(running),
             Some(Action::LineSubmit) => {
-                let line = self.editor.take();
+                // Enter while the menu is open runs what it highlights. The
+                // typed text is a prefix; the highlighted word is the intent.
+                // The menu reads the editor, so pick before draining it.
+                let picked = self.highlighted();
+                let typed = self.editor.take();
+                let line = match picked {
+                    Some(c) => c.line,
+                    None => typed,
+                };
                 return if line.trim().is_empty() {
                     Act::None
                 } else {

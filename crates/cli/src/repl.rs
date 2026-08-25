@@ -194,11 +194,12 @@ pub fn complete(line: &str, commands: &[Command], models: &[Choice]) -> Vec<Cand
         return Vec::new();
     }
     let Some((word, rest)) = line.split_once(char::is_whitespace) else {
+        // The exact word stays in the list. Dropping it would leave only the
+        // longer `/news` when `/new` is typed in full, and Tab would hand the
+        // line to the wrong command.
         return commands
             .iter()
             .filter(|c| c.word.starts_with(line))
-            // An exact and only match is already typed; offering it is noise.
-            .filter(|c| c.word.as_ref() != line)
             .map(|c| Candidate {
                 show: format!("{} {}", c.word, c.args).trim_end().to_string(),
                 line: c.word.to_string(),
@@ -753,8 +754,9 @@ mod tests {
     fn completion_narrows_as_the_word_is_typed() {
         assert_eq!(offered("/n"), ["/new", "/name [text]"]);
         assert_eq!(offered("/na"), ["/name [text]"]);
-        // Already whole: there is nothing left to offer.
-        assert!(offered("/name").is_empty());
+        // A word typed in full stays first: the menu must not drop it and
+        // leave only a longer one that starts the same way.
+        assert_eq!(offered("/name"), ["/name [text]"]);
         // Past a word with nothing to complete, the rest is prose.
         assert!(offered("/name the flaky test").is_empty());
         // Not a command at all.
@@ -762,6 +764,14 @@ mod tests {
         assert!(offered("").is_empty());
     }
 
+    #[test]
+    fn an_exact_word_stays_first_when_it_prefixes_another() {
+        // `/news` is a skill here; `/new` typed in full keeps first place in
+        // the menu, so Tab accepts the built-in rather than sliding onto news.
+        let found = [skill("news", "headlines from the fixed feeds")];
+        let table = commands(&found, &mut Vec::new());
+        assert_eq!(offered_from("/new", &table), ["/new", "/news [text]"]);
+    }
     #[test]
     fn accepting_a_command_that_wants_an_argument_leaves_room_for_one() {
         let of = |line: &str| -> Candidate { complete(line, &table(), &choices()).swap_remove(0) };

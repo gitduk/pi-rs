@@ -191,6 +191,12 @@ impl Tool for Read {
                 end + 1
             ));
         }
-        Ok(ToolOutput::text(out))
+        // The progress line shows the rows that actually came back: offset
+        // may have been clamped, and the file may have ended first.
+        let mut output = ToolOutput::text(out);
+        if ranged {
+            output = output.with_preview(format!("[{rel}#{tag} {}-{}]", start + 1, end));
+        }
+        Ok(output)
     }
 }

@@ -685,11 +685,11 @@ pub fn describe(event: &Event, p: &Paint, width: usize) -> Option<String> {
             let (head, rest) = preview.split_once('\n').unwrap_or((preview, ""));
             let mut out = format!("{mark} {name} {}", p.on(&p.theme.muted, &clip(head, room)));
             for row in rest.lines() {
-                // The mark is the whole of what a diff row means, and colour
-                // says it faster than reading the first character does.
-                let style = match row.as_bytes().first() {
-                    Some(b'+') => &p.theme.diff.add,
-                    Some(b'-') => &p.theme.diff.del,
+                // The row number leads each diff row, so the mark is the
+                // second word; colour beats reading the diff text.
+                let style = match row.split_whitespace().nth(1) {
+                    Some("+") => &p.theme.diff.add,
+                    Some("-") => &p.theme.diff.del,
                     _ => &p.theme.muted,
                 };
                 out.push('\n');
