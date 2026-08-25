@@ -113,7 +113,7 @@ fn addr(spec: &str, line: usize, verb: &str) -> Result<Target, Error> {
         _ => match rest.strip_prefix('-') {
             None => Err(bad(format!("`{verb} {spec}`: {}", forms()))),
             Some(m) if m.trim().is_empty() => Err(bad(format!(
-                "`{verb} {spec}`: a range needs both ends, as in `{n}-{m}`"
+                "`{verb} {spec}`: a range needs both ends, as in `N-M`"
             ))),
             Some(m) => {
                 let what = format!("`{verb} {spec}`: `{m}` is not a line number");

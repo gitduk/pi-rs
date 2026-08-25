@@ -215,13 +215,14 @@ fn hunk_help(after: &str, landed: &[Landed]) -> String {
     let mut out = String::from("The hunks, against the file as it stands:");
     let mut off = String::new();
     for (i, l) in landed.iter().enumerate() {
-        let addr = if l.took.is_empty() {
-            format!("{}", l.start)
-        } else if l.took.len() == 1 {
-            format!("{}-{}", l.start, l.start)
-        } else {
-            format!("{}-{}", l.start, l.start + l.took.len() - 1)
-        };
+        // Whatever surface a hunk covers, its address prints the way the
+        // grammar writes it — a single line as `N`, a span as `N-M` — so the
+        // shapes the model sees in the help are the ones its parser takes.
+        let addr = hashline::Target::Range {
+            start: l.start,
+            end: l.start + l.took.len().saturating_sub(1),
+        }
+        .to_string();
         if i < 6 {
             if l.took.is_empty() {
                 out.push_str(&format!("\n  {addr}(insertion)"));
@@ -569,7 +570,8 @@ mod tests {
             took_at: 5,
         }];
         let help = hunk_help(before, &landed);
-        assert!(help.contains("5-5"), "{help}");
+        assert!(help.contains("5"), "{help}");
+        assert!(!help.contains("5-5"), "{help}");
         assert!(help.contains("fn g() {"), "{help}");
         assert!(!help.contains("Brace balance"), "{help}");
     }
