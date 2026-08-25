@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use brain::slice::{head_bytes, tail_bytes};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::process::Stdio;
@@ -19,22 +20,6 @@ struct Args {
     cwd: Option<String>,
 }
 
-/// Largest prefix of `s` within `max` bytes that ends on a char boundary.
-pub(crate) fn head(s: &str, max: usize) -> &str {
-    match s.char_indices().find(|(i, c)| i + c.len_utf8() > max) {
-        Some((i, _)) => &s[..i],
-        None => s,
-    }
-}
-
-/// Mirror of [`head`] from the end.
-fn tail(s: &str, max: usize) -> &str {
-    let start = s.len().saturating_sub(max);
-    match s.char_indices().find(|(i, _)| *i >= start) {
-        Some((i, _)) => &s[i..],
-        None => "",
-    }
-}
 
 /// Keep both ends: the head carries what the command set out to do, the tail
 /// carries how it failed.
@@ -46,7 +31,7 @@ fn clamp(label: &str, body: &str) -> String {
         return format!("<{label}>\n{body}\n</{label}>\n");
     }
     let half = MAX_OUTPUT / 2;
-    let (h, t) = (head(body, half), tail(body, half));
+    let (h, t) = (head_bytes(body, half), tail_bytes(body, half));
     let dropped = body.len() - h.len() - t.len();
     format!("<{label}>\n{h}\n… {dropped} bytes elided …\n{t}\n</{label}>\n")
 }

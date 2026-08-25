@@ -67,13 +67,14 @@ impl Report {
     }
 }
 
-/// Replace a result's content with a bounded stand-in. Over the prune
-/// threshold the notice leads a head and a tail; under it the notice alone
-/// stands for the whole, which is all a superseded or empty result is worth.
-/// Returns the replacement text, or nothing when the result must be left
-/// alone; the caller records it, and the view derives from the record, so
-/// plan's scratch copy never reaches the session.
-fn elide(result: &mut ToolResult, notice: &str, policy: &Policy) -> Option<String> {
+/// Replace a result's content with a bounded stand-in. `ends` Some keeps a
+/// head and tail over the prune threshold — the aged-out tier, where the
+/// result was useful but too big; None replaces with the notice alone, which
+/// is all a superseded or empty result is worth. Returns the replacement
+/// text, or nothing when the result must be left alone; the caller records
+/// it, and the view derives from the record, so plan's scratch copy never
+/// reaches the session.
+fn elide(result: &mut ToolResult, notice: &str, ends: Option<&Policy>) -> Option<String> {
     if PROTECTED.contains(&result.name.as_str()) {
         return None;
     }
@@ -84,8 +85,10 @@ fn elide(result: &mut ToolResult, notice: &str, policy: &Policy) -> Option<Strin
     if already {
         return None;
     }
-    let text = result.flatten_text();
-    let replacement = pruned(notice, &text, policy);
+    let replacement = match ends {
+        Some(policy) => pruned(notice, &result.flatten_text(), policy),
+        None => notice.to_string(),
+    };
     result.content = vec![ToolResultContent::Text(Text {
         text: replacement.clone(),
     })];
@@ -101,11 +104,8 @@ fn pruned(notice: &str, text: &str, policy: &Policy) -> String {
     if c <= policy.prune_chars {
         return notice.to_string();
     }
-    let head: String = text.chars().take(policy.head_chars).collect();
-    let tail: String = text
-        .chars()
-        .skip(c.saturating_sub(policy.tail_chars))
-        .collect();
+    let head = brain::slice::head_chars(text, policy.head_chars);
+    let tail = brain::slice::tail_chars(text, policy.tail_chars);
     let dropped = c.saturating_sub(policy.head_chars + policy.tail_chars);
     format!("{notice}\n\n{head}\n\n[… {dropped} chars elided …]\n\n{tail}")
 }
@@ -213,11 +213,16 @@ pub fn plan(log: &Log, budget: usize, policy: &Policy) -> (Compaction, Report) {
     let calls = calls(&work);
     let positions = results_with_suffix(&work);
 
-    let note = |record: &mut Compaction, work: &mut [Message], i, j, notice: String| -> bool {
+    let note = |record: &mut Compaction,
+                work: &mut [Message],
+                i,
+                j,
+                notice: String,
+                ends: Option<&Policy>| -> bool {
         let Some(r) = result_at(work, i, j) else {
             return false;
         };
-        let Some(replacement) = elide(r, &notice, policy) else {
+        let Some(replacement) = elide(r, &notice, ends) else {
             return false;
         };
         record.elisions.push(Elision {
@@ -252,7 +257,7 @@ pub fn plan(log: &Log, budget: usize, policy: &Policy) -> (Compaction, Report) {
             continue;
         }
         let notice = format!("[elided: superseded by a later {name}]");
-        if note(&mut record, &mut work, *i, *j, notice) {
+        if note(&mut record, &mut work, *i, *j, notice, None) {
             report.superseded += 1;
         }
     }
@@ -267,6 +272,7 @@ pub fn plan(log: &Log, budget: usize, policy: &Policy) -> (Compaction, Report) {
                 *i,
                 *j,
                 "[elided: this result reported nothing]".into(),
+                None,
             )
         {
             report.uneventful += 1;
@@ -280,9 +286,44 @@ pub fn plan(log: &Log, budget: usize, policy: &Policy) -> (Compaction, Report) {
                 break;
             }
             let notice = "[elided to fit the context window]";
-            if note(&mut record, &mut work, *i, *j, notice.into()) {
+            if note(&mut record, &mut work, *i, *j, notice.into(), Some(policy)) {
                 report.aged_out += 1;
             }
+        }
+    }
+
+    // The kept ends are a floor a window the provider just named can refuse.
+    // Last rung: a pruned result keeps only the notice that leads it. The
+    // `already` guard would refuse to touch an elided result, so this
+    // replaces outright; a one-line notice has no newline and stays as it is.
+    if estimate::tokens(&work) > budget {
+        for (i, j, _) in &positions {
+            if estimate::tokens(&work) <= budget {
+                break;
+            }
+            let Some(r) = result_at(&mut work, *i, *j) else {
+                continue;
+            };
+            if PROTECTED.contains(&r.name.as_str()) {
+                continue;
+            }
+            let [ToolResultContent::Text(t)] = r.content.as_slice() else {
+                continue;
+            };
+            let Some(notice) = t.text.lines().next() else {
+                continue;
+            };
+            if !t.text.starts_with("[elided") || t.text.len() == notice.len() {
+                continue;
+            }
+            let notice = notice.to_string();
+            r.content = vec![ToolResultContent::Text(Text {
+                text: notice.clone(),
+            })];
+            record.elisions.push(Elision {
+                call: r.call.clone(),
+                notice,
+            });
         }
     }
 

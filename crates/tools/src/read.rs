@@ -177,7 +177,7 @@ impl Tool for Read {
             let n = start + i + 1;
             out.push_str(&crate::rows::addr(n, &spans));
             if line.len() > MAX_LINE {
-                out.push_str(crate::bash::head(line, MAX_LINE));
+                out.push_str(brain::slice::head_bytes(line, MAX_LINE));
                 out.push_str("… (line truncated)\n");
             } else {
                 out.push_str(line);

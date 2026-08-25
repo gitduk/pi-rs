@@ -992,12 +992,12 @@ async fn an_overflow_refusal_shrinks_the_transcript_and_retries() {
         "{events:?}"
     );
     // Compaction must land the transcript inside the window the refusal
-    // named; head and tail of a long result are kept, so "fits" is the
-    // invariant, not a round number.
+    // named, comfortably — the head-and-tail floor lowers to a notice when
+    // the budget cannot hold even a pruned result.
     assert!(
         events
             .iter()
-            .any(|e| matches!(e, Event::Compacted(r) if r.after < 2_000)),
+            .any(|e| matches!(e, Event::Compacted(r) if r.after < 1_000)),
         "{events:?}"
     );
     assert_eq!(session.context().last().unwrap().text(), "fits now");

@@ -98,21 +98,16 @@ fn an_older_read_of_the_same_path_is_superseded_and_the_newest_survives() {
         call("c2", "read", json!({ "path": "a.rs" })),
         result("c2", "read", &big(9_000)),
     ];
-    // 9k chars sits over the prune threshold, so the superseded read keeps a
-    // bounded head and tail; once that lands, the drop tier — which would
-    // move every index — is never reached.
-    let r = compact(&mut m, 5_500, &Policy::default());
+    // Between the two sizes: superseding one read is enough — a superseded
+    // result is dead weight and keeps only its notice — and the drop tier,
+    // which would move every index, is never reached.
+    let r = compact(&mut m, 4_000, &Policy::default());
 
     assert_eq!(r.superseded, 1);
     assert_eq!(r.dropped, 0, "{r:?}");
     assert!(
         body_of(&m[2]).contains("superseded by a later read"),
         "{}",
-        body_of(&m[2])
-    );
-    assert!(
-        body_of(&m[2]).contains("chars elided"),
-        "head and tail kept, not a bare notice: {}",
         body_of(&m[2])
     );
     assert!(
@@ -227,7 +222,7 @@ fn an_aged_out_result_keeps_its_head_and_tail() {
     ];
     let r = compact(
         &mut m,
-        500,
+        2_000,
         &Policy { protect_tail: 0, ..Policy::default() },
     );
 
@@ -256,6 +251,57 @@ fn a_result_under_the_prune_threshold_keeps_only_the_notice() {
     assert_eq!(r.aged_out, 1, "{r:?}");
     let body = body_of(&m[2]);
     assert_eq!(body, "[elided to fit the context window]", "{body}");
+    assert_balanced(&m);
+}
+
+#[test]
+fn a_head_and_tail_too_big_for_the_window_lowers_to_the_notice() {
+    let mut m = vec![
+        Message::user("go"),
+        call("c1", "bash", json!({ "command": "cmd" })),
+        result("c1", "bash", &big(30_000)),
+    ];
+    // Budget below what even a pruned result costs: the last rung drops the
+    // kept ends, leaving the notice alone.
+    let r = compact(
+        &mut m,
+        500,
+        &Policy { protect_tail: 0, ..Policy::default() },
+    );
+
+    assert_eq!(r.aged_out, 1, "{r:?}");
+    assert_eq!(
+        body_of(&m[2]),
+        "[elided to fit the context window]",
+        "{}",
+        body_of(&m[2])
+    );
+    assert_balanced(&m);
+}
+
+#[test]
+fn the_drop_tier_spares_a_skill_exchange() {
+    let mut m = vec![
+        Message::user("go"),
+        call("c1", "skill", json!({ "name": "commit" })),
+        result("c1", "skill", &big(20_000)),
+        call("c2", "bash", json!({ "command": "cmd" })),
+        result("c2", "bash", &big(20_000)),
+    ];
+    let r = compact(
+        &mut m,
+        200,
+        &Policy { protect_tail: 0, ..Policy::default() },
+    );
+
+    // The skill body is instructions being followed: elision refuses it, and
+    // so does the drop tier, which takes the bash exchange instead.
+    assert!(r.dropped > 0, "{r:?}");
+    assert!(
+        body_of(&m[2]).starts_with("xxx"),
+        "the skill body must survive: {}",
+        body_of(&m[2])
+    );
     assert_balanced(&m);
 }
 

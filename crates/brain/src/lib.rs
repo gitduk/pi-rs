@@ -4,6 +4,7 @@ pub mod estimate;
 pub mod fault;
 pub mod message;
 pub mod request;
+pub mod slice;
 pub mod stream;
 pub mod transport;
 
