@@ -456,7 +456,7 @@ impl Agent {
         // Holding the working tail back is a preference; fitting at all is not.
         // Once the provider has refused the request, the tail yields.
         let policy = if urgent {
-            compact::Policy { protect_tail: 0 }
+            compact::Policy { protect_tail: 0, ..Policy::default() }
         } else {
             *policy
         };
