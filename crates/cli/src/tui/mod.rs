@@ -185,6 +185,8 @@ struct Ui {
     paint: Paint,
     /// The painted prompt gutter, shared by the editor and the echoed lines.
     prompt: String,
+    /// The same gutter for a `!` line, where the bang takes the icon's place.
+    bang_prompt: String,
     /// Model output with no newline after it yet. Kept live because it is still
     /// being written; a completed line goes straight to scrollback.
     open: String,
@@ -240,10 +242,11 @@ impl Ui {
         commands: Arc<Vec<Command>>,
         paint: Paint,
     ) -> Self {
-        let prompt = Self::paint_prompt(&paint);
+        let prompt = Self::paint_prompt(&paint, &paint.theme.prompt.icon);
+        let bang_prompt = Self::paint_prompt(&paint, "!");
         let banner = paint.on(&paint.theme.muted, BANNER);
         let mut editor = Editor::default();
-        editor.set_prompt(prompt.clone());
+        editor.set_prompts(prompt.clone(), bang_prompt.clone());
         Self {
             screen,
             keys,
@@ -252,6 +255,7 @@ impl Ui {
             editor,
             paint,
             prompt,
+            bang_prompt,
             open: String::new(),
             dim: false,
             md: Markdown::default(),
@@ -273,11 +277,8 @@ impl Ui {
     }
 
     /// The prompt gutter as the terminal shows it, colour and all.
-    fn paint_prompt(paint: &Paint) -> String {
-        format!(
-            "{} ",
-            paint.on(&paint.theme.prompt.color, &paint.theme.prompt.icon)
-        )
+    fn paint_prompt(paint: &Paint, icon: &str) -> String {
+        format!("{} ", paint.on(&paint.theme.prompt.color, icon))
     }
     fn say(&mut self, line: impl Into<String>) {
         self.above.push(line.into());
@@ -528,8 +529,10 @@ impl Ui {
 
     fn set_theme(&mut self, theme: Arc<render::Theme>) {
         self.paint.theme = theme;
-        self.prompt = Self::paint_prompt(&self.paint);
-        self.editor.set_prompt(self.prompt.clone());
+        self.prompt = Self::paint_prompt(&self.paint, &self.paint.theme.prompt.icon);
+        self.bang_prompt = Self::paint_prompt(&self.paint, "!");
+        self.editor
+            .set_prompts(self.prompt.clone(), self.bang_prompt.clone());
         // above[0] is the banner, painted once at construction; restyle it so
         // a /reload lands on the new theme instead of the old.
         if let Some(first) = self.above.first_mut() {
@@ -546,12 +549,15 @@ impl Ui {
     /// Echo what was sent, so the prompt survives the editor being cleared.
     fn echo(&mut self, line: &str) {
         for (i, part) in line.split('\n').enumerate() {
-            let gutter = if i == 0 {
-                self.prompt.clone()
+            let (gutter, body) = if i == 0 {
+                match part.strip_prefix('!') {
+                    Some(rest) => (self.bang_prompt.clone(), rest),
+                    None => (self.prompt.clone(), part),
+                }
             } else {
-                "  ".to_string()
+                ("  ".to_string(), part)
             };
-            self.say(format!("{gutter}{part}"));
+            self.say(format!("{gutter}{body}"));
         }
     }
 

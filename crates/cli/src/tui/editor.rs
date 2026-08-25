@@ -7,7 +7,6 @@ use unicode_width::UnicodeWidthChar;
 const GUTTER: usize = 2;
 const CONT: &str = "  ";
 
-#[derive(Default)]
 pub struct Editor {
     text: String,
     /// Byte offset of the caret. Always on a char boundary.
@@ -19,11 +18,29 @@ pub struct Editor {
     draft: String,
     /// The painted first-row gutter, so the theme can restyle it.
     prompt: String,
+    /// The same gutter for a `!` line: the bang takes the prompt's place, so
+    /// `!cmd` reads as a command rather than `› !cmd`.
+    prompt_bang: String,
+}
+
+impl Default for Editor {
+    fn default() -> Self {
+        Self {
+            prompt_bang: "! ".into(),
+            text: String::new(),
+            cursor: 0,
+            history: Vec::new(),
+            at: 0,
+            draft: String::new(),
+            prompt: String::new(),
+        }
+    }
 }
 
 impl Editor {
-    pub fn set_prompt(&mut self, prompt: String) {
+    pub fn set_prompts(&mut self, prompt: String, bang: String) {
         self.prompt = prompt;
+        self.prompt_bang = bang;
     }
 
     pub fn is_empty(&self) -> bool {
@@ -223,15 +240,25 @@ impl Editor {
     /// is repainted by counting rows back, and a row the terminal wrapped on
     /// its own is a row the count does not know about.
     pub fn view(&self, width: usize) -> (Vec<String>, (u16, u16)) {
+        // A line starting with `!` is a shell command; the bang takes the
+        // prompt's place so the line reads `!cmd` rather than `› !cmd`.
+        let bang = self.text.starts_with('!');
+        let body = if bang { &self.text[1..] } else { self.text.as_str() };
+        let cursor = if bang {
+            self.cursor.saturating_sub(1)
+        } else {
+            self.cursor
+        };
+
         let avail = width.saturating_sub(GUTTER).max(1);
         let mut rows: Vec<String> = Vec::new();
         let mut row = String::new();
         let mut used = 0usize;
         let mut caret = None;
 
-        for (i, ch) in self.text.char_indices() {
+        for (i, ch) in body.char_indices() {
             if ch == '\n' {
-                if i == self.cursor {
+                if i == cursor {
                     caret = Some((rows.len() as u16, (GUTTER + used) as u16));
                 }
                 rows.push(std::mem::take(&mut row));
@@ -245,7 +272,7 @@ impl Editor {
             }
             // After the wrap, so a caret sitting exactly on the break lands at
             // the start of the new row rather than off the end of the old one.
-            if i == self.cursor {
+            if i == cursor {
                 caret = Some((rows.len() as u16, (GUTTER + used) as u16));
             }
             row.push(ch);
@@ -254,7 +281,11 @@ impl Editor {
         let caret = caret.unwrap_or((rows.len() as u16, (GUTTER + used) as u16));
         rows.push(row);
 
-        let prompt = self.prompt.as_str();
+        let prompt = if bang {
+            self.prompt_bang.as_str()
+        } else {
+            self.prompt.as_str()
+        };
         let painted = rows
             .into_iter()
             .enumerate()
@@ -362,6 +393,39 @@ mod tests {
         // Still the same buffer: Up moved within it instead of recalling.
         assert_eq!(m.text, "one\ntwo");
         assert!(m.cursor < 4);
+    }
+
+    #[test]
+    fn a_bang_line_puts_the_bang_in_the_prompt() {
+        let mut e = typed("!git status");
+        e.set_prompts("› ".into(), "! ".into());
+        let (rows, caret) = e.view(40);
+        assert_eq!(rows[0], "! git status", "the bang takes the icon's place");
+        assert_eq!(caret, (0, 12), "GUTTER 2 + the ten characters of `git status`");
+
+        let mut plain = typed("git status");
+        plain.set_prompts("› ".into(), "! ".into());
+        assert_eq!(plain.view(40).0[0], "› git status");
+    }
+
+    #[test]
+    fn deleting_the_bang_returns_the_plain_prompt() {
+        let mut e = typed("!git");
+        e.set_prompts("› ".into(), "! ".into());
+        e.home();
+        e.delete();
+        assert_eq!(e.view(40).0[0], "› git");
+    }
+
+    #[test]
+    fn a_bang_line_wraps_with_the_bang_in_the_gutter() {
+        let mut e = typed("!abcdefgh");
+        e.set_prompts("› ".into(), "! ".into());
+        // Width 6 leaves 4 columns after the gutter, as in the plain case;
+        // the bang does not eat a column of the body.
+        let (rows, caret) = e.view(6);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(caret, (1, 6));
     }
 
     #[test]
