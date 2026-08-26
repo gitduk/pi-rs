@@ -177,6 +177,70 @@ impl Log {
         self.append_user(prompt);
     }
 
+
+    /// Live user messages that carry a prompt — including a prompt folded
+    /// into a tool-results message by `append_user`, which keeps it as an
+    /// amendment rather than as content. The text is the message's own text
+    /// blocks followed by its amendments, in order. Log order.
+    pub fn prompts(&self) -> Vec<(EntryId, String)> {
+        let amendments = self.amendments();
+        self.live()
+            .into_iter()
+            .filter_map(|(id, m)| {
+                let Message::User { content } = m else {
+                    return None;
+                };
+                let mut text: String = content
+                    .iter()
+                    .filter_map(|c| match c {
+                        UserContent::Text(t) => Some(t.text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                if let Some(parts) = amendments.get(&id) {
+                    for part in parts {
+                        // Each amendment is its own prompt; keep them apart so
+                        // the selector does not run them together.
+                        if !text.is_empty() {
+                            text.push('\n');
+                        }
+                        text.push_str(part);
+                    }
+                }
+                (!text.is_empty()).then_some((id, text))
+            })
+            .collect()
+    }
+
+    /// Rewind to a user message: everything after it leaves the log, and the
+    /// message itself stays, so the conversation can go on from there.
+    /// Returns how many entries that was.
+    ///
+    /// Amendments recorded after the cut still belong to messages inside it —
+    /// a prompt folded into the previous turn is part of that turn, and the
+    /// rewind selector shows it as such — so they come along with their
+    /// target instead of being cut.
+    pub fn rollback_to(&mut self, user: EntryId) -> usize {
+        let Some(keep) = self
+            .entries
+            .iter()
+            .position(|e| e.id() == user)
+            .map(|i| i + 1)
+        else {
+            return 0;
+        };
+        let kept: HashSet<EntryId> = self.entries[..keep].iter().map(Entry::id).collect();
+        let mut tail: Vec<Entry> = self.entries[keep..]
+            .iter()
+            .filter(|e| matches!(e, Entry::Amend { target, .. } if kept.contains(target)))
+            .cloned()
+            .collect();
+        let dropped = self.entries.len() - keep;
+        self.entries.truncate(keep);
+        self.entries.append(&mut tail);
+        dropped
+    }
+
     pub fn entries(&self) -> &[Entry] {
         &self.entries
     }
@@ -269,7 +333,7 @@ impl Log {
             .collect()
     }
 
-    fn amendments(&self) -> HashMap<EntryId, Vec<&str>> {
+    pub fn amendments(&self) -> HashMap<EntryId, Vec<&str>> {
         let mut out: HashMap<EntryId, Vec<&str>> = HashMap::new();
         for e in &self.entries {
             if let Entry::Amend { target, text, .. } = e {
@@ -445,6 +509,90 @@ mod tests {
         let back: Log = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
         let mut back = back;
         assert!(back.push(Message::user("later")) > last);
+    }
+
+
+    #[test]
+    fn a_rewind_keeps_the_chosen_message_and_drops_what_follows() {
+        let mut l = log();
+        l.push(Message::user("second turn"));
+        l.push(Message::assistant_text("second answer"));
+
+        assert_eq!(l.rollback_to(EntryId(5)), 1);
+        assert_eq!(l.context().len(), 6);
+        assert_eq!(l.context()[5].text(), "second turn");
+        assert_eq!(l.entries().last().unwrap().id(), EntryId(5));
+    }
+
+    #[test]
+    fn a_rewind_keeps_amendments_that_target_kept_messages() {
+        // The last prompt folds into the tool-results message as an
+        // amendment; rewinding to that message has to keep it, or the
+        // selector's preview and the rewound transcript disagree.
+        let mut l = log();
+        l.amend(EntryId(4), "continue");
+        assert_eq!(l.rollback_to(EntryId(4)), 1);
+        assert_eq!(l.prompts().last().unwrap().1, "continue");
+        assert_eq!(l.context()[4].text(), "continue");
+    }
+    #[test]
+    fn a_rewind_to_the_first_message_keeps_only_it() {
+        let mut l = log();
+        assert_eq!(l.rollback_to(EntryId(0)), 4);
+        assert_eq!(l.context().len(), 1);
+        assert_eq!(l.context()[0].text(), "go");
+    }
+
+    #[test]
+    fn a_rewind_to_the_last_message_drops_nothing() {
+        let mut l = log();
+        assert_eq!(l.rollback_to(EntryId(4)), 0);
+        assert_eq!(l.context().len(), 5);
+    }
+
+    #[test]
+    fn a_rewind_to_an_unknown_id_is_a_no_op() {
+        let mut l = log();
+        assert_eq!(l.rollback_to(EntryId(99)), 0);
+        assert_eq!(l.context().len(), 5);
+    }
+
+    #[test]
+    fn ids_keep_climbing_across_a_rewind() {
+        let mut l = log();
+        let before = l.push(Message::user("tail"));
+        l.rollback_to(before);
+        assert!(l.push(Message::user("later")) > before);
+    }
+
+    #[test]
+    fn prompts_are_the_messages_with_text() {
+        let l = log();
+        let prompts = l.prompts();
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].0, EntryId(0));
+        assert_eq!(prompts[0].1, "go");
+    }
+
+    #[test]
+    fn a_prompt_folded_into_tool_results_is_seen() {
+        // After a tool round the log ends on a tool-results user message;
+        // the next prompt folds into it as an amendment, and has to count.
+        let mut l = log();
+        l.amend(EntryId(4), "continue");
+        let prompts = l.prompts();
+        assert_eq!(prompts.len(), 2);
+        assert_eq!(prompts[1].0, EntryId(4));
+        assert_eq!(prompts[1].1, "continue");
+    }
+
+    #[test]
+    fn a_prompt_with_an_amendment_carries_both() {
+        let mut l = log();
+        let id = l.push(Message::user("one"));
+        l.amend(id, "two");
+        let prompts = l.prompts();
+        assert_eq!(prompts.last().unwrap().1, "one\ntwo");
     }
 }
 

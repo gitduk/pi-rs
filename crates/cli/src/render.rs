@@ -564,7 +564,10 @@ fn spans(text: &str, under: &str, depth: u8, theme: &Theme) -> String {
             Some((kind, style, body, tail)) => {
                 let code = style.codes();
                 let inner = if kind == SpanKind::Code || depth == NESTING {
-                    body.to_string()
+                    // Code span body is embedded raw into the ANSI output.
+                    // Escape any literal ESC bytes so they don't inject
+                    // spurious SGR sequences into the styled stream.
+                    if body.contains('\x1b') { body.replace('\x1b', "[ESC]") } else { body.to_string() }
                 } else {
                     let joined = if under.is_empty() {
                         code.to_string()

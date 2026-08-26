@@ -49,9 +49,13 @@ pub enum Action {
     MenuPrevious,
     MenuDismiss,
     RunInterrupt,
+    Rewind,
+    ScrollUp,
+    ScrollDown,
     AppExit,
     AppClearScreen,
     ThinkFold,
+    ThinkFoldAll,
 }
 
 pub struct Binding {
@@ -219,6 +223,27 @@ pub const BINDINGS: &[Binding] = &[
         note: "",
     },
     Binding {
+        id: "conversation.rewind",
+        action: A::Rewind,
+        when: W::Editor,
+        keys: &["esc"],
+        note: "twice with an empty line to rewind to a message",
+    },
+    Binding {
+        id: "view.scroll-up",
+        action: A::ScrollUp,
+        when: W::Editor,
+        keys: &["pageup", "ctrl+b"],
+        note: "or the wheel",
+    },
+    Binding {
+        id: "view.scroll-down",
+        action: A::ScrollDown,
+        when: W::Editor,
+        keys: &["pagedown", "ctrl+f"],
+        note: "or the wheel",
+    },
+    Binding {
         id: "app.exit",
         action: A::AppExit,
         when: W::Editor,
@@ -237,7 +262,14 @@ pub const BINDINGS: &[Binding] = &[
         action: A::ThinkFold,
         when: W::Editor,
         keys: &["ctrl+t"],
-        note: "reasoning in full, or a count of it",
+        note: "the current reasoning block in full, or a count of it",
+    },
+    Binding {
+        id: "think.fold-all",
+        action: A::ThinkFoldAll,
+        when: W::Editor,
+        keys: &["ctrl+shift+t", "alt+t"],
+        note: "every reasoning block, the current one included",
     },
 ];
 
@@ -290,10 +322,14 @@ fn show(p: Press) -> String {
 
 /// A key press, normalized.
 ///
-/// Shift is dropped from character keys because the character already carries
-/// it — `shift+a` and `A` are the same press reported two ways depending on the
-/// terminal, and a table that distinguished them would work on some and not
-/// others. Named keys keep it, so `shift+enter` stays expressible.
+/// Shift is dropped from a bare character because the character already
+/// carries it — `shift+a` and `A` are the same press reported two ways
+/// depending on the terminal, and a table that distinguished them would work
+/// on some and not others. It is kept when Ctrl or Alt rides with it, so
+/// `ctrl+shift+t` stays distinct from `ctrl+t` on the terminals that report
+/// it; the ones that do not degrade it to `ctrl+t`, which is why a reachable
+/// alternate is worth binding beside it. Named keys keep it, so
+/// `shift+enter` stays expressible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Press {
     pub code: KeyCode,
@@ -306,12 +342,17 @@ impl Press {
         match code {
             KeyCode::Char(c) => Press {
                 code: KeyCode::Char(c.to_ascii_lowercase()),
-                mods: mods - KeyModifiers::SHIFT,
+                mods: if mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+                    mods
+                } else {
+                    mods - KeyModifiers::SHIFT
+                },
             },
             _ => Press { code, mods },
         }
     }
 }
+
 
 fn named(word: &str) -> Option<KeyCode> {
     Some(match word {
@@ -430,9 +471,26 @@ impl Keys {
             layers.push(When::Run);
         }
         layers.push(When::Editor);
-        layers
-            .into_iter()
-            .find_map(|w| self.map.get(&(w, press)).copied())
+        if let hit @ Some(_) = layers
+            .iter()
+            .find_map(|w| self.map.get(&(*w, press)).copied())
+        {
+            return hit;
+        }
+        // A shift-riding press that nothing owns — `ctrl+shift+t` has its
+        // own binding, but the terminals that do not report shift make
+        // `ctrl+shift+w` arrive as `ctrl+w`. Falling back to the bare press
+        // keeps those keys working on both kinds of terminal.
+        if press.mods.contains(KeyModifiers::SHIFT) {
+            let bare = Press {
+                mods: press.mods - KeyModifiers::SHIFT,
+                ..press
+            };
+            return layers
+                .iter()
+                .find_map(|w| self.map.get(&(*w, bare)).copied());
+        }
+        None
     }
 }
 
@@ -487,11 +545,7 @@ mod tests {
             k.action(press("esc"), true, true),
             Some(Action::MenuDismiss)
         );
-        assert_eq!(
-            k.action(press("esc"), false, true),
-            Some(Action::RunInterrupt)
-        );
-        assert_eq!(k.action(press("esc"), false, false), None);
+        assert_eq!(k.action(press("esc"), false, false), Some(Action::Rewind));
     }
 
     #[test]
@@ -532,8 +586,52 @@ mod tests {
         let a = Press::of(KeyCode::Char('A'), KeyModifiers::SHIFT);
         let b = Press::of(KeyCode::Char('a'), KeyModifiers::NONE);
         assert_eq!(a, b);
+        // Ctrl+Shift rides beside Ctrl on the terminals that report it, so
+        // ctrl+shift+t can own an action of its own there.
+        assert_ne!(press("ctrl+shift+t"), press("ctrl+t"));
+        assert_eq!(
+            press("ctrl+shift+t"),
+            Press::of(KeyCode::Char('T'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+
+        );
         // Named keys keep it, so shift+enter stays expressible.
         assert_ne!(press("shift+enter"), press("enter"));
+    }
+    #[test]
+    fn a_shift_riding_press_falls_back_to_the_bare_key() {
+        // `ctrl+shift+w` is its own press only on the terminals that report
+        // the shift; on the ones that swallow it, it is `ctrl+w`. The lookup
+        // falls back, so the key does the same thing everywhere.
+        let keys = Keys::default();
+        assert_eq!(
+            keys.action(press("ctrl+shift+w"), false, false),
+            Some(Action::DeleteWordBack)
+        );
+        // A binding that owns the shift press wins over the fallback.
+        assert_eq!(
+            keys.action(press("ctrl+shift+t"), false, false),
+            Some(Action::ThinkFoldAll)
+        );
+    }
+
+    #[test]
+    fn the_global_fold_is_reachable_on_the_terminals_that_report_shift() {
+        // Ctrl+Shift+T is ctrl+t on terminals that swallow the shift; on the
+        // ones that report it, it must reach the action it is bound to. Alt+T
+        // stays bound too, so the degrade has a reachable alternate.
+        let keys = Keys::default();
+        assert_eq!(
+            keys.action(press("ctrl+shift+t"), false, false),
+            Some(Action::ThinkFoldAll)
+        );
+        assert_eq!(
+            keys.action(press("alt+t"), false, false),
+            Some(Action::ThinkFoldAll)
+        );
+        assert_eq!(
+            keys.action(press("ctrl+t"), false, false),
+            Some(Action::ThinkFold)
+        );
     }
 
     #[test]

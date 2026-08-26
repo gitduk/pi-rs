@@ -447,6 +447,18 @@ impl Repl {
         )?;
         Ok(())
     }
+
+    /// Rewind the conversation to a user message and write the shorter
+    /// transcript back. How many entries were dropped; an unknown id drops
+    /// nothing.
+    pub fn rewind_to(&mut self, user: agent::log::EntryId) -> anyhow::Result<usize> {
+        let dropped = self.session.log.rollback_to(user);
+        if dropped == 0 {
+            return Ok(0);
+        }
+        self.save()?;
+        Ok(dropped)
+    }
 }
 
 /// Enough about a model to choose between them: who serves it, how much it

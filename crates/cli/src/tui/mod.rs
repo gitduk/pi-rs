@@ -11,20 +11,32 @@ mod editor;
 mod screen;
 mod status;
 
+use std::borrow::Cow;
+use std::collections::HashSet;
 use std::time::Instant;
 
+use agent::log::EntryId;
 use agent::{AgentError, Event, Totals};
+use brain::message::{
+    AssistantContent, Message, ReasoningContent, ToolCallId, ToolResult, ToolResultContent,
+    UserContent,
+};
 use anyhow::Result;
 use brain::stream::Usage;
-use crossterm::event::{Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
 use crate::keys::{Action, Keys, Press};
+use ratatui::layout::{Constraint, Layout};
+use ratatui::style::Style as RStyle;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{List, ListItem, ListState};
+use crate::render::Style as ThemeStyle;
 use crate::render::{self, Markdown, Paint};
 use crate::repl::{self, Candidate, Choice, Command, Repl, Step};
 use editor::Editor;
-use screen::{Caret, Screen};
+use screen::{Rows, Screen};
 use std::sync::Arc;
 
 /// What a folded run shows instead of what it is thinking.
@@ -39,8 +51,12 @@ const BANNER: &str = concat!("π ", env!("CARGO_PKG_VERSION"));
 /// second clear reads as the second half of a double-tap and quits.
 const DOUBLE_TAP: std::time::Duration = std::time::Duration::from_millis(500);
 
-fn is_double_tap(previous: Option<Instant>, now: Instant) -> bool {
-    previous.is_some_and(|p| now.duration_since(p) < DOUBLE_TAP)
+/// Whether a press lands inside the double-tap window of the previous one,
+/// and records the press either way.
+fn double_tap(last: &mut Option<Instant>, now: Instant) -> bool {
+    let hit = last.is_some_and(|p| now.duration_since(p) < DOUBLE_TAP);
+    *last = Some(now);
+    hit
 }
 
 /// What a key press asked the loop to do. Every press redraws regardless.
@@ -49,21 +65,47 @@ enum Act {
     None,
     Submit(String),
     Interrupt,
+    /// The rewind selector wants the session's user messages.
+    OpenRewind,
+    /// A message chosen from the rewind selector: the conversation rewinds
+    /// there, that message kept and everything after it forgotten.
+    Rewind(EntryId),
     Quit,
 }
-
-/// Whether reasoning reaches the scrollback, and what it holds back while it
-/// does not.
+/// A line in the scrollback.
+enum Entry {
+    /// A plain, painted line.
+    Plain(String),
+    /// A block of reasoning that can be folded or unfolded.
+    Folded {
+        /// Which reasoning block this entry belongs to; the stream appends
+        /// completed lines to the open block's entry and nothing else.
+        block: u64,
+        /// The actual reasoning lines, kept so they can be shown when unfolded.
+        lines: Vec<String>,
+        /// Whether the block is currently folded.
+        folded: bool,
+    },
+}
+/// Whether reasoning is folded to its count line, and which block the stream
+/// is filling right now.
 ///
-/// A switch, set before or during a block and never after: a line handed to the
-/// terminal cannot be taken back, and a key that pretended otherwise would put
-/// reasoning below the answer it came before. Shut, the block leaves a count
-/// and the lines are dropped; open, they are ordinary output.
+/// Thinking always lives in a foldable scrollback entry, folded or not: the
+/// screen is repainted from its entries every frame, so a line already shown
+/// can still be folded. Each entry carries its own state; `folded` is what
+/// the blocks no one is touching are folded to.
 struct Thinking {
-    /// Reasoning lines the shut window has kept out of scrollback.
-    held: Vec<String>,
-    /// Whether reasoning is kept back at all.
+    /// The next block id; closed entries keep the id they were born with, so
+    /// `land` appends only to the open block's entry.
+    next: u64,
+    /// The block streaming right now, if any.
+    streaming: Option<u64>,
+    /// What untouched blocks are folded to: the value a new block is born
+    /// with, and the target a global flip is measured from.
     folded: bool,
+    /// A `ctrl+t` on a block with no entry yet — one not born, or none at
+    /// all — leaves its flip here, for the next block's first line.
+    pending: Option<bool>,
 }
 
 /// Shut: the reasoning is worth a glance while it runs and almost never worth
@@ -75,51 +117,222 @@ struct Thinking {
 impl Default for Thinking {
     fn default() -> Self {
         Self {
-            held: Vec::new(),
+            next: 1,
+            streaming: None,
             folded: true,
+            pending: None,
         }
     }
 }
 
 impl Thinking {
-    /// Whether a finished row waits here instead of going to scrollback.
-    fn holds(&self, dim: bool) -> bool {
-        self.folded && dim
+    /// Whether a reasoning row is hidden behind the count line: dim, and the
+    /// streaming block folded — its own entry when it has one, the value it
+    /// will be born with otherwise.
+    fn holds(&self, dim: bool, above: &[Entry]) -> bool {
+        dim && self.stream_fold(above)
     }
 
-    /// Open the window or shut it, and say what the scrollback gets for it.
-    ///
-    /// A line naming the new state, always: pressed between runs the switch has
-    /// nothing to hand over and only governs the next block, so without one the
-    /// key would answer nothing at all. Then what was held — the answer has not
-    /// started, so those lines still land where they belong, before it.
-    /// Shutting takes nothing back, and starts at the next line: the terminal
-    /// owns what it has printed, which is why this is a switch and not a view.
-    fn toggle(&mut self) -> (String, Vec<String>) {
+    /// The value a block with no entry yet takes: the last `ctrl+t` flip, or
+    /// the switch.
+    fn unborn_fold(&self) -> bool {
+        self.pending.unwrap_or(self.folded)
+    }
+
+    /// How the block streaming now is folded: its entry's own state, or —
+    /// before its first line lands — the value pending for it.
+    fn stream_fold(&self, above: &[Entry]) -> bool {
+        if let Some(id) = self.streaming
+            && let Some(Entry::Folded { folded, .. }) = above
+                .iter()
+                .rev()
+                .find(|e| matches!(e, Entry::Folded { block, .. } if *block == id))
+        {
+            return *folded;
+        }
+        self.unborn_fold()
+    }
+
+    /// A new reasoning block is about to start. It gets an id the scrollback
+    /// entry will be born with; its first line takes `birth_fold`.
+    fn start(&mut self) {
+        self.streaming = Some(self.next);
+        self.next += 1;
+    }
+
+    /// The streaming block is over; the entry it filled stays where it is.
+    /// The streaming block is over; the entry it filled stays where it is.
+    /// A flip still pending for it — the block ended before its first line
+    /// landed — dies here rather than leaking into the next block's birth.
+    fn close_block(&mut self) {
+        self.streaming = None;
+        self.pending = None;
+    }
+    /// The value the next block's entry is born with: the last `ctrl+t` on a
+    /// block with no entry yet, or the switch.
+    fn birth_fold(&mut self) -> bool {
+        self.pending.take().unwrap_or(self.folded)
+    }
+
+    /// Fold or unfold every block in the scrollback and move the switch with
+    /// them, the current block included: entries and switch must never
+    /// disagree, or the next block is born with a stale value and a mixed
+    /// screen can never fold back to a single state. A pending birth flip
+    /// belongs to a block the global key has just made irrelevant.
+    fn flip_all(&mut self, above: &mut [Entry]) {
         self.folded = !self.folded;
-        if self.folded {
-            ("thinking · folded".to_string(), Vec::new())
-        } else {
-            (
-                "thinking · shown".to_string(),
-                std::mem::take(&mut self.held),
-            )
+        self.pending = None;
+        for entry in above.iter_mut() {
+            if let Entry::Folded { folded, .. } = entry {
+                *folded = self.folded;
+            }
         }
     }
 
-    /// This block of reasoning is over. A count is what the shut window leaves,
-    /// because the point of shutting it is that the scrollback does not keep
-    /// the rest — and the lines go, so nothing outlives the count that stands
-    /// for it.
-    fn close(&mut self) -> Option<String> {
-        let n = std::mem::take(&mut self.held).len();
-        if !self.folded || n == 0 {
-            return None;
+    /// Flip the current block only: the one streaming, or the newest
+    /// finished one when nothing is. The switch is left alone, so the blocks
+    /// no one is touching keep what they had; a block not born yet records
+    /// the flip in `pending` for its first line.
+    fn toggle_current(&mut self, above: &mut [Entry]) {
+        let flipped = if let Some(id) = self.streaming {
+            above
+                .iter_mut()
+                .rev()
+                .find(|e| matches!(e, Entry::Folded { block, .. } if *block == id))
+        } else {
+            above
+                .iter_mut()
+                .rev()
+                .find(|e| matches!(e, Entry::Folded { .. }))
+        };
+        if let Some(Entry::Folded { folded, .. }) = flipped {
+            *folded = !*folded;
+            self.pending = None;
+        } else {
+            self.pending = Some(!self.unborn_fold());
         }
-        let s = if n == 1 { "" } else { "s" };
-        Some(format!("thinking · {n} line{s}"))
     }
 }
+
+/// The count line a shut thinking block leaves in the scrollback.
+fn thinking_summary(n: usize) -> String {
+    let s = if n == 1 { "" } else { "s" };
+    format!("thinking · {n} line{s}")
+}
+
+/// The rows one scrollback entry renders to, and the row at index `i` of
+/// them: a plain line is itself; a folded block is its summary, or its full
+/// lines when unfolded.
+fn entry_len(entry: &Entry) -> usize {
+    match entry {
+        Entry::Plain(_) => 1,
+        Entry::Folded { lines, folded, .. } => {
+            if *folded {
+                1
+            } else {
+                lines.len()
+            }
+        }
+    }
+}
+
+fn entry_row<'a>(entry: &'a Entry, i: usize, paint: &Paint) -> Cow<'a, str> {
+    match entry {
+        Entry::Plain(s) => Cow::Borrowed(s),
+        Entry::Folded { lines, folded, .. } => {
+            if *folded {
+                // The count row is synthesized at draw time, so it takes its
+                // muted styling here rather than from a painted entry.
+                Cow::Owned(paint.on(&paint.theme.muted, &thinking_summary(lines.len())))
+            } else {
+                Cow::Borrowed(&lines[i])
+            }
+        }
+    }
+}
+
+/// The scrollback as rows, walked from either end without flattening the
+/// whole history: `window` only ever needs the newest `want` rows, and an
+/// unfolded thinking block is not worth re-materializing per frame.
+struct ScrollbackRows<'a> {
+    entries: &'a [Entry],
+    /// For the folded summary row, which is synthesized at draw time and so
+    /// carries no paint of its own.
+    paint: &'a Paint,
+    /// Next entry to read from the front, and the row offset inside it.
+    front: (usize, usize),
+    /// Next entry to read from the back, and the row offset inside it.
+    back: (usize, usize),
+}
+
+impl<'a> ScrollbackRows<'a> {
+    fn new(entries: &'a [Entry], paint: &'a Paint) -> Self {
+        let back = entries.len().saturating_sub(1);
+        let back_row = if entries.is_empty() {
+            0
+        } else {
+            entry_len(&entries[back])
+        };
+        Self {
+            entries,
+            paint,
+            front: (0, 0),
+            back: (back, back_row),
+        }
+    }
+}
+
+impl<'a> Iterator for ScrollbackRows<'a> {
+    type Item = Cow<'a, str>;
+
+    fn next(&mut self) -> Option<Cow<'a, str>> {
+        // `next_back` guards the empty case through its row pointers; the
+        // front walk would index `entries[0]` before any check.
+        if self.entries.is_empty() {
+            return None;
+        }
+        while self.front.0 <= self.back.0 {
+            let entry = &self.entries[self.front.0];
+            if self.front.0 == self.back.0 {
+                if self.front.1 >= self.back.1 {
+                    return None;
+                }
+                let row = entry_row(entry, self.front.1, self.paint);
+                self.front.1 += 1;
+                return Some(row);
+            }
+            if self.front.1 < entry_len(entry) {
+                let row = entry_row(entry, self.front.1, self.paint);
+                self.front.1 += 1;
+                return Some(row);
+            }
+            self.front = (self.front.0 + 1, 0);
+        }
+        None
+    }
+}
+
+impl<'a> DoubleEndedIterator for ScrollbackRows<'a> {
+    fn next_back(&mut self) -> Option<Cow<'a, str>> {
+        while self.front.0 <= self.back.0 {
+            let entry = &self.entries[self.back.0];
+            if self.front.0 == self.back.0 {
+                if self.front.1 >= self.back.1 {
+                    return None;
+                }
+                self.back.1 -= 1;
+                return Some(entry_row(entry, self.back.1, self.paint));
+            }
+            if self.back.1 > 0 {
+                self.back.1 -= 1;
+                return Some(entry_row(entry, self.back.1, self.paint));
+            }
+            self.back = (self.back.0 - 1, entry_len(&self.entries[self.back.0 - 1]));
+        }
+        None
+    }
+}
+
 
 /// The rows between the scrollback and the status line: the reasoning window,
 /// and the paragraph still being written.
@@ -129,16 +342,28 @@ impl Thinking {
 /// one that gets its second chance in front of the user.
 fn body(
     thinking: &Thinking,
+    above: &[Entry],
     md: &Markdown,
     dim: bool,
     open: &str,
-    width: usize,
-    room: usize,
+    space: (usize, usize),
     paint: &Paint,
 ) -> Vec<String> {
-    // One row stands for all of it, the unfinished line included.
-    if thinking.holds(dim) {
-        return vec![paint.on(&paint.theme.muted, THINKING)];
+    let (width, room) = space;
+    if thinking.holds(dim, above) {
+        // The block's count row in the scrollback already answers the fold
+        // switch; the live placeholder is only for the moment before the
+        // block's first completed line exists to count.
+        let counted = thinking.streaming.is_some_and(|id| {
+            above
+                .iter()
+                .rev()
+                .any(|e| matches!(e, Entry::Folded { block, .. } if *block == id))
+        });
+        if !counted {
+            return vec![paint.on(&paint.theme.muted, THINKING)];
+        }
+        return Vec::new();
     }
     if open.is_empty() {
         return Vec::new();
@@ -176,6 +401,161 @@ fn tool_row(frame: usize, name: &str, summary: &str) -> String {
     format!("{} {name}{arg}", status::FRAMES[frame % status::FRAMES.len()])
 }
 
+/// One tool result as the ✓/✗ row the live stream would have scrolled up.
+fn tool_result_line(r: &ToolResult, paint: &Paint, width: usize) -> String {
+    let mark = if r.is_error {
+        paint.on(&paint.theme.status.err, "✗")
+    } else {
+        paint.on(&paint.theme.status.ok, "✓")
+    };
+    let body: String = r
+        .content
+        .iter()
+        .filter_map(|c| match c {
+            ToolResultContent::Text(t) => Some(t.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    let head = body.split_once('\n').map_or(body.as_str(), |(h, _)| h);
+    let room = width.saturating_sub(2).max(20);
+    format!("{mark} {} {}", r.name, paint.on(&paint.theme.muted, &render::clip(head, room)))
+}
+
+/// A tool's start line: what an unanswered call keeps in the view.
+fn tool_start_line(name: &str, summary: &str) -> String {
+    let arg = if summary.is_empty() {
+        String::new()
+    } else {
+        format!(" {summary}")
+    };
+    format!("→ {name}{arg}")
+}
+
+/// A prompt's lines as the stream echoed them: the first with its gutter,
+/// the rest indented.
+fn push_prompt_lines(out: &mut Vec<Entry>, text: &str, prompt: &str, bang_prompt: &str) {
+    for (i, line) in text.lines().enumerate() {
+        let (gutter, body) = if i == 0 {
+            match line.strip_prefix('!') {
+                Some(rest) => (bang_prompt, rest.trim_start()),
+                None => (prompt, line),
+            }
+        } else {
+            ("  ", line)
+        };
+        out.push(Entry::Plain(format!("{gutter}{body}")));
+    }
+}
+
+/// The transcript as rows, exactly as the live stream would have drawn them:
+/// prompts with their gutter, answers as markdown, tool calls as their result
+/// lines, reasoning as a foldable block. A rewind rebuilds the screen from
+/// this, so the view returns to the point the conversation did.
+fn render_log(
+    log: &agent::log::Log,
+    paint: &Paint,
+    prompt: &str,
+    bang_prompt: &str,
+    width: usize,
+    folded: bool,
+) -> Vec<Entry> {
+    // A call whose result is in the log shows only its result row; one that
+    // never got an answer (an interrupted turn) shows the start line instead,
+    // the way `abandon_tools` leaves it.
+    let answered: HashSet<ToolCallId> = log
+        .live()
+        .iter()
+        .filter_map(|(_, m)| match m {
+            Message::User { content } => Some(content),
+            _ => None,
+        })
+        .flat_map(|content| {
+            content.iter().filter_map(|c| match c {
+                UserContent::ToolResult(r) => Some(r.call.clone()),
+                _ => None,
+            })
+        })
+        .collect();
+
+    let amendments = log.amendments();
+    let mut out = Vec::new();
+    for (id, m) in log.live() {
+        match m {
+            Message::User { content } => {
+                for c in content {
+                    match c {
+                        UserContent::Text(t) => {
+                            push_prompt_lines(&mut out, &t.text, prompt, bang_prompt);
+                        }
+                        UserContent::ToolResult(r) => {
+                            out.push(Entry::Plain(tool_result_line(r, paint, width)));
+                        }
+                        UserContent::Image(_) => {}
+                    }
+                }
+                // A prompt folded into a tool-results message by
+                // `append_user` is an amendment, not content; it echoes too.
+                if let Some(parts) = amendments.get(&id) {
+                    for part in parts {
+                        push_prompt_lines(&mut out, part, prompt, bang_prompt);
+                    }
+                }
+            }
+            Message::Assistant { content, .. } => {
+                for b in content {
+                    match b {
+                        AssistantContent::Text(t) => {
+                            // A fresh instance per block, matching the live
+                            // stream resetting its markdown at each close.
+                            let mut md = Markdown::default();
+                            for line in t.text.lines() {
+                                let painted = md.line(line, paint);
+                                md.advance(line);
+                                out.push(Entry::Plain(painted));
+                            }
+                        }
+                        AssistantContent::ToolCall(c) => {
+                            if answered.contains(&c.id) {
+                                continue;
+                            }
+                            out.push(Entry::Plain(
+                                paint.on(
+                                    &paint.theme.muted,
+                                    &tool_start_line(&c.name, &render::summarize(&c.args)),
+                                ),
+                            ));
+                        }
+                        AssistantContent::Reasoning(r) => {
+                            // Muted, exactly as the live stream paints a
+                            // reasoning row: a rebuilt block must not come
+                            // out brighter than the one it replaces.
+                            let lines: Vec<String> = r
+                                .content
+                                .iter()
+                                .filter_map(|c| match c {
+                                    ReasoningContent::Text { text, .. } => Some(text.as_str()),
+                                    _ => None,
+                                })
+                                .flat_map(|s| s.lines().map(str::to_string))
+                                .map(|s| paint.on(&paint.theme.muted, &s))
+                                .collect();
+                            out.push(Entry::Folded {
+                                // A rebuilt entry is never appended to, so the
+                                // id only has to stay out of the live stream's.
+                                block: 0,
+                                lines,
+                                folded,
+                            });
+                        }
+                    }
+                }
+            }
+            Message::System { .. } => {}
+        }
+    }
+    out
+}
+
 /// Everything the terminal shows, and nothing the session knows.
 struct Ui {
     screen: Screen,
@@ -196,7 +576,10 @@ struct Ui {
     md: Markdown,
     thinking: Thinking,
     /// Finished lines waiting to be pushed above on the next render.
-    above: Vec<String>,
+    /// Finished lines waiting to be pushed above on the next render.
+    above: Vec<Entry>,
+
+
     /// Tool calls still running, one animated row each. A finished call
     /// replaces its row with the ✓/✗ line in scrollback, so a call that never
     /// answered would leave a spinning row behind; `abandon_tools` clears it.
@@ -204,10 +587,10 @@ struct Ui {
 
     /// Lines submitted while the run was working.
     queued: Vec<String>,
-    /// Which completion is highlighted. Kept rather than the list itself: the
-    /// list is a function of what has been typed, and caching it is one more
-    /// thing to invalidate.
-    picked: usize,
+    /// Which row of the open list is highlighted; kept rather than the list
+    /// itself, which is a function of what has been typed. `None` anchors a
+    /// fresh list on its bottom row, the best match, beside the input line.
+    picked: Option<usize>,
     /// The text the list was dismissed at. Any edit changes the text and the
     /// list comes back, which is what makes Esc mean "not that" rather than
     /// "never again".
@@ -218,6 +601,11 @@ struct Ui {
     /// The same copy, of the same list `/help` prints.
     commands: Arc<Vec<Command>>,
     last_interrupt: Option<Instant>,
+    /// When the last Esc was pressed, for the rewind selector's double-tap.
+    last_esc: Option<Instant>,
+    /// The rewind selector's rows, log order, newest last. Empty is closed;
+    /// while it is open it replaces the completion list in the same rows.
+    rewind: Vec<MenuEntry>,
     started: Option<Instant>,
     spinner: usize,
     /// Turns of this run that have already reported their totals.
@@ -231,6 +619,32 @@ struct Ui {
     /// Which halves of the settled figures came from us, not the provider.
     estimated: agent::Estimated,
     stopping: bool,
+    /// Rows the view is scrolled up by. Zero shows the newest rows.
+    scroll: usize,
+}
+
+/// One row either menu can offer: a completion of the line, or a message
+/// from the rewind selector to go back to.
+#[derive(Clone)]
+enum MenuEntry {
+    Completion(Candidate),
+    Message { id: EntryId, show: String },
+}
+
+impl MenuEntry {
+    fn show(&self) -> &str {
+        match self {
+            MenuEntry::Completion(c) => &c.show,
+            MenuEntry::Message { show, .. } => show,
+        }
+    }
+
+    fn help(&self) -> &str {
+        match self {
+            MenuEntry::Completion(c) => &c.help,
+            MenuEntry::Message { .. } => "",
+        }
+    }
 }
 
 impl Ui {
@@ -259,12 +673,15 @@ impl Ui {
             dim: false,
             md: Markdown::default(),
             thinking: Thinking::default(),
-            above: vec![banner],
+            above: vec![Entry::Plain(banner)],
+
             tools: Vec::new(),
             queued: Vec::new(),
-            picked: 0,
+            picked: None,
             dismissed_at: None,
             last_interrupt: None,
+            last_esc: None,
+            rewind: Vec::new(),
             started: None,
             spinner: 0,
             settled: Usage::default(),
@@ -272,6 +689,7 @@ impl Ui {
             produced: 0,
             estimated: agent::Estimated::default(),
             stopping: false,
+            scroll: 0,
         }
     }
 
@@ -280,18 +698,39 @@ impl Ui {
         format!("{} ", paint.on(&paint.theme.prompt.color, icon))
     }
     fn say(&mut self, line: impl Into<String>) {
-        self.above.push(line.into());
+        self.above.push(Entry::Plain(line.into()));
     }
 
-    /// Where a finished row goes: the terminal's scrollback, or the window that
-    /// can still be redrawn. The only rows that wait are held-back reasoning.
+    /// Where a finished row goes: a reasoning line into the streaming block's
+    /// foldable entry, anything else straight into scrollback.
     fn land(&mut self, painted: String, dim: bool) {
-        if self.thinking.holds(dim) {
-            self.thinking.held.push(painted);
-        } else {
-            self.above.push(painted);
+        if dim
+            && let Some(id) = self.thinking.streaming
+        {
+            if let Some(Entry::Folded { lines, .. }) = self.open_entry(id) {
+                lines.push(painted);
+                return;
+            }
+            // The block's first line: born with the value a `ctrl+t`
+            // before it left, or the switch.
+            self.above.push(Entry::Folded {
+                block: id,
+                lines: vec![painted],
+                folded: self.thinking.birth_fold(),
+            });
+            return;
         }
+        self.above.push(Entry::Plain(painted));
     }
+
+    /// The scrollback entry for a streaming block, if it has one yet.
+    fn open_entry(&mut self, id: u64) -> Option<&mut Entry> {
+        self.above
+            .iter_mut()
+            .rev()
+            .find(|e| matches!(e, Entry::Folded { block, .. } if *block == id))
+    }
+
 
     /// End the open paragraph and send it up into scrollback.
     /// A finished row, styled for what it is: reasoning, or the answer's
@@ -312,9 +751,9 @@ impl Ui {
             self.land(painted, self.dim);
         }
         if self.dim {
-            // The reasoning is over, so the scrollback finally gets its say in
-            // it: the lines if the window was open, a count of them if not.
-            self.close_thinking();
+            // The block is over: it stops taking lines; its entry is already
+            // in the scrollback, folded or not.
+            self.thinking.close_block();
         } else {
             // A fence the answer left open stays open only within the answer.
             // A tool call ends the block, and the block is as far as markdown
@@ -329,25 +768,22 @@ impl Ui {
         if dim != self.dim {
             self.close();
             self.dim = dim;
+            if dim {
+                // A new reasoning block: `close` just settled the previous
+                // one; this one gets a fresh id.
+                self.thinking.start();
+            }
         }
+
         self.open.push_str(delta);
         // A finished line is no longer changing, so it belongs in the
-        // terminal's own scrollback rather than in the region we repaint —
-        // unless it is reasoning, which waits until its block ends for a key
-        // that can still decide where it goes.
+        // scrollback rather than in the region we repaint: reasoning into
+        // the streaming block's foldable entry, answer text as a plain row.
         while let Some(i) = self.open.find('\n') {
             let line: String = self.open.drain(..=i).collect();
             let line = line.trim_end_matches('\n').to_string();
             let painted = self.paint_row(&line, dim);
             self.land(painted, dim);
-        }
-    }
-
-    /// What the scrollback keeps once a block of reasoning is over.
-    fn close_thinking(&mut self) {
-        if let Some(note) = self.thinking.close() {
-            self.above
-                .push(self.paint.on(&self.paint.theme.muted, &note));
         }
     }
 
@@ -393,7 +829,7 @@ impl Ui {
                     // Row by row: a scrollback line is written with a carriage
                     // return of its own, and an embedded newline would stair-
                     // step down the screen without one.
-                    self.above.extend(said.lines().map(str::to_string));
+                    self.above.extend(said.lines().map(str::to_string).map(Entry::Plain));
                 }
             }
             _ => {
@@ -402,7 +838,7 @@ impl Ui {
                     // Row by row: a scrollback line is written with a carriage
                     // return of its own, and an embedded newline would stair-
                     // step down the screen without one.
-                    self.above.extend(said.lines().map(str::to_string));
+                    self.above.extend(said.lines().map(str::to_string).map(Entry::Plain));
                 }
             }
         }
@@ -414,59 +850,73 @@ impl Ui {
     /// start line the row stood for and clear the row.
     fn abandon_tools(&mut self) {
         for t in std::mem::take(&mut self.tools) {
-            let arg = if t.summary.is_empty() {
-                String::new()
-            } else {
-                format!(" {}", t.summary)
-            };
-            let line = format!("→ {}{arg}", t.name);
-            self.say(self.paint.on(&self.paint.theme.muted, &line));
+            self.say(
+                self.paint
+                    .on(&self.paint.theme.muted, &tool_start_line(&t.name, &t.summary)),
+            );
         }
     }
 
-    /// What the line could still become. Only while a command word is being
-    /// typed, and never during a run — the editor is a queue then, not a
-    /// command line.
-    fn menu(&self) -> Vec<Candidate> {
-        if self.started.is_some() || self.dismissed_at.as_deref() == Some(self.editor.text()) {
+    /// What the line could still become: a completion while a command word is
+    /// being typed, or — with the rewind selector open — the user messages a
+    /// conversation can be rewound to. Never during a run, when the editor is
+    /// a queue, not a command line.
+    fn menu(&self) -> Vec<MenuEntry> {
+        if self.started.is_some() {
             return Vec::new();
         }
+        if !self.rewind.is_empty() {
+            return self.rewind.clone();
+        }
+        if self.dismissed_at.as_deref() == Some(self.editor.text()) {
+            return Vec::new();
+        }
+        // Bottom-up: the best match belongs on the row right above the input.
         repl::complete(self.editor.text(), &self.commands, &self.choices)
+            .into_iter()
+            .rev()
+            .map(MenuEntry::Completion)
+            .collect()
     }
 
-    /// The highlighted completion, clamped: the list shrinks as the word grows.
-    fn highlighted(&self) -> Option<Candidate> {
+    /// Open the rewind selector on the given messages, newest selected first.
+    fn open_rewind(&mut self, entries: Vec<MenuEntry>) {
+        self.picked = Some(entries.len().saturating_sub(1));
+        self.rewind = entries;
+    }
+
+    /// The highlighted row, clamped: the list shrinks as the word grows.
+    fn highlighted(&self) -> Option<MenuEntry> {
         let mut menu = self.menu();
         if menu.is_empty() {
             return None;
         }
-        Some(menu.swap_remove(self.picked.min(menu.len() - 1)))
+        let at = self.picked.unwrap_or(menu.len() - 1).min(menu.len() - 1);
+        Some(menu.swap_remove(at))
     }
 
-    fn menu_rows(&self, width: usize) -> Vec<String> {
-        let menu = self.menu();
-        if menu.is_empty() {
-            return Vec::new();
-        }
-        let picked = self.picked.min(menu.len() - 1);
-        let head = menu.iter().map(|c| c.show.len()).max().unwrap_or(0);
+    /// The menu's rows as ratatui list items. The selected row is styled by
+    /// the list itself; everything else sits muted.
+    fn menu_items(&self, menu: &[MenuEntry]) -> Vec<ListItem<'static>> {
+        let head = menu.iter().map(|c| c.show().len()).max().unwrap_or(0);
+        let muted = self.rat_style(&self.paint.theme.muted);
         menu.iter()
-            .enumerate()
-            .map(|(i, c)| {
-                let line = format!("  {:head$}  {}", c.show, c.help);
-                let painted = if i == picked {
-                    self.paint.on(&self.paint.theme.menu.selected, &line)
-                } else {
-                    self.paint.on(&self.paint.theme.muted, &line)
-                };
-                screen::fit(&painted, width)
+            .map(|c| {
+                let line = format!("  {:head$}  {}", c.show(), c.help());
+                ListItem::new(Line::from(Span::styled(line, muted)))
             })
-            .map(|rows| rows.into_iter().next().unwrap_or_default())
             .collect()
     }
 
-    /// The rows to repaint, and where the caret sits among them.
-    fn live(&self) -> (Vec<String>, Caret) {
+    /// A theme style, as ratatui sees it.
+    fn rat_style(&self, s: &ThemeStyle) -> RStyle {
+        screen::parse_sgr(s.codes(), RStyle::default())
+    }
+
+
+    /// The rows above the input line: running tools, the open stream, and
+    /// the status line. The editor draws separately, pinned to the bottom.
+    fn live(&self, room: usize) -> Vec<String> {
         let width = self.screen.usable();
         let mut rows = Vec::new();
 
@@ -478,14 +928,13 @@ impl Ui {
             ));
         }
 
-        let room = (self.screen.height as usize).saturating_sub(4).max(1);
         rows.extend(body(
             &self.thinking,
+            &self.above,
             &self.md,
             self.dim,
             &self.open,
-            width,
-            room,
+            (width, room),
             &self.paint,
         ));
 
@@ -503,27 +952,7 @@ impl Ui {
             ));
         }
 
-        let (input, caret) = self.editor.view(width);
-        let offset = rows.len() as u16;
-        rows.extend(input);
-        let mut caret = (caret.0 + offset, caret.1);
-        // Below the prompt, so the line being typed does not move under the
-        // cursor as the list grows and shrinks with it.
-        rows.extend(self.menu_rows(width));
-
-        // A region taller than the screen scrolls its own top rows away, and
-        // the walk back over it then eats lines that are no longer part of it.
-        // Drop from the top instead, keeping the row the caret is on.
-        let room = (self.screen.height as usize).saturating_sub(1).max(1);
-        if rows.len() > room {
-            let start = (caret.0 as usize + 1)
-                .saturating_sub(room)
-                .min(rows.len() - room);
-            rows.drain(..start);
-            rows.truncate(room);
-            caret.0 -= start as u16;
-        }
-        (rows, caret)
+        rows
     }
 
     fn set_theme(&mut self, theme: Arc<render::Theme>) {
@@ -534,31 +963,117 @@ impl Ui {
             .set_prompts(self.prompt.clone(), self.bang_prompt.clone());
         // above[0] is the banner, painted once at construction; restyle it so
         // a /reload lands on the new theme instead of the old.
-        if let Some(first) = self.above.first_mut() {
-            *first = self.paint.on(&self.paint.theme.muted, BANNER);
+        if let Some(Entry::Plain(s)) = self.above.first_mut() {
+            *s = self.paint.on(&self.paint.theme.muted, BANNER);
         }
+
+
     }
 
     fn flush(&mut self) {
-        let (live, caret) = self.live();
-        let above = std::mem::take(&mut self.above);
-        let _ = self.screen.render(&above, &live, caret);
+        let menu = self.menu();
+        let width = self.screen.usable();
+        let (input, caret) = self.editor.view(width);
+        // A paste taller than the terminal must not push the editor area off
+        // the bottom; the editor scrolls to keep the caret's row visible.
+        let editor_h = input
+            .len()
+            .min((self.screen.height as usize).saturating_sub(1));
+        let editor_top = (caret.0 as usize + 1).saturating_sub(editor_h);
+        let input_view: Vec<String> = input
+            .into_iter()
+            .skip(editor_top)
+            .take(editor_h)
+            .collect();
+        let caret_in_view = (caret.0 as usize).saturating_sub(editor_top);
+        // From the bottom up: the input line is pinned, the menu sits above
+        // it, and the scrolled history fills what is left. The caret's row
+        // therefore depends only on the pinned rows, never on how the
+        // history wraps.
+        let menu_h = if menu.is_empty() {
+            0
+        } else {
+            menu.len()
+                .min((self.screen.height as usize).saturating_sub(editor_h + 1))
+        };
+        let hist_view = (self.screen.height as usize)
+            .saturating_sub(editor_h + menu_h)
+            .max(1);
+        let live = self.live(hist_view);
+        // Measured in rows, not lines: a line wider than the terminal wraps
+        // into several, and counting lines here would put more rows in the
+        // area than fit — pushing the newest ones off the bottom, underneath
+        // the input, where nothing shows them.
+        let scrollback = ScrollbackRows::new(&self.above, &self.paint);
+        let (rows, scroll) = screen::window(
+            scrollback.chain(live.iter().map(|s| Cow::Borrowed(s.as_str()))),
+            width,
+            hist_view,
+            self.scroll,
+        );
+
+        self.scroll = scroll;
+        let items = self.menu_items(&menu);
+        let picked = self
+            .picked
+            .unwrap_or(menu.len().saturating_sub(1))
+            .min(menu.len().saturating_sub(1));
+        let highlight = self.rat_style(&self.paint.theme.menu.selected);
+        let _ = self.screen.draw(|frame| {
+            let area = frame.area();
+            let chunks = Layout::vertical([
+                Constraint::Fill(1),
+                Constraint::Length(menu_h as u16),
+                Constraint::Length(editor_h as u16),
+            ])
+            .split(area);
+            let (main, menu_area, editor_area) = (chunks[0], chunks[1], chunks[2]);
+            frame.render_widget(Rows(&rows), main);
+            if !items.is_empty() {
+                let mut state = ListState::default();
+                state.select(Some(picked));
+                frame.render_stateful_widget(
+                    List::new(items).highlight_style(highlight),
+                    menu_area,
+                    &mut state,
+                );
+            }
+            frame.render_widget(Rows(&input_view), editor_area);
+            let caret_row = editor_area.y + caret_in_view as u16;
+            frame.set_cursor_position((caret.1, caret_row));
+        });
     }
+
+    /// Rebuild the history from the transcript, forgetting everything the old
+    /// drawing showed: a rewind changes what the conversation is, and the
+    /// screen has to show the new one, not the old one with a note on it.
+    fn rebuild(&mut self, log: &agent::log::Log) {
+        self.above.clear();
+        self.open.clear();
+        self.dim = false;
+        self.tools.clear();
+        self.thinking.streaming = None;
+        self.thinking.pending = None;
+        self.md.reset();
+        self.scroll = 0;
+        self.above = render_log(
+            log,
+            &self.paint,
+            &self.prompt,
+            &self.bang_prompt,
+            self.screen.usable(),
+            self.thinking.folded,
+        );
+    }
+
 
     /// Echo what was sent, so the prompt survives the editor being cleared.
     fn echo(&mut self, line: &str) {
-        for (i, part) in line.split('\n').enumerate() {
-            let (gutter, body) = if i == 0 {
-                match part.strip_prefix('!') {
-                    Some(rest) => (self.bang_prompt.clone(), rest.trim_start()),
-                    None => (self.prompt.clone(), part),
-                }
-            } else {
-                ("  ".to_string(), part)
-            };
-            self.say(format!("{gutter}{body}"));
-        }
+        let mut rows = Vec::new();
+        push_prompt_lines(&mut rows, line, &self.prompt, &self.bang_prompt);
+        self.above.extend(rows);
     }
+
 
     fn key(&mut self, event: TermEvent, running: bool) -> Act {
         let key = match event {
@@ -567,36 +1082,98 @@ impl Ui {
                 return Act::None;
             }
             TermEvent::Paste(text) => {
+                self.last_esc = None;
                 self.editor.insert_str(&text.replace('\r', "\n"));
                 return Act::None;
             }
+            TermEvent::Mouse(mouse) => {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => self.scroll_view(true),
+                    MouseEventKind::ScrollDown => self.scroll_view(false),
+                    _ => {}
+                }
+                return Act::None;
+            }
             // Windows reports both press and release; acting on each would
-            // double every keystroke.
-            TermEvent::Key(k) if k.kind != KeyEventKind::Release => k,
+            // double every keystroke. Any key other than Esc breaks the
+            // rewind double-tap: an armed press that typing interrupted must
+            // not fire later.
+            TermEvent::Key(k) if k.kind != KeyEventKind::Release => {
+                if k.code != KeyCode::Esc {
+                    self.last_esc = None;
+                }
+                k
+            }
             _ => return Act::None,
         };
         let press = Press::of(key.code, key.modifiers);
         let bound = self.keys.action(press, !self.menu().is_empty(), running);
+        // A key that is not one of the selector's own closes it first: it
+        // means "drop this and keep typing", the way editing the line
+        // dismisses the completion list.
+        if !self.rewind.is_empty()
+            && !matches!(
+                bound,
+                Some(
+                    Action::MenuDismiss
+                        | Action::MenuAccept
+                        | Action::MenuNext
+                        | Action::MenuPrevious
+                        | Action::LineSubmit
+                )
+            )
+        {
+            self.rewind.clear();
+        }
 
         match bound {
             Some(Action::LineClear) => return self.interrupt_or_clear(running),
             Some(Action::LineSubmit) => {
-                // Enter while the menu is open runs what it highlights. The
+                // Enter while a menu is open runs what it highlights. The
                 // typed text is a prefix; the highlighted word is the intent.
                 // The menu reads the editor, so pick before draining it.
-                let picked = self.highlighted();
-                let typed = self.editor.take();
-                let line = match picked {
-                    Some(c) => c.line,
-                    None => typed,
-                };
-                return if line.trim().is_empty() {
-                    Act::None
-                } else {
-                    Act::Submit(line)
-                };
+                match self.highlighted() {
+                    Some(MenuEntry::Message { id, .. }) => {
+                        self.rewind.clear();
+                        return Act::Rewind(id);
+                    }
+                    Some(MenuEntry::Completion(c)) => {
+                        let line = c.line;
+                        // The completion's line is what runs; the typed prefix
+                        // that produced it goes, so it cannot be re-submitted
+                        // as a stray prompt later.
+                        self.editor.take();
+                        return if line.trim().is_empty() {
+                            Act::None
+                        } else {
+                            Act::Submit(line)
+                        };
+                    }
+                    None => {
+                        let typed = self.editor.take();
+                        return if typed.trim().is_empty() {
+                            Act::None
+                        } else {
+                            Act::Submit(typed)
+                        };
+                    }
+                }
             }
             Some(Action::RunInterrupt) => return Act::Interrupt,
+            Some(Action::Rewind) => {
+                // Double Esc with an empty line opens the rewind selector.
+                // The first press only arms it; the second, inside the
+                // window, asks the loop for the session's messages.
+                if !self.editor.is_empty() {
+                    return Act::None;
+                }
+                let now = Instant::now();
+                if double_tap(&mut self.last_esc, now) {
+                    self.last_esc = None;
+                    return Act::OpenRewind;
+                }
+                return Act::None;
+            }
             Some(Action::AppExit) => {
                 return if self.editor.is_empty() && !running {
                     Act::Quit
@@ -624,31 +1201,58 @@ impl Ui {
             Some(Action::HistoryOlder) => self.editor.up(),
             Some(Action::HistoryNewer) => self.editor.down(),
             Some(Action::AppClearScreen) => self.screen.clear(),
+            Some(Action::ScrollUp) => self.scroll_view(true),
+            Some(Action::ScrollDown) => self.scroll_view(false),
             Some(Action::ThinkFold) => {
-                let (said, mut held) = self.thinking.toggle();
-                self.above
-                    .push(self.paint.on(&self.paint.theme.muted, &said));
-                self.above.append(&mut held);
+                // The current block only: the one streaming, or the newest
+                // finished one when nothing is. The switch is left alone, so
+                // the blocks no one is touching keep what they had.
+                self.thinking.toggle_current(&mut self.above);
             }
+            Some(Action::ThinkFoldAll) => {
+                // Every block in the scrollback, the current one included,
+                // and the switch with them: one key presses the whole screen
+                // to a single state.
+                self.thinking.flip_all(&mut self.above);
+            }
+
             Some(Action::MenuAccept) => {
-                if let Some(c) = self.highlighted() {
-                    self.editor.set_line(&c.line);
-                    // Something still expected after it wants a space first.
-                    if c.more {
-                        self.editor.insert(' ');
+                match self.highlighted() {
+                    Some(MenuEntry::Message { id, .. }) => {
+                        self.rewind.clear();
+                        return Act::Rewind(id);
                     }
-                    self.picked = 0;
+                    Some(MenuEntry::Completion(c)) => {
+                        self.editor.set_line(&c.line);
+                        // Something still expected after it wants a space first.
+                        if c.more {
+                            self.editor.insert(' ');
+                        }
+                        self.picked = None;
+                    }
+                    None => {}
                 }
             }
             Some(Action::MenuNext) => {
-                let n = self.menu().len();
-                self.picked = (self.picked + 1).min(n.saturating_sub(1));
+                let n = self.menu().len().saturating_sub(1);
+                let at = self.picked.unwrap_or(n).min(n);
+                self.picked = Some(at.saturating_add(1).min(n));
             }
-            Some(Action::MenuPrevious) => self.picked = self.picked.saturating_sub(1),
+            Some(Action::MenuPrevious) => {
+                let n = self.menu().len().saturating_sub(1);
+                let at = self.picked.unwrap_or(n).min(n);
+                self.picked = Some(at.saturating_sub(1));
+            }
             Some(Action::MenuDismiss) => {
-                // Recorded against the text, so any edit brings the list back:
-                // this means "not that", not "never again".
-                self.dismissed_at = Some(self.editor.text().to_string());
+                let was_rewind = !self.rewind.is_empty();
+                self.rewind.clear();
+                // The completion list is recorded against the text, so any
+                // edit brings it back: this means "not that", not "never
+                // again". The rewind selector dismisses without recording,
+                // so the completion list stays available after it.
+                if !was_rewind {
+                    self.dismissed_at = Some(self.editor.text().to_string());
+                }
             }
             // Unbound and printable is the one thing no table has to say.
             None => {
@@ -661,20 +1265,32 @@ impl Ui {
                 }
             }
             Some(
-                Action::LineClear | Action::LineSubmit | Action::RunInterrupt | Action::AppExit,
+                Action::LineClear
+                | Action::LineSubmit
+                | Action::RunInterrupt
+                | Action::AppExit
+                | Action::Rewind,
             ) => unreachable!("handled above"),
         }
         Act::None
+    }
+
+    /// Nudge the scrolled history window one half screen, the same step
+    /// PageUp/PageDown and the mouse wheel take.
+    fn scroll_view(&mut self, up: bool) {
+        let step = (self.screen.height as usize) / 2;
+        self.scroll = if up {
+            self.scroll.saturating_add(step)
+        } else {
+            self.scroll.saturating_sub(step)
+        };
     }
 
     /// One key, three meanings, and the escalation travels with the binding
     /// rather than with Ctrl-C: stop the run, clear the line, or — pressed
     /// twice inside the window — leave.
     fn interrupt_or_clear(&mut self, running: bool) -> Act {
-        let now = Instant::now();
-        let quit = is_double_tap(self.last_interrupt, now);
-        self.last_interrupt = Some(now);
-        if quit {
+        if double_tap(&mut self.last_interrupt, Instant::now()) {
             return Act::Quit;
         }
         if running {
@@ -690,6 +1306,8 @@ impl Ui {
         }
         Act::None
     }
+
+
 }
 
 /// What the status line should say the run has cost.
@@ -763,6 +1381,11 @@ impl Tui {
         if let Some(prior) = history_path().and_then(|p| std::fs::read_to_string(p).ok()) {
             ui.editor.seed_history(editor::decode(&prior));
         }
+        // A resumed session shows its transcript from the start: the whole
+        // screen is rebuildable now, so there is no reason to hide it.
+        if !core.session.log.is_empty() {
+            ui.rebuild(&core.session.log);
+        }
         Ok(Self {
             core,
             ui,
@@ -795,9 +1418,20 @@ impl Tui {
             let line = match self.ui.key(key, false) {
                 Act::Submit(line) => line,
                 Act::Quit => break,
+                Act::OpenRewind => {
+                    self.open_rewind();
+                    continue;
+                }
+                Act::Rewind(id) => {
+                    self.rewind_turn(id);
+                    continue;
+                }
                 Act::Interrupt | Act::None => continue,
             };
             self.ui.echo(&line);
+            // A fresh turn starts at the newest row: a view scrolled up to
+            // read would otherwise stream the run's output out of sight.
+            self.ui.scroll = 0;
             // Written per line rather than on the way out: quitting with two
             // Ctrl-Cs skips every tidy exit path there is.
             self.save_history();
@@ -823,15 +1457,17 @@ impl Tui {
                                         ui.screen.leave();
                                         std::process::exit(130)
                                     }
+                                    // Esc means interrupt while the run is in flight.
+                                    Act::OpenRewind | Act::Rewind(_) => {}
                                     Act::None => {}
                                 },
                             }
                         }
                     };
-                    self.ui.above.extend(lines);
+                    self.ui.above.extend(lines.into_iter().map(Entry::Plain));
                 }
                 Step::Handled(lines) => {
-                    self.ui.above.extend(lines);
+                    self.ui.above.extend(lines.into_iter().map(Entry::Plain));
                     // The key map lives in two places; a reload has to reach
                     // both or the screen keeps answering to the old bindings.
                     if !Arc::ptr_eq(&self.ui.keys, &self.core.keys) {
@@ -896,6 +1532,66 @@ impl Tui {
         Ok(())
     }
 
+    /// A message chosen from the rewind selector: cut the transcript there
+    /// and say what is left.
+    fn rewind_turn(&mut self, id: EntryId) {
+        match self.core.rewind_to(id) {
+            Ok(0) => {
+                self.ui.say(
+                    self.ui
+                        .paint
+                        .on(&self.ui.paint.theme.muted, "nothing to rewind to"),
+                );
+            }
+            Ok(_) => {
+                // The transcript is the source of truth again: rebuild the
+                // whole view from it, so the screen returns to the node the
+                // conversation did instead of keeping the forgotten turns.
+                self.ui.rebuild(&self.core.session.log);
+                let tail = self.core.session.log.live().last().map(|(_, m)| m.text());
+                let at = tail
+                    .filter(|t| !t.is_empty())
+                    .map(|t| format!(" — the transcript now ends at {}", render::clip(&t, 60)))
+                    .unwrap_or_default();
+                self.ui.say(
+                    self.ui
+                        .paint
+                        .on(&self.ui.paint.theme.muted, &format!("rewound{at}")),
+                );
+            }
+            Err(e) => {
+                self.ui
+                    .say(format!("warning: the transcript was not saved: {e}"));
+            }
+        }
+    }
+
+    /// Open the rewind selector on every user message the conversation can
+    /// go back to.
+    fn open_rewind(&mut self) {
+        let entries: Vec<MenuEntry> = self
+            .core
+            .session
+            .log
+            .prompts()
+            .into_iter()
+            .map(|(id, text)| MenuEntry::Message {
+                id,
+                show: render::clip(&text, 60),
+            })
+            .collect();
+        if entries.is_empty() {
+            self.ui.say(
+                self.ui
+                    .paint
+                    .on(&self.ui.paint.theme.muted, "nothing to rewind to"),
+            );
+            return;
+        }
+        self.ui.open_rewind(entries);
+    }
+
+
     async fn turn(
         &mut self,
         prompt: String,
@@ -939,6 +1635,8 @@ impl Tui {
                             ui.screen.leave();
                             std::process::exit(130)
                         }
+                        // Esc means interrupt while the run is in flight.
+                        Act::OpenRewind | Act::Rewind(_) => {}
                         Act::None => {}
                     },
                     _ = tick.tick() => ui.spinner += 1,
@@ -981,28 +1679,29 @@ impl Tui {
 
 #[cfg(test)]
 mod tests {
-    use super::{Thinking, body, counts, tool_row};
+    use super::{Cow, Entry, ScrollbackRows, Thinking, body, counts, tool_row};
     use crate::render::Markdown;
     use crate::render::Paint;
     use brain::stream::Usage;
 
-    fn thought(n: usize) -> Thinking {
-        let mut t = Thinking::default();
-        for i in 1..=n {
-            t.held.push(format!("line {i}"));
+    /// A closed reasoning block of `n` lines in the scrollback.
+    fn block(n: usize, folded: bool) -> Entry {
+        Entry::Folded {
+            block: 1,
+            lines: (1..=n).map(|i| format!("line {i}")).collect(),
+            folded,
         }
-        t
     }
 
     /// What the screen shows for a run in the middle of reasoning.
     fn shown(t: &Thinking, open: &str) -> Vec<String> {
         body(
             t,
+            &[],
             &Markdown::default(),
             true,
             open,
-            80,
-            9,
+            (80, 9),
             &Paint::new(false),
         )
     }
@@ -1015,74 +1714,254 @@ mod tests {
     }
 
     #[test]
-    fn a_shut_window_is_one_row_whatever_it_holds() {
-        // Including the line still arriving: it is reasoning too, and putting
-        // it on screen is the window this row exists to replace.
-        let t = thought(30);
-        assert_eq!(shown(&t, "half a sentence"), vec!["thinking..."]);
+    fn a_folded_entry_is_its_summary_until_unfolded() {
+        let entries = [block(2, true)];
+        let paint = Paint::new(false);
+        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&entries, &paint).collect();
+        assert_eq!(rows, vec!["thinking · 2 lines"]);
     }
 
     #[test]
-    fn opening_it_hands_the_scrollback_what_was_held() {
-        // The answer has not started, so they still land where they belong.
-        let mut t = thought(5);
-        let (said, held) = t.toggle();
-        assert_eq!(said, "thinking · shown");
-        assert_eq!(held.len(), 5);
-        assert!(t.held.is_empty());
-        assert!(!t.holds(true), "open, reasoning is ordinary output");
-        assert_eq!(shown(&t, "half a sentence"), vec!["half a sentence"]);
+    fn an_unfolded_entry_shows_its_lines() {
+        let entries = [block(2, false)];
+        let paint = Paint::new(false);
+        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&entries, &paint).collect();
+        assert_eq!(rows, vec!["line 1", "line 2"]);
     }
 
     #[test]
-    fn shutting_it_again_starts_from_the_next_line() {
-        // What already reached the terminal stays there; a switch that
-        // pretended otherwise would have to never print in the first place.
-        let mut t = thought(5);
-        t.toggle();
-        let (said, held) = t.toggle();
-        assert_eq!(said, "thinking · folded");
-        assert!(held.is_empty());
-        assert!(t.holds(true));
-    }
-
-    #[test]
-    fn the_answer_is_never_held() {
-        let t = thought(3);
-        assert!(!t.holds(false));
-        let rows = body(
-            &t,
-            &Markdown::default(),
-            false,
-            "hello",
-            80,
-            9,
-            &Paint::new(false),
-        );
+    fn a_plain_entry_is_itself() {
+        let entries = [Entry::Plain("hello".to_string())];
+        let paint = Paint::new(false);
+        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&entries, &paint).collect();
         assert_eq!(rows, vec!["hello"]);
     }
 
     #[test]
-    fn a_shut_window_leaves_a_count_and_nothing_behind_it() {
-        // Nothing outlives the count that stands for it: a line kept back here
-        // could only ever be printed below the answer it came before.
-        let mut t = thought(13);
-        assert_eq!(t.close().as_deref(), Some("thinking · 13 lines"));
-        assert!(t.held.is_empty());
-        assert_eq!(t.close(), None, "nothing held, nothing said");
-        assert!(t.toggle().1.is_empty(), "and nothing left to open");
-
-        let mut one = thought(1);
-        assert_eq!(one.close().as_deref(), Some("thinking · 1 line"));
+    fn an_empty_scrollback_iterates_to_nothing() {
+        // The front walk used to index `entries[0]` before any check, so a
+        // forward iteration over an empty scrollback panicked.
+        let paint = Paint::new(false);
+        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&[], &paint).collect();
+        assert!(rows.is_empty());
     }
 
     #[test]
-    fn an_open_window_leaves_no_count() {
-        // It was printed as it arrived; a count would be describing what the
-        // reader is already looking at.
-        let mut open = thought(4);
-        open.toggle();
-        assert_eq!(open.close(), None);
+    fn scrollback_rows_walk_from_both_ends() {
+        let entries = vec![
+            Entry::Plain("a".to_string()),
+            block(2, false),
+            Entry::Plain("d".to_string()),
+        ];
+        let paint = Paint::new(false);
+        let rows = ScrollbackRows::new(&entries, &paint);
+        let (front, back): (Vec<_>, Vec<_>) = {
+            let mut f = Vec::new();
+            let mut b = Vec::new();
+            let mut it = rows;
+            loop {
+                match (it.next(), it.next_back()) {
+                    (Some(x), Some(y)) => {
+                        f.push(x);
+                        b.push(y);
+                    }
+                    (Some(x), None) => f.push(x),
+                    (None, Some(y)) => b.push(y),
+                    (None, None) => break,
+                }
+            }
+            (f, b)
+        };
+        assert_eq!(front, vec!["a", "line 1"]);
+        assert_eq!(back, vec!["d", "line 2"]);
+    }
+
+
+    #[test]
+    fn a_shut_window_is_one_row_whatever_it_holds() {
+        // Including the line still arriving: it is reasoning too, and putting
+        // it on screen is the window this row exists to replace.
+        let t = Thinking::default();
+        assert_eq!(shown(&t, "half a sentence"), vec!["thinking..."]);
+    }
+
+    #[test]
+    fn an_unfolded_block_streams_its_line_live() {
+        // One switch on the streaming block: folded, the live row is the
+        // placeholder; unfolded, it is the reasoning itself.
+        let mut t = Thinking::default();
+        t.start();
+        t.folded = false;
+        assert_eq!(shown(&t, "half a sentence"), vec!["half a sentence"]);
+        t.folded = true;
+        assert_eq!(shown(&t, "half a sentence"), vec!["thinking..."]);
+    }
+
+
+
+    #[test]
+    fn a_counted_block_needs_no_live_placeholder() {
+        // The count row in the scrollback already stands for the folded
+        // block; a second "thinking..." live row would show it twice.
+        let mut t = Thinking::default();
+        t.start();
+        let above = [block(1, true)];
+        let rows = body(
+            &t,
+            &above,
+            &Markdown::default(),
+            true,
+            "half a sentence",
+            (80, 9),
+            &Paint::new(false),
+        );
+        assert!(rows.is_empty());
+    }
+
+
+    #[test]
+    fn toggling_moves_the_current_block_and_nothing_else() {
+        // `ctrl+t` flips the block streaming now, and only it: the finished
+        // block behind it and the switch keep what they had.
+        let mut t = Thinking::default();
+        t.start();
+        let mut above = vec![
+            Entry::Folded {
+                block: 9,
+                lines: vec!["old".to_string()],
+                folded: false,
+            },
+            Entry::Folded {
+                block: 1,
+                lines: vec!["new".to_string()],
+                folded: true,
+            },
+        ];
+        t.toggle_current(&mut above);
+        assert!(t.folded);
+        assert!(matches!(&above[0], Entry::Folded { folded: false, .. }));
+        assert!(matches!(&above[1], Entry::Folded { folded: false, .. }));
+    }
+
+    #[test]
+    fn a_block_that_ends_before_its_first_line_spends_the_flip() {
+        // A `ctrl+t` on a block with no entry yet records a pending flip; if
+        // the block then ends without a line, the flip dies with it instead
+        // of leaking into the next block's birth.
+        let mut t = Thinking::default();
+        t.start();
+        let mut above: Vec<Entry> = Vec::new();
+        t.toggle_current(&mut above);
+        t.close_block();
+        assert!(t.birth_fold());
+    }
+
+
+    #[test]
+    fn a_flip_before_the_first_line_lands_on_birth() {
+        // A `ctrl+t` on a block with no entry yet cannot flip anything on
+        // screen; it records the flip for the next first line, so the block
+        // is born the way the key asked — and the switch is not touched.
+        let mut t = Thinking::default();
+        t.start();
+        let mut above: Vec<Entry> = Vec::new();
+        t.toggle_current(&mut above);
+        assert!(t.folded);
+        assert!(!t.birth_fold());
+        // The pending flip is spent: a second birth takes the switch.
+        assert!(t.birth_fold());
+    }
+
+
+    #[test]
+    fn the_live_placeholder_follows_the_streaming_entry() {
+        // Once the block has an entry, the live region reads its own state,
+        // not the switch: a block the user unfolded streams its lines even
+        // though the switch still says folded.
+        let mut t = Thinking::default();
+        t.start();
+        assert!(t.holds(true, &[]));
+        let above = [block(1, false)];
+        assert!(!t.holds(true, &above));
+    }
+
+
+    #[test]
+    fn a_global_flip_takes_the_current_block_with_it() {
+        // The case that named the key: everything else unfolded, the current
+        // block folded on its own. The global key folds the whole screen —
+        // the current block keeps its fold, because the fold is where the
+        // rest are going.
+        let mut t = Thinking::default();
+        t.folded = false;
+        t.start();
+        let mut above = vec![Entry::Folded {
+            block: 1,
+            lines: vec!["new".to_string()],
+            folded: true,
+        }];
+        t.flip_all(&mut above);
+        assert!(t.folded);
+        assert!(matches!(&above[0], Entry::Folded { folded: true, .. }));
+    }
+
+
+    #[test]
+    fn flipping_every_block_moves_the_switch_with_them() {
+        // The global key folds or unfolds every block, the current one
+        // included, and moves the switch with them: entries and switch never
+        // disagree, so the screen always folds back to a single state.
+        let mut t = Thinking::default();
+        t.start();
+        let mut above = vec![block(1, true)];
+        t.toggle_current(&mut above); // unfold the current block on its own
+        t.close_block();
+        t.flip_all(&mut above); // global fold
+        assert!(!t.folded);
+        assert!(above
+            .iter()
+            .all(|e| matches!(e, Entry::Folded { folded: false, .. })));
+        // The switch moved with them, so the next block is born unfolded.
+        assert!(!t.birth_fold());
+        // And a second global press folds the whole screen back.
+        t.flip_all(&mut above);
+        assert!(t.folded);
+        assert!(above
+            .iter()
+            .all(|e| matches!(e, Entry::Folded { folded: true, .. })));
+    }
+
+
+    #[test]
+    fn refolding_hides_lines_the_reader_has_already_seen() {
+        // The screen repaints from scrollback every frame, so lines already
+        // shown are still the same entry: folding them takes them back.
+        let mut entry = block(2, false);
+        let paint = Paint::new(false);
+        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(std::slice::from_ref(&entry), &paint).collect();
+        assert_eq!(rows, vec!["line 1", "line 2"]);
+        if let Entry::Folded { folded, .. } = &mut entry {
+            *folded = true;
+        }
+        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(std::slice::from_ref(&entry), &paint).collect();
+        assert_eq!(rows, vec!["thinking · 2 lines"]);
+    }
+
+
+    #[test]
+    fn the_answer_is_never_folded() {
+        let t = Thinking::default();
+        assert!(!t.holds(false, &[]));
+        let rows = body(
+            &t,
+            &[],
+            &Markdown::default(),
+            false,
+            "hello",
+            (80, 9),
+            &Paint::new(false),
+        );
+        assert_eq!(rows, vec!["hello"]);
     }
 
     #[test]
@@ -1090,11 +1969,11 @@ mod tests {
         let t = Thinking::default();
         let rows = body(
             &t,
+            &[],
             &Markdown::default(),
             false,
             &"x".repeat(500),
-            80,
-            3,
+            (80, 3),
             &Paint::new(false),
         );
         assert_eq!(rows.len(), 3);
