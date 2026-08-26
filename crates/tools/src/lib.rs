@@ -101,6 +101,12 @@ pub struct ToolOutput {
     /// One line for a progress display. Set it when the first line of the
     /// result is structure rather than content.
     pub preview: Option<String>,
+    /// A standard unified patch of what changed; `edit` fills it. No tool
+    /// reads it back, so compaction may drop it like `useless`.
+    pub patch: Option<String>,
+    /// The first line the change touched in the new file, when `patch` names
+    /// one; a reader that shows the patch can jump to it.
+    pub first_changed_line: Option<usize>,
 }
 
 impl ToolOutput {
@@ -111,7 +117,15 @@ impl ToolOutput {
             })],
             useless: false,
             preview: None,
+            patch: None,
+            first_changed_line: None,
         }
+    }
+
+    pub fn with_patch(mut self, patch: Option<String>, first: Option<usize>) -> Self {
+        self.patch = patch;
+        self.first_changed_line = first;
+        self
     }
 
     pub fn with_preview(mut self, line: impl Into<String>) -> Self {

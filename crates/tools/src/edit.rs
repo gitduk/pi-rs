@@ -553,7 +553,13 @@ impl Tool for Edit {
                 }
             }
         }
-        Ok(ToolOutput::text(report).with_preview(sketch(&plan.changes, &loaded)))
+        let patch = hashline::unified_patch(&plan.changes, &view);
+        Ok(ToolOutput::text(report)
+            .with_preview(sketch(&plan.changes, &loaded))
+            .with_patch(
+                (!patch.is_empty()).then_some(patch),
+                hashline::first_changed_line(&plan.changes),
+            ))
     }
 }
 #[cfg(test)]

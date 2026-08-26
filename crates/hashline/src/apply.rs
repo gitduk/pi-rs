@@ -52,28 +52,35 @@ pub struct Plan {
     pub changes: Vec<Change>,
 }
 
-/// Keeps a file's trailing-newline state, which `lines()` silently discards.
-fn split(content: &str) -> (Vec<&str>, bool) {
+/// Keeps a file's trailing-newline state, which `lines()` silently discards,
+/// and whether its rows end in `\r\n`, so new rows join with the same ending
+/// the file already has instead of mixing CRLF and LF.
+fn split(content: &str) -> (Vec<&str>, bool, bool) {
     if content.is_empty() {
-        return (Vec::new(), true);
+        return (Vec::new(), true, false);
     }
     let trailing = content.ends_with('\n');
+    let crlf = content.contains("\r\n");
     let body = if trailing {
         &content[..content.len() - 1]
     } else {
         content
     };
-    (body.split('\n').collect(), trailing)
+    let lines: Vec<&str> = body
+        .split('\n')
+        .map(|l| l.strip_suffix('\r').unwrap_or(l))
+        .collect();
+    (lines, trailing, crlf)
 }
 
-fn join(lines: &[String], trailing: bool) -> String {
-    let mut out = lines.join("\n");
+fn join(lines: &[String], trailing: bool, crlf: bool) -> String {
+    let sep = if crlf { "\r\n" } else { "\n" };
+    let mut out = lines.join(sep);
     if trailing && !out.is_empty() {
-        out.push('\n');
+        out.push_str(sep);
     }
     out
 }
-
 /// Validate every section, then build the whole plan. Nothing reaches the caller
 /// unless all of it succeeds: a half-applied patch is worse than a rejected one.
 pub fn apply(patch: &Patch, files: &Files<'_>, blocks: &dyn Blocks) -> Result<Plan, Error> {
@@ -106,7 +113,7 @@ pub fn apply(patch: &Patch, files: &Files<'_>, blocks: &dyn Blocks) -> Result<Pl
     let mut registers: HashMap<Option<String>, Vec<String>> = HashMap::new();
     for (section, ops) in patch.sections.iter().zip(&resolved) {
         let content = files[section.path.as_str()];
-        let (lines, _) = split(content);
+        let (lines, _, _) = split(content);
         for op in ops {
             if let Op::Cut {
                 target: Target::Range { start, end },
@@ -224,7 +231,7 @@ fn build(
         });
     }
 
-    let (lines, trailing) = split(content);
+    let (lines, trailing, crlf) = split(content);
     let len = lines.len();
 
     let mut spans: Vec<(usize, usize, Vec<String>)> = Vec::new();
@@ -385,7 +392,7 @@ fn build(
         );
     }
 
-    let content = join(&out, trailing);
+    let content = join(&out, trailing, crlf);
     Ok(match dest {
         Some(to) => Change::Rename {
             from: section.path.clone(),
@@ -399,4 +406,153 @@ fn build(
             landed,
         },
     })
+}
+
+/// A standard unified patch of the changes, for readers that understand one.
+///
+/// Built from the hunks the applier already knows rather than a fresh diff:
+/// the took/gave rows are the change, and a diff would only re-derive them.
+/// Rows are LF; a file's own line ending is applied on write, not here.
+/// Removals of whole files are left out — nothing in a standard patch names
+/// a deleted file more usefully than the report already does.
+///
+/// Context lines come from the file's prior content, which `apply` no longer
+/// has once a change has been built — the caller passes it in.
+pub fn unified_patch(changes: &[Change], before: &HashMap<&str, &str>) -> String {
+    let mut out = String::new();
+    for change in changes {
+        let (old_path, new_path, old, content, landed) = match change {
+            Change::Remove { .. } => continue,
+            Change::Write {
+                path,
+                content,
+                landed,
+                ..
+            } => (
+                path,
+                path,
+                before.get(path.as_str()).copied().unwrap_or_default(),
+                content,
+                landed,
+            ),
+            Change::Rename {
+                from,
+                to,
+                content,
+                landed,
+                ..
+            } => (
+                from,
+                to,
+                before.get(from.as_str()).copied().unwrap_or_default(),
+                content,
+                landed,
+            ),
+        };
+        hunks(&mut out, old_path, new_path, old, content, landed);
+    }
+    out
+}
+
+/// The first line the changes touch in the new file, for a reader to jump to.
+/// A hunk that only removed anchors at the line before the deletion, which is
+/// where the patch header places it and the closest row still in the file.
+pub fn first_changed_line(changes: &[Change]) -> Option<usize> {
+    for change in changes {
+        let (content, landed) = match change {
+            Change::Remove { .. } => continue,
+            Change::Write {
+                content,
+                landed,
+                ..
+            }
+            | Change::Rename {
+                content,
+                landed,
+                ..
+            } => (content, landed),
+        };
+        let lines: Vec<&str> = content.lines().collect();
+        if let Some(l) = landed.iter().find(|l| changed(l, &lines)) {
+            return Some(if l.gave() == 0 {
+                l.start.saturating_sub(1).max(1)
+            } else {
+                l.start
+            });
+        }
+    }
+    None
+}
+fn hunks(out: &mut String, old_path: &str, new_path: &str, old_content: &str, content: &str, landed: &[Landed]) {
+    const CONTEXT: usize = 3;
+    let old: Vec<&str> = old_content.lines().collect();
+    let new: Vec<&str> = content.lines().collect();
+    let changed: Vec<&Landed> = landed.iter().filter(|l| changed(l, &new)).collect();
+    if changed.is_empty() {
+        return;
+    }
+    out.push_str(&format!("--- a/{old_path}\n+++ b/{new_path}\n"));
+    // Context rows are never shared between neighbouring hunks: each takes
+    // what it can up to the next hunk's displaced rows, front to back.
+    let mut ctx_end = 0usize;
+    for (i, l) in changed.iter().enumerate() {
+        let change_end = l.took_at - 1 + l.took.len();
+        let next_start = changed.get(i + 1).map_or(usize::MAX, |n| n.took_at - 1);
+        let pre = CONTEXT.min(l.took_at.saturating_sub(ctx_end + 1));
+        let post = CONTEXT
+            .min(next_start.saturating_sub(change_end))
+            .min(old.len().saturating_sub(change_end));
+
+        let old_start = l.took_at - pre;
+        let new_start = l.start.saturating_sub(pre).max(1);
+        let old_len = pre + l.took.len() + post;
+        let new_len = pre + l.gave() + post;
+        // A zero-length side names the line before the change: there is no
+        // row for it to count, so the header points at where one would sit.
+        let old_at = if old_len == 0 {
+            old_start.saturating_sub(1)
+        } else {
+            old_start
+        };
+        let new_at = if new_len == 0 {
+            new_start.saturating_sub(1)
+        } else {
+            new_start
+        };
+        out.push_str(&format!("@@ -{old_at},{old_len} +{new_at},{new_len} @@\n"));
+        for t in &old[change_end - l.took.len() - pre..change_end - l.took.len()] {
+            out.push(' ');
+            out.push_str(t);
+            out.push('\n');
+        }
+        for t in &l.took {
+            out.push('-');
+            out.push_str(t);
+            out.push('\n');
+        }
+        for g in new.get(l.start.saturating_sub(1)..l.end).unwrap_or_default() {
+            out.push('+');
+            out.push_str(g);
+            out.push('\n');
+        }
+        for t in &old[change_end..change_end + post] {
+            out.push(' ');
+            out.push_str(t);
+            out.push('\n');
+        }
+        ctx_end = change_end + post;
+    }
+}
+
+/// Whether a hunk changes anything: a replacement whose body matches the lines
+/// it displaces is a write that wrote nothing, and no patch should name it.
+fn changed(l: &Landed, lines: &[&str]) -> bool {
+    let gave = lines
+        .get(l.start.saturating_sub(1)..l.end)
+        .unwrap_or_default();
+    l.took.len() != gave.len()
+        || l.took
+            .iter()
+            .zip(gave)
+            .any(|(t, g)| t != g)
 }

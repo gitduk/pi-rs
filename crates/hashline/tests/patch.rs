@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use hashline::{
-    Blocks, Change, Error, LinePos, NoBlocks, Op, Target, apply, parse, tag,
+    Blocks, Change, Error, LinePos, NoBlocks, Op, Plan, Target, apply, first_changed_line,
+    parse, tag, unified_patch,
 };
 
 /// Explicit start→end pairs. hashline never parses source itself, so its own
@@ -27,6 +28,18 @@ fn edit(before: &str, ops: &str) -> Result<String, Error> {
         Change::Write { content, .. } => Ok(content.clone()),
         other => panic!("expected a write, got {other:?}"),
     }
+}
+
+/// Apply `ops` to a single file and return the whole plan, hunks and all.
+fn plan_for(before: &str, ops: &str) -> Plan {
+    let src = format!("[a.rs#{}]\n{ops}", tag(before));
+    apply(&parse(&src).unwrap(), &files(&[("a.rs", before)]), &NoBlocks).unwrap()
+}
+
+/// The unified patch `ops` produces against `before`, as a string.
+fn patch_of(before: &str, ops: &str) -> String {
+    let plan = plan_for(before, ops);
+    unified_patch(&plan.changes, &files(&[("a.rs", before)]))
 }
 
 const SRC: &str = "one\ntwo\nthree\nfour\n";
@@ -572,4 +585,77 @@ fn a_line_pasted_from_read_output_is_recognized_as_such() {
         "{err}"
     );
     assert!(err.contains("`PUT N*:`"), "{err}");
+}
+
+#[test]
+fn crlf_files_keep_their_ending_and_new_rows_join_with_it() {
+    let before = "one\r\ntwo\r\nthree\r\n";
+    assert_eq!(
+        edit(before, "PUT 2:\n+TWO\n").unwrap(),
+        "one\r\nTWO\r\nthree\r\n"
+    );
+    assert_eq!(
+        edit(before, "PUT 1:UP:\n+zero\n").unwrap(),
+        "zero\r\none\r\ntwo\r\nthree\r\n"
+    );
+    assert_eq!(
+        edit(before, "CUT 2 @x\nPUT 1:UP: @x\n").unwrap(),
+        "two\r\none\r\nthree\r\n"
+    );
+}
+
+#[test]
+fn a_crlf_file_without_a_trailing_newline_keeps_it_that_way() {
+    assert_eq!(
+        edit("one\r\ntwo", "PUT 1:\n+ONE\n").unwrap(),
+        "ONE\r\ntwo"
+    );
+}
+
+#[test]
+fn unified_patch_is_standard_and_carries_real_line_numbers() {
+    let plan = plan_for(SRC, "PUT 2-3:\n+TWO\n+THREE\n");
+    assert_eq!(
+        patch_of(SRC, "PUT 2-3:\n+TWO\n+THREE\n"),
+        "--- a/a.rs\n+++ b/a.rs\n@@ -1,4 +1,4 @@\n one\n-two\n-three\n+TWO\n+THREE\n four\n"
+    );
+    assert_eq!(first_changed_line(&plan.changes), Some(2));
+}
+
+#[test]
+fn unified_patch_keeps_neighbouring_hunks_from_sharing_context() {
+    // The head insertion takes lines 1-3 as context; the deletion then has no
+    // context left before it, so it names only its own row.
+    assert_eq!(
+        patch_of(SRC, "PUT 1:UP:\n+zero\nCUT 4:\n"),
+        "--- a/a.rs\n+++ b/a.rs\n@@ -1,3 +1,4 @@\n+zero\n one\n two\n three\n@@ -4,1 +4,0 @@\n-four\n"
+    );
+    assert_eq!(first_changed_line(&plan_for(SRC, "PUT 1:UP:\n+zero\nCUT 4:\n").changes), Some(1));
+}
+
+#[test]
+fn unified_patch_skips_hunks_that_changed_nothing_and_deleted_files() {
+    assert_eq!(patch_of(SRC, "PUT 2:\n+two\n"), "");
+    assert_eq!(first_changed_line(&plan_for(SRC, "PUT 2:\n+two\n").changes), None);
+
+    let removed = format!("[a.rs#{}]\nRM\n", tag(SRC));
+    let plan = apply(&parse(&removed).unwrap(), &files(&[("a.rs", SRC)]), &NoBlocks).unwrap();
+    assert_eq!(unified_patch(&plan.changes, &files(&[("a.rs", SRC)])), "");
+    assert_eq!(first_changed_line(&plan.changes), None);
+}
+
+#[test]
+fn unified_patch_names_both_sides_of_a_rename() {
+    let src = format!("[a.rs#{}]\nPUT 1:\n+ONE\nMV lib/a.rs\n", tag(SRC));
+    let plan = apply(&parse(&src).unwrap(), &files(&[("a.rs", SRC)]), &NoBlocks).unwrap();
+    assert_eq!(
+        unified_patch(&plan.changes, &files(&[("a.rs", SRC)])),
+        "--- a/a.rs\n+++ b/lib/a.rs\n@@ -1,4 +1,4 @@\n-one\n+ONE\n two\n three\n four\n"
+    );
+}
+
+#[test]
+fn first_changed_line_anchors_a_pure_deletion_before_it() {
+    assert_eq!(first_changed_line(&plan_for(SRC, "CUT 4:\n").changes), Some(3));
+    assert_eq!(first_changed_line(&plan_for(SRC, "CUT 1:\n").changes), Some(1));
 }

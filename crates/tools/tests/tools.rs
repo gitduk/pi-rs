@@ -252,6 +252,41 @@ async fn edit_applies_a_patch_anchored_to_the_tag_read_returned() {
     assert!(report.contains("2:TWO"), "{report}");
 }
 
+#[tokio::test]
+async fn edit_result_carries_a_unified_patch_and_the_first_changed_line() {
+    let (_d, c) = ctx();
+    std::fs::write(c.workspace.root().join("a.rs"), "one\ntwo\nthree\n").unwrap();
+    let out = tools::edit::Edit
+        .execute(
+            json!({ "patch": format!("[a.rs#{}]\nPUT 2:\n+TWO\n", hashline::tag("one\ntwo\nthree\n")) }),
+            &c,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out.patch.as_deref(),
+        Some("--- a/a.rs\n+++ b/a.rs\n@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three\n")
+    );
+}
+
+#[tokio::test]
+async fn edit_writes_new_rows_with_the_files_line_ending() {
+    let (_d, c) = ctx();
+    std::fs::write(c.workspace.root().join("a.rs"), "one\r\ntwo\r\nthree\r\n").unwrap();
+    let view = run(&tools::read::Read, json!({ "path": "a.rs" }), &c).await;
+    let tag = view.split('#').nth(1).unwrap().split(']').next().unwrap();
+    let out = tools::edit::Edit
+        .execute(
+            json!({ "patch": format!("[a.rs#{tag}]\nPUT 2:\n+TWO\n") }),
+            &c,
+        )
+        .await
+        .unwrap();
+    let written = std::fs::read_to_string(c.workspace.root().join("a.rs")).unwrap();
+    assert_eq!(written, "one\r\nTWO\r\nthree\r\n");
+    assert!(out.patch.is_some(), "a real change carries a patch");
+}
+
 const THREE_FNS: &str = "\
 pub fn keep() -> i32 {
     1

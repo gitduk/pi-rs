@@ -3,7 +3,7 @@ use std::collections::HashMap;
 mod apply;
 mod parse;
 
-pub use apply::{Change, Landed, Plan, apply};
+pub use apply::{Change, Landed, Plan, apply, first_changed_line, unified_patch};
 pub use parse::{FORMS, Form, parse};
 
 /// Content hash shown as `[path#TAG]`. Recomputing it beats storing a snapshot
