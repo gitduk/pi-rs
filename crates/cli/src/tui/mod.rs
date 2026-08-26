@@ -92,8 +92,8 @@ enum Entry {
 ///
 /// Thinking always lives in a foldable scrollback entry, folded or not: the
 /// screen is repainted from its entries every frame, so a line already shown
-/// can still be folded. Each entry carries its own state; `folded` is what
-/// the blocks no one is touching are folded to.
+/// can still be folded. A block's own state lasts only while it is current;
+/// the next submitted question folds it back to `folded`, the switch.
 struct Thinking {
     /// The next block id; closed entries keep the id they were born with, so
     /// `land` appends only to the open block's entry.
@@ -160,7 +160,15 @@ impl Thinking {
         self.next += 1;
     }
 
-    /// The streaming block is over; the entry it filled stays where it is.
+    /// The block that was current stops being so the moment a new input is
+    /// submitted: it folds to the switch, its unfold lasting only while it
+    /// was current.
+    fn fold_previous(&mut self, above: &mut [Entry]) {
+        if let Some(Entry::Folded { folded, .. }) = last_folded(above) {
+            *folded = self.folded;
+        }
+    }
+
     /// The streaming block is over; the entry it filled stays where it is.
     /// A flip still pending for it — the block ended before its first line
     /// landed — dies here rather than leaking into the next block's birth.
@@ -200,10 +208,7 @@ impl Thinking {
                 .rev()
                 .find(|e| matches!(e, Entry::Folded { block, .. } if *block == id))
         } else {
-            above
-                .iter_mut()
-                .rev()
-                .find(|e| matches!(e, Entry::Folded { .. }))
+            last_folded(above)
         };
         if let Some(Entry::Folded { folded, .. }) = flipped {
             *folded = !*folded;
@@ -212,6 +217,14 @@ impl Thinking {
             self.pending = Some(!self.unborn_fold());
         }
     }
+}
+
+/// The newest reasoning block's entry in the scrollback, if any.
+fn last_folded(above: &mut [Entry]) -> Option<&mut Entry> {
+    above
+        .iter_mut()
+        .rev()
+        .find(|e| matches!(e, Entry::Folded { .. }))
 }
 
 /// The count line a shut thinking block leaves in the scrollback.
@@ -1067,11 +1080,14 @@ impl Ui {
     }
 
 
-    /// Echo what was sent, so the prompt survives the editor being cleared.
-    fn echo(&mut self, line: &str) {
+    /// Accept a submitted input: echo it so the prompt survives the editor
+    /// being cleared, then fold the block that was current back to the switch
+    /// — the input pushes it out of current no matter what it turns out to be.
+    fn submit(&mut self, line: &str) {
         let mut rows = Vec::new();
         push_prompt_lines(&mut rows, line, &self.prompt, &self.bang_prompt);
         self.above.extend(rows);
+        self.thinking.fold_previous(&mut self.above);
     }
 
 
@@ -1428,7 +1444,7 @@ impl Tui {
                 }
                 Act::Interrupt | Act::None => continue,
             };
-            self.ui.echo(&line);
+            self.ui.submit(&line);
             // A fresh turn starts at the newest row: a view scrolled up to
             // read would otherwise stream the run's output out of sight.
             self.ui.scroll = 0;
@@ -1521,7 +1537,7 @@ impl Tui {
                         self.turn(prompt, &tx, &mut rx).await;
                         if !self.ui.queued.is_empty() {
                             let queued = std::mem::take(&mut self.ui.queued).join("\n");
-                            self.ui.echo(&queued);
+                            self.ui.submit(&queued);
                             next = Some(queued);
                         }
                     }
@@ -1854,6 +1870,52 @@ mod tests {
         t.toggle_current(&mut above);
         t.close_block();
         assert!(t.birth_fold());
+    }
+
+    #[test]
+    fn a_finished_block_keeps_its_fold_until_the_next_question() {
+        // An unfold survives the answer — a finished block is still current —
+        // and folds back to the switch the moment a new input is submitted.
+        let mut t = Thinking::default();
+        t.start();
+        let mut above = vec![block(1, t.birth_fold())];
+        t.toggle_current(&mut above);
+        assert!(matches!(&above[0], Entry::Folded { folded: false, .. }));
+        t.close_block();
+        // Still current until the next question is asked.
+        assert!(matches!(&above[0], Entry::Folded { folded: false, .. }));
+        t.fold_previous(&mut above);
+        // The submitted question pushes it out of current: it folds to the
+        // switch.
+        assert!(matches!(&above[0], Entry::Folded { folded: true, .. }));
+        assert!(t.birth_fold());
+    }
+
+    #[test]
+    fn a_finished_block_follows_a_global_unfold() {
+        // The fold follows the switch both ways: a screen the global key
+        // opened keeps its block open once the next question takes over.
+        let mut t = Thinking::default();
+        t.folded = false;
+        t.start();
+        let mut above = vec![block(1, t.birth_fold())];
+        t.close_block();
+        t.fold_previous(&mut above);
+        assert!(matches!(&above[0], Entry::Folded { folded: false, .. }));
+    }
+
+    #[test]
+    fn a_new_block_in_the_same_answer_leaves_the_previous_unfolded() {
+        // Only a submitted question pushes a block out of current: a second
+        // reasoning block in the same answer leaves the first one unfolded.
+        let mut t = Thinking::default();
+        t.start();
+        let mut above = vec![block(1, t.birth_fold())];
+        t.toggle_current(&mut above);
+        assert!(matches!(&above[0], Entry::Folded { folded: false, .. }));
+        t.close_block();
+        t.start();
+        assert!(matches!(&above[0], Entry::Folded { folded: false, .. }));
     }
 
 
