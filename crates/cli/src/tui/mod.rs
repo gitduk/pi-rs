@@ -71,9 +71,9 @@ enum Act {
     /// A message chosen from the rewind selector: the conversation rewinds
     /// there, that message kept and everything after it forgotten.
     Rewind(EntryId),
-    /// `ctrl+l` twice: the session is cleared and the screen is rebuilt from
-    /// the empty one.
-    ClearSession,
+    /// `ctrl+l` twice: a fresh session, the old one kept on disk, and the
+    /// screen is rebuilt from the empty one.
+    NewSession,
     Quit,
 }
 /// A line in the scrollback.
@@ -617,8 +617,8 @@ struct Ui {
     sessions: Vec<ResumeChoice>,
     /// The same copy, of the same list `/help` prints.
     commands: Arc<Vec<Command>>,
-    /// When the last `ctrl+l` was pressed, for the clear-session double-tap.
-    last_clear: Option<Instant>,
+    /// When the last `ctrl+l` was pressed, for the new-session double-tap.
+    last_l: Option<Instant>,
     last_interrupt: Option<Instant>,
     /// When the last Esc was pressed, for the rewind selector's double-tap.
     last_esc: Option<Instant>,
@@ -698,7 +698,7 @@ impl Ui {
 
             tools: Vec::new(),
             queued: Vec::new(),
-            last_clear: None,
+            last_l: None,
             picked: None,
             dismissed_at: None,
             last_interrupt: None,
@@ -1206,11 +1206,11 @@ impl Ui {
             }
             Some(Action::AppClearScreen) => {
                 // One press clears the screen; a second, inside the window,
-                // clears the session too — which rebuilds the screen empty.
+                // starts a fresh session and rebuilds the screen empty.
                 let now = Instant::now();
-                if double_tap(&mut self.last_clear, now) {
-                    self.last_clear = None;
-                    return Act::ClearSession;
+                if double_tap(&mut self.last_l, now) {
+                    self.last_l = None;
+                    return Act::NewSession;
                 }
                 self.screen.clear();
                 return Act::None;
@@ -1453,6 +1453,16 @@ impl Tui {
         self.ui.sessions = self.core.store.choices(self.core.ctx.workspace.root());
     }
 
+    /// A `/new` or a `/resume` replaced the session — the transcript is the
+    /// source of truth again — so the screen is rebuilt from the new one
+    /// instead of keeping the old conversation up, and the completion list
+    /// follows.
+    fn land_swap(&mut self, said: Vec<String>) {
+        self.ui.rebuild(&self.core.session);
+        self.refresh_sessions();
+        self.ui.above.extend(said.into_iter().map(Entry::Plain));
+    }
+
     pub async fn run(
         mut self,
         tx: UnboundedSender<Event>,
@@ -1474,13 +1484,11 @@ impl Tui {
                     self.rewind_turn(id);
                     continue;
                 }
-                Act::ClearSession => {
-                    let Step::Swap(said) = self.core.command("/clear", &self.totals) else {
-                        unreachable!("ctrl+l twice reaches the /clear branch");
+                Act::NewSession => {
+                    let Step::Swap(said) = self.core.command("/new", &self.totals) else {
+                        unreachable!("ctrl+l twice reaches the /new branch");
                     };
-                    self.ui.rebuild(&self.core.session);
-                    self.refresh_sessions();
-                    self.ui.above.extend(said.into_iter().map(Entry::Plain));
+                    self.land_swap(said);
                     continue;
                 }
                 Act::Interrupt | Act::None => continue,
@@ -1515,7 +1523,7 @@ impl Tui {
                                         std::process::exit(130)
                                     }
                                     // Esc means interrupt while the run is in flight.
-                                    Act::OpenRewind | Act::Rewind(_) | Act::ClearSession => {}
+                                    Act::OpenRewind | Act::Rewind(_) | Act::NewSession => {}
                                     Act::None => {}
                                 },
                             }
@@ -1523,16 +1531,7 @@ impl Tui {
                     };
                     self.ui.above.extend(lines.into_iter().map(Entry::Plain));
                 }
-                Step::Swap(said) => {
-                    // The transcript is the source of truth again: a /clear or
-                    // a /resume replaced it, so the screen is rebuilt from the
-                    // new one instead of keeping the old conversation up.
-                    self.ui.rebuild(&self.core.session);
-                    // /resume switched to a saved session and /clear deleted
-                    // one: the completion list follows.
-                    self.refresh_sessions();
-                    self.ui.above.extend(said.into_iter().map(Entry::Plain));
-                }
+                Step::Swap(said) => self.land_swap(said),
                 Step::Handled(lines) => {
                     self.ui.above.extend(lines.into_iter().map(Entry::Plain));
                     // The key map lives in two places; a reload has to reach
@@ -1702,7 +1701,7 @@ impl Tui {
                             std::process::exit(130)
                         }
                         // Esc means interrupt while the run is in flight.
-                        Act::OpenRewind | Act::Rewind(_) | Act::ClearSession => {}
+                        Act::OpenRewind | Act::Rewind(_) | Act::NewSession => {}
                         Act::None => {}
                     },
                     _ = tick.tick() => ui.spinner += 1,

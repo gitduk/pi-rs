@@ -174,17 +174,6 @@ impl Store {
             .collect()
     }
 
-    /// Forget a session: remove its transcript file, so a cleared session
-    /// cannot be resumed.
-    pub fn delete(&self, id: &str) -> Result<()> {
-        std::fs::remove_file(self.path(id)).with_context(|| {
-            format!(
-                "cannot remove the saved transcript for {id} at {}",
-                self.path(id).display()
-            )
-        })
-    }
-
     /// Most recent session recorded for this workspace: the top of `list`.
     pub fn latest(&self, workspace: &Path) -> Result<Stored> {
         self.list(workspace)
@@ -387,22 +376,6 @@ mod tests {
                 .iter()
                 .all(|s| s.id == "c")
         );
-    }
-
-    #[test]
-    fn delete_removes_a_session_so_it_cannot_be_resumed() {
-        let tmp = tempfile::tempdir().unwrap();
-        let store = Store::new(tmp.path());
-        let log = log_with(vec![Message::user("x")]);
-        store
-            .save("t", std::path::Path::new("/w"), "m", None, &log)
-            .unwrap();
-
-        store.delete("t").unwrap();
-        assert!(store.load("t").is_err());
-        assert!(store.list(std::path::Path::new("/w")).is_empty());
-        // Deleting what is already gone is a real error, not a silent pass.
-        assert!(store.delete("t").is_err());
     }
 
     #[test]

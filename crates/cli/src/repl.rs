@@ -56,11 +56,6 @@ const BUILTIN: &[Command] = &[
         "start a fresh session, keeping this one on disk",
     ),
     Command::builtin(
-        "/clear",
-        "",
-        "forget this session — the transcript is not saved",
-    ),
-    Command::builtin(
         "/resume",
         "[id]",
         "list this workspace's sessions, or switch to one",
@@ -551,8 +546,6 @@ pub enum Cmd {
     Keys,
     Reload,
     Log,
-    /// Everything after the word, or empty to clear.
-    Clear,
     /// The session to switch to, or empty to list what there is.
     Resume(String),
     Name(String),
@@ -672,7 +665,6 @@ pub fn parse(line: &str) -> Option<Cmd> {
         "/todo" => Cmd::Todo,
         "/cost" => Cmd::Cost,
         "/new" => Cmd::New,
-        "/clear" => Cmd::Clear,
         "/resume" => Cmd::Resume(rest(line)),
         "/keys" => Cmd::Keys,
         "/reload" => Cmd::Reload,
@@ -704,7 +696,7 @@ pub enum Step {
     /// Dealt with here; these lines are what there is to show for it. Returned
     /// rather than printed because one surface prints and the other paints.
     Handled(Vec<String>),
-    /// The session was replaced — a `/clear` or a `/resume` — so the surface
+    /// The session was replaced — a `/new` or a `/resume` — so the surface
     /// has to rebuild its view from the new one, not just show the lines.
     Swap(Vec<String>),
     Quit,
@@ -755,8 +747,7 @@ impl Repl {
                 totals.cost,
                 totals.estimated,
             )),
-            Cmd::New => Step::Handled(self.fresh_session("started")),
-            Cmd::Clear => Step::Swap(self.clear()),
+            Cmd::New => Step::Swap(self.fresh_session("started")),
             Cmd::Resume(name) => {
                 if name.is_empty() {
                     Step::Handled(self.resume_listing())
@@ -788,8 +779,7 @@ impl Repl {
     }
 
     /// Drop the in-memory conversation and open a fresh session under a new
-    /// id. The plan goes too. What becomes of the old transcript is the
-    /// caller's call: `/new` leaves it on disk, `/clear` deletes it first.
+    /// id. The plan goes too; the old transcript stays on disk.
     fn fresh_session(&mut self, said: &str) -> Vec<String> {
         self.session = Session::default();
         self.id = crate::session::new_id();
@@ -801,30 +791,6 @@ impl Repl {
             held.clear();
         }
         vec![format!("{said} {}", self.id)]
-    }
-
-    /// Forget the running session entirely — memory and disk — and start
-    fn clear(&mut self) -> Vec<String> {
-        match self.store.delete(&self.id) {
-            // A session never saved has no file to remove; that is fine.
-            // Any other failure leaves the transcript on disk, so the
-            // "cleared" claim would be a lie — say so and change nothing.
-            Err(e)
-                if e.downcast_ref::<std::io::Error>()
-                    .is_none_or(|io| io.kind() != std::io::ErrorKind::NotFound) =>
-            {
-                let detail = format!("{e:#}");
-                tracing::warn!(target: "pi::session", id = %self.id, error = %detail, "clear could not remove the saved transcript");
-                vec![
-                    format!(
-                        "could not clear — the transcript for {} is still on disk",
-                        self.id
-                    ),
-                    detail,
-                ]
-            }
-            _ => self.fresh_session("cleared — nothing was saved, now on"),
-        }
     }
 
     /// The sessions `/resume` can switch to, newest first, the one running
@@ -1275,9 +1241,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_and_resume_parse() {
-        assert_eq!(parse("/clear"), Some(Cmd::Clear));
-        assert_eq!(parse("/clear please"), Some(Cmd::Clear));
+    fn resume_parse() {
         // Bare, /resume lists; a word names the session to switch to.
         assert_eq!(parse("/resume"), Some(Cmd::Resume(String::new())));
         assert_eq!(

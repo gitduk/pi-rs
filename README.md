@@ -106,18 +106,18 @@ through. `prompt.icon` is the one value that is neither colour nor attribute.
 A key that is not one of those is refused at load, like a misspelled compat
 key.
 
-`/help` `/new` `/clear` `/resume` `/name` `/model` `/compact` `/reload` `/keys` `/log` `/todo` `/cost` `/exit`, and one
+`/help` `/new` `/resume` `/name` `/model` `/compact` `/reload` `/keys` `/log` `/todo` `/cost` `/exit`, and one
 more for every skill on disk. Typing `/` opens a list of what the line could
 still become; `↑` `↓` pick, `Tab` accepts, `Esc` dismisses it until the next
 keystroke. `/model` and `/resume` complete their arguments too: the model
 name is the tedious part the config already knows, and a saved session is
 named by its first question.
 
-`/clear` forgets the running session entirely — memory and disk — and starts
-a fresh one; `ctrl+l` twice does the same (once clears the screen). `/resume`
-lists the sessions saved for this workspace, newest first, by the first thing
-each was asked, and `/resume <id>` switches to one — the session you leave is
-saved first, so nothing is lost on the way out.
+`/new` starts a fresh session, keeping this one on disk; `ctrl+l` twice does
+the same (once clears the screen). `/resume` lists the sessions saved for this
+workspace, newest first, by the first thing each was asked, and `/resume <id>`
+switches to one — the session you leave is saved first, so nothing is lost on
+the way out.
 
 A line that starts with `!` is a shell command, not a prompt: `! git status`
 runs it and shows the output, and the command and its result are recorded in

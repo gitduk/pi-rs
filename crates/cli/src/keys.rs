@@ -255,7 +255,7 @@ pub const BINDINGS: &[Binding] = &[
         action: A::AppClearScreen,
         when: W::Editor,
         keys: &["ctrl+l"],
-        note: "twice to clear the session",
+        note: "twice to start a new session",
     },
     Binding {
         id: "think.fold",
