@@ -198,30 +198,30 @@ async fn a_bad_pattern_says_so_instead_of_returning_nothing() {
     assert!(err.contains("bad pattern `fn (`"), "{err}");
 }
 
-    #[tokio::test]
-    async fn search_reaches_outside_the_workspace() {
-        let (_d, c) = tree();
-        let outside = tempfile::tempdir().unwrap();
-        std::fs::write(outside.path().join("out.txt"), "needle here\n").unwrap();
+#[tokio::test]
+async fn search_reaches_outside_the_workspace() {
+    let (_d, c) = tree();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("out.txt"), "needle here\n").unwrap();
 
-        let g = tools::grep::Grep
-            .execute(
-                json!({ "pattern": "needle", "path": outside.path().to_str().unwrap() }),
-                &c,
-            )
-            .await
-            .unwrap();
-        assert!(g.flatten().contains("needle"), "{g:?}");
+    let g = tools::grep::Grep
+        .execute(
+            json!({ "pattern": "needle", "path": outside.path().to_str().unwrap() }),
+            &c,
+        )
+        .await
+        .unwrap();
+    assert!(g.flatten().contains("needle"), "{g:?}");
 
-        let l = tools::glob::Glob
-            .execute(
-                json!({ "pattern": "*.txt", "path": outside.path().to_str().unwrap() }),
-                &c,
-            )
-            .await
-            .unwrap();
-        assert!(l.flatten().contains("out.txt"), "{l:?}");
-    }
+    let l = tools::glob::Glob
+        .execute(
+            json!({ "pattern": "*.txt", "path": outside.path().to_str().unwrap() }),
+            &c,
+        )
+        .await
+        .unwrap();
+    assert!(l.flatten().contains("out.txt"), "{l:?}");
+}
 
 #[tokio::test]
 async fn the_git_directory_is_never_swept() {
