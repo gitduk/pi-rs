@@ -4,7 +4,7 @@ use brain::estimate;
 use brain::message::{Message, Text, ToolCallId, ToolResult, ToolResultContent, UserContent};
 use serde_json::Value;
 
-use crate::log::{Compaction, Elision, EntryId, Log};
+use crate::session::{Compaction, Elision, EntryId, Session};
 
 /// Tools whose results describe current state rather than an action taken. Only
 /// these supersede: an `edit` result records something that happened, and the
@@ -176,10 +176,10 @@ fn exchange_droppable(work: &[Message], k: usize) -> bool {
     }
 }
 
-/// Decide how to shrink the log's context to fit `budget`, cheapest measure
+/// Decide how to shrink the session's context to fit `budget`, cheapest measure
 /// first.
 ///
-/// Nothing is mutated: the result is a record the caller appends to the log,
+/// Nothing is mutated: the result is a record the caller appends to the session,
 /// and the view derives from it. That is what keeps a long session readable
 /// afterwards — a transcript compacted in place is a transcript destroyed.
 ///
@@ -191,9 +191,9 @@ fn exchange_droppable(work: &[Message], k: usize) -> bool {
 /// inside the warm prefix costs a full cache rewrite. That guard is for
 /// opportunistic pruning; this runs only when the context is already over
 /// budget, where paying for a rewrite beats being refused outright.
-pub fn plan(log: &Log, budget: usize, policy: &Policy) -> (Compaction, Report) {
-    let mut ids: Vec<EntryId> = log.live().iter().map(|(id, _)| *id).collect();
-    let mut work = log.context();
+pub fn plan(session: &Session, budget: usize, policy: &Policy) -> (Compaction, Report) {
+    let mut ids: Vec<EntryId> = session.live().iter().map(|(id, _)| *id).collect();
+    let mut work = session.context();
 
     let mut record = Compaction {
         tokens_before: estimate::tokens(&work),

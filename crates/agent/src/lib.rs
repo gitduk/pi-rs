@@ -13,12 +13,12 @@ use tokio_util::sync::CancellationToken;
 use tools::{Concurrency, Ctx, Registry, ToolError, ToolOutput};
 use tracing::Instrument as _;
 
-use crate::log::Log;
+use crate::session::Session;
 
 pub mod approval;
 pub mod compact;
 pub mod event;
-pub mod log;
+pub mod session;
 pub mod summarize;
 
 pub use approval::{Approver, Ceiling, Decision};
@@ -121,31 +121,6 @@ pub enum AgentError {
     NoResult,
 }
 
-/// The transcript. Held by the caller so a run that ends in an error still
-/// leaves behind everything it produced.
-#[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct Session {
-    pub log: Log,
-}
-
-impl Session {
-    pub fn with_prompt(prompt: impl Into<String>) -> Self {
-        let mut log = Log::new();
-        log.push(Message::user(prompt));
-        Self { log }
-    }
-
-    /// Continue an existing transcript with a new prompt.
-    pub fn resumed(mut log: Log, prompt: impl Into<String>) -> Self {
-        log.resume(prompt);
-        Self { log }
-    }
-
-    /// What the model sees this turn.
-    pub fn context(&self) -> Vec<Message> {
-        self.log.context()
-    }
-}
 
 pub struct Agent {
     pub transport: Arc<dyn Transport>,
@@ -223,7 +198,7 @@ impl Agent {
         // A resumed session brings its plan back; the tool sees it as the list
         // it left behind rather than an empty one.
         if let Ok(mut held) = ctx.todos.lock() {
-            *held = session.log.todos().to_vec();
+            *held = session.todos().to_vec();
         }
 
         // Our token estimate is a bound, not a measurement. When the provider
@@ -358,7 +333,7 @@ impl Agent {
             );
 
             let calls: Vec<ToolCall> = done.message.tool_calls().cloned().collect();
-            session.log.push(done.message);
+            session.push(done.message);
 
             if calls.is_empty() {
                 // A run that owes a structured result gets one reminder; the
@@ -368,7 +343,7 @@ impl Agent {
                         return Err(AgentError::NoResult);
                     }
                     nudged = true;
-                    session.log.push(Message::user(
+                    session.push(Message::user(
                         "The result has not been delivered yet. Call `yield` with it now.",
                     ));
                     continue;
@@ -397,11 +372,11 @@ impl Agent {
                 .run_calls(&calls, &bad, ctx, tx, &mut echoes)
                 .instrument(span.clone())
                 .await?;
-            let answered = session.log.push(Message::tool_results(results));
+            let answered = session.push(Message::tool_results(results));
             if let Some(note) = turns_left(turn, self.max_turns) {
                 // Amended onto the results rather than pushed after them: two
                 // user messages running break the alternation both wires want.
-                session.log.amend(answered, note);
+                session.amend(answered, note);
             }
             self.record_todos(session, ctx);
 
@@ -435,13 +410,13 @@ impl Agent {
         let Ok(mut held) = ctx.todos.lock() else {
             return;
         };
-        if *held == session.log.todos() {
+        if *held == session.todos() {
             return;
         }
-        session.log.set_todos(held.clone());
-        // The log normalizes; writing it back keeps the next comparison from
+        session.set_todos(held.clone());
+        // The session normalizes; writing it back keeps the next comparison from
         // seeing a difference that is only the normalization.
-        *held = session.log.todos().to_vec();
+        *held = session.todos().to_vec();
     }
 
     /// Shrink the transcript to `budget` if it is over, recording what went.
@@ -466,10 +441,10 @@ impl Agent {
         } else {
             *policy
         };
-        let (mut record, mut report) = compact::plan(&session.log, budget, &policy);
+        let (mut record, mut report) = compact::plan(&session, budget, &policy);
         if !record.dropped.is_empty() && self.summarize {
             let cost = self
-                .write_summary(&session.log, &mut record, None)
+                .write_summary(&session, &mut record, None)
                 .instrument(tracing::info_span!(target: "pi::compact", "summarize"))
                 .await;
             report.summarized = record.summary.is_some();
@@ -478,7 +453,7 @@ impl Agent {
         // A pass that reclaimed nothing is not news; reporting it every turn
         // buries the ones that did.
         if report.touched() {
-            session.log.record(record);
+            session.record(record);
             say(tx, Event::Compacted(report));
         }
     }
@@ -501,11 +476,11 @@ impl Agent {
         focus: Option<&str>,
     ) -> Option<(compact::Report, Totals)> {
         let policy = self.compaction?;
-        let (mut record, mut report) = compact::plan(&session.log, policy.protect_tail, &policy);
+        let (mut record, mut report) = compact::plan(&session, policy.protect_tail, &policy);
         let mut spent = Totals::default();
         if !record.dropped.is_empty() && self.summarize {
             let cost = self
-                .write_summary(&session.log, &mut record, focus)
+                .write_summary(&session, &mut record, focus)
                 .instrument(tracing::info_span!(target: "pi::compact", "summarize"))
                 .await;
             report.summarized = record.summary.is_some();
@@ -514,7 +489,7 @@ impl Agent {
         if !report.touched() {
             return None;
         }
-        session.log.record(record);
+        session.record(record);
         Some((report, spent))
     }
 
@@ -525,17 +500,17 @@ impl Agent {
     /// the summary costs context; failing the turn costs the whole run.
     async fn write_summary(
         &self,
-        log: &Log,
-        record: &mut log::Compaction,
+        session: &Session,
+        record: &mut session::Compaction,
         focus: Option<&str>,
     ) -> brain::stream::Usage {
-        let history = summarize::render(&log.summaries(), &log.messages_for(&record.dropped));
+        let history = summarize::render(&session.summaries(), &session.messages_for(&record.dropped));
         match summarize::run(&*self.transport, &self.spec, history, focus).await {
             Ok((text, usage)) => {
                 record.summary = Some(text);
                 // The new summary covers what the old one did, so the entry
                 // carrying the old one leaves the view.
-                record.dropped.extend(log.summary_entries());
+                record.dropped.extend(session.summary_entries());
                 usage
             }
             Err(e) => {

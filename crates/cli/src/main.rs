@@ -566,7 +566,7 @@ async fn main() -> Result<()> {
         .name
         .clone()
         .or_else(|| prior.as_ref().and_then(|p| p.name.clone()));
-    let carried = prior.map(|p| p.into_log()).unwrap_or_default();
+    let carried = prior.map(|p| p.into_session()).unwrap_or_default();
     let resumed = carried.context().len();
 
     let Some(prompt) = prompt else {
@@ -576,7 +576,7 @@ async fn main() -> Result<()> {
         let core = repl::Repl {
             agent: ag,
             store,
-            session: agent::Session { log: carried },
+            session: carried,
             id,
             name,
             keys: key_map.clone(),
@@ -622,8 +622,9 @@ async fn main() -> Result<()> {
         .with_cancel(agent::cancel_on_interrupt());
 
     // Always through the log: a loaded session whose view happens to be empty
-    // still has history worth keeping, and `resume` handles an empty log.
-    let mut session = agent::Session::resumed(carried, prompt);
+    // still has history worth keeping, and `resume` handles an empty session.
+    let mut session = carried;
+    session.resume(prompt);
     let outcome = ag.run(&mut session, &ctx, &tx).await;
 
     drop(tx);
@@ -631,7 +632,7 @@ async fn main() -> Result<()> {
 
     // Saved whichever way the run ended: an aborted turn is exactly the one
     // worth resuming.
-    match store.save(&id, &root, &model_id, name.as_deref(), &session.log) {
+    match store.save(&id, &root, &model_id, name.as_deref(), &session) {
         Ok(_) if !args.quiet => {
             let called = name.as_deref().map_or(String::new(), |n| format!(" “{n}”"));
             let carried = if resumed > 0 {

@@ -234,7 +234,7 @@ change disappears silently.
 
 **Compaction** is a ladder: supersede a read that a later read replaced, elide
 an uneventful result, age one out, and only then summarize before dropping. The
-session log is append-only; compaction writes a *record* of what it dropped and
+the session is append-only; compaction writes a *record* of what it dropped and
 the model's view is derived from it, so the history that made the session worth
 reading survives.
 
@@ -268,7 +268,7 @@ derived from it is not a bill.
 | crate | | |
 |---|---|---|
 | `brain` | 2.7k | messages, wires, streams, faults, estimates |
-| `agent` | 3.9k | the turn loop, compaction, the session log |
+| `agent` | 3.9k | the turn loop, compaction, the session |
 | `tools` | 3.8k | the tool set and the tiered workspace gate |
 | `cli` | 6.2k | terminal, config, sessions, the journal |
 | `hashline` | 1.2k | the patch format — pure, no IO |

@@ -78,7 +78,7 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
 }
 
 async fn turn(core: &mut Repl, prompt: String, tx: &UnboundedSender<Event>) -> Totals {
-    core.session.log.resume(prompt);
+    core.session.resume(prompt);
     let ctx = core
         .ctx
         .clone()

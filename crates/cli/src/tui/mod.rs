@@ -15,7 +15,7 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::time::Instant;
 
-use agent::log::EntryId;
+use agent::session::EntryId;
 use agent::{AgentError, Event, Totals};
 use brain::message::{
     AssistantContent, Message, ReasoningContent, ToolCallId, ToolResult, ToolResultContent,
@@ -465,17 +465,17 @@ fn push_prompt_lines(out: &mut Vec<Entry>, text: &str, prompt: &str, bang_prompt
 /// lines, reasoning as a foldable block. A rewind rebuilds the screen from
 /// this, so the view returns to the point the conversation did.
 fn render_log(
-    log: &agent::log::Log,
+    session: &agent::session::Session,
     paint: &Paint,
     prompt: &str,
     bang_prompt: &str,
     width: usize,
     folded: bool,
 ) -> Vec<Entry> {
-    // A call whose result is in the log shows only its result row; one that
+    // A call whose result is in the session shows only its result row; one that
     // never got an answer (an interrupted turn) shows the start line instead,
     // the way `abandon_tools` leaves it.
-    let answered: HashSet<ToolCallId> = log
+    let answered: HashSet<ToolCallId> = session
         .live()
         .iter()
         .filter_map(|(_, m)| match m {
@@ -490,9 +490,9 @@ fn render_log(
         })
         .collect();
 
-    let amendments = log.amendments();
+    let amendments = session.amendments();
     let mut out = Vec::new();
-    for (id, m) in log.live() {
+    for (id, m) in session.live() {
         match m {
             Message::User { content } => {
                 for c in content {
@@ -616,7 +616,7 @@ struct Ui {
     last_interrupt: Option<Instant>,
     /// When the last Esc was pressed, for the rewind selector's double-tap.
     last_esc: Option<Instant>,
-    /// The rewind selector's rows, log order, newest last. Empty is closed;
+    /// The rewind selector's rows, session order, newest last. Empty is closed;
     /// while it is open it replaces the completion list in the same rows.
     rewind: Vec<MenuEntry>,
     started: Option<Instant>,
@@ -1060,7 +1060,7 @@ impl Ui {
     /// Rebuild the history from the transcript, forgetting everything the old
     /// drawing showed: a rewind changes what the conversation is, and the
     /// screen has to show the new one, not the old one with a note on it.
-    fn rebuild(&mut self, log: &agent::log::Log) {
+    fn rebuild(&mut self, session: &agent::session::Session) {
         self.above.clear();
         self.open.clear();
         self.dim = false;
@@ -1070,7 +1070,7 @@ impl Ui {
         self.md.reset();
         self.scroll = 0;
         self.above = render_log(
-            log,
+            session,
             &self.paint,
             &self.prompt,
             &self.bang_prompt,
@@ -1399,8 +1399,8 @@ impl Tui {
         }
         // A resumed session shows its transcript from the start: the whole
         // screen is rebuildable now, so there is no reason to hide it.
-        if !core.session.log.is_empty() {
-            ui.rebuild(&core.session.log);
+        if !core.session.is_empty() {
+            ui.rebuild(&core.session);
         }
         Ok(Self {
             core,
@@ -1563,8 +1563,8 @@ impl Tui {
                 // The transcript is the source of truth again: rebuild the
                 // whole view from it, so the screen returns to the node the
                 // conversation did instead of keeping the forgotten turns.
-                self.ui.rebuild(&self.core.session.log);
-                let tail = self.core.session.log.live().last().map(|(_, m)| m.text());
+                self.ui.rebuild(&self.core.session);
+                let tail = self.core.session.live().last().map(|(_, m)| m.text());
                 let at = tail
                     .filter(|t| !t.is_empty())
                     .map(|t| format!(" — the transcript now ends at {}", render::clip(&t, 60)))
@@ -1588,7 +1588,6 @@ impl Tui {
         let entries: Vec<MenuEntry> = self
             .core
             .session
-            .log
             .prompts()
             .into_iter()
             .map(|(id, text)| MenuEntry::Message {
@@ -1614,7 +1613,7 @@ impl Tui {
         tx: &UnboundedSender<Event>,
         rx: &mut UnboundedReceiver<Event>,
     ) {
-        self.core.session.log.resume(prompt);
+        self.core.session.resume(prompt);
         let cancel = CancellationToken::new();
         let ctx = self
             .core

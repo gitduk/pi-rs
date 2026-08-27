@@ -15,7 +15,7 @@ pub struct Elision {
 }
 
 /// A record of one compaction pass. It says what the model stopped seeing; it
-/// does not remove anything, so the log keeps the whole session.
+/// does not remove anything, so the session keeps everything.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Compaction {
     /// Entries the view skips entirely.
@@ -50,7 +50,7 @@ pub enum Entry {
     /// Text the view appends to an earlier user turn. Resuming a session that
     /// died mid-turn cannot start a second user message in a row — both wires
     /// require the roles to alternate — and rewriting the stored message would
-    /// give up the one property this log exists for.
+/// give up the one property this session exists for.
     Amend {
         id: EntryId,
         target: EntryId,
@@ -69,28 +69,38 @@ impl Entry {
     }
 }
 
-/// Append-only session history.
+/// The whole conversation: every message, tool result, and compaction record,
+/// in order.
 ///
-/// What the model sees is *derived* from this, never stored in place of it:
-/// compaction writes a record and the view applies it. Anything else loses the
-/// session the moment it grows long enough to need shrinking.
+/// Held by the caller so a run that ends in an error still leaves behind
+/// everything it produced. What the model sees is *derived* from this, never
+/// stored in place of it: compaction writes a record and the view applies it.
+/// Anything else loses the session the moment it grows long enough to need
+/// shrinking.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct Log {
+pub struct Session {
     entries: Vec<Entry>,
     next: u64,
 }
 
-impl Log {
+impl Session {
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// A session that starts from a single user prompt.
+    pub fn with_prompt(prompt: impl Into<String>) -> Self {
+        let mut session = Self::new();
+        session.push(Message::user(prompt));
+        session
+    }
+
     pub fn from_messages(messages: impl IntoIterator<Item = Message>) -> Self {
-        let mut log = Self::new();
+        let mut session = Self::new();
         for m in messages {
-            log.push(m);
+            session.push(m);
         }
-        log
+        session
     }
 
     pub fn push(&mut self, message: Message) -> EntryId {
@@ -181,7 +191,7 @@ impl Log {
     /// Live user messages that carry a prompt — including a prompt folded
     /// into a tool-results message by `append_user`, which keeps it as an
     /// amendment rather than as content. The text is the message's own text
-    /// blocks followed by its amendments, in order. Log order.
+    /// blocks followed by its amendments, in order. Session order.
     pub fn prompts(&self) -> Vec<(EntryId, String)> {
         let amendments = self.amendments();
         self.live()
@@ -212,8 +222,7 @@ impl Log {
             .collect()
     }
 
-    /// Rewind to a user message: everything after it leaves the log, and the
-    /// message itself stays, so the conversation can go on from there.
+    /// Rewind to a user message: everything after it leaves the session, and the
     /// Returns how many entries that was.
     ///
     /// Amendments recorded after the cut still belong to messages inside it —
@@ -309,7 +318,7 @@ impl Log {
             .collect()
     }
 
-    /// The messages behind a set of ids, in log order.
+    /// The messages behind a set of ids, in session order.
     pub fn messages_for(&self, ids: &[EntryId]) -> Vec<&Message> {
         self.messages()
             .filter(|(id, _)| ids.contains(id))
@@ -418,8 +427,8 @@ mod tests {
         Message::tool_results(vec![ToolResult::text(ToolCallId(id.into()), "read", body)])
     }
 
-    fn log() -> Log {
-        Log::from_messages([
+    fn log() -> Session {
+        Session::from_messages([
             Message::user("go"),
             call("c1"),
             result("c1", "first body"),
@@ -496,7 +505,7 @@ mod tests {
             tokens_before: 900,
             tokens_after: 100,
         });
-        let back: Log = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
+        let back: Session = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
         assert_eq!(back, l);
         assert_eq!(back.context().len(), l.context().len());
     }
@@ -506,7 +515,7 @@ mod tests {
         let mut l = log();
         l.record(Compaction::default());
         let last = l.push(Message::user("more"));
-        let back: Log = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
+        let back: Session = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
         let mut back = back;
         assert!(back.push(Message::user("later")) > last);
     }
@@ -576,7 +585,7 @@ mod tests {
 
     #[test]
     fn a_prompt_folded_into_tool_results_is_seen() {
-        // After a tool round the log ends on a tool-results user message;
+        // After a tool round the session ends on a tool-results user message;
         // the next prompt folds into it as an amendment, and has to count.
         let mut l = log();
         l.amend(EntryId(4), "continue");
@@ -622,7 +631,7 @@ mod resume_tests {
         )])
     }
 
-    fn roles(log: &Log) -> Vec<&'static str> {
+    fn roles(log: &Session) -> Vec<&'static str> {
         log.context()
             .iter()
             .map(|m| match m {
@@ -635,7 +644,7 @@ mod resume_tests {
 
     #[test]
     fn a_prompt_after_tool_results_joins_that_turn() {
-        let mut l = Log::from_messages([Message::user("hi"), call("c1"), results("c1")]);
+        let mut l = Session::from_messages([Message::user("hi"), call("c1"), results("c1")]);
         l.resume("and now?");
 
         // Two user turns in a row are rejected outright by both wires.
@@ -648,7 +657,7 @@ mod resume_tests {
 
     #[test]
     fn an_unanswered_call_leaves_the_view_before_the_prompt_lands() {
-        let mut l = Log::from_messages([
+        let mut l = Session::from_messages([
             Message::user("hi"),
             Message::assistant_text("ok"),
             call("c9"),
@@ -658,7 +667,7 @@ mod resume_tests {
         assert_eq!(roles(&l), vec!["user", "assistant", "user"]);
         assert_eq!(l.context()[2].text(), "next");
         // Three original messages plus the new prompt: the unanswered call left
-        // the view without leaving the log.
+        // the view without leaving the session.
         assert_eq!(l.messages().count(), 4);
         assert!(
             l.messages()
@@ -669,14 +678,14 @@ mod resume_tests {
 
     #[test]
     fn a_clean_transcript_gains_one_turn() {
-        let mut l = Log::from_messages([Message::user("hi"), Message::assistant_text("done")]);
+        let mut l = Session::from_messages([Message::user("hi"), Message::assistant_text("done")]);
         l.resume("more");
         assert_eq!(roles(&l), vec!["user", "assistant", "user"]);
     }
 
     #[test]
     fn an_empty_log_starts_the_conversation() {
-        let mut l = Log::new();
+        let mut l = Session::new();
         l.resume("first");
         assert_eq!(l.context().len(), 1);
         assert_eq!(l.context()[0].text(), "first");
@@ -684,7 +693,7 @@ mod resume_tests {
 
     #[test]
     fn a_second_user_turn_folds_into_the_first_so_the_roles_keep_alternating() {
-        let mut l = Log::new();
+        let mut l = Session::new();
         l.append_user("first");
         l.append_user("second");
         l.append_user("third");

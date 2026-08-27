@@ -13,7 +13,8 @@ use futures::stream::{BoxStream, StreamExt};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use agent::{Agent, AgentError, Ceiling, Event, Session};
+use agent::session::Session;
+use agent::{Agent, AgentError, Ceiling, Event};
 use tools::{Concurrency, Ctx, Registry, Tier, Tool, ToolError, ToolOutput, Workspace};
 
 /// Replays one scripted event list per turn, so the loop is exercised without
@@ -722,7 +723,7 @@ async fn dropped_history_comes_back_as_a_summary_on_the_opening_turn() {
     );
 
     // And the bodies it replaced are still in the log.
-    assert!(session.log.messages().count() > view.len());
+    assert!(session.messages().count() > view.len());
 }
 
 #[tokio::test]
@@ -988,9 +989,7 @@ async fn an_overflow_refusal_shrinks_the_transcript_and_retries() {
             ),
         ]));
     }
-    let mut session = Session {
-        log: agent::log::Log::from_messages(history),
-    };
+    let mut session = Session::from_messages(history);
     let (tx, mut rx) = mpsc::unbounded_channel();
     let out = a.run(&mut session, &ctx, &tx).await;
     drop(tx);
@@ -1073,9 +1072,7 @@ async fn an_overflow_with_no_number_falls_back_to_squeezing() {
     spec.context_window = 60_000;
     let mut a = Agent::new(Arc::new(Mute { fits: 8_000 }), spec);
     fast_retry(&mut a);
-    let mut session = Session {
-        log: agent::log::Log::from_messages(history),
-    };
+    let mut session = Session::from_messages(history);
     let (tx, mut rx) = mpsc::unbounded_channel();
     let out = a.run(&mut session, &ctx, &tx).await;
     drop(tx);

@@ -1,9 +1,9 @@
 use agent::compact::{Policy, Report, plan};
-use agent::log::Log;
+use agent::session::Session;
 
 /// Drive the real path — plan, record, derive — and hand back the new view.
 fn compact(messages: &mut Vec<Message>, budget: usize, policy: &Policy) -> Report {
-    let mut log = Log::from_messages(messages.clone());
+    let mut log = Session::from_messages(messages.clone());
     let (record, report) = plan(&log, budget, policy);
     log.record(record);
     *messages = log.context();
@@ -380,7 +380,8 @@ fn an_already_elided_result_is_not_counted_twice() {
 
 mod budget {
     use super::{big, call, result};
-    use agent::{Agent, Session};
+    use agent::session::Session;
+    use agent::Agent;
     use async_trait::async_trait;
     use brain::catalog::ModelSpec;
     use brain::request::Request;
@@ -457,9 +458,8 @@ mod budget {
         // tail protection is what has to stop the descent.
         for i in 0..14 {
             let path = format!("f{i}.rs");
-            s.log
-                .push(call(&format!("c{i}"), "read", json!({ "path": path })));
-            s.log.push(result(&format!("c{i}"), "read", &big(4_000)));
+            s.push(call(&format!("c{i}"), "read", json!({ "path": path })));
+            s.push(result(&format!("c{i}"), "read", &big(4_000)));
         }
         let before = brain::estimate::tokens(&s.context());
         assert!(before < a.budget(), "the automatic pass would decline this");
@@ -486,11 +486,11 @@ mod budget {
     fn a_healthy_transcript_is_under_budget_and_stays_untouched() {
         let a = agent_with(200_000, 32_000);
         let s = Session::with_prompt("hello");
-        let (record, r) = agent::compact::plan(&s.log, a.budget(), &agent::Policy::default());
+        let (record, r) = agent::compact::plan(&s, a.budget(), &agent::Policy::default());
         assert!(!r.touched());
         assert_eq!(
             record,
-            agent::log::Compaction {
+            agent::session::Compaction {
                 tokens_before: r.before,
                 tokens_after: r.after,
                 ..Default::default()

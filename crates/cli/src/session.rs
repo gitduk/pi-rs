@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use agent::log::Log;
+use agent::session::Session;
 use anyhow::{Context, Result};
 use brain::message::Message;
 use serde::{Deserialize, Serialize};
@@ -16,7 +16,7 @@ pub struct Stored {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default)]
-    pub log: Log,
+    pub log: Session,
     /// Transcripts written before the log existed. Read, never written.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     messages: Vec<Message>,
@@ -24,9 +24,10 @@ pub struct Stored {
 
 impl Stored {
     /// The transcript, whichever shape it was stored in.
-    pub fn into_log(self) -> Log {
+    /// The transcript, whichever shape it was stored in.
+    pub fn into_session(self) -> Session {
         if self.log.is_empty() && !self.messages.is_empty() {
-            Log::from_messages(self.messages)
+            Session::from_messages(self.messages)
         } else {
             self.log
         }
@@ -78,7 +79,7 @@ impl Store {
         workspace: &Path,
         model: &str,
         name: Option<&str>,
-        log: &Log,
+        session: &Session,
     ) -> Result<PathBuf> {
         std::fs::create_dir_all(&self.root)?;
         let path = self.path(id);
@@ -89,7 +90,7 @@ impl Store {
             model: model.to_string(),
             created: now(),
             name: name.map(str::to_string),
-            log: log.clone(),
+            log: session.clone(),
             messages: Vec::new(),
         };
 
@@ -154,8 +155,8 @@ mod tests {
     use brain::message::{AssistantContent, ToolCall, ToolCallId};
     use serde_json::json;
 
-    fn log_with(messages: Vec<Message>) -> Log {
-        Log::from_messages(messages)
+    fn log_with(messages: Vec<Message>) -> Session {
+        Session::from_messages(messages)
     }
 
     fn call(name: &str) -> Message {
@@ -206,7 +207,7 @@ mod tests {
         let back = store.load("t1").unwrap();
         assert_eq!(back.model, "test-model");
         assert_eq!(back.name.as_deref(), Some("the flaky test"));
-        assert_eq!(back.into_log(), log);
+        assert_eq!(back.into_session(), log);
     }
 
     #[test]
@@ -218,7 +219,7 @@ mod tests {
             .save("t", std::path::Path::new("/w"), "m", None, &log)
             .unwrap();
 
-        let back = store.load("t").unwrap().into_log();
+        let back = store.load("t").unwrap().into_session();
         assert_eq!(
             back.context().len(),
             3,
@@ -232,8 +233,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::new(tmp.path());
         let mut log = log_with(vec![Message::user("go"), call("read"), results()]);
-        log.record(agent::log::Compaction {
-            elisions: vec![agent::log::Elision {
+        log.record(agent::session::Compaction {
+            elisions: vec![agent::session::Elision {
                 call: ToolCallId("c1".into()),
                 notice: "[gone]".into(),
             }],
@@ -243,7 +244,7 @@ mod tests {
             .save("t", std::path::Path::new("/w"), "m", None, &log)
             .unwrap();
 
-        let back = store.load("t").unwrap().into_log();
+        let back = store.load("t").unwrap().into_session();
         // The view is shrunk, and the body that was elided is still on disk.
         assert!(format!("{:?}", back.context()[2]).contains("[gone]"));
         assert!(
@@ -264,7 +265,7 @@ mod tests {
         )
         .unwrap();
 
-        let log = store.load("old").unwrap().into_log();
+        let log = store.load("old").unwrap().into_session();
         assert_eq!(log.context().len(), 1);
         assert_eq!(log.context()[0].text(), "hi");
     }

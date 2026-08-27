@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
-use agent::{Agent, Session, Totals};
+use agent::{Agent, Totals};
+use agent::session::Session;
 use tokio_util::sync::CancellationToken;
 use tools::{Ctx, Tool, ToolError};
 use tools::skills::Skill;
@@ -390,7 +391,7 @@ impl Repl {
             spec.id,
             summary(spec.transport_name(), spec.context_window, &spec.pricing)
         ));
-        if carries_reasoning(&self.session.log) {
+        if carries_reasoning(&self.session) {
             said.push(demotion(spec.thinking_replay).into());
         }
         tracing::info!(
@@ -443,7 +444,7 @@ impl Repl {
             self.ctx.workspace.root(),
             &self.agent.spec.id,
             self.name.as_deref(),
-            &self.session.log,
+            &self.session,
         )?;
         Ok(())
     }
@@ -451,8 +452,8 @@ impl Repl {
     /// Rewind the conversation to a user message and write the shorter
     /// transcript back. How many entries were dropped; an unknown id drops
     /// nothing.
-    pub fn rewind_to(&mut self, user: agent::log::EntryId) -> anyhow::Result<usize> {
-        let dropped = self.session.log.rollback_to(user);
+    pub fn rewind_to(&mut self, user: agent::session::EntryId) -> anyhow::Result<usize> {
+        let dropped = self.session.rollback_to(user);
         if dropped == 0 {
             return Ok(0);
         }
@@ -496,10 +497,10 @@ fn demotion(replay: brain::catalog::ThinkingReplay) -> &'static str {
 /// Worth saying at a switch: it is the one part of the history that does not
 /// survive intact, and a model that suddenly reads its own earlier thinking as
 /// quoted prose is otherwise an unexplained change in tone.
-fn carries_reasoning(log: &agent::log::Log) -> bool {
+fn carries_reasoning(session: &agent::session::Session) -> bool {
     // `live`, not `messages`: what compaction has already dropped is not going
     // to reach the new model in any form, demoted or otherwise.
-    log.live().iter().any(|(_, m)| {
+    session.live().iter().any(|(_, m)| {
         matches!(m, brain::message::Message::Assistant { content, .. }
             if content.iter().any(|b| matches!(b, brain::message::AssistantContent::Reasoning(_))))
     })
@@ -688,7 +689,7 @@ impl Repl {
                 Some(p) => format!("{}", p.display()),
                 None => "not recording — --log is off, or the file would not open".into(),
             }),
-            Cmd::Todo => lines(tools::todo::render(self.session.log.todos())),
+            Cmd::Todo => lines(tools::todo::render(self.session.todos())),
             Cmd::Cost => lines(crate::render::spent(
                 &totals.usage,
                 totals.cost,
@@ -744,7 +745,7 @@ impl Repl {
             "Ran `{command}`\n{}",
             if body.is_empty() { "(no output)" } else { &body }
         );
-        self.session.log.append_user(text);
+        self.session.append_user(text);
         let mut said: Vec<String> = body
             .lines()
             // The tags wrap the model's copy; the terminal shows the output
