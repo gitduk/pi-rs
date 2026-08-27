@@ -1894,8 +1894,7 @@ mod tests {
     fn a_finished_block_follows_a_global_unfold() {
         // The fold follows the switch both ways: a screen the global key
         // opened keeps its block open once the next question takes over.
-        let mut t = Thinking::default();
-        t.folded = false;
+        let mut t = Thinking { folded: false, ..Default::default() };
         t.start();
         let mut above = vec![block(1, t.birth_fold())];
         t.close_block();
@@ -1953,8 +1952,7 @@ mod tests {
         // block folded on its own. The global key folds the whole screen —
         // the current block keeps its fold, because the fold is where the
         // rest are going.
-        let mut t = Thinking::default();
-        t.folded = false;
+        let mut t = Thinking { folded: false, ..Default::default() };
         t.start();
         let mut above = vec![Entry::Folded {
             block: 1,

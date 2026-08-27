@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
-use agent::{Agent, Totals};
 use agent::session::Session;
+use agent::{Agent, Totals};
 use tokio_util::sync::CancellationToken;
 use tools::{Ctx, Tool, ToolError};
 use tools::skills::Skill;

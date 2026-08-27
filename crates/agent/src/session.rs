@@ -50,7 +50,7 @@ pub enum Entry {
     /// Text the view appends to an earlier user turn. Resuming a session that
     /// died mid-turn cannot start a second user message in a row — both wires
     /// require the roles to alternate — and rewriting the stored message would
-/// give up the one property this session exists for.
+    /// give up the one property this session exists for.
     Amend {
         id: EntryId,
         target: EntryId,
@@ -188,7 +188,6 @@ impl Session {
 
         self.append_user(prompt);
     }
-
 
     /// Live user messages that carry a prompt — including a prompt folded
     /// into a tool-results message by `append_user`, which keeps it as an
@@ -521,7 +520,6 @@ mod tests {
         let mut back = back;
         assert!(back.push(Message::user("later")) > last);
     }
-
 
     #[test]
     fn a_rewind_keeps_the_chosen_message_and_drops_what_follows() {

@@ -441,10 +441,10 @@ impl Agent {
         } else {
             *policy
         };
-        let (mut record, mut report) = compact::plan(&session, budget, &policy);
+        let (mut record, mut report) = compact::plan(session, budget, &policy);
         if !record.dropped.is_empty() && self.summarize {
             let cost = self
-                .write_summary(&session, &mut record, None)
+                .write_summary(session, &mut record, None)
                 .instrument(tracing::info_span!(target: "pi::compact", "summarize"))
                 .await;
             report.summarized = record.summary.is_some();
@@ -476,11 +476,11 @@ impl Agent {
         focus: Option<&str>,
     ) -> Option<(compact::Report, Totals)> {
         let policy = self.compaction?;
-        let (mut record, mut report) = compact::plan(&session, policy.protect_tail, &policy);
+        let (mut record, mut report) = compact::plan(session, policy.protect_tail, &policy);
         let mut spent = Totals::default();
         if !record.dropped.is_empty() && self.summarize {
             let cost = self
-                .write_summary(&session, &mut record, focus)
+                .write_summary(session, &mut record, focus)
                 .instrument(tracing::info_span!(target: "pi::compact", "summarize"))
                 .await;
             report.summarized = record.summary.is_some();
@@ -504,7 +504,8 @@ impl Agent {
         record: &mut session::Compaction,
         focus: Option<&str>,
     ) -> brain::stream::Usage {
-        let history = summarize::render(&session.summaries(), &session.messages_for(&record.dropped));
+        let history =
+            summarize::render(&session.summaries(), &session.messages_for(&record.dropped));
         match summarize::run(&*self.transport, &self.spec, history, focus).await {
             Ok((text, usage)) => {
                 record.summary = Some(text);
