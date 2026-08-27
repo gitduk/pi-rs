@@ -62,7 +62,7 @@ impl Tool for Read {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "Workspace-relative path." },
+                "path": { "type": "string", "description": "Workspace-relative path, or an absolute path anywhere readable." },
                 "offset": { "type": "integer", "description": "1-based first line. Default 1." },
                 "limit": { "type": "integer", "description": "Max lines. Default 2000." },
                 "outline": {
@@ -93,7 +93,7 @@ impl Tool for Read {
                 (path, args.path.clone())
             }
             None => {
-                let p = ctx.workspace.resolve(&args.path)?;
+                let p = ctx.workspace.resolve_free(&args.path)?;
                 let rel = ctx.workspace.display(&p);
                 (p, rel)
             }

@@ -43,10 +43,11 @@ pub fn walker(root: &Path) -> ignore::WalkBuilder {
     b
 }
 
-/// Resolve an optional subdirectory argument to a walk root.
+/// Resolve an optional subdirectory argument to a walk root. Searches are
+/// read-only, so the walk may leave the workspace.
 pub fn root_of(ws: &Workspace, path: &Option<String>) -> Result<PathBuf, ToolError> {
     match path {
-        Some(p) => ws.resolve(p),
+        Some(p) => ws.resolve_free(p),
         None => Ok(ws.root().to_path_buf()),
     }
 }

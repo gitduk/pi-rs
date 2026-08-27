@@ -95,7 +95,7 @@ async fn write_creates_parents_and_round_trips_through_read() {
 }
 
 #[tokio::test]
-async fn tools_reach_outside_the_workspace() {
+async fn read_leaves_the_workspace_but_write_and_bash_do_not() {
     let (_d, c) = ctx();
     let outside = tempfile::tempdir().unwrap();
     let o = outside.path();
@@ -112,17 +112,14 @@ async fn tools_reach_outside_the_workspace() {
             json!({ "path": o.join("y.rs").to_str().unwrap(), "content": "fn y() {}\n" }),
             &c,
         )
-        .await
-        .unwrap();
-    assert!(b.flatten().contains("wrote 1 line,"), "{b:?}");
-    assert_eq!(std::fs::read_to_string(o.join("y.rs")).unwrap(), "fn y() {}\n");
+        .await;
+    assert!(matches!(b, Err(ToolError::Escape(_))), "{b:?}");
+    assert!(!o.join("y.rs").exists());
 
     let d = tools::bash::Bash
         .execute(json!({ "command": "pwd", "cwd": o.to_str().unwrap() }), &c)
-        .await
-        .unwrap();
-    let canon = std::fs::canonicalize(o).unwrap();
-    assert!(d.flatten().contains(canon.to_str().unwrap()), "{d:?}");
+        .await;
+    assert!(matches!(d, Err(ToolError::Escape(_))), "{d:?}");
 }
 
 #[tokio::test]
@@ -712,20 +709,12 @@ async fn edit_refuses_a_file_it_cannot_read_and_says_to_use_write() {
 }
 
 #[tokio::test]
-async fn edit_can_reach_outside_the_workspace() {
+async fn edit_cannot_reach_outside_the_workspace() {
     let (_d, c) = ctx();
-    let outside = tempfile::tempdir().unwrap();
-    let f = outside.path().join("escape.rs");
-    std::fs::write(&f, "x\n").unwrap();
     let r = tools::edit::Edit
-        .execute(
-            json!({ "patch": format!("[{}#{}]\nRM\n", f.display(), hashline::tag("x\n")) }),
-            &c,
-        )
-        .await
-        .unwrap();
-    assert!(r.flatten().contains("removed"), "{r:?}");
-    assert!(!f.exists());
+        .execute(json!({ "patch": "[../escape.rs#0000]\nRM\n" }), &c)
+        .await;
+    assert!(matches!(r, Err(ToolError::Escape(_))), "{r:?}");
 }
 
 #[tokio::test]

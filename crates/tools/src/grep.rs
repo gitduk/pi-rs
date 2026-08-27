@@ -55,7 +55,7 @@ impl Tool for Grep {
             "type": "object",
             "properties": {
                 "pattern": { "type": "string", "description": "Rust regex syntax." },
-                "path": { "type": "string", "description": "Subdirectory to search. Default the workspace root." },
+                "path": { "type": "string", "description": "Subdirectory to search; an absolute path may leave the workspace. Default the workspace root." },
                 "glob": {
                     "type": "array",
                     "items": { "type": "string" },

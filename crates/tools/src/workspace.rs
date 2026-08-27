@@ -38,11 +38,22 @@ impl Workspace {
     }
 
     /// Resolve a model-supplied path. Relative paths join the workspace
-    /// root; absolute paths are used as-is. No boundary is enforced: tools
-    /// may reach anywhere on the filesystem. Canonicalizing the deepest
-    /// existing ancestor is what makes a path that does not exist yet real;
-    /// the remaining components cannot be links because they do not exist.
+    /// root; absolute paths are used as-is. Write and exec tools must stay
+    /// inside the workspace; a path that would escape it is refused.
+    /// Canonicalizing the deepest existing ancestor is what stops a symlink
+    /// from pointing outside the workspace; the remaining components cannot
+    /// be links because they do not exist.
     pub fn resolve(&self, input: &str) -> Result<PathBuf, ToolError> {
+        self.resolve_inner(input, true)
+    }
+
+    /// Like `resolve`, but with no boundary. Read-only tools use this so the
+    /// model can read and search anywhere on the filesystem.
+    pub fn resolve_free(&self, input: &str) -> Result<PathBuf, ToolError> {
+        self.resolve_inner(input, false)
+    }
+
+    fn resolve_inner(&self, input: &str, guarded: bool) -> Result<PathBuf, ToolError> {
         if input.is_empty() {
             return Err(ToolError::Invalid("empty path".into()));
         }
@@ -72,6 +83,9 @@ impl Workspace {
         let mut resolved = real;
         for name in tail.iter().rev() {
             resolved.push(name);
+        }
+        if guarded && !resolved.starts_with(&self.root) {
+            return Err(ToolError::Escape(input.into()));
         }
         Ok(resolved)
     }
@@ -105,13 +119,30 @@ mod tests {
     }
 
     #[test]
-    fn allows_paths_outside_the_workspace() {
+    fn rejects_paths_outside_the_workspace() {
+        let (_d, ws) = ws();
+        assert!(matches!(
+            ws.resolve("../outside"),
+            Err(ToolError::Escape(_))
+        ));
+        assert!(matches!(
+            ws.resolve("a/../../outside"),
+            Err(ToolError::Escape(_))
+        ));
+        assert!(matches!(
+            ws.resolve("/etc/passwd"),
+            Err(ToolError::Escape(_))
+        ));
+    }
+
+    #[test]
+    fn resolve_free_allows_paths_outside_the_workspace() {
         let (_d, ws) = ws();
         let outside = ws.root().parent().unwrap().join("outside");
-        assert_eq!(ws.resolve("../outside").unwrap(), outside);
-        assert_eq!(ws.resolve("a/../../outside").unwrap(), outside);
+        assert_eq!(ws.resolve_free("../outside").unwrap(), outside);
+        assert_eq!(ws.resolve_free("a/../../outside").unwrap(), outside);
         assert_eq!(
-            ws.resolve("/etc/passwd").unwrap(),
+            ws.resolve_free("/etc/passwd").unwrap(),
             Path::new("/etc/passwd")
         );
     }
@@ -125,12 +156,24 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_symlink_pointing_outside_resolves_to_its_target() {
+    fn rejects_a_symlink_pointing_outside() {
+        let (_d, ws) = ws();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), ws.root().join("escape")).unwrap();
+        assert!(matches!(
+            ws.resolve("escape/secret"),
+            Err(ToolError::Escape(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_free_follows_a_symlink_outside() {
         let (_d, ws) = ws();
         let outside = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(outside.path(), ws.root().join("escape")).unwrap();
         assert_eq!(
-            ws.resolve("escape/secret").unwrap(),
+            ws.resolve_free("escape/secret").unwrap(),
             outside.path().join("secret")
         );
     }

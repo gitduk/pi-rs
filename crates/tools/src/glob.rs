@@ -36,7 +36,7 @@ impl Tool for Glob {
             "type": "object",
             "properties": {
                 "pattern": { "type": "string", "description": "e.g. `*.rs`, `src/**/mod.rs`" },
-                "path": { "type": "string", "description": "Subdirectory to search. Default the workspace root." },
+                "path": { "type": "string", "description": "Subdirectory to search; an absolute path may leave the workspace. Default the workspace root." },
                 "limit": { "type": "integer", "description": "Max paths. Default 200." },
             },
             "required": ["pattern"],
