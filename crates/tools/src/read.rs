@@ -83,9 +83,9 @@ impl Tool for Read {
 
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
         let args: Args = crate::parse_args(args)?;
-        // A `spill:` path names a file in the session's spill directory, which
-        // the workspace gate would refuse. Only locators our own writer mints
-        // resolve; anything else is refused before the filesystem is touched.
+        // A `spill:` path names a file in the session's spill directory. Only
+        // locators our own writer mints resolve; anything else is refused
+        // before the filesystem is touched.
         let is_spill = args.path.starts_with("spill:");
         let (path, rel) = match args.path.strip_prefix("spill:") {
             Some(_) => {

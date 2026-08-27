@@ -98,18 +98,17 @@ fn sibling_files(dir: &std::path::Path) -> Vec<String> {
 /// A skill's body, with the way to reach the files it points at.
 ///
 /// Shared with the surface that runs a skill as a slash command: the model is
-/// given the same instructions either way, and either way `read` cannot see a
-/// skill's own directory.
+/// given the same instructions either way, and the skill tool is how a skill's
+/// own files are reached.
 pub fn instructions(skill: &Skill, text: &str) -> String {
     let mut out = body(text).to_string();
-    // Skills usually live outside the workspace, where `read` cannot reach.
-    // Instructions that point at a sibling file are useless unless the way to
-    // fetch it arrives with them.
+    // Skills usually live outside the workspace; instructions that point at a
+    // sibling are useless unless the way to fetch it arrives with them.
     let siblings = sibling_files(&skill.dir);
     if !siblings.is_empty() {
         out.push_str(&format!(
             "\n---\nFiles in this skill: {}\nFetch one with \
-             `skill(name: \"{}\", file: \"<path>\")` — `read` cannot reach them.\n",
+             `skill(name: \"{}\", file: \"<path>\")`.\n",
             siblings.join(", "),
             skill.name
         ));
@@ -159,8 +158,8 @@ impl Tool for SkillTool {
             return Ok(ToolOutput::text(out).with_preview(skill.name.clone()));
         };
 
-        // Skills live outside the workspace, so the workspace gate does not
-        // cover them; the skill's own directory is the boundary instead.
+        // A file argument stays inside the skill's own directory; that is the
+        // boundary, not the workspace.
         let target = skill.dir.join(&rel);
         let real = target
             .canonicalize()

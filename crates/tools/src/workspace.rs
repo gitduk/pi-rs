@@ -2,8 +2,9 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::ToolError;
 
-/// The only directory tools may touch. Every path a tool receives resolves
-/// through here; nothing else in this crate calls the filesystem directly.
+/// The workspace root every relative tool path is resolved against.
+/// Absolute paths pass through untouched; nothing else in this crate calls
+/// the filesystem directly.
 #[derive(Debug, Clone)]
 pub struct Workspace {
     root: PathBuf,
@@ -36,8 +37,10 @@ impl Workspace {
         &self.root
     }
 
-    /// Resolve a model-supplied path. Canonicalizing the deepest existing
-    /// ancestor is what stops a symlink from pointing outside the workspace;
+    /// Resolve a model-supplied path. Relative paths join the workspace
+    /// root; absolute paths are used as-is. No boundary is enforced: tools
+    /// may reach anywhere on the filesystem. Canonicalizing the deepest
+    /// existing ancestor is what makes a path that does not exist yet real;
     /// the remaining components cannot be links because they do not exist.
     pub fn resolve(&self, input: &str) -> Result<PathBuf, ToolError> {
         if input.is_empty() {
@@ -69,9 +72,6 @@ impl Workspace {
         let mut resolved = real;
         for name in tail.iter().rev() {
             resolved.push(name);
-        }
-        if !resolved.starts_with(&self.root) {
-            return Err(ToolError::Escape(input.into()));
         }
         Ok(resolved)
     }
@@ -105,20 +105,15 @@ mod tests {
     }
 
     #[test]
-    fn rejects_parent_traversal() {
+    fn allows_paths_outside_the_workspace() {
         let (_d, ws) = ws();
-        assert!(matches!(
-            ws.resolve("../outside"),
-            Err(ToolError::Escape(_))
-        ));
-        assert!(matches!(
-            ws.resolve("a/../../outside"),
-            Err(ToolError::Escape(_))
-        ));
-        assert!(matches!(
-            ws.resolve("/etc/passwd"),
-            Err(ToolError::Escape(_))
-        ));
+        let outside = ws.root().parent().unwrap().join("outside");
+        assert_eq!(ws.resolve("../outside").unwrap(), outside);
+        assert_eq!(ws.resolve("a/../../outside").unwrap(), outside);
+        assert_eq!(
+            ws.resolve("/etc/passwd").unwrap(),
+            Path::new("/etc/passwd")
+        );
     }
 
     #[test]
@@ -130,13 +125,13 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn rejects_a_symlink_pointing_outside() {
+    fn a_symlink_pointing_outside_resolves_to_its_target() {
         let (_d, ws) = ws();
         let outside = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(outside.path(), ws.root().join("escape")).unwrap();
-        assert!(matches!(
-            ws.resolve("escape/secret"),
-            Err(ToolError::Escape(_))
-        ));
+        assert_eq!(
+            ws.resolve("escape/secret").unwrap(),
+            outside.path().join("secret")
+        );
     }
 }

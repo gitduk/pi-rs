@@ -1,7 +1,7 @@
 mod common;
 
 use serde_json::json;
-use tools::{Ctx, Tool, ToolError, Workspace};
+use tools::{Ctx, Tool, Workspace};
 
 fn tree() -> (tempfile::TempDir, Ctx) {
     let dir = tempfile::tempdir().unwrap();
@@ -198,20 +198,30 @@ async fn a_bad_pattern_says_so_instead_of_returning_nothing() {
     assert!(err.contains("bad pattern `fn (`"), "{err}");
 }
 
-#[tokio::test]
-async fn search_cannot_reach_outside_the_workspace() {
-    let (_d, c) = tree();
-    for r in [
-        tools::grep::Grep
-            .execute(json!({ "pattern": "x", "path": "../" }), &c)
-            .await,
-        tools::glob::Glob
-            .execute(json!({ "pattern": "*", "path": "/etc" }), &c)
-            .await,
-    ] {
-        assert!(matches!(r, Err(ToolError::Escape(_))), "{r:?}");
+    #[tokio::test]
+    async fn search_reaches_outside_the_workspace() {
+        let (_d, c) = tree();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("out.txt"), "needle here\n").unwrap();
+
+        let g = tools::grep::Grep
+            .execute(
+                json!({ "pattern": "needle", "path": outside.path().to_str().unwrap() }),
+                &c,
+            )
+            .await
+            .unwrap();
+        assert!(g.flatten().contains("needle"), "{g:?}");
+
+        let l = tools::glob::Glob
+            .execute(
+                json!({ "pattern": "*.txt", "path": outside.path().to_str().unwrap() }),
+                &c,
+            )
+            .await
+            .unwrap();
+        assert!(l.flatten().contains("out.txt"), "{l:?}");
     }
-}
 
 #[tokio::test]
 async fn the_git_directory_is_never_swept() {

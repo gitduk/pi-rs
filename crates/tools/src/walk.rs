@@ -26,8 +26,8 @@ pub fn globs(patterns: &[String]) -> Result<Option<GlobSet>, ToolError> {
     ))
 }
 
-/// A gitignore-aware walk rooted inside the workspace. Links are not followed:
-/// one pointing outside would hand back paths the workspace gate rejects.
+/// A gitignore-aware walk rooted in a directory. Links are not followed: one
+/// pointing elsewhere would leave the root and can revisit the same files.
 ///
 /// Dotted entries are kept — `.github`, `.cargo` and friends are ordinary
 /// project files — but `.git` itself is not: an object store is megabytes of

@@ -130,13 +130,12 @@ async fn a_loaded_skill_says_how_to_reach_its_own_files() {
         .unwrap()
         .flatten();
 
-    // Skills usually sit outside the workspace, where `read` cannot reach.
+    // The footer hands the model a way to fetch sibling files.
     assert!(out.contains("references/inversion.md"), "{out}");
     assert!(
         out.contains(r#"skill(name: "thinking", file: "<path>")"#),
         "{out}"
     );
-    assert!(out.contains("`read` cannot reach them"), "{out}");
 }
 
 #[tokio::test]
