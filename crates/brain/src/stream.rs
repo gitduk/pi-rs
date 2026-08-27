@@ -107,6 +107,7 @@ pub struct Accumulator {
     stop: StopReason,
     usage: Usage,
     next_local_id: u64,
+    seen_provider_ids: std::collections::HashSet<ProviderCallId>,
 }
 
 impl Accumulator {
@@ -121,6 +122,7 @@ impl Accumulator {
             stop: StopReason::default(),
             usage: Usage::default(),
             next_local_id: 0,
+            seen_provider_ids: std::collections::HashSet::new(),
         }
     }
 
@@ -166,10 +168,13 @@ impl Accumulator {
         }
     }
 
-    fn mint_id(&mut self, provider: Option<&ProviderCallId>) -> ToolCallId {
+    fn mint_id(&mut self, provider: &mut Option<ProviderCallId>) -> ToolCallId {
         match provider {
-            Some(p) => ToolCallId(p.0.clone()),
-            None => {
+            Some(p) if self.seen_provider_ids.insert(p.clone()) => ToolCallId(p.0.clone()),
+            _ => {
+                // A duplicate provider id must not travel back on its wire;
+                // dropping it sends the fresh local id instead.
+                *provider = None;
                 self.next_local_id += 1;
                 ToolCallId(format!("call_{}", self.next_local_id))
             }
@@ -183,8 +188,8 @@ impl Accumulator {
 
         for (_, b) in blocks {
             match b.kind {
-                Some(BlockKind::ToolCall { provider, name }) => {
-                    let id = self.mint_id(provider.as_ref());
+                Some(BlockKind::ToolCall { mut provider, name }) => {
+                    let id = self.mint_id(&mut provider);
                     let raw = if b.text.trim().is_empty() {
                         "{}"
                     } else {
@@ -286,6 +291,42 @@ mod tests {
         assert_eq!(calls[0].args["path"], "a.rs");
         // The provider's id is what may travel back on its wire.
         assert_eq!(calls[0].provider.as_ref().unwrap().as_str(), "toolu_1");
+    }
+
+    #[test]
+    fn a_duplicate_provider_id_gets_a_fresh_local_one() {
+        // Some hosts stream two tool calls carrying the same id; OpenAI
+        // rejects the request. The duplicate must not travel back verbatim.
+        let mut a = acc();
+        for (i, name) in ["read", "grep"].into_iter().enumerate() {
+            a.push(StreamEvent::BlockStart {
+                index: i,
+                kind: BlockKind::ToolCall {
+                    provider: Some(ProviderCallId("call_dup".into())),
+                    name: name.into(),
+                },
+            });
+            a.push(StreamEvent::ToolArgsDelta {
+                index: i,
+                delta: "{}".into(),
+            });
+            a.push(StreamEvent::BlockEnd { index: i });
+        }
+        a.push(StreamEvent::Done {
+            stop: StopReason::ToolUse,
+            usage: Usage::default(),
+        });
+
+        let done = a.finish();
+        let calls: Vec<_> = done.message.tool_calls().collect();
+        assert_eq!(calls.len(), 2);
+        let ids: Vec<_> = calls.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids[0], "call_dup");
+        assert_ne!(ids[0], ids[1]);
+        // The wire keys on the provider id when present, so the duplicate must
+        // arrive with none: its fresh local id is what travels back.
+        assert!(calls[0].provider.is_some());
+        assert!(calls[1].provider.is_none());
     }
 
     #[test]
