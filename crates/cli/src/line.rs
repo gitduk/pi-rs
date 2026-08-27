@@ -43,7 +43,7 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
                     println!("{line}");
                 }
             }
-            Step::Handled(lines) => {
+            Step::Swap(lines) | Step::Handled(lines) => {
                 for line in lines {
                     println!("{line}");
                 }

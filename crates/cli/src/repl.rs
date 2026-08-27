@@ -56,6 +56,16 @@ const BUILTIN: &[Command] = &[
         "start a fresh session, keeping this one on disk",
     ),
     Command::builtin(
+        "/clear",
+        "",
+        "forget this session — the transcript is not saved",
+    ),
+    Command::builtin(
+        "/resume",
+        "[id]",
+        "list this workspace's sessions, or switch to one",
+    ),
+    Command::builtin(
         "/name",
         "[text]",
         "call this session something you will recognise",
@@ -518,6 +528,9 @@ pub enum Cmd {
     Reload,
     Log,
     /// Everything after the word, or empty to clear.
+    Clear,
+    /// The session to switch to, or empty to list what there is.
+    Resume(String),
     Name(String),
     /// Everything after the word focuses the summary.
     Compact(String),
@@ -635,6 +648,8 @@ pub fn parse(line: &str) -> Option<Cmd> {
         "/todo" => Cmd::Todo,
         "/cost" => Cmd::Cost,
         "/new" => Cmd::New,
+        "/clear" => Cmd::Clear,
+        "/resume" => Cmd::Resume(rest(line)),
         "/keys" => Cmd::Keys,
         "/reload" => Cmd::Reload,
         "/log" => Cmd::Log,
@@ -665,11 +680,32 @@ pub enum Step {
     /// Dealt with here; these lines are what there is to show for it. Returned
     /// rather than printed because one surface prints and the other paints.
     Handled(Vec<String>),
+    /// The session was replaced — a `/clear` or a `/resume` — so the surface
+    /// has to rebuild its view from the new one, not just show the lines.
+    Swap(Vec<String>),
     Quit,
 }
 
 fn lines(text: impl Into<String>) -> Step {
     Step::Handled(text.into().lines().map(str::to_string).collect())
+}
+
+/// How long ago a transcript was last saved, in human terms.
+fn ago(secs: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let ago = now.saturating_sub(secs);
+    if ago < 60 {
+        "just now".into()
+    } else if ago < 3600 {
+        format!("{}m ago", ago / 60)
+    } else if ago < 86400 {
+        format!("{}h ago", ago / 3600)
+    } else {
+        format!("{}d ago", ago / 86400)
+    }
 }
 
 impl Repl {
@@ -695,15 +731,17 @@ impl Repl {
                 totals.cost,
                 totals.estimated,
             )),
-            Cmd::New => {
-                // The old one stays on disk; only the thread of conversation ends.
-                self.session = Session::default();
-                self.id = crate::session::new_id();
-                crate::journal::now_recording(&self.id);
-                if let Ok(mut held) = self.ctx.todos.lock() {
-                    held.clear();
+            Cmd::New => Step::Handled(self.fresh_session("started")),
+            Cmd::Clear => Step::Swap(self.clear()),
+            Cmd::Resume(name) => {
+                if name.is_empty() {
+                    Step::Handled(self.resume_listing())
+                } else {
+                    match self.resume(&name) {
+                        Ok(said) => Step::Swap(said),
+                        Err(why) => Step::Handled(vec![why]),
+                    }
                 }
-                lines(format!("started {}", self.id))
             }
             Cmd::Name(name) => {
                 if name.is_empty() {
@@ -723,6 +761,99 @@ impl Repl {
             }),
             Cmd::Other { word, args } => dispatch(&self.commands, &word, &args),
         }
+    }
+
+    /// Drop the in-memory conversation and open a fresh session under a new
+    /// id. The plan goes too. What becomes of the old transcript is the
+    /// caller's call: `/new` leaves it on disk, `/clear` deletes it first.
+    fn fresh_session(&mut self, said: &str) -> Vec<String> {
+        self.session = Session::default();
+        self.id = crate::session::new_id();
+        crate::journal::now_recording(&self.id);
+        // Spills are filed under the session id; a fresh one has to own its
+        // own namespace or the old session keeps swallowing them.
+        self.ctx = self.ctx.clone().with_session(&self.id);
+        if let Ok(mut held) = self.ctx.todos.lock() {
+            held.clear();
+        }
+        vec![format!("{said} {}", self.id)]
+    }
+
+    /// Forget the running session entirely — memory and disk — and start
+    fn clear(&mut self) -> Vec<String> {
+        match self.store.delete(&self.id) {
+            // A session never saved has no file to remove; that is fine.
+            // Any other failure leaves the transcript on disk, so the
+            // "cleared" claim would be a lie — say so and change nothing.
+            Err(e)
+                if e.downcast_ref::<std::io::Error>()
+                    .is_none_or(|io| io.kind() != std::io::ErrorKind::NotFound) =>
+            {
+                let detail = format!("{e:#}");
+                tracing::warn!(target: "pi::session", id = %self.id, error = %detail, "clear could not remove the saved transcript");
+                vec![
+                    format!("could not clear — the transcript for {} is still on disk", self.id),
+                    detail,
+                ]
+            }
+            _ => self.fresh_session("cleared — nothing was saved, now on"),
+        }
+    }
+
+    /// The sessions `/resume` can switch to, newest first, the one running
+    /// now marked.
+    fn resume_listing(&self) -> Vec<String> {
+        let list = self.store.list(self.ctx.workspace.root());
+        if list.is_empty() {
+            return vec![
+                "no sessions recorded for this workspace".into(),
+                "one is saved here at the end of every turn".into(),
+            ];
+        }
+        let width = list.iter().map(|s| s.id.len()).max().unwrap_or(0);
+        let mut out: Vec<String> = list
+            .iter()
+            .map(|s| {
+                let mark = if s.id == self.id { "●" } else { " " };
+                let name = s.name.as_deref().unwrap_or("");
+                format!("{mark} {:width$}  {:>10}  {name}", s.id, ago(s.created))
+            })
+            .collect();
+        out.push("resume one with /resume <id>".into());
+        out
+    }
+
+    /// Switch to a saved session: its transcript, name and id become this
+    /// one's, and every further turn extends it. The session being left is
+    /// saved first, so nothing is lost on the way out.
+    ///
+    /// The model in charge does not change — that stays the prompt's decision
+    /// — so reasoning a different model wrote is demoted the way it is after
+    /// a `/model` switch.
+    fn resume(&mut self, id: &str) -> Result<Vec<String>, String> {
+        // The session being left has to survive too, or /resume throws it
+        // away. An empty one — just opened, nothing said — has nothing to keep.
+        if !self.session.is_empty()
+            && let Err(e) = self.save()
+        {
+            tracing::warn!(target: "pi::session", error = %e, "resume could not save the leaving session");
+        }
+        let stored = self.store.load(id).map_err(|e| refused("resume", e))?;
+        let resumed_id = stored.id.clone();
+        let name = stored.name.clone();
+        self.session = stored.into_session();
+        self.id = resumed_id;
+        self.name = name;
+        crate::journal::now_recording(&self.id);
+        // The resumed id owns its spills, and a resumed session must rejoin
+        // them (the invariant `with_session` promises) instead of keeping the
+        // namespace the process happened to start with.
+        self.ctx = self.ctx.clone().with_session(&self.id);
+        let mut said = vec![format!("resumed {}", self.id)];
+        if let Some(name) = self.name.as_deref() {
+            said.push(format!("“{name}”"));
+        }
+        Ok(said)
     }
 
     /// Run what `!` named: show the output, and record the command and its
@@ -763,7 +894,7 @@ impl Repl {
 #[cfg(test)]
 mod tests {
     use super::{
-        BUILTIN, Candidate, Choice, Cmd, Command, Source, Step, bash_command, commands,
+        BUILTIN, Candidate, Choice, Cmd, Command, Source, Step, ago, bash_command, commands,
         complete, dispatch, expand, gist, help, parse,
     };
     use tools::skills::Skill;
@@ -1039,6 +1170,30 @@ mod tests {
         assert_eq!(parse("/todo"), Some(Cmd::Todo));
         assert_eq!(parse("fix the bug"), None);
         assert_eq!(parse(""), None);
+    }
+
+    #[test]
+    fn clear_and_resume_parse() {
+        assert_eq!(parse("/clear"), Some(Cmd::Clear));
+        assert_eq!(parse("/clear please"), Some(Cmd::Clear));
+        // Bare, /resume lists; a word names the session to switch to.
+        assert_eq!(parse("/resume"), Some(Cmd::Resume(String::new())));
+        assert_eq!(
+            parse("/resume 1756240000-123"),
+            Some(Cmd::Resume("1756240000-123".into()))
+        );
+    }
+
+    #[test]
+    fn ago_is_human() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(ago(now), "just now");
+        assert_eq!(ago(now - 120), "2m ago");
+        assert_eq!(ago(now - 7200), "2h ago");
+        assert_eq!(ago(now - 3 * 86400), "3d ago");
     }
 
     #[test]

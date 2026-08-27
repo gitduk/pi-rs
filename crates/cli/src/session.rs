@@ -113,32 +113,44 @@ impl Store {
         Ok(serde_json::from_str(&body)?)
     }
 
-    /// Most recent session recorded for this workspace.
-    pub fn latest(&self, workspace: &Path) -> Result<Stored> {
+    /// Every session recorded for this workspace, newest first. What `latest`
+    /// returns is the top of this list.
+    pub fn list(&self, workspace: &Path) -> Vec<Stored> {
         let want = workspace.display().to_string();
-        let mut best: Option<(u64, Stored)> = None;
+        let mut found: Vec<Stored> = std::fs::read_dir(&self.root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| {
+                if entry.path().extension().is_none_or(|e| e != "json") {
+                    return None;
+                }
+                let body = std::fs::read_to_string(entry.path()).ok()?;
+                let stored = serde_json::from_str::<Stored>(&body).ok()?;
+                (stored.workspace == want).then_some(stored)
+            })
+            .collect();
+        found.sort_by_key(|s| std::cmp::Reverse(s.created));
+        found
+    }
 
-        let entries = std::fs::read_dir(&self.root)
-            .with_context(|| format!("no sessions yet under {}", self.root.display()))?;
-        for entry in entries.flatten() {
-            if entry.path().extension().is_none_or(|e| e != "json") {
-                continue;
-            }
-            let Ok(body) = std::fs::read_to_string(entry.path()) else {
-                continue;
-            };
-            let Ok(stored) = serde_json::from_str::<Stored>(&body) else {
-                continue;
-            };
-            if stored.workspace != want {
-                continue;
-            }
-            if best.as_ref().is_none_or(|(t, _)| stored.created > *t) {
-                best = Some((stored.created, stored));
-            }
-        }
-        best.map(|(_, s)| s)
-            .with_context(|| format!("no session recorded for {want}"))
+    /// Forget a session: remove its transcript file, so a cleared session
+    /// cannot be resumed.
+    pub fn delete(&self, id: &str) -> Result<()> {
+        std::fs::remove_file(self.path(id)).with_context(|| {
+            format!(
+                "cannot remove the saved transcript for {id} at {}",
+                self.path(id).display()
+            )
+        })
+    }
+
+    /// Most recent session recorded for this workspace: the top of `list`.
+    pub fn latest(&self, workspace: &Path) -> Result<Stored> {
+        self.list(workspace)
+            .into_iter()
+            .next()
+            .with_context(|| format!("no session recorded for {}", workspace.display()))
     }
 }
 
@@ -299,5 +311,57 @@ mod tests {
             "other"
         );
         assert!(store.latest(std::path::Path::new("/nowhere")).is_err());
+    }
+
+    #[test]
+    fn list_returns_this_workspaces_sessions_newest_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::new(tmp.path());
+        let log = log_with(vec![Message::user("x")]);
+        store
+            .save("a", std::path::Path::new("/w"), "m", None, &log)
+            .unwrap();
+        store
+            .save("b", std::path::Path::new("/w"), "m", None, &log)
+            .unwrap();
+        store
+            .save("c", std::path::Path::new("/other"), "m", None, &log)
+            .unwrap();
+
+        // `created` has one-second resolution, so newness is forced explicitly.
+        let mut stored = store.load("a").unwrap();
+        stored.id = "newest".into();
+        stored.created += 60;
+        std::fs::write(store.path("newest"), serde_json::to_vec(&stored).unwrap()).unwrap();
+
+        let ids: Vec<String> = store
+            .list(std::path::Path::new("/w"))
+            .iter()
+            .map(|s| s.id.clone())
+            .collect();
+        assert_eq!(ids, ["newest", "b", "a"]);
+        // Another workspace's sessions stay out.
+        assert!(
+            store
+                .list(std::path::Path::new("/other"))
+                .iter()
+                .all(|s| s.id == "c")
+        );
+    }
+
+    #[test]
+    fn delete_removes_a_session_so_it_cannot_be_resumed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::new(tmp.path());
+        let log = log_with(vec![Message::user("x")]);
+        store
+            .save("t", std::path::Path::new("/w"), "m", None, &log)
+            .unwrap();
+
+        store.delete("t").unwrap();
+        assert!(store.load("t").is_err());
+        assert!(store.list(std::path::Path::new("/w")).is_empty());
+        // Deleting what is already gone is a real error, not a silent pass.
+        assert!(store.delete("t").is_err());
     }
 }

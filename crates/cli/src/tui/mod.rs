@@ -70,6 +70,9 @@ enum Act {
     /// A message chosen from the rewind selector: the conversation rewinds
     /// there, that message kept and everything after it forgotten.
     Rewind(EntryId),
+    /// `ctrl+l` twice: the session is cleared and the screen is rebuilt from
+    /// the empty one.
+    ClearSession,
     Quit,
 }
 /// A line in the scrollback.
@@ -610,6 +613,8 @@ struct Ui {
     choices: Vec<Choice>,
     /// The same copy, of the same list `/help` prints.
     commands: Arc<Vec<Command>>,
+    /// When the last `ctrl+l` was pressed, for the clear-session double-tap.
+    last_clear: Option<Instant>,
     last_interrupt: Option<Instant>,
     /// When the last Esc was pressed, for the rewind selector's double-tap.
     last_esc: Option<Instant>,
@@ -687,6 +692,7 @@ impl Ui {
 
             tools: Vec::new(),
             queued: Vec::new(),
+            last_clear: None,
             picked: None,
             dismissed_at: None,
             last_interrupt: None,
@@ -1188,6 +1194,17 @@ impl Ui {
                 }
                 return Act::None;
             }
+            Some(Action::AppClearScreen) => {
+                // One press clears the screen; a second, inside the window,
+                // clears the session too — which rebuilds the screen empty.
+                let now = Instant::now();
+                if double_tap(&mut self.last_clear, now) {
+                    self.last_clear = None;
+                    return Act::ClearSession;
+                }
+                self.screen.clear();
+                return Act::None;
+            }
             Some(Action::AppExit) => {
                 return if self.editor.is_empty() && !running {
                     Act::Quit
@@ -1214,7 +1231,6 @@ impl Ui {
             Some(Action::MoveLineEnd) => self.editor.end(),
             Some(Action::HistoryOlder) => self.editor.up(),
             Some(Action::HistoryNewer) => self.editor.down(),
-            Some(Action::AppClearScreen) => self.screen.clear(),
             Some(Action::ScrollUp) => self.scroll_view(true),
             Some(Action::ScrollDown) => self.scroll_view(false),
             Some(Action::ThinkFold) => {
@@ -1283,7 +1299,8 @@ impl Ui {
                 | Action::LineSubmit
                 | Action::RunInterrupt
                 | Action::AppExit
-                | Action::Rewind,
+                | Action::Rewind
+                | Action::AppClearScreen,
             ) => unreachable!("handled above"),
         }
         Act::None
@@ -1440,6 +1457,14 @@ impl Tui {
                     self.rewind_turn(id);
                     continue;
                 }
+                Act::ClearSession => {
+                    let Step::Swap(said) = self.core.command("/clear", &self.totals) else {
+                        unreachable!("ctrl+l twice reaches the /clear branch");
+                    };
+                    self.ui.rebuild(&self.core.session);
+                    self.ui.above.extend(said.into_iter().map(Entry::Plain));
+                    continue;
+                }
                 Act::Interrupt | Act::None => continue,
             };
             self.ui.submit(&line);
@@ -1472,13 +1497,20 @@ impl Tui {
                                         std::process::exit(130)
                                     }
                                     // Esc means interrupt while the run is in flight.
-                                    Act::OpenRewind | Act::Rewind(_) => {}
+                                    Act::OpenRewind | Act::Rewind(_) | Act::ClearSession => {}
                                     Act::None => {}
                                 },
                             }
                         }
                     };
                     self.ui.above.extend(lines.into_iter().map(Entry::Plain));
+                }
+                Step::Swap(said) => {
+                    // The transcript is the source of truth again: a /clear or
+                    // a /resume replaced it, so the screen is rebuilt from the
+                    // new one instead of keeping the old conversation up.
+                    self.ui.rebuild(&self.core.session);
+                    self.ui.above.extend(said.into_iter().map(Entry::Plain));
                 }
                 Step::Handled(lines) => {
                     self.ui.above.extend(lines.into_iter().map(Entry::Plain));
@@ -1649,7 +1681,7 @@ impl Tui {
                             std::process::exit(130)
                         }
                         // Esc means interrupt while the run is in flight.
-                        Act::OpenRewind | Act::Rewind(_) => {}
+                        Act::OpenRewind | Act::Rewind(_) | Act::ClearSession => {}
                         Act::None => {}
                     },
                     _ = tick.tick() => ui.spinner += 1,
