@@ -562,7 +562,7 @@ pub fn opening(
         default_model = config.defaults.model.as_deref().unwrap_or("-"),
         project_model = project.defaults.model.as_deref().unwrap_or("-"),
         project_max_tier = ?project.defaults.max_tier,
-        resumed = prior.map(|p| p.log.entries().len()).unwrap_or(0),
+        resumed = prior.map(|p| p.session.entries().len()).unwrap_or(0),
         session = id,
         "start"
     );

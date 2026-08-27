@@ -79,7 +79,9 @@ impl Entry {
 /// shrinking.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Session {
+    #[serde(default)]
     entries: Vec<Entry>,
+    #[serde(default)]
     next: u64,
 }
 

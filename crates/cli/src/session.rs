@@ -15,8 +15,8 @@ pub struct Stored {
     /// nobody recognises a week later.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[serde(default)]
-    pub log: Session,
+    #[serde(flatten, default)]
+    pub session: Session,
     /// Transcripts written before the log existed. Read, never written.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     messages: Vec<Message>,
@@ -24,12 +24,11 @@ pub struct Stored {
 
 impl Stored {
     /// The transcript, whichever shape it was stored in.
-    /// The transcript, whichever shape it was stored in.
     pub fn into_session(self) -> Session {
-        if self.log.is_empty() && !self.messages.is_empty() {
+        if self.session.is_empty() && !self.messages.is_empty() {
             Session::from_messages(self.messages)
         } else {
-            self.log
+            self.session
         }
     }
 }
@@ -90,7 +89,7 @@ impl Store {
             model: model.to_string(),
             created: now(),
             name: name.map(str::to_string),
-            log: session.clone(),
+            session: session.clone(),
             messages: Vec::new(),
         };
 
@@ -204,6 +203,12 @@ mod tests {
                 "a transcript holds prompts and file contents"
             );
         }
+        // The session flattens to the top level: no nested `log` key.
+        let body = std::fs::read_to_string(&path).unwrap();
+        let flat = serde_json::from_str::<serde_json::Value>(&body).unwrap();
+        let flat = flat.as_object().unwrap();
+        assert!(flat.contains_key("entries"), "session must flatten to the top level");
+        assert!(!flat.contains_key("log"), "the nested `log` key must be gone");
         let back = store.load("t1").unwrap();
         assert_eq!(back.model, "test-model");
         assert_eq!(back.name.as_deref(), Some("the flaky test"));
