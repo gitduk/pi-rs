@@ -902,6 +902,13 @@ pub fn clip(s: &str, max: usize) -> String {
     one
 }
 
+/// Pad a string to a display width with trailing spaces, so a column of
+/// mixed-width (CJK) text lines up where `{:width$}` would only count chars.
+pub fn pad(s: &str, width: usize) -> String {
+    let w = unicode_width::UnicodeWidthStr::width(s);
+    format!("{s}{}", " ".repeat(width.saturating_sub(w)))
+}
+
 /// The one argument worth showing in a progress line.
 pub fn summarize(args: &serde_json::Value) -> String {
     // A patch is many lines; the files it touches are the useful part.

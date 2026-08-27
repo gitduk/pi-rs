@@ -22,6 +22,16 @@ pub struct Stored {
     messages: Vec<Message>,
 }
 
+/// A saved session as the resume list and its completion see it: the id it is
+/// named by, and the first thing the user asked it, which is what it is known
+/// by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeChoice {
+    pub id: String,
+    pub prompt: String,
+    pub created: u64,
+}
+
 impl Stored {
     /// The transcript, whichever shape it was stored in.
     pub fn into_session(self) -> Session {
@@ -30,6 +40,19 @@ impl Stored {
         } else {
             self.session
         }
+    }
+}
+impl Stored {
+    /// The first thing the user asked this session, if anything. What the
+    /// resume list shows in place of the id.
+    pub fn first_prompt(&self) -> Option<String> {
+        if let Some(prompt) = self.session.first_prompt() {
+            return Some(prompt);
+        }
+        self.messages
+            .iter()
+            .find_map(|m| matches!(m, Message::User { .. }).then(|| m.text()))
+            .filter(|t| !t.is_empty())
     }
 }
 
@@ -132,6 +155,23 @@ impl Store {
             .collect();
         found.sort_by_key(|s| std::cmp::Reverse(s.created));
         found
+    }
+
+    /// Every session `/resume` can name for this workspace, newest first,
+    /// reduced to what the list and its completion show: the id it is named
+    /// by and its first prompt.
+    pub fn choices(&self, workspace: &Path) -> Vec<ResumeChoice> {
+        self.list(workspace)
+            .into_iter()
+            .map(|s| {
+                let prompt = s.first_prompt().unwrap_or_default();
+                ResumeChoice {
+                    id: s.id,
+                    prompt,
+                    created: s.created,
+                }
+            })
+            .collect()
     }
 
     /// Forget a session: remove its transcript file, so a cleared session
@@ -363,5 +403,28 @@ mod tests {
         assert!(store.list(std::path::Path::new("/w")).is_empty());
         // Deleting what is already gone is a real error, not a silent pass.
         assert!(store.delete("t").is_err());
+    }
+
+    #[test]
+    fn choices_show_the_first_question_and_skip_an_empty_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::new(tmp.path());
+        let asked = log_with(vec![
+            Message::user("why is the flaky test flaky?"),
+            Message::assistant_text("there"),
+        ]);
+        store
+            .save("a", std::path::Path::new("/w"), "m", None, &asked)
+            .unwrap();
+        // A session that never got a prompt has nothing to resume to by name.
+        store
+            .save("b", std::path::Path::new("/w"), "m", None, &Session::new())
+            .unwrap();
+
+        let got = store.choices(std::path::Path::new("/w"));
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].id, "b"); // newest first, even when it has no prompt
+        assert_eq!(got[0].prompt, "");
+        assert_eq!(got[1].prompt, "why is the flaky test flaky?");
     }
 }

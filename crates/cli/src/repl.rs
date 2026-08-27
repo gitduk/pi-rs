@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 use tools::{Ctx, Tool, ToolError};
 use tools::skills::Skill;
 
-use crate::session::Store;
+use crate::session::{ResumeChoice, Store};
 
 /// Where a command came from, and so what running it means.
 #[derive(Clone)]
@@ -199,9 +199,16 @@ pub struct Candidate {
 /// What the line could still become: a command while its word is being typed,
 /// then that command's own argument once the word is settled.
 ///
-/// Only `/model` has an argument worth completing. A prompt is prose and a
-/// focus phrase is prose; guessing at either is worse than leaving it alone.
-pub fn complete(line: &str, commands: &[Command], models: &[Choice]) -> Vec<Candidate> {
+/// Two commands have arguments worth completing: `/model` against the models
+/// in the config, and `/resume` against the workspace's saved sessions. A
+/// prompt is prose and a focus phrase is prose; guessing at either is worse
+/// than leaving it alone.
+pub fn complete(
+    line: &str,
+    commands: &[Command],
+    models: &[Choice],
+    sessions: &[ResumeChoice],
+) -> Vec<Candidate> {
     if !line.starts_with('/') {
         return Vec::new();
     }
@@ -220,26 +227,43 @@ pub fn complete(line: &str, commands: &[Command], models: &[Choice]) -> Vec<Cand
             })
             .collect();
     };
-    if word != "/model" {
-        return Vec::new();
-    }
     let typed = rest.trim_start();
-    // A second word means the name is settled and something else is being
-    // typed. There is no third thing to offer.
-    if typed.contains(char::is_whitespace) {
-        return Vec::new();
+    match word {
+        // A second word means the model name is settled and something else is
+        // being typed. There is no third thing to offer.
+        "/model" if typed.contains(char::is_whitespace) => Vec::new(),
+        "/model" => models
+            .iter()
+            .filter(|m| m.name.starts_with(typed) && m.name != typed)
+            .map(|m| Candidate {
+                show: m.name.clone(),
+                line: format!("/model {}", m.name),
+                help: m.note.clone(),
+                more: false,
+            })
+            .collect(),
+        // A session is named by what was asked first, though its id still
+        // matches — someone may remember half of it. Accepting puts the id in
+        // the line, because that is what `/resume` loads by. A first question
+        // is a whole sentence, so the argument may keep several words.
+        "/resume" => sessions
+            .iter()
+            .filter(|s| {
+                !s.prompt.is_empty() && (s.prompt.starts_with(typed) || s.id.starts_with(typed))
+            })
+            .map(|s| Candidate {
+                show: crate::render::clip(&s.prompt, RESUME_WIDTH),
+                line: format!("/resume {}", s.id),
+                help: ago(s.created),
+                more: false,
+            })
+            .collect(),
+        _ => Vec::new(),
     }
-    models
-        .iter()
-        .filter(|m| m.name.starts_with(typed) && m.name != typed)
-        .map(|m| Candidate {
-            show: m.name.clone(),
-            line: format!("/model {}", m.name),
-            help: m.note.clone(),
-            more: false,
-        })
-        .collect()
 }
+
+/// How much of a session's first prompt a list row or completion shows.
+const RESUME_WIDTH: usize = 60;
 
 /// A session and everything that outlives any one turn of it.
 ///
@@ -803,23 +827,43 @@ impl Repl {
     /// The sessions `/resume` can switch to, newest first, the one running
     /// now marked.
     fn resume_listing(&self) -> Vec<String> {
-        let list = self.store.list(self.ctx.workspace.root());
+        let list = self.store.choices(self.ctx.workspace.root());
         if list.is_empty() {
             return vec![
                 "no sessions recorded for this workspace".into(),
                 "one is saved here at the end of every turn".into(),
             ];
         }
-        let width = list.iter().map(|s| s.id.len()).max().unwrap_or(0);
-        let mut out: Vec<String> = list
+        // What a session is known by is its first question, not its id; a
+        // session with nothing said yet is not worth naming.
+        let shown: Vec<(bool, String, u64)> = list
             .iter()
             .map(|s| {
-                let mark = if s.id == self.id { "●" } else { " " };
-                let name = s.name.as_deref().unwrap_or("");
-                format!("{mark} {:width$}  {:>10}  {name}", s.id, ago(s.created))
+                let text = if s.prompt.is_empty() {
+                    "(no question)".into()
+                } else {
+                    crate::render::clip(&s.prompt, RESUME_WIDTH)
+                };
+                (s.id == self.id, text, s.created)
             })
             .collect();
-        out.push("resume one with /resume <id>".into());
+        let width = shown
+            .iter()
+            .map(|(_, t, _)| unicode_width::UnicodeWidthStr::width(t.as_str()))
+            .max()
+            .unwrap_or(0);
+        let mut out: Vec<String> = shown
+            .iter()
+            .map(|(mark, text, created)| {
+                format!(
+                    "{} {}  {:>10}",
+                    if *mark { "●" } else { " " },
+                    crate::render::pad(text, width),
+                    ago(*created)
+                )
+            })
+            .collect();
+        out.push("resume one by typing /resume and Tab".into());
         out
     }
 
@@ -894,8 +938,8 @@ impl Repl {
 #[cfg(test)]
 mod tests {
     use super::{
-        BUILTIN, Candidate, Choice, Cmd, Command, Source, Step, ago, bash_command, commands,
-        complete, dispatch, expand, gist, help, parse,
+        BUILTIN, Candidate, Choice, Cmd, Command, ResumeChoice, Source, Step, ago, bash_command,
+        commands, complete, dispatch, expand, gist, help, parse,
     };
     use tools::skills::Skill;
 
@@ -935,7 +979,7 @@ mod tests {
     }
 
     fn offered_from(line: &str, table: &[Command]) -> Vec<String> {
-        complete(line, table, &choices())
+        complete(line, table, &choices(), &[])
             .into_iter()
             .map(|c| c.show)
             .collect()
@@ -969,7 +1013,7 @@ mod tests {
     }
     #[test]
     fn accepting_a_command_that_wants_an_argument_leaves_room_for_one() {
-        let of = |line: &str| -> Candidate { complete(line, &table(), &choices()).swap_remove(0) };
+        let of = |line: &str| -> Candidate { complete(line, &table(), &choices(), &[]).swap_remove(0) };
         let name = of("/nam");
         assert_eq!((name.line.as_str(), name.more), ("/name", true));
         // Nothing follows /todo, so the caret should not be pushed past a space
@@ -991,7 +1035,7 @@ mod tests {
         assert!(offered("/model flash and").is_empty());
         // Accepting one replaces the line, not just the word.
         assert_eq!(
-            complete("/model fla", &table(), &choices())[0].line,
+            complete("/model fla", &table(), &choices(), &[])[0].line,
             "/model flash"
         );
     }
@@ -1000,7 +1044,51 @@ mod tests {
     fn a_config_with_no_models_offers_nothing_rather_than_every_command() {
         // The `--wire` case: choices() is empty there, and the argument branch
         // must not fall back to completing command words again.
-        assert!(complete("/model fl", &table(), &[]).is_empty());
+        assert!(complete("/model fl", &table(), &[], &[]).is_empty());
+    }
+
+    fn sessions() -> Vec<ResumeChoice> {
+        vec![
+            ResumeChoice {
+                id: "1756240000-100".into(),
+                prompt: "why is the flaky test flaky?".into(),
+                created: 1_756_240_000,
+            },
+            ResumeChoice {
+                id: "1756240000-200".into(),
+                prompt: "lint the workspace".into(),
+                created: 1_756_240_100,
+            },
+        ]
+    }
+
+    #[test]
+    fn the_sessions_complete_by_first_prompt_and_accept_the_id() {
+        let sessions = sessions();
+        let of = |line: &str| {
+            complete(line, &table(), &[], &sessions)
+                .into_iter()
+                .map(|c| c.show)
+                .collect::<Vec<_>>()
+        };
+        // A bare space offers every session by its first question, not its id.
+        assert_eq!(of("/resume "), ["why is the flaky test flaky?", "lint the workspace"]);
+        assert_eq!(of("/resume why"), ["why is the flaky test flaky?"]);
+        // A first question is a sentence, so a multi-word prefix matches too.
+        assert_eq!(of("/resume lint the"), ["lint the workspace"]);
+        // Half an id still matches — someone may remember it that way.
+        assert_eq!(of("/resume 1756"), ["why is the flaky test flaky?", "lint the workspace"]);
+        // A session with nothing said yet is not offered.
+        let quiet = [ResumeChoice {
+            id: "1756240000-300".into(),
+            prompt: String::new(),
+            created: 0,
+        }];
+        assert!(complete("/resume ", &table(), &[], &quiet).is_empty());
+        // Accepting replaces the line with the id, which is what /resume loads.
+        let got = &complete("/resume lint", &table(), &[], &sessions)[0];
+        assert_eq!(got.line, "/resume 1756240000-200");
+        assert!(!got.more);
     }
 
     #[test]

@@ -197,30 +197,17 @@ impl Session {
         let amendments = self.amendments();
         self.live()
             .into_iter()
-            .filter_map(|(id, m)| {
-                let Message::User { content } = m else {
-                    return None;
-                };
-                let mut text: String = content
-                    .iter()
-                    .filter_map(|c| match c {
-                        UserContent::Text(t) => Some(t.text.as_str()),
-                        _ => None,
-                    })
-                    .collect();
-                if let Some(parts) = amendments.get(&id) {
-                    for part in parts {
-                        // Each amendment is its own prompt; keep them apart so
-                        // the selector does not run them together.
-                        if !text.is_empty() {
-                            text.push('\n');
-                        }
-                        text.push_str(part);
-                    }
-                }
-                (!text.is_empty()).then_some((id, text))
-            })
+            .filter_map(|(id, m)| prompt_text(id, m, &amendments).map(|text| (id, text)))
             .collect()
+    }
+
+    /// The first thing the user asked, if anything. The text `prompts` would
+    /// report first, without building the whole list for the one value.
+    pub fn first_prompt(&self) -> Option<String> {
+        let amendments = self.amendments();
+        self.live()
+            .into_iter()
+            .find_map(|(id, m)| prompt_text(id, m, &amendments))
     }
 
     /// Rewind to a user message: everything after it leaves the session, and the
@@ -389,6 +376,37 @@ impl Session {
             })
             .collect()
     }
+}
+
+/// A user message's prompt text: its own text blocks followed by whatever
+/// `append_user` folded in as amendments. `None` when the message carries no
+/// text of its own.
+fn prompt_text(
+    id: EntryId,
+    m: &Message,
+    amendments: &HashMap<EntryId, Vec<&str>>,
+) -> Option<String> {
+    let Message::User { content } = m else {
+        return None;
+    };
+    let mut text: String = content
+        .iter()
+        .filter_map(|c| match c {
+            UserContent::Text(t) => Some(t.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    if let Some(parts) = amendments.get(&id) {
+        for part in parts {
+            // Each amendment is its own prompt; keep them apart so
+            // the selector does not run them together.
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(part);
+        }
+    }
+    (!text.is_empty()).then_some(text)
 }
 
 fn apply(block: &UserContent, elisions: &HashMap<&ToolCallId, &str>) -> UserContent {
@@ -602,6 +620,20 @@ mod tests {
         l.amend(id, "two");
         let prompts = l.prompts();
         assert_eq!(prompts.last().unwrap().1, "one\ntwo");
+    }
+
+    #[test]
+    fn first_prompt_is_the_first_question_and_none_when_there_is_none() {
+        let l = log();
+        assert_eq!(l.first_prompt().as_deref(), Some("go"));
+
+        // A first prompt that was amended carries its amendment, like `prompts`.
+        let mut with_amendment = Session::new();
+        let id = with_amendment.push(Message::user("one"));
+        with_amendment.amend(id, "two");
+        assert_eq!(with_amendment.first_prompt().as_deref(), Some("one\ntwo"));
+
+        assert_eq!(Session::new().first_prompt(), None);
     }
 }
 

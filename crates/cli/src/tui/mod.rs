@@ -35,6 +35,7 @@ use ratatui::widgets::{List, ListItem, ListState};
 use crate::render::Style as ThemeStyle;
 use crate::render::{self, Markdown, Paint};
 use crate::repl::{self, Candidate, Choice, Command, Repl, Step};
+use crate::session::ResumeChoice;
 use editor::Editor;
 use screen::{Rows, Screen};
 use std::sync::Arc;
@@ -611,6 +612,9 @@ struct Ui {
     /// What `/model` can complete to. A copy rather than a borrow of the
     /// config: the loop holds the session mutably while it draws.
     choices: Vec<Choice>,
+    /// The same copy, of the same list `/resume` prints. A session appears
+    /// here only once it is on disk, which is what `/resume` can switch to.
+    sessions: Vec<ResumeChoice>,
     /// The same copy, of the same list `/help` prints.
     commands: Arc<Vec<Command>>,
     /// When the last `ctrl+l` was pressed, for the clear-session double-tap.
@@ -668,6 +672,7 @@ impl Ui {
         keys: Arc<Keys>,
         choices: Vec<Choice>,
         commands: Arc<Vec<Command>>,
+        sessions: Vec<ResumeChoice>,
         paint: Paint,
     ) -> Self {
         let prompt = Self::paint_prompt(&paint, &paint.theme.prompt.icon);
@@ -680,6 +685,7 @@ impl Ui {
             keys,
             choices,
             commands,
+            sessions,
             editor,
             paint,
             prompt,
@@ -889,7 +895,7 @@ impl Ui {
             return Vec::new();
         }
         // Bottom-up: the best match belongs on the row right above the input.
-        repl::complete(self.editor.text(), &self.commands, &self.choices)
+        repl::complete(self.editor.text(), &self.commands, &self.choices, &self.sessions)
             .into_iter()
             .rev()
             .map(MenuEntry::Completion)
@@ -915,11 +921,15 @@ impl Ui {
     /// The menu's rows as ratatui list items. The selected row is styled by
     /// the list itself; everything else sits muted.
     fn menu_items(&self, menu: &[MenuEntry]) -> Vec<ListItem<'static>> {
-        let head = menu.iter().map(|c| c.show().len()).max().unwrap_or(0);
+        let head = menu
+            .iter()
+            .map(|c| unicode_width::UnicodeWidthStr::width(c.show()))
+            .max()
+            .unwrap_or(0);
         let muted = self.rat_style(&self.paint.theme.muted);
         menu.iter()
             .map(|c| {
-                let line = format!("  {:head$}  {}", c.show(), c.help());
+                let line = format!("  {}  {}", render::pad(c.show(), head), c.help());
                 ListItem::new(Line::from(Span::styled(line, muted)))
             })
             .collect()
@@ -1407,6 +1417,7 @@ impl Tui {
             keys,
             core.choices(),
             core.commands.clone(),
+            core.store.choices(core.ctx.workspace.root()),
             paint,
         );
         if let Some(prior) = history_path().and_then(|p| std::fs::read_to_string(p).ok()) {
@@ -1436,6 +1447,12 @@ impl Tui {
         let _ = std::fs::write(path, editor::encode(keep));
     }
 
+    /// Sessions change on the commands that create, delete or switch them;
+    /// refresh the copy the completion menu reads.
+    fn refresh_sessions(&mut self) {
+        self.ui.sessions = self.core.store.choices(self.core.ctx.workspace.root());
+    }
+
     pub async fn run(
         mut self,
         tx: UnboundedSender<Event>,
@@ -1462,6 +1479,7 @@ impl Tui {
                         unreachable!("ctrl+l twice reaches the /clear branch");
                     };
                     self.ui.rebuild(&self.core.session);
+                    self.refresh_sessions();
                     self.ui.above.extend(said.into_iter().map(Entry::Plain));
                     continue;
                 }
@@ -1510,6 +1528,9 @@ impl Tui {
                     // a /resume replaced it, so the screen is rebuilt from the
                     // new one instead of keeping the old conversation up.
                     self.ui.rebuild(&self.core.session);
+                    // /resume switched to a saved session and /clear deleted
+                    // one: the completion list follows.
+                    self.refresh_sessions();
                     self.ui.above.extend(said.into_iter().map(Entry::Plain));
                 }
                 Step::Handled(lines) => {
@@ -1705,6 +1726,10 @@ impl Tui {
             self.ui
                 .say(format!("warning: the transcript was not saved: {e}"));
         }
+
+        // The save put the running session on disk, the one `/resume` is
+        // likeliest to want back; make the completion list see it.
+        self.refresh_sessions();
 
         match out {
             Ok(o) => self.totals.merge(&o.totals),
