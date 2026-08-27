@@ -3,8 +3,8 @@ use std::borrow::Cow;
 use agent::session::Session;
 use agent::{Agent, Totals};
 use tokio_util::sync::CancellationToken;
-use tools::{Ctx, Tool, ToolError};
 use tools::skills::Skill;
+use tools::{Ctx, Tool, ToolError};
 
 use crate::session::{ResumeChoice, Store};
 
@@ -87,7 +87,7 @@ const BUILTIN: &[Command] = &[
         "",
         "re-read ~/.pi.toml, the instructions and the skills",
     ),
-    Command::builtin("/log", "", "where this run is writing its journal"),
+    Command::builtin("/log", "", "where this session is writing its journal"),
     Command::builtin(
         "/keys",
         "",
@@ -793,7 +793,7 @@ impl Repl {
     fn fresh_session(&mut self, said: &str) -> Vec<String> {
         self.session = Session::default();
         self.id = crate::session::new_id();
-        crate::journal::now_recording(&self.id);
+        crate::journal::switched(&self.id);
         // Spills are filed under the session id; a fresh one has to own its
         // own namespace or the old session keeps swallowing them.
         self.ctx = self.ctx.clone().with_session(&self.id);
@@ -816,7 +816,10 @@ impl Repl {
                 let detail = format!("{e:#}");
                 tracing::warn!(target: "pi::session", id = %self.id, error = %detail, "clear could not remove the saved transcript");
                 vec![
-                    format!("could not clear — the transcript for {} is still on disk", self.id),
+                    format!(
+                        "could not clear — the transcript for {} is still on disk",
+                        self.id
+                    ),
                     detail,
                 ]
             }
@@ -888,7 +891,7 @@ impl Repl {
         self.session = stored.into_session();
         self.id = resumed_id;
         self.name = name;
-        crate::journal::now_recording(&self.id);
+        crate::journal::switched(&self.id);
         // The resumed id owns its spills, and a resumed session must rejoin
         // them (the invariant `with_session` promises) instead of keeping the
         // namespace the process happened to start with.
@@ -918,7 +921,11 @@ impl Repl {
         let body = out.flatten();
         let text = format!(
             "Ran `{command}`\n{}",
-            if body.is_empty() { "(no output)" } else { &body }
+            if body.is_empty() {
+                "(no output)"
+            } else {
+                &body
+            }
         );
         self.session.append_user(text);
         let mut said: Vec<String> = body
@@ -1013,7 +1020,8 @@ mod tests {
     }
     #[test]
     fn accepting_a_command_that_wants_an_argument_leaves_room_for_one() {
-        let of = |line: &str| -> Candidate { complete(line, &table(), &choices(), &[]).swap_remove(0) };
+        let of =
+            |line: &str| -> Candidate { complete(line, &table(), &choices(), &[]).swap_remove(0) };
         let name = of("/nam");
         assert_eq!((name.line.as_str(), name.more), ("/name", true));
         // Nothing follows /todo, so the caret should not be pushed past a space
@@ -1072,12 +1080,18 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         // A bare space offers every session by its first question, not its id.
-        assert_eq!(of("/resume "), ["why is the flaky test flaky?", "lint the workspace"]);
+        assert_eq!(
+            of("/resume "),
+            ["why is the flaky test flaky?", "lint the workspace"]
+        );
         assert_eq!(of("/resume why"), ["why is the flaky test flaky?"]);
         // A first question is a sentence, so a multi-word prefix matches too.
         assert_eq!(of("/resume lint the"), ["lint the workspace"]);
         // Half an id still matches — someone may remember it that way.
-        assert_eq!(of("/resume 1756"), ["why is the flaky test flaky?", "lint the workspace"]);
+        assert_eq!(
+            of("/resume 1756"),
+            ["why is the flaky test flaky?", "lint the workspace"]
+        );
         // A session with nothing said yet is not offered.
         let quiet = [ResumeChoice {
             id: "1756240000-300".into(),

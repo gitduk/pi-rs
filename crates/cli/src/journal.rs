@@ -5,10 +5,10 @@
 //! timings that never reach a message. Reading a bug back means reading the two
 //! together rather than reproducing it.
 //!
-//! One file per run, named for the session the run started on. `/new` starts a
-//! second transcript without starting a second journal — a bug that spans the
-//! two is one story, and it reads as one only if it stays in one file — so the
-//! seam is recorded instead.
+//! One file per session, kept across every run that touched it: a run that
+//! starts by resuming opens the resumed session's journal, and a `/resume` or
+//! `/new` mid-run switches the file the records land in. The seam where the
+//! switch happened is recorded in the file it moved to.
 //!
 //! One JSON object per line. `jq` is the intended reader; a line is never
 //! wrapped and never depends on the line before it.
@@ -169,11 +169,16 @@ struct Sink {
     out: BufWriter<File>,
     written: u64,
     capped: bool,
+    /// Which file `out` is writing to right now; `retarget` moves it when the
+    /// run switches sessions. Kept here, under the sink's own lock, so [`path`]
+    /// reads it back rather than from a second copy that could drift.
+    path: PathBuf,
 }
 
-/// The open journal. One per process; the layer holds it and nothing else
-/// writes to the file. Where it is on disk is [`path`], not a field here —
-/// there is one journal, and two copies of its name only stay equal by luck.
+/// The open journal. One per run; the layer holds it and nothing else writes
+/// to the file. Which file it is writing to lives on the [`Sink`], so [`path`]
+/// reads it back from the journal itself rather than from a second copy that
+/// could drift.
 struct Journal {
     /// Wall clock is what pairs a record with everything else on the machine;
     /// the monotonic one is what measures. Neither substitutes for the other.
@@ -182,31 +187,56 @@ struct Journal {
     sink: Mutex<Sink>,
 }
 
+/// A fresh sink on `file`, counting what is already in it.
+fn sink_for(file: File, path: &Path) -> Sink {
+    let written = file.metadata().map(|m| m.len()).unwrap_or(0);
+    Sink {
+        out: BufWriter::new(file),
+        written,
+        capped: false,
+        path: path.to_path_buf(),
+    }
+}
+
+/// Open for appending, 0600, the same as the transcript beside it.
+fn open_file(path: &Path) -> std::io::Result<File> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Prompts, paths and patches, the same as the transcript.
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(file)
+}
+
 impl Journal {
     fn open(path: &Path, field_cap: usize) -> std::io::Result<Self> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            // Prompts, paths and patches, the same as the transcript.
-            let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
-        }
-        let written = file.metadata().map(|m| m.len()).unwrap_or(0);
+        let file = open_file(path)?;
         Ok(Self {
             start: Instant::now(),
             field_cap,
-            sink: Mutex::new(Sink {
-                out: BufWriter::new(file),
-                written,
-                capped: false,
-            }),
+            sink: Mutex::new(sink_for(file, path)),
         })
+    }
+
+    /// Point the same journal at another session's file — a `/resume` or a
+    /// `/new` — without re-installing the subscriber. The run's clock keeps
+    /// counting, and the cap applies to the new file from empty.
+    fn retarget(&self, path: &Path) -> std::io::Result<()> {
+        let file = open_file(path)?;
+        let Ok(mut sink) = self.sink.lock() else {
+            // A poisoned lock is a run to be rescued, not one to kill.
+            return Ok(());
+        };
+        *sink = sink_for(file, path);
+        Ok(())
     }
 
     /// One record. Every failure here is swallowed: a run must not die of its
@@ -468,20 +498,26 @@ where
 
 // ------------------------------------------------------------------- install
 
-/// The journal this process is writing, if it is writing one.
-///
-/// A process fact, held as one: there is exactly one journal, every surface
-/// that wants to name it is far from where it was opened, and threading a path
-/// through the terminal loop to print one line is worse than saying so here.
-static PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+/// The journal this run writes to. One per run, retargeted in place when the
+/// run moves to another session, so a surface that wants to name it can reach
+/// it from far away without the path being threaded through the terminal loop.
+static JOURNAL: std::sync::OnceLock<std::sync::Arc<Journal>> = std::sync::OnceLock::new();
 
-pub fn path() -> Option<&'static Path> {
-    PATH.get().map(PathBuf::as_path)
+/// Where the journal is writing right now, for `/log` and the failure line.
+/// Read back from the journal itself — the sink holds its own path — so there
+/// is no second copy to keep in step.
+pub fn path() -> Option<PathBuf> {
+    JOURNAL.get()?.sink.lock().ok().map(|s| s.path.clone())
 }
 
 /// Where journals live, beside the transcripts they belong to.
 fn dir() -> Option<PathBuf> {
     tools::state::dir().map(|d| d.join("logs"))
+}
+
+/// Where a session's journal lives.
+fn path_for(dir: &Path, id: &str) -> PathBuf {
+    dir.join(format!("{}.jsonl", tools::state::file_stem(id)))
 }
 
 /// Drop journals nothing will be read back from. Failures are ignored: a full
@@ -509,16 +545,15 @@ fn prune(dir: &Path) {
 
 /// Open the journal for this session and make it the process's `tracing` sink.
 ///
-/// Returns the path so the caller can say where it went. `None` means nothing
-/// is being recorded — the level is off, there is no state directory, or the
-/// file would not open; none of those is worth failing a run over, which is
-/// why the error is reported and dropped rather than returned.
+/// Not recording is not worth failing a run over — the level is off, there is
+/// no state directory, or the file would not open — so the error is reported
+/// and dropped rather than returned.
 pub fn install(id: &str, level: LogLevel) {
     if level == LogLevel::Off {
         return;
     }
     let Some(dir) = dir() else { return };
-    let path = dir.join(format!("{}.jsonl", tools::state::file_stem(id)));
+    let path = path_for(&dir, id);
     let journal = match Journal::open(&path, level.field_cap()) {
         Ok(j) => std::sync::Arc::new(j),
         Err(e) => {
@@ -526,9 +561,12 @@ pub fn install(id: &str, level: LogLevel) {
             return;
         }
     };
-    let layer = JournalLayer { journal }.with_filter(ours(level.filter()));
+    let layer = JournalLayer {
+        journal: journal.clone(),
+    }
+    .with_filter(ours(level.filter()));
     if tracing::subscriber::set_global_default(tracing_subscriber::registry().with(layer)).is_ok() {
-        let _ = PATH.set(path);
+        let _ = JOURNAL.set(journal);
     }
     // Off the startup path: a fortnight of journals is hundreds of files to
     // stat, almost never with anything to delete, and the run has a request to
@@ -580,10 +618,16 @@ pub fn opening(
     }
 }
 
-/// The journal outlives the transcript it was named after: `/new` starts a
-/// fresh session in the same process, and a bug that spans the two reads as
-/// one story only if it stays in one file. This is the seam between them.
-pub fn now_recording(id: &str) {
+/// The run has moved to a different session — a `/resume` or a `/new` — so
+/// point the journal at that session's file, and mark the seam in it. Each
+/// session keeps one journal across every run that touched it, which is how
+/// `/log` and the file both follow the session.
+pub fn switched(id: &str) {
+    if let (Some(dir), Some(journal)) = (dir(), JOURNAL.get())
+        && let Err(e) = journal.retarget(&path_for(&dir, id))
+    {
+        tracing::warn!(target: "pi::session", session = id, error = %e, "could not move the journal to this session");
+    }
     tracing::info!(target: "pi::session", session = id, "transcript");
 }
 
@@ -762,5 +806,18 @@ mod tests {
         Journal::open(&path, 64).unwrap().write(Map::new());
         Journal::open(&path, 64).unwrap().write(Map::new());
         assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 2);
+    }
+
+    #[test]
+    fn retarget_moves_the_records_to_another_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("a.jsonl");
+        let second = dir.path().join("b.jsonl");
+        let j = Journal::open(&first, 64).unwrap();
+        j.write(Map::new());
+        j.retarget(&second).unwrap();
+        j.write(Map::new());
+        assert_eq!(std::fs::read_to_string(&first).unwrap().lines().count(), 1);
+        assert_eq!(std::fs::read_to_string(&second).unwrap().lines().count(), 1);
     }
 }

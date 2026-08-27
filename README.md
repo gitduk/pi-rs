@@ -148,8 +148,11 @@ a reload that changed nothing.
 
 ### The journal
 
-Every run writes one, at `~/.local/state/pi/logs/<session>.jsonl`, and `/log`
-says where. It is the other half of the transcript: the transcript holds every
+Every session keeps one, at `~/.local/state/pi/logs/<session>.jsonl`, and
+`/log` says where. A run opens the journal of the session it starts on —
+`--resume` included — and `/resume` or `/new` switches it to the session now
+in charge, so the whole of a session reads as one file across the runs that
+touched it.
 message, tool call and result, so the journal holds what never reaches a
 message — which config was read, what went on the wire and what came back, how
 long each turn and each tool took, why a patch was refused, what the loop
