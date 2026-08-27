@@ -92,20 +92,21 @@ enum Entry {
 ///
 /// Thinking always lives in a foldable scrollback entry, folded or not: the
 /// screen is repainted from its entries every frame, so a line already shown
-/// can still be folded. A block's own state lasts only while it is current;
-/// the next submitted question folds it back to `folded`, the switch.
+/// can still be folded. A block's own state lasts only while it is last; the
+/// next block pushes it back to `folded`, the switch.
 struct Thinking {
     /// The next block id; closed entries keep the id they were born with, so
     /// `land` appends only to the open block's entry.
     next: u64,
     /// The block streaming right now, if any.
     streaming: Option<u64>,
-    /// What untouched blocks are folded to: the value a new block is born
-    /// with, and the target a global flip is measured from.
+    /// What untouched blocks are folded to: the value a block that stops being
+    /// last folds back to, and the target a global flip is measured from.
     folded: bool,
-    /// A `ctrl+t` on a block with no entry yet — one not born, or none at
-    /// all — leaves its flip here, for the next block's first line.
-    pending: Option<bool>,
+    /// How the last block — the one `ctrl+t` names, finished or streaming —
+    /// is folded. It survives the block itself, so the next block is born
+    /// with it until the key flips it again.
+    last: bool,
 }
 
 /// Shut: the reasoning is worth a glance while it runs and almost never worth
@@ -120,27 +121,21 @@ impl Default for Thinking {
             next: 1,
             streaming: None,
             folded: true,
-            pending: None,
+            last: true,
         }
     }
 }
 
 impl Thinking {
     /// Whether a reasoning row is hidden behind the count line: dim, and the
-    /// streaming block folded — its own entry when it has one, the value it
-    /// will be born with otherwise.
+    /// streaming block folded — its own entry when it has one, the last
+    /// value it will be born with otherwise.
     fn holds(&self, dim: bool, above: &[Entry]) -> bool {
         dim && self.stream_fold(above)
     }
 
-    /// The value a block with no entry yet takes: the last `ctrl+t` flip, or
-    /// the switch.
-    fn unborn_fold(&self) -> bool {
-        self.pending.unwrap_or(self.folded)
-    }
-
     /// How the block streaming now is folded: its entry's own state, or —
-    /// before its first line lands — the value pending for it.
+    /// before its first line lands — the last value.
     fn stream_fold(&self, above: &[Entry]) -> bool {
         if let Some(id) = self.streaming
             && let Some(Entry::Folded { folded, .. }) = above
@@ -150,46 +145,50 @@ impl Thinking {
         {
             return *folded;
         }
-        self.unborn_fold()
+        self.last
     }
 
-    /// A new reasoning block is about to start. It gets an id the scrollback
-    /// entry will be born with; its first line takes `birth_fold`.
-    fn start(&mut self) {
-        self.streaming = Some(self.next);
-        self.next += 1;
-    }
-
-    /// The block that was current stops being so the moment a new input is
-    /// submitted: it folds to the switch, its unfold lasting only while it
-    /// was current.
-    fn fold_previous(&mut self, above: &mut [Entry]) {
+    /// The block that was last stops being so: it folds back to the switch.
+    /// A new input and a new block both push it out of last.
+    fn retire_last(&mut self, above: &mut [Entry]) {
         if let Some(Entry::Folded { folded, .. }) = last_folded(above) {
             *folded = self.folded;
         }
     }
 
+    /// A new reasoning block is about to start. It gets an id the scrollback
+    /// entry will be born with; its first line takes `birth_fold`.
+    fn start(&mut self, above: &mut [Entry]) {
+        self.retire_last(above);
+        self.streaming = Some(self.next);
+        self.next += 1;
+    }
+
+    /// The block that was last stops being so the moment a new input is
+    /// submitted: it folds to the switch, its unfold lasting only while it
+    /// was last.
+    fn fold_previous(&mut self, above: &mut [Entry]) {
+        self.retire_last(above);
+    }
+
     /// The streaming block is over; the entry it filled stays where it is.
-    /// A flip still pending for it — the block ended before its first line
-    /// landed — dies here rather than leaking into the next block's birth.
     fn close_block(&mut self) {
         self.streaming = None;
-        self.pending = None;
     }
-    /// The value the next block's entry is born with: the last `ctrl+t` on a
-    /// block with no entry yet, or the switch.
-    fn birth_fold(&mut self) -> bool {
-        self.pending.take().unwrap_or(self.folded)
+
+    /// The value the next block's entry is born with: however `ctrl+t` last
+    /// left the last block.
+    fn birth_fold(&self) -> bool {
+        self.last
     }
 
     /// Fold or unfold every block in the scrollback and move the switch with
-    /// them, the current block included: entries and switch must never
-    /// disagree, or the next block is born with a stale value and a mixed
-    /// screen can never fold back to a single state. A pending birth flip
-    /// belongs to a block the global key has just made irrelevant.
+    /// them, the last block included: entries and switch must never disagree,
+    /// or the next block is born with a stale value and a mixed screen can
+    /// never fold back to a single state.
     fn flip_all(&mut self, above: &mut [Entry]) {
         self.folded = !self.folded;
-        self.pending = None;
+        self.last = self.folded;
         for entry in above.iter_mut() {
             if let Entry::Folded { folded, .. } = entry {
                 *folded = self.folded;
@@ -197,11 +196,12 @@ impl Thinking {
         }
     }
 
-    /// Flip the current block only: the one streaming, or the newest
-    /// finished one when nothing is. The switch is left alone, so the blocks
-    /// no one is touching keep what they had; a block not born yet records
-    /// the flip in `pending` for its first line.
+    /// Flip the last block only: the one streaming, or the newest finished
+    /// one when nothing is. The switch is left alone, so the blocks no one is
+    /// touching keep what they had; a block with no entry yet is born with
+    /// the flip.
     fn toggle_current(&mut self, above: &mut [Entry]) {
+        self.last = !self.last;
         let flipped = if let Some(id) = self.streaming {
             above
                 .iter_mut()
@@ -211,10 +211,7 @@ impl Thinking {
             last_folded(above)
         };
         if let Some(Entry::Folded { folded, .. }) = flipped {
-            *folded = !*folded;
-            self.pending = None;
-        } else {
-            self.pending = Some(!self.unborn_fold());
+            *folded = self.last;
         }
     }
 }
@@ -724,8 +721,8 @@ impl Ui {
                 lines.push(painted);
                 return;
             }
-            // The block's first line: born with the value a `ctrl+t`
-            // before it left, or the switch.
+        // The block's first line: born the way `ctrl+t` last left
+        // the last block — its own fold, not the switch.
             self.above.push(Entry::Folded {
                 block: id,
                 lines: vec![painted],
@@ -783,8 +780,9 @@ impl Ui {
             self.dim = dim;
             if dim {
                 // A new reasoning block: `close` just settled the previous
-                // one; this one gets a fresh id.
-                self.thinking.start();
+                // one; this one gets a fresh id and pushes the old last one
+                // back to the switch.
+                self.thinking.start(&mut self.above);
             }
         }
 
@@ -1066,7 +1064,7 @@ impl Ui {
         self.dim = false;
         self.tools.clear();
         self.thinking.streaming = None;
-        self.thinking.pending = None;
+        self.thinking.last = self.thinking.folded;
         self.md.reset();
         self.scroll = 0;
         self.above = render_log(
@@ -1220,15 +1218,15 @@ impl Ui {
             Some(Action::ScrollUp) => self.scroll_view(true),
             Some(Action::ScrollDown) => self.scroll_view(false),
             Some(Action::ThinkFold) => {
-                // The current block only: the one streaming, or the newest
+                // The last block only: the one streaming, or the newest
                 // finished one when nothing is. The switch is left alone, so
                 // the blocks no one is touching keep what they had.
                 self.thinking.toggle_current(&mut self.above);
             }
             Some(Action::ThinkFoldAll) => {
-                // Every block in the scrollback, the current one included,
-                // and the switch with them: one key presses the whole screen
-                // to a single state.
+                // Every block in the scrollback, the last one included, and
+                // the switch with them: one key presses the whole screen to a
+                // single state.
                 self.thinking.flip_all(&mut self.above);
             }
 
@@ -1699,10 +1697,10 @@ mod tests {
     use crate::render::Paint;
     use brain::stream::Usage;
 
-    /// A closed reasoning block of `n` lines in the scrollback.
-    fn block(n: usize, folded: bool) -> Entry {
+    /// A closed reasoning block of id `id` and `n` lines in the scrollback.
+    fn block(id: u64, n: usize, folded: bool) -> Entry {
         Entry::Folded {
-            block: 1,
+            block: id,
             lines: (1..=n).map(|i| format!("line {i}")).collect(),
             folded,
         }
@@ -1730,7 +1728,7 @@ mod tests {
 
     #[test]
     fn a_folded_entry_is_its_summary_until_unfolded() {
-        let entries = [block(2, true)];
+        let entries = [block(1, 2, true)];
         let paint = Paint::new(false);
         let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&entries, &paint).collect();
         assert_eq!(rows, vec!["thinking · 2 lines"]);
@@ -1738,7 +1736,7 @@ mod tests {
 
     #[test]
     fn an_unfolded_entry_shows_its_lines() {
-        let entries = [block(2, false)];
+        let entries = [block(1, 2, false)];
         let paint = Paint::new(false);
         let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&entries, &paint).collect();
         assert_eq!(rows, vec!["line 1", "line 2"]);
@@ -1765,7 +1763,7 @@ mod tests {
     fn scrollback_rows_walk_from_both_ends() {
         let entries = vec![
             Entry::Plain("a".to_string()),
-            block(2, false),
+            block(1, 2, false),
             Entry::Plain("d".to_string()),
         ];
         let paint = Paint::new(false);
@@ -1802,13 +1800,13 @@ mod tests {
 
     #[test]
     fn an_unfolded_block_streams_its_line_live() {
-        // One switch on the streaming block: folded, the live row is the
+        // One switch on the last block: folded, the live row is the
         // placeholder; unfolded, it is the reasoning itself.
         let mut t = Thinking::default();
-        t.start();
-        t.folded = false;
+        t.start(&mut []);
+        t.last = false;
         assert_eq!(shown(&t, "half a sentence"), vec!["half a sentence"]);
-        t.folded = true;
+        t.last = true;
         assert_eq!(shown(&t, "half a sentence"), vec!["thinking..."]);
     }
 
@@ -1819,8 +1817,8 @@ mod tests {
         // The count row in the scrollback already stands for the folded
         // block; a second "thinking..." live row would show it twice.
         let mut t = Thinking::default();
-        t.start();
-        let above = [block(1, true)];
+        t.start(&mut []);
+        let above = [block(1, 1, true)];
         let rows = body(
             &t,
             &above,
@@ -1835,113 +1833,113 @@ mod tests {
 
 
     #[test]
-    fn toggling_moves_the_current_block_and_nothing_else() {
-        // `ctrl+t` flips the block streaming now, and only it: the finished
-        // block behind it and the switch keep what they had.
+    fn toggling_moves_the_last_block_and_nothing_else() {
+        // `ctrl+t` flips the block that is last now, and only it: the block
+        // pushed out of last by the new one folds back to the switch.
         let mut t = Thinking::default();
-        t.start();
-        let mut above = vec![
-            Entry::Folded {
-                block: 9,
-                lines: vec!["old".to_string()],
-                folded: false,
-            },
-            Entry::Folded {
-                block: 1,
-                lines: vec!["new".to_string()],
-                folded: true,
-            },
-        ];
+        let mut above = vec![Entry::Folded {
+            block: 9,
+            lines: vec!["old".to_string()],
+            folded: false,
+        }];
+        t.start(&mut above);
+        above.push(Entry::Folded {
+            block: 1,
+            lines: vec!["new".to_string()],
+            folded: true,
+        });
         t.toggle_current(&mut above);
         assert!(t.folded);
-        assert!(matches!(&above[0], Entry::Folded { folded: false, .. }));
+        assert!(matches!(&above[0], Entry::Folded { folded: true, .. }));
         assert!(matches!(&above[1], Entry::Folded { folded: false, .. }));
     }
 
     #[test]
-    fn a_block_that_ends_before_its_first_line_spends_the_flip() {
-        // A `ctrl+t` on a block with no entry yet records a pending flip; if
-        // the block then ends without a line, the flip dies with it instead
-        // of leaking into the next block's birth.
+    fn a_flip_survives_a_block_that_never_lands_a_line() {
+        // A `ctrl+t` names the last block even when it has no entry yet; if
+        // the block then ends without a line, the flip stays for the next
+        // block's birth — the key set the last value, not this block's.
         let mut t = Thinking::default();
-        t.start();
+        t.start(&mut []);
         let mut above: Vec<Entry> = Vec::new();
         t.toggle_current(&mut above);
         t.close_block();
-        assert!(t.birth_fold());
+        assert!(!t.birth_fold());
     }
 
     #[test]
     fn a_finished_block_keeps_its_fold_until_the_next_question() {
-        // An unfold survives the answer — a finished block is still current —
+        // An unfold survives the answer — a finished block is still last —
         // and folds back to the switch the moment a new input is submitted.
         let mut t = Thinking::default();
-        t.start();
-        let mut above = vec![block(1, t.birth_fold())];
+        t.start(&mut []);
+        let mut above = vec![block(1, 1, t.birth_fold())];
         t.toggle_current(&mut above);
         assert!(matches!(&above[0], Entry::Folded { folded: false, .. }));
         t.close_block();
-        // Still current until the next question is asked.
+        // Still last until the next question is asked.
         assert!(matches!(&above[0], Entry::Folded { folded: false, .. }));
         t.fold_previous(&mut above);
-        // The submitted question pushes it out of current: it folds to the
+        // The submitted question pushes it out of last: it folds to the
         // switch.
         assert!(matches!(&above[0], Entry::Folded { folded: true, .. }));
-        assert!(t.birth_fold());
+        assert!(!t.birth_fold());
     }
-
     #[test]
     fn a_finished_block_follows_a_global_unfold() {
         // The fold follows the switch both ways: a screen the global key
         // opened keeps its block open once the next question takes over.
         let mut t = Thinking { folded: false, ..Default::default() };
-        t.start();
-        let mut above = vec![block(1, t.birth_fold())];
+        t.start(&mut []);
+        let mut above = vec![block(1, 1, t.birth_fold())];
         t.close_block();
         t.fold_previous(&mut above);
         assert!(matches!(&above[0], Entry::Folded { folded: false, .. }));
     }
 
     #[test]
-    fn a_new_block_in_the_same_answer_leaves_the_previous_unfolded() {
-        // Only a submitted question pushes a block out of current: a second
-        // reasoning block in the same answer leaves the first one unfolded.
+    fn a_new_block_in_the_same_answer_folds_the_previous_and_inherits_the_flip() {
+        // A second reasoning block in the same answer is the new last: the
+        // first one folds back to the switch, and the second is born the way
+        // `ctrl+t` left the last block.
         let mut t = Thinking::default();
-        t.start();
-        let mut above = vec![block(1, t.birth_fold())];
+        t.start(&mut []);
+        let mut above = vec![block(1, 1, t.birth_fold())];
         t.toggle_current(&mut above);
         assert!(matches!(&above[0], Entry::Folded { folded: false, .. }));
         t.close_block();
-        t.start();
-        assert!(matches!(&above[0], Entry::Folded { folded: false, .. }));
+        t.start(&mut above);
+        above.push(block(2, 1, t.birth_fold()));
+        assert!(matches!(&above[0], Entry::Folded { folded: true, .. }));
+        assert!(matches!(&above[1], Entry::Folded { folded: false, .. }));
     }
-
 
     #[test]
     fn a_flip_before_the_first_line_lands_on_birth() {
         // A `ctrl+t` on a block with no entry yet cannot flip anything on
-        // screen; it records the flip for the next first line, so the block
-        // is born the way the key asked — and the switch is not touched.
+        // screen; it flips the last value, so the block is born the way the
+        // key asked — and the switch is not touched.
         let mut t = Thinking::default();
-        t.start();
+        t.start(&mut []);
         let mut above: Vec<Entry> = Vec::new();
         t.toggle_current(&mut above);
         assert!(t.folded);
         assert!(!t.birth_fold());
-        // The pending flip is spent: a second birth takes the switch.
-        assert!(t.birth_fold());
+        // The flip is the last value now, not a one-shot: the next birth
+        // takes it too.
+        assert!(!t.birth_fold());
     }
 
 
     #[test]
     fn the_live_placeholder_follows_the_streaming_entry() {
         // Once the block has an entry, the live region reads its own state,
-        // not the switch: a block the user unfolded streams its lines even
-        // though the switch still says folded.
+        // not the last value: a block the user unfolded streams its lines
+        // even though the switch still says folded.
         let mut t = Thinking::default();
-        t.start();
+        t.start(&mut []);
         assert!(t.holds(true, &[]));
-        let above = [block(1, false)];
+        let above = [block(1, 1, false)];
         assert!(!t.holds(true, &above));
     }
 
@@ -1953,7 +1951,7 @@ mod tests {
         // the current block keeps its fold, because the fold is where the
         // rest are going.
         let mut t = Thinking { folded: false, ..Default::default() };
-        t.start();
+        t.start(&mut []);
         let mut above = vec![Entry::Folded {
             block: 1,
             lines: vec!["new".to_string()],
@@ -1971,8 +1969,8 @@ mod tests {
         // included, and moves the switch with them: entries and switch never
         // disagree, so the screen always folds back to a single state.
         let mut t = Thinking::default();
-        t.start();
-        let mut above = vec![block(1, true)];
+        t.start(&mut []);
+        let mut above = vec![block(1, 1, true)];
         t.toggle_current(&mut above); // unfold the current block on its own
         t.close_block();
         t.flip_all(&mut above); // global fold
@@ -1995,7 +1993,7 @@ mod tests {
     fn refolding_hides_lines_the_reader_has_already_seen() {
         // The screen repaints from scrollback every frame, so lines already
         // shown are still the same entry: folding them takes them back.
-        let mut entry = block(2, false);
+        let mut entry = block(1, 2, false);
         let paint = Paint::new(false);
         let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(std::slice::from_ref(&entry), &paint).collect();
         assert_eq!(rows, vec!["line 1", "line 2"]);
@@ -2094,5 +2092,30 @@ mod tests {
         assert!(!counts(&Usage::default(), &turn, 0, guessed).input_exact);
         let measured = counts(&Usage::default(), &turn, 0, Default::default());
         assert!(measured.output_exact && measured.input_exact);
+    }
+    #[test]
+    fn a_flip_applies_to_each_new_last_block_until_flipped_back() {
+        // `ctrl+t` controls the last thinking block, whatever it is: the
+        // first one is born unfolded, and each new block that takes over as
+        // last is born unfolded too, while the one it displaces folds back to
+        // the switch.
+        let mut t = Thinking::default();
+
+        // Startup: the key names a block that does not exist yet.
+        t.toggle_current(&mut []);
+        assert!(!t.birth_fold());
+
+        // The first thinking block arrives and is the last one.
+        t.start(&mut []);
+        let mut above = vec![block(1, 1, t.birth_fold())];
+        assert!(matches!(&above[0], Entry::Folded { folded: false, .. }));
+        t.close_block();
+
+        // A tool call ends the block; the next thinking block is the new
+        // last, born unfolded, and the first one folds back to the switch.
+        t.start(&mut above);
+        above.push(block(2, 1, t.birth_fold()));
+        assert!(matches!(&above[0], Entry::Folded { folded: true, .. }));
+        assert!(matches!(&above[1], Entry::Folded { folded: false, .. }));
     }
 }
