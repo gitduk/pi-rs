@@ -116,7 +116,7 @@ impl Tool for Write {
 
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
         let args: Args = crate::parse_args(args)?;
-        let path = ctx.workspace.resolve(&args.path)?;
+        let path = ctx.workspace.resolve(&args.path, self.tier())?;
         let rel = ctx.workspace.display(&path);
         let _guard = ctx.lock_file(&path).await;
 

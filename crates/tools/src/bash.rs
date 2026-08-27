@@ -74,7 +74,7 @@ impl Tool for Bash {
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
         let args: Args = crate::parse_args(args)?;
         let cwd = match &args.cwd {
-            Some(p) => ctx.workspace.resolve(p)?,
+            Some(p) => ctx.workspace.resolve(p, self.tier())?,
             None => ctx.workspace.root().to_path_buf(),
         };
         // A zero would otherwise kill the command before it started.

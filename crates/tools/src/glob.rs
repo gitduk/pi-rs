@@ -50,7 +50,7 @@ impl Tool for Glob {
 
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
         let args: Args = crate::parse_args(args)?;
-        let root = root_of(&ctx.workspace, &args.path)?;
+        let root = root_of(&ctx.workspace, &args.path, self.tier())?;
         let set = globs(std::slice::from_ref(&args.pattern))?
             .ok_or_else(|| ToolError::Invalid("empty pattern".into()))?;
         let limit = args.limit.unwrap_or(DEFAULT_LIMIT).max(1);
@@ -60,7 +60,7 @@ impl Tool for Glob {
         // every other tool in the same turn.
         let found = tokio::task::spawn_blocking(move || {
             let mut hits: Vec<(SystemTime, String)> = Vec::new();
-            for entry in walker(&root).build().flatten() {
+            for entry in walker(&ws, &root).build().flatten() {
                 if !entry.file_type().is_some_and(|t| t.is_file()) {
                     continue;
                 }

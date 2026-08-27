@@ -469,7 +469,7 @@ impl Tool for Edit {
         let mut guards = Vec::new();
         let mut loaded: HashMap<String, String> = HashMap::new();
         for path in patch.paths() {
-            let real = ctx.workspace.resolve(path)?;
+            let real = ctx.workspace.resolve(path, self.tier())?;
             guards.push(ctx.lock_file(&real).await);
             let content = tokio::fs::read_to_string(&real).await.map_err(|e| {
                 ToolError::Invalid(format!(
@@ -527,12 +527,12 @@ impl Tool for Edit {
                         ));
                         continue;
                     }
-                    tokio::fs::write(ctx.workspace.resolve(path)?, content).await?;
+                    tokio::fs::write(ctx.workspace.resolve(path, self.tier())?, content).await?;
                     let before = loaded.get(path).map_or("", String::as_str);
                     report.push_str(&echo(path, before, content, landed));
                 }
                 Change::Remove { path } => {
-                    tokio::fs::remove_file(ctx.workspace.resolve(path)?).await?;
+                    tokio::fs::remove_file(ctx.workspace.resolve(path, self.tier())?).await?;
                     report.push_str(&format!("removed {path}\n"));
                 }
                 Change::Rename {
@@ -541,12 +541,12 @@ impl Tool for Edit {
                     content,
                     landed,
                 } => {
-                    let dest = ctx.workspace.resolve(to)?;
+                    let dest = ctx.workspace.resolve(to, self.tier())?;
                     if let Some(parent) = dest.parent() {
                         tokio::fs::create_dir_all(parent).await?;
                     }
                     tokio::fs::write(&dest, content).await?;
-                    tokio::fs::remove_file(ctx.workspace.resolve(from)?).await?;
+                    tokio::fs::remove_file(ctx.workspace.resolve(from, self.tier())?).await?;
                     report.push_str(&format!("{from} → "));
                     let before = loaded.get(from).map_or("", String::as_str);
                     report.push_str(&echo(to, before, content, landed));

@@ -1,6 +1,6 @@
 use std::path::{Component, Path, PathBuf};
 
-use crate::ToolError;
+use crate::{Tier, ToolError};
 
 /// The workspace root every relative tool path is resolved against.
 /// Absolute paths pass through untouched; nothing else in this crate calls
@@ -38,22 +38,13 @@ impl Workspace {
     }
 
     /// Resolve a model-supplied path. Relative paths join the workspace
-    /// root; absolute paths are used as-is. Write and exec tools must stay
-    /// inside the workspace; a path that would escape it is refused.
-    /// Canonicalizing the deepest existing ancestor is what stops a symlink
-    /// from pointing outside the workspace; the remaining components cannot
-    /// be links because they do not exist.
-    pub fn resolve(&self, input: &str) -> Result<PathBuf, ToolError> {
-        self.resolve_inner(input, true)
-    }
-
-    /// Like `resolve`, but with no boundary. Read-only tools use this so the
-    /// model can read and search anywhere on the filesystem.
-    pub fn resolve_free(&self, input: &str) -> Result<PathBuf, ToolError> {
-        self.resolve_inner(input, false)
-    }
-
-    fn resolve_inner(&self, input: &str, guarded: bool) -> Result<PathBuf, ToolError> {
+    /// root; absolute paths are used as-is. The tier sets the boundary:
+    /// `Tier::Read` may reach anywhere on the filesystem; write and exec
+    /// tools must stay inside the workspace, and a path that would escape
+    /// it is refused. Canonicalizing the deepest existing ancestor is what
+    /// stops a symlink from pointing outside the workspace; the remaining
+    /// components cannot be links because they do not exist.
+    pub fn resolve(&self, input: &str, tier: Tier) -> Result<PathBuf, ToolError> {
         if input.is_empty() {
             return Err(ToolError::Invalid("empty path".into()));
         }
@@ -84,7 +75,7 @@ impl Workspace {
         for name in tail.iter().rev() {
             resolved.push(name);
         }
-        if guarded && !resolved.starts_with(&self.root) {
+        if tier != Tier::Read && !resolved.starts_with(&self.root) {
             return Err(ToolError::Escape(input.into()));
         }
         Ok(resolved)
@@ -113,7 +104,7 @@ mod tests {
     #[test]
     fn resolves_relative_and_nonexistent_paths() {
         let (_d, ws) = ws();
-        let p = ws.resolve("a/b/c.txt").unwrap();
+        let p = ws.resolve("a/b/c.txt", Tier::Write).unwrap();
         assert!(p.starts_with(ws.root()));
         assert_eq!(ws.display(&p), "a/b/c.txt");
     }
@@ -122,27 +113,27 @@ mod tests {
     fn rejects_paths_outside_the_workspace() {
         let (_d, ws) = ws();
         assert!(matches!(
-            ws.resolve("../outside"),
+            ws.resolve("../outside", Tier::Write),
             Err(ToolError::Escape(_))
         ));
         assert!(matches!(
-            ws.resolve("a/../../outside"),
+            ws.resolve("a/../../outside", Tier::Write),
             Err(ToolError::Escape(_))
         ));
         assert!(matches!(
-            ws.resolve("/etc/passwd"),
+            ws.resolve("/etc/passwd", Tier::Write),
             Err(ToolError::Escape(_))
         ));
     }
 
     #[test]
-    fn resolve_free_allows_paths_outside_the_workspace() {
+    fn read_tier_allows_paths_outside_the_workspace() {
         let (_d, ws) = ws();
         let outside = ws.root().parent().unwrap().join("outside");
-        assert_eq!(ws.resolve_free("../outside").unwrap(), outside);
-        assert_eq!(ws.resolve_free("a/../../outside").unwrap(), outside);
+        assert_eq!(ws.resolve("../outside", Tier::Read).unwrap(), outside);
+        assert_eq!(ws.resolve("a/../../outside", Tier::Read).unwrap(), outside);
         assert_eq!(
-            ws.resolve_free("/etc/passwd").unwrap(),
+            ws.resolve("/etc/passwd", Tier::Read).unwrap(),
             Path::new("/etc/passwd")
         );
     }
@@ -150,7 +141,7 @@ mod tests {
     #[test]
     fn inner_traversal_that_stays_inside_is_allowed() {
         let (_d, ws) = ws();
-        let p = ws.resolve("a/b/../c.txt").unwrap();
+        let p = ws.resolve("a/b/../c.txt", Tier::Write).unwrap();
         assert_eq!(ws.display(&p), "a/c.txt");
     }
 
@@ -161,19 +152,19 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(outside.path(), ws.root().join("escape")).unwrap();
         assert!(matches!(
-            ws.resolve("escape/secret"),
+            ws.resolve("escape/secret", Tier::Write),
             Err(ToolError::Escape(_))
         ));
     }
 
     #[cfg(unix)]
     #[test]
-    fn resolve_free_follows_a_symlink_outside() {
+    fn read_tier_follows_a_symlink_outside() {
         let (_d, ws) = ws();
         let outside = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(outside.path(), ws.root().join("escape")).unwrap();
         assert_eq!(
-            ws.resolve_free("escape/secret").unwrap(),
+            ws.resolve("escape/secret", Tier::Read).unwrap(),
             outside.path().join("secret")
         );
     }

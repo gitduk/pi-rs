@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
-use crate::{ToolError, Workspace};
+use crate::{Tier, ToolError, Workspace};
 
 /// Compile a comma-free list of globs. A bare name like `*.rs` should match at
 /// any depth, which `**/` prefixing is what makes true.
@@ -32,22 +32,28 @@ pub fn globs(patterns: &[String]) -> Result<Option<GlobSet>, ToolError> {
 /// Dotted entries are kept — `.github`, `.cargo` and friends are ordinary
 /// project files — but `.git` itself is not: an object store is megabytes of
 /// noise no model can act on, and it is never what a search meant to find.
-pub fn walker(root: &Path) -> ignore::WalkBuilder {
+/// The machine-wide global gitignore only applies inside the workspace: a
+/// search outside it is scoped to what the user named, not to their config.
+pub fn walker(ws: &Workspace, root: &Path) -> ignore::WalkBuilder {
     let mut b = ignore::WalkBuilder::new(root);
     b.hidden(false)
         .follow_links(false)
         .git_ignore(true)
-        .git_global(true)
+        .git_global(root.starts_with(ws.root()))
         .require_git(false)
         .filter_entry(|e| e.file_name() != ".git");
     b
 }
 
-/// Resolve an optional subdirectory argument to a walk root. Searches are
-/// read-only, so the walk may leave the workspace.
-pub fn root_of(ws: &Workspace, path: &Option<String>) -> Result<PathBuf, ToolError> {
+/// Resolve an optional subdirectory argument to a walk root. The walk may
+/// leave the workspace when the calling tool is `Tier::Read`.
+pub fn root_of(
+    ws: &Workspace,
+    path: &Option<String>,
+    tier: Tier,
+) -> Result<PathBuf, ToolError> {
     match path {
-        Some(p) => ws.resolve_free(p),
+        Some(p) => ws.resolve(p, tier),
         None => Ok(ws.root().to_path_buf()),
     }
 }

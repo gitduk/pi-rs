@@ -76,7 +76,7 @@ impl Tool for Grep {
 
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
         let args: Args = crate::parse_args(args)?;
-        let root = root_of(&ctx.workspace, &args.path)?;
+        let root = root_of(&ctx.workspace, &args.path, self.tier())?;
         let set = globs(&args.glob)?;
         let limit = args.limit.unwrap_or(DEFAULT_LIMIT).max(1);
         let ws = ctx.workspace.clone();
@@ -91,7 +91,7 @@ impl Tool for Grep {
         // threads either way, so the whole sweep goes off the async runtime.
         let (mut hits, skipped) = tokio::task::spawn_blocking(move || {
             let (tx, rx) = std::sync::mpsc::channel::<Result<Hit, ()>>();
-            walker(&root).build_parallel().run(|| {
+            walker(&ws, &root).build_parallel().run(|| {
                 let tx = tx.clone();
                 let matcher = matcher.clone();
                 let set = set.clone();

@@ -93,7 +93,7 @@ impl Tool for Read {
                 (path, args.path.clone())
             }
             None => {
-                let p = ctx.workspace.resolve_free(&args.path)?;
+                let p = ctx.workspace.resolve(&args.path, self.tier())?;
                 let rel = ctx.workspace.display(&p);
                 (p, rel)
             }
