@@ -50,8 +50,10 @@ pub enum Action {
     MenuDismiss,
     RunInterrupt,
     Rewind,
-    ScrollUp,
-    ScrollDown,
+    ScrollPageUp,
+    ScrollPageDown,
+    ScrollHalfUp,
+    ScrollHalfDown,
     AppExit,
     AppClearScreen,
     ThinkFold,
@@ -231,17 +233,31 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         id: "view.scroll-up",
-        action: A::ScrollUp,
+        action: A::ScrollPageUp,
         when: W::Editor,
-        keys: &["pageup", "ctrl+b"],
-        note: "or the wheel",
+        keys: &["pageup"],
+        note: "",
     },
     Binding {
         id: "view.scroll-down",
-        action: A::ScrollDown,
+        action: A::ScrollPageDown,
         when: W::Editor,
-        keys: &["pagedown", "ctrl+f"],
-        note: "or the wheel",
+        keys: &["pagedown"],
+        note: "",
+    },
+    Binding {
+        id: "view.scroll-half-up",
+        action: A::ScrollHalfUp,
+        when: W::Editor,
+        keys: &["ctrl+b"],
+        note: "",
+    },
+    Binding {
+        id: "view.scroll-half-down",
+        action: A::ScrollHalfDown,
+        when: W::Editor,
+        keys: &["ctrl+f"],
+        note: "",
     },
     Binding {
         id: "app.exit",
@@ -433,7 +449,10 @@ impl Keys {
     ///
     /// Replacing rather than adding: a user removing `ctrl+h` from
     /// delete-char-back has no other way to say so, and an override that could
-    /// only add would make the defaults permanent.
+    /// only add would make the defaults permanent. An explicit binding also
+    /// wins over a default on the same key — that is how a config that copied
+    /// the old defaults keeps working when a default splits into two ids —
+    /// and only two explicit bindings on one key are an error.
     pub fn resolve(overrides: &BTreeMap<String, Vec<String>>) -> Result<Self> {
         for id in overrides.keys() {
             if !BINDINGS.iter().any(|b| b.id == id) {
@@ -443,18 +462,35 @@ impl Keys {
         }
         let mut map: HashMap<(When, Press), Action> = HashMap::new();
         let mut who: HashMap<(When, Press), &str> = HashMap::new();
+        // Explicit bindings first: they are authoritative over defaults, and
+        // two of them on one key in one context is a genuine conflict.
         for b in BINDINGS {
-            let specs: Vec<&str> = match overrides.get(b.id) {
-                Some(v) => v.iter().map(String::as_str).collect(),
-                None => b.keys.to_vec(),
-            };
-            for spec in specs {
+            if let Some(v) = overrides.get(b.id) {
+                for spec in v {
+                    let press = parse(spec).map_err(|e| anyhow::anyhow!("{}: {e}", b.id))?;
+                    if let Some(other) = who.insert((b.when, press), b.id) {
+                        bail!("`{spec}` is bound to both {other} and {} at once", b.id);
+                    }
+                    map.insert((b.when, press), b.action);
+                }
+            }
+        }
+        // Defaults fill what the user has not claimed; one that lands on an
+        // explicitly bound key yields, and one that repeats another default
+        // is a table bug the same error catches.
+        for b in BINDINGS {
+            if overrides.contains_key(b.id) {
+                continue;
+            }
+            for spec in b.keys {
                 let press = parse(spec).map_err(|e| anyhow::anyhow!("{}: {e}", b.id))?;
-                // Same key, same context: there is no defensible winner, and
-                // picking one silently is how a rebind half-works.
-                if let Some(other) = who.insert((b.when, press), b.id) {
+                if let Some(other) = who.get(&(b.when, press)) {
+                    if overrides.contains_key(*other) {
+                        continue;
+                    }
                     bail!("`{spec}` is bound to both {other} and {} at once", b.id);
                 }
+                who.insert((b.when, press), b.id);
                 map.insert((b.when, press), b.action);
             }
         }
@@ -549,11 +585,47 @@ mod tests {
     }
 
     #[test]
-    fn two_actions_in_one_context_may_not_share_a_key() {
+    fn an_explicit_binding_wins_over_a_default_on_the_same_key() {
+        // move.line.start defaults to ctrl+a; binding move.line.end to it
+        // takes the key over rather than failing startup.
         let mut o = BTreeMap::new();
         o.insert("move.line.end".to_string(), vec!["ctrl+a".to_string()]);
+        let k = Keys::resolve(&o).unwrap();
+        assert_eq!(
+            k.action(press("ctrl+a"), false, false),
+            Some(Action::MoveLineEnd)
+        );
+        assert_eq!(k.action(press("home"), false, false), Some(Action::MoveLineStart));
+    }
+
+    #[test]
+    fn two_explicit_bindings_may_not_share_a_key() {
+        let mut o = BTreeMap::new();
+        o.insert("move.line.start".to_string(), vec!["ctrl+z".to_string()]);
+        o.insert("move.line.end".to_string(), vec!["ctrl+z".to_string()]);
         let e = Keys::resolve(&o).unwrap_err().to_string();
         assert!(e.contains("bound to both"), "{e}");
+    }
+
+    #[test]
+    fn a_config_copied_from_the_old_scroll_defaults_still_resolves() {
+        // view.scroll-up used to default to ["pageup", "ctrl+b"]; after the
+        // half-page split its ctrl+b would collide with the new half-up
+        // default, and the explicit copy must win, not error.
+        let mut o = BTreeMap::new();
+        o.insert(
+            "view.scroll-up".to_string(),
+            vec!["pageup".to_string(), "ctrl+b".to_string()],
+        );
+        let k = Keys::resolve(&o).unwrap();
+        assert_eq!(
+            k.action(press("ctrl+b"), false, false),
+            Some(Action::ScrollPageUp)
+        );
+        assert_eq!(
+            k.action(press("pageup"), false, false),
+            Some(Action::ScrollPageUp)
+        );
     }
 
     #[test]

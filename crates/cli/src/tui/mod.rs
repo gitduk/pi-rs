@@ -1118,8 +1118,8 @@ impl Ui {
             }
             TermEvent::Mouse(mouse) => {
                 match mouse.kind {
-                    MouseEventKind::ScrollUp => self.scroll_view(true),
-                    MouseEventKind::ScrollDown => self.scroll_view(false),
+                    MouseEventKind::ScrollUp => self.scroll_view(true, 1),
+                    MouseEventKind::ScrollDown => self.scroll_view(false, 1),
                     _ => {}
                 }
                 return Act::None;
@@ -1241,8 +1241,10 @@ impl Ui {
             Some(Action::MoveLineEnd) => self.editor.end(),
             Some(Action::HistoryOlder) => self.editor.up(),
             Some(Action::HistoryNewer) => self.editor.down(),
-            Some(Action::ScrollUp) => self.scroll_view(true),
-            Some(Action::ScrollDown) => self.scroll_view(false),
+            Some(Action::ScrollPageUp) => self.scroll_view(true, self.page_scroll_step()),
+            Some(Action::ScrollPageDown) => self.scroll_view(false, self.page_scroll_step()),
+            Some(Action::ScrollHalfUp) => self.scroll_view(true, self.half_scroll_step()),
+            Some(Action::ScrollHalfDown) => self.scroll_view(false, self.half_scroll_step()),
             Some(Action::ThinkFold) => {
                 // The last block only: the one streaming, or the newest
                 // finished one when nothing is. The switch is left alone, so
@@ -1316,15 +1318,23 @@ impl Ui {
         Act::None
     }
 
-    /// Nudge the scrolled history window one half screen, the same step
-    /// PageUp/PageDown and the mouse wheel take.
-    fn scroll_view(&mut self, up: bool) {
-        let step = (self.screen.height as usize) / 2;
+    /// Nudge the scrolled history window by `step` rows, up or down.
+    fn scroll_view(&mut self, up: bool, step: usize) {
         self.scroll = if up {
             self.scroll.saturating_add(step)
         } else {
             self.scroll.saturating_sub(step)
         };
+    }
+
+    /// A page keeps 4 rows of context at the edge, the way the upstream pi
+    /// TUI does (`Math.max(1, viewportHeight - 4)`).
+    fn page_scroll_step(&self) -> usize {
+        (self.screen.height as usize).saturating_sub(4).max(1)
+    }
+
+    fn half_scroll_step(&self) -> usize {
+        ((self.screen.height as usize) / 2).max(1)
     }
 
     /// One key, three meanings, and the escalation travels with the binding
