@@ -893,7 +893,7 @@ impl Repl {
                 &body
             }
         );
-        self.session.append_user(text);
+        self.session.push(brain::message::Message::user(text));
         let mut said: Vec<String> = body
             .lines()
             // The tags wrap the model's copy; the terminal shows the output

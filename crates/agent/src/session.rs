@@ -133,12 +133,6 @@ impl Session {
             .unwrap_or(&[])
     }
 
-    /// Append a user turn as its own message. A session may end on tool
-    /// results or another user message; the view merges adjacent user
-    /// messages when it builds what goes on the wire.
-    pub fn append_user(&mut self, text: impl Into<String>) -> EntryId {
-        self.push(Message::user(text))
-    }
 
     /// Continue with a new prompt, repairing a turn that may have died
     /// mid-call. An assistant turn whose tool calls were never answered would
@@ -657,9 +651,9 @@ mod resume_tests {
     #[test]
     fn adjacent_user_turns_merge_when_building_the_wire() {
         let mut l = Session::new();
-        l.append_user("first");
-        l.append_user("second");
-        l.append_user("third");
+        l.push(Message::user("first"));
+        l.push(Message::user("second"));
+        l.push(Message::user("third"));
         // Each stays its own message in the log; the wire gets them merged.
         assert_eq!(l.messages().count(), 3);
         assert_eq!(roles(&l), vec!["user"]);
