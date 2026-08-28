@@ -445,9 +445,15 @@ fn tool_start_line(name: &str, summary: &str) -> String {
     format!("→ {name}{arg}")
 }
 
-/// A prompt's lines as the stream echoed them: the first with its gutter,
-/// the rest indented.
-fn push_prompt_lines(out: &mut Vec<Entry>, text: &str, prompt: &str, bang_prompt: &str) {
+/// A prompt's lines as the stream echoed them: the first with its gutter and
+/// the body in the input style, the rest indented to match.
+fn push_prompt_lines(
+    out: &mut Vec<Entry>,
+    text: &str,
+    prompt: &str,
+    bang_prompt: &str,
+    paint: &Paint,
+) {
     for (i, line) in text.lines().enumerate() {
         let (gutter, body) = if i == 0 {
             match line.strip_prefix('!') {
@@ -457,6 +463,7 @@ fn push_prompt_lines(out: &mut Vec<Entry>, text: &str, prompt: &str, bang_prompt
         } else {
             ("  ", line)
         };
+        let body = paint.on(&paint.theme.input, body);
         out.push(Entry::Plain(format!("{gutter}{body}")));
     }
 }
@@ -499,7 +506,7 @@ fn render_log(
                 for c in content {
                     match c {
                         UserContent::Text(t) => {
-                            push_prompt_lines(&mut out, &t.text, prompt, bang_prompt);
+                            push_prompt_lines(&mut out, &t.text, prompt, bang_prompt, paint);
                         }
                         UserContent::ToolResult(r) => {
                             out.push(Entry::Plain(tool_result_line(r, paint, width)));
@@ -511,7 +518,7 @@ fn render_log(
                 // `append_user` is an amendment, not content; it echoes too.
                 if let Some(parts) = amendments.get(&id) {
                     for part in parts {
-                        push_prompt_lines(&mut out, part, prompt, bang_prompt);
+                        push_prompt_lines(&mut out, part, prompt, bang_prompt, paint);
                     }
                 }
             }
@@ -1000,7 +1007,7 @@ impl Ui {
     fn flush(&mut self) {
         let menu = self.menu();
         let width = self.screen.usable();
-        let (input, caret) = self.editor.view(width);
+        let (input, caret) = self.editor.view(&self.paint, width);
         // A paste taller than the terminal must not push the editor area off
         // the bottom; the editor scrolls to keep the caret's row visible.
         let editor_h = input
@@ -1099,7 +1106,7 @@ impl Ui {
     /// — the input pushes it out of current no matter what it turns out to be.
     fn submit(&mut self, line: &str) {
         let mut rows = Vec::new();
-        push_prompt_lines(&mut rows, line, &self.prompt, &self.bang_prompt);
+        push_prompt_lines(&mut rows, line, &self.prompt, &self.bang_prompt, &self.paint);
         self.above.extend(rows);
         self.thinking.fold_previous(&mut self.above);
     }

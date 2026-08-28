@@ -709,6 +709,7 @@ usage_in_streaming = false
         assert_eq!(c.theme.code.codes(), "38;2;88;166;255");
         assert_eq!(c.theme.menu.selected.codes(), "7");
         assert_eq!(c.theme.prompt.icon, "›");
+        assert_eq!(c.theme.input.codes(), "");
     }
 
     #[test]
@@ -716,6 +717,12 @@ usage_in_streaming = false
         let c = parse("[theme]\ncode = \"#dd80ff\"\nprompt.color = \"#f80\"\n").unwrap();
         assert_eq!(c.theme.code.codes(), "38;2;221;128;255");
         assert_eq!(c.theme.prompt.color.codes(), "38;2;255;136;0");
+    }
+
+    #[test]
+    fn an_input_reads_a_foreground_and_attributes() {
+        let c = parse("[theme]\ninput = { color = \"#f80\", sgr = [\"bold\"] }\n").unwrap();
+        assert_eq!(c.theme.input.codes(), "1;38;2;255;136;0");
     }
 
     #[test]

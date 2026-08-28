@@ -1,5 +1,6 @@
 //! The line being typed: a text buffer, a caret, and the history behind it.
 
+use crate::render::Paint;
 use unicode_width::UnicodeWidthChar;
 
 /// Columns the prompt marker occupies. Continuation rows are indented to match
@@ -226,7 +227,7 @@ impl Editor {
     /// Wrapping is done here rather than left to the terminal: the live region
     /// is repainted by counting rows back, and a row the terminal wrapped on
     /// its own is a row the count does not know about.
-    pub fn view(&self, width: usize) -> (Vec<String>, (u16, u16)) {
+    pub fn view(&self, paint: &Paint, width: usize) -> (Vec<String>, (u16, u16)) {
         // A line starting with `!` is a shell command; the bang takes the
         // prompt's place so the line reads `! cmd` rather than `› ! cmd`.
         let bang = self.text.starts_with('!');
@@ -276,7 +277,10 @@ impl Editor {
         let painted = rows
             .into_iter()
             .enumerate()
-            .map(|(i, r)| if i == 0 { prompt } else { CONT }.to_string() + &r)
+            .map(|(i, r)| {
+                let body = paint.on(&paint.theme.input, &r);
+                format!("{}{body}", if i == 0 { prompt } else { CONT })
+            })
             .collect();
         (painted, caret)
     }
@@ -326,7 +330,12 @@ fn floor_boundary(s: &str, mut i: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::Editor;
+    use super::{Editor, Paint};
+    /// A painter the view tests share: colourless, so the rows they assert
+    /// on carry no escape sequences.
+    fn paint() -> Paint {
+        Paint::new(false)
+    }
 
     /// An editor with the two painted gutters a real Ui would set, so view
     /// tests see the prompt a user would.
@@ -388,12 +397,12 @@ mod tests {
     #[test]
     fn a_bang_line_puts_the_bang_in_the_prompt() {
         let e = typed("!git status");
-        let (rows, caret) = e.view(40);
+        let (rows, caret) = e.view(&paint(), 40);
         assert_eq!(rows[0], "! git status", "the bang takes the icon's place");
         assert_eq!(caret, (0, 12), "GUTTER 2 + the ten characters of `git status`");
 
         let plain = typed("git status");
-        assert_eq!(plain.view(40).0[0], "› git status");
+        assert_eq!(plain.view(&paint(), 40).0[0], "› git status");
     }
 
     #[test]
@@ -401,7 +410,7 @@ mod tests {
         let mut e = typed("!git");
         e.home();
         e.delete();
-        assert_eq!(e.view(40).0[0], "› git");
+        assert_eq!(e.view(&paint(), 40).0[0], "› git");
     }
 
     #[test]
@@ -409,7 +418,7 @@ mod tests {
         let e = typed("!abcdefgh");
         // Width 6 leaves 4 columns after the gutter, as in the plain case;
         // the bang does not eat a column of the body.
-        let (rows, caret) = e.view(6);
+        let (rows, caret) = e.view(&paint(), 6);
         assert_eq!(rows.len(), 2);
         assert_eq!(caret, (1, 6));
     }
@@ -427,11 +436,11 @@ mod tests {
     fn a_wrapped_line_puts_the_caret_on_the_row_it_belongs_to() {
         let mut e = typed("abcdefgh");
         // Width 6 leaves 4 columns after the gutter.
-        let (rows, caret) = e.view(6);
+        let (rows, caret) = e.view(&paint(), 6);
         assert_eq!(rows.len(), 2);
         assert_eq!(caret, (1, 6), "the caret is past the end of the second row");
         e.home();
-        assert_eq!(e.view(6).1, (0, 2), "and back in the gutter's shadow");
+        assert_eq!(e.view(&paint(), 6).1, (0, 2), "and back in the gutter's shadow");
     }
 
     #[test]
@@ -441,12 +450,12 @@ mod tests {
             e.left();
         }
         // Column 4 of a 4-wide row does not exist; it is column 0 of the next.
-        assert_eq!(e.view(6).1, (1, 2));
+        assert_eq!(e.view(&paint(), 6).1, (1, 2));
     }
 
     #[test]
     fn an_explicit_newline_starts_a_row_of_its_own() {
-        let (rows, caret) = typed("one\ntwo").view(40);
+        let (rows, caret) = typed("one\ntwo").view(&paint(), 40);
         assert_eq!(rows.len(), 2);
         assert!(rows[1].starts_with("  two"));
         assert_eq!(caret, (1, 5));

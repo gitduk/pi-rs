@@ -96,7 +96,7 @@ context is refused at load, along with an unknown id or an unreadable binding.
 
 Colours are configurable the same way, under `[theme]` in `~/.pi.toml`. Every
 key is a Style: a colour, text attributes, or both. `muted` `heading`
-`emphasis` `code`, plus `diff.add` `diff.del`, `status.ok` `status.err`,
+`emphasis` `code` `input`, plus `diff.add` `diff.del`, `status.ok` `status.err`,
 `menu.selected` and `prompt.color` `prompt.icon`. A plain string is shorthand
 for a colour alone — `code = "#dd80ff"` (or the short `#f80`, same as
 `"38;2;221;128;255"`); a table takes the full form

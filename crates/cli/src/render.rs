@@ -263,6 +263,8 @@ pub struct Theme {
     pub menu: Menu,
     #[serde(default)]
     pub prompt: Prompt,
+    #[serde(default = "default_input")]
+    pub input: Style,
 }
 
 const GREEN: Color = Color::Rgb(137, 210, 129);
@@ -367,6 +369,12 @@ fn default_selected() -> Style {
 fn default_prompt_color() -> Style {
     Style::color(Color::Basic(36))
 }
+
+/// The input body: the terminal's own foreground until a config colours it.
+fn default_input() -> Style {
+    Style::attrs(&[])
+}
+
 fn default_icon() -> String {
     "›".into()
 }
@@ -382,6 +390,7 @@ impl Default for Theme {
             status: Status::default(),
             menu: Menu::default(),
             prompt: Prompt::default(),
+            input: default_input(),
         }
     }
 }
