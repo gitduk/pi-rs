@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use brain::message::{Message, Text, ToolCallId, ToolResultContent, UserContent};
+use brain::message::{
+    Message, Text, ToolCall, ToolCallId, ToolResult, ToolResultContent, UserContent,
+};
 use serde::{Deserialize, Serialize};
 use tools::todo::Todo;
 
@@ -47,24 +49,14 @@ pub enum Entry {
         id: EntryId,
         items: Vec<Todo>,
     },
-    /// Text the view appends to an earlier user turn. Resuming a session that
-    /// died mid-turn cannot start a second user message in a row — both wires
-    /// require the roles to alternate — and rewriting the stored message would
-    /// give up the one property this session exists for.
-    Amend {
-        id: EntryId,
-        target: EntryId,
-        text: String,
-    },
 }
 
 impl Entry {
     pub fn id(&self) -> EntryId {
         match self {
-            Entry::Message { id, .. }
-            | Entry::Compaction { id, .. }
-            | Entry::Amend { id, .. }
-            | Entry::Todos { id, .. } => *id,
+            Entry::Message { id, .. } | Entry::Compaction { id, .. } | Entry::Todos { id, .. } => {
+                *id
+            }
         }
     }
 }
@@ -141,82 +133,60 @@ impl Session {
             .unwrap_or(&[])
     }
 
-    pub fn amend(&mut self, target: EntryId, text: impl Into<String>) -> EntryId {
-        let id = EntryId(self.next);
-        self.next += 1;
-        self.entries.push(Entry::Amend {
-            id,
-            target,
-            text: text.into(),
-        });
-        id
-    }
-
-    /// Append a user turn, folding it into the last user message when the
-    /// transcript already ends on one: both wires require the roles to
-    /// alternate, and a message that merely grows is one less history to
-    /// replay. This is the one way a caller adds a user turn.
+    /// Append a user turn as its own message. A session may end on tool
+    /// results or another user message; the view merges adjacent user
+    /// messages when it builds what goes on the wire.
     pub fn append_user(&mut self, text: impl Into<String>) -> EntryId {
-        match self.live().last() {
-            Some((id, Message::User { .. })) => self.amend(*id, text),
-            _ => self.push(Message::user(text)),
-        }
+        self.push(Message::user(text))
     }
 
-    /// Graft a new prompt onto a session that may have died mid-turn.
-    ///
-    /// An assistant turn whose calls were never answered has to leave the view:
-    /// an unanswered `tool_use` makes the next request invalid. What remains
-    /// then usually ends on tool results, and the prompt joins that turn rather
-    /// than starting one the wire would reject.
-    pub fn resume(&mut self, prompt: impl Into<String>) {
-        let unanswered: Vec<EntryId> = self
+    /// Continue with a new prompt, repairing a turn that may have died
+    /// mid-call. An assistant turn whose tool calls were never answered would
+    /// make the next request invalid (a `tool_use` with no `tool_result`);
+    /// each is closed with an interrupted result instead, so the model knows
+    /// it was stopped, and the prompt is appended as its own user message.
+    pub fn send_prompt(&mut self, prompt: impl Into<String>) {
+        let unanswered: Vec<ToolCall> = self
             .live()
             .iter()
             .rev()
-            .take_while(|(_, m)| {
-                matches!(m, Message::Assistant { .. }) && m.tool_calls().next().is_some()
-            })
-            .map(|(id, _)| *id)
+            .take_while(|(_, m)| matches!(m, Message::Assistant { .. }))
+            .flat_map(|(_, m)| m.tool_calls())
+            .cloned()
             .collect();
         if !unanswered.is_empty() {
-            self.record(Compaction {
-                dropped: unanswered,
-                ..Default::default()
-            });
+            let results = unanswered
+                .into_iter()
+                .map(|c| {
+                    ToolResult::error(
+                        c.id,
+                        c.name,
+                        "The tool call was interrupted before its result returned.",
+                    )
+                })
+                .collect();
+            self.push(Message::tool_results(results));
         }
-
-        self.append_user(prompt);
+        self.push(Message::user(prompt));
     }
 
-    /// Live user messages that carry a prompt — including a prompt folded
-    /// into a tool-results message by `append_user`, which keeps it as an
-    /// amendment rather than as content. The text is the message's own text
-    /// blocks followed by its amendments, in order. Session order.
+    /// Live user messages that carry a prompt, in session order: each user
+    /// message's own text blocks.
     pub fn prompts(&self) -> Vec<(EntryId, String)> {
-        let amendments = self.amendments();
         self.live()
             .into_iter()
-            .filter_map(|(id, m)| prompt_text(id, m, &amendments).map(|text| (id, text)))
+            .filter_map(|(id, m)| prompt_text(m).map(|text| (id, text)))
             .collect()
     }
 
     /// The first thing the user asked, if anything. The text `prompts` would
     /// report first, without building the whole list for the one value.
     pub fn first_prompt(&self) -> Option<String> {
-        let amendments = self.amendments();
-        self.live()
-            .into_iter()
-            .find_map(|(id, m)| prompt_text(id, m, &amendments))
+        self.live().into_iter().find_map(|(_, m)| prompt_text(m))
     }
 
-    /// Rewind to a user message: everything after it leaves the session, and the
-    /// Returns how many entries that was.
-    ///
-    /// Amendments recorded after the cut still belong to messages inside it —
-    /// a prompt folded into the previous turn is part of that turn, and the
-    /// rewind selector shows it as such — so they come along with their
-    /// target instead of being cut.
+    /// Rewind to a user message: everything after it leaves the session, and
+    /// returns how many entries that was.
     pub fn rollback_to(&mut self, user: EntryId) -> usize {
         let Some(keep) = self
             .entries
@@ -226,15 +196,8 @@ impl Session {
         else {
             return 0;
         };
-        let kept: HashSet<EntryId> = self.entries[..keep].iter().map(Entry::id).collect();
-        let mut tail: Vec<Entry> = self.entries[keep..]
-            .iter()
-            .filter(|e| matches!(e, Entry::Amend { target, .. } if kept.contains(target)))
-            .cloned()
-            .collect();
         let dropped = self.entries.len() - keep;
         self.entries.truncate(keep);
-        self.entries.append(&mut tail);
         dropped
     }
 
@@ -330,82 +293,57 @@ impl Session {
             .collect()
     }
 
-    pub fn amendments(&self) -> HashMap<EntryId, Vec<&str>> {
-        let mut out: HashMap<EntryId, Vec<&str>> = HashMap::new();
-        for e in &self.entries {
-            if let Entry::Amend { target, text, .. } = e {
-                out.entry(*target).or_default().push(text);
-            }
-        }
-        out
-    }
-
     /// What goes on the wire.
     ///
     /// A summary rides on the opening turn rather than as a message of its own:
     /// dropping whole exchanges leaves the history starting on an assistant
-    /// turn, and both wires require the roles to alternate.
+    /// turn. Adjacent user messages — a tool result followed by the prompt
+    /// that closed it — are merged, since both wires require the roles to
+    /// alternate.
     pub fn context(&self) -> Vec<Message> {
         let elisions = self.elisions();
-        let amendments = self.amendments();
         let summaries = self.summaries();
+        let mut out: Vec<Message> = Vec::new();
         let mut first_user = true;
 
-        self.live()
-            .into_iter()
-            .map(|(id, m)| {
-                let Message::User { content } = m else {
-                    return m.clone();
-                };
-                let mut content: Vec<UserContent> =
-                    content.iter().map(|b| apply(b, &elisions)).collect();
-                if first_user {
-                    first_user = false;
-                    for s in &summaries {
-                        content.push(UserContent::Text(Text {
-                            text: format!("<earlier-work>\n{s}\n</earlier-work>"),
-                        }));
-                    }
-                }
-                for text in amendments.get(&id).into_iter().flatten() {
+        for (_, m) in self.live() {
+            let Message::User { content } = m else {
+                out.push(m.clone());
+                continue;
+            };
+            let mut content: Vec<UserContent> =
+                content.iter().map(|b| apply(b, &elisions)).collect();
+            if first_user {
+                first_user = false;
+                for s in &summaries {
                     content.push(UserContent::Text(Text {
-                        text: (*text).to_string(),
+                        text: format!("<earlier-work>\n{s}\n</earlier-work>"),
                     }));
                 }
-                Message::User { content }
-            })
-            .collect()
+            }
+            if let Some(Message::User { content: prev }) = out.last_mut() {
+                prev.extend(content);
+            } else {
+                out.push(Message::User { content });
+            }
+        }
+        out
     }
 }
 
-/// A user message's prompt text: its own text blocks followed by whatever
-/// `append_user` folded in as amendments. `None` when the message carries no
-/// text of its own.
-fn prompt_text(
-    id: EntryId,
-    m: &Message,
-    amendments: &HashMap<EntryId, Vec<&str>>,
-) -> Option<String> {
+/// A user message's prompt text: its own text blocks. `None` when the message
+/// carries no text of its own.
+fn prompt_text(m: &Message) -> Option<String> {
     let Message::User { content } = m else {
         return None;
     };
-    let mut text: String = content
+    let text: String = content
         .iter()
         .filter_map(|c| match c {
             UserContent::Text(t) => Some(t.text.as_str()),
             _ => None,
         })
         .collect();
-    if let Some(parts) = amendments.get(&id) {
-        for part in parts {
-            // Each amendment is its own prompt; keep them apart so
-            // the selector does not run them together.
-            if !text.is_empty() {
-                text.push('\n');
-            }
-            text.push_str(part);
-        }
-    }
     (!text.is_empty()).then_some(text)
 }
 
@@ -546,22 +484,11 @@ mod tests {
         l.push(Message::assistant_text("second answer"));
 
         assert_eq!(l.rollback_to(EntryId(5)), 1);
-        assert_eq!(l.context().len(), 6);
-        assert_eq!(l.context()[5].text(), "second turn");
+        assert_eq!(l.context().len(), 5);
+        assert_eq!(l.context()[4].text(), "second turn");
         assert_eq!(l.entries().last().unwrap().id(), EntryId(5));
     }
 
-    #[test]
-    fn a_rewind_keeps_amendments_that_target_kept_messages() {
-        // The last prompt folds into the tool-results message as an
-        // amendment; rewinding to that message has to keep it, or the
-        // selector's preview and the rewound transcript disagree.
-        let mut l = log();
-        l.amend(EntryId(4), "continue");
-        assert_eq!(l.rollback_to(EntryId(4)), 1);
-        assert_eq!(l.prompts().last().unwrap().1, "continue");
-        assert_eq!(l.context()[4].text(), "continue");
-    }
     #[test]
     fn a_rewind_to_the_first_message_keeps_only_it() {
         let mut l = log();
@@ -602,36 +529,30 @@ mod tests {
     }
 
     #[test]
-    fn a_prompt_folded_into_tool_results_is_seen() {
-        // After a tool round the session ends on a tool-results user message;
-        // the next prompt folds into it as an amendment, and has to count.
+    fn a_prompt_after_tool_results_is_its_own_message() {
+        // A tool round ends on a tool-results user message; the next prompt
+        // is its own user message, counted on its own.
         let mut l = log();
-        l.amend(EntryId(4), "continue");
+        l.send_prompt("continue");
         let prompts = l.prompts();
         assert_eq!(prompts.len(), 2);
-        assert_eq!(prompts[1].0, EntryId(4));
+        assert_eq!(prompts[1].0, EntryId(5));
         assert_eq!(prompts[1].1, "continue");
     }
 
     #[test]
-    fn a_prompt_with_an_amendment_carries_both() {
-        let mut l = log();
-        let id = l.push(Message::user("one"));
-        l.amend(id, "two");
+    fn two_user_messages_stay_apart_in_prompts() {
+        let mut l = Session::new();
+        l.send_prompt("one");
+        l.send_prompt("two");
         let prompts = l.prompts();
-        assert_eq!(prompts.last().unwrap().1, "one\ntwo");
+        assert_eq!(prompts[1].1, "two");
     }
 
     #[test]
     fn first_prompt_is_the_first_question_and_none_when_there_is_none() {
         let l = log();
         assert_eq!(l.first_prompt().as_deref(), Some("go"));
-
-        // A first prompt that was amended carries its amendment, like `prompts`.
-        let mut with_amendment = Session::new();
-        let id = with_amendment.push(Message::user("one"));
-        with_amendment.amend(id, "two");
-        assert_eq!(with_amendment.first_prompt().as_deref(), Some("one\ntwo"));
 
         assert_eq!(Session::new().first_prompt(), None);
     }
@@ -675,64 +596,73 @@ mod resume_tests {
     }
 
     #[test]
-    fn a_prompt_after_tool_results_joins_that_turn() {
+    fn a_prompt_after_tool_results_merges_on_the_wire() {
         let mut l = Session::from_messages([Message::user("hi"), call("c1"), results("c1")]);
-        l.resume("and now?");
+        l.send_prompt("and now?");
 
-        // Two user turns in a row are rejected outright by both wires.
+        // The prompt is its own message, merged into the adjacent tool
+        // results only when building what goes on the wire.
         assert_eq!(roles(&l), vec!["user", "assistant", "user"]);
         assert_eq!(l.context()[2].text(), "and now?");
-        // The graft is a record, not a rewrite: the stored message is untouched.
-        assert_eq!(l.messages().count(), 3);
-        assert!(!format!("{:?}", l.messages().nth(2).unwrap().1).contains("and now?"));
+        assert_eq!(l.messages().count(), 4);
     }
 
     #[test]
-    fn an_unanswered_call_leaves_the_view_before_the_prompt_lands() {
+    fn an_unanswered_call_is_closed_with_an_interrupted_result() {
         let mut l = Session::from_messages([
             Message::user("hi"),
             Message::assistant_text("ok"),
             call("c9"),
         ]);
-        l.resume("next");
+        l.send_prompt("next");
 
-        assert_eq!(roles(&l), vec!["user", "assistant", "user"]);
-        assert_eq!(l.context()[2].text(), "next");
-        // Three original messages plus the new prompt: the unanswered call left
-        // the view without leaving the session.
-        assert_eq!(l.messages().count(), 4);
+        assert_eq!(l.messages().count(), 5);
         assert!(
             l.messages()
                 .any(|(_, m)| m.tool_calls().any(|c| c.id.0 == "c9"))
         );
-        assert!(!l.context().iter().any(|m| m.tool_calls().next().is_some()));
+        let ctx = l.context();
+        let closed: Vec<_> = ctx
+            .iter()
+            .filter_map(|m| match m {
+                Message::User { content } => Some(content),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|c| match c {
+                UserContent::ToolResult(r) => Some(r),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].call.0, "c9");
+        assert!(closed[0].is_error);
     }
 
     #[test]
     fn a_clean_transcript_gains_one_turn() {
         let mut l = Session::from_messages([Message::user("hi"), Message::assistant_text("done")]);
-        l.resume("more");
+        l.send_prompt("more");
         assert_eq!(roles(&l), vec!["user", "assistant", "user"]);
     }
 
     #[test]
     fn an_empty_log_starts_the_conversation() {
         let mut l = Session::new();
-        l.resume("first");
+        l.send_prompt("first");
         assert_eq!(l.context().len(), 1);
         assert_eq!(l.context()[0].text(), "first");
     }
 
     #[test]
-    fn a_second_user_turn_folds_into_the_first_so_the_roles_keep_alternating() {
+    fn adjacent_user_turns_merge_when_building_the_wire() {
         let mut l = Session::new();
         l.append_user("first");
         l.append_user("second");
         l.append_user("third");
-        // The whole point: two user turns in a row are rejected by both wires.
+        // Each stays its own message in the log; the wire gets them merged.
+        assert_eq!(l.messages().count(), 3);
         assert_eq!(roles(&l), vec!["user"]);
         assert_eq!(l.context()[0].text(), "firstsecondthird");
-        // The folds are records, not rewrites: each append is an entry.
-        assert_eq!(l.messages().count(), 1);
     }
 }

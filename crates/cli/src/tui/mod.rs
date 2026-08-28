@@ -498,9 +498,8 @@ fn render_log(
         })
         .collect();
 
-    let amendments = session.amendments();
     let mut out = Vec::new();
-    for (id, m) in session.live() {
+    for (_, m) in session.live() {
         match m {
             Message::User { content } => {
                 for c in content {
@@ -514,13 +513,7 @@ fn render_log(
                         UserContent::Image(_) => {}
                     }
                 }
-                // A prompt folded into a tool-results message by
-                // `append_user` is an amendment, not content; it echoes too.
-                if let Some(parts) = amendments.get(&id) {
-                    for part in parts {
-                        push_prompt_lines(&mut out, part, prompt, bang_prompt, paint);
-                    }
-                }
+
             }
             Message::Assistant { content, .. } => {
                 for b in content {
@@ -1680,7 +1673,7 @@ impl Tui {
         tx: &UnboundedSender<Event>,
         rx: &mut UnboundedReceiver<Event>,
     ) {
-        self.core.session.resume(prompt);
+        self.core.session.send_prompt(prompt);
         let cancel = CancellationToken::new();
         let ctx = self
             .core

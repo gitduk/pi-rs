@@ -624,7 +624,7 @@ async fn main() -> Result<()> {
     // Always through the log: a loaded session whose view happens to be empty
     // still has history worth keeping, and `resume` handles an empty session.
     let mut session = carried;
-    session.resume(prompt);
+    session.send_prompt(prompt);
     let outcome = ag.run(&mut session, &ctx, &tx).await;
 
     drop(tx);

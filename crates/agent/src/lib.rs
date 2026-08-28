@@ -372,12 +372,13 @@ impl Agent {
                 .run_calls(&calls, &bad, ctx, tx, &mut echoes)
                 .instrument(span.clone())
                 .await?;
-            let answered = session.push(Message::tool_results(results));
+            session.push(Message::tool_results(results));
             if let Some(note) = turns_left(turn, self.max_turns) {
-                // Amended onto the results rather than pushed after them: two
-                // user messages running break the alternation both wires want.
-                session.amend(answered, note);
+                // A note on its own turn; the view merges adjacent user
+                // messages when it builds what goes on the wire.
+                session.push(Message::user(note));
             }
+            self.record_todos(session, ctx);
             self.record_todos(session, ctx);
 
             if let Some(value) = self.yielded(ctx) {
