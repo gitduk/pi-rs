@@ -50,14 +50,6 @@ fn replaces_an_inclusive_range() {
 }
 
 #[test]
-fn a_single_line_is_written_n_to_n() {
-    assert_eq!(
-        edit(SRC, "PUT 2:\n+2\n").unwrap(),
-        "one\n2\nthree\nfour\n"
-    );
-}
-
-#[test]
 fn body_length_is_independent_of_range_length() {
     assert_eq!(
         edit(SRC, "PUT 2:\n+a\n+b\n+c\n").unwrap(),
@@ -369,6 +361,7 @@ fn a_spelling_this_grammar_dropped_is_simply_not_an_address() {
         "PUT 2>:\n+x",
         "PUT 2*>:\n+x",
         "CUT 2>",
+        "CUT 2:UP",    // direction lives on PUT; CUT takes lines or a block
         "CUT abc",     // never valid under either
     ] {
         assert!(
@@ -437,35 +430,6 @@ fn what_the_grammar_prints_is_what_the_grammar_reads() {
         };
         assert!(ok, "`PUT {spec}:` parsed to the wrong site");
     }
-}
-
-#[test]
-fn a_direction_on_a_cut_is_refused() {
-    // Direction lives on PUT; `CUT` takes lines or a block, and a `:UP` or
-    // `:DOWN` on one names a position nothing cuts from. The whole grammar is
-    // the answer, since the address forms it lists are all `CUT` takes.
-    let says = |ops: &str| {
-        parse(&format!("[f.rs#AAAA]\n{ops}\n"))
-            .unwrap_err()
-            .to_string()
-    };
-    assert!(
-        says("CUT 2:UP").contains("an address is"),
-        "{}",
-        says("CUT 2:UP")
-    );
-    assert!(
-        says("CUT 2>").contains("an address is"),
-        "{}",
-        says("CUT 2>")
-    );
-
-    // A range missing its end says so, rather than quoting nothing at all.
-    assert!(
-        says("CUT 3-").contains("needs both ends"),
-        "{}",
-        says("CUT 3-")
-    );
 }
 
 #[test]

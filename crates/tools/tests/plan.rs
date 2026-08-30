@@ -12,6 +12,8 @@ fn item(task: &str, status: &str) -> serde_json::Value {
     json!({ "task": task, "status": status })
 }
 
+/// What the tool answers with. Not the list: that reaches the model as a note
+/// on the next request, recomputed from the stored plan.
 async fn write(c: &Ctx, items: Vec<serde_json::Value>) -> String {
     tools::todo::TodoTool
         .execute(json!({ "items": items }), c)
@@ -20,10 +22,16 @@ async fn write(c: &Ctx, items: Vec<serde_json::Value>) -> String {
         .flatten()
 }
 
+/// The plan as it now stands, the way the note and `/todo` render it.
+async fn shown(c: &Ctx, items: Vec<serde_json::Value>) -> String {
+    write(c, items).await;
+    render(&c.todos.lock().unwrap())
+}
+
 #[tokio::test]
 async fn a_written_list_comes_back_marked_and_counted() {
     let (_d, c) = ctx();
-    let out = write(
+    let out = shown(
         &c,
         vec![
             item("read the code", "done"),
@@ -42,7 +50,7 @@ async fn a_written_list_comes_back_marked_and_counted() {
 #[tokio::test]
 async fn only_one_item_can_be_in_progress() {
     let (_d, c) = ctx();
-    let out = write(&c, vec![item("a", "in_progress"), item("b", "in_progress")]).await;
+    let out = shown(&c, vec![item("a", "in_progress"), item("b", "in_progress")]).await;
 
     // Two in progress is a plan the agent is not actually following.
     assert!(out.contains("[~] a"), "{out}");
@@ -65,7 +73,7 @@ async fn the_list_is_replaced_whole_not_merged() {
 #[tokio::test]
 async fn a_reason_shows_for_blocked_and_abandoned_work_only() {
     let (_d, c) = ctx();
-    let out = write(
+    let out = shown(
         &c,
         vec![
             json!({ "task": "deploy", "status": "blocked", "note": "waiting on credentials" }),
@@ -123,5 +131,20 @@ fn a_short_list_shows_everything() {
 #[tokio::test]
 async fn an_empty_list_says_so_instead_of_rendering_nothing() {
     let (_d, c) = ctx();
-    assert!(write(&c, vec![]).await.contains("the list is empty"));
+    assert!(shown(&c, vec![]).await.contains("the list is empty"));
+}
+
+/// The tool answers with a count, not the plan. Echoing the list here as well
+/// would leave one copy per call in the transcript, each stale the moment the
+/// next call lands — and the note already carries the current one.
+#[tokio::test]
+async fn the_tool_acknowledges_rather_than_repeating_the_list() {
+    let (_d, c) = ctx();
+    let out = write(
+        &c,
+        vec![item("read the code", "done"), item("fix the bug", "pending")],
+    )
+    .await;
+    assert_eq!(out.trim(), "Recorded: 1 of 2 open.");
+    assert!(!out.contains("fix the bug"), "{out}");
 }

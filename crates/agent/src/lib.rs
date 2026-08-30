@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use brain::catalog::ModelSpec;
+use brain::model::ModelSpec;
 use brain::message::{Message, ToolCall, ToolResult, ToolResultContent};
 use brain::request::{Effort, Request};
 use brain::stream::{Accumulator, StreamEvent};
@@ -36,7 +36,7 @@ const REPEAT_LIMIT: usize = 2;
 /// leeway applies: nothing legitimate re-sends, byte for byte, a call that just
 /// came back refused. Waiting for a third spends a turn learning what the
 /// second already showed — which is how a model that cannot get a tool's format
-/// right rides the turn limit all the way down.
+/// right spends a whole session getting it wrong the same way.
 const FAILURE_LIMIT: usize = 1;
 
 /// Headroom for framing the estimate does not model. Compacting slightly early
@@ -98,14 +98,6 @@ impl Retry {
     }
 }
 
-/// What a run leaves behind.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Outcome {
-    pub totals: Totals,
-    /// Present when the run ended through the `yield` tool.
-    pub yielded: Option<serde_json::Value>,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
     #[error(transparent)]
@@ -113,12 +105,6 @@ pub enum AgentError {
 
     #[error("cancelled")]
     Cancelled,
-
-    #[error("stopped at the {0}-turn limit")]
-    TurnLimit(usize),
-
-    #[error("the run ended without calling `yield`, so it produced no result")]
-    NoResult,
 }
 
 
@@ -129,17 +115,18 @@ pub struct Agent {
     pub approver: Arc<dyn Approver>,
     pub system: String,
     pub effort: Effort,
-    /// None runs without a turn limit; Some caps the run at that many turns.
-    pub max_turns: Option<usize>,
     /// None leaves the transcript alone and lets the provider refuse it.
     pub compaction: Option<Policy>,
     /// Ask the model to summarize the history compaction is about to drop.
     /// False drops it outright, which is faster and loses more.
     pub summarize: bool,
+    /// Who writes that summary, when it is not the model doing the work. The
+    /// job is large input, small output and little judgement, so it need not be
+    /// the expensive one. Its own transport all the same: the spec that priced
+    /// a turn has to be the one that ran it, or a cheap summary is billed at
+    /// the working model's rate.
+    pub summarizer: Option<(Arc<dyn Transport>, ModelSpec)>,
     pub retry: Retry,
-    /// When set, the run must end by calling this tool, and its argument is the
-    /// result. Set by adding a `yield` tool to the registry.
-    pub finish_tool: Option<String>,
     /// Whether this run has already said that the host under-counts its input.
     short_input_said: AtomicBool,
 }
@@ -164,11 +151,10 @@ impl Agent {
             approver: Arc::new(Ceiling(tools::Tier::Exec)),
             system: DEFAULT_SYSTEM.to_string(),
             effort: Effort::Off,
-            max_turns: None,
             compaction: Some(Policy::default()),
             summarize: true,
+            summarizer: None,
             retry: Retry::default(),
-            finish_tool: None,
             short_input_said: AtomicBool::new(false),
         }
     }
@@ -188,11 +174,10 @@ impl Agent {
         session: &mut Session,
         ctx: &Ctx,
         tx: &UnboundedSender<Event>,
-    ) -> Result<Outcome, AgentError> {
+    ) -> Result<Totals, AgentError> {
         let mut totals = Totals::default();
-        let mut nudged = false;
-        // What each call last returned, so a loop can be named rather than run
-        // until the turn limit stops it.
+        // What each call last returned, so a loop can be named — naming it is
+        // the only thing that stops one.
         let mut echoes = Echoes::new();
 
         // A resumed session brings its plan back; the tool sees it as the list
@@ -204,16 +189,10 @@ impl Agent {
         // Our token estimate is a bound, not a measurement. When the provider
         // says otherwise, this is what carries the correction forward.
         let mut scale = 1.0f64;
-        // A window the provider named, which outranks whatever the catalog says.
+        // A window the provider named, which outranks whatever the spec says.
         let mut hard: Option<usize> = None;
 
         for turn in 1.. {
-            if let Some(max) = self.max_turns
-                && turn > max
-            {
-                tracing::error!(target: "pi::loop", turns = max, "turn limit");
-                return Err(AgentError::TurnLimit(max));
-            }
             say(tx, Event::TurnStart { turn });
             // Entered around each await rather than held across them: a guard
             // spanning an await point labels whatever else the runtime polls.
@@ -223,18 +202,30 @@ impl Agent {
             // actually sent, which a squeeze or a compaction may have changed.
             let mut sent;
 
+            // True this turn only, and never stored. The plan goes here
+            // rather than into the transcript: written down, turn 3's list is
+            // still there at turn 30 contradicting the current one, and both
+            // read as fact. Recomputed every turn, there is exactly one of it
+            // and it is never stale.
+            //
+            // Stated, not urged. A list of what is open is information; the
+            // same list with "finish these now" on it is a deadline, and a
+            // hurried model does worse work than the tokens ever cost.
+            let notes: Vec<String> = match session.todos() {
+                [] => Vec::new(),
+                items => vec![format!("<plan>\n{}\n</plan>", tools::todo::render(items))],
+            };
             let done = loop {
                 let budget = ((hard.unwrap_or_else(|| self.budget()) as f64) * scale) as usize;
-                self.maybe_compact(session, budget, squeezes > 0, &mut totals, tx)
+                sent = self
+                    .maybe_compact(session, budget, squeezes > 0, &mut totals, tx)
                     .instrument(span.clone())
                     .await;
-
-                sent = session.context();
                 tracing::debug!(
                     target: "pi::loop",
                     parent: &span,
                     messages = sent.len(),
-                    estimated = brain::estimate::tokens(&sent),
+                    estimated = brain::estimate::tokens(&sent, &self.spec),
                     budget,
                     squeezes,
                     scale,
@@ -245,6 +236,7 @@ impl Agent {
                 let req = Request {
                     system: Some(self.system.clone()),
                     messages: sent.clone(),
+                    notes: notes.clone(),
                     tools: self.registry.defs(),
                     max_output_tokens: None,
                     temperature: None,
@@ -268,6 +260,13 @@ impl Agent {
                         // unknown amount.
                         match brain::fault::overflow_limit(&e) {
                             Some(limit) => {
+                                // Every shrink so far was guesswork against the
+                                // window the spec claimed, and that baseline is
+                                // now replaced; corrections learned after this
+                                // still stack on top.
+                                if hard.is_none() {
+                                    scale = 1.0;
+                                }
                                 hard = Some(self.budget_within(limit));
                                 say(
                                     tx,
@@ -293,7 +292,7 @@ impl Agent {
                 }
             };
 
-            let (usage, estimated) = self.fill_usage(done.usage, &sent, &done.message);
+            let (usage, estimated) = self.fill_usage(done.usage, &sent, &notes, &done.message);
             let cost = self.spec.cost(&usage);
             totals.add_estimated(&usage, cost, estimated);
             say(
@@ -333,21 +332,12 @@ impl Agent {
             );
 
             let calls: Vec<ToolCall> = done.message.tool_calls().cloned().collect();
-            session.push(done.message);
+            let Message::Assistant { content, .. } = done.message else {
+                unreachable!("the accumulator only ever builds an assistant message")
+            };
+            session.push_assistant(content);
 
             if calls.is_empty() {
-                // A run that owes a structured result gets one reminder; the
-                // model usually just forgot the last step.
-                if self.finish_tool.is_some() && self.yielded(ctx).is_none() {
-                    if nudged {
-                        return Err(AgentError::NoResult);
-                    }
-                    nudged = true;
-                    session.push(Message::user(
-                        "The result has not been delivered yet. Call `yield` with it now.",
-                    ));
-                    continue;
-                }
                 say(
                     tx,
                     Event::Done {
@@ -357,10 +347,7 @@ impl Agent {
                         estimated: totals.estimated,
                     },
                 );
-                return Ok(Outcome {
-                    totals,
-                    yielded: self.yielded(ctx),
-                });
+                return Ok(totals);
             }
 
             let bad: HashMap<_, _> = done
@@ -372,55 +359,29 @@ impl Agent {
                 .run_calls(&calls, &bad, ctx, tx, &mut echoes)
                 .instrument(span.clone())
                 .await?;
-            session.push(Message::tool_results(results));
-            if let Some(note) = turns_left(turn, self.max_turns) {
-                // A note on its own turn; the view merges adjacent user
-                // messages when it builds what goes on the wire.
-                session.push(Message::user(note));
-            }
+            session.push_previewed(results);
             self.record_todos(session, ctx);
-            self.record_todos(session, ctx);
-
-            if let Some(value) = self.yielded(ctx) {
-                say(
-                    tx,
-                    Event::Done {
-                        turns: turn,
-                        usage: totals.usage,
-                        cost: totals.cost,
-                        estimated: totals.estimated,
-                    },
-                );
-                return Ok(Outcome {
-                    totals,
-                    yielded: Some(value),
-                });
-            }
         }
 
         unreachable!("an unlimited run can only leave by returning inside the loop")
     }
 
-    fn yielded(&self, ctx: &Ctx) -> Option<serde_json::Value> {
-        ctx.yielded.lock().ok()?.clone()
-    }
-
-    /// Fold a plan the todo tool wrote into the session, so it survives
-    /// compaction and comes back on resume.
+    /// Fold a plan the todo tool wrote into the session, so it survives a
+    /// resume and reaches the next turn's note.
     fn record_todos(&self, session: &mut Session, ctx: &Ctx) {
-        let Ok(mut held) = ctx.todos.lock() else {
+        let Ok(held) = ctx.todos.lock() else {
             return;
         };
-        if *held == session.todos() {
-            return;
-        }
         session.set_todos(held.clone());
-        // The session normalizes; writing it back keeps the next comparison from
-        // seeing a difference that is only the normalization.
-        *held = session.todos().to_vec();
     }
 
-    /// Shrink the transcript to `budget` if it is over, recording what went.
+    /// Shrink the transcript to `budget` if it is over, recording what went,
+    /// and hand back what to send.
+    ///
+    /// The context comes back rather than being rebuilt by the caller: this has
+    /// to build one to measure, and when nothing changed that is exactly the
+    /// one to send. Building it twice a turn walked every entry and cloned
+    /// every block for an answer already in hand.
     async fn maybe_compact(
         &self,
         session: &mut Session,
@@ -428,12 +389,13 @@ impl Agent {
         urgent: bool,
         totals: &mut Totals,
         tx: &UnboundedSender<Event>,
-    ) {
+    ) -> Vec<Message> {
+        let measured = session.context();
         let Some(policy) = &self.compaction else {
-            return;
+            return measured;
         };
-        if brain::estimate::tokens(&session.context()) <= budget {
-            return;
+        if brain::estimate::tokens(&measured, &self.spec) <= budget {
+            return measured;
         }
         // Holding the working tail back is a preference; fitting at all is not.
         // Once the provider has refused the request, the tail yields.
@@ -442,21 +404,24 @@ impl Agent {
         } else {
             *policy
         };
-        let (mut record, mut report) = compact::plan(session, budget, &policy);
+        let (mut record, mut report) = compact::plan(session, &self.spec, budget, &policy);
         if !record.dropped.is_empty() && self.summarize {
-            let cost = self
+            let (used, priced) = self
                 .write_summary(session, &mut record, None)
                 .instrument(tracing::info_span!(target: "pi::compact", "summarize"))
                 .await;
             report.summarized = record.summary.is_some();
-            totals.add(&cost, self.spec.cost(&cost));
+            totals.add(&used, priced);
         }
         // A pass that reclaimed nothing is not news; reporting it every turn
         // buries the ones that did.
-        if report.touched() {
-            session.record(record);
-            say(tx, Event::Compacted(report));
+        if !report.touched() {
+            return measured;
         }
+        session.record(record);
+        say(tx, Event::Compacted(report));
+        // It changed, so the measurement above is stale.
+        session.context()
     }
 
     /// What a manual compaction leaves alone, when there is one.
@@ -477,15 +442,15 @@ impl Agent {
         focus: Option<&str>,
     ) -> Option<(compact::Report, Totals)> {
         let policy = self.compaction?;
-        let (mut record, mut report) = compact::plan(session, policy.protect_tail, &policy);
+        let (mut record, mut report) = compact::plan(session, &self.spec, policy.protect_tail, &policy);
         let mut spent = Totals::default();
         if !record.dropped.is_empty() && self.summarize {
-            let cost = self
+            let (used, priced) = self
                 .write_summary(session, &mut record, focus)
                 .instrument(tracing::info_span!(target: "pi::compact", "summarize"))
                 .await;
             report.summarized = record.summary.is_some();
-            spent.add(&cost, self.spec.cost(&cost));
+            spent.add(&used, priced);
         }
         if !report.touched() {
             return None;
@@ -499,25 +464,35 @@ impl Agent {
     ///
     /// A failure here is not fatal: the entries still go, unsummarized. Losing
     /// the summary costs context; failing the turn costs the whole run.
+    ///
+    /// Returns the usage *and what it cost*, because only here is it known
+    /// which spec priced it. Handing back a bare usage let both callers pick a
+    /// spec themselves, and both picked the main model's — so a cheaper
+    /// summarizer would have been billed at the expensive model's rates, twice
+    /// over and without a word.
     async fn write_summary(
         &self,
         session: &Session,
         record: &mut session::Compaction,
         focus: Option<&str>,
-    ) -> brain::stream::Usage {
+    ) -> (brain::stream::Usage, f64) {
+        let (transport, spec) = match &self.summarizer {
+            Some((t, s)) => (&**t, s),
+            None => (&*self.transport, &self.spec),
+        };
         let history =
-            summarize::render(&session.summaries(), &session.messages_for(&record.dropped));
-        match summarize::run(&*self.transport, &self.spec, history, focus).await {
+            summarize::render(&session.summaries(), &session.entries_for(&record.dropped));
+        match summarize::run(transport, spec, history, focus).await {
             Ok((text, usage)) => {
                 record.summary = Some(text);
                 // The new summary covers what the old one did, so the entry
                 // carrying the old one leaves the view.
                 record.dropped.extend(session.summary_entries());
-                usage
+                (usage, spec.cost(&usage))
             }
             Err(e) => {
                 tracing::warn!(target: "pi::compact", error = %e, "summarizing dropped history failed");
-                brain::stream::Usage::default()
+                (brain::stream::Usage::default(), 0.0)
             }
         }
     }
@@ -555,6 +530,7 @@ impl Agent {
         &self,
         reported: brain::stream::Usage,
         sent: &[Message],
+        notes: &[String],
         reply: &Message,
     ) -> (brain::stream::Usage, Estimated) {
         let mut usage = reported;
@@ -562,8 +538,9 @@ impl Agent {
         // Deferred: this walks the whole transcript and re-serializes every
         // tool schema, and a host that states its own figures needs none of it.
         let ours = || {
-            (brain::estimate::tokens(sent)
+            (brain::estimate::tokens(sent, &self.spec)
                 + brain::estimate::text(&self.system)
+                + brain::estimate::notes(notes)
                 + brain::estimate::tool_defs(&self.registry.defs())) as u64
         };
         // Any reported caching exempts the check below, writes as well as
@@ -596,14 +573,14 @@ impl Agent {
             }
         }
         if usage.output == 0 {
-            usage.output = brain::estimate::message(reply) as u64;
+            usage.output = brain::estimate::produced(reply) as u64;
             estimated.output = true;
         }
         (usage, estimated)
     }
 
     /// The same accounting against a window the provider named instead of the
-    /// one the catalog claims.
+    /// one the spec claims.
     fn budget_within(&self, window: usize) -> usize {
         // A spec may declare an output cap larger than the window it is being
         // used against — an overridden window, a proxy, a stale entry. Reserving
@@ -675,7 +652,7 @@ impl Agent {
     ) -> Result<brain::stream::Completion, AgentError> {
         // A fresh accumulator per attempt: half a stream must not bleed into
         // the message the retry produces.
-        let mut acc = Accumulator::new(self.transport.name(), &self.spec.wire_id);
+        let mut acc = Accumulator::new(self.spec.model.clone());
         let idle = self.retry.idle;
 
         let mut stream = tokio::select! {
@@ -714,6 +691,14 @@ impl Agent {
             acc.push(ev);
         }
 
+        // What the host owed and did not send. Said once per session by the
+        // reporter itself, and said here rather than only in the journal: a
+        // turn that quietly came back smaller looks exactly like an ordinary
+        // one, which is the whole reason it needs saying.
+        for gap in self.transport.gaps() {
+            say(tx, Event::Warning(gap));
+        }
+
         Ok(acc.finish())
     }
 
@@ -722,11 +707,11 @@ impl Agent {
     async fn run_calls(
         &self,
         calls: &[ToolCall],
-        bad: &HashMap<brain::message::ToolCallId, String>,
+        bad: &HashMap<String, String>,
         ctx: &Ctx,
         tx: &UnboundedSender<Event>,
         echoes: &mut Echoes,
-    ) -> Result<Vec<ToolResult>, AgentError> {
+    ) -> Result<Vec<(ToolResult, Option<String>)>, AgentError> {
         let actions: Vec<Action> = calls
             .iter()
             .map(|c| {
@@ -755,7 +740,7 @@ impl Agent {
                     say(
                         tx,
                         Event::ToolDenied {
-                            id: call.id.0.clone(),
+                            id: call.id.clone(),
                             name: call.name.clone(),
                             reason: why.clone(),
                         },
@@ -765,7 +750,7 @@ impl Agent {
                     say(
                         tx,
                         Event::ToolStart {
-                            id: call.id.0.clone(),
+                            id: call.id.clone(),
                             name: call.name.clone(),
                             args: call.args.clone(),
                         },
@@ -812,6 +797,9 @@ impl Agent {
 
         let mut results = Vec::with_capacity(calls.len());
         for ((call, action), output) in calls.iter().zip(&actions).zip(outputs) {
+            // What the screen showed, when a tool sketched more than its stored
+            // content holds. The rebuild has no other way back to it.
+            let mut sketched = None;
             let result = match (action, output) {
                 (Action::Reject(why), _) => failed(call, why.clone(), echoes),
                 (_, Some(Err(ToolError::Cancelled))) => return Err(AgentError::Cancelled),
@@ -825,7 +813,7 @@ impl Agent {
                     say(
                         tx,
                         Event::ToolEnd {
-                            id: call.id.0.clone(),
+                            id: call.id.clone(),
                             name: call.name.clone(),
                             is_error: true,
                             preview: body.clone(),
@@ -834,10 +822,11 @@ impl Agent {
                     failed(call, body, echoes)
                 }
                 (_, Some(Ok(out))) => {
+                    sketched = out.preview.clone();
                     say(
                         tx,
                         Event::ToolEnd {
-                            id: call.id.0.clone(),
+                            id: call.id.clone(),
                             name: call.name.clone(),
                             is_error: false,
                             preview: out.preview(),
@@ -852,7 +841,6 @@ impl Agent {
                     }
                     ToolResult {
                         call: call.id.clone(),
-                        provider: call.provider.clone(),
                         name: call.name.clone(),
                         content,
                         is_error: false,
@@ -861,34 +849,16 @@ impl Agent {
                 }
                 (_, None) => unreachable!("only rejected calls produce no output"),
             };
-            results.push(result);
+            results.push((result, sketched));
         }
 
         Ok(results)
     }
 }
 
-/// How many turns are left, said at two points on the way down.
-///
-/// A run that stops at the limit stops mid-work, and the model never saw it
-/// coming: the budget belongs to the caller and is stated nowhere the model can
-/// read. One that knows batches what is left instead of spending a turn per
-/// fix — which is how a run's whole budget goes on eight rebuilds and no finished task.
-fn turns_left(turn: usize, max: Option<usize>) -> Option<String> {
-    let max = max?;
-    match max.checked_sub(turn)? {
-        10 => Some(format!(
-            "[10 of {max} turns left. Batch what you can from here — \
-             one fix per turn will not fit in what remains.]"
-        )),
-        3 => Some("[3 turns left. Finish and answer now; the run stops after that.]".into()),
-        _ => None,
-    }
-}
-
 /// The scope a tool's own records land in, and what times it.
 fn ran(call: &ToolCall) -> tracing::Span {
-    tracing::info_span!(target: "pi::tool", "tool", name = %call.name, call = %call.id.0)
+    tracing::info_span!(target: "pi::tool", "tool", name = %call.name, call = %call.id)
 }
 
 /// Which way one call came back. The detection is the same either way; only the
@@ -913,8 +883,8 @@ fn failed(call: &ToolCall, mut body: String, echoes: &mut Echoes) -> ToolResult 
 /// Name a call that has come back identical too many times.
 ///
 /// A model that keeps making the same call and getting the same thing back is
-/// stuck, and without a turn limit it keeps going until being told so. Saying so is
-/// what breaks the loop. Failures count the same as answers: a patch refused
+/// stuck, and nothing else stops it — there is no turn limit, so saying so is
+/// the only brake. Failures count the same as answers: a patch refused
 /// for the same reason three running is the commonest way a session dies, and
 /// counting only the answers left exactly that case unnamed.
 fn repeat_notice(

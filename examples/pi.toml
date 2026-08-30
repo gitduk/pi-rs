@@ -4,140 +4,95 @@
 # ships something, and nothing in it would tell you which entries still
 # describe reality. What follows was measured against live endpoints on the
 # date in each comment; treat it as a starting point, not as current.
-
-[defaults]
-# Omit this when the file defines exactly one model — there is nothing else it
-# could mean.
-model = "flash"
-effort = "medium"      # off | low | medium | high
-tier = "exec"          # read | write | exec
-max_turns = 100        # cap per run; omit for no limit
+#
+# pi talks to one endpoint at a time, so the endpoint is this file. A model is
+# named the way that endpoint names it, and nothing else.
 
 # ---------------------------------------------------------------------------
-# A local proxy speaking the OpenAI wire.
+# The endpoint.
+#
+# `format` is the shape pi speaks, not the vendor: `anthropic` is the Messages
+# API, `openai` is the Responses API. Those are the two native shapes and pi
+# speaks nothing else — a server offering only /v1/chat/completions belongs
+# behind a gateway that translates.
 # ---------------------------------------------------------------------------
-[models.flash]
-# The table name is what goes on the wire. Set `wire_id` only to give `-m` a
-# shorter handle than the endpoint's own name for the model.
-base_url = "http://127.0.0.1:7896/v1"
-wire = "openai"
-context_window = 1_000_000
-max_output_tokens = 384_000
-thinking = "effort"    # effort (OpenAI-family) | budget (Anthropic) | omit
-# A local server usually wants any non-empty string. Anything actually secret
-# belongs in `api_key_env`, which names an environment variable instead.
-api_key = "x"
-
-[models.flash.pricing]
-input_per_mtok = 0.14
-output_per_mtok = 0.28
-cache_read_per_mtok = 0.0028
-
-# ---------------------------------------------------------------------------
-# Anthropic direct. Measured 2026-08.
-# ---------------------------------------------------------------------------
-[models.opus]
-wire_id = "claude-opus-5"
 base_url = "https://api.anthropic.com"
-wire = "anthropic"
-context_window = 200_000
+format   = "anthropic"           # anthropic | openai
+
+# A `$` reads the environment; anything else is the key itself. A literal key
+# beginning with `$` cannot be written here — put it in a variable.
+api_key  = "$ANTHROPIC_API_KEY"
+
+# Anthropic only, and off unless someone measured it: an unknown top-level
+# field is a 400 on some servers. `standard` is the 5-minute breakpoint,
+# `long_ttl` the 1-hour one.
+cache_control = "standard"
+
+# ---------------------------------------------------------------------------
+# What to run.
+# ---------------------------------------------------------------------------
+
+# What the endpoint calls the model. Omit it when the file describes exactly
+# one model — there is nothing else it could mean.
+model = "claude-sonnet-5"
+
+# Who writes the summary when history is compacted. Big input, small output,
+# little judgement — so it need not be the model doing the work. Defaults to
+# `model`.
+summarize_model = "claude-haiku-4-5"
+
+effort = "medium"                # off | low | medium | high
+tier   = "exec"                  # read | write | exec
+
+# Replaces the built-in system prompt. Rarely what you want: the built-in one
+# is what the tools were written against.
+# system = "~/.pi/system.md"
+
+# ---------------------------------------------------------------------------
+# Facts about a model the defaults get wrong.
+#
+# Every field below has a default, so a model needs an entry only where it
+# differs — and needs none at all to be usable. An unlisted name is passed
+# through to the endpoint with the defaults: a 128k window, 8k of output, no
+# pricing and no thinking.
+# ---------------------------------------------------------------------------
+
+# Measured 2026-08-14.
+[models."claude-sonnet-5"]
+context_window    = 200_000
 max_output_tokens = 64_000
-thinking = "budget"
-thinking_replay = "signed"
-vision = true
-cache_breakpoints = true
-api_key_env = "ANTHROPIC_API_KEY"
+vision            = true
+# How the model takes a thinking instruction, absent if it takes none.
+# `adaptive` is Claude 4.6+, `budget` 4.5 and earlier, `effort` the OpenAI
+# Responses control. Naming one the format cannot carry is refused at load.
+thinking          = "adaptive"
+# Claude 4.6+ and the OpenAI reasoning models reject every temperature but the
+# default, so the only request they accept is one that omits it.
+accepts_temperature = false
+pricing = { input_per_mtok = 3.0, output_per_mtok = 15.0, cache_read_per_mtok = 0.3, cache_write_per_mtok = 3.75 }
 
-[models.opus.pricing]
-input_per_mtok = 5.0
-output_per_mtok = 25.0
-cache_read_per_mtok = 0.5
-cache_write_per_mtok = 6.25
+# Measured 2026-08-14.
+[models."claude-haiku-4-5"]
+context_window    = 200_000
+max_output_tokens = 32_000
+thinking          = "budget"
+pricing = { input_per_mtok = 1.0, output_per_mtok = 5.0 }
 
-[models.opus.compat]
-# Rejected with a 400 on the newer Anthropic models.
-sampling_params = false
-
-# ---------------------------------------------------------------------------
-# DeepSeek behind its Anthropic-compatible shim. Every value below was measured
-# against the live endpoint in 2026-08, not inferred from the vendor it mimics.
-# ---------------------------------------------------------------------------
-[models.deepseek]
-wire_id = "deepseek-reasoner"
-base_url = "https://api.deepseek.com/anthropic"
-wire = "anthropic"
-context_window = 128_000
-# What we ask for, not a discovered ceiling: the endpoint accepts 200_000 and
-# silently clamps, so it reports no real limit.
-max_output_tokens = 32_768
-thinking = "budget"
-thinking_replay = "signed"
-cache_breakpoints = true
-api_key_env = "DEEPSEEK_API_KEY"
-
-[models.deepseek.compat]
-# `ttl: "1h"` is accepted without error, but nothing confirms it is honored;
-# plain ephemeral is the claim that can be defended.
-long_cache_retention = false
+# What becomes of reasoning another model produced, when the transcript moves
+# here by `/model`. `off` leaves it out — what the docs say to do, and the
+# cheapest. `tagged` wraps it in `<think>`, for models trained to read that.
+# Reasoning this model itself signed always replays as itself and is not
+# governed by this.
+[models."some-open-weights-model"]
+replay_thinking = "tagged"
 
 # ---------------------------------------------------------------------------
-# Every compat key, with the default each wire uses when it is not named.
-#
-#   anthropic: sampling_params = true, forced_tool_choice = true,
-#              tool_result_id_alias = false, long_cache_retention = true,
-#              adaptive_thinking = true
-#
-#   openai:    max_tokens_field = "max_completion_tokens",
-#              multiple_system_messages = true, mistral_tool_ids = false,
-#              assistant_after_tool_result = false, tool_result_name = false,
-#              reasoning_effort = false,
-#              reasoning_field = "reasoning_content",
-#              usage_in_streaming = true
-#
-# A key that is not one of these is refused at load with the list of the ones
-# that are: a typo otherwise leaves a quirk at its default and produces a 400
-# much later, pointing at nothing.
+# A second endpoint is not a config shape. Point `base_url` at the one you
+# want, or keep two files and pass `--config`.
 # ---------------------------------------------------------------------------
 
-# Theme. Every key is a Style: a colour, some text attributes, or both. A
-# plain string is shorthand for a colour alone; a table is the full form
-# { color = …, sgr = ["bold", "italic"] }, either half optional. Colours are
-# `#hex` (3 or 6 digits), an ANSI base code ("36") or `38;5;N`; attributes are
-# names — bold, dim, italic, underline, blink, reverse, strike — or any SGR
-# parameter list ("8") passed through unchanged. Anything not given keeps the
-# default shown; unknown keys and attributes are refused at load.
-# `prompt.icon` is the one value that is neither colour nor attribute.
-# [theme]
-# muted = { sgr = ["dim"] }
-# heading = { sgr = ["bold"] }
-# emphasis = { sgr = ["italic"] }
-# code = "#58a6ff"
-#
-# [theme.diff]
-# add = "#89d281"
-# del = "#fc3a4b"
-#
-# [theme.status]
-# ok = "#89d281"
-# err = "#fc3a4b"
-#
-# [theme.menu]
-# selected = { sgr = ["reverse"] }
-#
-# [theme.prompt]
-# color = "36"
-# icon = "›"
-
-# Keys. An id here replaces that action's defaults rather than adding to them,
-# because a default that could only be buried and never removed is not really
-# configurable. `/keys` lists every id with what it is bound to.
-#
-# The namespace decides when a binding is live: edit.* and move.* whenever you
-# are typing, menu.* only with the completion list open, run.* only during a
-# turn. Two actions may share a key when they are never live together — `up` is
-# menu.previous with the list open and history.older without it. Sharing one
-# within a context is refused at load, as is an unknown id.
-# ---------------------------------------------------------------------------
-# [keys]
-# "app.clear-screen" = "ctrl+g"
-# "move.line.start"  = ["home", "f5"]
+[keys]
+# An entry replaces that action's defaults rather than adding to them.
+"menu.accept"   = ["tab"]
+"menu.next"     = ["down", "ctrl+n"]
+"menu.previous" = ["up", "ctrl+p"]

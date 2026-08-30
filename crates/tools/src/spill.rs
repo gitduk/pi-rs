@@ -115,7 +115,7 @@ pub fn prune(body: &str) -> String {
     let half = MAX_OUTPUT / 2;
     let (h, t) = (head_bytes(body, half), tail_bytes(body, half));
     let dropped = body.len() - h.len() - t.len();
-    format!("{h}\n… {dropped} bytes elided …\n{t}")
+    format!("{h}\n… {dropped} bytes omitted …\n{t}")
 }
 
 /// The `<label>`-wrapped form bash uses for stdout and stderr. Under the
@@ -176,7 +176,7 @@ mod tests {
         let got = prune(&body);
         assert!(got.ends_with("head-line\n"), "{got}");
 
-        assert!(got.contains("bytes elided"), "{got}");
+        assert!(got.contains("bytes omitted"), "{got}");
         assert!(got.len() < body.len(), "prune must shrink");
     }
 }

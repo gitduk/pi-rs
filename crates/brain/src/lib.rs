@@ -1,4 +1,4 @@
-pub mod catalog;
+pub mod model;
 pub mod error;
 pub mod estimate;
 pub mod fault;
@@ -8,11 +8,11 @@ pub mod slice;
 pub mod stream;
 pub mod transport;
 
-pub use catalog::{Capabilities, ModelSpec, ThinkingReplay, Wire};
+pub use model::{Format, ModelSpec, ReplayThinking};
 pub use error::{BrainError, Result};
 pub use fault::{Fault, classify};
 pub use message::{
-    AssistantContent, Message, ProviderCallId, ToolCall, ToolCallId, ToolResult, UserContent,
+    AssistantContent, Message, ToolCall, ToolResult, UserContent,
 };
 pub use request::{Effort, Request, ToolChoice, ToolDef};
 pub use stream::{Accumulator, Completion, StopReason, StreamEvent, Usage};

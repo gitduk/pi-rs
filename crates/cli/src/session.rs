@@ -1,15 +1,23 @@
 use std::path::{Path, PathBuf};
 
 use agent::session::Session;
+/// The clock this crate dates transcripts by — the session's own, so a file
+/// and the entries inside it are never stamped by two.
+pub use agent::session::now;
 use anyhow::{Context, Result};
-use brain::message::Message;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Stored {
     pub id: String,
     pub workspace: String,
+    /// Which model this session ran, as the endpoint names it. One name for
+    /// it everywhere now: the archive used to spell it differently from the
+    /// config and from the wire, and was the one place a reader could not tell
+    /// the three apart.
     pub model: String,
+    /// When the session began. Rewritten on every save it would be a
+    /// last-touched time under a name that says otherwise.
     pub created: u64,
     /// What the user calls this session. Ids are a timestamp and a pid, which
     /// nobody recognises a week later.
@@ -17,9 +25,62 @@ pub struct Stored {
     pub name: Option<String>,
     #[serde(flatten, default)]
     pub session: Session,
-    /// Transcripts written before the log existed. Read, never written.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    messages: Vec<Message>,
+}
+
+/// An archive read only as far as the listing needs.
+///
+/// The identity fields are required, exactly as `Stored` requires them, so a
+/// session that lists is a session that loads. Everything under them is
+/// optional and shallow: `serde` skips a field no struct here names without
+/// building it, and what it skips is the whole of the transcript.
+#[derive(Deserialize)]
+struct Peek {
+    id: String,
+    workspace: String,
+    /// Unused, and required anyway: it is what separates an archive this build
+    /// can resume from one written before the provider rename.
+    #[allow(dead_code)]
+    model: String,
+    #[serde(default)]
+    created: u64,
+    #[serde(default)]
+    entries: Vec<PeekEntry>,
+}
+
+#[derive(Deserialize)]
+struct PeekEntry {
+    #[serde(default)]
+    at: u64,
+    #[serde(default)]
+    body: Option<PeekBody>,
+}
+
+#[derive(Deserialize)]
+struct PeekBody {
+    #[serde(rename = "type", default)]
+    kind: String,
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    shown: Option<String>,
+}
+
+impl Peek {
+    /// When this session was last worked on, which is what `/resume` sorts by.
+    fn touched(&self) -> u64 {
+        self.entries.last().map_or(self.created, |e| e.at)
+    }
+
+    /// The first thing the user asked, which is what the list shows in place
+    /// of an id. A `!` command's output is not it.
+    fn opening(&self) -> Option<String> {
+        self.entries
+            .iter()
+            .filter_map(|e| e.body.as_ref())
+            .find(|b| b.kind == "prompt")
+            .map(|b| b.shown.clone().unwrap_or_else(|| b.text.clone()))
+            .filter(|t| !t.is_empty())
+    }
 }
 
 /// A saved session as the resume list and its completion see it: the id it is
@@ -33,34 +94,9 @@ pub struct ResumeChoice {
 }
 
 impl Stored {
-    /// The transcript, whichever shape it was stored in.
     pub fn into_session(self) -> Session {
-        if self.session.is_empty() && !self.messages.is_empty() {
-            Session::from_messages(self.messages)
-        } else {
-            self.session
-        }
+        self.session
     }
-}
-impl Stored {
-    /// The first thing the user asked this session, if anything. What the
-    /// resume list shows in place of the id.
-    pub fn first_prompt(&self) -> Option<String> {
-        if let Some(prompt) = self.session.first_prompt() {
-            return Some(prompt);
-        }
-        self.messages
-            .iter()
-            .find_map(|m| matches!(m, Message::User { .. }).then(|| m.text()))
-            .filter(|t| !t.is_empty())
-    }
-}
-
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 /// Where transcripts live. Held as a value rather than read from the
@@ -95,12 +131,16 @@ impl Store {
         self.root.join(format!("{}.json", tools::state::file_stem(id)))
     }
 
+    /// `created` is the caller's because it is set once and never changes.
+    /// Reading it back off disk here meant parsing the whole transcript to
+    /// recover one integer — on every turn, growing with the session it saved.
     pub fn save(
         &self,
         id: &str,
         workspace: &Path,
         model: &str,
         name: Option<&str>,
+        created: u64,
         session: &Session,
     ) -> Result<PathBuf> {
         std::fs::create_dir_all(&self.root)?;
@@ -110,10 +150,9 @@ impl Store {
             id: id.to_string(),
             workspace: workspace.display().to_string(),
             model: model.to_string(),
-            created: now(),
+            created,
             name: name.map(str::to_string),
             session: session.clone(),
-            messages: Vec::new(),
         };
 
         // Rename, so a crash mid-write cannot leave a truncated transcript.
@@ -136,11 +175,19 @@ impl Store {
         Ok(serde_json::from_str(&body)?)
     }
 
-    /// Every session recorded for this workspace, newest first. What `latest`
-    /// returns is the top of this list.
-    pub fn list(&self, workspace: &Path) -> Vec<Stored> {
+    /// Every session recorded for this workspace, newest first, read as
+    /// shallowly as the answer allows.
+    ///
+    /// A listing needs four fields and one sentence. Reading each archive as a
+    /// whole `Stored` to get them meant deserializing every reasoning block and
+    /// every tool result in every session — 44 MB on one developer's machine,
+    /// and it grows every day pi is used. `Peek` takes the same identity fields
+    /// `load` requires, so what the list accepts is exactly what can be
+    /// resumed; the entries below them are read shallowly, because their shape
+    /// is not the list's business.
+    fn peek(&self, workspace: &Path) -> Vec<Peek> {
         let want = workspace.display().to_string();
-        let mut found: Vec<Stored> = std::fs::read_dir(&self.root)
+        let mut found: Vec<Peek> = std::fs::read_dir(&self.root)
             .into_iter()
             .flatten()
             .flatten()
@@ -149,11 +196,27 @@ impl Store {
                     return None;
                 }
                 let body = std::fs::read_to_string(entry.path()).ok()?;
-                let stored = serde_json::from_str::<Stored>(&body).ok()?;
-                (stored.workspace == want).then_some(stored)
+                // Said rather than skipped. A transcript this build cannot read
+                // is still on disk, and swallowing it makes "unreadable" look
+                // exactly like "you have no sessions".
+                match serde_json::from_str::<Peek>(&body) {
+                    Ok(peek) => (peek.workspace == want).then_some(peek),
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "pi::session",
+                            path = %entry.path().display(),
+                            error = %e,
+                            "unreadable transcript skipped"
+                        );
+                        None
+                    }
+                }
             })
             .collect();
-        found.sort_by_key(|s| std::cmp::Reverse(s.created));
+        // Newest by last activity, not by creation. `/resume` is reached for
+        // to pick up where you left off, and a session started last week and
+        // worked on this morning is the one you mean.
+        found.sort_by_key(|p| std::cmp::Reverse(p.touched()));
         found
     }
 
@@ -161,25 +224,26 @@ impl Store {
     /// reduced to what the list and its completion show: the id it is named
     /// by and its first prompt.
     pub fn choices(&self, workspace: &Path) -> Vec<ResumeChoice> {
-        self.list(workspace)
+        self.peek(workspace)
             .into_iter()
-            .map(|s| {
-                let prompt = s.first_prompt().unwrap_or_default();
-                ResumeChoice {
-                    id: s.id,
-                    prompt,
-                    created: s.created,
-                }
+            .map(|p| ResumeChoice {
+                prompt: p.opening().unwrap_or_default(),
+                id: p.id,
+                created: p.created,
             })
             .collect()
     }
 
-    /// Most recent session recorded for this workspace: the top of `list`.
+    /// Most recent session recorded for this workspace, read in full — it is
+    /// about to be resumed, which is the one time the whole transcript is
+    /// wanted.
     pub fn latest(&self, workspace: &Path) -> Result<Stored> {
-        self.list(workspace)
+        let newest = self
+            .peek(workspace)
             .into_iter()
             .next()
-            .with_context(|| format!("no session recorded for {}", workspace.display()))
+            .with_context(|| format!("no session recorded for {}", workspace.display()))?;
+        self.load(&newest.id)
     }
 }
 
@@ -192,7 +256,7 @@ mod tests {
     }
 
     use super::*;
-    use brain::message::{AssistantContent, ToolCall, ToolCallId};
+    use brain::message::{AssistantContent, Message, ToolCall};
     use serde_json::json;
 
     fn log_with(messages: Vec<Message>) -> Session {
@@ -201,10 +265,8 @@ mod tests {
 
     fn call(name: &str) -> Message {
         Message::Assistant {
-            id: None,
             content: vec![AssistantContent::ToolCall(ToolCall {
-                id: ToolCallId("c1".into()),
-                provider: None,
+                id: "c1".into(),
                 name: name.into(),
                 args: json!({}),
             })],
@@ -213,7 +275,7 @@ mod tests {
 
     fn results() -> Message {
         Message::tool_results(vec![brain::message::ToolResult::text(
-            ToolCallId("c1".into()),
+            "c1",
             "read",
             "body",
         )])
@@ -230,6 +292,7 @@ mod tests {
                 std::path::Path::new("/w"),
                 "test-model",
                 Some("the flaky test"),
+                7,
                 &log,
             )
             .unwrap();
@@ -262,7 +325,7 @@ mod tests {
         let store = Store::new(tmp.path());
         let log = log_with(vec![Message::user("go"), call("read"), results()]);
         store
-            .save("t", std::path::Path::new("/w"), "m", None, &log)
+            .save("t", std::path::Path::new("/w"), "m", None, 1, &log)
             .unwrap();
 
         let back = store.load("t").unwrap().into_session();
@@ -279,41 +342,28 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::new(tmp.path());
         let mut log = log_with(vec![Message::user("go"), call("read"), results()]);
+        // The result is its own entry now, so the omission names that entry.
+        let target = log.view().last().unwrap().id();
         log.record(agent::session::Compaction {
-            elisions: vec![agent::session::Elision {
-                call: ToolCallId("c1".into()),
+            omissions: vec![agent::session::Omission {
+                block: None,
+                entry: target,
                 notice: "[gone]".into(),
             }],
             ..Default::default()
         });
         store
-            .save("t", std::path::Path::new("/w"), "m", None, &log)
+            .save("t", std::path::Path::new("/w"), "m", None, 1, &log)
             .unwrap();
 
         let back = store.load("t").unwrap().into_session();
-        // The view is shrunk, and the body that was elided is still on disk.
+        // The view is shrunk, and the body that was omitted is still on disk.
         assert!(format!("{:?}", back.context()[2]).contains("[gone]"));
         assert!(
-            back.messages()
-                .any(|(_, m)| format!("{m:?}").contains("body"))
+            back.entries()
+                .iter()
+                .any(|e| format!("{e:?}").contains("body"))
         );
-    }
-
-    #[test]
-    fn a_transcript_written_before_the_log_existed_still_loads() {
-        let tmp = tempfile::tempdir().unwrap();
-        let store = Store::new(tmp.path());
-        std::fs::create_dir_all(tmp.path()).unwrap();
-        std::fs::write(
-            store.path("old"),
-            r#"{"id":"old","workspace":"/w","model":"m","created":1,
-                "messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}"#,
-        )
-        .unwrap();
-
-        let log = store.load("old").unwrap().into_session();
-        assert_eq!(log.context().len(), 1);
-        assert_eq!(log.context()[0].text(), "hi");
     }
 
     #[test]
@@ -322,10 +372,10 @@ mod tests {
         let store = Store::new(tmp.path());
         let log = log_with(vec![Message::user("x")]);
         store
-            .save("old", std::path::Path::new("/a"), "m", None, &log)
+            .save("old", std::path::Path::new("/a"), "m", None, 1, &log)
             .unwrap();
         store
-            .save("other", std::path::Path::new("/b"), "m", None, &log)
+            .save("other", std::path::Path::new("/b"), "m", None, 1, &log)
             .unwrap();
 
         // `created` has one-second resolution, so newness is forced explicitly.
@@ -348,13 +398,13 @@ mod tests {
         let store = Store::new(tmp.path());
         let log = log_with(vec![Message::user("x")]);
         store
-            .save("a", std::path::Path::new("/w"), "m", None, &log)
+            .save("a", std::path::Path::new("/w"), "m", None, 1, &log)
             .unwrap();
         store
-            .save("b", std::path::Path::new("/w"), "m", None, &log)
+            .save("b", std::path::Path::new("/w"), "m", None, 1, &log)
             .unwrap();
         store
-            .save("c", std::path::Path::new("/other"), "m", None, &log)
+            .save("c", std::path::Path::new("/other"), "m", None, 1, &log)
             .unwrap();
 
         // `created` has one-second resolution, so newness is forced explicitly.
@@ -364,17 +414,17 @@ mod tests {
         std::fs::write(store.path("newest"), serde_json::to_vec(&stored).unwrap()).unwrap();
 
         let ids: Vec<String> = store
-            .list(std::path::Path::new("/w"))
+            .choices(std::path::Path::new("/w"))
             .iter()
-            .map(|s| s.id.clone())
+            .map(|c| c.id.clone())
             .collect();
         assert_eq!(ids, ["newest", "b", "a"]);
         // Another workspace's sessions stay out.
         assert!(
             store
-                .list(std::path::Path::new("/other"))
+                .choices(std::path::Path::new("/other"))
                 .iter()
-                .all(|s| s.id == "c")
+                .all(|c| c.id == "c")
         );
     }
 
@@ -387,17 +437,17 @@ mod tests {
             Message::assistant_text("there"),
         ]);
         store
-            .save("a", std::path::Path::new("/w"), "m", None, &asked)
+            .save("a", std::path::Path::new("/w"), "m", None, 1, &asked)
             .unwrap();
         // A session that never got a prompt has nothing to resume to by name.
         store
-            .save("b", std::path::Path::new("/w"), "m", None, &Session::new())
+            .save("b", std::path::Path::new("/w"), "m", None, 1, &Session::new())
             .unwrap();
 
         let got = store.choices(std::path::Path::new("/w"));
-        assert_eq!(got.len(), 2);
-        assert_eq!(got[0].id, "b"); // newest first, even when it has no prompt
-        assert_eq!(got[0].prompt, "");
-        assert_eq!(got[1].prompt, "why is the flaky test flaky?");
+        assert_eq!(got.len(), 2, "a session with no prompt is still resumable");
+        let by = |id: &str| got.iter().find(|c| c.id == id).expect(id);
+        assert_eq!(by("a").prompt, "why is the flaky test flaky?");
+        assert_eq!(by("b").prompt, "", "nothing to name it by, and that is fine");
     }
 }

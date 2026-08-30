@@ -168,11 +168,16 @@ impl Tool for TodoTool {
         let mut items = args.items;
         normalize(&mut items);
 
-        let body = render(&items);
+        // An acknowledgement, not the list. The list reaches the model as a
+        // note on the next request, recomputed from the stored plan — echoing
+        // it here too would put one copy per call in the transcript, every one
+        // of them stale the moment the next call lands.
         let open = items.iter().filter(|t| !t.status.closed()).count();
+        let total = items.len();
         *ctx.todos.lock().expect("todo list poisoned") = items;
 
-        Ok(ToolOutput::text(body).with_preview(format!("{open} open")))
+        Ok(ToolOutput::text(format!("Recorded: {open} of {total} open."))
+            .with_preview(format!("{open} open")))
     }
 }
 

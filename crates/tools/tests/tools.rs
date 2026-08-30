@@ -226,7 +226,7 @@ async fn multibyte_output_respects_the_byte_budget_and_stays_valid_utf8() {
     )
     .await;
     assert!(
-        out.contains("bytes elided"),
+        out.contains("bytes omitted"),
         "{}",
         &out[..80.min(out.len())]
     );
@@ -264,23 +264,6 @@ async fn edit_applies_a_patch_anchored_to_the_tag_read_returned() {
 }
 
 #[tokio::test]
-async fn edit_result_carries_a_unified_patch_and_the_first_changed_line() {
-    let (_d, c) = ctx();
-    std::fs::write(c.workspace.root().join("a.rs"), "one\ntwo\nthree\n").unwrap();
-    let out = tools::edit::Edit
-        .execute(
-            json!({ "patch": format!("[a.rs#{}]\nPUT 2:\n+TWO\n", hashline::tag("one\ntwo\nthree\n")) }),
-            &c,
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        out.patch.as_deref(),
-        Some("--- a/a.rs\n+++ b/a.rs\n@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three\n")
-    );
-}
-
-#[tokio::test]
 async fn edit_writes_new_rows_with_the_files_line_ending() {
     let (_d, c) = ctx();
     std::fs::write(c.workspace.root().join("a.rs"), "one\r\ntwo\r\nthree\r\n").unwrap();
@@ -295,7 +278,7 @@ async fn edit_writes_new_rows_with_the_files_line_ending() {
         .unwrap();
     let written = std::fs::read_to_string(c.workspace.root().join("a.rs")).unwrap();
     assert_eq!(written, "one\r\nTWO\r\nthree\r\n");
-    assert!(out.patch.is_some(), "a real change carries a patch");
+    assert!(out.preview.is_some(), "a real change sketches what it did");
 }
 
 const THREE_FNS: &str = "\
@@ -865,14 +848,14 @@ async fn an_over_long_output_is_kept_somewhere_the_model_can_reach() {
     .await;
 
     assert!(
-        out.contains("bytes elided"),
+        out.contains("bytes omitted"),
         "{}",
         &out[..90.min(out.len())]
     );
     let locator = out
         .lines()
         .find_map(|l| l.strip_prefix("full output: ").and_then(|l| l.split(' ').next()))
-        .expect("the elided middle must be recoverable");
+        .expect("the omitted middle must be recoverable");
     let whole = std::fs::read_to_string(c.spill_path(locator).unwrap()).unwrap();
     assert!(
         whole.contains("MIDDLE_MARKER"),
@@ -897,7 +880,7 @@ async fn read_spills_an_over_long_view_and_reads_it_back_by_locator() {
         .await
         .unwrap()
         .flatten();
-    assert!(out.contains("bytes elided"), "{out}");
+    assert!(out.contains("bytes omitted"), "{out}");
     let locator = out
         .lines()
         .find_map(|l| l.strip_prefix("full output: ").and_then(|l| l.split(' ').next()))

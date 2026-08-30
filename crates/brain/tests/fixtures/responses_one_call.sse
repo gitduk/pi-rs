@@ -1,0 +1,20 @@
+event: response.created
+data: {"response":{"created_at":1788133305,"id":"021788133305260534779bc6a83ab3f36a7a90c1e71ba3593b7f5","model":"deepseek-v4-flash","object":"response","output":[],"status":"in_progress"},"type":"response.created"}
+event: response.in_progress
+data: {"response":{"created_at":1788133305,"id":"021788133305260534779bc6a83ab3f36a7a90c1e71ba3593b7f5","model":"deepseek-v4-flash","object":"response","output":[],"status":"in_progress"},"type":"response.in_progress"}
+event: response.output_item.added
+data: {"item":{"arguments":"","call_id":"call_rxzy3x1fzw4hwubddvut2b9p","id":"fc_167d33a1-4455-47c5-a8f9-47390b83c8b0","name":"read","status":"in_progress","type":"function_call"},"output_index":0,"type":"response.output_item.added"}
+event: response.function_call_arguments.delta
+data: {"delta":"{\"path\": \"","item_id":"fc_167d33a1-4455-47c5-a8f9-47390b83c8b0","output_index":0,"type":"response.function_call_arguments.delta"}
+event: response.function_call_arguments.delta
+data: {"delta":"a","item_id":"fc_167d33a1-4455-47c5-a8f9-47390b83c8b0","output_index":0,"type":"response.function_call_arguments.delta"}
+event: response.function_call_arguments.delta
+data: {"delta":".txt","item_id":"fc_167d33a1-4455-47c5-a8f9-47390b83c8b0","output_index":0,"type":"response.function_call_arguments.delta"}
+event: response.function_call_arguments.delta
+data: {"delta":"\"","item_id":"fc_167d33a1-4455-47c5-a8f9-47390b83c8b0","output_index":0,"type":"response.function_call_arguments.delta"}
+event: response.function_call_arguments.delta
+data: {"delta":"}","item_id":"fc_167d33a1-4455-47c5-a8f9-47390b83c8b0","output_index":0,"type":"response.function_call_arguments.delta"}
+event: response.output_item.done
+data: {"item":{"call_id":"call_rxzy3x1fzw4hwubddvut2b9p","id":"fc_167d33a1-4455-47c5-a8f9-47390b83c8b0","status":"completed","type":"function_call"},"output_index":0,"type":"response.output_item.done"}
+event: response.completed
+data: {"response":{"created_at":1788133305,"id":"021788133305260534779bc6a83ab3f36a7a90c1e71ba3593b7f5","model":"deepseek-v4-flash-ga-260731","object":"response","status":"completed","usage":{"input_tokens":1007,"output_tokens":16,"total_tokens":1023}},"type":"response.completed"}

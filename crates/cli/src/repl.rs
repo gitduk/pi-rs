@@ -269,6 +269,10 @@ pub struct Repl {
     pub store: Store,
     pub session: Session,
     pub id: String,
+    /// When this session began. Held rather than read back: it is set once and
+    /// never changes, and going to disk for it made every save parse the whole
+    /// transcript to recover one integer.
+    pub created: u64,
     /// What the user calls this session, if anything.
     pub name: Option<String>,
     /// Held so `/keys` can show what is actually in force, overrides included.
@@ -279,6 +283,10 @@ pub struct Repl {
     /// The command line, kept because it outranks the config and so has to be
     /// re-applied over every reload.
     pub args: std::sync::Arc<crate::Args>,
+    /// The instruction files this run stands on, named as a person would.
+    /// Shown under the banner; rebuilt by `/reload` like everything else the
+    /// config decides.
+    pub context: Vec<String>,
     /// What a slash answers to, built-ins and skills together. Rebuilt by
     /// `/reload`, because a skill can appear between one turn and the next.
     ///
@@ -323,7 +331,7 @@ impl Repl {
         self.agent.approver = std::sync::Arc::new(agent::Ceiling(resolved.tier));
         self.agent.system = resolved.system;
         self.agent.effort = resolved.effort;
-        self.agent.max_turns = resolved.max_turns;
+        self.context = resolved.context;
         self.keys = std::sync::Arc::new(resolved.keys);
         // A skill can appear between one turn and the next, so the table of
         // what a slash answers to is recomputed like everything else here.
@@ -335,10 +343,9 @@ impl Repl {
 
         tracing::info!(
             target: "pi::session",
-            models = self.config.models.len(),
+            models = self.config.names().len(),
             rebound_keys = self.config.keys.len(),
             commands = self.commands.len(),
-            max_turns = self.agent.max_turns,
             effort = ?self.agent.effort,
             system_bytes = self.agent.system.len(),
             prompt_changed = changed,
@@ -358,24 +365,14 @@ impl Repl {
     }
 
     /// The models `/model` can reach, with what tells them apart.
-    ///
-    /// Empty under `--wire`: the command line named one endpoint directly and
-    /// the config is not consulted, so there is no list to pick from — only a
-    /// wire id to type.
     pub fn choices(&self) -> Vec<Choice> {
-        if self.args.wire.is_some() {
-            return Vec::new();
-        }
+        let format = self.config.format.map(|f| f.name()).unwrap_or_default();
         self.config
             .models
             .iter()
             .map(|(name, entry)| Choice {
                 name: name.clone(),
-                note: summary(
-                    entry.wire.transport_name(),
-                    entry.context_window,
-                    &entry.pricing,
-                ),
+                note: summary(format, entry.context_window, &entry.pricing),
             })
             .collect()
     }
@@ -401,7 +398,7 @@ impl Repl {
         ) {
             Ok(d) => d,
             Err(e) => {
-                let held = self.agent.spec.id.clone();
+                let held = self.agent.spec.model.clone();
                 return vec![format!("still on {held} — {}", refused("switch", e))];
             }
         };
@@ -410,24 +407,24 @@ impl Repl {
         // lands on need not be the same string. Comparing the typed one would
         // re-dial the model already running and then announce a reasoning
         // demotion that never happened.
-        if dialled.spec.id == self.agent.spec.id {
-            return vec![format!("already on {}", self.agent.spec.id)];
+        if dialled.spec.model == self.agent.spec.model {
+            return vec![format!("already on {}", self.agent.spec.model)];
         }
         let mut said: Vec<String> = dialled.warning.into_iter().chain(dialled.notes).collect();
         let spec = &dialled.spec;
         said.push(format!(
             "now on {} · {}",
-            spec.id,
-            summary(spec.transport_name(), spec.context_window, &spec.pricing)
+            spec.model,
+            summary(spec.format.name(), spec.context_window, &spec.pricing)
         ));
         if carries_reasoning(&self.session) {
-            said.push(demotion(spec.thinking_replay).into());
+            said.push(demotion(spec.replay_thinking).into());
         }
         tracing::info!(
             target: "pi::session",
-            from = %self.agent.spec.id,
-            to = %spec.id,
-            wire = spec.transport_name(),
+            from = %self.agent.spec.model,
+            to = %spec.model,
+            format = spec.format.name(),
             context_window = spec.context_window,
             "model switched"
         );
@@ -437,17 +434,7 @@ impl Repl {
 
     /// What `/model` on its own shows.
     fn listing(&self) -> Vec<String> {
-        let here = &self.agent.spec.id;
-        // Two different reasons the list can be empty, and reporting the wrong
-        // one sends the reader to the wrong file.
-        if self.args.wire.is_some() {
-            return vec![
-                format!("on {here}, at the endpoint --base-url named"),
-                "--wire bypasses ~/.pi.toml, so `/model <id>` asks that same endpoint \
-                 for another of its models"
-                    .into(),
-            ];
-        }
+        let here = &self.agent.spec.model;
         let choices = self.choices();
         if choices.is_empty() {
             return vec![
@@ -471,23 +458,24 @@ impl Repl {
         self.store.save(
             &self.id,
             self.ctx.workspace.root(),
-            &self.agent.spec.id,
+            &self.agent.spec.model,
             self.name.as_deref(),
+            self.created,
             &self.session,
         )?;
         Ok(())
     }
 
     /// Rewind the conversation to a user message and write the shorter
-    /// transcript back. How many entries were dropped; an unknown id drops
-    /// nothing.
+    /// transcript back. How many entries were removed from it; an unknown id
+    /// removes nothing.
     pub fn rewind_to(&mut self, user: agent::session::EntryId) -> anyhow::Result<usize> {
-        let dropped = self.session.rollback_to(user);
-        if dropped == 0 {
+        let removed = self.session.rollback_to(user);
+        if removed == 0 {
             return Ok(0);
         }
         self.save()?;
-        Ok(dropped)
+        Ok(removed)
     }
 }
 
@@ -495,9 +483,10 @@ impl Repl {
 /// holds, and what it costs where that is known.
 ///
 /// Takes the three pieces rather than a config entry, because the running model
-/// may never have been one — an ad-hoc `--wire` spec has no entry to read.
-fn summary(wire: &str, window: u32, p: &brain::catalog::Pricing) -> String {
-    let mut parts = vec![wire.to_string(), format!("{}k", window / 1000)];
+/// may never have been one — a name passed through with default numbers has no
+/// entry to read.
+fn summary(format: &str, window: u32, p: &brain::model::Pricing) -> String {
+    let mut parts = vec![format.to_string(), format!("{}k", window / 1000)];
     if p.input_per_mtok > 0.0 || p.output_per_mtok > 0.0 {
         parts.push(format!(
             "${:.2}/${:.2} per Mtok",
@@ -512,12 +501,11 @@ fn summary(wire: &str, window: u32, p: &brain::catalog::Pricing) -> String {
 /// Only ever asked about a model that did not write it — the origin recorded on
 /// each block cannot match after a switch — so the signed path is out and one of
 /// these three is what the transport will do with it.
-fn demotion(replay: brain::catalog::ThinkingReplay) -> &'static str {
-    use brain::catalog::ThinkingReplay as R;
+fn demotion(replay: brain::model::ReplayThinking) -> &'static str {
+    use brain::model::ReplayThinking as R;
     match replay {
-        R::Signed | R::BareProse => "reasoning from the earlier turns replays as plain text",
         R::Tagged => "reasoning from the earlier turns replays wrapped in <think> tags",
-        R::Drop => "reasoning from the earlier turns is dropped rather than replayed",
+        R::Off => "reasoning from the earlier turns is dropped rather than replayed",
     }
 }
 
@@ -527,11 +515,13 @@ fn demotion(replay: brain::catalog::ThinkingReplay) -> &'static str {
 /// survive intact, and a model that suddenly reads its own earlier thinking as
 /// quoted prose is otherwise an unexplained change in tone.
 fn carries_reasoning(session: &agent::session::Session) -> bool {
-    // `live`, not `messages`: what compaction has already dropped is not going
-    // to reach the new model in any form, demoted or otherwise.
-    session.live().iter().any(|(_, m)| {
-        matches!(m, brain::message::Message::Assistant { content, .. }
-            if content.iter().any(|b| matches!(b, brain::message::AssistantContent::Reasoning(_))))
+    // The view, not every entry: what compaction has already dropped is not
+    // going to reach the new model in any form, demoted or otherwise.
+    session.view().iter().any(|s| {
+        s.entry().blocks().is_some_and(|bs| {
+            bs.iter()
+                .any(|b| matches!(b, brain::message::AssistantContent::Reasoning(_)))
+        })
     })
 }
 
@@ -619,7 +609,10 @@ fn dispatch(commands: &[Command], word: &str, args: &str) -> Step {
         return lines(format!("unknown command {word} — /help lists them"));
     };
     match expanded(skill, args) {
-        Ok(text) => Step::Prompt(text),
+        Ok(send) => Step::Prompt {
+            typed: Some(format!("/{} {args}", skill.name).trim_end().to_string()),
+            send,
+        },
         Err(why) => lines(why),
     }
 }
@@ -690,7 +683,14 @@ pub enum Step {
     /// A `!` command to run. The surface executes it and records the result,
     /// because only it can await; `Repl::bash` does the actual work.
     Bash(String),
-    Prompt(String),
+    /// What to send, and — when a skill expanded into it — the line that was
+    /// typed. `prompts()` reads the second: a rewind menu offering four
+    /// thousand characters of `SKILL.md` is offering the wrong thing, and so
+    /// is a session named after one.
+    Prompt {
+        send: String,
+        typed: Option<String>,
+    },
     /// Needs the network, so the surface runs it and reports.
     Compact(Option<String>),
     /// Dealt with here; these lines are what there is to show for it. Returned
@@ -730,7 +730,10 @@ impl Repl {
             return Step::Bash(command.to_string());
         }
         let Some(cmd) = parse(line) else {
-            return Step::Prompt(line.to_string());
+            return Step::Prompt {
+                send: line.to_string(),
+                typed: None,
+            };
         };
         match cmd {
             Cmd::Exit => Step::Quit,
@@ -780,13 +783,25 @@ impl Repl {
 
     /// Drop the in-memory conversation and open a fresh session under a new
     /// id. The plan goes too; the old transcript stays on disk.
+    /// Become the session this id names: the stamp that dates it, the journal
+    /// it writes to, and the namespace its spills are filed under.
+    ///
+    /// One place because the id and the stamp always travel together and the
+    /// two callers each set what the other did not — `created` was the one
+    /// that got missed, and a resumed session was then re-dated on its next
+    /// save with the stamp of the session it had just left.
+    fn becomes(&mut self, id: String, created: u64) {
+        self.id = id;
+        self.created = created;
+        crate::journal::switched(&self.id);
+        // Spills are filed under the session id; a session has to own its own
+        // namespace or the one before it keeps swallowing them.
+        self.ctx = self.ctx.clone().with_session(&self.id);
+    }
+
     fn fresh_session(&mut self, said: &str) -> Vec<String> {
         self.session = Session::default();
-        self.id = crate::session::new_id();
-        crate::journal::switched(&self.id);
-        // Spills are filed under the session id; a fresh one has to own its
-        // own namespace or the old session keeps swallowing them.
-        self.ctx = self.ctx.clone().with_session(&self.id);
+        self.becomes(crate::session::new_id(), crate::session::now());
         if let Ok(mut held) = self.ctx.todos.lock() {
             held.clear();
         }
@@ -852,16 +867,10 @@ impl Repl {
             tracing::warn!(target: "pi::session", error = %e, "resume could not save the leaving session");
         }
         let stored = self.store.load(id).map_err(|e| refused("resume", e))?;
-        let resumed_id = stored.id.clone();
-        let name = stored.name.clone();
+        let (resumed_id, name, created) = (stored.id.clone(), stored.name.clone(), stored.created);
         self.session = stored.into_session();
-        self.id = resumed_id;
         self.name = name;
-        crate::journal::switched(&self.id);
-        // The resumed id owns its spills, and a resumed session must rejoin
-        // them (the invariant `with_session` promises) instead of keeping the
-        // namespace the process happened to start with.
-        self.ctx = self.ctx.clone().with_session(&self.id);
+        self.becomes(resumed_id, created);
         let mut said = vec![format!("resumed {}", self.id)];
         if let Some(name) = self.name.as_deref() {
             said.push(format!("“{name}”"));
@@ -893,7 +902,17 @@ impl Repl {
                 &body
             }
         );
-        self.session.push(brain::message::Message::user(text));
+        // What the model reads is the command *and its output*; what the
+        // screen shows is the line the user typed. Storing only the first left
+        // the rebuilt scrollback printing `Ran \`git status\`` as a prompt,
+        // with the output indented under it — the live path never did that,
+        // because it had the typed line and the rebuild did not.
+        self.session.push_user(agent::session::UserBody::Aside(
+            agent::session::UserText {
+                text,
+                shown: Some(format!("!{command}")),
+            },
+        ));
         let mut said: Vec<String> = body
             .lines()
             // The tags wrap the model's copy; the terminal shows the output
@@ -914,6 +933,7 @@ mod tests {
         BUILTIN, Candidate, Choice, Cmd, Command, ResumeChoice, Source, Step, ago, bash_command,
         commands, complete, dispatch, expand, gist, help, parse,
     };
+    use agent::session::{Entry, Session, UserBody, UserText};
     use tools::skills::Skill;
 
     #[test]
@@ -1016,8 +1036,8 @@ mod tests {
 
     #[test]
     fn a_config_with_no_models_offers_nothing_rather_than_every_command() {
-        // The `--wire` case: choices() is empty there, and the argument branch
-        // must not fall back to completing command words again.
+        // choices() is empty when the file defines no model, and the argument
+        // branch must not fall back to completing command words again.
         assert!(complete("/model fl", &table(), &[], &[]).is_empty());
     }
 
@@ -1179,7 +1199,8 @@ mod tests {
         s.dir = dir;
 
         let table = commands(std::slice::from_ref(&s), &mut Vec::new());
-        let Step::Prompt(text) = dispatch(&table, "/commit", "the parser work") else {
+        let Step::Prompt { send: text, typed } = dispatch(&table, "/commit", "the parser work")
+        else {
             panic!("a skill runs a turn; it is not handled here");
         };
         assert!(text.starts_with("Run the `commit` skill."), "{text}");
@@ -1189,7 +1210,34 @@ mod tests {
         // Arguments below the body, so the skill reads as the standing order.
         let body = text.find("Stage, then").unwrap();
         assert!(text.find("the parser work").unwrap() > body, "{text}");
+
+        // What the model reads is the whole body; what a person reads is the
+        // line they typed. Sending the body as both put four thousand
+        // characters of `SKILL.md` in the rewind menu and named the session
+        // after them.
+        assert_eq!(typed.as_deref(), Some("/commit the parser work"));
     }
+
+    #[test]
+    fn a_skill_with_no_arguments_is_named_by_its_word_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("commit");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: commit\ndescription: Write a commit.\n---\nStage, then write it.\n",
+        )
+        .unwrap();
+        let mut s = skill("commit", "Write a commit.");
+        s.dir = dir;
+
+        let table = commands(std::slice::from_ref(&s), &mut Vec::new());
+        let Step::Prompt { typed, .. } = dispatch(&table, "/commit", "") else {
+            panic!("a skill runs a turn");
+        };
+        assert_eq!(typed.as_deref(), Some("/commit"), "no trailing space");
+    }
+
 
     #[test]
     fn a_skill_whose_file_has_gone_says_so_rather_than_prompting() {
@@ -1297,5 +1345,24 @@ mod tests {
         // `!!cmd` is shell `! cmd` (negate the exit code), not pi's
         // excluded-from-context marker — that half of the feature is not here.
         assert_eq!(bash_command("!!git status"), Some("!git status"));
+    }
+
+    /// The transcript and the screen want different strings from a `!` line:
+    /// the model needs the command *and* its output, the reader needs the line
+    /// they typed. Storing only the first is what made the rebuilt scrollback
+    /// print `Ran \`git status\`` as a prompt with the output indented beneath.
+    #[test]
+    fn a_bang_line_stores_what_was_typed_beside_what_was_sent() {
+        let mut s = Session::new();
+        s.push_user(UserBody::Aside(UserText {
+            text: "Ran `git status`\nnothing to commit".into(),
+            shown: Some("!git status".into()),
+        }));
+
+        let Entry::User { body: UserBody::Aside(t), .. } = &s.entries()[0] else {
+            panic!("a text entry")
+        };
+        assert!(t.text.contains("nothing to commit"), "the model reads the output");
+        assert_eq!(t.shown.as_deref(), Some("!git status"), "the reader sees the line");
     }
 }

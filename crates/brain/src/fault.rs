@@ -139,7 +139,7 @@ mod tests {
 
     fn api(status: u16, body: &str) -> BrainError {
         BrainError::Api {
-            transport: "anthropic",
+            format: "anthropic",
             status,
             body: body.into(),
         }

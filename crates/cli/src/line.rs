@@ -62,14 +62,14 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
                 }
                 None => {
                     let held = core.agent.kept_tokens().unwrap_or(0);
-                    let now = brain::estimate::tokens(&core.session.context());
+                    let now = brain::estimate::tokens(&core.session.context(), &core.agent.spec);
                     println!(
                         "nothing to compact — {now} tokens, all inside the {held} kept as working context"
                     );
                 }
             },
-            Step::Prompt(prompt) => {
-                let spent = turn(&mut core, prompt, &tx).await;
+            Step::Prompt { send, typed } => {
+                let spent = turn(&mut core, send, typed, &tx).await;
                 totals.merge(&spent);
             }
         }
@@ -77,13 +77,17 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
     Ok(())
 }
 
-async fn turn(core: &mut Repl, prompt: String, tx: &UnboundedSender<Event>) -> Totals {
-    core.session.send_prompt(prompt);
+async fn turn(
+    core: &mut Repl,
+    prompt: String,
+    typed: Option<String>,
+    tx: &UnboundedSender<Event>,
+) -> Totals {
+    core.session.send_prompt(prompt, typed);
     let ctx = core
         .ctx
         .clone()
-        .with_cancel(agent::cancel_on_interrupt())
-        .with_fresh_result();
+        .with_cancel(agent::cancel_on_interrupt());
     let out = core.agent.run(&mut core.session, &ctx, tx).await;
 
     // Saved either way: an interrupted turn is exactly the one worth keeping.
@@ -92,7 +96,7 @@ async fn turn(core: &mut Repl, prompt: String, tx: &UnboundedSender<Event>) -> T
     }
 
     match out {
-        Ok(o) => o.totals,
+        Ok(totals) => totals,
         Err(AgentError::Cancelled) => {
             eprintln!("stopped");
             Totals::default()

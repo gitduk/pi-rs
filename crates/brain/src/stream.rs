@@ -1,9 +1,8 @@
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::message::{
-    AssistantContent, Message, Origin, ProviderCallId, Reasoning, ReasoningContent, Text, ToolCall,
-    ToolCallId,
+    AssistantContent, Message, Reasoning, ReasoningContent, Text, ToolCall,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -28,7 +27,7 @@ pub enum BlockKind {
     Text,
     Reasoning,
     ToolCall {
-        provider: Option<ProviderCallId>,
+        id: Option<String>,
         name: String,
     },
 }
@@ -38,7 +37,6 @@ pub enum BlockKind {
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamEvent {
     MessageStart {
-        id: Option<String>,
         usage: Usage,
     },
     BlockStart {
@@ -65,6 +63,20 @@ pub enum StreamEvent {
     BlockEnd {
         index: usize,
     },
+    /// The turn's finished content, handed over whole rather than folded from
+    /// the deltas before it.
+    ///
+    /// Responses puts the complete `output[]` on `response.completed`, so the
+    /// deltas are free to be what they are — something to paint on screen, with
+    /// no claim to correctness. It is also the only way to get
+    /// `encrypted_content` intact: the copy on `output_item.added` may be
+    /// truncated, and a truncated one is not rejected, just unreadable next
+    /// turn. Anthropic's terminal frame carries usage and nothing else, so that
+    /// wire still folds.
+    Complete {
+        content: Vec<AssistantContent>,
+        invalid: Vec<InvalidToolArgs>,
+    },
     Done {
         stop: StopReason,
         usage: Usage,
@@ -76,7 +88,7 @@ pub enum StreamEvent {
 /// model an error result for it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InvalidToolArgs {
-    pub call: ToolCallId,
+    pub call: String,
     pub name: String,
     pub raw: String,
     pub error: String,
@@ -101,35 +113,32 @@ struct Block {
 /// transport: the events are already normalized, so this exists exactly once.
 #[derive(Debug)]
 pub struct Accumulator {
-    origin: Origin,
-    id: Option<String>,
+    /// The model these blocks are attributed to, as the endpoint names it.
+    by: String,
     blocks: BTreeMap<usize, Block>,
+    /// Set by a wire whose terminal frame states the turn outright; the folded
+    /// blocks are then only what was painted while it arrived.
+    complete: Option<(Vec<AssistantContent>, Vec<InvalidToolArgs>)>,
     stop: StopReason,
     usage: Usage,
     next_local_id: u64,
-    seen_provider_ids: std::collections::HashSet<ProviderCallId>,
 }
 
 impl Accumulator {
-    pub fn new(transport: impl Into<String>, model: impl Into<String>) -> Self {
+    pub fn new(by: String) -> Self {
         Self {
-            origin: Origin {
-                transport: transport.into(),
-                model: model.into(),
-            },
-            id: None,
+            by,
             blocks: BTreeMap::new(),
+            complete: None,
             stop: StopReason::default(),
             usage: Usage::default(),
             next_local_id: 0,
-            seen_provider_ids: std::collections::HashSet::new(),
         }
     }
 
     pub fn push(&mut self, ev: StreamEvent) {
         match ev {
-            StreamEvent::MessageStart { id, usage } => {
-                self.id = id;
+            StreamEvent::MessageStart { usage } => {
                 self.usage = usage;
             }
             StreamEvent::BlockStart { index, kind } => {
@@ -148,6 +157,9 @@ impl Accumulator {
                 self.blocks.entry(index).or_default().signature = Some(signature);
             }
             StreamEvent::BlockEnd { .. } => {}
+            StreamEvent::Complete { content, invalid } => {
+                self.complete = Some((content, invalid));
+            }
             StreamEvent::Done { stop, usage } => {
                 self.stop = stop;
                 // A terminal frame that omits a counter reports 0; never let
@@ -168,28 +180,81 @@ impl Accumulator {
         }
     }
 
-    fn mint_id(&mut self, provider: &mut Option<ProviderCallId>) -> ToolCallId {
-        match provider {
-            Some(p) if self.seen_provider_ids.insert(p.clone()) => ToolCallId(p.0.clone()),
-            _ => {
-                // A duplicate provider id must not travel back on its wire;
-                // dropping it sends the fresh local id instead.
-                *provider = None;
-                self.next_local_id += 1;
-                ToolCallId(format!("call_{}", self.next_local_id))
-            }
-        }
+    /// The provider's own id, or a local stand-in when it named none. Only
+    /// gateways that drop the field reach the second arm; both native formats
+    /// make the id mandatory.
+    ///
+    /// Ids repeated within one turn are deliberately not rewritten. Every
+    /// archive checked had the provider's id used verbatim, and a host that
+    /// repeats one is answered by the wire's own duplicate-id refusal rather
+    /// than by carrying a de-duplicating table for a case never observed.
+    fn call_id(&mut self, provider: Option<String>) -> String {
+        provider.unwrap_or_else(|| {
+            self.next_local_id += 1;
+            format!("call_{}", self.next_local_id)
+        })
     }
 
     pub fn finish(mut self) -> Completion {
+        let (mut content, mut invalid) = match self.complete.take() {
+            Some(stated) => stated,
+            None => self.fold(),
+        };
+
+        // Every call gets exactly one result, and a result is addressed by the
+        // call's id — so an id that arrives twice cannot be answered at all.
+        // Kept: the first, which is the one the deltas filled in. Observed once
+        // against a translating gateway and not reproducible on demand, so this
+        // guards the invariant rather than the cause: whatever sends it, the
+        // turn is unsendable the moment two calls share an id.
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut repeated = Vec::new();
+        content.retain(|c| match c {
+            AssistantContent::ToolCall(call) => {
+                let first = seen.insert(call.id.clone());
+                if !first {
+                    repeated.push(call.id.clone());
+                }
+                first
+            }
+            _ => true,
+        });
+        for id in &repeated {
+            tracing::warn!(
+                target: "pi::wire", call = %id,
+                "the turn named this call twice; the repeat was dropped"
+            );
+        }
+
+        // A host that omits finish_reason would otherwise end the turn with
+        // tool calls pending; the calls themselves are the authority.
+        let has_calls = content
+            .iter()
+            .any(|c| matches!(c, AssistantContent::ToolCall(_)));
+        let stop = match self.stop {
+            StopReason::EndTurn if has_calls => StopReason::ToolUse,
+            other => other,
+        };
+
+        content.shrink_to_fit();
+        invalid.shrink_to_fit();
+        Completion {
+            message: Message::Assistant { content },
+            invalid,
+            stop,
+            usage: self.usage,
+        }
+    }
+
+    /// The turn rebuilt from the deltas, for a wire whose terminal frame does
+    /// not state it.
+    fn fold(&mut self) -> (Vec<AssistantContent>, Vec<InvalidToolArgs>) {
         let mut content = Vec::new();
         let mut invalid = Vec::new();
-        let blocks = std::mem::take(&mut self.blocks);
-
-        for (_, b) in blocks {
+        for (_, b) in std::mem::take(&mut self.blocks) {
             match b.kind {
-                Some(BlockKind::ToolCall { mut provider, name }) => {
-                    let id = self.mint_id(&mut provider);
+                Some(BlockKind::ToolCall { id, name }) => {
+                    let id = self.call_id(id);
                     let raw = if b.text.trim().is_empty() {
                         "{}"
                     } else {
@@ -207,12 +272,7 @@ impl Accumulator {
                             json!({})
                         }
                     };
-                    content.push(AssistantContent::ToolCall(ToolCall {
-                        id,
-                        provider,
-                        name,
-                        args,
-                    }));
+                    content.push(AssistantContent::ToolCall(ToolCall { id, name, args }));
                 }
                 Some(BlockKind::Reasoning) => {
                     content.push(AssistantContent::Reasoning(Reasoning {
@@ -221,7 +281,7 @@ impl Accumulator {
                             text: b.text,
                             signature: b.signature,
                         }],
-                        origin: Some(self.origin.clone()),
+                        by: Some(self.by.clone()),
                     }));
                 }
                 _ => {
@@ -231,26 +291,7 @@ impl Accumulator {
                 }
             }
         }
-
-        // A host that omits finish_reason would otherwise end the turn with
-        // tool calls pending; the calls themselves are the authority.
-        let has_calls = content
-            .iter()
-            .any(|c| matches!(c, AssistantContent::ToolCall(_)));
-        let stop = match self.stop {
-            StopReason::EndTurn if has_calls => StopReason::ToolUse,
-            other => other,
-        };
-
-        Completion {
-            message: Message::Assistant {
-                id: self.id,
-                content,
-            },
-            invalid,
-            stop,
-            usage: self.usage,
-        }
+        (content, invalid)
     }
 }
 
@@ -258,8 +299,47 @@ impl Accumulator {
 mod tests {
     use super::*;
 
+    /// A result is addressed by its call's id, so two calls sharing one can
+    /// never both be answered — the next request is invalid whichever result
+    /// goes back. Seen once against a translating gateway.
+    #[test]
+    fn a_call_id_the_turn_names_twice_is_answered_once() {
+        let mut a = acc();
+        for (index, args) in [(0usize, "{\"path\": \"a.txt\"}"), (1, "")] {
+            a.push(StreamEvent::BlockStart {
+                index,
+                kind: BlockKind::ToolCall {
+                    id: Some("call_same".into()),
+                    name: "read".into(),
+                },
+            });
+            if !args.is_empty() {
+                a.push(StreamEvent::ToolArgsDelta {
+                    index,
+                    delta: args.into(),
+                });
+            }
+            a.push(StreamEvent::BlockEnd { index });
+        }
+        let done = a.finish();
+        let Message::Assistant { content } = &done.message else {
+            panic!("assistant")
+        };
+        let calls: Vec<_> = content
+            .iter()
+            .filter_map(|c| match c {
+                AssistantContent::ToolCall(c) => Some(c),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls.len(), 1, "{content:?}");
+        // The one the deltas filled in, not the empty repeat.
+        assert_eq!(calls[0].args["path"], "a.txt");
+        assert_eq!(done.stop, StopReason::ToolUse);
+    }
+
     fn acc() -> Accumulator {
-        Accumulator::new("anthropic", "test-model")
+        Accumulator::new("test-model".into())
     }
 
     #[test]
@@ -268,7 +348,7 @@ mod tests {
         a.push(StreamEvent::BlockStart {
             index: 0,
             kind: BlockKind::ToolCall {
-                provider: Some(ProviderCallId("toolu_1".into())),
+                id: Some("toolu_1".into()),
                 name: "read".into(),
             },
         });
@@ -289,20 +369,23 @@ mod tests {
         let calls: Vec<_> = done.message.tool_calls().collect();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].args["path"], "a.rs");
-        // The provider's id is what may travel back on its wire.
-        assert_eq!(calls[0].provider.as_ref().unwrap().as_str(), "toolu_1");
+        assert_eq!(calls[0].id, "toolu_1");
     }
 
     #[test]
-    fn a_duplicate_provider_id_gets_a_fresh_local_one() {
-        // Some hosts stream two tool calls carrying the same id; OpenAI
-        // rejects the request. The duplicate must not travel back verbatim.
+    fn a_call_the_provider_did_not_name_gets_a_local_id() {
+        // Both native formats make the id mandatory, so only a gateway that
+        // drops it reaches this path — and the pair still has to agree, since
+        // the result keys on whatever the call carries.
         let mut a = acc();
-        for (i, name) in ["read", "grep"].into_iter().enumerate() {
+        for (i, (id, name)) in [(Some("toolu_1"), "read"), (None, "grep")]
+            .into_iter()
+            .enumerate()
+        {
             a.push(StreamEvent::BlockStart {
                 index: i,
                 kind: BlockKind::ToolCall {
-                    provider: Some(ProviderCallId("call_dup".into())),
+                    id: id.map(str::to_string),
                     name: name.into(),
                 },
             });
@@ -320,13 +403,10 @@ mod tests {
         let done = a.finish();
         let calls: Vec<_> = done.message.tool_calls().collect();
         assert_eq!(calls.len(), 2);
-        let ids: Vec<_> = calls.iter().map(|c| c.id.as_str()).collect();
-        assert_eq!(ids[0], "call_dup");
-        assert_ne!(ids[0], ids[1]);
-        // The wire keys on the provider id when present, so the duplicate must
-        // arrive with none: its fresh local id is what travels back.
-        assert!(calls[0].provider.is_some());
-        assert!(calls[1].provider.is_none());
+        // Named ids are passed through untouched; two calls sharing one id is
+        // the provider's bug, not something to paper over by renaming.
+        assert_eq!(calls[0].id, "toolu_1");
+        assert_eq!(calls[1].id, "call_1");
     }
 
     #[test]
@@ -335,7 +415,7 @@ mod tests {
         a.push(StreamEvent::BlockStart {
             index: 0,
             kind: BlockKind::ToolCall {
-                provider: None,
+                id: None,
                 name: "read".into(),
             },
         });
@@ -363,7 +443,6 @@ mod tests {
     fn terminal_zeros_never_clobber_a_live_count() {
         let mut a = acc();
         a.push(StreamEvent::MessageStart {
-            id: Some("msg_1".into()),
             usage: Usage {
                 input: 120,
                 cache_read: 40,
@@ -421,7 +500,7 @@ mod tests {
         let AssistantContent::Reasoning(r) = &content[0] else {
             panic!("{content:?}")
         };
-        assert_eq!(r.origin.as_ref().unwrap().model, "test-model");
+        assert_eq!(r.by.as_deref(), Some("test-model"));
         assert_eq!(
             r.content[0],
             ReasoningContent::Text {
@@ -438,7 +517,7 @@ mod tests {
         a.push(StreamEvent::BlockStart {
             index: 0,
             kind: BlockKind::ToolCall {
-                provider: None,
+                id: None,
                 name: "read".into(),
             },
         });

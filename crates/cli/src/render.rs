@@ -683,6 +683,34 @@ pub fn spent(usage: &brain::stream::Usage, cost: f64, estimated: agent::Estimate
 ///
 /// Newline-separated, because the caller decides what a row is: the interactive
 /// surface repaints a region and has to hand them over one at a time.
+/// The rows a finished tool result takes on screen: its head, clipped to fit,
+/// and under it whatever a tool sketched — an edit's diff rows.
+///
+/// One function, called from both the live stream and the rebuild from the
+/// transcript. They used to render this differently, which is what a second
+/// producer buys you.
+pub fn result_rows(is_error: bool, name: &str, preview: &str, p: &Paint, width: usize) -> Vec<String> {
+    let room = width.saturating_sub(2).max(20);
+    let mark = if is_error {
+        p.on(&p.theme.status.err, "✗")
+    } else {
+        p.on(&p.theme.status.ok, "✓")
+    };
+    let (head, rest) = preview.split_once('\n').unwrap_or((preview, ""));
+    let mut out = vec![format!("{mark} {name} {}", p.on(&p.theme.muted, &clip(head, room)))];
+    out.extend(rest.lines().map(|row| {
+        // The row number leads each diff row, so the mark is the second word;
+        // colour beats reading the diff text.
+        let style = match row.split_whitespace().nth(1) {
+            Some("+") => &p.theme.diff.add,
+            Some("-") => &p.theme.diff.del,
+            _ => &p.theme.muted,
+        };
+        p.on(style, &format!("  {}", clip(row, room)))
+    }));
+    out
+}
+
 pub fn describe(event: &Event, p: &Paint, width: usize) -> Option<String> {
     let room = width.saturating_sub(2).max(20);
     Some(match event {
@@ -699,25 +727,7 @@ pub fn describe(event: &Event, p: &Paint, width: usize) -> Option<String> {
             preview,
             ..
         } => {
-            let mark = if *is_error {
-                p.on(&p.theme.status.err, "✗")
-            } else {
-                p.on(&p.theme.status.ok, "✓")
-            };
-            let (head, rest) = preview.split_once('\n').unwrap_or((preview, ""));
-            let mut out = format!("{mark} {name} {}", p.on(&p.theme.muted, &clip(head, room)));
-            for row in rest.lines() {
-                // The row number leads each diff row, so the mark is the
-                // second word; colour beats reading the diff text.
-                let style = match row.split_whitespace().nth(1) {
-                    Some("+") => &p.theme.diff.add,
-                    Some("-") => &p.theme.diff.del,
-                    _ => &p.theme.muted,
-                };
-                out.push('\n');
-                out.push_str(&p.on(style, &format!("  {}", clip(row, room))));
-            }
-            out
+            result_rows(*is_error, name, preview, p, width).join("\n")
         }
         Event::ToolDenied { name, reason, .. } => {
             format!(
@@ -756,9 +766,6 @@ pub fn describe(event: &Event, p: &Paint, width: usize) -> Option<String> {
 pub struct Renderer {
     paint: Paint,
     quiet: bool,
-    /// A schema was asked for, so stdout belongs to the result alone. Prose the
-    /// model produces on the way there is progress, not the answer.
-    structured: bool,
     thinking: bool,
     /// Each stream is tracked separately: they share a terminal when both are
     /// a tty, but only the dirty one may be terminated when piped apart.
@@ -767,11 +774,10 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(quiet: bool, structured: bool, theme: Arc<Theme>) -> Self {
+    pub fn new(quiet: bool, theme: Arc<Theme>) -> Self {
         Self {
             paint: Paint::with_theme(std::io::stderr().is_terminal(), theme),
             quiet,
-            structured,
             thinking: false,
             out_dirty: false,
             err_dirty: false,
@@ -790,16 +796,6 @@ impl Renderer {
                 }
                 eprint!("{}", self.paint.on(&self.paint.theme.muted, d));
                 self.err_dirty = true;
-                let _ = std::io::stderr().flush();
-            }
-            Event::TextDelta(d) if self.structured => {
-                if self.quiet {
-                    return;
-                }
-                self.end_thinking();
-                self.settle_out();
-                eprint!("{}", self.paint.on(&self.paint.theme.muted, d));
-                self.err_dirty = !d.ends_with('\n');
                 let _ = std::io::stderr().flush();
             }
             Event::TextDelta(d) => {
@@ -871,6 +867,9 @@ fn compaction_line(r: &agent::compact::Report) -> String {
     }
     if r.aged_out > 0 {
         parts.push(format!("{} aged out", r.aged_out));
+    }
+    if r.args_taken > 0 {
+        parts.push(format!("{} arguments taken", r.args_taken));
     }
     if r.dropped > 0 {
         let how = if r.summarized {
@@ -956,18 +955,9 @@ mod tests {
     }
 
     #[test]
-    fn a_schema_keeps_prose_off_stdout() {
-        let mut r = super::Renderer::new(false, true, std::sync::Arc::new(super::Theme::default()));
-        r.on(agent::Event::TextDelta("thinking out loud".into()));
-        // stdout carries the result and nothing else, so it pipes into jq.
-        assert!(!r.out_dirty, "prose must not reach stdout under a schema");
-        assert!(r.err_dirty);
-    }
-
-    #[test]
     fn consecutive_text_deltas_stay_on_one_line() {
         let mut r =
-            super::Renderer::new(false, false, std::sync::Arc::new(super::Theme::default()));
+            super::Renderer::new(false, std::sync::Arc::new(super::Theme::default()));
         r.on(agent::Event::TextDelta("There".into()));
         assert!(r.out_dirty, "an unterminated delta leaves the line open");
         r.on(agent::Event::TextDelta("'s a bug".into()));
@@ -992,13 +982,15 @@ mod tests {
             superseded: 3,
             uneventful: 1,
             aged_out: 6,
+            args_taken: 2,
             dropped: 0,
             summarized: false,
             still_over: false,
         };
         assert_eq!(
             super::compaction_line(&r),
-            "compacted 130000 → 48000 tokens · 3 superseded, 1 uneventful, 6 aged out"
+            "compacted 130000 → 48000 tokens · 3 superseded, 1 uneventful, 6 aged out, \
+             2 arguments taken"
         );
     }
 

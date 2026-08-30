@@ -1,0 +1,142 @@
+event: response.created
+data: {"response":{"created_at":1788099483,"id":"021788099482890ed0e184fb98d17720dee9f0ee33ee7e1b20426","model":"deepseek-v4-flash","object":"response","output":[],"status":"in_progress"},"type":"response.created"}
+event: response.in_progress
+data: {"response":{"created_at":1788099483,"id":"021788099482890ed0e184fb98d17720dee9f0ee33ee7e1b20426","model":"deepseek-v4-flash","object":"response","output":[],"status":"in_progress"},"type":"response.in_progress"}
+event: response.output_item.added
+data: {"item":{"summary":[],"type":"reasoning"},"output_index":0,"type":"response.output_item.added"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"用户","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"要","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"列出","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"当前","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"目录","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"下的","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"文件","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"。","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"直接","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"执行","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"即可","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"。","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"用","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":" read","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":" ","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"列出","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"目录","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"或者","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":" bash","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":" ls","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"。\n\n","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"注意","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":" R","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"11","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":" ","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"关于","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":" C","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"WD","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":" ","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"相对","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"路径","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"是","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"给","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"项目","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"代码","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"的","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"，","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"shell","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":" ","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"命令","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"我要","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"显","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"式","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"固定","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":" base","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"。","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"但","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"当前","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":" workspace","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":" root","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":" ","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"是","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"固定的","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"，","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"我用","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":" read","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":" ","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"列","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"目录","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.reasoning_summary_text.delta
+data: {"delta":"。","output_index":0,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+event: response.output_item.done
+data: {"item":{"role":"assistant","status":"completed","type":"message"},"output_index":0,"type":"response.output_item.done"}
+event: response.output_item.added
+data: {"item":{"arguments":"","call_id":"call_zizj1cqtuu0jxhdlds3s7dlj","id":"fc_346d2aed-bee9-4e17-aca6-c5fe5792eb0d","name":"read","status":"in_progress","type":"function_call"},"output_index":1,"type":"response.output_item.added"}
+event: response.function_call_arguments.delta
+data: {"delta":"{\"path\": \"","item_id":"fc_346d2aed-bee9-4e17-aca6-c5fe5792eb0d","output_index":1,"type":"response.function_call_arguments.delta"}
+event: response.function_call_arguments.delta
+data: {"delta":".","item_id":"fc_346d2aed-bee9-4e17-aca6-c5fe5792eb0d","output_index":1,"type":"response.function_call_arguments.delta"}
+event: response.function_call_arguments.delta
+data: {"delta":"\"","item_id":"fc_346d2aed-bee9-4e17-aca6-c5fe5792eb0d","output_index":1,"type":"response.function_call_arguments.delta"}
+event: response.function_call_arguments.delta
+data: {"delta":"}","item_id":"fc_346d2aed-bee9-4e17-aca6-c5fe5792eb0d","output_index":1,"type":"response.function_call_arguments.delta"}
+event: response.output_item.done
+data: {"item":{"call_id":"call_zizj1cqtuu0jxhdlds3s7dlj","id":"fc_346d2aed-bee9-4e17-aca6-c5fe5792eb0d","status":"completed","type":"function_call"},"output_index":1,"type":"response.output_item.done"}
+event: response.completed
+data: {"response":{"created_at":1788099483,"id":"021788099482890ed0e184fb98d17720dee9f0ee33ee7e1b20426","model":"deepseek-v4-flash-ga-260731","object":"response","status":"completed","usage":{"input_tokens":988,"output_tokens":1,"total_tokens":989}},"type":"response.completed"}

@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use brain::message::{
-    Message, Text, ToolCall, ToolCallId, ToolResult, ToolResultContent, UserContent,
+    AssistantContent, Image, Message, Text, ToolCall, ToolResult, ToolResultContent, UserContent,
 };
 use serde::{Deserialize, Serialize};
 use tools::todo::Todo;
@@ -9,11 +9,66 @@ use tools::todo::Todo;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct EntryId(pub u64);
 
-/// One tool result the model no longer sees in full.
+/// Wall-clock seconds, the stamp every session artefact is dated by. Public
+/// because the transcript store dates its files by the same clock, and two
+/// clocks would date one session twice.
+pub fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// One entry the model no longer sees in full.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Elision {
-    pub call: ToolCallId,
+pub struct Omission {
+    pub entry: EntryId,
+    /// Which block of an assistant turn, when what went is one tool call's
+    /// arguments rather than the entry. `None` addresses the entry itself.
+    ///
+    /// The first crack in "an assistant turn is addressed whole", and kept as
+    /// narrow as the reason for it: only a `tool_use`'s oversized arguments.
+    /// Its thinking blocks are never touched — the API filters prior ones on
+    /// its own and does not bill them, and the last turn's may not be edited
+    /// at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block: Option<usize>,
     pub notice: String,
+}
+
+/// An argument string longer than this is worth replacing with a notice. Read
+/// by the planner deciding and by the view rebuilding, so the two agree
+/// without the record having to spell out which strings went.
+pub const ARG_CHARS: usize = 1_024;
+
+/// A tool call as the model sees it once its bulk is gone: same id, same name,
+/// every argument short enough to be worth keeping. A `write`'s path survives
+/// and its file content does not.
+pub fn omitted_args(call: &ToolCall, notice: &str) -> ToolCall {
+    let mut out = call.clone();
+    if let Some(map) = out.args.as_object_mut() {
+        for v in map.values_mut() {
+            if v.as_str().is_some_and(|t| t.chars().count() > ARG_CHARS) {
+                *v = serde_json::Value::String(notice.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// What the oversized arguments of `call` weigh in characters — nothing when
+/// none of them is worth omitting.
+pub fn oversized_args(call: &ToolCall) -> usize {
+    call.args
+        .as_object()
+        .map(|m| {
+            m.values()
+                .filter_map(|v| v.as_str())
+                .map(|t| t.chars().count())
+                .filter(|n| *n > ARG_CHARS)
+                .sum()
+        })
+        .unwrap_or(0)
 }
 
 /// A record of one compaction pass. It says what the model stopped seeing; it
@@ -22,8 +77,8 @@ pub struct Elision {
 pub struct Compaction {
     /// Entries the view skips entirely.
     pub dropped: Vec<EntryId>,
-    /// Tool results the view shows as a notice instead of their content.
-    pub elisions: Vec<Elision>,
+    /// Entries the view shows as a notice instead of their content.
+    pub omissions: Vec<Omission>,
     /// Stands in for the dropped entries. Absent when nothing was dropped, or
     /// when summarizing failed — the entries still go, unsummarized.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -32,41 +87,150 @@ pub struct Compaction {
     pub tokens_after: usize,
 }
 
+/// Text from the user's side of the conversation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserText {
+    /// What the model reads.
+    pub text: String,
+    /// What a person reads — the rollback menu, `/resume` naming, the screen.
+    /// `None` when it is the same as `text`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shown: Option<String>,
+}
+
+/// The user side, one block per entry. Splitting them is what lets compaction
+/// address a single tool result — or a single pasted command's output —
+/// without touching what sits beside it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum UserBody {
+    /// What the user asked. It opens a round, and the drop tier's unit is a
+    /// round: a question and everything that answered it go together or not at
+    /// all. Never omitted — what someone asked is not the answer's spare
+    /// context.
+    Prompt(UserText),
+    /// User-side text that is not a question: the output of a `!` command.
+    ///
+    /// A separate variant rather than a flag, because four places ask whether
+    /// an entry is a question and three of them need a different answer for
+    /// this one — it opens no round, it does not name the session, and it *is*
+    /// omittable, since nothing downstream is waiting on an answer to it. A
+    /// boolean cannot carry four answers, and inferring them from `shown` is
+    /// what let a `!cargo test` be dropped out from under the `fix that` that
+    /// referred to it.
+    Aside(UserText),
+    /// The result, and what the screen showed for it when that is more than the
+    /// result's own first line — the rows an edit sketched, which the stored
+    /// content does not contain.
+    ///
+    /// Beside the result rather than inside it. `ToolResult` is the wire type:
+    /// a screen-only field there would be one every encoder has to remember not
+    /// to send, and one the token estimate would count for bytes that never
+    /// leave. Here neither is possible — `brain` cannot see this type, and
+    /// `user_block` carries only the `ToolResult` across.
+    ///
+    /// The same distinction `UserText` makes with `shown`, one variant along:
+    /// what the model reads, beside what a person sees.
+    Result {
+        result: ToolResult,
+        preview: Option<String>,
+    },
+    Image(Image),
+}
+
+/// The session's atom. Append only, or truncated by a rollback; the content of
+/// an entry is never rewritten.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Entry {
-    Message {
+    User {
         id: EntryId,
-        message: Message,
+        at: u64,
+        body: UserBody,
+    },
+    /// One response, whole. Its blocks are never addressed separately: nothing
+    /// reads them apart, and holding them together is what keeps a `tool_use`
+    /// beside the reasoning that produced it.
+    Assistant {
+        id: EntryId,
+        at: u64,
+        blocks: Vec<AssistantContent>,
     },
     Compaction {
         id: EntryId,
+        at: u64,
         record: Compaction,
-    },
-    /// The task list as it stood. State is derived by taking the last one, so
-    /// it survives compaction and comes back with a resumed session.
-    Todos {
-        id: EntryId,
-        items: Vec<Todo>,
     },
 }
 
 impl Entry {
     pub fn id(&self) -> EntryId {
         match self {
-            Entry::Message { id, .. } | Entry::Compaction { id, .. } | Entry::Todos { id, .. } => {
-                *id
-            }
+            Entry::User { id, .. }
+            | Entry::Assistant { id, .. }
+            | Entry::Compaction { id, .. } => *id,
         }
+    }
+
+    pub fn at(&self) -> u64 {
+        match self {
+            Entry::User { at, .. }
+            | Entry::Assistant { at, .. }
+            | Entry::Compaction { at, .. } => *at,
+        }
+    }
+
+    /// An assistant turn's blocks; `None` for every other kind.
+    pub fn blocks(&self) -> Option<&[AssistantContent]> {
+        match self {
+            Entry::Assistant { blocks, .. } => Some(blocks),
+            _ => None,
+        }
+    }
+
+    pub fn tool_calls(&self) -> impl Iterator<Item = &ToolCall> {
+        let blocks = match self {
+            Entry::Assistant { blocks, .. } => blocks.as_slice(),
+            _ => &[],
+        };
+        blocks.iter().filter_map(|b| match b {
+            AssistantContent::ToolCall(c) => Some(c),
+            _ => None,
+        })
     }
 }
 
-/// The whole conversation: every message, tool result, and compaction record,
-/// in order.
+/// One entry as the model currently sees it. Both shapes answer `id`, which is
+/// the whole point: compaction needs the content to measure and the id to
+/// record, and reading them from two lists is what let them drift apart.
+#[derive(Debug, Clone, Copy)]
+pub enum Seen<'a> {
+    As(&'a Entry),
+    /// Content replaced, shell kept — a `tool_use` must keep its `tool_result`.
+    Omitted { entry: &'a Entry, notice: &'a str },
+}
+
+impl<'a> Seen<'a> {
+    pub fn id(&self) -> EntryId {
+        match self {
+            Seen::As(e) | Seen::Omitted { entry: e, .. } => e.id(),
+        }
+    }
+
+    pub fn entry(&self) -> &'a Entry {
+        match self {
+            Seen::As(e) | Seen::Omitted { entry: e, .. } => e,
+        }
+    }
+
+}
+
+/// The whole conversation: every prompt, tool result, response, and compaction
+/// record, in order.
 ///
 /// Held by the caller so a run that ends in an error still leaves behind
 /// everything it produced. What the model sees is *derived* from this, never
-/// stored in place of it: compaction writes a record and the view applies it.
+/// stored in place of it: compaction writes a record and `view` applies it.
 /// Anything else loses the session the moment it grows long enough to need
 /// shrinking.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -75,6 +239,15 @@ pub struct Session {
     entries: Vec<Entry>,
     #[serde(default)]
     next: u64,
+    /// The plan as it stands, beside the conversation rather than inside it.
+    ///
+    /// It was an entry once, and had to be filtered back out of every walk:
+    /// the model never read it there, because a plan is a fact about *now* and
+    /// an append-only list can only say what was true at some point. It
+    /// reaches the model as a note instead, recomputed every turn — so there
+    /// is exactly one of it, and it is never stale.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    todos: Vec<Todo>,
 }
 
 impl Session {
@@ -85,114 +258,199 @@ impl Session {
     /// A session that starts from a single user prompt.
     pub fn with_prompt(prompt: impl Into<String>) -> Self {
         let mut session = Self::new();
-        session.push(Message::user(prompt));
+        session.prompt(prompt);
         session
     }
 
+    /// Build a session from a transcript's worth of messages, one entry per
+    /// block. The seam exists because a message is what a request looks like
+    /// while an entry is what the session stores; nothing in the run needs it,
+    /// but a test that wants to say "given this conversation" does.
     pub fn from_messages(messages: impl IntoIterator<Item = Message>) -> Self {
-        let mut session = Self::new();
+        let mut log = Self::new();
         for m in messages {
-            session.push(m);
+            match m {
+                Message::User { content } => {
+                    for b in content {
+                        log.push_user(match b {
+                            UserContent::Text(t) => UserBody::Prompt(UserText {
+                                text: t.text,
+                                shown: None,
+                            }),
+                            UserContent::ToolResult(r) => UserBody::Result { result: r, preview: None },
+                            UserContent::Image(i) => UserBody::Image(i),
+                        });
+                    }
+                }
+                Message::Assistant { content, .. } => {
+                    log.push_assistant(content);
+                }
+                Message::System { .. } => {}
+            }
         }
-        session
+        log
     }
 
-    pub fn push(&mut self, message: Message) -> EntryId {
+    fn mint(&mut self) -> (EntryId, u64) {
         let id = EntryId(self.next);
         self.next += 1;
-        self.entries.push(Entry::Message { id, message });
+        (id, now())
+    }
+
+    pub fn push_user(&mut self, body: UserBody) -> EntryId {
+        let (id, at) = self.mint();
+        self.entries.push(Entry::User { id, at, body });
+        id
+    }
+
+    /// Text from the person at the keyboard. `shown` differs only when what
+    /// was typed is not what was sent — a `!` command and its output.
+    pub fn prompt(&mut self, text: impl Into<String>) -> EntryId {
+        self.push_user(UserBody::Prompt(UserText {
+            text: text.into(),
+            shown: None,
+        }))
+    }
+
+    /// One entry per result: compaction decides about them one at a time.
+    /// Each result becomes its own entry; joining them into one wire message is
+    /// the encoder's business.
+    pub fn push_results(&mut self, results: Vec<ToolResult>) -> Vec<EntryId> {
+        self.push_previewed(results.into_iter().map(|r| (r, None)).collect())
+    }
+
+    /// The same, carrying what the screen showed for each — the rows an edit
+    /// sketched, which its stored content does not hold.
+    pub fn push_previewed(&mut self, results: Vec<(ToolResult, Option<String>)>) -> Vec<EntryId> {
+        results
+            .into_iter()
+            .map(|(result, preview)| self.push_user(UserBody::Result { result, preview }))
+            .collect()
+    }
+
+    pub fn push_assistant(&mut self, blocks: Vec<AssistantContent>) -> EntryId {
+        let (id, at) = self.mint();
+        self.entries.push(Entry::Assistant { id, at, blocks });
         id
     }
 
     pub fn record(&mut self, record: Compaction) -> EntryId {
-        let id = EntryId(self.next);
-        self.next += 1;
-        self.entries.push(Entry::Compaction { id, record });
+        let (id, at) = self.mint();
+        self.entries.push(Entry::Compaction { id, at, record });
         id
     }
 
     /// Record the task list. At most one item may be in progress: two are a
     /// plan the agent is not actually following.
-    pub fn set_todos(&mut self, mut items: Vec<Todo>) -> EntryId {
+    pub fn set_todos(&mut self, mut items: Vec<Todo>) {
         tools::todo::normalize(&mut items);
-        let id = EntryId(self.next);
-        self.next += 1;
-        self.entries.push(Entry::Todos { id, items });
-        id
+        self.todos = items;
     }
 
     /// The task list as it now stands.
     pub fn todos(&self) -> &[Todo] {
-        self.entries
-            .iter()
-            .rev()
-            .find_map(|e| match e {
-                Entry::Todos { items, .. } => Some(items.as_slice()),
-                _ => None,
-            })
-            .unwrap_or(&[])
+        &self.todos
     }
-
 
     /// Continue with a new prompt, repairing a turn that may have died
     /// mid-call. An assistant turn whose tool calls were never answered would
     /// make the next request invalid (a `tool_use` with no `tool_result`);
-    /// each is closed with an interrupted result instead, so the model knows
-    /// it was stopped, and the prompt is appended as its own user message.
-    pub fn send_prompt(&mut self, prompt: impl Into<String>) {
-        let unanswered: Vec<ToolCall> = self
-            .live()
+    /// each is closed with a result naming the interruption instead — the model
+    /// is told a person stopped it rather than that the call failed, which are
+    /// different things to answer. The prompt is appended as its own entry.
+    /// `shown` is what the user typed, when that differs from what the model
+    /// is sent — a `!cmd` line becomes the command *and its output*, and the
+    /// screen has to show the line, not the transcript of running it.
+    pub fn send_prompt(&mut self, prompt: impl Into<String>, shown: Option<String>) {
+        let answered: HashSet<&str> = self
+            .entries
             .iter()
             .rev()
-            .take_while(|(_, m)| matches!(m, Message::Assistant { .. }))
-            .flat_map(|(_, m)| m.tool_calls())
+            .take_while(|e| !matches!(e, Entry::Assistant { .. }))
+            .filter_map(|e| match e {
+                Entry::User {
+                    body: UserBody::Result { result: r, .. },
+                    ..
+                } => Some(r.call.as_str()),
+                _ => None,
+            })
+            .collect();
+        let unanswered: Vec<ToolCall> = self
+            .entries
+            .iter()
+            .rev()
+            .find(|e| matches!(e, Entry::Assistant { .. }))
+            .into_iter()
+            .flat_map(Entry::tool_calls)
+            .filter(|c| !answered.contains(c.id.as_str()))
             .cloned()
             .collect();
-        if !unanswered.is_empty() {
-            let results = unanswered
-                .into_iter()
-                .map(|c| {
-                    ToolResult::error(
-                        c.id,
-                        c.name,
-                        "The tool call was interrupted before its result returned.",
-                    )
-                })
-                .collect();
-            self.push(Message::tool_results(results));
+        for c in unanswered {
+            self.push_user(UserBody::Result {
+                result: ToolResult::error(
+                    c.id,
+                    c.name,
+                    "The user stopped this call before it returned; nothing about the call itself failed.",
+                ),
+                preview: None,
+            });
         }
-        self.push(Message::user(prompt));
+        self.push_user(UserBody::Prompt(UserText {
+            text: prompt.into(),
+            shown,
+        }));
     }
 
-    /// Live user messages that carry a prompt, in session order: each user
-    /// message's own text blocks.
+    /// Everywhere the conversation can be rewound to, in session order.
+    ///
+    /// Asides included, and deliberately: rewinding to before a `!` command is
+    /// a thing someone wants. What *names* the session is a different question
+    /// with a different answer, and the resume listing asks that one against
+    /// the archive without loading it.
+    ///
+    /// Reads `history`, not `view`: a prompt compaction dropped is still one
+    /// the user asked, so the rewind menu can reach it — and rewinding past a
+    /// compaction entry truncates that too, which undoes the compaction and
+    /// brings the content back. It also keeps the session's name from changing
+    /// the first time its opening turn is compacted away.
     pub fn prompts(&self) -> Vec<(EntryId, String)> {
-        self.live()
-            .into_iter()
-            .filter_map(|(id, m)| prompt_text(m).map(|text| (id, text)))
+        self.entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::User {
+                    id,
+                    body: UserBody::Prompt(t) | UserBody::Aside(t),
+                    ..
+                } => Some((*id, t.shown.clone().unwrap_or_else(|| t.text.clone()))),
+                _ => None,
+            })
             .collect()
     }
 
-    /// The first thing the user asked, if anything. The text `prompts` would
-    /// report first, without building the whole list for the one value.
-    pub fn first_prompt(&self) -> Option<String> {
-        self.live().into_iter().find_map(|(_, m)| prompt_text(m))
-    }
 
-    /// Rewind to a user message: everything after it leaves the session, and
-    /// returns how many entries that was.
-    pub fn rollback_to(&mut self, user: EntryId) -> usize {
+    /// Rewind to an entry: everything after it is removed from the session,
+    /// and returns how many entries that was.
+    ///
+    /// Removed, not compacted: a compaction only records what the model stopped
+    /// seeing, while this deletes. A `Compaction` entry caught in the cut takes
+    /// its record with it, so the content that pass dropped comes back.
+    pub fn rollback_to(&mut self, entry: EntryId) -> usize {
         let Some(keep) = self
             .entries
             .iter()
-            .position(|e| e.id() == user)
+            .position(|e| e.id() == entry)
             .map(|i| i + 1)
         else {
             return 0;
         };
-        let dropped = self.entries.len() - keep;
+        let removed = self.entries.len() - keep;
         self.entries.truncate(keep);
-        dropped
+        // The plan described work this rewind just undid. Carrying it forward
+        // would tell the model six items are done when two of them are not —
+        // stated as fact, every turn, in a note. Restating a plan costs one
+        // tool call; acting on a false one costs the work.
+        self.todos.clear();
+        removed
     }
 
     pub fn entries(&self) -> &[Entry] {
@@ -203,23 +461,7 @@ impl Session {
         !self
             .entries
             .iter()
-            .any(|e| matches!(e, Entry::Message { .. }))
-    }
-
-    /// Every message entry, whether or not the view still shows it.
-    pub fn messages(&self) -> impl Iterator<Item = (EntryId, &Message)> {
-        self.entries.iter().filter_map(|e| match e {
-            Entry::Message { id, message } => Some((*id, message)),
-            _ => None,
-        })
-    }
-
-    /// Message entries the view still shows, before elisions are applied.
-    pub fn live(&self) -> Vec<(EntryId, &Message)> {
-        let dropped = self.dropped();
-        self.messages()
-            .filter(|(id, _)| !dropped.contains(id))
-            .collect()
+            .any(|e| matches!(e, Entry::User { .. } | Entry::Assistant { .. }))
     }
 
     fn dropped(&self) -> HashSet<EntryId> {
@@ -233,18 +475,105 @@ impl Session {
             .collect()
     }
 
-    /// Later passes win: a result elided as superseded and later aged out shows
-    /// the newer notice.
-    fn elisions(&self) -> HashMap<&ToolCallId, &str> {
+    /// Later passes win: an entry omitted as superseded and later aged out
+    /// shows the newer notice. Whole-entry omissions only — the ones naming a
+    /// block are `block_omissions`, and mixing them would let a block notice
+    /// hide an entry that is still shown in full.
+    fn omissions(&self) -> HashMap<EntryId, &str> {
         let mut out = HashMap::new();
         for e in &self.entries {
             if let Entry::Compaction { record, .. } = e {
-                for el in &record.elisions {
-                    out.insert(&el.call, el.notice.as_str());
+                for el in record.omissions.iter().filter(|o| o.block.is_none()) {
+                    out.insert(el.entry, el.notice.as_str());
                 }
             }
         }
         out
+    }
+
+    /// Arguments the model no longer sees, by the block that held them.
+    pub fn block_omissions(&self) -> HashMap<(EntryId, usize), &str> {
+        let mut out = HashMap::new();
+        for e in &self.entries {
+            if let Entry::Compaction { record, .. } = e {
+                for el in &record.omissions {
+                    if let Some(n) = el.block {
+                        out.insert((el.entry, n), el.notice.as_str());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// An assistant turn's blocks as the model sees them.
+    pub fn shown_blocks(
+        blocks: &[AssistantContent],
+        id: EntryId,
+        gone: &HashMap<(EntryId, usize), &str>,
+    ) -> Vec<AssistantContent> {
+        if gone.is_empty() {
+            return blocks.to_vec();
+        }
+        blocks
+            .iter()
+            .enumerate()
+            .map(|(n, b)| match (b, gone.get(&(id, n))) {
+                (AssistantContent::ToolCall(c), Some(notice)) => {
+                    AssistantContent::ToolCall(omitted_args(c, notice))
+                }
+                _ => b.clone(),
+            })
+            .collect()
+    }
+
+    /// What the model can see right now, in session order.
+    ///
+    /// Compaction records and task lists are inputs to this, not content, so
+    /// they are skipped; dropped entries are gone; omitted ones keep their
+    /// shell. Nothing is merged — that is the wire's business, and doing it
+    /// here is what once made two lists of different lengths share an index.
+    /// What a person can see: everything, in order, compaction or no.
+    ///
+    /// The other half of `view`, and the split is the whole point —
+    /// **compaction is the model losing sight of history, not the user**.
+    /// Not destroying the transcript is only worth something if it can still be
+    /// read afterwards, and the one surface that reads it to a human was
+    /// reading the model's copy: the conversation sat complete on disk and the
+    /// screen showed it truncated.
+    ///
+    /// Readers divide cleanly. `view`: estimate, encode, compact — anything
+    /// asking what the model is sent. `history`: the screen, the rewind menu,
+    /// the session's own name.
+    pub fn history(&self) -> impl Iterator<Item = &Entry> {
+        self.entries.iter()
+    }
+
+    /// Every entry the model has stopped seeing — dropped by a compaction, or
+    /// shown to it as a notice. What the screen marks rather than hides.
+    ///
+    /// The whole set, not one lookup: the only caller walks the transcript, and
+    /// answering per entry meant rebuilding both maps from every entry each
+    /// time. That is quadratic, and a rebuild is exactly when the transcript is
+    /// longest.
+    pub fn out_of_view(&self) -> HashSet<EntryId> {
+        let mut out = self.dropped();
+        out.extend(self.omissions().keys().copied());
+        out
+    }
+
+    pub fn view(&self) -> Vec<Seen<'_>> {
+        let dropped = self.dropped();
+        let omissions = self.omissions();
+        self.entries
+            .iter()
+            .filter(|e| matches!(e, Entry::User { .. } | Entry::Assistant { .. }))
+            .filter(|e| !dropped.contains(&e.id()))
+            .map(|entry| match omissions.get(&entry.id()) {
+                Some(notice) => Seen::Omitted { entry, notice },
+                None => Seen::As(entry),
+            })
+            .collect()
     }
 
     /// Summaries still in force, oldest first. A compaction entry can itself be
@@ -255,19 +584,11 @@ impl Session {
         self.entries
             .iter()
             .filter_map(|e| match e {
-                Entry::Compaction { id, record } if !dropped.contains(id) => {
+                Entry::Compaction { id, record, .. } if !dropped.contains(id) => {
                     record.summary.as_deref()
                 }
                 _ => None,
             })
-            .collect()
-    }
-
-    /// The messages behind a set of ids, in session order.
-    pub fn messages_for(&self, ids: &[EntryId]) -> Vec<&Message> {
-        self.messages()
-            .filter(|(id, _)| ids.contains(id))
-            .map(|(_, m)| m)
             .collect()
     }
 
@@ -277,7 +598,7 @@ impl Session {
         self.entries
             .iter()
             .filter_map(|e| match e {
-                Entry::Compaction { id, record }
+                Entry::Compaction { id, record, .. }
                     if record.summary.is_some() && !dropped.contains(id) =>
                 {
                     Some(*id)
@@ -287,26 +608,54 @@ impl Session {
             .collect()
     }
 
-    /// What goes on the wire.
+    /// The entries behind a set of ids, in session order.
+    pub fn entries_for(&self, ids: &[EntryId]) -> Vec<&Entry> {
+        self.entries
+            .iter()
+            .filter(|e| ids.contains(&e.id()))
+            .collect()
+    }
+
+    /// The view as messages: one entry, one message, in view order.
     ///
-    /// A summary rides on the opening turn rather than as a message of its own:
-    /// dropping whole exchanges leaves the history starting on an assistant
-    /// turn. Adjacent user messages — a tool result followed by the prompt
-    /// that closed it — are merged, since both wires require the roles to
-    /// alternate.
+    /// Deliberately unmerged. Anthropic wants a turn's user blocks in one
+    /// `role:"user"` message and Responses wants them apart, so joining them is
+    /// a format rule and lives in the encoder. Doing it here would write one
+    /// wire's requirement into the projection both of them read.
     pub fn context(&self) -> Vec<Message> {
-        let elisions = self.elisions();
         let summaries = self.summaries();
+        let gone = self.block_omissions();
         let mut out: Vec<Message> = Vec::new();
         let mut first_user = true;
 
-        for (_, m) in self.live() {
-            let Message::User { content } = m else {
-                out.push(m.clone());
-                continue;
+        for seen in self.view() {
+            let block = match seen {
+                Seen::As(Entry::Assistant { id, blocks, .. }) => {
+                    out.push(Message::Assistant {
+                        content: Self::shown_blocks(blocks, *id, &gone),
+                    });
+                    continue;
+                }
+                // An assistant turn is never omitted: its `tool_use` blocks
+                // must stay to keep the answering results legal.
+                Seen::Omitted {
+                    entry: Entry::Assistant { id, blocks, .. },
+                    ..
+                } => {
+                    out.push(Message::Assistant {
+                        content: Self::shown_blocks(blocks, *id, &gone),
+                    });
+                    continue;
+                }
+                Seen::As(Entry::User { body, .. }) => user_block(body),
+                Seen::Omitted {
+                    entry: Entry::User { body, .. },
+                    notice,
+                } => omitted_block(body, notice),
+                _ => continue,
             };
-            let mut content: Vec<UserContent> =
-                content.iter().map(|b| apply(b, &elisions)).collect();
+
+            let mut content = vec![block];
             if first_user {
                 first_user = false;
                 for s in &summaries {
@@ -315,348 +664,129 @@ impl Session {
                     }));
                 }
             }
-            if let Some(Message::User { content: prev }) = out.last_mut() {
-                prev.extend(content);
-            } else {
-                out.push(Message::User { content });
-            }
+            out.push(Message::User { content });
         }
         out
     }
 }
 
-/// A user message's prompt text: its own text blocks. `None` when the message
-/// carries no text of its own.
-fn prompt_text(m: &Message) -> Option<String> {
-    let Message::User { content } = m else {
-        return None;
-    };
-    let text: String = content
-        .iter()
-        .filter_map(|c| match c {
-            UserContent::Text(t) => Some(t.text.as_str()),
-            _ => None,
-        })
-        .collect();
-    (!text.is_empty()).then_some(text)
+pub fn user_block(body: &UserBody) -> UserContent {
+    match body {
+        UserBody::Prompt(t) | UserBody::Aside(t) => UserContent::Text(Text {
+            text: t.text.clone(),
+        }),
+        UserBody::Result { result: r, .. } => UserContent::ToolResult(r.clone()),
+        UserBody::Image(i) => UserContent::Image(i.clone()),
+    }
 }
 
-fn apply(block: &UserContent, elisions: &HashMap<&ToolCallId, &str>) -> UserContent {
-    let UserContent::ToolResult(r) = block else {
-        return block.clone();
-    };
-    let Some(notice) = elisions.get(&r.call) else {
-        return block.clone();
-    };
-    let mut out = r.clone();
-    out.content = vec![ToolResultContent::Text(Text {
-        text: (*notice).to_string(),
-    })];
-    out.useless = false;
-    UserContent::ToolResult(out)
+/// The shell an omitted entry keeps. A result must stay a result, or the
+/// `tool_use` it answers is left dangling.
+pub fn omitted_block(body: &UserBody, notice: &str) -> UserContent {
+    match body {
+        UserBody::Result { result: r, .. } => {
+            let mut out = r.clone();
+            out.content = vec![ToolResultContent::Text(Text {
+                text: notice.to_string(),
+            })];
+            out.useless = false;
+            UserContent::ToolResult(out)
+        }
+        _ => UserContent::Text(Text {
+            text: notice.to_string(),
+        }),
+    }
 }
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
-    use brain::message::{AssistantContent, ToolCall, ToolResult};
-    use serde_json::json;
+    use brain::message::{Text as MsgText, ToolResult};
 
-    fn call(id: &str) -> Message {
-        Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::ToolCall(ToolCall {
-                id: ToolCallId(id.into()),
-                provider: None,
-                name: "read".into(),
-                args: json!({ "path": "a.rs" }),
-            })],
-        }
-    }
-
-    fn result(id: &str, body: &str) -> Message {
-        Message::tool_results(vec![ToolResult::text(ToolCallId(id.into()), "read", body)])
-    }
-
-    fn log() -> Session {
-        Session::from_messages([
-            Message::user("go"),
-            call("c1"),
-            result("c1", "first body"),
-            call("c2"),
-            result("c2", "second body"),
-        ])
-    }
-
+    /// The contract the Anthropic encoder's join is written against: what a
+    /// turn holds arrives as separate messages, and joining them is the wire's
+    /// business, not this projection's.
     #[test]
-    fn a_fresh_log_shows_every_message() {
-        assert_eq!(log().context().len(), 5);
-    }
-
-    #[test]
-    fn an_elision_changes_the_view_and_leaves_the_log_whole() {
-        let mut l = log();
-        l.record(Compaction {
-            elisions: vec![Elision {
-                call: ToolCallId("c1".into()),
-                notice: "[gone]".into(),
-            }],
-            ..Default::default()
-        });
-
-        let view = l.context();
-        assert_eq!(view.len(), 5, "elision replaces content, never a message");
-        assert!(format!("{:?}", view[2]).contains("[gone]"));
-        // The record is what changed; the message entry still holds its body.
-        assert!(
-            l.messages()
-                .any(|(_, m)| format!("{m:?}").contains("first body"))
-        );
-    }
-
-    #[test]
-    fn a_dropped_entry_leaves_the_view_but_stays_in_the_log() {
-        let mut l = log();
-        let ids: Vec<_> = l.messages().map(|(id, _)| id).collect();
-        l.record(Compaction {
-            dropped: vec![ids[1], ids[2]],
-            ..Default::default()
-        });
-
-        assert_eq!(l.context().len(), 3);
-        assert_eq!(l.messages().count(), 5);
-        assert_eq!(l.context()[0].text(), "go");
-    }
-
-    #[test]
-    fn a_later_pass_overrides_an_earlier_notice() {
-        let mut l = log();
-        for notice in ["[first notice]", "[second notice]"] {
-            l.record(Compaction {
-                elisions: vec![Elision {
-                    call: ToolCallId("c1".into()),
-                    notice: notice.into(),
-                }],
-                ..Default::default()
-            });
-        }
-        assert!(format!("{:?}", l.context()[2]).contains("[second notice]"));
-    }
-
-    #[test]
-    fn the_log_round_trips_through_json_with_its_records() {
-        let mut l = log();
-        l.record(Compaction {
-            dropped: vec![EntryId(1)],
-            elisions: vec![Elision {
-                call: ToolCallId("c2".into()),
-                notice: "[x]".into(),
-            }],
-            summary: Some("did some work".into()),
-            tokens_before: 900,
-            tokens_after: 100,
-        });
-        let back: Session = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
-        assert_eq!(back, l);
-        assert_eq!(back.context().len(), l.context().len());
-    }
-
-    #[test]
-    fn ids_keep_climbing_so_a_reloaded_log_cannot_collide() {
-        let mut l = log();
-        l.record(Compaction::default());
-        let last = l.push(Message::user("more"));
-        let back: Session = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
-        let mut back = back;
-        assert!(back.push(Message::user("later")) > last);
-    }
-
-    #[test]
-    fn a_rewind_keeps_the_chosen_message_and_drops_what_follows() {
-        let mut l = log();
-        l.push(Message::user("second turn"));
-        l.push(Message::assistant_text("second answer"));
-
-        assert_eq!(l.rollback_to(EntryId(5)), 1);
-        assert_eq!(l.context().len(), 5);
-        assert_eq!(l.context()[4].text(), "second turn");
-        assert_eq!(l.entries().last().unwrap().id(), EntryId(5));
-    }
-
-    #[test]
-    fn a_rewind_to_the_first_message_keeps_only_it() {
-        let mut l = log();
-        assert_eq!(l.rollback_to(EntryId(0)), 4);
-        assert_eq!(l.context().len(), 1);
-        assert_eq!(l.context()[0].text(), "go");
-    }
-
-    #[test]
-    fn a_rewind_to_the_last_message_drops_nothing() {
-        let mut l = log();
-        assert_eq!(l.rollback_to(EntryId(4)), 0);
-        assert_eq!(l.context().len(), 5);
-    }
-
-    #[test]
-    fn a_rewind_to_an_unknown_id_is_a_no_op() {
-        let mut l = log();
-        assert_eq!(l.rollback_to(EntryId(99)), 0);
-        assert_eq!(l.context().len(), 5);
-    }
-
-    #[test]
-    fn ids_keep_climbing_across_a_rewind() {
-        let mut l = log();
-        let before = l.push(Message::user("tail"));
-        l.rollback_to(before);
-        assert!(l.push(Message::user("later")) > before);
-    }
-
-    #[test]
-    fn prompts_are_the_messages_with_text() {
-        let l = log();
-        let prompts = l.prompts();
-        assert_eq!(prompts.len(), 1);
-        assert_eq!(prompts[0].0, EntryId(0));
-        assert_eq!(prompts[0].1, "go");
-    }
-
-    #[test]
-    fn a_prompt_after_tool_results_is_its_own_message() {
-        // A tool round ends on a tool-results user message; the next prompt
-        // is its own user message, counted on its own.
-        let mut l = log();
-        l.send_prompt("continue");
-        let prompts = l.prompts();
-        assert_eq!(prompts.len(), 2);
-        assert_eq!(prompts[1].0, EntryId(5));
-        assert_eq!(prompts[1].1, "continue");
-    }
-
-    #[test]
-    fn two_user_messages_stay_apart_in_prompts() {
-        let mut l = Session::new();
-        l.send_prompt("one");
-        l.send_prompt("two");
-        let prompts = l.prompts();
-        assert_eq!(prompts[1].1, "two");
-    }
-
-    #[test]
-    fn first_prompt_is_the_first_question_and_none_when_there_is_none() {
-        let l = log();
-        assert_eq!(l.first_prompt().as_deref(), Some("go"));
-
-        assert_eq!(Session::new().first_prompt(), None);
-    }
-}
-
-#[cfg(test)]
-mod resume_tests {
-    use super::*;
-    use brain::message::{AssistantContent, ToolCall, ToolResult};
-    use serde_json::json;
-
-    fn call(id: &str) -> Message {
-        Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::ToolCall(ToolCall {
-                id: ToolCallId(id.into()),
-                provider: None,
-                name: "read".into(),
-                args: json!({}),
-            })],
-        }
-    }
-
-    fn results(id: &str) -> Message {
-        Message::tool_results(vec![ToolResult::text(
-            ToolCallId(id.into()),
-            "read",
-            "body",
-        )])
-    }
-
-    fn roles(log: &Session) -> Vec<&'static str> {
-        log.context()
-            .iter()
-            .map(|m| match m {
-                Message::System { .. } => "system",
-                Message::User { .. } => "user",
-                Message::Assistant { .. } => "assistant",
-            })
-            .collect()
-    }
-
-    #[test]
-    fn a_prompt_after_tool_results_merges_on_the_wire() {
-        let mut l = Session::from_messages([Message::user("hi"), call("c1"), results("c1")]);
-        l.send_prompt("and now?");
-
-        // The prompt is its own message, merged into the adjacent tool
-        // results only when building what goes on the wire.
-        assert_eq!(roles(&l), vec!["user", "assistant", "user"]);
-        assert_eq!(l.context()[2].text(), "and now?");
-        assert_eq!(l.messages().count(), 4);
-    }
-
-    #[test]
-    fn an_unanswered_call_is_closed_with_an_interrupted_result() {
-        let mut l = Session::from_messages([
-            Message::user("hi"),
-            Message::assistant_text("ok"),
-            call("c9"),
+    fn the_view_hands_over_one_message_per_entry() {
+        let mut s = Session::new();
+        s.prompt("go");
+        s.push_assistant(vec![AssistantContent::Text(MsgText { text: "on it".into() })]);
+        s.push_results(vec![
+            ToolResult::text("c1", "read", "a"),
+            ToolResult::text("c2", "grep", "b"),
         ]);
-        l.send_prompt("next");
+        s.push_user(UserBody::Image(Image::Url { url: "http://x/i.png".into() }));
+        s.prompt("and now this");
 
-        assert_eq!(l.messages().count(), 5);
-        assert!(
-            l.messages()
-                .any(|(_, m)| m.tool_calls().any(|c| c.id.0 == "c9"))
-        );
-        let ctx = l.context();
-        let closed: Vec<_> = ctx
-            .iter()
-            .filter_map(|m| match m {
-                Message::User { content } => Some(content),
-                _ => None,
-            })
-            .flatten()
-            .filter_map(|c| match c {
-                UserContent::ToolResult(r) => Some(r),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(closed.len(), 1);
-        assert_eq!(closed[0].call.0, "c9");
-        assert!(closed[0].is_error);
+        let msgs = s.context();
+        assert_eq!(msgs.len(), s.view().len());
+        for m in &msgs {
+            if let Message::User { content } = m {
+                assert_eq!(content.len(), 1, "a user message carried more than its entry");
+            }
+        }
     }
 
+    /// Compaction is the model losing sight of history, not the user. What
+    /// names a session is read out of the archive, so it has to stay in the
+    /// archive — a compaction that removed it would rename the session the
+    /// first time the window filled.
     #[test]
-    fn a_clean_transcript_gains_one_turn() {
-        let mut l = Session::from_messages([Message::user("hi"), Message::assistant_text("done")]);
-        l.send_prompt("more");
-        assert_eq!(roles(&l), vec!["user", "assistant", "user"]);
+    fn compacting_the_opening_turn_leaves_it_in_the_transcript() {
+        let mut s = Session::new();
+        let first = s.prompt("why is the flaky test flaky?");
+        s.push_assistant(vec![AssistantContent::Text(MsgText { text: "looking".into() })]);
+        s.prompt("and the other one?");
+
+        s.record(Compaction {
+            dropped: vec![first],
+            ..Default::default()
+        });
+
+        // Gone from what the model reads, still on disk and still first.
+        assert!(!s.view().iter().any(|seen| seen.id() == first));
+        assert!(s.out_of_view().contains(&first));
+        assert_eq!(s.history().count(), 4, "nothing left the transcript");
+        assert_eq!(s.prompts().first().map(|(id, _)| *id), Some(first));
     }
 
+    /// And because the menu can still name it, rewinding to it truncates the
+    /// compaction entry too — which puts the dropped turns back.
     #[test]
-    fn an_empty_log_starts_the_conversation() {
-        let mut l = Session::new();
-        l.send_prompt("first");
-        assert_eq!(l.context().len(), 1);
-        assert_eq!(l.context()[0].text(), "first");
+    fn rewinding_past_a_compaction_undoes_it() {
+        let mut s = Session::new();
+        let first = s.prompt("the task");
+        s.push_assistant(vec![AssistantContent::Text(MsgText { text: "on it".into() })]);
+        let second = s.prompt("more");
+        s.record(Compaction {
+            dropped: vec![first],
+            ..Default::default()
+        });
+
+        assert!(s.prompts().iter().any(|(id, _)| *id == first), "the menu must reach it");
+        s.rollback_to(second);
+
+        assert!(!s.out_of_view().contains(&first), "the compaction went with the rewind");
+        assert!(s.view().iter().any(|seen| seen.id() == first));
     }
 
+    /// The one user message that legitimately carries more than one block.
     #[test]
-    fn adjacent_user_turns_merge_when_building_the_wire() {
-        let mut l = Session::new();
-        l.push(Message::user("first"));
-        l.push(Message::user("second"));
-        l.push(Message::user("third"));
-        // Each stays its own message in the log; the wire gets them merged.
-        assert_eq!(l.messages().count(), 3);
-        assert_eq!(roles(&l), vec!["user"]);
-        assert_eq!(l.context()[0].text(), "firstsecondthird");
+    fn summaries_ride_the_first_user_message_rather_than_one_of_their_own() {
+        let mut s = Session::new();
+        s.prompt("go");
+        s.push_assistant(vec![AssistantContent::Text(MsgText { text: "done".into() })]);
+        s.record(Compaction {
+            summary: Some("earlier: read two files".into()),
+            ..Default::default()
+        });
+
+        let msgs = s.context();
+        let Message::User { content } = &msgs[0] else {
+            panic!("the first message is the opening prompt")
+        };
+        assert_eq!(content.len(), 2);
+        assert!(matches!(&content[1], UserContent::Text(t) if t.text.contains("<earlier-work>")));
     }
 }

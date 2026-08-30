@@ -2,10 +2,7 @@ use std::io::{IsTerminal as _, Read as _};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use brain::catalog::{
-    AnthropicCompat, Capabilities, ModelSpec, OpenAiCompat, Pricing, ThinkingReplay,
-    ThinkingSupport, Wire,
-};
+use brain::model::{CacheControl, Format, ModelSpec};
 use brain::request::Effort;
 use brain::transport::{Transport, anthropic::Anthropic, openai::OpenAi};
 use clap::{Parser, ValueEnum};
@@ -25,25 +22,27 @@ mod tui;
 /// tier the same way the command line does.
 #[derive(Debug, Clone, Copy, ValueEnum, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum WireArg {
+pub enum FormatArg {
     Anthropic,
     Openai,
 }
 
-impl WireArg {
-    /// The wire this names, carrying the protocol's own defaults for its
-    /// quirks. A config entry that states quirks builds its own instead.
-    fn wire(self) -> Wire {
+impl FormatArg {
+    /// The format this names. Caching stays off: nothing on this path was
+    /// measured, and an unknown top-level field is a 400 on some servers.
+    fn format(self) -> Format {
         match self {
-            WireArg::Anthropic => Wire::Anthropic(AnthropicCompat::default()),
-            WireArg::Openai => Wire::OpenAi(OpenAiCompat::default()),
+            FormatArg::Anthropic => Format::Anthropic {
+                cache_control: CacheControl::Off,
+            },
+            FormatArg::Openai => Format::OpenAi,
         }
     }
 
     /// Delegated rather than matched again, so a model `/model` lists and one
     /// it has just switched to cannot print two names for the same protocol.
-    pub fn transport_name(self) -> &'static str {
-        self.wire().transport_name()
+    pub fn name(self) -> &'static str {
+        self.format().name()
     }
 }
 
@@ -76,8 +75,9 @@ pub struct Args {
     #[arg(long, value_name = "FILE", env = "PI_CONFIG")]
     config: Option<String>,
 
-    /// A model defined in ~/.pi.toml, or the upstream id together with --wire.
-    /// Defaults to the resumed session's model, else the config's.
+    /// What the endpoint calls the model. A name ~/.pi.toml does not describe
+    /// is passed through with default numbers. Defaults to the resumed
+    /// session's model, else the config's.
     #[arg(short, long)]
     model: Option<String>,
 
@@ -93,12 +93,8 @@ pub struct Args {
     #[arg(short = 'c', long = "continue")]
     continue_last: bool,
 
-    /// Treat --model as the endpoint's own id on this wire, for a one-off
-    /// against a server not worth writing into the config yet.
-    #[arg(long, value_enum)]
-    wire: Option<WireArg>,
-
-    /// Overrides the model's base url. Required with --wire.
+    /// Overrides the base url the model's provider names, for pointing a
+    /// configured model at a different host.
     #[arg(long)]
     base_url: Option<String>,
 
@@ -116,10 +112,6 @@ pub struct Args {
 
     #[arg(long, value_enum)]
     effort: Option<EffortArg>,
-
-    /// Cap the run at this many turns; the default is no limit.
-    #[arg(long)]
-    max_turns: Option<usize>,
 
     /// Override the model's context window, for a proxy whose real window is
     /// smaller than the config says.
@@ -159,11 +151,6 @@ pub struct Args {
     #[arg(long)]
     no_context_files: bool,
 
-    /// A JSON Schema file. The run must end by calling `yield` with a matching
-    /// object, which is printed to stdout instead of prose.
-    #[arg(long, value_name = "FILE")]
-    schema: Option<String>,
-
     /// Answer only; no progress, no usage line.
     #[arg(short, long)]
     quiet: bool,
@@ -180,40 +167,10 @@ pub struct Args {
     log: journal::LogLevel,
 }
 
-/// A model described entirely by flags. Endpoints that mimic a known wire are
-/// not worth a catalog entry each until their quirks have been measured.
-fn ad_hoc(args: &Args, model: &str, wire: WireArg) -> Result<ModelSpec> {
-    let base_url = args
-        .base_url
-        .clone()
-        .context("--wire needs --base-url, e.g. --base-url http://localhost:8000/v1")?;
-    let thinking = match wire {
-        WireArg::Anthropic => ThinkingSupport::Budget,
-        WireArg::Openai => ThinkingSupport::Effort,
-    };
-    Ok(ModelSpec {
-        id: model.to_string(),
-        wire_id: model.to_string(),
-        base_url,
-        wire: wire.wire(),
-        context_window: 128_000,
-        max_output_tokens: 8_192,
-        caps: Capabilities {
-            tools: true,
-            parallel_tool_calls: true,
-            vision: false,
-            thinking: Some(thinking),
-            cache_breakpoints: false,
-        },
-        thinking_replay: ThinkingReplay::Tagged,
-        pricing: Pricing::default(),
-    })
-}
-
 /// `configured` is what the config entry supplied, if the model came from one.
 fn transport_for(spec: &ModelSpec, configured: Option<String>) -> Result<Arc<dyn Transport>> {
-    match spec.wire {
-        Wire::Anthropic(_) => {
+    match spec.format {
+        Format::Anthropic { cache_control: _ } => {
             let key = match configured {
                 Some(k) => k,
                 None => {
@@ -222,7 +179,7 @@ fn transport_for(spec: &ModelSpec, configured: Option<String>) -> Result<Arc<dyn
             };
             Ok(Arc::new(Anthropic::new(key)))
         }
-        Wire::OpenAi(_) => {
+        Format::OpenAi => {
             // A local server usually wants no key at all.
             let key = configured
                 .or_else(|| std::env::var("OPENAI_API_KEY").ok())
@@ -248,45 +205,33 @@ pub struct Dialled {
     pub warning: Option<String>,
 }
 
-/// The table name is the wire name, easy to miss when the two were written at
-/// different times: say the edit, not just the mismatch.
-fn unknown(config: &config::Config, model: &str, named_by: config::Origin) -> anyhow::Error {
-    let by = named_by.describe();
-    match config.ids().as_slice() {
-        [] => anyhow::anyhow!(
-            "unknown model `{model}`, named by {by}, and ~/.pi.toml defines none — \
-             see examples/pi.toml."
-        ),
-        [only] => anyhow::anyhow!(
-            "unknown model `{model}`, named by {by}; the only one defined is `{only}`. \
-             Rename [models.{only}] to [models.{model}], or point {by} at `{only}`."
-        ),
-        ids => anyhow::anyhow!(
-            "unknown model `{model}`, named by {by}; defined: {}.",
-            ids.join(", ")
-        ),
-    }
+/// Why this run wanted that model, for an endpoint that cannot serve it.
+///
+/// Every name resolves now — an unlisted one is passed through with default
+/// numbers — so the only way this fails is a config with no endpoint to send
+/// it to, and the useful half of that message is who asked.
+fn unknown(model: &str, named_by: config::Origin) -> String {
+    format!(
+        "`{model}`, named by {}, cannot be reached — see examples/pi.toml",
+        named_by.describe()
+    )
 }
 
 /// Resolve a model name into something that can be talked to.
 ///
 /// Startup and `/model` share this so the two cannot decide differently about
-/// the same name. `--wire` short-circuits the config in both: it says the
-/// command line has named one endpoint and one protocol for the whole run, and
-/// a config entry of the same name would name a different server. Both cannot
-/// hold, and the flag wins here as flags do everywhere else.
+/// the same name. The config is the only way in: a model worth talking to is
+/// worth four lines naming its endpoint and protocol, and every other field
+/// already defaults to claiming nothing.
 pub fn dial(
     args: &Args,
     config: &config::Config,
     model: &str,
     named_by: config::Origin,
 ) -> Result<Dialled> {
-    let entry = args.wire.is_none().then(|| config.find(model)).flatten();
-    let mut spec = match (args.wire, entry) {
-        (Some(wire), _) => ad_hoc(args, model, wire)?,
-        (None, Some((id, e))) => e.spec(id)?,
-        (None, None) => return Err(unknown(config, model, named_by)),
-    };
+    let mut spec = config
+        .find(model)
+        .with_context(|| unknown(model, named_by))?;
     if let Some(url) = &args.base_url {
         spec.base_url = url.clone();
     }
@@ -295,25 +240,25 @@ pub fn dial(
     }
 
     let mut notes = Vec::new();
-    // An ad-hoc spec is a guess. Saying which guess lets the user correct the
-    // one that matters instead of debugging a 400 later.
-    if args.wire.is_some() {
+    // A passed-through model is a guess. Saying which guess lets the user
+    // correct the one that matters instead of debugging a 400 later.
+    if !config.is_written(model) {
         notes.push(format!(
-            "assuming a {}-token window, {} max output, and no pricing for `{}`. \
-             Set --context if the server's window differs.",
-            spec.context_window, spec.max_output_tokens, spec.id
+            "assuming a {}-token window, {} max output, no pricing, and no \
+             thinking for `{}`. Set --context if the server's window differs; \
+             --effort needs a config entry naming the model's thinking shape.",
+            spec.context_window, spec.max_output_tokens, spec.model
         ));
     }
 
-    // The table name was only needed to build the spec; what is left is the
-    // entry itself.
-    let entry = entry.map(|(_, e)| e);
-    let key = match entry.and_then(config::Entry::key) {
+    let key = match config.key() {
         Some(k) => Some(k.with_context(|| format!("the key for `{model}`"))?),
         None => None,
     };
-    let warning = entry
-        .filter(|e| e.api_key.is_some())
+    let warning = config
+        .api_key
+        .as_deref()
+        .filter(|k| !k.starts_with('$'))
         .and_then(|_| {
             args.config
                 .clone()
@@ -356,7 +301,6 @@ pub struct Resolved {
     pub system: String,
     pub tier: tools::Tier,
     pub effort: Effort,
-    pub max_turns: Option<usize>,
     pub keys: keys::Keys,
     /// The built-ins plus one command per skill. Here rather than in the Repl
     /// because a skill discovered at reload has to reach the prompt the same
@@ -364,6 +308,10 @@ pub struct Resolved {
     pub commands: Vec<repl::Command>,
     /// Worth saying once, at startup and at each reload.
     pub notes: Vec<String>,
+    /// The instruction files folded into the system prompt, named as a person
+    /// would. Shown under the banner rather than said as a note: it is what
+    /// this run is standing on, not news.
+    pub context: Vec<String>,
 }
 
 /// Fails whole or not at all. A half-applied config is worse than a stale one,
@@ -406,21 +354,12 @@ pub fn resolve(
     if !tool.is_empty() {
         registry = registry.with(tool);
     }
-    if let Some(path) = &args.schema {
-        let body =
-            std::fs::read_to_string(path).with_context(|| format!("cannot read schema {path}"))?;
-        let schema: serde_json::Value =
-            serde_json::from_str(&body).with_context(|| format!("{path} is not valid JSON"))?;
-        tools::finish::check(&schema).map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
-        registry = registry.with(tools::finish::Yield::new(schema));
-    }
 
     let settled = config.settle(
         &project.clone(),
         config::Flags {
             effort: args.effort,
             tier: args.tier,
-            max_turns: args.max_turns,
         },
     );
     let tier = match settled.tier {
@@ -435,7 +374,7 @@ pub fn resolve(
         EffortArg::High => Effort::High,
     };
 
-    let mut system = match args.system.as_ref().or(config.defaults.system.as_ref()) {
+    let mut system = match args.system.as_ref().or(config.system.as_ref()) {
         Some(path) => std::fs::read_to_string(path)
             .with_context(|| format!("cannot read system prompt {path}"))?,
         None => agent::DEFAULT_SYSTEM.to_string(),
@@ -443,8 +382,14 @@ pub fn resolve(
     // Appended rather than sent as a message: these are standing instructions,
     // they do not change within a run, and the system prompt is the part of the
     // request a provider will cache.
+    let mut context = Vec::new();
     if !args.no_context_files {
         let loaded = context::load(root);
+        context = loaded
+            .files
+            .iter()
+            .map(|p| context::short(p, root))
+            .collect();
         system.push_str(&loaded.text);
     }
 
@@ -453,10 +398,10 @@ pub fn resolve(
         system,
         tier,
         effort,
-        max_turns: settled.max_turns,
         keys: config.key_map()?,
         commands,
         notes,
+        context,
     })
 }
 
@@ -465,11 +410,10 @@ pub fn resolve(
 fn paint(
     mut rx: mpsc::UnboundedReceiver<agent::Event>,
     quiet: bool,
-    structured: bool,
     theme: std::sync::Arc<render::Theme>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut r = render::Renderer::new(quiet, structured, theme);
+        let mut r = render::Renderer::new(quiet, theme);
         while let Some(event) = rx.recv().await {
             r.on(event);
         }
@@ -515,13 +459,7 @@ async fn main() -> Result<()> {
         args.model.as_deref(),
         prior.as_ref().map(|p| p.model.as_str()),
     ) else {
-        if args.wire.is_some() {
-            bail!("--wire needs -m to say what the endpoint calls the model");
-        }
-        bail!(
-            "no model to run. Define one in ~/.pi.toml — see examples/pi.toml — \
-             or name an endpoint with --wire and --base-url."
-        );
+        bail!("no model to run. Define one in ~/.pi.toml — see examples/pi.toml.");
     };
     let dialled = dial(&args, &config, &named, named_by)?;
 
@@ -539,33 +477,43 @@ async fn main() -> Result<()> {
 
     // Captured before the spec and workspace move into the agent and context.
     let root = workspace.root().to_path_buf();
-    let model_id = dialled.spec.id.clone();
+    let model_id = dialled.spec.model.clone();
 
     let mut ag = agent::Agent::new(dialled.transport, dialled.spec);
     ag.registry = resolved.registry;
     ag.approver = Arc::new(agent::Ceiling(resolved.tier));
     ag.system = resolved.system;
     ag.effort = resolved.effort;
-    ag.max_turns = resolved.max_turns;
     if args.no_compact {
         ag.compaction = None;
     }
     ag.summarize = !args.no_summary;
+    // Resolved here rather than lazily: a name that does not exist should be a
+    // startup error, not a surprise the first time history gets long enough to
+    // compact.
+    if let Some(name) = &config.summarize_model
+        && !args.no_summary
+        && name != &model_id
+    {
+        let summarizer = dial(&args, &config, name, config::Origin::Global)
+            .with_context(|| format!("defaults.summarize_with = \"{name}\""))?;
+        ag.summarizer = Some((summarizer.transport, summarizer.spec));
+    }
     ag.retry.attempts = args.retries;
     ag.retry.idle = std::time::Duration::from_secs(args.idle_timeout.max(1));
-    if args.schema.is_some() {
-        ag.finish_tool = Some(tools::finish::NAME.to_string());
-    }
 
     let (tx, rx) = mpsc::unbounded_channel();
     let quiet = args.quiet;
-    let structured = args.schema.is_some();
 
     // An explicit --name renames a resumed session; otherwise it keeps its own.
     let name = args
         .name
         .clone()
         .or_else(|| prior.as_ref().and_then(|p| p.name.clone()));
+    let created = prior
+        .as_ref()
+        .map(|p| p.created)
+        .unwrap_or_else(session::now);
     let carried = prior.map(|p| p.into_session()).unwrap_or_default();
     let resumed = carried.context().len();
 
@@ -578,11 +526,13 @@ async fn main() -> Result<()> {
             store,
             session: carried,
             id,
+            created,
             name,
             keys: key_map.clone(),
             config: config.clone(),
             args: args.clone(),
             commands: std::sync::Arc::new(resolved.commands),
+            context: resolved.context,
             ctx,
         };
         // The live region needs the terminal at both ends: keys come in one
@@ -594,7 +544,6 @@ async fn main() -> Result<()> {
         let painter = paint(
             rx,
             quiet,
-            structured,
             std::sync::Arc::new(config.theme.clone()),
         );
         let out = line::run(core, tx).await;
@@ -614,7 +563,6 @@ async fn main() -> Result<()> {
     let painter = paint(
         rx,
         quiet,
-        structured,
         std::sync::Arc::new(config.theme.clone()),
     );
     let ctx = tools::Ctx::new(workspace)
@@ -624,7 +572,7 @@ async fn main() -> Result<()> {
     // Always through the log: a loaded session whose view happens to be empty
     // still has history worth keeping, and `resume` handles an empty session.
     let mut session = carried;
-    session.send_prompt(prompt);
+    session.send_prompt(prompt, None);
     let outcome = ag.run(&mut session, &ctx, &tx).await;
 
     drop(tx);
@@ -632,7 +580,7 @@ async fn main() -> Result<()> {
 
     // Saved whichever way the run ended: an aborted turn is exactly the one
     // worth resuming.
-    match store.save(&id, &root, &model_id, name.as_deref(), &session) {
+    match store.save(&id, &root, &model_id, name.as_deref(), created, &session) {
         Ok(_) if !args.quiet => {
             let called = name.as_deref().map_or(String::new(), |n| format!(" “{n}”"));
             let carried = if resumed > 0 {
@@ -646,11 +594,6 @@ async fn main() -> Result<()> {
         }
         Err(e) => eprintln!("warning: the transcript was not saved: {e}"),
         _ => {}
-    }
-
-    // stdout carries the result and nothing else, so it pipes into jq.
-    if let Some(value) = outcome.as_ref().ok().and_then(|o| o.yielded.as_ref()) {
-        println!("{}", serde_json::to_string_pretty(value)?);
     }
 
     // A run the user stopped is not a failure of the run; scripts should be

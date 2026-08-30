@@ -8,6 +8,7 @@
 //! timer for the spinner — so nothing has to be bolted on beside it.
 
 mod editor;
+mod row;
 mod screen;
 mod status;
 
@@ -15,12 +16,9 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::time::Instant;
 
-use agent::session::EntryId;
+use agent::session::{Entry as LogEntry, EntryId, UserBody};
 use agent::{AgentError, Event, Totals};
-use brain::message::{
-    AssistantContent, Message, ReasoningContent, ToolCallId, ToolResult, ToolResultContent,
-    UserContent,
-};
+use brain::message::{AssistantContent, ReasoningContent};
 use anyhow::Result;
 use brain::stream::Usage;
 use crossterm::event::{Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
@@ -28,6 +26,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
 use crate::keys::{Action, Keys, Press};
+use row::Row;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::Style as RStyle;
 use ratatui::text::{Line, Span};
@@ -43,7 +42,6 @@ use std::sync::Arc;
 /// What a folded run shows instead of what it is thinking.
 const THINKING: &str = "thinking...";
 
-const BANNER: &str = concat!("π ", env!("CARGO_PKG_VERSION"));
 
 /// How close two Ctrl-C presses must be to read as one deliberate quit.
 ///
@@ -76,30 +74,49 @@ enum Act {
     NewSession,
     Quit,
 }
-/// A line in the scrollback.
-enum Entry {
-    /// A plain, painted line.
-    Plain(String),
-    /// A block of reasoning that can be folded or unfolded.
-    Folded {
-        /// Which reasoning block this entry belongs to; the stream appends
-        /// completed lines to the open block's entry and nothing else.
-        block: u64,
-        /// The actual reasoning lines, kept so they can be shown when unfolded.
-        lines: Vec<String>,
-        /// Whether the block is currently folded.
-        folded: bool,
-    },
+/// What `/resume <name>` completes against, read the first time a completion
+/// asks for it.
+///
+/// Lazy because reading it means opening every archive for this workspace, and
+/// most runs never type `/resume` at all — reading it up front was the whole of
+/// a noticeable startup pause. `/resume` with no argument does not come through
+/// here; it asks the store directly, as it always did.
+struct Sessions {
+    store: crate::session::Store,
+    workspace: std::path::PathBuf,
+    read: std::cell::OnceCell<Vec<ResumeChoice>>,
 }
+
+impl Sessions {
+    fn new(store: crate::session::Store, workspace: std::path::PathBuf) -> Self {
+        Self {
+            store,
+            workspace,
+            read: std::cell::OnceCell::new(),
+        }
+    }
+
+    fn get(&self) -> &[ResumeChoice] {
+        self.read.get_or_init(|| self.store.choices(&self.workspace))
+    }
+
+    /// A turn or a switch can change what the list would say. Dropped rather
+    /// than recomputed: whoever asks next pays, and most of the time nobody
+    /// does.
+    fn forget(&mut self) {
+        self.read.take();
+    }
+}
+
 /// Whether reasoning is folded to its count line, and which block the stream
 /// is filling right now.
 ///
 /// Thinking always lives in a foldable scrollback entry, folded or not: the
-/// screen is repainted from its entries every frame, so a line already shown
+/// screen is repainted from its rows every frame, so a line already shown
 /// can still be folded. A block's own state lasts only while it is last; the
 /// next block pushes it back to `folded`, the switch.
 struct Thinking {
-    /// The next block id; closed entries keep the id they were born with, so
+    /// The next block id; closed rows keep the id they were born with, so
     /// `land` appends only to the open block's entry.
     next: u64,
     /// The block streaming right now, if any.
@@ -134,45 +151,53 @@ impl Thinking {
     /// Whether a reasoning row is hidden behind the count line: dim, and the
     /// streaming block folded — its own entry when it has one, the last
     /// value it will be born with otherwise.
-    fn holds(&self, dim: bool, above: &[Entry]) -> bool {
-        dim && self.stream_fold(above)
+    fn holds(&self, reasoning: bool, scrollback: &[Row]) -> bool {
+        reasoning && self.stream_fold(scrollback)
     }
 
     /// How the block streaming now is folded: its entry's own state, or —
     /// before its first line lands — the last value.
-    fn stream_fold(&self, above: &[Entry]) -> bool {
+    fn stream_fold(&self, scrollback: &[Row]) -> bool {
         if let Some(id) = self.streaming
-            && let Some(Entry::Folded { folded, .. }) = above
+            && let Some(folded) = scrollback
                 .iter()
                 .rev()
-                .find(|e| matches!(e, Entry::Folded { block, .. } if *block == id))
+                .find(|r| r.block() == Some(id))
+                .and_then(Row::folded)
         {
-            return *folded;
+            return folded;
         }
         self.last
     }
 
     /// The block that was last stops being so: it folds back to the switch.
     /// A new input and a new block both push it out of last.
-    fn retire_last(&mut self, above: &mut [Entry]) {
-        if let Some(Entry::Folded { folded, .. }) = last_folded(above) {
-            *folded = self.folded;
+    fn retire_last(&mut self, scrollback: &mut [Row]) {
+        if let Some(row) = last_folded(scrollback) {
+            row.set_folded(self.folded);
         }
+    }
+
+    /// The next block id. The one place ids come from, so a rebuilt block and
+    /// a streamed one can never mean the same number.
+    fn take_id(&mut self) -> u64 {
+        let id = self.next;
+        self.next += 1;
+        id
     }
 
     /// A new reasoning block is about to start. It gets an id the scrollback
     /// entry will be born with; its first line takes `birth_fold`.
-    fn start(&mut self, above: &mut [Entry]) {
-        self.retire_last(above);
-        self.streaming = Some(self.next);
-        self.next += 1;
+    fn start(&mut self, scrollback: &mut [Row]) {
+        self.retire_last(scrollback);
+        self.streaming = Some(self.take_id());
     }
 
     /// The block that was last stops being so the moment a new input is
     /// submitted: it folds to the switch, its unfold lasting only while it
     /// was last.
-    fn fold_previous(&mut self, above: &mut [Entry]) {
-        self.retire_last(above);
+    fn fold_previous(&mut self, scrollback: &mut [Row]) {
+        self.retire_last(scrollback);
     }
 
     /// The streaming block is over; the entry it filled stays where it is.
@@ -187,16 +212,14 @@ impl Thinking {
     }
 
     /// Fold or unfold every block in the scrollback and move the switch with
-    /// them, the last block included: entries and switch must never disagree,
+    /// them, the last block included: rows and switch must never disagree,
     /// or the next block is born with a stale value and a mixed screen can
     /// never fold back to a single state.
-    fn flip_all(&mut self, above: &mut [Entry]) {
+    fn flip_all(&mut self, scrollback: &mut [Row]) {
         self.folded = !self.folded;
         self.last = self.folded;
-        for entry in above.iter_mut() {
-            if let Entry::Folded { folded, .. } = entry {
-                *folded = self.folded;
-            }
+        for row in scrollback.iter_mut() {
+            row.set_folded(self.folded);
         }
     }
 
@@ -204,72 +227,34 @@ impl Thinking {
     /// one when nothing is. The switch is left alone, so the blocks no one is
     /// touching keep what they had; a block with no entry yet is born with
     /// the flip.
-    fn toggle_current(&mut self, above: &mut [Entry]) {
+    fn toggle_current(&mut self, scrollback: &mut [Row]) {
         self.last = !self.last;
         let flipped = if let Some(id) = self.streaming {
-            above
-                .iter_mut()
-                .rev()
-                .find(|e| matches!(e, Entry::Folded { block, .. } if *block == id))
+            scrollback.iter_mut().rev().find(|r| r.block() == Some(id))
         } else {
-            last_folded(above)
+            last_folded(scrollback)
         };
-        if let Some(Entry::Folded { folded, .. }) = flipped {
-            *folded = self.last;
+        if let Some(row) = flipped {
+            row.set_folded(self.last);
         }
     }
 }
 
 /// The newest reasoning block's entry in the scrollback, if any.
-fn last_folded(above: &mut [Entry]) -> Option<&mut Entry> {
-    above
+fn last_folded(scrollback: &mut [Row]) -> Option<&mut Row> {
+    scrollback
         .iter_mut()
         .rev()
-        .find(|e| matches!(e, Entry::Folded { .. }))
-}
-
-/// The count line a shut thinking block leaves in the scrollback.
-fn thinking_summary(n: usize) -> String {
-    let s = if n == 1 { "" } else { "s" };
-    format!("thinking · {n} line{s}")
-}
-
-/// The rows one scrollback entry renders to, and the row at index `i` of
-/// them: a plain line is itself; a folded block is its summary, or its full
-/// lines when unfolded.
-fn entry_len(entry: &Entry) -> usize {
-    match entry {
-        Entry::Plain(_) => 1,
-        Entry::Folded { lines, folded, .. } => {
-            if *folded {
-                1
-            } else {
-                lines.len()
-            }
-        }
-    }
-}
-
-fn entry_row<'a>(entry: &'a Entry, i: usize, paint: &Paint) -> Cow<'a, str> {
-    match entry {
-        Entry::Plain(s) => Cow::Borrowed(s),
-        Entry::Folded { lines, folded, .. } => {
-            if *folded {
-                // The count row is synthesized at draw time, so it takes its
-                // muted styling here rather than from a painted entry.
-                Cow::Owned(paint.on(&paint.theme.muted, &thinking_summary(lines.len())))
-            } else {
-                Cow::Borrowed(&lines[i])
-            }
-        }
-    }
+        .find(|r| r.block().is_some())
 }
 
 /// The scrollback as rows, walked from either end without flattening the
 /// whole history: `window` only ever needs the newest `want` rows, and an
 /// unfolded thinking block is not worth re-materializing per frame.
 struct ScrollbackRows<'a> {
-    entries: &'a [Entry],
+    rows: &'a [Row],
+    /// The frame's width, for the rows that clip to fit.
+    width: usize,
     /// For the folded summary row, which is synthesized at draw time and so
     /// carries no paint of its own.
     paint: &'a Paint,
@@ -280,15 +265,16 @@ struct ScrollbackRows<'a> {
 }
 
 impl<'a> ScrollbackRows<'a> {
-    fn new(entries: &'a [Entry], paint: &'a Paint) -> Self {
-        let back = entries.len().saturating_sub(1);
-        let back_row = if entries.is_empty() {
+    fn new(rows: &'a [Row], paint: &'a Paint, width: usize) -> Self {
+        let back = rows.len().saturating_sub(1);
+        let back_row = if rows.is_empty() {
             0
         } else {
-            entry_len(&entries[back])
+            rows[back].len()
         };
         Self {
-            entries,
+            rows,
+            width,
             paint,
             front: (0, 0),
             back: (back, back_row),
@@ -301,22 +287,22 @@ impl<'a> Iterator for ScrollbackRows<'a> {
 
     fn next(&mut self) -> Option<Cow<'a, str>> {
         // `next_back` guards the empty case through its row pointers; the
-        // front walk would index `entries[0]` before any check.
-        if self.entries.is_empty() {
+        // front walk would index `rows[0]` before any check.
+        if self.rows.is_empty() {
             return None;
         }
         while self.front.0 <= self.back.0 {
-            let entry = &self.entries[self.front.0];
+            let entry = &self.rows[self.front.0];
             if self.front.0 == self.back.0 {
                 if self.front.1 >= self.back.1 {
                     return None;
                 }
-                let row = entry_row(entry, self.front.1, self.paint);
+                let row = entry.line(self.front.1, self.paint, self.width);
                 self.front.1 += 1;
                 return Some(row);
             }
-            if self.front.1 < entry_len(entry) {
-                let row = entry_row(entry, self.front.1, self.paint);
+            if self.front.1 < entry.len() {
+                let row = entry.line(self.front.1, self.paint, self.width);
                 self.front.1 += 1;
                 return Some(row);
             }
@@ -329,19 +315,19 @@ impl<'a> Iterator for ScrollbackRows<'a> {
 impl<'a> DoubleEndedIterator for ScrollbackRows<'a> {
     fn next_back(&mut self) -> Option<Cow<'a, str>> {
         while self.front.0 <= self.back.0 {
-            let entry = &self.entries[self.back.0];
+            let entry = &self.rows[self.back.0];
             if self.front.0 == self.back.0 {
                 if self.front.1 >= self.back.1 {
                     return None;
                 }
                 self.back.1 -= 1;
-                return Some(entry_row(entry, self.back.1, self.paint));
+                return Some(entry.line(self.back.1, self.paint, self.width));
             }
             if self.back.1 > 0 {
                 self.back.1 -= 1;
-                return Some(entry_row(entry, self.back.1, self.paint));
+                return Some(entry.line(self.back.1, self.paint, self.width));
             }
-            self.back = (self.back.0 - 1, entry_len(&self.entries[self.back.0 - 1]));
+            self.back = (self.back.0 - 1, self.rows[self.back.0 - 1].len());
         }
         None
     }
@@ -356,36 +342,36 @@ impl<'a> DoubleEndedIterator for ScrollbackRows<'a> {
 /// one that gets its second chance in front of the user.
 fn body(
     thinking: &Thinking,
-    above: &[Entry],
+    scrollback: &[Row],
     md: &Markdown,
-    dim: bool,
-    open: &str,
+    reasoning: bool,
+    partial: &str,
     space: (usize, usize),
     paint: &Paint,
 ) -> Vec<String> {
     let (width, room) = space;
-    if thinking.holds(dim, above) {
+    if thinking.holds(reasoning, scrollback) {
         // The block's count row in the scrollback already answers the fold
         // switch; the live placeholder is only for the moment before the
         // block's first completed line exists to count.
         let counted = thinking.streaming.is_some_and(|id| {
-            above
+            scrollback
                 .iter()
                 .rev()
-                .any(|e| matches!(e, Entry::Folded { block, .. } if *block == id))
+                .any(|r| r.block() == Some(id))
         });
         if !counted {
             return vec![paint.on(&paint.theme.muted, THINKING)];
         }
         return Vec::new();
     }
-    if open.is_empty() {
+    if partial.is_empty() {
         return Vec::new();
     }
-    let painted = if dim {
-        paint.on(&paint.theme.muted, open)
+    let painted = if reasoning {
+        paint.on(&paint.theme.muted, partial)
     } else {
-        md.line(open, paint)
+        md.line(partial, paint)
     };
     let mut rows = screen::fit(&painted, width);
     // A paragraph can outgrow the screen; the tail is the part still being
@@ -407,136 +393,82 @@ struct RunTool {
 /// The one row a still-running tool occupies. The frame is the animation;
 /// `ToolEnd` and `abandon_tools` replace the row with a final line.
 fn tool_row(frame: usize, name: &str, summary: &str) -> String {
-    let arg = if summary.is_empty() {
-        String::new()
-    } else {
-        format!(" {summary}")
-    };
-    format!("{} {name}{arg}", status::FRAMES[frame % status::FRAMES.len()])
+    let frame = status::FRAMES[frame % status::FRAMES.len()];
+    format!("{frame} {}", row::named(name, summary))
 }
 
-/// One tool result as the ✓/✗ row the live stream would have scrolled up.
-fn tool_result_line(r: &ToolResult, paint: &Paint, width: usize) -> String {
-    let mark = if r.is_error {
-        paint.on(&paint.theme.status.err, "✗")
-    } else {
-        paint.on(&paint.theme.status.ok, "✓")
-    };
-    let body: String = r
-        .content
-        .iter()
-        .filter_map(|c| match c {
-            ToolResultContent::Text(t) => Some(t.text.as_str()),
-            _ => None,
-        })
-        .collect();
-    let head = body.split_once('\n').map_or(body.as_str(), |(h, _)| h);
-    let room = width.saturating_sub(2).max(20);
-    format!("{mark} {} {}", r.name, paint.on(&paint.theme.muted, &render::clip(head, room)))
-}
-
-/// A tool's start line: what an unanswered call keeps in the view.
-fn tool_start_line(name: &str, summary: &str) -> String {
-    let arg = if summary.is_empty() {
-        String::new()
-    } else {
-        format!(" {summary}")
-    };
-    format!("→ {name}{arg}")
-}
-
-/// A prompt's lines as the stream echoed them: the first with its gutter and
-/// the body in the input style, the rest indented to match.
-fn push_prompt_lines(
-    out: &mut Vec<Entry>,
-    text: &str,
-    prompt: &str,
-    bang_prompt: &str,
-    paint: &Paint,
-) {
-    for (i, line) in text.lines().enumerate() {
-        let (gutter, body) = if i == 0 {
-            match line.strip_prefix('!') {
-                Some(rest) => (bang_prompt, rest.trim_start()),
-                None => (prompt, line),
-            }
-        } else {
-            ("  ", line)
-        };
-        let body = paint.on(&paint.theme.input, body);
-        out.push(Entry::Plain(format!("{gutter}{body}")));
-    }
-}
 
 /// The transcript as rows, exactly as the live stream would have drawn them:
 /// prompts with their gutter, answers as markdown, tool calls as their result
 /// lines, reasoning as a foldable block. A rewind rebuilds the screen from
 /// this, so the view returns to the point the conversation did.
-fn render_log(
+fn scrollback_from(
     session: &agent::session::Session,
     paint: &Paint,
     prompt: &str,
     bang_prompt: &str,
-    width: usize,
-    folded: bool,
-) -> Vec<Entry> {
+    thinking: &mut Thinking,
+) -> Vec<Row> {
     // A call whose result is in the session shows only its result row; one that
     // never got an answer (an interrupted turn) shows the start line instead,
     // the way `abandon_tools` leaves it.
-    let answered: HashSet<ToolCallId> = session
-        .live()
-        .iter()
-        .filter_map(|(_, m)| match m {
-            Message::User { content } => Some(content),
+    let answered: HashSet<String> = session
+        .history()
+        .filter_map(|e| match e {
+            LogEntry::User {
+                body: UserBody::Result { result: r, .. },
+                ..
+            } => Some(r.call.clone()),
             _ => None,
-        })
-        .flat_map(|content| {
-            content.iter().filter_map(|c| match c {
-                UserContent::ToolResult(r) => Some(r.call.clone()),
-                _ => None,
-            })
         })
         .collect();
 
     let mut out = Vec::new();
-    for (_, m) in session.live() {
-        match m {
-            Message::User { content } => {
-                for c in content {
-                    match c {
-                        UserContent::Text(t) => {
-                            push_prompt_lines(&mut out, &t.text, prompt, bang_prompt, paint);
-                        }
-                        UserContent::ToolResult(r) => {
-                            out.push(Entry::Plain(tool_result_line(r, paint, width)));
-                        }
-                        UserContent::Image(_) => {}
-                    }
-                }
-
+    // History, not the view: compaction is the model losing sight of the
+    // conversation, not the user. What it dropped is marked and kept.
+    let mut hidden = false;
+    let unseen = session.out_of_view();
+    for entry in session.history() {
+        let gone = unseen.contains(&entry.id());
+        if gone != hidden && !matches!(entry, LogEntry::Compaction { .. })
+        {
+            hidden = gone;
+            if gone {
+                out.push(Row::notice(paint.on(
+                    &paint.theme.muted,
+                    "─── compacted; the model no longer sees the rest of this ───",
+                )));
             }
-            Message::Assistant { content, .. } => {
-                for b in content {
+        }
+        match entry {
+            LogEntry::User { body, .. } => match body {
+                UserBody::Prompt(t) | UserBody::Aside(t) => {
+                    let shown = t.shown.as_deref().unwrap_or(&t.text);
+                    out.extend(Row::prompt(shown, prompt, bang_prompt, paint));
+                }
+                UserBody::Result { result: r, preview } => {
+                    out.push(Row::stored_result(r, preview.as_deref()));
+                }
+                UserBody::Image(_) => {}
+            },
+            LogEntry::Assistant { blocks, .. } => {
+                for b in blocks {
                     match b {
                         AssistantContent::Text(t) => {
-                            // A fresh instance per block, matching the live
-                            // stream resetting its markdown at each close.
+                            // A fresh instance per block; where a block ends is
+                            // the caller's to say, and `Row::answer` states the
+                            // rest once for both callers.
                             let mut md = Markdown::default();
-                            for line in t.text.lines() {
-                                let painted = md.line(line, paint);
-                                md.advance(line);
-                                out.push(Entry::Plain(painted));
-                            }
+                            out.extend(Row::answer(&t.text, &mut md, paint));
                         }
                         AssistantContent::ToolCall(c) => {
                             if answered.contains(&c.id) {
                                 continue;
                             }
-                            out.push(Entry::Plain(
-                                paint.on(
-                                    &paint.theme.muted,
-                                    &tool_start_line(&c.name, &render::summarize(&c.args)),
-                                ),
+                            out.push(Row::tool_start(
+                                &c.name,
+                                &render::summarize(&c.args),
+                                paint,
                             ));
                         }
                         AssistantContent::Reasoning(r) => {
@@ -550,21 +482,26 @@ fn render_log(
                                     ReasoningContent::Text { text, .. } => Some(text.as_str()),
                                     _ => None,
                                 })
-                                .flat_map(|s| s.lines().map(str::to_string))
-                                .map(|s| paint.on(&paint.theme.muted, &s))
+                                .flat_map(str::lines)
+                                .map(|l| Row::reasoning_line(l, paint))
                                 .collect();
-                            out.push(Entry::Folded {
-                                // A rebuilt entry is never appended to, so the
-                                // id only has to stay out of the live stream's.
-                                block: 0,
+                            // From the same counter the live stream draws
+                            // from, because there is only one rule for what a
+                            // block id is. Handing every rebuilt block `0`
+                            // worked only for as long as nothing looked one up
+                            // by id — and `streaming_row` and `stream_fold` both
+                            // do, taking the last match.
+                            out.push(Row::reasoning(
+                                thinking.take_id(),
                                 lines,
-                                folded,
-                            });
+                                thinking.folded,
+                            ));
                         }
                     }
                 }
             }
-            Message::System { .. } => {}
+            // Neither is anything the screen shows.
+            LogEntry::Compaction { .. } => {}
         }
     }
     out
@@ -582,16 +519,18 @@ struct Ui {
     bang_prompt: String,
     /// Model output with no newline after it yet. Kept live because it is still
     /// being written; a completed line goes straight to scrollback.
-    open: String,
-    /// Whether `open` is reasoning rather than the answer.
-    dim: bool,
+    partial: String,
+    /// Whether `partial` is reasoning rather than the answer.
+    reasoning: bool,
     /// Where the answer's markdown stands: what a row means depends on the
     /// rows before it, and only a fence carries that far.
     md: Markdown,
     thinking: Thinking,
-    /// Finished lines waiting to be pushed above on the next render.
-    /// Finished lines waiting to be pushed above on the next render.
-    above: Vec<Entry>,
+    /// The conversation as the screen holds it: finished rows, oldest first,
+    /// everything above the editor. Not a projection of the session — it also
+    /// carries what only the screen ever knew, the banner and every notice a
+    /// command or a warning left behind, interleaved where they happened.
+    scrollback: Vec<Row>,
 
 
     /// Tool calls still running, one animated row each. A finished call
@@ -612,9 +551,13 @@ struct Ui {
     /// What `/model` can complete to. A copy rather than a borrow of the
     /// config: the loop holds the session mutably while it draws.
     choices: Vec<Choice>,
-    /// The same copy, of the same list `/resume` prints. A session appears
-    /// here only once it is on disk, which is what `/resume` can switch to.
-    sessions: Vec<ResumeChoice>,
+    sessions: Sessions,
+    /// The instruction files named in the opening block, kept so `/reload`
+    /// onto a new theme can rebuild it.
+    context: Vec<String>,
+    /// How many rows the opening block occupies. A theme change replaces
+    /// exactly those and leaves the conversation under them alone.
+    opened: usize,
     /// The same copy, of the same list `/help` prints.
     commands: Arc<Vec<Command>>,
     /// When the last `ctrl+l` was pressed, for the new-session double-tap.
@@ -672,12 +615,14 @@ impl Ui {
         keys: Arc<Keys>,
         choices: Vec<Choice>,
         commands: Arc<Vec<Command>>,
-        sessions: Vec<ResumeChoice>,
+        sessions: Sessions,
+        context: &[String],
         paint: Paint,
     ) -> Self {
+        let opening = Row::banner(context, &paint);
+        let opened = opening.len();
         let prompt = Self::paint_prompt(&paint, &paint.theme.prompt.icon);
         let bang_prompt = Self::paint_prompt(&paint, "!");
-        let banner = paint.on(&paint.theme.muted, BANNER);
         let mut editor = Editor::default();
         editor.set_prompts(prompt.clone(), bang_prompt.clone());
         Self {
@@ -686,15 +631,17 @@ impl Ui {
             choices,
             commands,
             sessions,
+            context: context.to_vec(),
+            opened,
             editor,
             paint,
             prompt,
             bang_prompt,
-            open: String::new(),
-            dim: false,
+            partial: String::new(),
+            reasoning: false,
             md: Markdown::default(),
             thinking: Thinking::default(),
-            above: vec![Entry::Plain(banner)],
+            scrollback: opening,
 
             tools: Vec::new(),
             queued: Vec::new(),
@@ -720,59 +667,57 @@ impl Ui {
         format!("{} ", paint.on(&paint.theme.prompt.color, icon))
     }
     fn say(&mut self, line: impl Into<String>) {
-        self.above.push(Entry::Plain(line.into()));
+        self.scrollback.push(Row::notice(line));
     }
 
     /// Where a finished row goes: a reasoning line into the streaming block's
     /// foldable entry, anything else straight into scrollback.
-    fn land(&mut self, painted: String, dim: bool) {
-        if dim
+    fn land(&mut self, painted: String, reasoning: bool) {
+        if reasoning
             && let Some(id) = self.thinking.streaming
         {
-            if let Some(Entry::Folded { lines, .. }) = self.open_entry(id) {
-                lines.push(painted);
+            if let Some(row) = self.streaming_row(id) {
+                row.push_line(painted);
                 return;
             }
-        // The block's first line: born the way `ctrl+t` last left
-        // the last block — its own fold, not the switch.
-            self.above.push(Entry::Folded {
-                block: id,
-                lines: vec![painted],
-                folded: self.thinking.birth_fold(),
-            });
+            // The block's first line: born the way `ctrl+t` last left the last
+            // block — its own fold, not the switch.
+            self.scrollback.push(Row::reasoning(
+                id,
+                vec![painted],
+                self.thinking.birth_fold(),
+            ));
             return;
         }
-        self.above.push(Entry::Plain(painted));
+        self.scrollback.push(Row::notice(painted));
     }
 
     /// The scrollback entry for a streaming block, if it has one yet.
-    fn open_entry(&mut self, id: u64) -> Option<&mut Entry> {
-        self.above
+    fn streaming_row(&mut self, id: u64) -> Option<&mut Row> {
+        self.scrollback
             .iter_mut()
             .rev()
-            .find(|e| matches!(e, Entry::Folded { block, .. } if *block == id))
+            .find(|r| r.block() == Some(id))
     }
 
 
     /// End the open paragraph and send it up into scrollback.
     /// A finished row, styled for what it is: reasoning, or the answer's
     /// markdown. The one place either decision is made.
-    fn paint_row(&mut self, line: &str, dim: bool) -> String {
-        if dim {
-            return self.paint.on(&self.paint.theme.muted, line);
+    fn paint_row(&mut self, line: &str, reasoning: bool) -> String {
+        if reasoning {
+            return Row::reasoning_line(line, &self.paint);
         }
-        let painted = self.md.line(line, &self.paint);
-        self.md.advance(line);
-        painted
+        Row::answer_line(line, &mut self.md, &self.paint)
     }
 
     fn close(&mut self) {
-        if !self.open.is_empty() {
-            let text = std::mem::take(&mut self.open);
-            let painted = self.paint_row(&text, self.dim);
-            self.land(painted, self.dim);
+        if !self.partial.is_empty() {
+            let text = std::mem::take(&mut self.partial);
+            let painted = self.paint_row(&text, self.reasoning);
+            self.land(painted, self.reasoning);
         }
-        if self.dim {
+        if self.reasoning {
             // The block is over: it stops taking lines; its entry is already
             // in the scrollback, folded or not.
             self.thinking.close_block();
@@ -782,31 +727,31 @@ impl Ui {
             // state can honestly reach.
             self.md.reset();
         }
-        self.dim = false;
+        self.reasoning = false;
     }
 
-    fn write(&mut self, delta: &str, dim: bool) {
+    fn write(&mut self, delta: &str, reasoning: bool) {
         self.produced += delta.len();
-        if dim != self.dim {
+        if reasoning != self.reasoning {
             self.close();
-            self.dim = dim;
-            if dim {
+            self.reasoning = reasoning;
+            if reasoning {
                 // A new reasoning block: `close` just settled the previous
                 // one; this one gets a fresh id and pushes the old last one
                 // back to the switch.
-                self.thinking.start(&mut self.above);
+                self.thinking.start(&mut self.scrollback);
             }
         }
 
-        self.open.push_str(delta);
+        self.partial.push_str(delta);
         // A finished line is no longer changing, so it belongs in the
         // scrollback rather than in the region we repaint: reasoning into
         // the streaming block's foldable entry, answer text as a plain row.
-        while let Some(i) = self.open.find('\n') {
-            let line: String = self.open.drain(..=i).collect();
+        while let Some(i) = self.partial.find('\n') {
+            let line: String = self.partial.drain(..=i).collect();
             let line = line.trim_end_matches('\n').to_string();
-            let painted = self.paint_row(&line, dim);
-            self.land(painted, dim);
+            let painted = self.paint_row(&line, reasoning);
+            self.land(painted, reasoning);
         }
     }
 
@@ -845,15 +790,18 @@ impl Ui {
                     summary: render::summarize(args),
                 });
             }
-            Event::ToolEnd { id, .. } => {
+            Event::ToolEnd {
+                id,
+                name,
+                is_error,
+                preview,
+            } => {
                 self.close();
                 self.tools.retain(|t| t.id != *id);
-                if let Some(said) = render::describe(&event, &self.paint, self.screen.usable()) {
-                    // Row by row: a scrollback line is written with a carriage
-                    // return of its own, and an embedded newline would stair-
-                    // step down the screen without one.
-                    self.above.extend(said.lines().map(str::to_string).map(Entry::Plain));
-                }
+                // The same row the rebuild produces, from the same parts. Two
+                // renderings of this is what the second producer used to buy.
+                self.scrollback
+                    .push(Row::result(!is_error, name.clone(), preview.clone()));
             }
             _ => {
                 self.close();
@@ -861,7 +809,7 @@ impl Ui {
                     // Row by row: a scrollback line is written with a carriage
                     // return of its own, and an embedded newline would stair-
                     // step down the screen without one.
-                    self.above.extend(said.lines().map(str::to_string).map(Entry::Plain));
+                    self.scrollback.extend(said.lines().map(Row::notice));
                 }
             }
         }
@@ -873,10 +821,8 @@ impl Ui {
     /// start line the row stood for and clear the row.
     fn abandon_tools(&mut self) {
         for t in std::mem::take(&mut self.tools) {
-            self.say(
-                self.paint
-                    .on(&self.paint.theme.muted, &tool_start_line(&t.name, &t.summary)),
-            );
+            let row = Row::tool_start(&t.name, &t.summary, &self.paint);
+            self.scrollback.push(row);
         }
     }
 
@@ -895,7 +841,7 @@ impl Ui {
             return Vec::new();
         }
         // Bottom-up: the best match belongs on the row right above the input.
-        repl::complete(self.editor.text(), &self.commands, &self.choices, &self.sessions)
+        repl::complete(self.editor.text(), &self.commands, &self.choices, self.sessions.get())
             .into_iter()
             .rev()
             .map(MenuEntry::Completion)
@@ -903,9 +849,9 @@ impl Ui {
     }
 
     /// Open the rewind selector on the given messages, newest selected first.
-    fn open_rewind(&mut self, entries: Vec<MenuEntry>) {
-        self.picked = Some(entries.len().saturating_sub(1));
-        self.rewind = entries;
+    fn open_rewind(&mut self, rows: Vec<MenuEntry>) {
+        self.picked = Some(rows.len().saturating_sub(1));
+        self.rewind = rows;
     }
 
     /// The highlighted row, clamped: the list shrinks as the word grows.
@@ -957,10 +903,10 @@ impl Ui {
 
         rows.extend(body(
             &self.thinking,
-            &self.above,
+            &self.scrollback,
             &self.md,
-            self.dim,
-            &self.open,
+            self.reasoning,
+            &self.partial,
             (width, room),
             &self.paint,
         ));
@@ -988,11 +934,12 @@ impl Ui {
         self.bang_prompt = Self::paint_prompt(&self.paint, "!");
         self.editor
             .set_prompts(self.prompt.clone(), self.bang_prompt.clone());
-        // above[0] is the banner, painted once at construction; restyle it so
-        // a /reload lands on the new theme instead of the old.
-        if let Some(Entry::Plain(s)) = self.above.first_mut() {
-            *s = self.paint.on(&self.paint.theme.muted, BANNER);
-        }
+        // The opening block is painted once at construction; rebuild it so a
+        // /reload lands on the new theme instead of the old.
+        let opening = Row::banner(&self.context, &self.paint);
+        let rest = self.scrollback.split_off(self.opened);
+        self.opened = opening.len();
+        self.scrollback = opening.into_iter().chain(rest).collect();
 
 
     }
@@ -1031,7 +978,7 @@ impl Ui {
         // into several, and counting lines here would put more rows in the
         // area than fit — pushing the newest ones off the bottom, underneath
         // the input, where nothing shows them.
-        let scrollback = ScrollbackRows::new(&self.above, &self.paint);
+        let scrollback = ScrollbackRows::new(&self.scrollback, &self.paint, width);
         let (rows, scroll) = screen::window(
             scrollback.chain(live.iter().map(|s| Cow::Borrowed(s.as_str()))),
             width,
@@ -1075,21 +1022,22 @@ impl Ui {
     /// drawing showed: a rewind changes what the conversation is, and the
     /// screen has to show the new one, not the old one with a note on it.
     fn rebuild(&mut self, session: &agent::session::Session) {
-        self.above.clear();
-        self.open.clear();
-        self.dim = false;
+        self.scrollback.clear();
+        // The opening block went with it; a rebuilt screen is the conversation.
+        self.opened = 0;
+        self.partial.clear();
+        self.reasoning = false;
         self.tools.clear();
         self.thinking.streaming = None;
         self.thinking.last = self.thinking.folded;
         self.md.reset();
         self.scroll = 0;
-        self.above = render_log(
+        self.scrollback = scrollback_from(
             session,
             &self.paint,
             &self.prompt,
             &self.bang_prompt,
-            self.screen.usable(),
-            self.thinking.folded,
+            &mut self.thinking,
         );
     }
 
@@ -1098,10 +1046,9 @@ impl Ui {
     /// being cleared, then fold the block that was current back to the switch
     /// — the input pushes it out of current no matter what it turns out to be.
     fn submit(&mut self, line: &str) {
-        let mut rows = Vec::new();
-        push_prompt_lines(&mut rows, line, &self.prompt, &self.bang_prompt, &self.paint);
-        self.above.extend(rows);
-        self.thinking.fold_previous(&mut self.above);
+        let rows = Row::prompt(line, &self.prompt, &self.bang_prompt, &self.paint);
+        self.scrollback.extend(rows);
+        self.thinking.fold_previous(&mut self.scrollback);
     }
 
 
@@ -1249,13 +1196,13 @@ impl Ui {
                 // The last block only: the one streaming, or the newest
                 // finished one when nothing is. The switch is left alone, so
                 // the blocks no one is touching keep what they had.
-                self.thinking.toggle_current(&mut self.above);
+                self.thinking.toggle_current(&mut self.scrollback);
             }
             Some(Action::ThinkFoldAll) => {
                 // Every block in the scrollback, the last one included, and
                 // the switch with them: one key presses the whole screen to a
                 // single state.
-                self.thinking.flip_all(&mut self.above);
+                self.thinking.flip_all(&mut self.scrollback);
             }
 
             Some(Action::MenuAccept) => {
@@ -1313,7 +1260,7 @@ impl Ui {
                 | Action::AppExit
                 | Action::Rewind
                 | Action::AppClearScreen,
-            ) => unreachable!("handled above"),
+            ) => unreachable!("handled scrollback"),
         }
         Act::None
     }
@@ -1427,7 +1374,8 @@ impl Tui {
             keys,
             core.choices(),
             core.commands.clone(),
-            core.store.choices(core.ctx.workspace.root()),
+            Sessions::new(core.store.clone(), core.ctx.workspace.root().to_path_buf()),
+            &core.context,
             paint,
         );
         if let Some(prior) = history_path().and_then(|p| std::fs::read_to_string(p).ok()) {
@@ -1459,8 +1407,11 @@ impl Tui {
 
     /// Sessions change on the commands that create, delete or switch them;
     /// refresh the copy the completion menu reads.
+    /// A turn or a switch can change what `/resume` would list. Dropped
+    /// rather than recomputed: whoever asks next pays, and most of the time
+    /// nobody does.
     fn refresh_sessions(&mut self) {
-        self.ui.sessions = self.core.store.choices(self.core.ctx.workspace.root());
+        self.ui.sessions.forget();
     }
 
     /// A `/new` or a `/resume` replaced the session — the transcript is the
@@ -1470,7 +1421,7 @@ impl Tui {
     fn land_swap(&mut self, said: Vec<String>) {
         self.ui.rebuild(&self.core.session);
         self.refresh_sessions();
-        self.ui.above.extend(said.into_iter().map(Entry::Plain));
+        self.ui.scrollback.extend(said.into_iter().map(Row::notice));
     }
 
     pub async fn run(
@@ -1539,11 +1490,11 @@ impl Tui {
                             }
                         }
                     };
-                    self.ui.above.extend(lines.into_iter().map(Entry::Plain));
+                    self.ui.scrollback.extend(lines.into_iter().map(Row::notice));
                 }
                 Step::Swap(said) => self.land_swap(said),
                 Step::Handled(lines) => {
-                    self.ui.above.extend(lines.into_iter().map(Entry::Plain));
+                    self.ui.scrollback.extend(lines.into_iter().map(Row::notice));
                     // The key map lives in two places; a reload has to reach
                     // both or the screen keeps answering to the old bindings.
                     if !Arc::ptr_eq(&self.ui.keys, &self.core.keys) {
@@ -1579,7 +1530,7 @@ impl Tui {
                         }
                         None => {
                             let held = self.core.agent.kept_tokens().unwrap_or(0);
-                            let now = brain::estimate::tokens(&self.core.session.context());
+                            let now = brain::estimate::tokens(&self.core.session.context(), &self.core.agent.spec);
                             let why = format!(
                                 "nothing to compact — {now} tokens, all inside the {held} \
                                  kept as working context"
@@ -1589,12 +1540,14 @@ impl Tui {
                         }
                     }
                 }
-                Step::Prompt(prompt) => {
-                    let mut next = Some(prompt);
+                Step::Prompt { send, mut typed } => {
+                    let mut next = Some(send);
                     // Anything submitted while the run worked becomes the next
                     // prompt rather than waiting for the user to send it again.
+                    // `typed` belongs to the first turn only: what was queued
+                    // after it is already what the user wrote.
                     while let Some(prompt) = next.take() {
-                        self.turn(prompt, &tx, &mut rx).await;
+                        self.turn(prompt, typed.take(), &tx, &mut rx).await;
                         if !self.ui.queued.is_empty() {
                             let queued = std::mem::take(&mut self.ui.queued).join("\n");
                             self.ui.submit(&queued);
@@ -1624,7 +1577,7 @@ impl Tui {
                 // whole view from it, so the screen returns to the node the
                 // conversation did instead of keeping the forgotten turns.
                 self.ui.rebuild(&self.core.session);
-                let tail = self.core.session.live().last().map(|(_, m)| m.text());
+                let tail = self.core.session.prompts().pop().map(|(_, text)| text);
                 let at = tail
                     .filter(|t| !t.is_empty())
                     .map(|t| format!(" — the transcript now ends at {}", render::clip(&t, 60)))
@@ -1645,7 +1598,7 @@ impl Tui {
     /// Open the rewind selector on every user message the conversation can
     /// go back to.
     fn open_rewind(&mut self) {
-        let entries: Vec<MenuEntry> = self
+        let rows: Vec<MenuEntry> = self
             .core
             .session
             .prompts()
@@ -1655,7 +1608,7 @@ impl Tui {
                 show: render::clip(&text, 60),
             })
             .collect();
-        if entries.is_empty() {
+        if rows.is_empty() {
             self.ui.say(
                 self.ui
                     .paint
@@ -1663,24 +1616,24 @@ impl Tui {
             );
             return;
         }
-        self.ui.open_rewind(entries);
+        self.ui.open_rewind(rows);
     }
 
 
     async fn turn(
         &mut self,
         prompt: String,
+        typed: Option<String>,
         tx: &UnboundedSender<Event>,
         rx: &mut UnboundedReceiver<Event>,
     ) {
-        self.core.session.send_prompt(prompt);
+        self.core.session.send_prompt(prompt, typed);
         let cancel = CancellationToken::new();
         let ctx = self
             .core
             .ctx
             .clone()
-            .with_cancel(cancel.clone())
-            .with_fresh_result();
+            .with_cancel(cancel.clone());
 
         self.ui.started = Some(Instant::now());
         self.ui.stopping = false;
@@ -1741,7 +1694,7 @@ impl Tui {
         self.refresh_sessions();
 
         match out {
-            Ok(o) => self.totals.merge(&o.totals),
+            Ok(totals) => self.totals.merge(&totals),
             Err(AgentError::Cancelled) => self
                 .ui
                 .say(self.ui.paint.on(&self.ui.paint.theme.muted, "stopped")),
@@ -1758,28 +1711,94 @@ impl Tui {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cow, Entry, ScrollbackRows, Thinking, body, counts, tool_row};
+    use super::{Cow, Row, ScrollbackRows, Thinking, body, counts, scrollback_from, tool_row};
     use crate::render::Markdown;
     use crate::render::Paint;
     use brain::stream::Usage;
 
-    /// A closed reasoning block of id `id` and `n` lines in the scrollback.
-    fn block(id: u64, n: usize, folded: bool) -> Entry {
-        Entry::Folded {
-            block: id,
-            lines: (1..=n).map(|i| format!("line {i}")).collect(),
-            folded,
+    /// Both scrollback producers draw block ids from one counter. They used
+    /// not to: a rebuilt block was always `0`, which held only while nothing
+    /// looked one up — and `streaming_row` and `stream_fold` both do, taking the
+    /// last match, so two blocks sharing a number is two blocks the lookup
+    /// cannot tell apart.
+    #[test]
+    fn rebuilt_reasoning_blocks_get_ids_of_their_own() {
+        use agent::session::Session;
+        use brain::message::{AssistantContent, Reasoning, ReasoningContent};
+
+        let mut s = Session::new();
+        s.prompt("go");
+        for n in 0..3 {
+            s.push_assistant(vec![AssistantContent::Reasoning(Reasoning {
+                id: None,
+                content: vec![ReasoningContent::Text {
+                    text: format!("thought {n}"),
+                    signature: None,
+                }],
+                by: None,
+            })]);
         }
+
+        let mut thinking = Thinking::default();
+        let rows = scrollback_from(&s, &Paint::new(false), "> ", "! ", &mut thinking);
+        let ids: Vec<u64> = rows
+            .iter()
+            .filter_map(Row::block)
+            .collect();
+        assert_eq!(ids.len(), 3, "{} rows, {ids:?}", rows.len());
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 3, "two blocks share a number: {ids:?}");
+        // And the counter moved, so a block streamed after the rebuild cannot
+        // land on one of these.
+        assert!(!ids.contains(&thinking.take_id()), "{ids:?}");
+    }
+
+    /// The screen opens with what this run is standing on. It used to be said
+    /// as a startup note, which scrolled away; here it stays at the top, which
+    /// is where "what is my agent obeying" belongs.
+    #[test]
+    fn the_opening_block_names_the_instruction_files() {
+        let paint = Paint::new(false);
+        let rows = Row::banner(&["~/.pi.md".into(), "AGENTS.md".into()], &paint);
+        let shown: Vec<String> = ScrollbackRows::new(&rows, &paint, 80)
+            .map(|r| r.to_string())
+            .collect();
+        // The version from the same place the banner reads it: spelled out
+        // here, every release breaks a test about the context files.
+        assert_eq!(
+            shown,
+            [
+                concat!("π ", env!("CARGO_PKG_VERSION")),
+                "context:",
+                "- ~/.pi.md",
+                "- AGENTS.md"
+            ]
+        );
+    }
+
+    /// Nothing loaded, nothing said — the common case is one personal file and
+    /// a heading over an empty list is worse than no heading.
+    #[test]
+    fn an_opening_block_with_no_instruction_files_is_the_banner_alone() {
+        let rows = Row::banner(&[], &Paint::new(false));
+        assert_eq!(rows.len(), 1);
+    }
+
+    /// A closed reasoning block of id `id` and `n` lines in the scrollback.
+    fn block(id: u64, n: usize, folded: bool) -> Row {
+        Row::reasoning(id, (1..=n).map(|i| format!("line {i}")).collect(), folded)
     }
 
     /// What the screen shows for a run in the middle of reasoning.
-    fn shown(t: &Thinking, open: &str) -> Vec<String> {
+    fn shown(t: &Thinking, partial: &str) -> Vec<String> {
         body(
             t,
             &[],
             &Markdown::default(),
             true,
-            open,
+            partial,
             (80, 9),
             &Paint::new(false),
         )
@@ -1794,46 +1813,133 @@ mod tests {
 
     #[test]
     fn a_folded_entry_is_its_summary_until_unfolded() {
-        let entries = [block(1, 2, true)];
+        let rows = [block(1, 2, true)];
         let paint = Paint::new(false);
-        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&entries, &paint).collect();
+        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, 80).collect();
         assert_eq!(rows, vec!["thinking · 2 lines"]);
     }
 
     #[test]
     fn an_unfolded_entry_shows_its_lines() {
-        let entries = [block(1, 2, false)];
+        let rows = [block(1, 2, false)];
         let paint = Paint::new(false);
-        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&entries, &paint).collect();
+        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, 80).collect();
         assert_eq!(rows, vec!["line 1", "line 2"]);
+    }
+
+    /// The divergence this change removes. The live stream rendered an edit's
+    /// sketch; the rebuild rendered the stored result's first line — so the
+    /// same turn looked one way while it happened and another after a rewind.
+    /// Now both build the same row from the same parts.
+    #[test]
+    fn the_live_row_and_the_rebuilt_row_are_the_same_row() {
+        let sketched = "2 files, +3 -1\n  12 + added\n  13 - gone";
+        // What the stream pushes when the tool ends.
+        let live = [Row::result(true, "edit", sketched)];
+        // What the rebuild pushes, reading the entry that same turn stored.
+        let stored = brain::message::ToolResult::text("c1", "edit", "✓ edit [a.rs#TAG] …");
+        let rebuilt = [Row::stored_result(&stored, Some(sketched))];
+
+        let paint = Paint::new(false);
+        let a: Vec<Cow<'_, str>> = ScrollbackRows::new(&live, &paint, 80).collect();
+        let b: Vec<Cow<'_, str>> = ScrollbackRows::new(&rebuilt, &paint, 80).collect();
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 3, "head plus the two diff rows");
+    }
+
+    /// The rows of one result are painted once per width and handed out one at
+    /// a time, so a stale cache would show the narrow frame's clipping in the
+    /// wide one — and only below the head row, where the single-row case
+    /// cannot see it.
+    #[test]
+    fn every_row_of_a_result_is_repainted_when_the_window_changes() {
+        let paint = Paint::new(false);
+        let long = "x".repeat(200);
+        let rows = [Row::result(true, "edit", format!("head\n  12 + {long}"))];
+
+        let narrow: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, 40).collect();
+        let wide: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, 160).collect();
+        // And back again: widening must not be the only direction that repaints.
+        let again: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, 40).collect();
+
+        assert_eq!(narrow.len(), 2, "head plus the one diff row");
+        assert!(wide[1].len() > narrow[1].len(), "{} vs {}", wide[1], narrow[1]);
+        assert_eq!(narrow, again, "the narrow frame came back different");
+    }
+
+    /// A tool that sketched nothing has nothing to store, and the rebuild falls
+    /// back to the first line of what it did store — which is what
+    /// `ToolOutput::preview` falls back to on the live side.
+    #[test]
+    fn a_result_without_a_sketch_falls_back_to_its_first_line() {
+        let stored = brain::message::ToolResult::text("c1", "read", "fn main() {}\nmore");
+        let rows = [Row::stored_result(&stored, None)];
+        let paint = Paint::new(false);
+        let out: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, 80).collect();
+        assert_eq!(out.len(), 1);
+        assert!(out[0].contains("fn main() {}"), "{}", out[0]);
+        assert!(!out[0].contains("more"), "only the first line");
+    }
+
+    /// The bug this shape exists to fix: a result row used to be clipped when
+    /// it landed and stored as the clipped string, so widening the terminal
+    /// could never bring back what had been cut.
+    #[test]
+    fn widening_the_window_gives_back_what_was_clipped() {
+        let paint = Paint::new(false);
+        let rows = [Row::result(true, "read", "a".repeat(200))];
+        let narrow: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, 40).collect();
+        let wide: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, 160).collect();
+
+        assert!(narrow[0].ends_with('…'), "{}", narrow[0]);
+        assert!(
+            wide[0].len() > narrow[0].len(),
+            "the wider frame showed no more of it: {} vs {}",
+            wide[0].len(),
+            narrow[0].len()
+        );
+        // Both are one row, and both name the tool.
+        assert!(narrow[0].contains("read") && wide[0].contains("read"));
+    }
+
+    /// A failure is not a result that happens to read badly.
+    #[test]
+    fn a_failed_result_is_marked_as_one() {
+        let paint = Paint::new(false);
+        let bad = [Row::result(false, "read", "gone")];
+        let good = [Row::result(true, "read", "gone")];
+        let bad: Vec<Cow<'_, str>> = ScrollbackRows::new(&bad, &paint, 80).collect();
+        let good: Vec<Cow<'_, str>> = ScrollbackRows::new(&good, &paint, 80).collect();
+        assert!(bad[0].starts_with('✗'), "{}", bad[0]);
+        assert!(good[0].starts_with('✓'), "{}", good[0]);
     }
 
     #[test]
     fn a_plain_entry_is_itself() {
-        let entries = [Entry::Plain("hello".to_string())];
+        let rows = [Row::notice("hello".to_string())];
         let paint = Paint::new(false);
-        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&entries, &paint).collect();
+        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, 80).collect();
         assert_eq!(rows, vec!["hello"]);
     }
 
     #[test]
     fn an_empty_scrollback_iterates_to_nothing() {
-        // The front walk used to index `entries[0]` before any check, so a
+        // The front walk used to index `rows[0]` before any check, so a
         // forward iteration over an empty scrollback panicked.
         let paint = Paint::new(false);
-        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&[], &paint).collect();
+        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&[], &paint, 80).collect();
         assert!(rows.is_empty());
     }
 
     #[test]
     fn scrollback_rows_walk_from_both_ends() {
-        let entries = vec![
-            Entry::Plain("a".to_string()),
+        let rows = vec![
+            Row::notice("a".to_string()),
             block(1, 2, false),
-            Entry::Plain("d".to_string()),
+            Row::notice("d".to_string()),
         ];
         let paint = Paint::new(false);
-        let rows = ScrollbackRows::new(&entries, &paint);
+        let rows = ScrollbackRows::new(&rows, &paint, 80);
         let (front, back): (Vec<_>, Vec<_>) = {
             let mut f = Vec::new();
             let mut b = Vec::new();
@@ -1884,10 +1990,10 @@ mod tests {
         // block; a second "thinking..." live row would show it twice.
         let mut t = Thinking::default();
         t.start(&mut []);
-        let above = [block(1, 1, true)];
+        let scrollback = [block(1, 1, true)];
         let rows = body(
             &t,
-            &above,
+            &scrollback,
             &Markdown::default(),
             true,
             "half a sentence",
@@ -1903,35 +2009,15 @@ mod tests {
         // `ctrl+t` flips the block that is last now, and only it: the block
         // pushed out of last by the new one folds back to the switch.
         let mut t = Thinking::default();
-        let mut above = vec![Entry::Folded {
-            block: 9,
-            lines: vec!["old".to_string()],
-            folded: false,
-        }];
-        t.start(&mut above);
-        above.push(Entry::Folded {
-            block: 1,
-            lines: vec!["new".to_string()],
-            folded: true,
-        });
-        t.toggle_current(&mut above);
+        let mut scrollback = vec![Row::reasoning(9, vec!["old".to_string()], false)];
+        t.start(&mut scrollback);
+        scrollback.push(Row::reasoning(1, vec!["new".to_string()], true));
+        t.toggle_current(&mut scrollback);
         assert!(t.folded);
-        assert!(matches!(&above[0], Entry::Folded { folded: true, .. }));
-        assert!(matches!(&above[1], Entry::Folded { folded: false, .. }));
+        assert!(scrollback[0].folded() == Some(true));
+        assert!(scrollback[1].folded() == Some(false));
     }
 
-    #[test]
-    fn a_flip_survives_a_block_that_never_lands_a_line() {
-        // A `ctrl+t` names the last block even when it has no entry yet; if
-        // the block then ends without a line, the flip stays for the next
-        // block's birth — the key set the last value, not this block's.
-        let mut t = Thinking::default();
-        t.start(&mut []);
-        let mut above: Vec<Entry> = Vec::new();
-        t.toggle_current(&mut above);
-        t.close_block();
-        assert!(!t.birth_fold());
-    }
 
     #[test]
     fn a_finished_block_keeps_its_fold_until_the_next_question() {
@@ -1939,16 +2025,16 @@ mod tests {
         // and folds back to the switch the moment a new input is submitted.
         let mut t = Thinking::default();
         t.start(&mut []);
-        let mut above = vec![block(1, 1, t.birth_fold())];
-        t.toggle_current(&mut above);
-        assert!(matches!(&above[0], Entry::Folded { folded: false, .. }));
+        let mut scrollback = vec![block(1, 1, t.birth_fold())];
+        t.toggle_current(&mut scrollback);
+        assert!(scrollback[0].folded() == Some(false));
         t.close_block();
         // Still last until the next question is asked.
-        assert!(matches!(&above[0], Entry::Folded { folded: false, .. }));
-        t.fold_previous(&mut above);
+        assert!(scrollback[0].folded() == Some(false));
+        t.fold_previous(&mut scrollback);
         // The submitted question pushes it out of last: it folds to the
         // switch.
-        assert!(matches!(&above[0], Entry::Folded { folded: true, .. }));
+        assert!(scrollback[0].folded() == Some(true));
         assert!(!t.birth_fold());
     }
     #[test]
@@ -1957,10 +2043,10 @@ mod tests {
         // opened keeps its block open once the next question takes over.
         let mut t = Thinking { folded: false, ..Default::default() };
         t.start(&mut []);
-        let mut above = vec![block(1, 1, t.birth_fold())];
+        let mut scrollback = vec![block(1, 1, t.birth_fold())];
         t.close_block();
-        t.fold_previous(&mut above);
-        assert!(matches!(&above[0], Entry::Folded { folded: false, .. }));
+        t.fold_previous(&mut scrollback);
+        assert!(scrollback[0].folded() == Some(false));
     }
 
     #[test]
@@ -1970,29 +2056,28 @@ mod tests {
         // `ctrl+t` left the last block.
         let mut t = Thinking::default();
         t.start(&mut []);
-        let mut above = vec![block(1, 1, t.birth_fold())];
-        t.toggle_current(&mut above);
-        assert!(matches!(&above[0], Entry::Folded { folded: false, .. }));
+        let mut scrollback = vec![block(1, 1, t.birth_fold())];
+        t.toggle_current(&mut scrollback);
+        assert!(scrollback[0].folded() == Some(false));
         t.close_block();
-        t.start(&mut above);
-        above.push(block(2, 1, t.birth_fold()));
-        assert!(matches!(&above[0], Entry::Folded { folded: true, .. }));
-        assert!(matches!(&above[1], Entry::Folded { folded: false, .. }));
+        t.start(&mut scrollback);
+        scrollback.push(block(2, 1, t.birth_fold()));
+        assert!(scrollback[0].folded() == Some(true));
+        assert!(scrollback[1].folded() == Some(false));
     }
 
     #[test]
     fn a_flip_before_the_first_line_lands_on_birth() {
-        // A `ctrl+t` on a block with no entry yet cannot flip anything on
-        // screen; it flips the last value, so the block is born the way the
-        // key asked — and the switch is not touched.
+        // `ctrl+t` on a block with no entry yet flips the last value, not the
+        // switch: it outlives close_block, and it is not a one-shot.
         let mut t = Thinking::default();
         t.start(&mut []);
-        let mut above: Vec<Entry> = Vec::new();
-        t.toggle_current(&mut above);
-        assert!(t.folded);
+        let mut scrollback: Vec<Row> = Vec::new();
+        t.toggle_current(&mut scrollback);
+        assert!(t.folded, "the switch itself is not touched");
         assert!(!t.birth_fold());
-        // The flip is the last value now, not a one-shot: the next birth
-        // takes it too.
+        t.close_block();
+        assert!(!t.birth_fold());
         assert!(!t.birth_fold());
     }
 
@@ -2005,8 +2090,8 @@ mod tests {
         let mut t = Thinking::default();
         t.start(&mut []);
         assert!(t.holds(true, &[]));
-        let above = [block(1, 1, false)];
-        assert!(!t.holds(true, &above));
+        let scrollback = [block(1, 1, false)];
+        assert!(!t.holds(true, &scrollback));
     }
 
 
@@ -2018,40 +2103,36 @@ mod tests {
         // rest are going.
         let mut t = Thinking { folded: false, ..Default::default() };
         t.start(&mut []);
-        let mut above = vec![Entry::Folded {
-            block: 1,
-            lines: vec!["new".to_string()],
-            folded: true,
-        }];
-        t.flip_all(&mut above);
+        let mut scrollback = vec![Row::reasoning(1, vec!["new".to_string()], true)];
+        t.flip_all(&mut scrollback);
         assert!(t.folded);
-        assert!(matches!(&above[0], Entry::Folded { folded: true, .. }));
+        assert!(scrollback[0].folded() == Some(true));
     }
 
 
     #[test]
     fn flipping_every_block_moves_the_switch_with_them() {
         // The global key folds or unfolds every block, the current one
-        // included, and moves the switch with them: entries and switch never
+        // included, and moves the switch with them: rows and switch never
         // disagree, so the screen always folds back to a single state.
         let mut t = Thinking::default();
         t.start(&mut []);
-        let mut above = vec![block(1, 1, true)];
-        t.toggle_current(&mut above); // unfold the current block on its own
+        let mut scrollback = vec![block(1, 1, true)];
+        t.toggle_current(&mut scrollback); // unfold the current block on its own
         t.close_block();
-        t.flip_all(&mut above); // global fold
+        t.flip_all(&mut scrollback); // global fold
         assert!(!t.folded);
-        assert!(above
+        assert!(scrollback
             .iter()
-            .all(|e| matches!(e, Entry::Folded { folded: false, .. })));
+            .all(|e| e.folded() == Some(false)));
         // The switch moved with them, so the next block is born unfolded.
         assert!(!t.birth_fold());
         // And a second global press folds the whole screen back.
-        t.flip_all(&mut above);
+        t.flip_all(&mut scrollback);
         assert!(t.folded);
-        assert!(above
+        assert!(scrollback
             .iter()
-            .all(|e| matches!(e, Entry::Folded { folded: true, .. })));
+            .all(|e| e.folded() == Some(true)));
     }
 
 
@@ -2061,12 +2142,10 @@ mod tests {
         // shown are still the same entry: folding them takes them back.
         let mut entry = block(1, 2, false);
         let paint = Paint::new(false);
-        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(std::slice::from_ref(&entry), &paint).collect();
+        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(std::slice::from_ref(&entry), &paint, 80).collect();
         assert_eq!(rows, vec!["line 1", "line 2"]);
-        if let Entry::Folded { folded, .. } = &mut entry {
-            *folded = true;
-        }
-        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(std::slice::from_ref(&entry), &paint).collect();
+        entry.set_folded(true);
+        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(std::slice::from_ref(&entry), &paint, 80).collect();
         assert_eq!(rows, vec!["thinking · 2 lines"]);
     }
 
@@ -2173,15 +2252,15 @@ mod tests {
 
         // The first thinking block arrives and is the last one.
         t.start(&mut []);
-        let mut above = vec![block(1, 1, t.birth_fold())];
-        assert!(matches!(&above[0], Entry::Folded { folded: false, .. }));
+        let mut scrollback = vec![block(1, 1, t.birth_fold())];
+        assert!(scrollback[0].folded() == Some(false));
         t.close_block();
 
         // A tool call ends the block; the next thinking block is the new
         // last, born unfolded, and the first one folds back to the switch.
-        t.start(&mut above);
-        above.push(block(2, 1, t.birth_fold()));
-        assert!(matches!(&above[0], Entry::Folded { folded: true, .. }));
-        assert!(matches!(&above[1], Entry::Folded { folded: false, .. }));
+        t.start(&mut scrollback);
+        scrollback.push(block(2, 1, t.birth_fold()));
+        assert!(scrollback[0].folded() == Some(true));
+        assert!(scrollback[1].folded() == Some(false));
     }
 }

@@ -28,31 +28,35 @@ describe reality — so the models a run can reach are the ones written down in
 `~/.pi.toml`, against the endpoint they are actually pointed at.
 
 ```toml
-[models.flash]
 base_url = "http://127.0.0.1:7896/v1"
-wire = "openai"                 # openai | anthropic
+format   = "openai"             # openai | anthropic
+api_key  = "x"
+
+[models.flash]
 context_window = 1_000_000
 max_output_tokens = 384_000
-api_key = "x"
 ```
 
-That is a complete config. With exactly one model defined you do not name a
-default — there is nothing else it could mean — so `pi` runs it.
+That is a complete config. pi talks to one endpoint at a time, so the endpoint
+is the file itself and a model is named the way that endpoint names it. With
+exactly one model described you do not name a default — there is nothing else
+it could mean — so `pi` runs it.
 
-[`examples/pi.toml`](examples/pi.toml) is the full reference: every field, every
-compat key with the default its wire uses, and measured starting points for a
-few real endpoints. It is documentation, not a table that claims to be current.
+[`examples/pi.toml`](examples/pi.toml) is the full reference: every field with
+the default it carries, and measured starting points for a few real endpoints.
+It is documentation, not a table that claims to be current.
 
-**Two wires.** `anthropic` is the Messages API, `openai` is Chat Completions.
-Each carries a `compat` record of quirks — whether the host accepts sampling
-parameters, which field it wants the token cap in, whether it streams usage —
-and a config names only the ones that differ from the wire's defaults. A key
-that is not one of them is refused at load, with the list of the ones that are:
-a typo there otherwise leaves a quirk at its default and produces a 400 much
-later, pointing at nothing.
+**Two wires.** `anthropic` is the Messages API, `openai` is the Responses API.
+Those are the two native shapes and pi speaks nothing else: a server offering
+only Chat Completions belongs behind a gateway that translates. A host's quirks
+are ordinary fields on the provider or the model — whether it takes sampling
+parameters, whether a forced tool choice sticks, whether it caches — each with
+a stated default. A key that is not one of them is refused at load, with the
+list of the ones that are: a typo there otherwise leaves a quirk at its default
+and produces a 400 much later, pointing at nothing.
 
 **Projects may configure, not redirect.** A `.pi.toml` inside a repository may
-set `model`, `effort`, `max_turns` and `max_tier`, and nothing else. It arrives
+set `model`, `effort` and `max_tier`, and nothing else. It arrives
 by `git clone`; a base url, a key or a system-prompt path would let a checkout
 point the run at a server of its own or name any file on disk to be sent to the
 provider. `max_tier` applies downward only, so a repository can declare itself
@@ -135,8 +139,7 @@ a block carries the model that produced it, and a model that did not write it
 gets the text without the signature, as prose or wrapped in `<think>` depending
 on what it accepts. Nothing is rewritten on the way, so switching back makes
 the original blocks native again. What has been spent stays spent — every turn
-was priced by the model that ran it. Under `--wire` the config is not consulted
-at all, and `/model <id>` asks that same endpoint for another of its models.
+was priced by the model that ran it.
 
 `/reload` re-reads the config, the standing instructions and the skills. It
 fails whole or not at all: a broken config leaves what was running running,
@@ -219,22 +222,19 @@ rest operate on a session and there is none here, and any other word starting
 with a slash is left as prose, because `pi "/usr/bin is missing"` is a prompt
 and refusing it to catch a typo is the worse trade.
 
-### Structured output
-
-```bash
-pi --schema report.json "summarize the failures" | jq .
-```
-
-The run must end by calling `yield` with an object matching the schema, which
-goes to stdout instead of prose.
-
 ## What it does
 
-**Tools.** `read` `write` `edit` `glob` `grep` `bash` `todo` `skill` `yield`.
+**Tools.** `read` `write` `edit` `glob` `grep` `bash` `todo` `skill`.
 Each declares a tier — read, write or exec — and `--tier` caps the run. Every
 path is resolved against the workspace root through the deepest existing
 ancestor, so a symlink cannot walk out. `bash` gets its own process group and a
 SIGTERM-then-SIGKILL timeout.
+
+**The plan** lives beside the conversation, not in it. `todo` records it and
+answers with a count; the list itself rides every request as a note that is
+recomputed from the stored plan and never written down. A plan in the
+transcript is one copy per call, each stale the moment the next lands, and all
+of them stated as fact.
 
 **Edits** are line-anchored patches with content-hash anchors, applied against
 original line numbers so an earlier hunk never shifts a later one. A stale
@@ -242,28 +242,31 @@ anchor is refused rather than applied to the wrong place. Concurrent edits to
 one file serialize per path — otherwise both pass their tag check and one
 change disappears silently.
 
-**Compaction** is a ladder: supersede a read that a later read replaced, elide
-an uneventful result, age one out, and only then summarize before dropping. The
-session is append-only; compaction writes a *record* of what it dropped and
+**Compaction** is a ladder, cheapest rung first: supersede a read that a later
+read replaced, omit an uneventful result, age one out, take the bulk of a tool
+call's arguments once it has run, and only then summarize before dropping. What
+it drops is a *round* — a question and everything that answered it — because
+taking the answer alone left the question standing with nothing after it.
+
+The session is append-only; compaction writes a *record* of what it dropped and
 the model's view is derived from it, so the history that made the session worth
-reading survives.
+reading survives. What the model is sent and what a person reads are different
+projections of the same list: compaction is the model losing sight of the
+conversation, not you.
 
 **Failures** are classified before they are retried. A spent quota and a
 throttle both arrive as HTTP 429 and only the message text separates them —
 retrying the first burns money. An overflow refusal usually names the real
 window, so the correction is read out of it rather than guessed.
 
-**The turn budget is visible to the model**, at ten turns left and again at
-three. A run that stops at `--max-turns` stops mid-work, and the model never
-saw it coming — the budget is the caller's and is stated nowhere it can read.
-One that knows batches what is left instead of spending a turn per fix.
-
-**A stuck model is named rather than run into the turn limit.** A call that
-comes back byte-identical is told so — on the third for an answer, since a
-re-read after compaction is legitimate, and on the second for a refusal, since
-nothing legitimate re-sends a call that was just refused. Repeated refusals are
-how most sessions actually die: a model that cannot get a tool's arguments
-right will spend every remaining turn getting them wrong the same way.
+**A stuck model is named, because nothing else stops it.** There is no turn
+cap: a run ends when the model stops, when you interrupt it, or when the
+transport gives up. So a call that comes back byte-identical is told so — on
+the third for an answer, since a re-read after compaction is legitimate, and on
+the second for a refusal, since nothing legitimate re-sends a call that was
+just refused. Repeated refusals are how most sessions actually die: a model
+that cannot get a tool's arguments right will keep getting them wrong the same
+way until it is told so.
 
 **Token counts** come from the provider where it reports them and from our own
 count where it does not — or where what it reports cannot be true. A proxy that

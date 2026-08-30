@@ -17,7 +17,6 @@ where
 pub mod bash;
 pub mod blocks;
 pub mod edit;
-pub mod finish;
 pub mod glob;
 pub mod grep;
 mod parses;
@@ -101,12 +100,6 @@ pub struct ToolOutput {
     /// One line for a progress display. Set it when the first line of the
     /// result is structure rather than content.
     pub preview: Option<String>,
-    /// A standard unified patch of what changed; `edit` fills it. No tool
-    /// reads it back, so compaction may drop it like `useless`.
-    pub patch: Option<String>,
-    /// The first line the change touched in the new file, when `patch` names
-    /// one; a reader that shows the patch can jump to it.
-    pub first_changed_line: Option<usize>,
 }
 
 impl ToolOutput {
@@ -117,15 +110,7 @@ impl ToolOutput {
             })],
             useless: false,
             preview: None,
-            patch: None,
-            first_changed_line: None,
         }
-    }
-
-    pub fn with_patch(mut self, patch: Option<String>, first: Option<usize>) -> Self {
-        self.patch = patch;
-        self.first_changed_line = first;
-        self
     }
 
     pub fn with_preview(mut self, line: impl Into<String>) -> Self {
@@ -174,8 +159,6 @@ pub struct Ctx {
     /// The agent's plan. Shared so the tool can write it and the loop can record
     /// it into the session, without the tool knowing a session exists.
     pub todos: std::sync::Arc<std::sync::Mutex<Vec<todo::Todo>>>,
-    /// Where `yield` leaves the run's result, when a schema was asked for.
-    pub yielded: std::sync::Arc<std::sync::Mutex<Option<serde_json::Value>>>,
     /// One lock per file. Tools in the same turn run concurrently, and two
     /// writers to one path otherwise read the same bytes, both succeed, and
     /// one change vanishes without anyone being told.
@@ -198,7 +181,6 @@ impl Ctx {
             workspace,
             cancel: tokio_util::sync::CancellationToken::new(),
             todos: Default::default(),
-            yielded: Default::default(),
             file_locks: Default::default(),
             session: None,
             spill_root: spill::default_root(None),
@@ -211,12 +193,6 @@ impl Ctx {
     /// fresh one each time while the shared handles carry over.
     pub fn with_cancel(mut self, cancel: tokio_util::sync::CancellationToken) -> Self {
         self.cancel = cancel;
-        self
-    }
-
-    /// A fresh slot for a run's structured result, leaving everything else.
-    pub fn with_fresh_result(mut self) -> Self {
-        self.yielded = Default::default();
         self
     }
 

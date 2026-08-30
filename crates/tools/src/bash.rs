@@ -128,7 +128,7 @@ impl Tool for Bash {
         let stderr = String::from_utf8_lossy(&out.stderr);
         let code = out.status.code().unwrap_or(-1);
 
-        // Anything elided is written out first, so a build log the model needs
+        // Anything omitted is written out first, so a build log the model needs
         // the middle of is one grep away rather than gone. The combined whole
         // is only assembled once either stream is known to be over the
         // threshold — a normal output must not pay for a full copy it drops.

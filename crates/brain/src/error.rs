@@ -3,9 +3,9 @@ pub enum BrainError {
     #[error("http: {0}")]
     Http(#[from] reqwest::Error),
 
-    #[error("{transport} {status}: {body}")]
+    #[error("{format} {status}: {body}")]
     Api {
-        transport: &'static str,
+        format: &'static str,
         status: u16,
         body: String,
     },

@@ -1,5 +1,7 @@
-use brain::catalog::ModelSpec;
-use brain::message::{AssistantContent, Message, UserContent};
+use brain::model::ModelSpec;
+use brain::message::{AssistantContent, Message};
+
+use crate::session::{Entry, UserBody};
 use brain::request::{Effort, Request, ToolChoice};
 use brain::stream::{Accumulator, Usage};
 use brain::transport::Transport;
@@ -29,36 +31,32 @@ fn clip(s: &str, max: usize) -> String {
 /// The dropped span starts on an assistant turn, so replaying it as messages
 /// would break the alternation both wires require — and a summarizer wants tool
 /// output as prose anyway.
-pub fn render(earlier: &[&str], messages: &[&Message]) -> String {
+pub fn render(earlier: &[&str], entries: &[&Entry]) -> String {
     let mut lines: Vec<String> = Vec::new();
     for s in earlier {
         lines.push(format!("[earlier summary]\n{s}"));
     }
-    for m in messages {
-        match m {
-            Message::System { content } => {
-                lines.push(format!("[system] {}", clip(content, BLOCK_CHARS)))
-            }
-            Message::User { content } => {
-                for b in content {
-                    match b {
-                        UserContent::Text(t) => {
-                            lines.push(format!("[user] {}", clip(&t.text, BLOCK_CHARS)))
-                        }
-                        UserContent::Image(_) => lines.push("[user] (image)".into()),
-                        UserContent::ToolResult(r) => {
-                            let mark = if r.is_error { " error" } else { "" };
-                            lines.push(format!(
-                                "[{} result{mark}] {}",
-                                r.name,
-                                clip(&r.flatten_text(), BLOCK_CHARS)
-                            ));
-                        }
-                    }
+    for e in entries {
+        match e {
+            Entry::User { body, .. } => match body {
+                UserBody::Prompt(t) => {
+                    lines.push(format!("[user] {}", clip(&t.text, BLOCK_CHARS)))
                 }
-            }
-            Message::Assistant { content, .. } => {
-                for b in content {
+                UserBody::Aside(t) => {
+                    lines.push(format!("[user ran] {}", clip(&t.text, BLOCK_CHARS)))
+                }
+                UserBody::Image(_) => lines.push("[user] (image)".into()),
+                UserBody::Result { result: r, .. } => {
+                    let mark = if r.is_error { " error" } else { "" };
+                    lines.push(format!(
+                        "[{} result{mark}] {}",
+                        r.name,
+                        clip(&r.flatten_text(), BLOCK_CHARS)
+                    ));
+                }
+            },
+            Entry::Assistant { blocks, .. } => {
+                for b in blocks {
                     match b {
                         AssistantContent::Text(t) => {
                             lines.push(format!("[assistant] {}", clip(&t.text, BLOCK_CHARS)))
@@ -74,6 +72,8 @@ pub fn render(earlier: &[&str], messages: &[&Message]) -> String {
                     }
                 }
             }
+            // Not content: it is the record that produced this call.
+            Entry::Compaction { .. } => {}
         }
     }
 
@@ -110,6 +110,7 @@ pub async fn run(
     let req = Request {
         system: Some(PROMPT.to_string()),
         messages: vec![Message::user(body)],
+        notes: Vec::new(),
         tools: Vec::new(),
         max_output_tokens: Some(MAX_SUMMARY_TOKENS.min(spec.max_output_tokens)),
         temperature: None,
@@ -118,7 +119,7 @@ pub async fn run(
         tool_choice: ToolChoice::None,
     };
 
-    let mut acc = Accumulator::new(transport.name(), &spec.wire_id);
+    let mut acc = Accumulator::new(spec.model.clone());
     let mut stream = transport.stream(spec, &req).await?;
     while let Some(ev) = stream.next().await {
         acc.push(ev?);
@@ -136,30 +137,53 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use brain::message::{ToolCall, ToolCallId, ToolResult};
+    use crate::session::{EntryId, UserText};
+    use brain::message::{ToolCall, ToolResult};
     use serde_json::json;
+
+    fn user(text: &str) -> Entry {
+        Entry::User {
+            id: EntryId(0),
+            at: 0,
+            body: UserBody::Prompt(UserText {
+                text: text.into(),
+                shown: None,
+            }),
+        }
+    }
+
+    fn result(call: &str, name: &str, body: impl Into<String>) -> Entry {
+        Entry::User {
+            id: EntryId(0),
+            at: 0,
+            body: UserBody::Result {
+                result: ToolResult::text(call, name, body),
+                preview: None,
+            },
+        }
+    }
+
+    fn assistant(blocks: Vec<AssistantContent>) -> Entry {
+        Entry::Assistant {
+            id: EntryId(0),
+            at: 0,
+            blocks,
+        }
+    }
 
     #[test]
     fn a_rendered_history_names_tools_and_keeps_prose() {
-        let a = Message::Assistant {
-            id: None,
-            content: vec![
-                AssistantContent::Text(brain::message::Text {
-                    text: "reading it".into(),
-                }),
-                AssistantContent::ToolCall(ToolCall {
-                    id: ToolCallId("c1".into()),
-                    provider: None,
-                    name: "read".into(),
-                    args: json!({ "path": "a.rs" }),
-                }),
-            ],
-        };
-        let r = Message::tool_results(vec![ToolResult::text(
-            ToolCallId("c1".into()),
-            "read",
-            "fn main() {}",
-        )]);
+        let a = assistant(vec![
+            AssistantContent::Text(brain::message::Text {
+                text: "reading it".into(),
+            }),
+            AssistantContent::ToolCall(ToolCall {
+                id: "c1".into(),
+                name: "read".into(),
+                args: json!({ "path": "a.rs" }),
+            }),
+        ]);
+        let r = result("c1", "read", "fn main() {}");
         let out = render(&[], &[&a, &r]);
 
         assert!(out.contains("[assistant] reading it"), "{out}");
@@ -169,7 +193,7 @@ mod tests {
 
     #[test]
     fn an_earlier_summary_leads_so_the_model_can_fold_it_in() {
-        let m = Message::user("go");
+        let m = user("go");
         let out = render(&["did three things"], &[&m]);
         assert!(
             out.starts_with("[earlier summary]\ndid three things"),
@@ -179,11 +203,7 @@ mod tests {
 
     #[test]
     fn a_huge_result_is_clipped_rather_than_sent_whole() {
-        let r = Message::tool_results(vec![ToolResult::text(
-            ToolCallId("c".into()),
-            "read",
-            "x".repeat(50_000),
-        )]);
+        let r = result("c", "read", "x".repeat(50_000));
         let out = render(&[], &[&r]);
         assert!(out.len() < BLOCK_CHARS + 200, "{}", out.len());
         assert!(out.contains("more bytes"), "{out}");
@@ -191,12 +211,16 @@ mod tests {
 
     #[test]
     fn a_long_history_keeps_both_ends() {
-        let first = Message::user("the original task");
-        let last = Message::user("the final state");
-        let filler: Vec<Message> = (0..200)
-            .map(|i| Message::assistant_text(format!("step {i} ") + &"y".repeat(600)))
+        let first = user("the original task");
+        let last = user("the final state");
+        let filler: Vec<Entry> = (0..200)
+            .map(|i| {
+                assistant(vec![AssistantContent::Text(brain::message::Text {
+                    text: format!("step {i} ") + &"y".repeat(600),
+                })])
+            })
             .collect();
-        let mut refs: Vec<&Message> = vec![&first];
+        let mut refs: Vec<&Entry> = vec![&first];
         refs.extend(filler.iter());
         refs.push(&last);
 
@@ -209,17 +233,14 @@ mod tests {
 
     #[test]
     fn reasoning_is_left_out_of_the_record() {
-        let a = Message::Assistant {
+        let a = assistant(vec![AssistantContent::Reasoning(brain::message::Reasoning {
             id: None,
-            content: vec![AssistantContent::Reasoning(brain::message::Reasoning {
-                id: None,
-                content: vec![brain::message::ReasoningContent::Text {
-                    text: "scratch work".into(),
-                    signature: None,
-                }],
-                origin: None,
-            })],
-        };
+            content: vec![brain::message::ReasoningContent::Text {
+                text: "scratch work".into(),
+                signature: None,
+            }],
+            by: None,
+        })]);
         assert!(!render(&[], &[&a]).contains("scratch work"));
     }
 }

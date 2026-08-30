@@ -2,16 +2,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
-use brain::catalog::{
-    AnthropicCompat, Capabilities, ModelSpec, Pricing, ThinkingReplay, ThinkingSupport, Wire,
-};
-use brain::message::{AssistantContent, Message, ProviderCallId, UserContent};
+use brain::model::ModelSpec;
+use brain::message::{AssistantContent, Message, UserContent};
 use brain::request::Request;
 use brain::stream::{BlockKind, StopReason, StreamEvent, Usage};
 use brain::transport::Transport;
 use futures::stream::{BoxStream, StreamExt};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
+
+mod common;
+use common::spec;
 
 use agent::session::Session;
 use agent::{Agent, AgentError, Ceiling, Event};
@@ -22,6 +23,8 @@ use tools::{Concurrency, Ctx, Registry, Tier, Tool, ToolError, ToolOutput, Works
 struct Scripted {
     turns: Vec<Vec<StreamEvent>>,
     next: AtomicUsize,
+    /// What rode each request but never entered the session.
+    notes: std::sync::Mutex<Vec<Vec<String>>>,
 }
 
 impl Scripted {
@@ -29,21 +32,25 @@ impl Scripted {
         Arc::new(Self {
             turns,
             next: AtomicUsize::new(0),
+            notes: std::sync::Mutex::new(Vec::new()),
         })
+    }
+
+    /// Every note sent, flattened across turns.
+    fn notes(&self) -> Vec<String> {
+        self.notes.lock().unwrap().iter().flatten().cloned().collect()
     }
 }
 
 #[async_trait]
 impl Transport for Scripted {
-    fn name(&self) -> &'static str {
-        "anthropic"
-    }
 
     async fn stream(
         &self,
         _spec: &ModelSpec,
-        _req: &Request,
+        req: &Request,
     ) -> brain::Result<BoxStream<'static, brain::Result<StreamEvent>>> {
+        self.notes.lock().unwrap().push(req.notes.clone());
         let i = self.next.fetch_add(1, Ordering::SeqCst);
         let events = self.turns.get(i).cloned().unwrap_or_default();
         Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
@@ -77,7 +84,7 @@ fn call_turn(calls: &[(&str, &str, &str)]) -> Vec<StreamEvent> {
         ev.push(StreamEvent::BlockStart {
             index: i,
             kind: BlockKind::ToolCall {
-                provider: Some(ProviderCallId((*id).into())),
+                id: Some((*id).into()),
                 name: (*name).into(),
             },
         });
@@ -93,29 +100,6 @@ fn call_turn(calls: &[(&str, &str, &str)]) -> Vec<StreamEvent> {
     ev
 }
 
-fn spec() -> ModelSpec {
-    ModelSpec {
-        id: "test".into(),
-        wire_id: "test-wire-id".into(),
-        base_url: "http://localhost".into(),
-        wire: Wire::Anthropic(AnthropicCompat::default()),
-        context_window: 200_000,
-        max_output_tokens: 8_000,
-        caps: Capabilities {
-            tools: true,
-            parallel_tool_calls: true,
-            vision: true,
-            thinking: Some(ThinkingSupport::Budget),
-            cache_breakpoints: true,
-        },
-        thinking_replay: ThinkingReplay::Signed,
-        pricing: Pricing {
-            input_per_mtok: 1.0,
-            output_per_mtok: 2.0,
-            ..Default::default()
-        },
-    }
-}
 
 fn harness(turns: Vec<Vec<StreamEvent>>) -> (tempfile::TempDir, Agent, Ctx) {
     let dir = tempfile::tempdir().unwrap();
@@ -128,7 +112,7 @@ async fn drive(
     agent: &Agent,
     ctx: &Ctx,
     prompt: &str,
-) -> (Session, Result<agent::Outcome, AgentError>, Vec<Event>) {
+) -> (Session, Result<agent::Totals, AgentError>, Vec<Event>) {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut session = Session::with_prompt(prompt);
     let out = agent.run(&mut session, ctx, &tx).await;
@@ -140,32 +124,19 @@ async fn drive(
     (session, out, events)
 }
 
-fn tool_results(msg: &Message) -> Vec<&brain::message::ToolResult> {
-    match msg {
-        Message::User { content } => content
-            .iter()
-            .filter_map(|c| match c {
-                UserContent::ToolResult(r) => Some(r),
-                _ => None,
-            })
-            .collect(),
-        _ => vec![],
-    }
-}
-
-fn user_texts(session: &Session) -> Vec<String> {
-    session
-        .context()
-        .iter()
-        .flat_map(|m| match m {
-            Message::User { content } => content
-                .iter()
-                .filter_map(|c| match c {
-                    UserContent::Text(t) => Some(t.text.clone()),
-                    _ => None,
-                })
-                .collect(),
-            _ => Vec::new(),
+/// Every result in the view, in order. One entry is one message now, so a
+/// turn's results arrive spread across several of them rather than packed into
+/// one — joining is the wire's business.
+fn tool_results(msgs: &[Message]) -> Vec<&brain::message::ToolResult> {
+    msgs.iter()
+        .filter_map(|m| match m {
+            Message::User { content } => Some(content.iter()),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|c| match c {
+            UserContent::ToolResult(r) => Some(r),
+            _ => None,
         })
         .collect()
 }
@@ -175,7 +146,7 @@ async fn a_turn_without_tool_calls_ends_the_run() {
     let (_d, a, ctx) = harness(vec![text_turn("done")]);
     let (session, out, events) = drive(&a, &ctx, "hi").await;
 
-    let totals = out.unwrap().totals;
+    let totals = out.unwrap();
     assert_eq!(totals.usage.input, 3_000);
     assert_eq!(totals.cost, 3_000.0 / 1e6 + 5.0 * 2.0 / 1e6);
     assert_eq!(session.context().len(), 2);
@@ -195,18 +166,16 @@ fn turn_reporting(body: &str, usage: Usage) -> Vec<StreamEvent> {
 }
 
 #[tokio::test]
-async fn a_provider_that_reports_nothing_gets_our_own_count_instead() {
-    // A proxy reporting zeros would otherwise make a whole session look free,
-    // and take the compaction-facing numbers down with it.
+async fn a_host_that_reports_nothing_gets_our_own_count_instead() {
+    // Zero is the absence of a number, not a small one: the whole prompt is
+    // ours to count, and travels marked rather than passing as measured.
     let (_d, a, ctx) = harness(vec![turn_reporting("done", Usage::default())]);
-    let totals = drive(&a, &ctx, "hi").await.1.unwrap().totals;
+    let totals = drive(&a, &ctx, "hi").await.1.unwrap();
 
-    assert!(
-        totals.usage.input > 0,
-        "input was left at the reported zero"
-    );
+    assert!(totals.usage.input > 1_000, "{}", totals.usage.input);
     assert!(totals.usage.output > 0);
     assert!(totals.cost > 0.0);
+    assert_eq!(totals.usage.cache_read, 0, "nothing was said about a cache");
     assert_eq!(
         totals.estimated,
         agent::Estimated {
@@ -228,7 +197,7 @@ async fn only_the_half_the_provider_withheld_is_filled_in() {
         ..Default::default()
     };
     let (_d, a, ctx) = harness(vec![turn_reporting("done", reported)]);
-    let totals = drive(&a, &ctx, "hi").await.1.unwrap().totals;
+    let totals = drive(&a, &ctx, "hi").await.1.unwrap();
 
     assert_eq!(
         totals.usage.input, 4_321,
@@ -253,7 +222,7 @@ async fn a_count_far_under_the_prompt_is_read_as_a_cache_miss() {
         ..Default::default()
     };
     let (_d, a, ctx) = harness(vec![turn_reporting("done", reported)]);
-    let totals = drive(&a, &ctx, "hi").await.1.unwrap().totals;
+    let totals = drive(&a, &ctx, "hi").await.1.unwrap();
 
     assert_eq!(totals.usage.input, 12, "a measured count was overwritten");
     assert!(!totals.estimated.input);
@@ -272,20 +241,6 @@ async fn a_count_far_under_the_prompt_is_read_as_a_cache_miss() {
 }
 
 #[tokio::test]
-async fn a_host_that_reports_nothing_is_counted_for() {
-    // Zero is not a small number here: it is the absence of one. Nothing was
-    // measured, so there is no miss to believe and no gap to attribute — the
-    // whole prompt is ours to count, and travels marked as such.
-    let (_d, a, ctx) = harness(vec![turn_reporting("done", Usage::default())]);
-    let totals = drive(&a, &ctx, "hi").await.1.unwrap().totals;
-
-    assert!(totals.usage.input > 1_000, "{}", totals.usage.input);
-    assert!(totals.estimated.input, "a count we made must travel marked");
-    assert_eq!(totals.usage.cache_read, 0, "nothing was said about a cache");
-    assert!(!totals.estimated.cache_read);
-}
-
-#[tokio::test]
 async fn a_small_count_beside_a_cached_prompt_is_left_alone() {
     // Cached input is excluded from the count by design, so twelve fresh
     // tokens beside a large cache figure is exactly right. Both halves of the
@@ -300,7 +255,7 @@ async fn a_small_count_beside_a_cached_prompt_is_left_alone() {
             cache_write: write,
         };
         let (_d, a, ctx) = harness(vec![turn_reporting("done", reported)]);
-        let totals = drive(&a, &ctx, "hi").await.1.unwrap().totals;
+        let totals = drive(&a, &ctx, "hi").await.1.unwrap();
 
         assert_eq!(totals.usage.input, 12, "read={read} write={write}");
         assert!(!totals.estimated.input, "read={read} write={write}");
@@ -308,51 +263,9 @@ async fn a_small_count_beside_a_cached_prompt_is_left_alone() {
 }
 
 #[tokio::test]
-async fn the_model_is_told_how_many_turns_are_left() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("a.txt"), "steady\n").unwrap();
-    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
-
-    // Thirteen turns of work against a budget of thirteen: the notice lands at
-    // ten left and again at three, and the run still ends on its own.
-    let mut script: Vec<_> = (0..12).map(|_| call_turn(&[("t", "todo", "{}")])).collect();
-    script.push(text_turn("done"));
-    let mut a = Agent::new(Scripted::new(script), spec());
-    a.max_turns = Some(13);
-
-    let (session, out, _) = drive(&a, &ctx, "work").await;
-    out.unwrap();
-
-    let said = user_texts(&session);
-
-    assert!(
-        said.iter().any(|t| t.contains("10 of 13 turns left")),
-        "{said:?}"
-    );
-    assert!(said.iter().any(|t| t.contains("3 turns left")), "{said:?}");
-}
-
-#[tokio::test]
-async fn an_unlimited_run_completes_without_saying_turns_are_left() {
-    // The default is no limit: the script that is told twice about what
-    // remains against a budget of thirteen here runs to the end in silence.
-    let mut script: Vec<_> = (0..12).map(|_| call_turn(&[("t", "todo", "{}")])).collect();
-    script.push(text_turn("done"));
-    let (_d, a, ctx) = harness(script);
-    let (session, out, _) = drive(&a, &ctx, "work").await;
-    out.unwrap();
-
-    let said = user_texts(&session);
-    assert!(
-        !said.iter().any(|t| t.contains("turns left")),
-        "{said:?}"
-    );
-}
-
-#[tokio::test]
 async fn a_fully_measured_turn_is_not_marked() {
     let (_d, a, ctx) = harness(vec![text_turn("done")]);
-    let totals = drive(&a, &ctx, "hi").await.1.unwrap().totals;
+    let totals = drive(&a, &ctx, "hi").await.1.unwrap();
     assert_eq!((totals.usage.input, totals.usage.output), (3_000, 5));
     assert!(!totals.estimated.any());
 }
@@ -369,7 +282,7 @@ async fn a_tool_call_round_trips_into_the_transcript() {
     // user, assistant(call), user(result), assistant(text)
     assert_eq!(session.context().len(), 4);
     let view = session.context();
-    let results = tool_results(&view[2]);
+    let results = tool_results(&view);
     assert_eq!(results.len(), 1);
     assert!(!results[0].is_error, "{:?}", results[0]);
     assert_eq!(results[0].name, "write");
@@ -394,7 +307,7 @@ async fn every_call_gets_a_result_even_when_nothing_runs() {
 
     // An unanswered tool_use makes the next request invalid on both wires.
     let view = session.context();
-    let results = tool_results(&view[2]);
+    let results = tool_results(&view);
     assert_eq!(results.len(), 3);
     assert!(results.iter().all(|r| r.is_error), "{results:?}");
     assert!(
@@ -426,7 +339,7 @@ async fn a_denied_tier_comes_back_as_a_result_not_an_abort() {
     out.unwrap();
 
     let view = session.context();
-    let results = tool_results(&view[2]);
+    let results = tool_results(&view);
     assert!(results[0].is_error);
     assert!(
         results[0].flatten_text().contains("capped at Read"),
@@ -497,7 +410,7 @@ async fn parallel_results_follow_call_order_not_completion_order() {
     out.unwrap();
 
     let view = session.context();
-    let results = tool_results(&view[2]);
+    let results = tool_results(&view);
     assert_eq!(
         results[0].flatten_text(),
         "slow",
@@ -534,24 +447,6 @@ async fn an_exclusive_call_forces_the_batch_to_run_serially() {
     assert!(
         started.elapsed().as_millis() >= 160,
         "an exclusive call must not overlap"
-    );
-}
-
-#[tokio::test]
-async fn the_turn_limit_stops_a_runaway_loop_but_keeps_the_transcript() {
-    let (_d, mut a, ctx) = harness(vec![
-        call_turn(&[("t1", "read", r#"{"path":"x"}"#)]),
-        call_turn(&[("t2", "read", r#"{"path":"x"}"#)]),
-        call_turn(&[("t3", "read", r#"{"path":"x"}"#)]),
-    ]);
-    a.max_turns = Some(2);
-    let (session, out, _) = drive(&a, &ctx, "loop forever").await;
-
-    assert!(matches!(out, Err(AgentError::TurnLimit(2))), "{out:?}");
-    assert_eq!(
-        session.context().len(),
-        5,
-        "work done before the limit survives"
     );
 }
 
@@ -611,9 +506,6 @@ struct WithSummarizer {
 
 #[async_trait]
 impl Transport for WithSummarizer {
-    fn name(&self) -> &'static str {
-        "anthropic"
-    }
 
     async fn stream(
         &self,
@@ -641,7 +533,7 @@ impl Transport for WithSummarizer {
     }
 }
 
-/// Weight in assistant prose, which elision cannot reclaim — only dropping the
+/// Weight in assistant prose, which omission cannot reclaim — only dropping the
 /// exchange does, and that is what the summarizer exists for.
 fn bulky_turn(id: &str) -> Vec<StreamEvent> {
     let mut ev = vec![
@@ -656,7 +548,7 @@ fn bulky_turn(id: &str) -> Vec<StreamEvent> {
         StreamEvent::BlockStart {
             index: 1,
             kind: BlockKind::ToolCall {
-                provider: Some(ProviderCallId(id.into())),
+                id: Some("c1".into()),
                 name: "read".into(),
             },
         },
@@ -670,6 +562,59 @@ fn bulky_turn(id: &str) -> Vec<StreamEvent> {
         usage: Usage::default(),
     });
     ev
+}
+
+/// The bug this shape exists to prevent: both compaction paths used to price
+/// the summary with `self.spec`, so a cheap summarizer was billed at the
+/// expensive model's rates — twice over, silently, and only visible in a total
+/// that looked plausible.
+#[tokio::test]
+async fn a_summary_is_priced_by_the_model_that_wrote_it() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "z".repeat(2_000)).unwrap();
+    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
+
+    // One each: the transport counts its own turns, so sharing one would make
+    // the second run answer from where the first stopped.
+    let wire = || {
+        Arc::new(WithSummarizer {
+            turns: (0..4).map(|i| bulky_turn(&format!("t{i}"))).collect(),
+            next: AtomicUsize::new(0),
+            summaries: AtomicUsize::new(0),
+        })
+    };
+
+    let mut main = spec();
+    main.context_window = 24_000;
+    main.max_output_tokens = 2_000;
+    main.pricing = brain::model::Pricing {
+        input_per_mtok: 1_000.0,
+        output_per_mtok: 1_000.0,
+        ..Default::default()
+    };
+
+    // Same endpoint, its own rates: what is being tested is which spec prices
+    // the summary, not which server answered.
+    let mut cheap = main.clone();
+    cheap.model = "cheap".into();
+    cheap.pricing = brain::model::Pricing::default();
+
+    let delegated = wire();
+    let mut a = Agent::new(delegated.clone(), main.clone());
+    a.summarizer = Some((wire(), cheap));
+    let cheaply = drive(&a, &ctx, "read it repeatedly").await.1.unwrap();
+
+    let itself = wire();
+    let b = Agent::new(itself.clone(), main);
+    let dearly = drive(&b, &ctx, "read it repeatedly").await.1.unwrap();
+
+    assert!(itself.summaries.load(Ordering::SeqCst) > 0, "nothing summarized");
+    assert!(
+        cheaply.cost < dearly.cost,
+        "a free summarizer was billed at the main model's rates: {} vs {}",
+        cheaply.cost,
+        dearly.cost
+    );
 }
 
 #[tokio::test]
@@ -693,8 +638,7 @@ async fn dropped_history_comes_back_as_a_summary_on_the_opening_turn() {
     spec.context_window = 24_000;
     spec.max_output_tokens = 2_000;
 
-    let mut a = Agent::new(transport.clone(), spec);
-    a.max_turns = Some(6);
+    let a = Agent::new(transport.clone(), spec);
 
     let (session, out, events) = drive(&a, &ctx, "read it repeatedly").await;
     out.unwrap();
@@ -723,7 +667,7 @@ async fn dropped_history_comes_back_as_a_summary_on_the_opening_turn() {
     );
 
     // And the bodies it replaced are still in the log.
-    assert!(session.messages().count() > view.len());
+    assert!(session.entries().len() > view.len());
 }
 
 #[tokio::test]
@@ -732,9 +676,6 @@ async fn a_summarizer_that_fails_drops_the_history_without_failing_the_turn() {
 
     #[async_trait]
     impl Transport for Broken {
-        fn name(&self) -> &'static str {
-            "anthropic"
-        }
         async fn stream(
             &self,
             _: &ModelSpec,
@@ -760,8 +701,7 @@ async fn a_summarizer_that_fails_drops_the_history_without_failing_the_turn() {
     let mut spec = spec();
     spec.context_window = 24_000;
     spec.max_output_tokens = 2_000;
-    let mut a = Agent::new(Arc::new(Broken(AtomicUsize::new(0))), spec);
-    a.max_turns = Some(6);
+    let a = Agent::new(Arc::new(Broken(AtomicUsize::new(0))), spec);
 
     let (_session, out, events) = drive(&a, &ctx, "read it repeatedly").await;
     // Losing the summary costs context; failing the turn costs the whole run.
@@ -781,9 +721,6 @@ struct Flaky {
 
 #[async_trait]
 impl Transport for Flaky {
-    fn name(&self) -> &'static str {
-        "anthropic"
-    }
     async fn stream(
         &self,
         _: &ModelSpec,
@@ -814,7 +751,7 @@ async fn a_throttled_request_is_retried_until_it_lands() {
     let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
     let mut a = Agent::new(
         flaky(2, || brain::BrainError::Api {
-            transport: "anthropic",
+            format: "anthropic",
             status: 429,
             body: "rate limit exceeded".into(),
         }),
@@ -839,7 +776,7 @@ async fn a_spent_quota_is_not_retried_however_much_it_looks_like_a_throttle() {
     let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
     let mut a = Agent::new(
         flaky(99, || brain::BrainError::Api {
-            transport: "anthropic",
+            format: "anthropic",
             status: 429,
             body: r#"{"error":{"code":"insufficient_quota"}}"#.into(),
         }),
@@ -883,9 +820,6 @@ struct Wedged;
 
 #[async_trait]
 impl Transport for Wedged {
-    fn name(&self) -> &'static str {
-        "anthropic"
-    }
     async fn stream(
         &self,
         _: &ModelSpec,
@@ -924,11 +858,9 @@ async fn a_stream_that_stops_sending_does_not_hold_the_turn_open() {
 
 fn call_message(id: &str) -> Message {
     Message::Assistant {
-        id: None,
         content: vec![brain::message::AssistantContent::ToolCall(
             brain::message::ToolCall {
-                id: brain::message::ToolCallId(id.into()),
-                provider: Some(ProviderCallId(id.into())),
+                id: id.into(),
                 name: "read".into(),
                 args: json!({ "path": "a.rs" }),
             },
@@ -944,19 +876,16 @@ struct Picky {
 
 #[async_trait]
 impl Transport for Picky {
-    fn name(&self) -> &'static str {
-        "anthropic"
-    }
     async fn stream(
         &self,
-        _: &ModelSpec,
+        spec: &ModelSpec,
         req: &Request,
     ) -> brain::Result<BoxStream<'static, brain::Result<StreamEvent>>> {
-        let size = brain::estimate::tokens(&req.messages);
+        let size = brain::estimate::tokens(&req.messages, spec);
         if size > self.fits {
             self.refusals.fetch_add(1, Ordering::SeqCst);
             return Err(brain::BrainError::Api {
-                transport: "anthropic",
+                format: "anthropic",
                 status: 400,
                 body: format!("prompt is too long: {size} tokens > {} maximum", self.fits),
             });
@@ -983,7 +912,7 @@ async fn an_overflow_refusal_shrinks_the_transcript_and_retries() {
         history.push(call_message(&format!("h{i}")));
         history.push(Message::tool_results(vec![
             brain::message::ToolResult::text(
-                brain::message::ToolCallId(format!("h{i}")),
+                format!("h{i}"),
                 "read",
                 "z".repeat(12_000),
             ),
@@ -1023,6 +952,78 @@ async fn an_overflow_refusal_shrinks_the_transcript_and_retries() {
     assert_eq!(session.context().last().unwrap().text(), "fits now");
 }
 
+/// Refuses three ways in order — unnamed, named, unnamed — so what the second
+/// blind squeeze is measured against becomes visible in the warnings.
+struct Mixed {
+    calls: AtomicUsize,
+    limit: usize,
+}
+
+#[async_trait]
+impl Transport for Mixed {
+    async fn stream(
+        &self,
+        _spec: &ModelSpec,
+        _req: &Request,
+    ) -> brain::Result<BoxStream<'static, brain::Result<StreamEvent>>> {
+        let unnamed = || brain::BrainError::Api {
+            format: "anthropic",
+            status: 413,
+            body: "Request exceeds the maximum size".into(),
+        };
+        match self.calls.fetch_add(1, Ordering::SeqCst) {
+            0 => Err(unnamed()),
+            1 => Err(brain::BrainError::Api {
+                format: "anthropic",
+                status: 400,
+                body: format!("prompt is too long: 99999 tokens > {} maximum", self.limit),
+            }),
+            2 => Err(unnamed()),
+            _ => Ok(futures::stream::iter(text_turn("fits now").into_iter().map(Ok)).boxed()),
+        }
+    }
+}
+
+/// A blind squeeze shrinks the estimate the spec claimed. Once the provider
+/// names its real window that baseline is gone, so the discount goes with it —
+/// otherwise the run spends the rest of its life at 60% of a figure that was
+/// never a guess, while the warning says it refitted to the window.
+#[tokio::test]
+async fn a_named_window_supersedes_the_guesswork_that_preceded_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
+
+    let mut a = Agent::new(
+        Arc::new(Mixed {
+            calls: AtomicUsize::new(0),
+            limit: 40_000,
+        }),
+        spec(),
+    );
+    fast_retry(&mut a);
+    let mut session = Session::from_messages(vec![Message::user("the task")]);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let out = a.run(&mut session, &ctx, &tx).await;
+    drop(tx);
+    let mut events = Vec::new();
+    while let Some(e) = rx.recv().await {
+        events.push(e);
+    }
+    out.unwrap();
+
+    let blind: Vec<&String> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Warning(w) if w.contains("named no limit") => Some(w),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(blind.len(), 2, "{events:?}");
+    // Both are the first squeeze against their own baseline. Compounding them
+    // would print 36% here, against a window the provider measured.
+    assert!(blind[1].contains("60%"), "{}", blind[1]);
+}
+
 /// Refuses without saying how big the window is.
 struct Mute {
     fits: usize,
@@ -1030,17 +1031,14 @@ struct Mute {
 
 #[async_trait]
 impl Transport for Mute {
-    fn name(&self) -> &'static str {
-        "anthropic"
-    }
     async fn stream(
         &self,
-        _: &ModelSpec,
+        spec: &ModelSpec,
         req: &Request,
     ) -> brain::Result<BoxStream<'static, brain::Result<StreamEvent>>> {
-        if brain::estimate::tokens(&req.messages) > self.fits {
+        if brain::estimate::tokens(&req.messages, spec) > self.fits {
             return Err(brain::BrainError::Api {
-                transport: "anthropic",
+                format: "anthropic",
                 status: 413,
                 body: "Request exceeds the maximum size".into(),
             });
@@ -1059,7 +1057,7 @@ async fn an_overflow_with_no_number_falls_back_to_squeezing() {
         history.push(call_message(&format!("h{i}")));
         history.push(Message::tool_results(vec![
             brain::message::ToolResult::text(
-                brain::message::ToolCallId(format!("h{i}")),
+                format!("h{i}"),
                 "read",
                 "z".repeat(12_000),
             ),
@@ -1090,112 +1088,6 @@ async fn an_overflow_with_no_number_falls_back_to_squeezing() {
     );
 }
 
-fn schema() -> serde_json::Value {
-    json!({
-        "type": "object",
-        "properties": { "count": { "type": "integer" }, "note": { "type": "string" } },
-        "required": ["count"],
-    })
-}
-
-fn yielding_agent(turns: Vec<Vec<StreamEvent>>) -> (tempfile::TempDir, Agent, Ctx) {
-    let dir = tempfile::tempdir().unwrap();
-    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
-    let mut a = Agent::new(Scripted::new(turns), spec());
-    a.registry = Registry::builtin().with(tools::finish::Yield::new(schema()));
-    a.finish_tool = Some(tools::finish::NAME.to_string());
-    (dir, a, ctx)
-}
-
-#[tokio::test]
-async fn a_yield_ends_the_run_and_hands_back_the_value() {
-    let (_d, a, ctx) = yielding_agent(vec![
-        call_turn(&[("y1", "yield", r#"{"count":3,"note":"three files"}"#)]),
-        text_turn("never reached"),
-    ]);
-    let (_s, out, _) = drive(&a, &ctx, "count things").await;
-
-    let value = out
-        .unwrap()
-        .yielded
-        .expect("the run must hand back a value");
-    assert_eq!(value["count"], 3);
-    assert_eq!(value["note"], "three files");
-}
-
-#[tokio::test]
-async fn nothing_runs_after_a_yield() {
-    let (_d, a, ctx) = yielding_agent(vec![
-        call_turn(&[("y1", "yield", r#"{"count":1}"#)]),
-        call_turn(&[(
-            "w1",
-            "write",
-            r#"{"path":"should-not-exist","content":"x"}"#,
-        )]),
-    ]);
-    let (_s, out, _) = drive(&a, &ctx, "go").await;
-    out.unwrap();
-    assert!(!ctx.workspace.root().join("should-not-exist").exists());
-}
-
-#[tokio::test]
-async fn a_missing_required_field_comes_back_as_a_result_to_fix() {
-    let (_d, a, ctx) = yielding_agent(vec![
-        call_turn(&[("y1", "yield", r#"{"note":"forgot the count"}"#)]),
-        call_turn(&[("y2", "yield", r#"{"count":7}"#)]),
-        text_turn("done"),
-    ]);
-    let (session, out, _) = drive(&a, &ctx, "go").await;
-
-    assert_eq!(out.unwrap().yielded.unwrap()["count"], 7);
-    let view = session.context();
-    let first = tool_results(&view[2]);
-    assert!(first[0].is_error);
-    assert!(
-        first[0]
-            .flatten_text()
-            .contains("missing required field(s): count"),
-        "{first:?}"
-    );
-}
-
-#[tokio::test]
-async fn a_run_that_forgets_to_yield_is_reminded_once() {
-    let (_d, a, ctx) = yielding_agent(vec![
-        text_turn("here is my prose answer"),
-        call_turn(&[("y1", "yield", r#"{"count":2}"#)]),
-        text_turn("done"),
-    ]);
-    let (session, out, _) = drive(&a, &ctx, "go").await;
-
-    assert_eq!(out.unwrap().yielded.unwrap()["count"], 2);
-    assert!(
-        session
-            .context()
-            .iter()
-            .any(|m| m.text().contains("Call `yield` with it now")),
-        "the reminder must be in the transcript"
-    );
-}
-
-#[tokio::test]
-async fn a_run_that_never_yields_fails_rather_than_returning_prose() {
-    let (_d, a, ctx) = yielding_agent(vec![text_turn("prose"), text_turn("more prose")]);
-    let (_s, out, _) = drive(&a, &ctx, "go").await;
-    // One reminder, then the run is a failure: the caller asked for a value.
-    assert!(matches!(out, Err(AgentError::NoResult)), "{out:?}");
-}
-
-#[test]
-fn a_schema_that_is_not_an_object_is_refused_with_the_fix() {
-    let err = tools::finish::check(&json!({ "type": "array" })).unwrap_err();
-    assert!(err.contains("a tool input must be an object"), "{err}");
-    assert!(
-        err.contains(r#""result""#),
-        "the message shows the wrapper: {err}"
-    );
-    assert!(tools::finish::check(&schema()).is_ok());
-}
 
 #[tokio::test]
 async fn a_call_that_keeps_returning_the_same_thing_is_named() {
@@ -1239,7 +1131,7 @@ async fn a_call_that_keeps_returning_the_same_thing_is_named() {
 }
 
 /// The shape a session actually dies in: a tool the model cannot get the
-/// arguments right for, refused identically until the turn limit.
+/// arguments right for, refused identically for as long as it is allowed to run.
 #[tokio::test]
 async fn a_call_that_keeps_failing_the_same_way_is_named_sooner() {
     let dir = tempfile::tempdir().unwrap();
@@ -1353,10 +1245,67 @@ async fn a_coded_tool_error_reaches_the_model_with_its_code() {
     let (session, out, _) = drive(&a, &ctx, "go").await;
     out.unwrap();
     let view = session.context();
-    let results = tool_results(&view[2]);
+    let results = tool_results(&view);
     assert!(results[0].is_error);
     let body = results[0].flatten_text();
     assert!(body.starts_with("Error: timed out after 42ms"), "{body}");
     assert!(body.ends_with("[code: TOOL_TIMEOUT]"), "{body}");
 
+}
+
+/// The plan reaches the model as a note, recomputed each turn — never as a
+/// message. Written into the transcript, turn 3's list is still there at turn
+/// 30 contradicting the current one, and both read as fact.
+#[tokio::test]
+async fn the_plan_rides_a_note_and_never_the_transcript() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
+    let wire = Scripted::new(vec![
+        call_turn(&[(
+            "t1",
+            "todo",
+            r#"{"items":[{"task":"read the code","status":"done"},
+                         {"task":"fix the parser","status":"in_progress"}]}"#,
+        )]),
+        text_turn("done"),
+    ]);
+    let a = Agent::new(wire.clone(), spec());
+    let (session, out, _) = drive(&a, &ctx, "work").await;
+    out.unwrap();
+
+    let sent = wire.notes();
+    assert!(
+        sent.iter().any(|n| n.contains("[~] fix the parser")),
+        "the plan never rode a note: {sent:?}"
+    );
+
+    // And nowhere in the transcript, which is the point.
+    let view = session.context();
+    let prose: String = view.iter().map(Message::text).collect();
+    let answered: String = tool_results(&view).iter().map(|r| r.flatten_text()).collect();
+    assert!(!prose.contains("fix the parser"), "{prose}");
+    assert!(!answered.contains("fix the parser"), "{answered}");
+    assert_eq!(answered.trim(), "Recorded: 1 of 2 open.");
+
+    // It survives on the session, so a resume brings it back.
+    assert_eq!(session.todos().len(), 2);
+}
+
+/// A rewind undoes work the plan says is done. Carrying it forward would tell
+/// the model six items are finished when two of them are not — in a note, as
+/// fact, every turn.
+#[test]
+fn rewinding_clears_a_plan_that_described_the_undone_work() {
+    let mut s = agent::session::Session::new();
+    let first = s.prompt("start");
+    s.prompt("more");
+    s.set_todos(vec![tools::todo::Todo {
+        task: "ship it".into(),
+        status: tools::todo::TodoStatus::Done,
+        note: None,
+    }]);
+    assert_eq!(s.todos().len(), 1);
+
+    s.rollback_to(first);
+    assert!(s.todos().is_empty(), "the plan outlived the work it described");
 }

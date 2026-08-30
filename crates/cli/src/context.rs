@@ -25,6 +25,22 @@ fn in_dir(dir: &Path) -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
+/// A path as a person would name it, shortest form first: relative to the
+/// workspace, then `~`, then absolute. A file inherited from a directory above
+/// the workspace lands in the middle case, which is the point — a bare
+/// `AGENTS.md` would not say it came from somewhere else.
+pub fn short(path: &Path, root: &Path) -> String {
+    if let Ok(rel) = path.strip_prefix(root) {
+        return rel.display().to_string();
+    }
+    if let Some(h) = home()
+        && let Ok(rel) = path.strip_prefix(&h)
+    {
+        return format!("~/{}", rel.display());
+    }
+    path.display().to_string()
+}
+
 /// Every instructions file that applies, most general first.
 ///
 /// Order is the whole point: the nearest directory speaks last, so where two

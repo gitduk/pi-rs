@@ -2,27 +2,25 @@ use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::stream::{BoxStream, StreamExt};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 
 use super::Transport;
-use crate::catalog::{
-    MaxTokensField, ModelSpec, OpenAiCompat, ReasoningField, ThinkingReplay, ThinkingSupport, Wire,
-};
+use crate::model::{Format, ModelSpec, ThinkingControl};
 use crate::error::{BrainError, Result};
 use crate::message::{
-    AssistantContent, Image, Message, ProviderCallId, Reasoning, ReasoningContent, UserContent,
+    AssistantContent, Image, Message, Reasoning, ReasoningContent, Replay, Text, ToolCall,
+    ToolResult, ToolResultContent, UserContent, tagged,
 };
 use crate::request::{Request, ToolChoice};
-use crate::stream::{BlockKind, StopReason, StreamEvent, Usage};
-
-/// Synthetic block indices. OpenAI has no global block index, so one is
-/// assigned per kind; the ordering is what the final message preserves.
-const IDX_REASONING: usize = 0;
-const IDX_TEXT: usize = 1;
-const IDX_TOOL_BASE: usize = 100;
+use super::{Gaps, Shared};
+use crate::stream::{BlockKind, InvalidToolArgs, StopReason, StreamEvent, Usage};
 
 pub struct OpenAi {
     http: reqwest::Client,
     api_key: String,
+    /// Session-lived, not per-request: what a host gets wrong it gets wrong
+    /// every turn, and the reader needs to hear it once.
+    gaps: Shared,
 }
 
 impl OpenAi {
@@ -30,373 +28,495 @@ impl OpenAi {
         Self {
             http: reqwest::Client::new(),
             api_key: api_key.into(),
+            gaps: Shared::new("openai"),
         }
     }
 }
 
-fn compat(spec: &ModelSpec) -> Result<&OpenAiCompat> {
-    match &spec.wire {
-        Wire::OpenAi(c) => Ok(c),
+fn check_format(spec: &ModelSpec) -> Result<()> {
+    match spec.format {
+        Format::OpenAi => Ok(()),
         _ => Err(BrainError::Config(format!(
-            "{} is not an openai-wire model",
-            spec.id
+            "{} is not an openai-format model",
+            spec.model
         ))),
     }
 }
-
-/// Mistral accepts exactly nine alphanumeric characters and rejects anything
-/// else, including the ids every other provider mints.
-fn mistral_id(id: &str) -> String {
-    let kept: String = id
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .take(9)
-        .collect();
-    format!("{kept:a<9}")
-}
-
-fn wire_call_id(local: &str, provider: Option<&ProviderCallId>, c: &OpenAiCompat) -> String {
-    let id = provider.map(|p| p.0.as_str()).unwrap_or(local);
-    if c.mistral_tool_ids {
-        mistral_id(id)
-    } else {
-        id.to_string()
-    }
-}
+/// The one thing the wire cannot say. A `function_call_output` has no
+/// `is_error` — `status` is the item's own generation state — so a failure
+/// that is not marked in the text reads to the model as a result.
+const FAILED: &str = "[tool error]";
 
 fn encode_image(img: &Image) -> Value {
     let url = match img {
         Image::Url { url } => url.clone(),
         Image::Base64 { media_type, data } => format!("data:{media_type};base64,{data}"),
     };
-    json!({ "type": "image_url", "image_url": { "url": url } })
+    json!({ "type": "input_image", "image_url": url })
 }
 
-fn reasoning_text(r: &Reasoning) -> String {
-    r.content
+/// `output` takes a string or a content-block array; the array is what carries
+/// an image back, so a result without one stays a plain string.
+fn encode_tool_result(r: &ToolResult) -> Value {
+    let has_image = r
+        .content
         .iter()
-        .filter_map(|c| match c {
-            ReasoningContent::Text { text, .. } => Some(text.as_str()),
-            ReasoningContent::Encrypted(_) => None,
-        })
-        .collect()
+        .any(|p| matches!(p, ToolResultContent::Image(_)));
+
+    let output = if has_image {
+        let mut blocks = Vec::new();
+        if r.is_error {
+            blocks.push(json!({ "type": "input_text", "text": FAILED }));
+        }
+        blocks.extend(r.content.iter().map(|p| match p {
+            ToolResultContent::Text(t) => json!({ "type": "input_text", "text": t.text }),
+            ToolResultContent::Json { value } => {
+                json!({ "type": "input_text", "text": value.to_string() })
+            }
+            ToolResultContent::Image(img) => encode_image(img),
+        }));
+        Value::Array(blocks)
+    } else if r.is_error {
+        json!(format!("{FAILED}\n{}", r.flatten_text()))
+    } else {
+        json!(r.flatten_text())
+    };
+
+    json!({
+        "type": "function_call_output",
+        "call_id": r.call,
+        "output": output,
+    })
 }
 
-fn reasoning_key(f: ReasoningField) -> &'static str {
-    match f {
-        ReasoningField::ReasoningContent => "reasoning_content",
-        ReasoningField::Reasoning => "reasoning",
-        ReasoningField::ReasoningText => "reasoning_text",
+/// Dress a stored reasoning block in this wire's shapes. Which way it leaves is
+/// `Reasoning::replay_for`'s call, shared with the estimate that sizes it.
+fn encode_reasoning(r: &Reasoning, spec: &ModelSpec) -> Option<Value> {
+    match r.replay_for(spec) {
+        Replay::Encrypted { id, encrypted } => Some(json!({
+            "type": "reasoning",
+            "id": id,
+            "summary": [],
+            "encrypted_content": encrypted,
+        })),
+        Replay::Demoted => Some(assistant_text(&tagged(&r.text()))),
+        // No OpenAI spec ever signs one: the transport is chosen by the same
+        // format `replay_for` reads.
+        Replay::Signed { .. } | Replay::Dropped => None,
     }
 }
 
-fn encode(msgs: &[Message], spec: &ModelSpec, c: &OpenAiCompat) -> Vec<Value> {
-    let mut out: Vec<Value> = Vec::new();
+fn assistant_text(text: &str) -> Value {
+    json!({
+        "type": "message",
+        "role": "assistant",
+        "content": [{ "type": "output_text", "text": text }],
+    })
+}
 
-    for msg in msgs {
-        match msg {
-            Message::System { content } => {
-                out.push(json!({ "role": "system", "content": content }))
-            }
-
-            Message::User { content } => {
-                let results: Vec<&crate::message::ToolResult> = content
-                    .iter()
-                    .filter_map(|b| match b {
-                        UserContent::ToolResult(r) => Some(r),
-                        _ => None,
-                    })
-                    .collect();
-
-                // One `role: "tool"` message per result; the stored shape packs
-                // them into a single user message and only splits on this wire.
-                for r in &results {
-                    let mut m = json!({
-                        "role": "tool",
-                        "tool_call_id": wire_call_id(&r.call.0, r.provider.as_ref(), c),
-                        "content": r.flatten_text(),
-                    });
-                    if c.tool_result_name {
-                        m["name"] = json!(r.name);
-                    }
-                    out.push(m);
-                }
-
-                let rest: Vec<Value> = content
-                    .iter()
-                    .filter_map(|b| match b {
-                        UserContent::Text(t) => Some(json!({ "type": "text", "text": t.text })),
-                        UserContent::Image(img) => Some(encode_image(img)),
-                        UserContent::ToolResult(_) => None,
-                    })
-                    .collect();
-
-                if !rest.is_empty() {
-                    // Some hosts reject a user turn that directly answers a tool
-                    // message; a stub assistant turn keeps the sequence legal.
-                    if c.assistant_after_tool_result && !results.is_empty() {
-                        out.push(json!({ "role": "assistant", "content": "" }));
-                    }
-                    out.push(json!({ "role": "user", "content": rest }));
-                }
-            }
-
-            Message::Assistant { content, .. } => {
-                let mut text = String::new();
-                let mut calls: Vec<Value> = Vec::new();
-                let mut reasoning: Option<String> = None;
-
-                for b in content {
-                    match b {
-                        AssistantContent::Text(t) => text.push_str(&t.text),
-                        AssistantContent::ToolCall(call) => calls.push(json!({
-                            "id": wire_call_id(&call.id.0, call.provider.as_ref(), c),
-                            "type": "function",
-                            "function": { "name": call.name, "arguments": call.args.to_string() },
-                        })),
-                        AssistantContent::Reasoning(r) => {
-                            let native = r.origin.as_ref().is_some_and(|o| {
-                                o.transport == "openai" && o.model == spec.wire_id
-                            });
-                            let body = reasoning_text(r);
-                            if body.is_empty() {
-                                continue;
-                            }
-                            match (native, spec.thinking_replay) {
-                                (_, ThinkingReplay::Drop) => {}
-                                (true, _) => reasoning = Some(body),
-                                (false, ThinkingReplay::Tagged) => {
-                                    text.push_str(&format!("<think>\n{body}\n</think>\n"))
-                                }
-                                (false, _) => text.push_str(&body),
-                            }
-                        }
-                    }
-                }
-
-                if text.is_empty() && calls.is_empty() && reasoning.is_none() {
-                    continue;
-                }
-                let mut m = json!({ "role": "assistant", "content": text });
-                if !calls.is_empty() {
-                    m["tool_calls"] = Value::Array(calls);
-                }
-                if let Some(body) = reasoning {
-                    m[reasoning_key(c.reasoning_field)] = json!(body);
-                }
-                out.push(m);
+/// Tool results are their own top-level items here, so a user turn holding both
+/// a result and prose leaves as two items — and in the order it held them.
+fn encode_user(content: &[UserContent], out: &mut Vec<Value>) {
+    let mut blocks: Vec<Value> = Vec::new();
+    for b in content {
+        match b {
+            UserContent::Text(t) => blocks.push(json!({ "type": "input_text", "text": t.text })),
+            UserContent::Image(img) => blocks.push(encode_image(img)),
+            UserContent::ToolResult(r) => {
+                flush_user(&mut blocks, out);
+                out.push(encode_tool_result(r));
             }
         }
     }
+    flush_user(&mut blocks, out);
+}
 
-    if !c.multiple_system_messages {
-        coalesce_system(&mut out);
+fn flush_user(blocks: &mut Vec<Value>, out: &mut Vec<Value>) {
+    if !blocks.is_empty() {
+        out.push(json!({
+            "type": "message",
+            "role": "user",
+            "content": std::mem::take(blocks),
+        }));
+    }
+}
+
+/// An assistant turn splits into reasoning, message and function_call items,
+/// in the order the model produced them. Consecutive text stays one message.
+fn encode_assistant(content: &[AssistantContent], spec: &ModelSpec, out: &mut Vec<Value>) {
+    let mut text = String::new();
+    for b in content {
+        match b {
+            AssistantContent::Text(t) => text.push_str(&t.text),
+            AssistantContent::Reasoning(r) => {
+                flush_assistant(&mut text, out);
+                out.extend(encode_reasoning(r, spec));
+            }
+            AssistantContent::ToolCall(call) => {
+                flush_assistant(&mut text, out);
+                out.push(json!({
+                    "type": "function_call",
+                    "call_id": call.id,
+                    "name": call.name,
+                    "arguments": call.args.to_string(),
+                }));
+            }
+        }
+    }
+    flush_assistant(&mut text, out);
+}
+
+fn flush_assistant(text: &mut String, out: &mut Vec<Value>) {
+    if !text.is_empty() {
+        out.push(assistant_text(&std::mem::take(text)));
+    }
+}
+
+/// The `input` item array. Nothing joins: `input` is flat and has no
+/// alternation rule, so one entry leaves as one item — the opposite of the
+/// Anthropic encoder, and the reason the join is the encoder's job.
+fn encode(msgs: &[Message], spec: &ModelSpec, notes: &[String]) -> Vec<Value> {
+    let mut out = Vec::new();
+    for m in msgs {
+        match m {
+            // The system prompt rides `instructions`, not the item array.
+            Message::System { .. } => {}
+            Message::User { content } => encode_user(content, &mut out),
+            Message::Assistant { content, .. } => encode_assistant(content, spec, &mut out),
+        }
+    }
+    // Its own trailing item: `input` is flat, so appending one changes nothing
+    // before it and the cached prefix reaches just as far as it did.
+    if !notes.is_empty() {
+        out.push(json!({
+            "type": "message",
+            "role": "user",
+            "content": notes
+                .iter()
+                .map(|n| json!({ "type": "input_text", "text": n }))
+                .collect::<Vec<_>>(),
+        }));
     }
     out
 }
 
-/// Strict chat templates accept only one leading system message. Joining them
-/// costs KV-cache reuse, so this runs only where the host demands it.
-fn coalesce_system(msgs: &mut Vec<Value>) {
-    let lead = msgs.iter().take_while(|m| m["role"] == "system").count();
-    if lead <= 1 {
-        return;
-    }
-    let joined = msgs[..lead]
-        .iter()
-        .filter_map(|m| m["content"].as_str())
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    msgs.splice(..lead, [json!({ "role": "system", "content": joined })]);
-}
-
-pub(crate) fn build_body(spec: &ModelSpec, req: &Request, c: &OpenAiCompat) -> Value {
-    let max_tokens = req
+pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
+    let max_output_tokens = req
         .max_output_tokens
         .unwrap_or(spec.max_output_tokens)
         .min(spec.max_output_tokens);
 
-    let mut messages = encode(&req.messages, spec, c);
-    if let Some(system) = &req.system {
-        messages.insert(0, json!({ "role": "system", "content": system }));
-        if !c.multiple_system_messages {
-            coalesce_system(&mut messages);
-        }
-    }
-
     let mut body = json!({
-        "model": spec.wire_id,
+        "model": spec.model,
         "stream": true,
-        "messages": messages,
+        "input": encode(&req.messages, spec, &req.notes),
+        "max_output_tokens": max_output_tokens,
+        // A transcript on someone else's disk is not pi's to leave behind, and
+        // the reference page documents no default for this — so it is said.
+        "store": false,
+        // Without it a stateless reasoning item comes back with nothing to
+        // replay, and nothing says so.
+        "include": ["reasoning.encrypted_content"],
     });
 
-    let key = match c.max_tokens_field {
-        MaxTokensField::MaxTokens => "max_tokens",
-        MaxTokensField::MaxCompletionTokens => "max_completion_tokens",
-    };
-    body[key] = json!(max_tokens);
-
-    if c.usage_in_streaming {
-        body["stream_options"] = json!({ "include_usage": true });
+    let instructions = req.system.clone().or_else(|| {
+        req.messages.iter().find_map(|m| match m {
+            Message::System { content } => Some(content.clone()),
+            _ => None,
+        })
+    });
+    if let Some(instructions) = instructions {
+        body["instructions"] = json!(instructions);
     }
-    if let Some(t) = req.temperature {
+
+    // Gated, as on the other wire: the OpenAI reasoning models are half of why
+    // this field exists, and they refuse every value but the default.
+    if let Some(t) = req.temperature
+        && spec.accepts_temperature
+    {
         body["temperature"] = json!(t);
     }
+
     if !req.tools.is_empty() {
         body["tools"] = json!(
             req.tools
                 .iter()
                 .map(|t| json!({
                     "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.input_schema,
-                    },
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.input_schema,
                 }))
                 .collect::<Vec<_>>()
         );
+        // Documented without a default, so it is sent rather than assumed.
+        body["parallel_tool_calls"] = json!(true);
         body["tool_choice"] = match &req.tool_choice {
             ToolChoice::Auto => json!("auto"),
             ToolChoice::None => json!("none"),
             ToolChoice::Required => json!("required"),
-            ToolChoice::Named(name) => json!({ "type": "function", "function": { "name": name } }),
+            ToolChoice::Named(name) => json!({ "type": "function", "name": name }),
         };
     }
-    if spec.caps.thinking == Some(ThinkingSupport::Effort)
-        && c.reasoning_effort
-        && let Some(e) = req.effort.as_openai()
+
+    if spec.thinking == Some(ThinkingControl::Effort)
+        && let Some(effort) = req.effort.as_openai()
     {
-        body["reasoning_effort"] = json!(e);
+        body["reasoning"] = json!({ "effort": effort });
     }
 
     body
 }
 
-fn finish_reason(raw: &str) -> StopReason {
-    match raw {
-        "tool_calls" | "function_call" => StopReason::ToolUse,
-        "length" => StopReason::MaxTokens,
-        "content_filter" => StopReason::Refusal,
-        _ => StopReason::EndTurn,
+
+/// `input_tokens` counts the cached prefix and the newly written one as well as
+/// the fresh tokens, so both come out of it. Subtracting only the read half —
+/// which is what the Chat Completions decoder did — bills the write twice.
+///
+/// `cache_write_tokens` is in OpenAI's own usage type but not every
+/// implementation fills it: DeepSeek's Responses endpoint sends only
+/// `cached_tokens`. Absent, it reads as zero and the arithmetic still balances.
+fn usage_of(u: &Value) -> Usage {
+    let details = &u["input_tokens_details"];
+    let cache_read = details["cached_tokens"].as_u64().unwrap_or(0);
+    let cache_write = details["cache_write_tokens"].as_u64().unwrap_or(0);
+    Usage {
+        input: u["input_tokens"]
+            .as_u64()
+            .unwrap_or(0)
+            .saturating_sub(cache_read)
+            .saturating_sub(cache_write),
+        output: u["output_tokens"].as_u64().unwrap_or(0),
+        cache_read,
+        cache_write,
     }
 }
 
-#[derive(Default)]
+/// Two levels, not one: a truncated turn is `status: "incomplete"` carrying the
+/// reason. Reading only the status would file it as a turn that ended.
+fn stop_of(response: &Value) -> StopReason {
+    if response["status"] != "incomplete" {
+        return StopReason::EndTurn;
+    }
+    match response["incomplete_details"]["reason"].as_str() {
+        Some("content_filter") => StopReason::Refusal,
+        // The other documented reason is max_output_tokens, and an
+        // unrecognised one is still a turn that did not finish.
+        _ => StopReason::MaxTokens,
+    }
+}
+
+fn text_of(parts: &Value, key: &str) -> String {
+    parts
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p[key].as_str())
+        .collect()
+}
+
+/// The turn as the terminal frame states it. This is the authority: the deltas
+/// before it were for the screen.
+fn read_output(
+    output: &Value,
+    origin: &str,
+    gaps: &mut Gaps,
+) -> (Vec<AssistantContent>, Vec<InvalidToolArgs>) {
+    let mut content = Vec::new();
+    let mut invalid = Vec::new();
+
+    for item in output.as_array().into_iter().flatten() {
+        match item["type"].as_str() {
+            Some("reasoning") => {
+                let mut parts = Vec::new();
+                // The ciphertext is the only part that replays; the prose is
+                // for the reader.
+                if let Some(enc) = item["encrypted_content"].as_str() {
+                    parts.push(ReasoningContent::Encrypted(enc.to_string()));
+                }
+                // Body and summary are two separate streams of the same
+                // thinking. The body is the real one; the summary stands in
+                // when an org is not shown the body.
+                let mut text = text_of(&item["content"], "text");
+                if text.is_empty() {
+                    text = text_of(&item["summary"], "text");
+                }
+                if !text.is_empty() {
+                    parts.push(ReasoningContent::Text {
+                        text,
+                        signature: None,
+                    });
+                }
+                if !parts.is_empty() {
+                    content.push(AssistantContent::Reasoning(Reasoning {
+                        // Required when the item is sent back, so it is kept.
+                        id: item["id"].as_str().map(str::to_string),
+                        content: parts,
+                        by: Some(origin.to_string()),
+                    }));
+                }
+            }
+            Some("message") => {
+                let mut text = text_of(&item["content"], "text");
+                // A refusal is a turn the model declined, not an empty one.
+                text.push_str(&text_of(&item["content"], "refusal"));
+                if !text.is_empty() {
+                    content.push(AssistantContent::Text(Text { text }));
+                }
+            }
+            Some("function_call") => {
+                let id = item["call_id"].as_str().unwrap_or_default().to_string();
+                let name = item["name"].as_str().unwrap_or_default().to_string();
+                let raw = item["arguments"].as_str().unwrap_or_default();
+                let args = match serde_json::from_str::<Value>(raw.trim()) {
+                    Ok(v) => v,
+                    Err(_) if raw.trim().is_empty() => json!({}),
+                    Err(e) => {
+                        invalid.push(InvalidToolArgs {
+                            call: id.clone(),
+                            name: name.clone(),
+                            raw: raw.to_string(),
+                            error: e.to_string(),
+                        });
+                        json!({})
+                    }
+                };
+                content.push(AssistantContent::ToolCall(ToolCall { id, name, args }));
+            }
+            // An item kind this build does not know, sitting in the frame that
+            // states the turn: whatever the model put there is now missing from
+            // it, so this is a loss and not a curiosity.
+            other => gaps.lost("response.output", other.unwrap_or("(untyped)")),
+        }
+    }
+    (content, invalid)
+}
+
+/// Responses events are typed and carry their own `output_index`, so the
+/// synthetic per-kind indices Chat Completions needed are gone.
 struct Decoder {
-    stop: StopReason,
-    usage: Usage,
-    started: std::collections::HashSet<usize>,
-    text_open: bool,
-    reasoning_open: bool,
+    origin: String,
+    gaps: Shared,
+    /// Which of the two reasoning streams opened an item. They describe the
+    /// same thinking, so letting both through prints it twice.
+    reasoning_stream: BTreeMap<usize, bool>,
 }
 
 impl Decoder {
-    fn frame(&mut self, data: &Value, c: &OpenAiCompat) -> Vec<StreamEvent> {
-        let mut out = Vec::new();
-
-        if let Some(u) = data.get("usage").filter(|u| !u.is_null()) {
-            self.usage.output = u["completion_tokens"].as_u64().unwrap_or(self.usage.output);
-            // OpenAI names the hit under `prompt_tokens_details`; DeepSeek and
-            // the hosts that copied it put the same number at the top level.
-            self.usage.cache_read = u["prompt_tokens_details"]["cached_tokens"]
-                .as_u64()
-                .or_else(|| u["prompt_cache_hit_tokens"].as_u64())
-                .unwrap_or(self.usage.cache_read);
-            // `prompt_tokens` here counts the whole prompt, cache included;
-            // leaving the hit in bills it twice, at two different rates.
-            self.usage.input = u["prompt_tokens"].as_u64().map_or(self.usage.input, |all| {
-                all.saturating_sub(self.usage.cache_read)
-            });
+    /// Takes the whole identity rather than a model name. It stamps every
+    /// reasoning block it decodes, and `replay_for` later compares that stamp
+    /// against `spec.model.clone()` — so a decoder that names the provider itself
+    /// can only ever name it wrong, and the ciphertext it stamped stops
+    /// replaying without anything failing.
+    fn new(origin: String, gaps: Shared) -> Self {
+        Self {
+            origin,
+            gaps,
+            reasoning_stream: BTreeMap::new(),
         }
-
-        // A usage-only terminal frame carries no choices.
-        let Some(choice) = data["choices"].get(0) else {
-            return out;
-        };
-
-        let delta = &choice["delta"];
-
-        let reasoning = delta[reasoning_key(c.reasoning_field)]
-            .as_str()
-            .or_else(|| delta["reasoning_content"].as_str());
-        if let Some(r) = reasoning.filter(|r| !r.is_empty()) {
-            if !self.reasoning_open {
-                self.reasoning_open = true;
-                out.push(StreamEvent::BlockStart {
-                    index: IDX_REASONING,
-                    kind: BlockKind::Reasoning,
-                });
-            }
-            out.push(StreamEvent::ReasoningDelta {
-                index: IDX_REASONING,
-                delta: r.to_string(),
-            });
-        }
-
-        if let Some(t) = delta["content"].as_str().filter(|t| !t.is_empty()) {
-            if !self.text_open {
-                self.text_open = true;
-                out.push(StreamEvent::BlockStart {
-                    index: IDX_TEXT,
-                    kind: BlockKind::Text,
-                });
-            }
-            out.push(StreamEvent::TextDelta {
-                index: IDX_TEXT,
-                delta: t.to_string(),
-            });
-        }
-
-        if let Some(calls) = delta["tool_calls"].as_array() {
-            for call in calls {
-                let slot = call["index"].as_u64().unwrap_or(0) as usize;
-                let index = IDX_TOOL_BASE + slot;
-                if self.started.insert(index) {
-                    out.push(StreamEvent::BlockStart {
-                        index,
-                        kind: BlockKind::ToolCall {
-                            provider: call["id"].as_str().map(|s| ProviderCallId(s.to_string())),
-                            name: call["function"]["name"]
-                                .as_str()
-                                .unwrap_or_default()
-                                .to_string(),
-                        },
-                    });
-                }
-                if let Some(args) = call["function"]["arguments"]
-                    .as_str()
-                    .filter(|a| !a.is_empty())
-                {
-                    out.push(StreamEvent::ToolArgsDelta {
-                        index,
-                        delta: args.to_string(),
-                    });
-                }
-            }
-        }
-
-        if let Some(r) = choice["finish_reason"].as_str().filter(|r| !r.is_empty()) {
-            self.stop = finish_reason(r);
-        }
-
-        out
     }
 
-    /// `[DONE]` is the wire's only reliable terminator: a host may omit
-    /// `stream_options`, or send usage on a frame that still carries choices.
-    fn done(&self) -> StreamEvent {
-        StreamEvent::Done {
-            stop: self.stop,
-            usage: self.usage,
+    fn frame(&mut self, data: &Value) -> Vec<StreamEvent> {
+        let index = data["output_index"].as_u64().unwrap_or(0) as usize;
+        let mut gaps = self.gaps.frame();
+        let Some(event) = gaps.owed(data, "frame", "type") else {
+            return Vec::new();
+        };
+        match event {
+            "response.output_item.added" => {
+                let item = &data["item"];
+                let kind = match item["type"].as_str() {
+                    Some("reasoning") => BlockKind::Reasoning,
+                    Some("message") => BlockKind::Text,
+                    Some("function_call") => BlockKind::ToolCall {
+                        id: item["call_id"].as_str().map(str::to_string),
+                        name: match gaps.owed(item, "function_call", "name") {
+                            Some(name) => name.to_string(),
+                            None => return Vec::new(),
+                        },
+                    },
+                    other => {
+                        gaps.lost(event, other.unwrap_or("(untyped)"));
+                        return Vec::new();
+                    }
+                };
+                vec![StreamEvent::BlockStart { index, kind }]
+            }
+            "response.output_text.delta" => match gaps.owed(data, event, "delta") {
+                Some(delta) => vec![StreamEvent::TextDelta {
+                    index,
+                    delta: delta.to_string(),
+                }],
+                None => Vec::new(),
+            },
+            "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
+                let body = data["type"] == "response.reasoning_text.delta";
+                match self.reasoning_stream.entry(index) {
+                    std::collections::btree_map::Entry::Vacant(slot) => {
+                        slot.insert(body);
+                    }
+                    std::collections::btree_map::Entry::Occupied(held) if *held.get() != body => {
+                        return Vec::new();
+                    }
+                    _ => {}
+                }
+                match gaps.owed(data, event, "delta") {
+                    Some(delta) => vec![StreamEvent::ReasoningDelta {
+                        index,
+                        delta: delta.to_string(),
+                    }],
+                    None => Vec::new(),
+                }
+            }
+            "response.function_call_arguments.delta" => {
+                match gaps.owed(data, event, "delta") {
+                    Some(delta) => vec![StreamEvent::ToolArgsDelta {
+                        index,
+                        delta: delta.to_string(),
+                    }],
+                    None => Vec::new(),
+                }
+            }
+            "response.output_item.done" => vec![StreamEvent::BlockEnd { index }],
+            "response.completed" | "response.incomplete" => {
+                let response = &data["response"];
+                let mut events = Vec::new();
+                // `output` is required on the Response this frame carries, so a
+                // host omitting it is out of spec — but saying nothing is still
+                // not saying the turn was empty. Read as a statement, an absent
+                // `output` threw away a tool call the deltas had already
+                // delivered and ended the run after the thinking, looking
+                // ordinary. The deltas stand instead, and the host is named:
+                // the quirk belongs in whatever gateway is doing this, and it
+                // cannot be fixed there while it is invisible here.
+                if response["output"].is_null() {
+                    gaps.lost(event, "output");
+                } else {
+                    let (content, invalid) =
+                        read_output(&response["output"], &self.origin, &mut gaps);
+                    events.push(StreamEvent::Complete { content, invalid });
+                }
+                events.push(StreamEvent::Done {
+                    stop: stop_of(response),
+                    usage: usage_of(&response["usage"]),
+                });
+                events
+            }
+            // Bookkeeping, or an event added after this was written. Costs the
+            // turn nothing: these frames only paint, and what the model said
+            // arrives either in the terminal frame or in the deltas.
+            other => {
+                gaps.ignored("frame", other);
+                Vec::new()
+            }
         }
     }
 }
 
 #[async_trait]
 impl Transport for OpenAi {
-    fn name(&self) -> &'static str {
-        "openai"
+    fn gaps(&self) -> Vec<String> {
+        self.gaps.drain()
     }
 
     async fn stream(
@@ -404,13 +524,13 @@ impl Transport for OpenAi {
         spec: &ModelSpec,
         req: &Request,
     ) -> Result<BoxStream<'static, Result<StreamEvent>>> {
-        let c = compat(spec)?.clone();
-        let body = build_body(spec, req, &c);
-        let url = format!("{}/chat/completions", spec.base_url.trim_end_matches('/'));
+        check_format(spec)?;
+        let body = build_body(spec, req);
+        let url = format!("{}/responses", spec.base_url.trim_end_matches('/'));
         let call = self.http.post(&url).bearer_auth(&self.api_key).json(&body);
         let resp = super::exchange("openai", url, spec, req, &body, call).await?;
 
-        let mut dec = Decoder::default();
+        let mut dec = Decoder::new(spec.model.clone(), self.gaps.clone());
 
         let stream = resp
             .bytes_stream()
@@ -418,18 +538,27 @@ impl Transport for OpenAi {
             .flat_map(move |frame| {
                 let events: Vec<Result<StreamEvent>> = match frame {
                     Err(e) => vec![Err(BrainError::Stream(e.to_string()))],
-                    // `[DONE]` is a sentinel, not JSON.
-                    Ok(f) if f.data.trim() == "[DONE]" => vec![Ok(dec.done())],
                     Ok(f) => match serde_json::from_str::<Value>(&f.data) {
                         Err(e) => vec![Err(BrainError::Stream(e.to_string()))],
                         Ok(data) if data.get("error").is_some_and(|e| !e.is_null()) => {
                             tracing::warn!(
-                                target: "pi::wire", wire = "openai",
+                                target: "pi::wire", format = "openai",
                                 detail = %data["error"], "error frame"
                             );
                             vec![Err(BrainError::Stream(data["error"].to_string()))]
                         }
-                        Ok(data) => dec.frame(&data, &c).into_iter().map(Ok).collect(),
+                        // A run that failed server-side reports it here, not
+                        // as a status: without this the turn ends looking
+                        // ordinary and empty.
+                        Ok(data) if data["type"] == "response.failed" => {
+                            let detail = &data["response"]["error"];
+                            tracing::warn!(
+                                target: "pi::wire", format = "openai",
+                                detail = %detail, "failed response"
+                            );
+                            vec![Err(BrainError::Stream(detail.to_string()))]
+                        }
+                        Ok(data) => dec.frame(&data).into_iter().map(Ok).collect(),
                     },
                 };
                 futures::stream::iter(events)
@@ -443,335 +572,814 @@ impl Transport for OpenAi {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::{Capabilities, Pricing};
-    use crate::message::{Text, ToolCallId, ToolResult, ToolResultContent};
+    use crate::message::{Text, ToolResult, ToolResultContent};
+    use crate::model::ReplayThinking;
+    use crate::request::Effort;
 
-    fn spec(c: OpenAiCompat) -> ModelSpec {
+    fn spec() -> ModelSpec {
         ModelSpec {
-            id: "local".into(),
-            wire_id: "test-model".into(),
-            base_url: "http://127.0.0.1:8000/v1".into(),
-            wire: Wire::OpenAi(c),
-            context_window: 128_000,
-            max_output_tokens: 8_000,
-            caps: Capabilities {
-                tools: true,
-                parallel_tool_calls: true,
-                vision: false,
-                thinking: Some(ThinkingSupport::Effort),
-                cache_breakpoints: false,
-            },
-            thinking_replay: ThinkingReplay::Tagged,
-            pricing: Pricing::default(),
+            base_url: "https://api.openai.com/v1".into(),
+            format: Format::OpenAi,
+            context_window: 400_000,
+            thinking: Some(ThinkingControl::Effort),
+            ..ModelSpec::test()
         }
     }
 
-    fn result(call: &str, name: &str) -> ToolResult {
-        ToolResult {
-            call: ToolCallId(call.into()),
-            provider: None,
+    fn call(id: &str, name: &str, args: Value) -> AssistantContent {
+        AssistantContent::ToolCall(crate::message::ToolCall {
+            id: id.into(),
             name: name.into(),
-            content: vec![ToolResultContent::Text(Text { text: "ok".into() })],
-            is_error: false,
-            useless: false,
+            args,
+        })
+    }
+
+    fn reasoning(parts: Vec<ReasoningContent>, from: Option<&str>) -> AssistantContent {
+        AssistantContent::Reasoning(Reasoning {
+            id: Some("rs_1".into()),
+            content: parts,
+            // Provider from the spec under test, never a literal: whether a
+            // block is native is decided by comparing against
+            // `spec().model`, so a hand-written provider here would make
+            // these pass on a coincidence.
+            by: from.map(|m| m.into()),
+        })
+    }
+
+    fn body(req: Request) -> Value {
+        build_body(&spec(), &req)
+    }
+
+    /// Scaffolding, not an assertion: dumps a request body to `$PI_SNAP` for
+    /// eyeballing against a live endpoint, and is a no-op without it.
+    #[test]
+    fn tmp_dump_live_body() {
+        let Ok(dir) = std::env::var("PI_SNAP") else { return };
+        let model = std::env::var("PI_MODEL").unwrap();
+        let mut s = spec();
+        s.model = model;
+        s.max_output_tokens = 128;
+        let req = Request {
+            system: Some("You are terse.".into()),
+            messages: vec![Message::user(
+                "Read the file a.rs using the read tool, then say done.",
+            )],
+            tools: vec![crate::request::ToolDef {
+                name: "read".into(),
+                description: "Read a file from disk".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } },
+                    "required": ["path"],
+                }),
+            }],
+            effort: Effort::Off,
+            ..Default::default()
+        };
+        std::fs::write(
+            format!("{dir}/live_body.json"),
+            serde_json::to_vec_pretty(&build_body(&s, &req)).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// The whole request, written out by hand. There is no old encoder to
+    /// compare against — Chat Completions is gone — so this test is the only
+    /// statement of what pi puts on the wire.
+    #[test]
+    fn a_turn_of_traffic_encodes_to_exactly_this() {
+        let req = Request {
+            system: Some("you are pi".into()),
+            messages: vec![
+                Message::user("go"),
+                Message::Assistant {
+                    content: vec![
+                        reasoning(
+                            vec![ReasoningContent::Encrypted("ct".into())],
+                            Some("test-model"),
+                        ),
+                        AssistantContent::Text(Text {
+                            text: "reading".into(),
+                        }),
+                        call("call_1", "read", json!({ "path": "a.rs" })),
+                    ],
+                },
+                Message::tool_results(vec![ToolResult::text("call_1", "read", "fn main() {}")]),
+                Message::user("now the other one"),
+            ],
+            tools: vec![crate::request::ToolDef {
+                name: "read".into(),
+                description: "read a file".into(),
+                input_schema: json!({ "type": "object" }),
+            }],
+            effort: Effort::Medium,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            body(req),
+            json!({
+                "model": "test-model",
+                "stream": true,
+                "max_output_tokens": 32_000,
+                "store": false,
+                "include": ["reasoning.encrypted_content"],
+                "instructions": "you are pi",
+                "parallel_tool_calls": true,
+                "tool_choice": "auto",
+                "reasoning": { "effort": "medium" },
+                "tools": [{
+                    "type": "function",
+                    "name": "read",
+                    "description": "read a file",
+                    "parameters": { "type": "object" },
+                }],
+                "input": [
+                    { "type": "message", "role": "user",
+                      "content": [{ "type": "input_text", "text": "go" }] },
+                    { "type": "reasoning", "id": "rs_1", "summary": [],
+                      "encrypted_content": "ct" },
+                    { "type": "message", "role": "assistant",
+                      "content": [{ "type": "output_text", "text": "reading" }] },
+                    { "type": "function_call", "call_id": "call_1", "name": "read",
+                      "arguments": "{\"path\":\"a.rs\"}" },
+                    { "type": "function_call_output", "call_id": "call_1",
+                      "output": "fn main() {}" },
+                    { "type": "message", "role": "user",
+                      "content": [{ "type": "input_text", "text": "now the other one" }] },
+                ],
+            })
+        );
+    }
+
+    /// The wire has no `is_error`, so an unmarked failure reads as a result.
+    #[test]
+    fn a_failed_tool_result_says_so_in_the_only_place_the_wire_leaves() {
+        let req = Request {
+            messages: vec![Message::tool_results(vec![ToolResult::error(
+                "c1",
+                "read",
+                "no such file",
+            )])],
+            ..Default::default()
+        };
+        assert_eq!(
+            body(req)["input"][0],
+            json!({
+                "type": "function_call_output",
+                "call_id": "c1",
+                "output": "[tool error]\nno such file",
+            })
+        );
+    }
+
+    /// The other half of the same defect: Chat Completions flattened an image
+    /// to the literal `[image]`.
+    #[test]
+    fn an_image_in_a_tool_result_travels_as_an_image() {
+        let req = Request {
+            messages: vec![Message::tool_results(vec![ToolResult {
+                call: "c1".into(),
+                name: "screenshot".into(),
+                content: vec![
+                    ToolResultContent::Text(Text {
+                        text: "captured".into(),
+                    }),
+                    ToolResultContent::Image(Image::Base64 {
+                        media_type: "image/png".into(),
+                        data: "AAAA".into(),
+                    }),
+                ],
+                is_error: false,
+                useless: false,
+            }])],
+            ..Default::default()
+        };
+        assert_eq!(
+            body(req)["input"][0]["output"],
+            json!([
+                { "type": "input_text", "text": "captured" },
+                { "type": "input_image", "image_url": "data:image/png;base64,AAAA" },
+            ])
+        );
+    }
+
+    /// Both defects at once, which is the shape a failing screenshot takes.
+    #[test]
+    fn a_failed_result_carrying_an_image_keeps_both_facts() {
+        let req = Request {
+            messages: vec![Message::tool_results(vec![ToolResult {
+                call: "c1".into(),
+                name: "screenshot".into(),
+                content: vec![ToolResultContent::Image(Image::Url {
+                    url: "http://x/i.png".into(),
+                })],
+                is_error: true,
+                useless: false,
+            }])],
+            ..Default::default()
+        };
+        assert_eq!(
+            body(req)["input"][0]["output"],
+            json!([
+                { "type": "input_text", "text": "[tool error]" },
+                { "type": "input_image", "image_url": "http://x/i.png" },
+            ])
+        );
+    }
+
+    #[test]
+    fn only_this_models_own_ciphertext_replays_as_reasoning() {
+        let prose = ReasoningContent::Text {
+            text: "step".into(),
+            signature: None,
+        };
+        let cases = [
+            // Another model's ciphertext cannot be decrypted by this one.
+            ("another model", Some("another-model"), Some("rs_1"), true),
+            // Ours, but the run never asked for the ciphertext.
+            ("no ciphertext", Some("test-model"), Some("rs_1"), false),
+            // Ours and encrypted, but with no item id to name it by — the
+            // endpoint requires one, so this must not ship as a reasoning item.
+            ("no item id", Some("test-model"), None, true),
+            // Locally synthesized: nothing says which model could read it.
+            ("no origin", None, Some("rs_1"), true),
+        ];
+        for (case, from, id, encrypted) in cases {
+            let content = if encrypted {
+                vec![ReasoningContent::Encrypted("ct".into()), prose.clone()]
+            } else {
+                vec![prose.clone()]
+            };
+            let req = Request {
+                messages: vec![Message::Assistant {
+                    content: vec![AssistantContent::Reasoning(Reasoning {
+                        id: id.map(str::to_string),
+                        content,
+                        by: from.map(|m| m.into()),
+                    })],
+                }],
+                ..Default::default()
+            };
+            assert_ne!(body(req)["input"][0]["type"], "reasoning", "{case}");
         }
     }
 
+    /// A demoted block ships as prose rather than vanishing; `Drop` is what
+    /// makes it vanish, and then the turn leaves nothing behind at all.
     #[test]
-    fn one_user_message_splits_into_one_tool_message_per_result() {
-        let c = OpenAiCompat::default();
-        let req = Request {
-            messages: vec![Message::tool_results(vec![
-                result("c1", "read"),
-                result("c2", "grep"),
-            ])],
-            ..Default::default()
-        };
-        let body = build_body(&spec(c.clone()), &req, &c);
-        let msgs = body["messages"].as_array().unwrap();
-        assert_eq!(msgs.len(), 2);
-        assert_eq!(msgs[0]["role"], "tool");
-        assert_eq!(msgs[0]["tool_call_id"], "c1");
-        assert_eq!(msgs[1]["tool_call_id"], "c2");
-        assert!(msgs[0].get("name").is_none());
-    }
-
-    #[test]
-    fn tool_result_name_added_only_where_the_wire_needs_it() {
-        let c = OpenAiCompat {
-            tool_result_name: true,
-            ..Default::default()
-        };
-        let req = Request {
-            messages: vec![Message::tool_results(vec![result("c1", "read")])],
-            ..Default::default()
-        };
-        let body = build_body(&spec(c.clone()), &req, &c);
-        assert_eq!(body["messages"][0]["name"], "read");
-    }
-
-    #[test]
-    fn a_user_turn_after_tool_results_gets_a_stub_assistant_when_required() {
-        let mut msg_content = vec![crate::message::UserContent::ToolResult(result(
-            "c1", "read",
-        ))];
-        msg_content.push(crate::message::UserContent::Text(Text {
-            text: "now what".into(),
-        }));
-        let msgs = vec![Message::User {
-            content: msg_content,
-        }];
-
-        let c = OpenAiCompat::default();
-        let body = build_body(
-            &spec(c.clone()),
-            &Request {
-                messages: msgs.clone(),
-                ..Default::default()
-            },
-            &c,
-        );
-        let roles: Vec<_> = body["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|m| m["role"].clone())
-            .collect();
-        assert_eq!(roles, vec![json!("tool"), json!("user")]);
-
-        let c = OpenAiCompat {
-            assistant_after_tool_result: true,
-            ..Default::default()
-        };
-        let body = build_body(
-            &spec(c.clone()),
-            &Request {
-                messages: msgs,
-                ..Default::default()
-            },
-            &c,
-        );
-        let roles: Vec<_> = body["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|m| m["role"].clone())
-            .collect();
-        assert_eq!(
-            roles,
-            vec![json!("tool"), json!("assistant"), json!("user")]
-        );
-    }
-
-    #[test]
-    fn max_tokens_field_follows_the_host() {
-        let c = OpenAiCompat::default();
-        let body = build_body(&spec(c.clone()), &Request::default(), &c);
-        assert_eq!(body["max_completion_tokens"], 8_000);
-        assert!(body.get("max_tokens").is_none());
-
-        let c = OpenAiCompat {
-            max_tokens_field: MaxTokensField::MaxTokens,
-            ..Default::default()
-        };
-        let body = build_body(&spec(c.clone()), &Request::default(), &c);
-        assert_eq!(body["max_tokens"], 8_000);
-    }
-
-    #[test]
-    fn leading_system_messages_coalesce_only_for_strict_templates() {
-        let msgs = vec![
-            Message::System {
-                content: "a".into(),
-            },
-            Message::System {
-                content: "b".into(),
-            },
-            Message::user("hi"),
-        ];
-
-        let c = OpenAiCompat::default();
-        let body = build_body(
-            &spec(c.clone()),
-            &Request {
-                messages: msgs.clone(),
-                ..Default::default()
-            },
-            &c,
-        );
-        assert_eq!(body["messages"].as_array().unwrap().len(), 3);
-
-        let c = OpenAiCompat {
-            multiple_system_messages: false,
-            ..Default::default()
-        };
-        let body = build_body(
-            &spec(c.clone()),
-            &Request {
-                messages: msgs,
-                ..Default::default()
-            },
-            &c,
-        );
-        let m = body["messages"].as_array().unwrap();
-        assert_eq!(m.len(), 2);
-        assert_eq!(m[0]["content"], "a\n\nb");
-    }
-
-    #[test]
-    fn mistral_ids_are_exactly_nine_alphanumerics() {
-        assert_eq!(mistral_id("toolu_01ABCdefGH"), "toolu01AB");
-        assert_eq!(mistral_id("ab"), "abaaaaaaa");
-        assert_eq!(mistral_id("").len(), 9);
-    }
-
-    #[test]
-    fn foreign_reasoning_is_folded_into_text_not_the_reasoning_field() {
-        let c = OpenAiCompat::default();
-        let msg = Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::Reasoning(Reasoning {
-                id: None,
-                content: vec![ReasoningContent::Text {
-                    text: "prior".into(),
+    fn a_reasoning_block_this_model_cannot_replay_is_demoted_not_dropped() {
+        let msgs = vec![Message::Assistant {
+            content: vec![reasoning(
+                vec![ReasoningContent::Text {
+                    text: "step".into(),
                     signature: None,
                 }],
-                origin: Some(crate::message::Origin {
-                    transport: "anthropic".into(),
-                    model: "test-model".into(),
-                }),
-            })],
-        };
+                Some("another-model"),
+            )],
+        }];
+        assert_eq!(
+            body(Request { messages: msgs.clone(), ..Default::default() })["input"][0],
+            json!({
+                "type": "message",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "<think>\nstep\n</think>" }],
+            })
+        );
+
+        let mut dropping = spec();
+        dropping.replay_thinking = ReplayThinking::Off;
+        let dropped = build_body(
+            &dropping,
+            &Request { messages: msgs, ..Default::default() },
+        );
+        assert_eq!(dropped["input"].as_array().unwrap().len(), 0);
+    }
+
+    /// `input` is flat, so the turn's own ordering is the only thing carrying
+    /// which reasoning belongs to which call.
+    #[test]
+    fn an_assistant_turn_splits_into_items_in_the_order_it_produced_them() {
         let req = Request {
-            messages: vec![msg],
+            messages: vec![Message::Assistant {
+                content: vec![
+                    AssistantContent::Text(Text { text: "first ".into() }),
+                    AssistantContent::Text(Text { text: "second".into() }),
+                    call("c1", "read", json!({})),
+                    AssistantContent::Text(Text { text: "after".into() }),
+                    call("c2", "grep", json!({})),
+                ],
+            }],
             ..Default::default()
         };
-        let body = build_body(&spec(c.clone()), &req, &c);
-        let m = &body["messages"][0];
-        assert!(m.get("reasoning_content").is_none());
-        assert_eq!(m["content"], "<think>\nprior\n</think>\n");
+        let kinds: Vec<String> = body(req)["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["type"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            kinds,
+            ["message", "function_call", "message", "function_call"],
+            "consecutive text joins; everything else keeps its place"
+        );
+    }
+
+    /// A user turn holding both leaves as two items, in order — the shape a
+    /// tool result followed by a prompt takes.
+    #[test]
+    fn a_result_and_the_prose_after_it_are_two_items() {
+        let req = Request {
+            messages: vec![Message::User {
+                content: vec![
+                    UserContent::ToolResult(ToolResult::text("c1", "read", "body")),
+                    UserContent::Text(Text {
+                        text: "now what".into(),
+                    }),
+                ],
+            }],
+            ..Default::default()
+        };
+        let items = body(req)["input"].clone();
+        assert_eq!(items[0]["type"], "function_call_output");
+        assert_eq!(items[1]["type"], "message");
+        assert_eq!(items[1]["role"], "user");
     }
 
     #[test]
-    fn streaming_tool_call_slots_map_to_distinct_blocks() {
-        let c = OpenAiCompat::default();
-        let mut dec = Decoder::default();
-        let frame = json!({
-            "choices": [{ "delta": { "tool_calls": [
-                { "index": 0, "id": "a", "function": { "name": "read", "arguments": "{\"p\":" } },
-                { "index": 1, "id": "b", "function": { "name": "grep", "arguments": "{}" } }
-            ]}}]
-        });
-        let events = dec.frame(&frame, &c);
-        let starts: Vec<usize> = events
+    fn a_system_message_rides_instructions_and_leaves_the_item_array() {
+        let req = Request {
+            messages: vec![
+                Message::System {
+                    content: "from the array".into(),
+                },
+                Message::user("hi"),
+            ],
+            ..Default::default()
+        };
+        let out = body(req);
+        assert_eq!(out["instructions"], "from the array");
+        assert_eq!(out["input"].as_array().unwrap().len(), 1);
+    }
+
+    // ─── decoding ────────────────────────────────────────────────────────
+    //
+    // The fixture below is hand-written from the SDK's event types, not
+    // recorded off a live endpoint. That is weaker evidence than a replay and
+    // is worth remembering: it proves pi reads what the types say, not what
+    // the server sends.
+
+    fn drive(frames: &[Value]) -> crate::stream::Completion {
+        let mut dec = Decoder::new(spec().model, Shared::new("openai"));
+        let mut acc = crate::stream::Accumulator::new(spec().model);
+        for f in frames {
+            for ev in dec.frame(f) {
+                acc.push(ev);
+            }
+        }
+        acc.finish()
+    }
+
+    /// Replay a stream recorded off a live endpoint. `data:` lines only — the
+    /// same thing `eventsource` hands the transport.
+    fn replay(sse: &str) -> crate::stream::Completion {
+        let frames: Vec<Value> = sse
+            .lines()
+            .filter_map(|l| l.strip_prefix("data:"))
+            .map(|l| serde_json::from_str(l.trim()).expect("a recorded frame is JSON"))
+            .collect();
+        drive(&frames)
+    }
+
+    /// Recorded against DeepSeek's Responses endpoint, 2026-08-29. Hand-written
+    /// frames prove pi reads what the SDK types say; these prove it reads what
+    /// a server actually sends, which is the stronger claim and the one the
+    /// landing plan asked for.
+    #[test]
+    fn a_recorded_tool_call_replays_into_the_call_the_model_made() {
+        let done = replay(include_str!("../../tests/fixtures/responses_tools.sse"));
+        assert!(done.invalid.is_empty());
+        assert_eq!(done.stop, StopReason::ToolUse);
+
+        let Message::Assistant { content } = done.message else {
+            panic!("assistant")
+        };
+        assert_eq!(content.len(), 1);
+        let AssistantContent::ToolCall(c) = &content[0] else {
+            panic!("a function_call item is a tool call")
+        };
+        // The wire carries two ids on this item; the one that travels back on
+        // `function_call_output` is `call_id`, never the item's own `id`.
+        assert_eq!(c.id, "call_00_RuRN73rvb71G7bDaBQlV2823");
+        assert_eq!(c.name, "read");
+        assert_eq!(c.args["path"], "a.rs");
+
+        assert_eq!(done.usage.cache_read, 0);
+        assert_eq!(done.usage.cache_write, 0);
+    }
+
+    #[test]
+    fn a_recorded_reasoning_turn_keeps_the_ciphertext_that_replays_it() {
+        let done = replay(include_str!("../../tests/fixtures/responses_reason.sse"));
+        assert_eq!(done.stop, StopReason::EndTurn);
+
+        let Message::Assistant { content } = done.message else {
+            panic!("assistant")
+        };
+        let AssistantContent::Reasoning(r) = &content[0] else {
+            panic!("the reasoning item comes first")
+        };
+        // Required when the item goes back, and only present because the
+        // request asked for it with `include`.
+        assert!(r.id.is_some());
+        assert!(
+            matches!(&r.content[0], ReasoningContent::Encrypted(s) if !s.is_empty()),
+            "the ciphertext is the whole of what replays"
+        );
+        // This turn carried a body and no summary, so the body is what is kept.
+        assert!(matches!(
+            &r.content[1],
+            ReasoningContent::Text { text, .. } if !text.is_empty()
+        ));
+        assert!(matches!(&content[1], AssistantContent::Text(t) if !t.text.is_empty()));
+
+        // 93 input, none cached: the three parts add back up.
+        let u = done.usage;
+        assert_eq!(u.input + u.cache_read + u.cache_write, 93);
+        assert_eq!(u.output, 45);
+    }
+
+    /// The reasoning models are half of why `accepts_temperature` exists, and
+    /// this wire is where they are. It gated on the other one only.
+    #[test]
+    fn sampling_params_dropped_when_the_model_rejects_them() {
+        let req = Request {
+            temperature: Some(0.7),
+            ..Default::default()
+        };
+        let mut rejects = spec();
+        rejects.accepts_temperature = false;
+        assert!(build_body(&rejects, &req)["temperature"].is_null());
+        // And still sent to a model that takes one.
+        assert_eq!(build_body(&spec(), &req)["temperature"], 0.7);
+    }
+
+    /// One `function_call` on the wire must be one call in the turn. Recorded
+    /// off the gateway, whose terminal frame states no output, so the whole
+    /// turn is rebuilt from the deltas.
+    #[test]
+    fn one_streamed_call_is_one_call() {
+        let done = replay(include_str!("../../tests/fixtures/responses_one_call.sse"));
+        let Message::Assistant { content } = &done.message else {
+            panic!("assistant")
+        };
+        let calls: Vec<_> = content
             .iter()
-            .filter_map(|e| match e {
-                StreamEvent::BlockStart { index, .. } => Some(*index),
+            .filter_map(|c| match c {
+                AssistantContent::ToolCall(c) => Some(c),
                 _ => None,
             })
             .collect();
-        assert_eq!(starts, vec![IDX_TOOL_BASE, IDX_TOOL_BASE + 1]);
+        assert_eq!(calls.len(), 1, "{content:?}");
+        assert_eq!(calls[0].args["path"], "a.txt");
+    }
 
-        // A second frame continues slot 0 without reopening it.
-        let more = dec.frame(
-            &json!({ "choices": [{ "delta": { "tool_calls": [
-                { "index": 0, "function": { "arguments": "1}" } }
-            ]}}]}),
-            &c,
-        );
-        assert_eq!(
-            more,
-            vec![StreamEvent::ToolArgsDelta {
-                index: IDX_TOOL_BASE,
-                delta: "1}".into()
-            }]
+    /// Recorded against a local gateway translating for DeepSeek, 2026-08-30.
+    /// Its terminal frame carries status and usage and no `output` at all, so
+    /// the turn is only ever stated by the deltas — the shape that ended every
+    /// tool-calling run after the thinking and before the call.
+    #[test]
+    fn a_terminal_frame_that_states_no_output_leaves_the_deltas_standing() {
+        let done = replay(include_str!("../../tests/fixtures/responses_no_output.sse"));
+        let Message::Assistant { content } = &done.message else {
+            panic!("assistant")
+        };
+        let call = content
+            .iter()
+            .find_map(|c| match c {
+                AssistantContent::ToolCall(c) => Some(c),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the call the deltas delivered: {content:?}"));
+        assert_eq!(call.name, "read");
+        assert!(call.args["path"].is_string(), "{}", call.args);
+        // The frame said `completed`; the calls are what make it a tool turn.
+        assert_eq!(done.stop, StopReason::ToolUse);
+    }
+
+    /// The seam neither suite either side of it crossed. One drove a stream and
+    /// read what came out; the other replayed reasoning it had built by hand.
+    /// Between them sat the decoder's idea of who produced the block, and while
+    /// it named the provider itself, every ciphertext it stamped quietly
+    /// demoted to prose on the way back out — with both suites still green.
+    #[test]
+    fn reasoning_decoded_from_a_stream_replays_as_reasoning() {
+        let done = replay(include_str!("../../tests/fixtures/responses_reason.sse"));
+        let req = Request {
+            messages: vec![done.message],
+            ..Default::default()
+        };
+        let item = &body(req)["input"][0];
+        assert_eq!(item["type"], "reasoning", "it demoted instead of replaying");
+        assert!(
+            item["encrypted_content"].as_str().is_some_and(|s| !s.is_empty()),
+            "the ciphertext is the whole of what replays: {item}"
         );
     }
 
-    #[test]
-    fn the_cache_hit_is_taken_out_of_the_prompt_count() {
-        // `prompt_tokens` on this wire includes what the cache served, under
-        // either of the two names hosts give it. Leaving it in bills it twice.
-        for hit in [
-            json!({ "prompt_tokens_details": { "cached_tokens": 700 } }),
-            json!({ "prompt_cache_hit_tokens": 700 }),
-        ] {
-            let mut usage = hit.as_object().unwrap().clone();
-            usage.insert("prompt_tokens".into(), json!(1_000));
-            usage.insert("completion_tokens".into(), json!(20));
+    fn a_turn() -> Vec<Value> {
+        vec![
+            json!({ "type": "response.created" }),
+            json!({ "type": "response.output_item.added", "output_index": 0,
+                    "item": { "type": "reasoning", "id": "rs_1" } }),
+            json!({ "type": "response.reasoning_summary_text.delta", "output_index": 0,
+                    "delta": "weigh" }),
+            json!({ "type": "response.output_item.done", "output_index": 0 }),
+            json!({ "type": "response.output_item.added", "output_index": 1,
+                    "item": { "type": "message", "role": "assistant" } }),
+            json!({ "type": "response.output_text.delta", "output_index": 1, "delta": "read" }),
+            json!({ "type": "response.output_text.delta", "output_index": 1, "delta": "ing" }),
+            json!({ "type": "response.output_item.done", "output_index": 1 }),
+            json!({ "type": "response.output_item.added", "output_index": 2,
+                    "item": { "type": "function_call", "call_id": "call_1", "name": "read" } }),
+            json!({ "type": "response.function_call_arguments.delta", "output_index": 2,
+                    "delta": "{\"pa" }),
+            json!({ "type": "response.function_call_arguments.delta", "output_index": 2,
+                    "delta": "th\":\"a.rs\"}" }),
+            json!({ "type": "response.output_item.done", "output_index": 2 }),
+            json!({ "type": "response.completed", "response": {
+                "status": "completed",
+                "usage": { "input_tokens": 1_000, "output_tokens": 42,
+                           "input_tokens_details": { "cached_tokens": 600,
+                                                     "cache_write_tokens": 300 } },
+                "output": [
+                    { "type": "reasoning", "id": "rs_1", "encrypted_content": "ct",
+                      "summary": [{ "type": "summary_text", "text": "weighed it" }] },
+                    { "type": "message", "role": "assistant",
+                      "content": [{ "type": "output_text", "text": "reading" }] },
+                    { "type": "function_call", "call_id": "call_1", "name": "read",
+                      "arguments": "{\"path\":\"a.rs\"}" },
+                ],
+            }}),
+        ]
+    }
 
-            let mut dec = Decoder::default();
-            dec.frame(
-                &json!({ "choices": [], "usage": usage }),
-                &OpenAiCompat::default(),
-            );
-            assert_eq!(
-                dec.usage,
-                Usage {
-                    input: 300,
-                    output: 20,
-                    cache_read: 700,
-                    cache_write: 0,
-                },
-                "{hit}"
-            );
+    #[test]
+    fn a_whole_turn_replays_into_the_message_the_terminal_frame_states() {
+        let done = drive(&a_turn());
+        assert!(done.invalid.is_empty());
+        assert_eq!(done.stop, StopReason::ToolUse, "a pending call is not an end");
+
+        let Message::Assistant { content, .. } = done.message else {
+            panic!("assistant")
+        };
+        assert_eq!(content.len(), 3);
+        // The ciphertext is what replays; the prose rides along for the reader.
+        let AssistantContent::Reasoning(r) = &content[0] else {
+            panic!("reasoning first")
+        };
+        assert_eq!(r.id.as_deref(), Some("rs_1"));
+        assert_eq!(r.content[0], ReasoningContent::Encrypted("ct".into()));
+        assert!(matches!(&content[1], AssistantContent::Text(t) if t.text == "reading"));
+        let AssistantContent::ToolCall(c) = &content[2] else {
+            panic!("call last")
+        };
+        assert_eq!((c.id.as_str(), c.name.as_str()), ("call_1", "read"));
+        assert_eq!(c.args["path"], "a.rs");
+    }
+
+    /// The whole reason the accumulator was split. Deltas are for the screen;
+    /// what lands in the transcript is what the terminal frame states.
+    #[test]
+    fn the_terminal_frame_outranks_the_deltas_that_preceded_it() {
+        let mut frames = a_turn();
+        // A truncated ciphertext is exactly what reassembling deltas produces,
+        // and it fails silently next turn rather than erroring here.
+        frames.insert(
+            3,
+            json!({ "type": "response.output_text.delta", "output_index": 1, "delta": "half" }),
+        );
+        let done = drive(&frames);
+        let Message::Assistant { content, .. } = done.message else {
+            panic!("assistant")
+        };
+        assert!(
+            matches!(&content[1], AssistantContent::Text(t) if t.text == "reading"),
+            "the deltas said `halfreading`; the frame says `reading`"
+        );
+    }
+
+    /// `input_tokens` counts both halves of the cache. Taking out only the read
+    /// half — which is what the Chat Completions decoder did — bills the write
+    /// twice, once as fresh input and once as a write.
+    #[test]
+    fn the_three_token_counts_add_back_up_to_what_was_billed() {
+        let done = drive(&a_turn());
+        let u = done.usage;
+        assert_eq!(u.cache_read, 600);
+        assert_eq!(u.cache_write, 300);
+        assert_eq!(u.input, 100);
+        assert_eq!(
+            u.input + u.cache_read + u.cache_write,
+            1_000,
+            "the three parts must add back to input_tokens"
+        );
+        assert_eq!(u.output, 42);
+    }
+
+    /// Two levels, not one: reading `status` alone files a truncated turn as
+    /// one that ended normally, and the loop never retries it.
+    #[test]
+    fn a_truncated_turn_is_not_a_turn_that_ended() {
+        let cases = [
+            (json!({ "status": "completed" }), StopReason::EndTurn),
+            (
+                json!({ "status": "incomplete",
+                        "incomplete_details": { "reason": "max_output_tokens" } }),
+                StopReason::MaxTokens,
+            ),
+            (
+                json!({ "status": "incomplete",
+                        "incomplete_details": { "reason": "content_filter" } }),
+                StopReason::Refusal,
+            ),
+            // An unrecognised reason is still a turn that did not finish.
+            (
+                json!({ "status": "incomplete", "incomplete_details": { "reason": "new" } }),
+                StopReason::MaxTokens,
+            ),
+        ];
+        for (response, want) in cases {
+            let mut response = response;
+            response["output"] = json!([]);
+            let frames = vec![json!({ "type": "response.completed", "response": response })];
+            assert_eq!(drive(&frames).stop, want, "{response}");
         }
     }
 
+    /// Body and summary are two streams of the same thinking. Letting both
+    /// through prints the reasoning twice.
     #[test]
-    fn done_fires_on_the_sentinel_carrying_the_usage_seen_so_far() {
-        let c = OpenAiCompat::default();
-        let mut dec = Decoder::default();
-        dec.frame(
-            &json!({ "choices": [{ "delta": { "content": "hi" }, "finish_reason": "stop" }] }),
-            &c,
-        );
-        // Usage rides a trailing choice-less frame; Done must come after it.
-        dec.frame(
-            &json!({ "choices": [], "usage": { "prompt_tokens": 9, "completion_tokens": 2 } }),
-            &c,
-        );
+    fn only_one_of_the_two_reasoning_streams_reaches_the_screen() {
+        let frames = [
+            json!({ "type": "response.output_item.added", "output_index": 0,
+                    "item": { "type": "reasoning", "id": "rs_1" } }),
+            json!({ "type": "response.reasoning_summary_text.delta", "output_index": 0,
+                    "delta": "summary" }),
+            json!({ "type": "response.reasoning_text.delta", "output_index": 0,
+                    "delta": "body" }),
+        ];
+        let mut dec = Decoder::new(spec().model, Shared::new("openai"));
+        let seen: String = frames
+            .iter()
+            .flat_map(|f| dec.frame(f))
+            .filter_map(|e| match e {
+                StreamEvent::ReasoningDelta { delta, .. } => Some(delta),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(seen, "summary", "the second stream must not join the first");
+    }
 
+    /// The body is the real thinking; the summary stands in only when an
+    /// organisation is not shown the body.
+    #[test]
+    fn the_recorded_reasoning_prefers_the_body_over_the_summary() {
+        let with_both = json!({ "type": "response.completed", "response": {
+            "status": "completed", "output": [{
+                "type": "reasoning", "id": "rs_1",
+                "summary": [{ "type": "summary_text", "text": "the gist" }],
+                "content": [{ "type": "reasoning_text", "text": "the working" }],
+            }],
+        }});
+        let Message::Assistant { content, .. } = drive(&[with_both]).message else {
+            panic!("assistant")
+        };
+        let AssistantContent::Reasoning(r) = &content[0] else {
+            panic!("reasoning")
+        };
         assert_eq!(
-            dec.done(),
-            StreamEvent::Done {
-                stop: StopReason::EndTurn,
-                usage: Usage {
-                    input: 9,
-                    output: 2,
-                    ..Default::default()
-                },
-            }
+            r.content[0],
+            ReasoningContent::Text { text: "the working".into(), signature: None }
         );
     }
 
     #[test]
-    fn a_dropped_reasoning_turn_does_not_emit_an_empty_assistant_message() {
-        let c = OpenAiCompat::default();
-        let mut s = spec(c.clone());
-        s.thinking_replay = ThinkingReplay::Drop;
-        let msg = Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::Reasoning(Reasoning {
-                id: None,
-                content: vec![ReasoningContent::Text {
-                    text: "prior".into(),
-                    signature: None,
-                }],
-                origin: Some(crate::message::Origin {
-                    transport: "anthropic".into(),
-                    model: "test-model".into(),
-                }),
-            })],
+    fn arguments_that_are_not_json_still_leave_a_balanced_call() {
+        let frames = vec![json!({ "type": "response.completed", "response": {
+            "status": "completed", "output": [{
+                "type": "function_call", "call_id": "c1", "name": "read",
+                "arguments": "{\"path\": ",
+            }],
+        }})];
+        let done = drive(&frames);
+        assert_eq!(done.invalid.len(), 1);
+        assert_eq!(done.invalid[0].call, "c1");
+        let Message::Assistant { content, .. } = done.message else {
+            panic!("assistant")
         };
-        let body = build_body(
-            &s,
-            &Request {
-                messages: vec![msg],
-                ..Default::default()
-            },
-            &c,
+        let AssistantContent::ToolCall(c) = &content[0] else {
+            panic!("the call still enters the message")
+        };
+        assert_eq!(c.args, json!({}));
+    }
+
+    /// `input` is flat, so a trailing item changes nothing before it and the
+    /// cached prefix reaches exactly as far as it did last turn.
+    /// The estimate and the encoder must answer the same question. They are
+    /// separate walks of the same transcript — one decides when to compact, the
+    /// other decides what ships — and a gap between them is invisible: the
+    /// budget simply runs out early, and what pays is real context dropped to
+    /// make room for bytes that were never sent. Measured on real sessions the
+    /// gap was 53%, because prior reasoning was counted whatever the spec did
+    /// with it.
+    #[test]
+    fn the_estimate_counts_what_the_wire_carries() {
+        let thinking = "z".repeat(20_000);
+        let with = |replay| {
+            let mut s = spec();
+            s.replay_thinking = replay;
+            s
+        };
+        let req = |_: &ModelSpec| Request {
+            messages: vec![
+                Message::user("go"),
+                Message::Assistant {
+                    content: vec![AssistantContent::Reasoning(Reasoning {
+                        id: None,
+                        // No signature, and a foreign author: exactly the block
+                        // a demotion decides about.
+                        content: vec![ReasoningContent::Text {
+                            text: thinking.clone(),
+                            signature: None,
+                        }],
+                        by: None,
+                    })],
+                },
+            ],
+            ..Default::default()
+        };
+
+        let dropped = with(ReplayThinking::Off);
+        let kept = with(ReplayThinking::Tagged);
+
+        let sent = |s: &ModelSpec| build_body(s, &req(s)).to_string();
+        assert!(!sent(&dropped).contains(&thinking), "it was dropped from the body");
+        assert!(sent(&kept).contains(&thinking), "it rode the body");
+
+        let counted = |s: &ModelSpec| crate::estimate::tokens(&req(s).messages, s);
+        let bare = crate::estimate::tokens(&[Message::user("go")], &dropped);
+        assert!(
+            counted(&dropped) < bare + 100,
+            "a block that never leaves must cost nothing: {} vs {bare}",
+            counted(&dropped)
         );
-        assert_eq!(body["messages"].as_array().unwrap().len(), 0);
+        assert!(
+            counted(&kept) > counted(&dropped) * 10,
+            "a block that does leave must be paid for: {} vs {}",
+            counted(&kept),
+            counted(&dropped)
+        );
+    }
+
+    #[test]
+    fn a_note_becomes_its_own_trailing_item() {
+        let req = Request {
+            messages: vec![Message::user("go"), Message::assistant_text("done")],
+            notes: vec!["[true only this turn]".into()],
+            ..Default::default()
+        };
+        let input = body(req);
+        let items = input["input"].as_array().unwrap();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[2]["role"], "user");
+        assert_eq!(items[2]["content"][0]["text"], "[true only this turn]");
+    }
+
+    /// Caching is on by default here, with one implicit breakpoint that moves
+    /// with the conversation. Naming `prompt_cache_options.mode = "explicit"`
+    /// and then setting no breakpoint turns caching off entirely and says
+    /// nothing — so the field is never written at all.
+    #[test]
+    fn nothing_is_said_about_caching_because_saying_it_can_only_turn_it_off() {
+        let out = body(Request {
+            messages: vec![Message::user("go")],
+            ..Default::default()
+        });
+        assert!(out.get("prompt_cache_options").is_none());
+        assert!(out.get("prompt_cache_key").is_none());
+    }
+
+    /// Neither field has a documented default, and the wrong value for either
+    /// fails silently: a stored transcript, or a reasoning item with nothing
+    /// to replay.
+    #[test]
+    fn a_stateless_run_says_so_and_asks_for_what_it_will_need_next_turn() {
+        let out = body(Request::default());
+        assert_eq!(out["store"], json!(false));
+        assert_eq!(out["include"], json!(["reasoning.encrypted_content"]));
+        // No tools, so neither field belongs on the request.
+        assert!(out.get("tool_choice").is_none());
+        assert!(out.get("parallel_tool_calls").is_none());
     }
 }
