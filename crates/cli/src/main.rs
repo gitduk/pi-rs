@@ -66,7 +66,12 @@ pub enum EffortArg {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "pi", about = "A coding agent that stays inside one directory.", version, disable_version_flag = true)]
+#[command(
+    name = "pi",
+    about = "A coding agent that stays inside one directory.",
+    version = concat!("v", env!("CARGO_PKG_VERSION")),
+    disable_version_flag = true
+)]
 pub struct Args {
     /// Print the version and exit.
     #[arg(short = 'v', long, action = clap::ArgAction::Version)]
