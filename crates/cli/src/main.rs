@@ -66,8 +66,11 @@ pub enum EffortArg {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "pi", about = "A coding agent that stays inside one directory.")]
+#[command(name = "pi", about = "A coding agent that stays inside one directory.", version, disable_version_flag = true)]
 pub struct Args {
+    /// Print the version and exit.
+    #[arg(short = 'v', long, action = clap::ArgAction::Version)]
+    version: Option<bool>,
     /// The prompt. Reads stdin when omitted.
     prompt: Option<String>,
 
