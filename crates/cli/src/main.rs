@@ -168,20 +168,16 @@ pub struct Args {
 }
 
 /// `configured` is the config's `api_key`; the format's environment variable
-/// is the fallback. Anthropic's own endpoint authenticates every request, so
-/// a run pointed at it with no key anywhere is a startup error; a gateway
-/// speaking the same wire may serve with no key at all.
-fn transport_for(spec: &ModelSpec, configured: Option<String>) -> Result<Arc<dyn Transport>> {
+/// is the fallback. A key is never required: whichever is set rides along,
+/// and an endpoint that needs one answers with its own refusal.
+fn transport_for(spec: &ModelSpec, configured: Option<String>) -> Arc<dyn Transport> {
     let key = configured.or_else(|| match spec.format {
         Format::Anthropic { .. } => std::env::var("ANTHROPIC_API_KEY").ok(),
         Format::OpenAi => std::env::var("OPENAI_API_KEY").ok(),
     });
-    if key.is_none() && spec.base_url == "https://api.anthropic.com" {
-        bail!("ANTHROPIC_API_KEY is not set");
-    }
     match spec.format {
-        Format::Anthropic { .. } => Ok(Arc::new(Anthropic::new(key))),
-        Format::OpenAi => Ok(Arc::new(OpenAi::new(key))),
+        Format::Anthropic { .. } => Arc::new(Anthropic::new(key)),
+        Format::OpenAi => Arc::new(OpenAi::new(key)),
     }
 }
 
@@ -258,7 +254,7 @@ pub fn dial(
                 .or_else(config::global_path)
         })
         .and_then(|path| config::warn_if_exposed(&path));
-    let transport = transport_for(&spec, key)?;
+    let transport = transport_for(&spec, key);
     Ok(Dialled {
         spec,
         transport,
