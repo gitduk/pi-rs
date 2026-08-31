@@ -171,12 +171,9 @@ pub struct Args {
 fn transport_for(spec: &ModelSpec, configured: Option<String>) -> Result<Arc<dyn Transport>> {
     match spec.format {
         Format::Anthropic { cache_control: _ } => {
-            let key = match configured {
-                Some(k) => k,
-                None => {
-                    std::env::var("ANTHROPIC_API_KEY").context("ANTHROPIC_API_KEY is not set")?
-                }
-            };
+            let key = configured
+                .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
+                .context("ANTHROPIC_API_KEY is not set")?;
             Ok(Arc::new(Anthropic::new(key)))
         }
         Format::OpenAi => {
@@ -266,7 +263,6 @@ pub fn dial(
                 .or_else(config::global_path)
         })
         .and_then(|path| config::warn_if_exposed(&path));
-
     let transport = transport_for(&spec, key)?;
     Ok(Dialled {
         spec,
