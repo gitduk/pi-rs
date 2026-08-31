@@ -216,7 +216,12 @@ impl Store {
         // Newest by last activity, not by creation. `/resume` is reached for
         // to pick up where you left off, and a session started last week and
         // worked on this morning is the one you mean.
-        found.sort_by_key(|p| std::cmp::Reverse(p.touched()));
+        //
+        // The id breaks a tie. It has to break somehow — a stamp is seconds,
+        // and two sessions touched in the same one are common — and left to
+        // `read_dir` the answer is whatever order the filesystem hands back,
+        // which differs between machines and between runs on one.
+        found.sort_by(|a, b| b.touched().cmp(&a.touched()).then_with(|| b.id.cmp(&a.id)));
         found
     }
 
@@ -261,6 +266,18 @@ mod tests {
 
     fn log_with(messages: Vec<Message>) -> Session {
         Session::from_messages(messages)
+    }
+
+    /// Set what `touched()` reads — the last entry's stamp.
+    ///
+    /// A stamp is seconds, so archives saved in one second tie, and a tie is
+    /// settled by the id rather than by recency. Forced through the JSON
+    /// because an entry's stamp is the session's to set, not a caller's.
+    fn touched_at(store: &Store, id: &str, at: u64) {
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(store.path(id)).unwrap()).unwrap();
+        raw["entries"].as_array_mut().unwrap().last_mut().unwrap()["at"] = json!(at);
+        std::fs::write(store.path(id), serde_json::to_vec(&raw).unwrap()).unwrap();
     }
 
     fn call(name: &str) -> Message {
@@ -378,11 +395,14 @@ mod tests {
             .save("other", std::path::Path::new("/b"), "m", None, 1, &log)
             .unwrap();
 
-        // `created` has one-second resolution, so newness is forced explicitly.
-        let mut stored = store.load("old").unwrap();
-        stored.id = "new".into();
-        stored.created += 60;
-        std::fs::write(store.path("new"), serde_json::to_vec(&stored).unwrap()).unwrap();
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(store.path("old")).unwrap()).unwrap();
+        raw["id"] = json!("new");
+        std::fs::write(store.path("new"), serde_json::to_vec(&raw).unwrap()).unwrap();
+        // `new` is the newer of the two, and `old` sorts after it by id — so
+        // only recency can put it first.
+        touched_at(&store, "old", 100);
+        touched_at(&store, "new", 200);
 
         assert_eq!(store.latest(std::path::Path::new("/a")).unwrap().id, "new");
         assert_eq!(
@@ -407,18 +427,23 @@ mod tests {
             .save("c", std::path::Path::new("/other"), "m", None, 1, &log)
             .unwrap();
 
-        // `created` has one-second resolution, so newness is forced explicitly.
-        let mut stored = store.load("a").unwrap();
-        stored.id = "newest".into();
-        stored.created += 60;
-        std::fs::write(store.path("newest"), serde_json::to_vec(&stored).unwrap()).unwrap();
+        store
+            .save("z", std::path::Path::new("/w"), "m", None, 1, &log)
+            .unwrap();
+
+        // Recency, decided on the field the sort reads. The expected order is
+        // the reverse of the ids' own, so a list that fell back to breaking
+        // ties by id would fail here rather than look right by accident.
+        touched_at(&store, "a", 300);
+        touched_at(&store, "b", 200);
+        touched_at(&store, "z", 100);
 
         let ids: Vec<String> = store
             .choices(std::path::Path::new("/w"))
             .iter()
             .map(|c| c.id.clone())
             .collect();
-        assert_eq!(ids, ["newest", "b", "a"]);
+        assert_eq!(ids, ["a", "b", "z"]);
         // Another workspace's sessions stay out.
         assert!(
             store
