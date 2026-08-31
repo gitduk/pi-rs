@@ -575,11 +575,6 @@ struct Ui {
     /// The turn in flight, as far as the provider has said. Superseded rather
     /// than added to when its `TurnEnd` lands, or the input would count twice.
     turn: Usage,
-    /// Bytes of answer and reasoning this turn has produced, which is all there
-    /// is to go on until the provider reports an output count.
-    produced: usize,
-    /// Which halves of the settled figures came from us, not the provider.
-    estimated: agent::Estimated,
     stopping: bool,
     /// Rows the view is scrolled up by. Zero shows the newest rows.
     scroll: usize,
@@ -655,8 +650,6 @@ impl Ui {
             spinner: 0,
             settled: Usage::default(),
             turn: Usage::default(),
-            produced: 0,
-            estimated: agent::Estimated::default(),
             stopping: false,
             scroll: 0,
         }
@@ -731,7 +724,6 @@ impl Ui {
     }
 
     fn write(&mut self, delta: &str, reasoning: bool) {
-        self.produced += delta.len();
         if reasoning != self.reasoning {
             self.close();
             self.reasoning = reasoning;
@@ -762,20 +754,15 @@ impl Ui {
             Event::Usage(usage) => {
                 // A retry sends a second one for the same turn: the count it
                 // carries replaces the abandoned attempt's rather than joining
-                // it, and the bytes that attempt produced go with it.
+                // it.
                 self.turn = *usage;
-                self.produced = 0;
             }
-            Event::TurnEnd {
-                usage, estimated, ..
-            } => {
-                self.estimated |= *estimated;
+            Event::TurnEnd { usage, .. } => {
                 self.settled.input += usage.input;
                 self.settled.output += usage.output;
                 self.settled.cache_read += usage.cache_read;
                 self.settled.cache_write += usage.cache_write;
                 self.turn = Usage::default();
-                self.produced = 0;
             }
             Event::TurnStart { .. } => {}
             // A call's two events are one line here: the start takes a row in
@@ -915,7 +902,7 @@ impl Ui {
             let line = status::line(
                 self.spinner,
                 since.elapsed(),
-                &counts(&self.settled, &self.turn, self.produced, self.estimated),
+                &counts(&self.settled, &self.turn),
                 self.queued.len(),
                 self.stopping,
             );
@@ -1310,30 +1297,14 @@ impl Ui {
 
 // What the status line should say the run has cost.
 //
-// The turn in flight contributes only what the provider has already stated —
-// the input count on the Anthropic wire, nothing at all on the OpenAI one —
-// so its output is stood in for by the bytes that have arrived. Its measured
-// figures are replaced, never added to, when its `TurnEnd` folds them into
-// `settled`, or a turn's input would be counted twice.
-fn counts(
-    settled: &Usage,
-    turn: &Usage,
-    produced: usize,
-    estimated: agent::Estimated,
-) -> status::Counts {
-    let output_exact = turn.output > 0 && !estimated.output;
+// Only the parts the provider has stated: the input count on the Anthropic
+// wire, nothing at all on the OpenAI one. Unstated parts are left out rather
+// than stood in for by bytes we counted, so a number on the line is always a
+// measurement.
+fn counts(settled: &Usage, turn: &Usage) -> status::Counts {
     status::Counts {
         input: settled.input + turn.input,
-        output: settled.output
-            + if output_exact {
-                turn.output
-            } else {
-                brain::estimate::bytes(produced) as u64
-            },
-        // The turn in flight contributes an input count only once the provider
-        // has stated one, so the settled half is what decides this.
-        input_exact: !estimated.input,
-        output_exact,
+        output: settled.output + turn.output,
     }
 }
 
@@ -1637,10 +1608,10 @@ impl Tui {
 
         self.ui.started = Some(Instant::now());
         self.ui.stopping = false;
+        // Per-run figures: a new prompt's status line must not start from the
+        // previous run's totals.
         self.ui.settled = Usage::default();
         self.ui.turn = Usage::default();
-        self.ui.produced = 0;
-        self.ui.estimated = agent::Estimated::default();
 
         let out = {
             // Disjoint borrows: the run holds the session while the loop keeps
@@ -2182,19 +2153,21 @@ mod tests {
     }
 
     #[test]
-    fn a_turn_that_has_only_started_shows_its_input_and_guesses_its_output() {
+    fn a_turn_that_has_only_started_shows_its_stated_input_and_no_output() {
+        // The Anthropic wire states the input count before the first token and
+        // the output count only at the end; what has not been said stays out.
         let turn = Usage {
             input: 8_400,
             ..Default::default()
         };
-        let c = counts(&Usage::default(), &turn, 1_536, Default::default());
-        assert_eq!((c.input, c.output, c.output_exact), (8_400, 512, false));
+        let c = counts(&Usage::default(), &turn);
+        assert_eq!((c.input, c.output), (8_400, 0));
     }
 
     #[test]
-    fn a_later_turn_adds_to_what_the_earlier_ones_measured() {
-        // The guess covers only the turn in flight; the settled figures behind
-        // it are measured and must not be re-guessed.
+    fn a_later_turn_adds_to_what_the_earlier_ones_stated() {
+        // The turn in flight contributes only what the provider has already
+        // said; an unstated output stays out rather than being stood in for.
         let settled = Usage {
             input: 10_000,
             output: 600,
@@ -2204,40 +2177,10 @@ mod tests {
             input: 2_000,
             ..Default::default()
         };
-        let c = counts(&settled, &turn, 300, Default::default());
-        assert_eq!((c.input, c.output, c.output_exact), (12_000, 700, false));
+        let c = counts(&settled, &turn);
+        assert_eq!((c.input, c.output), (12_000, 600));
     }
 
-    #[test]
-    fn a_measured_output_supersedes_the_guess_for_the_same_turn() {
-        let turn = Usage {
-            input: 2_000,
-            output: 90,
-            ..Default::default()
-        };
-        let c = counts(&Usage::default(), &turn, 9_000, Default::default());
-        assert_eq!((c.output, c.output_exact), (90, true));
-    }
-
-    #[test]
-    fn a_turn_the_provider_did_not_measure_stays_marked() {
-        // The figures are real numbers and still not the provider's; a status
-        // line that dropped the tilde would be claiming they were.
-        let turn = Usage {
-            input: 8_400,
-            output: 300,
-            ..Default::default()
-        };
-        let guessed = agent::Estimated {
-            input: true,
-            output: true,
-            ..Default::default()
-        };
-        assert!(!counts(&Usage::default(), &turn, 0, guessed).output_exact);
-        assert!(!counts(&Usage::default(), &turn, 0, guessed).input_exact);
-        let measured = counts(&Usage::default(), &turn, 0, Default::default());
-        assert!(measured.output_exact && measured.input_exact);
-    }
     #[test]
     fn a_flip_applies_to_each_new_last_block_until_flipped_back() {
         // `ctrl+t` controls the last thinking block, whatever it is: the

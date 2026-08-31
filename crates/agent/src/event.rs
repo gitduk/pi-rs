@@ -46,61 +46,23 @@ pub enum Event {
     TurnEnd {
         usage: Usage,
         cost: f64,
-        estimated: Estimated,
     },
     Done {
         turns: usize,
         usage: Usage,
         cost: f64,
-        estimated: Estimated,
     },
 }
 
-/// Which parts of a usage figure are our own count rather than the provider's.
+/// What a run has cost, per turn and in total.
 ///
-/// Per part, because a host that reports one and not the others is the ordinary
-/// case: marking them together would put a tilde on a number the provider
-/// actually stated, which claims less than is known just as wrongly as claiming
-/// more.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Estimated {
-    pub input: bool,
-    pub output: bool,
-    /// A cache figure the host did not state, inferred from the gap between
-    /// what it counted and what we sent.
-    pub cache_read: bool,
-}
-
-impl Estimated {
-    /// Anything derived from several — a cost, a total — is only as measured as
-    /// its least measured part.
-    pub fn any(self) -> bool {
-        self.input || self.output || self.cache_read
-    }
-
-    pub fn mark(flag: bool) -> &'static str {
-        if flag { "~" } else { "" }
-    }
-}
-
-// Merging two of these is per-part, and a part left out of the merge reports a
-// guess as measured. Written once here so a new part cannot be forgotten at
-// one of the call sites.
-impl std::ops::BitOrAssign for Estimated {
-    fn bitor_assign(&mut self, other: Self) {
-        self.input |= other.input;
-        self.output |= other.output;
-        self.cache_read |= other.cache_read;
-    }
-}
-
+/// The usage figures are the provider's own, verbatim: a field the host left
+/// out reads as zero, and a surface that shows a count treats that as "not
+/// reported", never as a real zero.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Totals {
     pub usage: Usage,
     pub cost: f64,
-    /// Set once any turn's figures were ours. It never clears: a total mixing
-    /// the two is not a measurement.
-    pub estimated: Estimated,
 }
 
 impl Totals {
@@ -112,16 +74,9 @@ impl Totals {
         self.cost += cost;
     }
 
-    pub fn add_estimated(&mut self, usage: &Usage, cost: f64, estimated: Estimated) {
-        self.add(usage, cost);
-        self.estimated |= estimated;
-    }
-
-    /// Fold another run's totals in whole. `add` takes the halves a caller
-    /// happens to hold; this one exists so a caller holding all of them cannot
-    /// drop the part that says how much of it was guessed.
+    /// Fold another run's totals in whole.
     pub fn merge(&mut self, other: &Self) {
-        self.add_estimated(&other.usage, other.cost, other.estimated);
+        self.add(&other.usage, other.cost);
     }
 }
 

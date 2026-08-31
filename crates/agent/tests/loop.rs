@@ -166,31 +166,22 @@ fn turn_reporting(body: &str, usage: Usage) -> Vec<StreamEvent> {
 }
 
 #[tokio::test]
-async fn a_host_that_reports_nothing_gets_our_own_count_instead() {
-    // Zero is the absence of a number, not a small one: the whole prompt is
-    // ours to count, and travels marked rather than passing as measured.
+async fn a_host_that_reports_nothing_leaves_the_usage_zero() {
+    // Zero is the absence of a number, not a small one: the provider said
+    // nothing, so the totals carry nothing — the display layer shows dashes.
     let (_d, a, ctx) = harness(vec![turn_reporting("done", Usage::default())]);
     let totals = drive(&a, &ctx, "hi").await.1.unwrap();
 
-    assert!(totals.usage.input > 1_000, "{}", totals.usage.input);
-    assert!(totals.usage.output > 0);
-    assert!(totals.cost > 0.0);
+    assert_eq!(totals.usage.input, 0);
+    assert_eq!(totals.usage.output, 0);
+    assert_eq!(totals.cost, 0.0);
     assert_eq!(totals.usage.cache_read, 0, "nothing was said about a cache");
-    assert_eq!(
-        totals.estimated,
-        agent::Estimated {
-            input: true,
-            output: true,
-            cache_read: false
-        },
-        "our own count must not pass as measured"
-    );
 }
 
 #[tokio::test]
-async fn only_the_half_the_provider_withheld_is_filled_in() {
+async fn a_part_the_provider_reported_survives_verbatim() {
     // Reporting one and not the other is the ordinary case, not a broken one:
-    // the measured half has to survive intact.
+    // the stated half is passed through as-is, the unstated half stays zero.
     let reported = Usage {
         input: 4_321,
         output: 0,
@@ -199,23 +190,14 @@ async fn only_the_half_the_provider_withheld_is_filled_in() {
     let (_d, a, ctx) = harness(vec![turn_reporting("done", reported)]);
     let totals = drive(&a, &ctx, "hi").await.1.unwrap();
 
-    assert_eq!(
-        totals.usage.input, 4_321,
-        "a measured count was overwritten"
-    );
-    assert!(totals.usage.output > 0);
-    // Only the half that was withheld is marked; the stated one keeps its
-    // standing.
-    assert!(!totals.estimated.input);
-    assert!(totals.estimated.output);
+    assert_eq!(totals.usage.input, 4_321);
+    assert_eq!(totals.usage.output, 0);
 }
 
 #[tokio::test]
-async fn a_count_far_under_the_prompt_is_read_as_a_cache_miss() {
-    // What a caching proxy does: a plausible-looking figure two orders of
-    // magnitude under what was sent, with no cache field to explain it. The
-    // figure is a measurement of the miss, so it survives, and the gap it
-    // leaves is the hit the host declined to name.
+async fn a_count_far_under_the_prompt_is_passed_through_verbatim() {
+    // A proxy that under-reports input: the figure is what the host said, so
+    // it survives as-is — no cache read is invented for the gap.
     let reported = Usage {
         input: 12,
         output: 40,
@@ -224,29 +206,15 @@ async fn a_count_far_under_the_prompt_is_read_as_a_cache_miss() {
     let (_d, a, ctx) = harness(vec![turn_reporting("done", reported)]);
     let totals = drive(&a, &ctx, "hi").await.1.unwrap();
 
-    assert_eq!(totals.usage.input, 12, "a measured count was overwritten");
-    assert!(!totals.estimated.input);
-    assert!(
-        totals.usage.cache_read > 1_000,
-        "{}",
-        totals.usage.cache_read
-    );
-    assert!(
-        totals.estimated.cache_read,
-        "a count we made must travel marked"
-    );
-    // The part the host got right keeps its standing.
+    assert_eq!(totals.usage.input, 12);
+    assert_eq!(totals.usage.cache_read, 0, "nothing was said about a cache");
     assert_eq!(totals.usage.output, 40);
-    assert!(!totals.estimated.output);
 }
 
 #[tokio::test]
-async fn a_small_count_beside_a_cached_prompt_is_left_alone() {
+async fn a_cached_prompt_is_passed_through_verbatim() {
     // Cached input is excluded from the count by design, so twelve fresh
-    // tokens beside a large cache figure is exactly right. Both halves of the
-    // cache count for this: the first turn of a cached session writes the whole
-    // prompt and reads none of it back, which is the case most easily mistaken
-    // for a host reporting nonsense.
+    // tokens beside a large cache figure is exactly right.
     for (read, write) in [(30_000, 0), (0, 30_000), (15_000, 15_000)] {
         let reported = Usage {
             input: 12,
@@ -258,16 +226,15 @@ async fn a_small_count_beside_a_cached_prompt_is_left_alone() {
         let totals = drive(&a, &ctx, "hi").await.1.unwrap();
 
         assert_eq!(totals.usage.input, 12, "read={read} write={write}");
-        assert!(!totals.estimated.input, "read={read} write={write}");
+        assert_eq!(totals.usage.cache_read, read, "read={read} write={write}");
     }
 }
 
 #[tokio::test]
-async fn a_fully_measured_turn_is_not_marked() {
+async fn a_fully_reported_turn_is_passed_through_verbatim() {
     let (_d, a, ctx) = harness(vec![text_turn("done")]);
     let totals = drive(&a, &ctx, "hi").await.1.unwrap();
     assert_eq!((totals.usage.input, totals.usage.output), (3_000, 5));
-    assert!(!totals.estimated.any());
 }
 
 #[tokio::test]

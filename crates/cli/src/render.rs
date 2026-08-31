@@ -647,29 +647,36 @@ pub(crate) fn short(n: u64) -> String {
         _ => format!("{:.1}m", n as f64 / 1_000_000.0),
     }
 }
+/// The in/out counts in the one wording every line that shows them uses: a
+/// figure the provider reported is shown as-is, one it left out reads as a
+/// dash, never as a count of ours standing in for it.
+pub(crate) fn in_out(input: u64, output: u64) -> String {
+    let input = if input > 0 {
+        short(input)
+    } else {
+        "-".to_string()
+    };
+    let output = if output > 0 {
+        short(output)
+    } else {
+        "-".to_string()
+    };
+    format!("{input} in / {output} out")
+}
 
 /// What a run has cost, in the one wording every place that says it uses.
 ///
-/// A tilde marks the part we counted ourselves, and only that part. The cost
-/// carries one whenever any part did, because a number derived from a guess is
-/// not a bill.
-pub fn spent(usage: &brain::stream::Usage, cost: f64, estimated: agent::Estimated) -> String {
-    let mark = agent::Estimated::mark;
-    format!(
-        "{}{} in / {}{} out · {}{} cached{}",
-        mark(estimated.input),
-        short(usage.input),
-        mark(estimated.output),
-        short(usage.output),
-        mark(estimated.cache_read),
-        short(usage.cache_read),
-        // An unpriced model reports no cost rather than $0.
-        if cost > 0.0 {
-            format!(" · {}${cost:.4}", mark(estimated.any()))
-        } else {
-            String::new()
-        },
-    )
+/// The cost is shown only when the model is priced — an unpriced model reports
+/// no cost rather than $0.
+pub fn spent(usage: &brain::stream::Usage, cost: f64) -> String {
+    let mut parts = vec![in_out(usage.input, usage.output)];
+    if usage.cache_read > 0 {
+        parts.push(format!("{} cached", short(usage.cache_read)));
+    }
+    if cost > 0.0 {
+        parts.push(format!("${cost:.4}"));
+    }
+    parts.join(" · ")
 }
 
 /// The wording for every event that occupies a whole line.
@@ -754,10 +761,9 @@ pub fn describe(event: &Event, p: &Paint, width: usize) -> Option<String> {
             turns,
             usage,
             cost,
-            estimated,
         } => p.on(
             &p.theme.muted,
-            &format!("{turns} turns · {}", spent(usage, *cost, *estimated)),
+            &format!("{turns} turns · {}", spent(usage, *cost)),
         ),
         _ => return None,
     })
@@ -945,7 +951,8 @@ pub fn summarize(args: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Markdown, Paint, summarize};
+    use super::{Markdown, Paint, describe, in_out, spent, summarize};
+    use brain::stream::Usage;
     use serde_json::json;
 
     #[test]
@@ -1119,5 +1126,63 @@ mod tests {
     fn a_search_shows_what_it_looked_for_not_where() {
         let args = json!({ "pattern": "fn tier", "path": "crates/tools/src" });
         assert_eq!(summarize(&args), "fn tier");
+    }
+    #[test]
+    fn the_in_out_pair_reads_the_same_everywhere() {
+        assert_eq!(in_out(8_400, 390), "8.4k in / 390 out");
+        assert_eq!(in_out(8_400, 0), "8.4k in / - out");
+        assert_eq!(in_out(0, 0), "- in / - out");
+    }
+    #[test]
+    fn a_measured_run_is_the_bill() {
+        let usage = Usage {
+            input: 8_400,
+            output: 390,
+            ..Default::default()
+        };
+        assert_eq!(spent(&usage, 0.0012), "8.4k in / 390 out · $0.0012");
+    }
+
+    #[test]
+    fn a_part_the_provider_left_out_reads_as_a_dash() {
+        // A host that reported no output shows the gap, never a count of ours.
+        let usage = Usage {
+            input: 8_400,
+            ..Default::default()
+        };
+        assert_eq!(spent(&usage, 0.0), "8.4k in / - out");
+    }
+
+    #[test]
+    fn a_run_with_nothing_reported_shows_dashes_everywhere() {
+        assert_eq!(spent(&Usage::default(), 0.0), "- in / - out");
+    }
+
+    #[test]
+    fn a_done_line_with_measured_usage_carries_the_bill() {
+        let e = agent::Event::Done {
+            turns: 2,
+            usage: Usage {
+                input: 8_400,
+                output: 390,
+                ..Default::default()
+            },
+            cost: 0.0012,
+        };
+        let s = describe(&e, &Paint::new(false), 100).unwrap();
+        assert_eq!(s, "2 turns · 8.4k in / 390 out · $0.0012");
+    }
+
+    #[test]
+    fn a_done_line_with_nothing_reported_shows_the_dashes() {
+        // A host that reported none of its usage: the line says the turns and
+        // shows the gaps as dashes rather than hiding them.
+        let e = agent::Event::Done {
+            turns: 3,
+            usage: Usage::default(),
+            cost: 0.0,
+        };
+        let s = describe(&e, &Paint::new(false), 100).unwrap();
+        assert_eq!(s, "3 turns · - in / - out");
     }
 }

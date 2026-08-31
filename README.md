@@ -271,13 +271,15 @@ just refused. Repeated refusals are how most sessions actually die: a model
 that cannot get a tool's arguments right will keep getting them wrong the same
 way until it is told so.
 
-**Token counts** come from the provider where it reports them and from our own
-count where it does not — or where what it reports cannot be true. A proxy that
-answers a thirty-thousand-token transcript with an input count of two hundred,
-and no caching of any kind to explain it, is not tokenizing differently; taking that
-figure at face value turns the running cost into fiction. A `~` marks which
-half of a count is ours. A count we made is not the provider's, and a cost
-derived from it is not a bill.
+**Token counts** come from the provider, and only from the provider. A host
+that reports nothing — or what it reports cannot be true — leaves that part
+out: the running line, the closing line and `/cost` show a dash where a count
+is missing, never a number of ours. A proxy that answers a
+thirty-thousand-token transcript with an input count of two hundred, and no
+caching of any kind to explain it, is not tokenizing differently; taking that
+figure at face value turns the running cost into fiction. A missing figure
+prices nothing, and the cost shown is only ever what the provider's own
+numbers amount to.
 
 ## Layout
 

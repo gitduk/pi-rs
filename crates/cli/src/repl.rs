@@ -745,11 +745,7 @@ impl Repl {
                 None => "not recording — --log is off, or the file would not open".into(),
             }),
             Cmd::Todo => lines(tools::todo::render(self.session.todos())),
-            Cmd::Cost => lines(crate::render::spent(
-                &totals.usage,
-                totals.cost,
-                totals.estimated,
-            )),
+            Cmd::Cost => lines(crate::render::spent(&totals.usage, totals.cost)),
             Cmd::New => Step::Swap(self.fresh_session("started")),
             Cmd::Resume(name) => {
                 if name.is_empty() {

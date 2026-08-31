@@ -21,14 +21,7 @@ const IMAGE_TOKENS: usize = 1_500;
 /// A bound on what a string costs. Public because the system prompt and tool
 /// schemas come out of the same budget the transcript does.
 pub fn text(s: &str) -> usize {
-    bytes(s.len())
-}
-
-/// The same bound for text that was never assembled into one string — a stream
-/// counted as it arrives. Public so a running count uses this ratio rather than
-/// picking its own.
-pub fn bytes(n: usize) -> usize {
-    n.div_ceil(BYTES_PER_TOKEN)
+    s.len().div_ceil(BYTES_PER_TOKEN)
 }
 
 use text as of;
@@ -58,18 +51,6 @@ pub fn message(m: &Message, spec: &ModelSpec) -> usize {
             Message::Assistant { content, .. } => {
                 content.iter().map(|b| assistant_block(b, spec)).sum()
             }
-        }
-}
-
-/// What a reply cost to produce, which is not what it will cost to send back.
-/// Reasoning is billed as output whichever way it replays, so everything counts
-/// here and the spec has no say.
-pub fn produced(m: &Message) -> usize {
-    MESSAGE_OVERHEAD
-        + match m {
-            Message::System { content } => of(content),
-            Message::User { content } => content.iter().map(user_block).sum(),
-            Message::Assistant { content, .. } => content.iter().map(whole_block).sum(),
         }
 }
 
