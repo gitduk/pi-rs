@@ -202,19 +202,6 @@ impl Agent {
             // actually sent, which a squeeze or a compaction may have changed.
             let mut sent;
 
-            // True this turn only, and never stored. The plan goes here
-            // rather than into the transcript: written down, turn 3's list is
-            // still there at turn 30 contradicting the current one, and both
-            // read as fact. Recomputed every turn, there is exactly one of it
-            // and it is never stale.
-            //
-            // Stated, not urged. A list of what is open is information; the
-            // same list with "finish these now" on it is a deadline, and a
-            // hurried model does worse work than the tokens ever cost.
-            let notes: Vec<String> = match session.todos() {
-                [] => Vec::new(),
-                items => vec![format!("<plan>\n{}\n</plan>", tools::todo::render(items))],
-            };
             let done = loop {
                 let budget = ((hard.unwrap_or_else(|| self.budget()) as f64) * scale) as usize;
                 sent = self
@@ -236,7 +223,7 @@ impl Agent {
                 let req = Request {
                     system: Some(self.system.clone()),
                     messages: sent.clone(),
-                    notes: notes.clone(),
+                    notes: Vec::new(),
                     tools: self.registry.defs(),
                     max_output_tokens: None,
                     temperature: None,
@@ -292,7 +279,7 @@ impl Agent {
                 }
             };
 
-            let (usage, estimated) = self.fill_usage(done.usage, &sent, &notes, &done.message);
+            let (usage, estimated) = self.fill_usage(done.usage, &sent, &done.message);
             let cost = self.spec.cost(&usage);
             totals.add_estimated(&usage, cost, estimated);
             say(
@@ -367,7 +354,7 @@ impl Agent {
     }
 
     /// Fold a plan the todo tool wrote into the session, so it survives a
-    /// resume and reaches the next turn's note.
+    /// resume and `mark` has the list its numbers refer to.
     fn record_todos(&self, session: &mut Session, ctx: &Ctx) {
         let Ok(held) = ctx.todos.lock() else {
             return;
@@ -530,7 +517,6 @@ impl Agent {
         &self,
         reported: brain::stream::Usage,
         sent: &[Message],
-        notes: &[String],
         reply: &Message,
     ) -> (brain::stream::Usage, Estimated) {
         let mut usage = reported;
@@ -540,7 +526,6 @@ impl Agent {
         let ours = || {
             (brain::estimate::tokens(sent, &self.spec)
                 + brain::estimate::text(&self.system)
-                + brain::estimate::notes(notes)
                 + brain::estimate::tool_defs(&self.registry.defs())) as u64
         };
         // Any reported caching exempts the check below, writes as well as

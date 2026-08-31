@@ -144,6 +144,32 @@ fn reads_of_different_files_never_supersede_each_other() {
     assert_eq!(compact(&mut m, 100_000, &Policy::default()).superseded, 0);
 }
 
+// The plan is a singleton: every call answers with the whole list, so an
+// earlier answer has since been rewritten.
+#[test]
+fn an_older_plan_is_superseded_however_the_call_was_written() {
+    let mut m = vec![
+        Message::user("go"),
+        call("c1", "todo", json!({ "op": "set", "items": [] })),
+        result("c1", "todo", &big(9_000)),
+        call("c2", "todo", json!({ "op": "mark", "at": [1], "status": "done" })),
+        result("c2", "todo", &big(9_000)),
+    ];
+    let r = compact(&mut m, 4_000, &Policy::default());
+
+    assert_eq!(r.superseded, 1);
+    assert!(
+        body_of(&m[2]).contains("superseded by a later todo"),
+        "{}",
+        body_of(&m[2])
+    );
+    assert!(
+        body_of(&m[4]).starts_with("xxx"),
+        "the newest plan must survive"
+    );
+    assert_balanced(&m);
+}
+
 #[test]
 fn an_edit_result_is_never_superseded_by_a_later_edit() {
     let mut m = vec![

@@ -1253,19 +1253,18 @@ async fn a_coded_tool_error_reaches_the_model_with_its_code() {
 
 }
 
-// The plan reaches the model as a note, recomputed each turn — never as a
-// message. Written into the transcript, turn 3's list is still there at turn
-// 30 contradicting the current one, and both read as fact.
+// The plan reaches the model as the todo tool's own result and nowhere else.
+// A note once read like the user speaking, so a stale plan got argued with.
 #[tokio::test]
-async fn the_plan_rides_a_note_and_never_the_transcript() {
+async fn the_plan_rides_its_tool_result_and_never_a_note() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
     let wire = Scripted::new(vec![
         call_turn(&[(
             "t1",
             "todo",
-            r#"{"items":[{"task":"read the code","status":"done"},
-                         {"task":"fix the parser","status":"in_progress"}]}"#,
+            r#"{"op":"set","items":[{"task":"read the code","status":"done"},
+                                    {"task":"fix the parser","status":"in_progress"}]}"#,
         )]),
         text_turn("done"),
     ]);
@@ -1273,27 +1272,50 @@ async fn the_plan_rides_a_note_and_never_the_transcript() {
     let (session, out, _) = drive(&a, &ctx, "work").await;
     out.unwrap();
 
-    let sent = wire.notes();
-    assert!(
-        sent.iter().any(|n| n.contains("[~] fix the parser")),
-        "the plan never rode a note: {sent:?}"
-    );
-
-    // And nowhere in the transcript, which is the point.
     let view = session.context();
-    let prose: String = view.iter().map(Message::text).collect();
     let answered: String = tool_results(&view).iter().map(|r| r.flatten_text()).collect();
-    assert!(!prose.contains("fix the parser"), "{prose}");
-    assert!(!answered.contains("fix the parser"), "{answered}");
-    assert_eq!(answered.trim(), "Recorded: 1 of 2 open.");
+    assert!(answered.contains("2. [~] fix the parser"), "{answered}");
+    assert!(answered.contains("1 open, 1 closed"), "{answered}");
 
-    // It survives on the session, so a resume brings it back.
+    // Nothing rides the user's turn, which is the point.
+    assert!(wire.notes().is_empty(), "{:?}", wire.notes());
+
+    // It survives on the session, so a resume brings it back and `mark` still
+    // has the list its numbers refer to.
     assert_eq!(session.todos().len(), 2);
 }
 
-// A rewind undoes work the plan says is done. Carrying it forward would tell
-// the model six items are finished when two of them are not — in a note, as
-// fact, every turn.
+// `mark` addresses items by the numbers the previous answer showed, so the tool
+// has to be reading the plan the session carries, not one built from this call.
+#[tokio::test]
+async fn a_mark_moves_an_item_the_earlier_call_wrote() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
+    let wire = Scripted::new(vec![
+        call_turn(&[(
+            "t1",
+            "todo",
+            r#"{"op":"set","items":[{"task":"read the code"},{"task":"fix the parser"}]}"#,
+        )]),
+        call_turn(&[("t2", "todo", r#"{"op":"mark","at":[2],"status":"done"}"#)]),
+        text_turn("done"),
+    ]);
+    let a = Agent::new(wire.clone(), spec());
+    let (session, out, _) = drive(&a, &ctx, "work").await;
+    out.unwrap();
+
+    let view = session.context();
+    let last = tool_results(&view).last().unwrap().flatten_text();
+    assert!(last.contains("2. [x] fix the parser"), "{last}");
+    assert_eq!(
+        session.todos()[1].status,
+        tools::todo::TodoStatus::Done,
+        "the session did not follow the mark"
+    );
+}
+
+// A rewind undoes work the plan says is done. Carrying it forward would leave
+// `mark` numbering items against a list the transcript no longer contains.
 #[test]
 fn rewinding_clears_a_plan_that_described_the_undone_work() {
     let mut s = agent::session::Session::new();

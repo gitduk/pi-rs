@@ -241,11 +241,10 @@ pub struct Session {
     next: u64,
     /// The plan as it stands, beside the conversation rather than inside it.
     ///
-    /// It was an entry once, and had to be filtered back out of every walk:
-    /// the model never read it there, because a plan is a fact about *now* and
-    /// an append-only list can only say what was true at some point. It
-    /// reaches the model as a note instead, recomputed every turn — so there
-    /// is exactly one of it, and it is never stale.
+    /// Not how the model reads it — that is the todo tool's own result, in the
+    /// transcript with every other result. This is the copy the tool mutates:
+    /// what `mark` numbers refer to, what `/todo` prints, and what a resume
+    /// restores so the numbers still mean what the transcript says they do.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     todos: Vec<Todo>,
 }
@@ -446,9 +445,9 @@ impl Session {
         let removed = self.entries.len() - keep;
         self.entries.truncate(keep);
         // The plan described work this rewind just undid. Carrying it forward
-        // would tell the model six items are done when two of them are not —
-        // stated as fact, every turn, in a note. Restating a plan costs one
-        // tool call; acting on a false one costs the work.
+        // would leave `mark` numbering items against a list the transcript no
+        // longer contains. Restating a plan costs one tool call; acting on a
+        // false one costs the work.
         self.todos.clear();
         removed
     }

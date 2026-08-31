@@ -43,6 +43,13 @@ pub struct Request {
     /// The tail is also the one place it is free: everything before it is
     /// unchanged from last turn, so the cached prefix still reaches as far as
     /// it did.
+    ///
+    /// Nothing produces one today. The plan did, and that is exactly what went
+    /// wrong: appended to the user's turn it was indistinguishable from the
+    /// user speaking, so a stale list got argued with instead of updated. The
+    /// mechanism is kept because per-turn state that must not be read back as
+    /// fact is a real need — but whatever fills it next has to survive being
+    /// read in the user's voice, because that is how it will be read.
     pub notes: Vec<String>,
     pub tools: Vec<ToolDef>,
     pub max_output_tokens: Option<u32>,

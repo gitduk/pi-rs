@@ -231,11 +231,13 @@ path is resolved against the workspace root through the deepest existing
 ancestor, so a symlink cannot walk out. `bash` gets its own process group and a
 SIGTERM-then-SIGKILL timeout.
 
-**The plan** lives beside the conversation, not in it. `todo` records it and
-answers with a count; the list itself rides every request as a note that is
-recomputed from the stored plan and never written down. A plan in the
-transcript is one copy per call, each stale the moment the next lands, and all
-of them stated as fact.
+**The plan** is a tool result like any other. `todo` takes `set`, `mark` and
+`clear`, and every call answers with the numbered list as it now stands —
+`mark` addresses items by those numbers, so closing three steps is one small
+call rather than a rewrite of the whole plan. Older answers supersede under
+compaction, so only the newest survives a long run. It rode a note appended to
+the last user turn once: the model could not tell a stale plan from the user
+speaking, and argued with it instead of updating it.
 
 **Edits** are line-anchored patches with content-hash anchors, applied against
 original line numbers so an earlier hunk never shifts a later one. A stale

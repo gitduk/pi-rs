@@ -13,9 +13,10 @@ use crate::session::{
 // record stays true however many later edits land — but only the newest file
 // read is worth carrying.
 //
-// `todo` was here until the plan moved to a note: its result is now an
-// acknowledgement with nothing in it to supersede.
-const SUPERSEDABLE: &[&str] = &["read", "grep", "glob"];
+// `todo` belongs here because the plan is a singleton: each call answers with
+// the whole list as it now stands, so an earlier answer is a plan that has
+// since been rewritten.
+const SUPERSEDABLE: &[&str] = &["read", "grep", "glob", "todo"];
 
 // Results that must survive compaction whatever the budget says.
 //
@@ -204,6 +205,11 @@ fn pruned(notice: &str, text: &str, policy: &Policy) -> String {
 fn supersede_key(name: &str, args: &Value) -> Option<String> {
     if !SUPERSEDABLE.contains(&name) {
         return None;
+    }
+    // One plan, whatever the call said: `set`, `mark` and `clear` all leave the
+    // same list, so keying on the arguments would supersede nothing.
+    if name == "todo" {
+        return Some("todo".into());
     }
     // A whole-file read supersedes an earlier ranged read of the same path, so
     // the key deliberately ignores offset and limit.
