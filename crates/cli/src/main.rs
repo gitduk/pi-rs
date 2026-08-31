@@ -69,7 +69,7 @@ pub enum EffortArg {
 #[command(
     name = "pi",
     about = "A coding agent that stays inside one directory.",
-    version = concat!("v", env!("CARGO_PKG_VERSION")),
+    version = env!("CARGO_PKG_VERSION"),
     disable_version_flag = true
 )]
 pub struct Args {
