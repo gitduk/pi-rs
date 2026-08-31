@@ -1761,7 +1761,7 @@ mod tests {
     #[test]
     fn the_opening_block_names_the_instruction_files() {
         let paint = Paint::new(false);
-        let rows = Row::banner(&["~/.pi.md".into(), "AGENTS.md".into()], &paint);
+        let rows = Row::banner(&["~/.pi/Pi.md".into(), "AGENTS.md".into()], &paint);
         let shown: Vec<String> = ScrollbackRows::new(&rows, &paint, 80)
             .map(|r| r.to_string())
             .collect();
@@ -1772,7 +1772,7 @@ mod tests {
             [
                 concat!("π ", env!("CARGO_PKG_VERSION")),
                 "context:",
-                "- ~/.pi.md",
+                "- ~/.pi/Pi.md",
                 "- AGENTS.md"
             ]
         );

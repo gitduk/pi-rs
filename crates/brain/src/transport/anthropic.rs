@@ -19,17 +19,17 @@ const MIN_THINKING_BUDGET: u32 = 1024;
 
 pub struct Anthropic {
     http: reqwest::Client,
-    api_key: String,
+    api_key: Option<String>,
     /// Session-lived, not per-request: what a host gets wrong it gets wrong
     /// every turn, and the reader needs to hear it once.
     gaps: Shared,
 }
 
 impl Anthropic {
-    pub fn new(api_key: impl Into<String>) -> Self {
+    pub fn new(api_key: Option<String>) -> Self {
         Self {
             http: reqwest::Client::new(),
-            api_key: api_key.into(),
+            api_key,
             gaps: Shared::new("anthropic"),
         }
     }
@@ -397,10 +397,11 @@ impl Transport for Anthropic {
         cache_control(spec)?;
         let body = build_body(spec, req);
         let url = format!("{}/v1/messages", spec.base_url.trim_end_matches('/'));
-        let call = self
-            .http
-            .post(&url)
-            .header("x-api-key", &self.api_key)
+        let mut call = self.http.post(&url);
+        if let Some(key) = &self.api_key {
+            call = call.header("x-api-key", key);
+        }
+        let call = call
             .header("anthropic-version", API_VERSION)
             .json(&body);
         let resp = super::exchange("anthropic", url, spec, req, &body, call).await?;

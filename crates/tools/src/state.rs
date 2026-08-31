@@ -4,12 +4,11 @@
 
 use std::path::PathBuf;
 
-/// `$XDG_STATE_HOME/pi`, or `~/.local/state/pi` when the variable is unset.
+/// The pi root: `$PI_HOME` when set, else `~/.pi`.
 pub fn dir() -> Option<PathBuf> {
-    std::env::var_os("XDG_STATE_HOME")
+    std::env::var_os("PI_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
-        .map(|b| b.join("pi"))
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".pi")))
 }
 
 /// An id as a file or directory name, with everything that could leave the
@@ -35,7 +34,7 @@ pub fn file_stem(id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::file_stem;
+    use super::{dir, file_stem};
 
     #[test]
     fn a_real_id_is_its_own_stem() {
@@ -47,5 +46,18 @@ mod tests {
         assert_eq!(file_stem("../../etc/cron.d/x"), "______etc_cron_d_x");
         assert_eq!(file_stem(".."), "__");
         assert_eq!(file_stem(""), "unnamed");
+    }
+
+    #[test]
+    fn pi_home_replaces_the_default_root() {
+        let prior = std::env::var_os("PI_HOME");
+        unsafe {
+            std::env::set_var("PI_HOME", "/srv/pi");
+        }
+        assert_eq!(dir().map(|d| d.display().to_string()), Some("/srv/pi".into()));
+        match prior {
+            Some(v) => unsafe { std::env::set_var("PI_HOME", v) },
+            None => unsafe { std::env::remove_var("PI_HOME") },
+        }
     }
 }

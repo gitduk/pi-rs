@@ -68,7 +68,7 @@ const BUILTIN: &[Command] = &[
     Command::builtin(
         "/model",
         "[name]",
-        "list the models in ~/.pi.toml, or move this session to one",
+        "list the models in ~/.pi/settings.toml, or move this session to one",
     ),
     Command::builtin(
         "/compact",
@@ -80,7 +80,7 @@ const BUILTIN: &[Command] = &[
     Command::builtin(
         "/reload",
         "",
-        "re-read ~/.pi.toml, the instructions and the skills",
+        "re-read ~/.pi/settings.toml, the instructions and the skills",
     ),
     Command::builtin("/log", "", "where this session is writing its journal"),
     Command::builtin(
@@ -438,7 +438,7 @@ impl Repl {
         let choices = self.choices();
         if choices.is_empty() {
             return vec![
-                format!("on {here}, and ~/.pi.toml now defines no model to switch to"),
+                format!("on {here}, and ~/.pi/settings.toml now defines no model to switch to"),
                 "see examples/pi.toml for what a [models.<name>] entry looks like".into(),
             ];
         }

@@ -1,10 +1,10 @@
 //! Standing instructions: what to do here, as opposed to what to do now.
 //!
-//! Personal ones live in `~/.pi.md`, beside `~/.pi.toml`. A project's live in
-//! its `AGENTS.md`, the vendor-neutral name every harness reads. Another
-//! harness's own file is deliberately not read in its place: the shared name
-//! exists so that one file serves every tool, and reading the alternatives too
-//! would reward keeping them apart.
+//! Personal ones live in `Pi.md` at the pi root, beside `settings.toml`. A
+//! project's live in its `AGENTS.md`, the vendor-neutral name every harness
+//! reads. Another harness's own file is deliberately not read in its place:
+//! the shared name exists so that one file serves every tool, and reading the
+//! alternatives too would reward keeping them apart.
 
 use std::path::{Path, PathBuf};
 
@@ -46,11 +46,11 @@ pub fn short(path: &Path, root: &Path) -> String {
 /// Order is the whole point: the nearest directory speaks last, so where two
 /// files disagree the more specific one is the one the model read most
 /// recently. The walk ends at the repository root and never reaches `$HOME`,
-/// whose `.pi.md` is the personal one and is already first in the list.
-pub fn paths(workspace: &Path, home: Option<&Path>) -> Vec<PathBuf> {
+/// whose `Pi.md` is the personal one and is already first in the list.
+pub fn paths(workspace: &Path, home: Option<&Path>, root: Option<&Path>) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if let Some(h) = home
-        && let personal = h.join(".pi.md")
+    if let Some(r) = root
+        && let personal = r.join("Pi.md")
         && personal.is_file()
     {
         out.push(personal);
@@ -71,17 +71,17 @@ pub fn paths(workspace: &Path, home: Option<&Path>) -> Vec<PathBuf> {
 }
 
 pub fn load(workspace: &Path) -> Loaded {
-    from(workspace, home().as_deref())
+    from(workspace, home().as_deref(), tools::state::dir().as_deref())
 }
 
-/// The same, against a stated home rather than this process's.
+/// The same, against a stated home and pi root rather than this process's.
 ///
 /// A test that reads the real `$HOME` passes or fails on whether whoever runs
-/// it happens to keep a `.pi.md` — which is a property of the machine, not of
+/// it happens to keep a `Pi.md` — which is a property of the machine, not of
 /// the code under test.
-fn from(workspace: &Path, home: Option<&Path>) -> Loaded {
+fn from(workspace: &Path, home: Option<&Path>, root: Option<&Path>) -> Loaded {
     let mut loaded = Loaded::default();
-    for path in paths(workspace, home) {
+    for path in paths(workspace, home, root) {
         let Ok(body) = std::fs::read_to_string(&path) else {
             continue;
         };
@@ -114,18 +114,19 @@ mod tests {
     fn the_nearest_directory_speaks_last() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
-        write(&home.join(".pi.md"), "personal");
+        let root = home.join(".pi");
+        write(&root.join("Pi.md"), "personal");
         let repo = home.join("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         write(&repo.join("AGENTS.md"), "repo");
         let deep = repo.join("crates/cli");
         write(&deep.join("AGENTS.md"), "crate");
 
-        let got = paths(&deep, Some(&home));
+        let got = paths(&deep, Some(&home), Some(&root));
         assert_eq!(
             got,
             vec![
-                home.join(".pi.md"),
+                root.join("Pi.md"),
                 repo.join("AGENTS.md"),
                 deep.join("AGENTS.md"),
             ],
@@ -142,10 +143,10 @@ mod tests {
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         write(&repo.join("CLAUDE.md"), "another harness's file");
-        assert!(paths(&repo, None).is_empty());
+        assert!(paths(&repo, None, None).is_empty());
 
         write(&repo.join("AGENTS.md"), "agents");
-        assert_eq!(paths(&repo, None), vec![repo.join("AGENTS.md")]);
+        assert_eq!(paths(&repo, None, None), vec![repo.join("AGENTS.md")]);
     }
 
     #[test]
@@ -156,7 +157,7 @@ mod tests {
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         let deep = repo.join("a/b");
         std::fs::create_dir_all(&deep).unwrap();
-        assert!(paths(&deep, None).is_empty(), "leaked past the repo root");
+        assert!(paths(&deep, None, None).is_empty(), "leaked past the repo root");
     }
 
     #[test]
@@ -168,7 +169,7 @@ mod tests {
         write(&home.join("AGENTS.md"), "stray");
         let notes = home.join("notes");
         std::fs::create_dir_all(&notes).unwrap();
-        assert!(paths(&notes, Some(&home)).is_empty());
+        assert!(paths(&notes, Some(&home), None).is_empty());
     }
 
     #[test]
@@ -177,7 +178,7 @@ mod tests {
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         write(&repo.join("AGENTS.md"), "  Use tabs.\n\n");
-        let got = from(&repo, None);
+        let got = from(&repo, None, None);
         assert!(got.text.contains("<instructions path="));
         assert!(got.text.contains("Use tabs."));
         assert!(got.text.ends_with("</instructions>"), "{}", got.text);
@@ -192,7 +193,7 @@ mod tests {
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         write(&repo.join("AGENTS.md"), "\n  \n");
-        let got = from(&repo, None);
+        let got = from(&repo, None, None);
         assert!(got.text.is_empty());
         assert!(got.files.is_empty());
     }

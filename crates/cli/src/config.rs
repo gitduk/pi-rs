@@ -2,7 +2,7 @@
 //!
 //! A working setup should not be a command line to retype. Pi keeps a provider
 //! catalog (`~/.pi/agent/models.json`) apart from preferences
-//! (`settings.json`); the split earns its keep there because the catalog is a
+//! (`settings.toml`); the split earns its keep there because the catalog is a
 //! thing you copy between machines. One file with two sections is the same idea
 //! with less to find.
 //!
@@ -26,7 +26,7 @@ use serde::Deserialize;
 
 use crate::{EffortArg, TierArg, FormatArg};
 
-/// The user's own file: `~/.pi.toml`.
+/// The user's own file: `~/.pi/settings.toml`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -280,8 +280,8 @@ impl Origin {
             Origin::Command => "/model",
             Origin::Resumed => "the resumed session",
             Origin::Project => "defaults.model in the project's .pi.toml",
-            Origin::Global => "defaults.model in ~/.pi.toml",
-            Origin::OnlyModel => "the only model in ~/.pi.toml",
+            Origin::Global => "defaults.model in ~/.pi/settings.toml",
+            Origin::OnlyModel => "the only model in ~/.pi/settings.toml",
         }
     }
 }
@@ -328,13 +328,15 @@ impl Config {
     /// The credential to send, or None when the endpoint wants none.
     ///
     /// Read at use rather than at load, so a run needs only the variable it
-    /// actually reaches for. The *shape* is checked at load, because a
+    /// actually reaches for. A `$NAME` that names an unset variable is the
+    /// same as no key: the request goes out without one and the endpoint's
+    /// response says what it needs. The *shape* is checked at load, because a
     /// malformed `$NAME` is a typo today and every day after.
-    pub fn key(&self) -> Option<Result<String>> {
+    pub fn key(&self) -> Option<String> {
         let raw = self.api_key.as_deref()?;
         match raw.strip_prefix('$') {
-            None => Some(Ok(raw.to_string())),
-            Some(name) => Some(std::env::var(name).with_context(|| format!("${name} is not set"))),
+            None => Some(raw.to_string()),
+            Some(name) => std::env::var(name).ok(),
         }
     }
 
@@ -404,16 +406,16 @@ fn home() -> Option<PathBuf> {
 
 /// Where the user's own config lives when they have not said otherwise.
 pub fn global_path() -> Option<PathBuf> {
-    home().map(|h| h.join(".pi.toml"))
+    tools::state::dir().map(|root| root.join("settings.toml"))
 }
 
 /// The nearest project file at or above `start`, stopping at the repository
 /// root.
 ///
-/// `home` is never searched: `~/.pi.toml` is the global file, and treating it
-/// as a project file too would hand it privileges the global file already has
-/// by other means — and hand every directory under `$HOME` outside a repo the
-/// same file as its "project" config.
+/// `home` is never searched: `~/.pi/settings.toml` is the global file, and
+/// treating it as a project file too would hand it privileges the global file
+/// already has by other means — and hand every directory under `$HOME` outside
+/// a repo the same file as its "project" config.
 pub fn project_path(start: &Path, home: Option<&Path>) -> Option<PathBuf> {
     for dir in start.ancestors() {
         if home == Some(dir) {
@@ -766,18 +768,20 @@ output_per_mtok = 0
 
         let env = parse(&one("openai", "api_key = \"$PI_TEST_KEY\"\n")).unwrap();
         unsafe { std::env::set_var("PI_TEST_KEY", "secret") };
-        assert_eq!(env.key().unwrap().unwrap(), "secret");
+        assert_eq!(env.key().unwrap(), "secret");
 
         let raw = parse(&one("openai", "api_key = \"literal\"\n")).unwrap();
-        assert_eq!(raw.key().unwrap().unwrap(), "literal");
+        assert_eq!(raw.key().unwrap(), "literal");
 
         // The shape is a typo today and every day after, so it is caught at
         // load; the value is not read until the provider is actually used.
         let bad = parse(&one("openai", "api_key = \"$not a name\"\n"));
         assert!(bad.unwrap_err().to_string().contains("environment variable"));
 
+        // A `$NAME` that is not set means no key: the request goes out without
+        // one, and the endpoint's response is what says so.
         let missing = parse(&one("openai", "api_key = \"$PI_NOT_SET_ANYWHERE\"\n")).unwrap();
-        assert!(missing.key().unwrap().is_err());
+        assert!(missing.key().is_none());
     }
 
     #[test]
@@ -946,7 +950,7 @@ output_per_mtok = 0
         let c = parse("model = \"typo\"\n").unwrap();
         let (name, origin) = c.model(&Project::default(), None, None).unwrap();
         assert_eq!(name, "typo");
-        assert!(origin.describe().contains("~/.pi.toml"));
+        assert!(origin.describe().contains("~/.pi/settings.toml"));
     }
     #[test]
     fn a_key_may_be_given_alone_or_in_a_list() {

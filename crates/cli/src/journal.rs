@@ -594,7 +594,7 @@ pub fn opening(
         version = env!("CARGO_PKG_VERSION"),
         argv = %std::env::args().skip(1).collect::<Vec<_>>().join(" "),
         workspace = %root.display(),
-        config = args.config.as_deref().unwrap_or("~/.pi.toml"),
+        config = args.config.as_deref().unwrap_or("~/.pi/settings.toml"),
         models = config.names().len(),
         rebound_keys = config.keys.len(),
         model = config.model.as_deref().unwrap_or("-"),

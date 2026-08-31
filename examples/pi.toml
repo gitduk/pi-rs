@@ -1,4 +1,4 @@
-# ~/.pi.toml — copy what you need and delete the rest.
+# ~/.pi/settings.toml — copy what you need and delete the rest.
 #
 # There is no built-in list of models. One would go stale the week a vendor
 # ships something, and nothing in it would tell you which entries still

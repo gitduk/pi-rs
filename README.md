@@ -25,7 +25,7 @@ Nothing to install and nothing to configure at build time. There is no
 There is **no built-in list of models**. A hand-written catalog goes stale the
 week a vendor ships something, and nothing in it tells you which entries still
 describe reality — so the models a run can reach are the ones written down in
-`~/.pi.toml`, against the endpoint they are actually pointed at.
+`~/.pi/settings.toml`, against the endpoint they are actually pointed at.
 
 ```toml
 base_url = "http://127.0.0.1:7896/v1"
@@ -83,7 +83,7 @@ One loop owns the terminal for the whole session. Finished output is pushed
 searchable, still there after exit. Only what is still changing is repainted.
 
 Keys are rebindable. `/keys` lists every action with what it is bound to; an
-id under `[keys]` in `~/.pi.toml` replaces that action's defaults:
+id under `[keys]` in `~/.pi/settings.toml` replaces that action's defaults:
 
 ```toml
 [keys]
@@ -98,8 +98,9 @@ key when they are never live together, which is how `up` is `menu.previous`
 with the list open and `history.older` without it. Sharing one *within* a
 context is refused at load, along with an unknown id or an unreadable binding.
 
-Colours are configurable the same way, under `[theme]` in `~/.pi.toml`. Every
-key is a Style: a colour, text attributes, or both. `muted` `heading`
+Colours are configurable the same way, under `[theme]` in
+`~/.pi/settings.toml`. Every key is a Style: a colour, text attributes, or
+both. `muted` `heading`
 `emphasis` `code` `input`, plus `diff.add` `diff.del`, `status.ok` `status.err`,
 `menu.selected` and `prompt.color` `prompt.icon`. A plain string is shorthand
 for a colour alone — `code = "#dd80ff"` (or the short `#f80`, same as
@@ -132,14 +133,14 @@ workspace, under the same timeout, with the same clamps as the model's own
 you are working from — for when a phase has ended and no budget can tell.
 `/name` and `--name` label a session, because the ids are timestamps.
 
-`/model` on its own lists what `~/.pi.toml` defines — wire, window, price —
-with a mark against the one running. `/model <name>` moves the session to
-another, transcript and all. Prior reasoning does not survive the move intact:
-a block carries the model that produced it, and a model that did not write it
-gets the text without the signature, as prose or wrapped in `<think>` depending
-on what it accepts. Nothing is rewritten on the way, so switching back makes
-the original blocks native again. What has been spent stays spent — every turn
-was priced by the model that ran it.
+`/model` on its own lists what `~/.pi/settings.toml` defines — wire, window,
+price — with a mark against the one running. `/model <name>` moves the session
+to another, transcript and all. Prior reasoning does not survive the move
+intact: a block carries the model that produced it, and a model that did not
+write it gets the text without the signature, as prose or wrapped in
+` thinking` depending on what it accepts. Nothing is rewritten on the way, so
+switching back makes the original blocks native again. What has been spent
+stays spent — every turn was priced by the model that ran it.
 
 `/reload` re-reads the config, the standing instructions and the skills. It
 fails whole or not at all: a broken config leaves what was running running,
@@ -151,7 +152,7 @@ a reload that changed nothing.
 
 ### The journal
 
-Every session keeps one, at `~/.local/state/pi/logs/<session>.jsonl`, and
+Every session keeps one, at `~/.pi/logs/<session>.jsonl`, and
 `/log` says where. A run opens the journal of the session it starts on —
 `--resume` included — and `/resume` or `/new` switches it to the session now
 in charge, so the whole of a session reads as one file across the runs that
@@ -165,7 +166,7 @@ two together rather than reproduced.
 One JSON object per line, so `jq` is the reader:
 
 ```bash
-J=~/.local/state/pi/logs/<session>.jsonl              # /log prints the path
+J=~/.pi/logs/<session>.jsonl                            # /log prints the path
 jq -c 'select(.lvl=="WARN" or .lvl=="ERROR")' $J      # only what went wrong
 jq -c 'select(.ev=="pi::span")|{msg,name,dur_ms}' $J  # what took the time
 jq -r 'select(.ev=="pi::edit")|.patch' $J             # what the model actually wrote
@@ -188,10 +189,10 @@ field named for one is replaced by a fingerprint of it.
 
 ### Standing instructions
 
-`~/.pi.md` for yours, `AGENTS.md` for a project's — walked up to the repository
-root, general first, so where two disagree the nearer directory is the one read
-last. Appended to the system prompt, which is the part a provider caches.
-`--no-context-files` turns it off.
+`~/.pi/Pi.md` for yours, `AGENTS.md` for a project's — walked up to the
+repository root, general first, so where two disagree the nearer directory is
+the one read last. Appended to the system prompt, which is the part a provider
+caches. `--no-context-files` turns it off.
 
 ### Skills
 

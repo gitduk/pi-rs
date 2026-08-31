@@ -17,17 +17,17 @@ use crate::stream::{BlockKind, InvalidToolArgs, StopReason, StreamEvent, Usage};
 
 pub struct OpenAi {
     http: reqwest::Client,
-    api_key: String,
+    api_key: Option<String>,
     /// Session-lived, not per-request: what a host gets wrong it gets wrong
     /// every turn, and the reader needs to hear it once.
     gaps: Shared,
 }
 
 impl OpenAi {
-    pub fn new(api_key: impl Into<String>) -> Self {
+    pub fn new(api_key: Option<String>) -> Self {
         Self {
             http: reqwest::Client::new(),
-            api_key: api_key.into(),
+            api_key,
             gaps: Shared::new("openai"),
         }
     }
@@ -527,7 +527,11 @@ impl Transport for OpenAi {
         check_format(spec)?;
         let body = build_body(spec, req);
         let url = format!("{}/responses", spec.base_url.trim_end_matches('/'));
-        let call = self.http.post(&url).bearer_auth(&self.api_key).json(&body);
+        let mut call = self.http.post(&url);
+        if let Some(key) = &self.api_key {
+            call = call.bearer_auth(key);
+        }
+        let call = call.json(&body);
         let resp = super::exchange("openai", url, spec, req, &body, call).await?;
 
         let mut dec = Decoder::new(spec.model.clone(), self.gaps.clone());

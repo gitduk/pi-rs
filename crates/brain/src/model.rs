@@ -4,8 +4,9 @@
 //! There is no built-in list of models. A hand-written one goes stale the week
 //! a vendor ships something, and there is no way to tell by reading it which
 //! entries still describe reality — so the models a run can reach are the ones
-//! the user has written down in `~/.pi.toml`, against the endpoint they are
-//! actually pointed at. `examples/pi.toml` carries measured starting points.
+//! the user has written down in `~/.pi/settings.toml`, against the endpoint
+//! they are actually pointed at. `examples/pi.toml` carries measured starting
+//! points.
 //!
 //! Two axes, and keeping them apart is what stops a setting from being written
 //! where it cannot be read. An **endpoint fact** is what this server implements

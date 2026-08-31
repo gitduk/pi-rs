@@ -71,13 +71,13 @@ pub struct Args {
     /// The prompt. Reads stdin when omitted.
     prompt: Option<String>,
 
-    /// Defaults and locally-defined models. Defaults to ~/.pi.toml.
+    /// Defaults and locally-defined models. Defaults to ~/.pi/settings.toml.
     #[arg(long, value_name = "FILE", env = "PI_CONFIG")]
     config: Option<String>,
 
-    /// What the endpoint calls the model. A name ~/.pi.toml does not describe
-    /// is passed through with default numbers. Defaults to the resumed
-    /// session's model, else the config's.
+    /// What the endpoint calls the model. A name ~/.pi/settings.toml does not
+    /// describe is passed through with default numbers. Defaults to the
+    /// resumed session's model, else the config's.
     #[arg(short, long)]
     model: Option<String>,
 
@@ -147,7 +147,7 @@ pub struct Args {
     #[arg(long)]
     no_skills: bool,
 
-    /// Ignore ~/.pi.md and the project's AGENTS.md.
+    /// Ignore ~/.pi/Pi.md and the project's AGENTS.md.
     #[arg(long)]
     no_context_files: bool,
 
@@ -167,22 +167,21 @@ pub struct Args {
     log: journal::LogLevel,
 }
 
-/// `configured` is what the config entry supplied, if the model came from one.
+/// `configured` is the config's `api_key`; the format's environment variable
+/// is the fallback. An Anthropic endpoint cannot serve without its key, so
+/// both absent is an error there; a local OpenAI gateway may serve with no
+/// key at all.
 fn transport_for(spec: &ModelSpec, configured: Option<String>) -> Result<Arc<dyn Transport>> {
     match spec.format {
         Format::Anthropic { cache_control: _ } => {
             let key = configured
                 .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
                 .context("ANTHROPIC_API_KEY is not set")?;
-            Ok(Arc::new(Anthropic::new(key)))
+            Ok(Arc::new(Anthropic::new(Some(key))))
         }
-        Format::OpenAi => {
-            // A local server usually wants no key at all.
-            let key = configured
-                .or_else(|| std::env::var("OPENAI_API_KEY").ok())
-                .unwrap_or_else(|| "sk-none".into());
-            Ok(Arc::new(OpenAi::new(key)))
-        }
+        Format::OpenAi => Ok(Arc::new(OpenAi::new(
+            configured.or_else(|| std::env::var("OPENAI_API_KEY").ok()),
+        ))),
     }
 }
 
@@ -247,11 +246,7 @@ pub fn dial(
             spec.context_window, spec.max_output_tokens, spec.model
         ));
     }
-
-    let key = match config.key() {
-        Some(k) => Some(k.with_context(|| format!("the key for `{model}`"))?),
-        None => None,
-    };
+    let key = config.key();
     let warning = config
         .api_key
         .as_deref()
@@ -455,7 +450,7 @@ async fn main() -> Result<()> {
         args.model.as_deref(),
         prior.as_ref().map(|p| p.model.as_str()),
     ) else {
-        bail!("no model to run. Define one in ~/.pi.toml — see examples/pi.toml.");
+        bail!("no model to run. Define one in ~/.pi/settings.toml — see examples/pi.toml.");
     };
     let dialled = dial(&args, &config, &named, named_by)?;
 

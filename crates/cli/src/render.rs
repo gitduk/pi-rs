@@ -367,7 +367,7 @@ fn default_selected() -> Style {
     Style::attrs(&[Attr::Reverse])
 }
 fn default_prompt_color() -> Style {
-    Style::color(Color::Basic(36))
+    Style::color(Color::Rgb(0, 255, 255))
 }
 
 /// The input body: the terminal's own foreground until a config colours it.
