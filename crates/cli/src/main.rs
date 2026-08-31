@@ -168,13 +168,11 @@ pub struct Args {
 }
 
 /// `configured` is the config's `api_key`; the format's environment variable
-/// is the fallback. A key is never required: whichever is set rides along,
-/// and an endpoint that needs one answers with its own refusal.
+/// (`{format}_API_KEY`) is the fallback. A key is never required: whichever
+/// is set rides along, and an endpoint that needs one answers with its own
+/// refusal.
 fn transport_for(spec: &ModelSpec, configured: Option<String>) -> Arc<dyn Transport> {
-    let key = configured.or_else(|| match spec.format {
-        Format::Anthropic { .. } => std::env::var("ANTHROPIC_API_KEY").ok(),
-        Format::OpenAi => std::env::var("OPENAI_API_KEY").ok(),
-    });
+    let key = configured.or_else(|| std::env::var(format!("{}_API_KEY", spec.format.name())).ok());
     match spec.format {
         Format::Anthropic { .. } => Arc::new(Anthropic::new(key)),
         Format::OpenAi => Arc::new(OpenAi::new(key)),

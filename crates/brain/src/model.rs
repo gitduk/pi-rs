@@ -30,7 +30,9 @@ pub enum Format {
 
 impl Format {
     /// The name this format goes by everywhere it is written down: the config
-    /// key's value, the journal's `format` field, an API error's first word.
+    /// key's value, the journal's `format` field, an API error's first word —
+    /// and, uppercased with `_API_KEY`, the environment variable a key falls
+    /// back to. Renaming one renames the credential contract too.
     pub fn name(&self) -> &'static str {
         match self {
             Format::Anthropic { .. } => "anthropic",
