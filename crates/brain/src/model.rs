@@ -16,9 +16,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Which native format an endpoint speaks. Only these two: one that speaks
-/// Chat Completions belongs behind a gateway that translates, the same way a
-/// quirk does.
+/// Which native format an endpoint speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "format", rename_all = "snake_case")]
 pub enum Format {
@@ -26,19 +24,23 @@ pub enum Format {
     Anthropic { cache_control: CacheControl },
     /// `POST /v1/responses`
     OpenAi,
+    /// `POST /chat/completions`, the OpenAI chat wire
+    Chat,
 }
 
 impl Format {
-    /// The name this format goes by everywhere it is written down: the config
-    /// key's value, the journal's `format` field, an API error's first word —
-    /// and, uppercased with `_API_KEY`, the environment variable a key falls
-    /// back to. Renaming one renames the credential contract too.
-    pub fn name(&self) -> &'static str {
-        match self {
-            Format::Anthropic { .. } => "anthropic",
-            Format::OpenAi => "openai",
-        }
+/// The name this format goes by everywhere it is written down: the config
+/// key's value, the journal's `format` field, an API error's first word.
+/// It is not the credential contract: the two OpenAI-family wires share
+/// `OPENAI_API_KEY`, and only Anthropic keys on this name.
+/// Renaming one renames the journal word but never a key.
+pub fn name(&self) -> &'static str {
+    match self {
+        Format::Anthropic { .. } => "anthropic",
+        Format::OpenAi => "openai",
+        Format::Chat => "chat",
     }
+}
 }
 
 /// Whether to ask an Anthropic endpoint to cache, and for how long.
@@ -138,12 +140,12 @@ impl ModelSpec {
     }
 }
 
-/// A spec for tests to override the two or three fields they actually care
-/// about.
-///
-/// `ModelSpec` has no `Default` on purpose — an id, a model and a base url have
-/// no sensible empty value in production — so without this every test module
-/// builds the whole struct, and three of them had already drifted apart.
+// A spec for tests to override the two or three fields they actually care
+// about.
+//
+// `ModelSpec` has no `Default` on purpose — an id, a model and a base url have
+// no sensible empty value in production — so without this every test module
+// builds the whole struct, and three of them had already drifted apart.
 #[cfg(test)]
 impl ModelSpec {
     pub(crate) fn test() -> Self {

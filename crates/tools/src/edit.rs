@@ -6,9 +6,9 @@ use std::collections::HashMap;
 
 use crate::{Ctx, Tier, Tool, ToolError, ToolOutput};
 
-/// How many landed lines to echo back per file before summarizing instead.
+// How many landed lines to echo back per file before summarizing instead.
 const ECHO_LIMIT: usize = 40;
-/// Diff rows a run's display carries for one patch.
+// Diff rows a run's display carries for one patch.
 const SKETCH_LIMIT: usize = 24;
 
 #[derive(Deserialize)]
@@ -63,11 +63,11 @@ address past the end of the file, and a patch that would leave the file
 unparseable when it parsed before. Nothing is written unless every section
 applies."#;
 
-/// One table row, wrapped under its own label rather than running off the side.
-///
-/// The description is read by a model on every request; a paragraph that used
-/// to wrap and now does not is a real cost of generating prose instead of
-/// writing it.
+// One table row, wrapped under its own label rather than running off the side.
+//
+// The description is read by a model on every request; a paragraph that used
+// to wrap and now does not is a real cost of generating prose instead of
+// writing it.
 fn wrapped(label: &str, width: usize, text: &str) -> String {
     const RIGHT: usize = 78;
     let pad = 2 + width + 2;
@@ -88,12 +88,12 @@ fn wrapped(label: &str, width: usize, text: &str) -> String {
     out
 }
 
-/// The description the model reads, with the address forms filled in from the
-/// table that defines them.
-///
-/// Built rather than written out: this prose and the parser disagreeing is not
-/// hypothetical — it happened inside the commit that moved the grammar, and the
-/// stale line sat two functions away from the rewrite.
+// The description the model reads, with the address forms filled in from the
+// table that defines them.
+//
+// Built rather than written out: this prose and the parser disagreeing is not
+// hypothetical — it happened inside the commit that moved the grammar, and the
+// stale line sat two functions away from the rewrite.
 fn format() -> &'static str {
     static TEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     TEXT.get_or_init(|| {
@@ -157,19 +157,19 @@ fn echo(path: &str, before: &str, content: &str, landed: &[Landed]) -> String {
     out
 }
 
-/// Refuse a patch that leaves a file the parser can no longer read.
-///
-/// Only "parsed before, does not now" — never "does not parse". A file that is
-/// already broken is usually the reason an edit is happening, and refusing to
-/// touch it would strand the model with no way to repair it.
-///
-/// This is what a line range costs and `N*` does not: the model resolves the
-/// closing line itself, and one off leaves an orphaned brace that applies
-/// cleanly. Nothing is written when it fires, so the whole patch stays undone.
-///
-/// The message carries the hunk addresses against the file as it stands, and
-/// any hunk whose body nets a different brace count from the lines it replaces
-/// — the first thing to look at when the parse broke.
+// Refuse a patch that leaves a file the parser can no longer read.
+//
+// Only "parsed before, does not now" — never "does not parse". A file that is
+// already broken is usually the reason an edit is happening, and refusing to
+// touch it would strand the model with no way to repair it.
+//
+// This is what a line range costs and `N*` does not: the model resolves the
+// closing line itself, and one off leaves an orphaned brace that applies
+// cleanly. Nothing is written when it fires, so the whole patch stays undone.
+//
+// The message carries the hunk addresses against the file as it stands, and
+// any hunk whose body nets a different brace count from the lines it replaces
+// — the first thing to look at when the parse broke.
 fn broke_syntax(plan: &hashline::Plan, loaded: &HashMap<String, String>) -> Option<String> {
     for change in &plan.changes {
         let (path, before, after, landed) = match change {
@@ -205,11 +205,11 @@ fn broke_syntax(plan: &hashline::Plan, loaded: &HashMap<String, String>) -> Opti
     None
 }
 
-/// What the patch's own hunks point at, for a break that a bare "line N is
-/// `}`" leaves the model to hunt down by itself. Each hunk shows the lines it
-/// displaces (`took` — the file as it stands, since nothing has been written)
-/// and any whose body nets a different brace count from what it displaces —
-/// the shape an off-by-one range leaves behind.
+// What the patch's own hunks point at, for a break that a bare "line N is
+// `}`" leaves the model to hunt down by itself. Each hunk shows the lines it
+// displaces (`took` — the file as it stands, since nothing has been written)
+// and any whose body nets a different brace count from what it displaces —
+// the shape an off-by-one range leaves behind.
 fn hunk_help(after: &str, landed: &[Landed]) -> String {
     let new: Vec<&str> = after.lines().collect();
     let mut out = String::from("The hunks, against the file as it stands:");
@@ -272,8 +272,8 @@ fn hunk_help(after: &str, landed: &[Landed]) -> String {
     }
     out
 }
-/// Clamped to whatever `lines` actually holds: a range that reaches past the
-/// end, or starts at zero, shows what there is rather than panicking.
+// Clamped to whatever `lines` actually holds: a range that reaches past the
+// end, or starts at zero, shows what there is rather than panicking.
 fn hunk_rows<'a, 'b>(lines: &'a [&'b str], l: &Landed) -> &'a [&'b str] {
     &lines[l.start.saturating_sub(1).min(lines.len())..l.end.min(lines.len())]
 }
@@ -285,8 +285,8 @@ fn brace_net(s: &str) -> isize {
     })
 }
 
-/// The first line at or after `start` where the running brace count stops
-/// being positive — where the construct that opens there actually ends.
+// The first line at or after `start` where the running brace count stops
+// being positive — where the construct that opens there actually ends.
 fn balanced_end(lines: &[&str], start: usize) -> Option<usize> {
     let mut net = 0isize;
     for (i, l) in lines.iter().enumerate().skip(start.saturating_sub(1)) {
@@ -307,15 +307,15 @@ fn crop(s: &str, max: usize) -> String {
     t
 }
 
-/// What a person watching sees: the lines that went, and the lines that came.
-///
-/// Separate from the report the model reads, which is a set of addresses it can
-/// edit against. "Where can I edit next" and "what just changed" are different
-/// questions, and only the second one has a reader.
-///
-/// The first line rides beside the tool's name, so it carries the counts; the
-/// rest are the diff itself, each row carrying the file line it was or became,
-/// capped, because a display is not a transcript.
+// What a person watching sees: the lines that went, and the lines that came.
+//
+// Separate from the report the model reads, which is a set of addresses it can
+// edit against. "Where can I edit next" and "what just changed" are different
+// questions, and only the second one has a reader.
+//
+// The first line rides beside the tool's name, so it carries the counts; the
+// rest are the diff itself, each row carrying the file line it was or became,
+// capped, because a display is not a transcript.
 fn sketch(changes: &[Change], loaded: &HashMap<String, String>) -> String {
     let (mut plus, mut minus) = (0usize, 0usize);
     let mut files: Vec<(&str, Vec<String>)> = Vec::new();
@@ -410,7 +410,7 @@ fn sketch(changes: &[Change], loaded: &HashMap<String, String>) -> String {
         .join("\n")
 }
 
-/// What each file's tag is right now, for a refusal that turned on one.
+// What each file's tag is right now, for a refusal that turned on one.
 fn tags(loaded: &HashMap<String, String>) -> String {
     let mut out: Vec<String> = loaded
         .iter()

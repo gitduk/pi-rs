@@ -233,7 +233,7 @@ async fn multibyte_output_respects_the_byte_budget_and_stays_valid_utf8() {
     assert!(out.len() < 40_000, "clamped output was {} bytes", out.len());
 }
 
-/// Read a file the way the model would, then edit it with the TAG that read returned.
+// Read a file the way the model would, then edit it with the TAG that read returned.
 async fn read_then_edit(c: &Ctx, path: &str, ops: &str) -> Result<String, ToolError> {
     let view = run(&tools::read::Read, json!({ "path": path }), c).await;
     let tag = view.split('#').nth(1).unwrap().split(']').next().unwrap();

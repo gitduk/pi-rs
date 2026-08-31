@@ -34,18 +34,18 @@ use tracing_subscriber::filter::Targets;
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
 
-/// How much of one string field survives. Raising the level raises this too:
-/// at `info` the journal is a timeline and a truncated patch still identifies
-/// itself, while `debug` is what you turn on to read the patch.
+// How much of one string field survives. Raising the level raises this too:
+// at `info` the journal is a timeline and a truncated patch still identifies
+// itself, while `debug` is what you turn on to read the patch.
 const FIELD_CAP_INFO: usize = 1_024;
 const FIELD_CAP_DEBUG: usize = 64 * 1_024;
 
-/// A wedged run can produce records without bound. Past this the journal says
-/// so and stops, rather than filling the disk of the machine it is diagnosing.
+// A wedged run can produce records without bound. Past this the journal says
+// so and stops, rather than filling the disk of the machine it is diagnosing.
 const FILE_CAP: u64 = 64 * 1024 * 1024;
 
-/// Journals outlive the sessions they describe by two weeks. Long enough for
-/// "it did something odd on Monday", short enough not to accumulate.
+// Journals outlive the sessions they describe by two weeks. Long enough for
+// "it did something odd on Monday", short enough not to accumulate.
 const KEEP: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -79,16 +79,16 @@ impl LogLevel {
     }
 }
 
-/// Names the record's own skeleton owns. `msg` is not among them: an event's
-/// format string is exactly what should fill it.
+// Names the record's own skeleton owns. `msg` is not among them: an event's
+// format string is exactly what should fill it.
 const HEAD: [&str; 5] = ["ts", "ms", "lvl", "ev", "in"];
 
-/// Field names whose value never reaches the file.
-///
-/// A backstop, not the rule: the rule is that call sites do not pass secrets.
-/// Matched on the whole name and on the `_key` / `_token` / `_secret` suffix,
-/// so `api_key` goes and `api_key_env` — the name of a variable, which is
-/// exactly what a key bug needs — stays.
+// Field names whose value never reaches the file.
+//
+// A backstop, not the rule: the rule is that call sites do not pass secrets.
+// Matched on the whole name and on the `_key` / `_token` / `_secret` suffix,
+// so `api_key` goes and `api_key_env` — the name of a variable, which is
+// exactly what a key bug needs — stays.
 const SECRET: [&str; 7] = [
     "api_key",
     "apikey",
@@ -107,8 +107,8 @@ fn secret(name: &str) -> bool {
         || lower.ends_with("_secret")
 }
 
-/// Enough to tell two keys apart, not enough to reconstruct either. FNV-1a
-/// because the question is only "is this the same string as last time".
+// Enough to tell two keys apart, not enough to reconstruct either. FNV-1a
+// because the question is only "is this the same string as last time".
 fn fingerprint(s: &str) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in s.as_bytes() {
@@ -118,8 +118,8 @@ fn fingerprint(s: &str) -> String {
     format!("<redacted {h:08x}>")
 }
 
-/// Cut on a char boundary, and say how much went. A silently short value reads
-/// as the whole value, which is how a truncated log tells you a lie.
+// Cut on a char boundary, and say how much went. A silently short value reads
+// as the whole value, which is how a truncated log tells you a lie.
 fn clip(s: &str, cap: usize) -> Value {
     if s.len() <= cap {
         return Value::String(s.to_string());
@@ -133,8 +133,8 @@ fn clip(s: &str, cap: usize) -> Value {
 
 // ---------------------------------------------------------------- timestamps
 
-/// RFC 3339, UTC, milliseconds. Hand-rolled: a calendar is thirty lines and a
-/// date crate is a dependency the rest of the binary has no use for.
+// RFC 3339, UTC, milliseconds. Hand-rolled: a calendar is thirty lines and a
+// date crate is a dependency the rest of the binary has no use for.
 fn rfc3339(t: SystemTime) -> String {
     let d = t.duration_since(UNIX_EPOCH).unwrap_or_default();
     let secs = d.as_secs() as i64;
@@ -149,7 +149,7 @@ fn rfc3339(t: SystemTime) -> String {
     )
 }
 
-/// Days since the epoch to a civil date (Howard Hinnant's `civil_from_days`).
+// Days since the epoch to a civil date (Howard Hinnant's `civil_from_days`).
 fn civil(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = z.div_euclid(146_097);
@@ -175,10 +175,10 @@ struct Sink {
     path: PathBuf,
 }
 
-/// The open journal. One per run; the layer holds it and nothing else writes
-/// to the file. Which file it is writing to lives on the [`Sink`], so [`path`]
-/// reads it back from the journal itself rather than from a second copy that
-/// could drift.
+// The open journal. One per run; the layer holds it and nothing else writes
+// to the file. Which file it is writing to lives on the [`Sink`], so [`path`]
+// reads it back from the journal itself rather than from a second copy that
+// could drift.
 struct Journal {
     /// Wall clock is what pairs a record with everything else on the machine;
     /// the monotonic one is what measures. Neither substitutes for the other.
@@ -187,7 +187,7 @@ struct Journal {
     sink: Mutex<Sink>,
 }
 
-/// A fresh sink on `file`, counting what is already in it.
+// A fresh sink on `file`, counting what is already in it.
 fn sink_for(file: File, path: &Path) -> Sink {
     let written = file.metadata().map(|m| m.len()).unwrap_or(0);
     Sink {
@@ -198,7 +198,7 @@ fn sink_for(file: File, path: &Path) -> Sink {
     }
 }
 
-/// Open for appending, 0600, the same as the transcript beside it.
+// Open for appending, 0600, the same as the transcript beside it.
 fn open_file(path: &Path) -> std::io::Result<File> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -270,8 +270,8 @@ impl Journal {
 
 // -------------------------------------------------------------------- layer
 
-/// Collects `tracing` fields into a JSON object, redacting and clipping on the
-/// way in so nothing oversized is ever held.
+// Collects `tracing` fields into a JSON object, redacting and clipping on the
+// way in so nothing oversized is ever held.
 struct Fields<'a> {
     into: &'a mut Map<String, Value>,
     cap: usize,
@@ -345,7 +345,7 @@ impl Visit for Fields<'_> {
     }
 }
 
-/// What a span carries to the records inside it.
+// What a span carries to the records inside it.
 struct Scope {
     fields: Map<String, Value>,
     opened: Instant,
@@ -355,18 +355,18 @@ struct JournalLayer {
     journal: std::sync::Arc<Journal>,
 }
 
-/// Which records reach the file.
-///
-/// Ours, at the chosen level; a dependency's, only at `trace`. Without the
-/// second half the journal is mostly hyper's connection pool, and `trace` — the
-/// level you reach for when nothing else explained it — is unreadable. That
-/// level is also the one place a dependency's own account is worth having,
-/// which is where the line lifts.
-///
-/// "Ours" is every crate in the workspace as well as the `pi::` namespace, so a
-/// `tracing` call that forgets the target convention is still recorded. The
-/// alternative — matching `pi::` alone — drops such a call silently at every
-/// level, which is precisely the kind of bug this file exists to catch.
+// Which records reach the file.
+//
+// Ours, at the chosen level; a dependency's, only at `trace`. Without the
+// second half the journal is mostly hyper's connection pool, and `trace` — the
+// level you reach for when nothing else explained it — is unreadable. That
+// level is also the one place a dependency's own account is worth having,
+// which is where the line lifts.
+//
+// "Ours" is every crate in the workspace as well as the `pi::` namespace, so a
+// `tracing` call that forgets the target convention is still recorded. The
+// alternative — matching `pi::` alone — drops such a call silently at every
+// level, which is precisely the kind of bug this file exists to catch.
 fn ours(level: LevelFilter) -> Targets {
     const MINE: [&str; 7] = ["pi", "cli", "agent", "brain", "tools", "hashline", "syntax"];
     let theirs = if level == LevelFilter::TRACE {
@@ -397,7 +397,7 @@ impl JournalLayer {
     }
 }
 
-/// The span path a record sits under, outermost first: `turn>tool`.
+// The span path a record sits under, outermost first: `turn>tool`.
 fn path_of<S>(span: &tracing_subscriber::registry::SpanRef<'_, S>) -> String
 where
     S: for<'a> LookupSpan<'a>,
@@ -498,9 +498,9 @@ where
 
 // ------------------------------------------------------------------- install
 
-/// The journal this run writes to. One per run, retargeted in place when the
-/// run moves to another session, so a surface that wants to name it can reach
-/// it from far away without the path being threaded through the terminal loop.
+// The journal this run writes to. One per run, retargeted in place when the
+// run moves to another session, so a surface that wants to name it can reach
+// it from far away without the path being threaded through the terminal loop.
 static JOURNAL: std::sync::OnceLock<std::sync::Arc<Journal>> = std::sync::OnceLock::new();
 
 /// Where the journal is writing right now, for `/log` and the failure line.
@@ -510,18 +510,18 @@ pub fn path() -> Option<PathBuf> {
     JOURNAL.get()?.sink.lock().ok().map(|s| s.path.clone())
 }
 
-/// Where journals live, beside the transcripts they belong to.
+// Where journals live, beside the transcripts they belong to.
 fn dir() -> Option<PathBuf> {
     tools::state::dir().map(|d| d.join("logs"))
 }
 
-/// Where a session's journal lives.
+// Where a session's journal lives.
 fn path_for(dir: &Path, id: &str) -> PathBuf {
     dir.join(format!("{}.jsonl", tools::state::file_stem(id)))
 }
 
-/// Drop journals nothing will be read back from. Failures are ignored: a full
-/// or read-only log directory is a reason to log less, never to stop the run.
+// Drop journals nothing will be read back from. Failures are ignored: a full
+// or read-only log directory is a reason to log less, never to stop the run.
 fn prune(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;

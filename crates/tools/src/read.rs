@@ -29,8 +29,8 @@ fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_SNIFF).any(|b| *b == 0)
 }
 
-/// Deliver the assembled view. Anything over the threshold is spilled and the
-/// transcript keeps a bounded head and tail plus the locator.
+// Deliver the assembled view. Anything over the threshold is spilled and the
+// transcript keeps a bounded head and tail plus the locator.
 fn deliver(ctx: &Ctx, out: String) -> Result<ToolOutput, ToolError> {
     match spill::write(ctx, &out)? {
         None => Ok(ToolOutput::text(out)),

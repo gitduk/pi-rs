@@ -8,7 +8,7 @@ pub struct Skill {
     pub dir: PathBuf,
 }
 
-/// A name that cannot leave the skills directory it was found in.
+// A name that cannot leave the skills directory it was found in.
 fn usable(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
@@ -17,7 +17,7 @@ fn usable(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// Strip one layer of matching quotes, as a YAML scalar would carry.
+// Strip one layer of matching quotes, as a YAML scalar would carry.
 fn unquote(value: &str) -> &str {
     let v = value.trim();
     for q in ['"', '\''] {
@@ -75,12 +75,12 @@ fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-/// `.agents/skills` here and in every ancestor up to the repository root.
-///
-/// A monorepo keeps shared skills at the top while the work happens several
-/// directories below, so stopping at the workspace would hide them. The walk
-/// ends at the repository root and never reaches `$HOME`, whose `.agents` is
-/// the personal one and is added separately.
+// `.agents/skills` here and in every ancestor up to the repository root.
+//
+// A monorepo keeps shared skills at the top while the work happens several
+// directories below, so stopping at the workspace would hide them. The walk
+// ends at the repository root and never reaches `$HOME`, whose `.agents` is
+// the personal one and is added separately.
 fn ancestral_agents(workspace: &Path) -> Vec<PathBuf> {
     let home = home();
     let mut out = Vec::new();
@@ -110,7 +110,7 @@ pub fn sources(workspace: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// What a skill directory turned out to be.
+// What a skill directory turned out to be.
 enum Read {
     Skill(Box<Skill>),
     /// Present but unusable, and worth saying so: a skill that silently fails
@@ -158,11 +158,11 @@ pub fn discover(workspace: &Path) -> Found {
     discover_from(&sources(workspace))
 }
 
-/// How far below a source directory a skill may sit.
-///
-/// Skill collections group by category, so the top level is not always where
-/// they are. A bound keeps a stray symlink or a `node_modules` from turning
-/// discovery into a full filesystem walk.
+// How far below a source directory a skill may sit.
+//
+// Skill collections group by category, so the top level is not always where
+// they are. A bound keeps a stray symlink or a `node_modules` from turning
+// discovery into a full filesystem walk.
 const MAX_DEPTH: usize = 3;
 
 /// The same, over explicit directories. Taking them as an argument keeps the

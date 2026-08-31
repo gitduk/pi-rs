@@ -19,7 +19,7 @@ fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-/// The one file a directory contributes, or none.
+// The one file a directory contributes, or none.
 fn in_dir(dir: &Path) -> Option<PathBuf> {
     let path = dir.join("AGENTS.md");
     path.is_file().then_some(path)
@@ -74,11 +74,11 @@ pub fn load(workspace: &Path) -> Loaded {
     from(workspace, home().as_deref(), tools::state::dir().as_deref())
 }
 
-/// The same, against a stated home and pi root rather than this process's.
-///
-/// A test that reads the real `$HOME` passes or fails on whether whoever runs
-/// it happens to keep a `Pi.md` — which is a property of the machine, not of
-/// the code under test.
+// The same, against a stated home and pi root rather than this process's.
+//
+// A test that reads the real `$HOME` passes or fails on whether whoever runs
+// it happens to keep a `Pi.md` — which is a property of the machine, not of
+// the code under test.
 fn from(workspace: &Path, home: Option<&Path>, root: Option<&Path>) -> Loaded {
     let mut loaded = Loaded::default();
     for path in paths(workspace, home, root) {

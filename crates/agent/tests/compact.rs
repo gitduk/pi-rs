@@ -7,7 +7,7 @@ use common::spec;
 use brain::message::{AssistantContent, Message, ToolCall, ToolResult, UserContent};
 use serde_json::json;
 
-/// Drive the real path — plan, record, derive — and hand back the new view.
+// Drive the real path — plan, record, derive — and hand back the new view.
 fn compact(messages: &mut Vec<Message>, budget: usize, policy: &Policy) -> Report {
     let mut log = Session::from_messages(messages.iter().cloned());
     let (record, report) = plan(&log, &spec(), budget, policy);
@@ -49,8 +49,8 @@ fn body_of(m: &Message) -> String {
     }
 }
 
-/// Every `tool_use` must still have exactly one answering `tool_result`, or the
-/// next request is invalid on both wires.
+// Every `tool_use` must still have exactly one answering `tool_result`, or the
+// next request is invalid on both wires.
 fn assert_balanced(messages: &[Message]) {
     let calls: Vec<_> = messages
         .iter()
@@ -370,8 +370,8 @@ fn a_dropped_exchange_never_orphans_the_result_that_answered_it() {
     );
 }
 
-/// The one weight on the assistant side compaction may take. What went is the
-/// bulk; what a later turn still needs — which file, which call — stays.
+// The one weight on the assistant side compaction may take. What went is the
+// bulk; what a later turn still needs — which file, which call — stays.
 #[test]
 fn an_oversized_argument_goes_while_the_path_beside_it_stays() {
     let mut s = Session::new();
@@ -420,8 +420,8 @@ fn an_oversized_argument_goes_while_the_path_beside_it_stays() {
     );
 }
 
-/// An argument already taken must not be taken again — the second pass would
-/// find the notice, not the bulk, and record an omission that reclaims nothing.
+// An argument already taken must not be taken again — the second pass would
+// find the notice, not the bulk, and record an omission that reclaims nothing.
 #[test]
 fn arguments_already_taken_are_not_taken_twice() {
     let mut s = Session::new();
@@ -643,11 +643,11 @@ fn a_skill_body_survives_a_compaction_that_takes_everything_else() {
     );
 }
 
-/// The planner counts `MESSAGE_OVERHEAD` per entry and the sender counts it per
-/// message. Those were two different numbers while the view merged a turn's
-/// user entries: six parallel results cost the planner six framings and the
-/// sender one, so compaction planned against a budget the request never spent.
-/// One entry, one message closes it — and this is what keeps it closed.
+// The planner counts `MESSAGE_OVERHEAD` per entry and the sender counts it per
+// message. Those were two different numbers while the view merged a turn's
+// user entries: six parallel results cost the planner six framings and the
+// sender one, so compaction planned against a budget the request never spent.
+// One entry, one message closes it — and this is what keeps it closed.
 #[test]
 fn the_planner_and_the_sender_count_the_same_transcript() {
     let mut s = Session::new();
@@ -679,9 +679,9 @@ fn the_planner_and_the_sender_count_the_same_transcript() {
     );
 }
 
-/// A `!` command's output is not a question. It used to be stored as the same
-/// `Text` a prompt is, so the drop tier read it as one — and took it as a round
-/// of its own, out from under the `fix that` that referred to it.
+// A `!` command's output is not a question. It used to be stored as the same
+// `Text` a prompt is, so the drop tier read it as one — and took it as a round
+// of its own, out from under the `fix that` that referred to it.
 #[test]
 fn a_bang_command_goes_with_the_question_that_refers_to_it() {
     let mut s = Session::new();
@@ -719,8 +719,8 @@ fn a_bang_command_goes_with_the_question_that_refers_to_it() {
     let _ = ran;
 }
 
-/// And it is the one piece of user-side text that *may* be shrunk: nothing is
-/// waiting on an answer to it, and a `!cargo test` can be tens of kilobytes.
+// And it is the one piece of user-side text that *may* be shrunk: nothing is
+// waiting on an answer to it, and a `!cargo test` can be tens of kilobytes.
 #[test]
 fn a_bang_command_can_be_shrunk_where_a_question_cannot() {
     let mut s = Session::new();
@@ -744,13 +744,13 @@ fn a_bang_command_can_be_shrunk_where_a_question_cannot() {
     assert!(joined.contains("fix that"), "and so does this one");
 }
 
-/// What the round-sized unit is for. Dropping an assistant turn and its
-/// results left the prompt that asked for them standing with nothing after it
-/// — legal on both wires, and pure waste: a question already answered, whose
-/// answer is gone, paid for on every turn from here on.
-///
-/// One prompt may stand unanswered, and only one: the opening task, which is
-/// kept on purpose.
+// What the round-sized unit is for. Dropping an assistant turn and its
+// results left the prompt that asked for them standing with nothing after it
+// — legal on both wires, and pure waste: a question already answered, whose
+// answer is gone, paid for on every turn from here on.
+//
+// One prompt may stand unanswered, and only one: the opening task, which is
+// kept on purpose.
 #[test]
 fn dropping_leaves_no_question_without_its_answer() {
     let mut s = Session::new();
@@ -800,10 +800,10 @@ fn dropping_leaves_no_question_without_its_answer() {
     assert_eq!(view[0].text(), "the original task", "the task itself stays");
 }
 
-/// The drop tier's unit is an assistant turn and the results answering it. A
-/// turn that called no tool has no answers, so it must go alone — sweeping
-/// forward to the next assistant takes the user's next question with it, and
-/// that question is not stale context, it is what they asked.
+// The drop tier's unit is an assistant turn and the results answering it. A
+// turn that called no tool has no answers, so it must go alone — sweeping
+// forward to the next assistant takes the user's next question with it, and
+// that question is not stale context, it is what they asked.
 #[test]
 fn dropping_a_chat_only_turn_does_not_take_the_next_question_with_it() {
     let mut s = Session::new();

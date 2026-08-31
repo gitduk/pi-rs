@@ -8,25 +8,25 @@ use crate::session::{
     Compaction, Entry, EntryId, Omission, Seen, Session, UserBody, oversized_args, user_block,
 };
 
-/// Tools whose results describe current state rather than an action taken. Only
-/// these supersede: an `edit` result records something that happened, and the
-/// record stays true however many later edits land — but only the newest file
-/// read is worth carrying.
-///
-/// `todo` was here until the plan moved to a note: its result is now an
-/// acknowledgement with nothing in it to supersede.
+// Tools whose results describe current state rather than an action taken. Only
+// these supersede: an `edit` result records something that happened, and the
+// record stays true however many later edits land — but only the newest file
+// read is worth carrying.
+//
+// `todo` was here until the plan moved to a note: its result is now an
+// acknowledgement with nothing in it to supersede.
 const SUPERSEDABLE: &[&str] = &["read", "grep", "glob"];
 
-/// Results that must survive compaction whatever the budget says.
-///
-/// A skill body is instructions the agent is in the middle of following.
-/// Omitting it saves tokens and breaks the task — omp protects these for the
-/// same reason.
+// Results that must survive compaction whatever the budget says.
+//
+// A skill body is instructions the agent is in the middle of following.
+// Omitting it saves tokens and breaks the task — omp protects these for the
+// same reason.
 const PROTECTED: &[&str] = &["skill"];
 
-/// What stands in for an argument the model no longer sees. Written into the
-/// record as well as the view, so an archive says what went without the reader
-/// having to know the rule.
+// What stands in for an argument the model no longer sees. Written into the
+// record as well as the view, so an archive says what went without the reader
+// having to know the rule.
 const ARGS_TAKEN: &str = "[omitted: the call has already run]";
 
 #[derive(Debug, Clone, Copy)]
@@ -79,9 +79,9 @@ impl Report {
     }
 }
 
-/// One entry as the plan currently intends to leave it. `tokens` tracks the
-/// running estimate so the budget check is a sum, not a re-walk of the whole
-/// transcript after every decision.
+// One entry as the plan currently intends to leave it. `tokens` tracks the
+// running estimate so the budget check is a sum, not a re-walk of the whole
+// transcript after every decision.
 struct Item<'a> {
     id: EntryId,
     entry: &'a Entry,
@@ -153,10 +153,10 @@ impl<'a> Item<'a> {
     }
 }
 
-/// Per entry, not per wire message: several user entries merge into one
-/// message, so this counts the framing more than once. That is the safe
-/// direction — the estimate decides *when* to compact, and compacting a little
-/// early costs tokens where compacting a little late costs the request.
+// Per entry, not per wire message: several user entries merge into one
+// message, so this counts the framing more than once. That is the safe
+// direction — the estimate decides *when* to compact, and compacting a little
+// early costs tokens where compacting a little late costs the request.
 fn tokens_of(
     seen: &Seen<'_>,
     spec: &ModelSpec,
@@ -173,8 +173,8 @@ fn tokens_of(
     estimate::MESSAGE_OVERHEAD + body
 }
 
-/// Tokens sitting after each index, so "is this inside the working tail" is a
-/// lookup rather than a re-walk.
+// Tokens sitting after each index, so "is this inside the working tail" is a
+// lookup rather than a re-walk.
 fn suffixes(items: &[Item<'_>]) -> Vec<usize> {
     let mut out = vec![0; items.len()];
     let mut running = 0;
@@ -185,9 +185,9 @@ fn suffixes(items: &[Item<'_>]) -> Vec<usize> {
     out
 }
 
-/// One text block standing in for a pruned entry: the notice, a bounded head,
-/// a marker naming how much went, and a bounded tail. Chars are code points, so
-/// slicing never splits a surrogate pair.
+// One text block standing in for a pruned entry: the notice, a bounded head,
+// a marker naming how much went, and a bounded tail. Chars are code points, so
+// slicing never splits a surrogate pair.
 fn pruned(notice: &str, text: &str, policy: &Policy) -> String {
     let c = text.chars().count();
     if c <= policy.prune_chars {
@@ -199,8 +199,8 @@ fn pruned(notice: &str, text: &str, policy: &Policy) -> String {
     format!("{notice}\n\n{head}\n\n[… {dropped} chars omitted …]\n\n{tail}")
 }
 
-/// What makes two results interchangeable. A later result under the same key
-/// makes every earlier one dead weight.
+// What makes two results interchangeable. A later result under the same key
+// makes every earlier one dead weight.
 fn supersede_key(name: &str, args: &Value) -> Option<String> {
     if !SUPERSEDABLE.contains(&name) {
         return None;
@@ -445,13 +445,13 @@ pub fn plan(
     (record, report)
 }
 
-/// Where each round of the conversation begins.
-///
-/// A round is a prompt and everything that answered it. What sits *ahead* of a
-/// prompt with nothing between belongs to it, not to the round that ended
-/// before: an image is the attachment the question is about, and a `!` command
-/// is what the user ran in order to ask. Attaching either backwards lets the
-/// drop tier take it out from under the question that refers to it.
+// Where each round of the conversation begins.
+//
+// A round is a prompt and everything that answered it. What sits *ahead* of a
+// prompt with nothing between belongs to it, not to the round that ended
+// before: an image is the attachment the question is about, and a `!` command
+// is what the user ran in order to ask. Attaching either backwards lets the
+// drop tier take it out from under the question that refers to it.
 fn round_starts(items: &[Item<'_>]) -> Vec<usize> {
     let is_prompt = |it: &Item<'_>| {
         matches!(
@@ -485,8 +485,8 @@ fn round_starts(items: &[Item<'_>]) -> Vec<usize> {
     out
 }
 
-/// A skill body is instructions the agent is in the middle of following.
-/// Eliding it saves tokens and breaks the task, and so does dropping it.
+// A skill body is instructions the agent is in the middle of following.
+// Eliding it saves tokens and breaks the task, and so does dropping it.
 fn protected(it: &Item<'_>) -> bool {
     matches!(
         it.entry,
@@ -497,8 +497,8 @@ fn protected(it: &Item<'_>) -> bool {
     )
 }
 
-/// The entries of `span` that are still in the view, or `None` when the span
-/// holds nothing to take or something that must not go.
+// The entries of `span` that are still in the view, or `None` when the span
+// holds nothing to take or something that must not go.
 fn takeable(items: &[Item<'_>], span: std::ops::Range<usize>) -> Option<Vec<usize>> {
     if items[span.clone()].iter().any(protected) {
         return None;
@@ -507,8 +507,8 @@ fn takeable(items: &[Item<'_>], span: std::ops::Range<usize>) -> Option<Vec<usiz
     (!out.is_empty()).then_some(out)
 }
 
-/// The first entry of a round's body — everything the prompt and its
-/// attachments are not.
+// The first entry of a round's body — everything the prompt and its
+// attachments are not.
 fn after_prompt(items: &[Item<'_>], start: usize, end: usize) -> usize {
     items[start..end]
         .iter()
@@ -524,22 +524,22 @@ fn after_prompt(items: &[Item<'_>], start: usize, end: usize) -> usize {
         .map_or(start, |p| start + p + 1)
 }
 
-/// What leaves the view next, oldest first.
-///
-/// The unit is a round — a prompt and everything that answered it — because
-/// the smaller one was an assistant turn and its results, which left the
-/// question standing with its answer gone. A question nobody will answer is
-/// not the answer's spare context; it is what someone asked.
-///
-/// The opening prompt is the task itself and stays whatever happens to its
-/// work, so round zero gives up its body and keeps its head.
-///
-/// A round the working tail reaches is taken exchange by exchange instead.
-/// That is not a weaker rule but the same one: inside a single round there is
-/// only one question, it is the task, and it is already being kept — so there
-/// is nothing left to orphan. It is also the only thing that works on the
-/// shape most sessions actually have, one prompt and eighty tool calls, where
-/// a round-sized unit can never fire at all.
+// What leaves the view next, oldest first.
+//
+// The unit is a round — a prompt and everything that answered it — because
+// the smaller one was an assistant turn and its results, which left the
+// question standing with its answer gone. A question nobody will answer is
+// not the answer's spare context; it is what someone asked.
+//
+// The opening prompt is the task itself and stays whatever happens to its
+// work, so round zero gives up its body and keeps its head.
+//
+// A round the working tail reaches is taken exchange by exchange instead.
+// That is not a weaker rule but the same one: inside a single round there is
+// only one question, it is the task, and it is already being kept — so there
+// is nothing left to orphan. It is also the only thing that works on the
+// shape most sessions actually have, one prompt and eighty tool calls, where
+// a round-sized unit can never fire at all.
 fn droppable(items: &[Item<'_>], policy: &Policy, suffix: &[usize]) -> Option<Vec<usize>> {
     let starts = round_starts(items);
     let tail = |end: usize| end < items.len() && suffix[end] >= policy.protect_tail;
@@ -579,13 +579,13 @@ fn droppable(items: &[Item<'_>], policy: &Policy, suffix: &[usize]) -> Option<Ve
     None
 }
 
-/// One exchange: an assistant turn and the results answering it. The unit
-/// `droppable` falls back to, inside the newest round.
-///
-/// Joined by call id rather than by adjacency, because the invariant is the
-/// pairing — a `tool_result` whose `tool_use` is gone makes the next request
-/// invalid — and adjacency does not express it: a turn that called no tool has
-/// no answers, so the entry after it belongs to whatever came next, not here.
+// One exchange: an assistant turn and the results answering it. The unit
+// `droppable` falls back to, inside the newest round.
+//
+// Joined by call id rather than by adjacency, because the invariant is the
+// pairing — a `tool_result` whose `tool_use` is gone makes the next request
+// invalid — and adjacency does not express it: a turn that called no tool has
+// no answers, so the entry after it belongs to whatever came next, not here.
 fn exchange(items: &[Item<'_>], start: usize) -> Vec<usize> {
     let calls: Vec<&str> = items[start]
         .entry

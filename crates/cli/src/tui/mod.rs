@@ -39,26 +39,26 @@ use editor::Editor;
 use screen::{Rows, Screen};
 use std::sync::Arc;
 
-/// What a folded run shows instead of what it is thinking.
+// What a folded run shows instead of what it is thinking.
 const THINKING: &str = "thinking...";
 
 
-/// How close two Ctrl-C presses must be to read as one deliberate quit.
-///
-/// Borrowed from pi, which uses the same 500ms. A latching flag looks simpler
-/// and is wrong: clear one half-typed line, type another, clear that — and the
-/// second clear reads as the second half of a double-tap and quits.
+// How close two Ctrl-C presses must be to read as one deliberate quit.
+//
+// Borrowed from pi, which uses the same 500ms. A latching flag looks simpler
+// and is wrong: clear one half-typed line, type another, clear that — and the
+// second clear reads as the second half of a double-tap and quits.
 const DOUBLE_TAP: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// Whether a press lands inside the double-tap window of the previous one,
-/// and records the press either way.
+// Whether a press lands inside the double-tap window of the previous one,
+// and records the press either way.
 fn double_tap(last: &mut Option<Instant>, now: Instant) -> bool {
     let hit = last.is_some_and(|p| now.duration_since(p) < DOUBLE_TAP);
     *last = Some(now);
     hit
 }
 
-/// What a key press asked the loop to do. Every press redraws regardless.
+// What a key press asked the loop to do. Every press redraws regardless.
 #[derive(Debug, PartialEq, Eq)]
 enum Act {
     None,
@@ -74,13 +74,13 @@ enum Act {
     NewSession,
     Quit,
 }
-/// What `/resume <name>` completes against, read the first time a completion
-/// asks for it.
-///
-/// Lazy because reading it means opening every archive for this workspace, and
-/// most runs never type `/resume` at all — reading it up front was the whole of
-/// a noticeable startup pause. `/resume` with no argument does not come through
-/// here; it asks the store directly, as it always did.
+// What `/resume <name>` completes against, read the first time a completion
+// asks for it.
+//
+// Lazy because reading it means opening every archive for this workspace, and
+// most runs never type `/resume` at all — reading it up front was the whole of
+// a noticeable startup pause. `/resume` with no argument does not come through
+// here; it asks the store directly, as it always did.
 struct Sessions {
     store: crate::session::Store,
     workspace: std::path::PathBuf,
@@ -108,13 +108,13 @@ impl Sessions {
     }
 }
 
-/// Whether reasoning is folded to its count line, and which block the stream
-/// is filling right now.
-///
-/// Thinking always lives in a foldable scrollback entry, folded or not: the
-/// screen is repainted from its rows every frame, so a line already shown
-/// can still be folded. A block's own state lasts only while it is last; the
-/// next block pushes it back to `folded`, the switch.
+// Whether reasoning is folded to its count line, and which block the stream
+// is filling right now.
+//
+// Thinking always lives in a foldable scrollback entry, folded or not: the
+// screen is repainted from its rows every frame, so a line already shown
+// can still be folded. A block's own state lasts only while it is last; the
+// next block pushes it back to `folded`, the switch.
 struct Thinking {
     /// The next block id; closed rows keep the id they were born with, so
     /// `land` appends only to the open block's entry.
@@ -130,12 +130,12 @@ struct Thinking {
     last: bool,
 }
 
-/// Shut: the reasoning is worth a glance while it runs and almost never worth
-/// the scrollback it costs afterwards.
-///
-/// The only constructor, because a derived one would answer `false` here — the
-/// opposite of what the type says two lines up, in the one place nobody would
-/// think to look.
+// Shut: the reasoning is worth a glance while it runs and almost never worth
+// the scrollback it costs afterwards.
+//
+// The only constructor, because a derived one would answer `false` here — the
+// opposite of what the type says two lines up, in the one place nobody would
+// think to look.
 impl Default for Thinking {
     fn default() -> Self {
         Self {
@@ -240,7 +240,7 @@ impl Thinking {
     }
 }
 
-/// The newest reasoning block's entry in the scrollback, if any.
+// The newest reasoning block's entry in the scrollback, if any.
 fn last_folded(scrollback: &mut [Row]) -> Option<&mut Row> {
     scrollback
         .iter_mut()
@@ -248,9 +248,9 @@ fn last_folded(scrollback: &mut [Row]) -> Option<&mut Row> {
         .find(|r| r.block().is_some())
 }
 
-/// The scrollback as rows, walked from either end without flattening the
-/// whole history: `window` only ever needs the newest `want` rows, and an
-/// unfolded thinking block is not worth re-materializing per frame.
+// The scrollback as rows, walked from either end without flattening the
+// whole history: `window` only ever needs the newest `want` rows, and an
+// unfolded thinking block is not worth re-materializing per frame.
 struct ScrollbackRows<'a> {
     rows: &'a [Row],
     /// The frame's width, for the rows that clip to fit.
@@ -334,12 +334,12 @@ impl<'a> DoubleEndedIterator for ScrollbackRows<'a> {
 }
 
 
-/// The rows between the scrollback and the status line: the reasoning window,
-/// and the paragraph still being written.
-///
-/// A free function because it is where both of this feature's bugs lived and
-/// `Ui` cannot be built without a terminal — a decision no test can reach is
-/// one that gets its second chance in front of the user.
+// The rows between the scrollback and the status line: the reasoning window,
+// and the paragraph still being written.
+//
+// A free function because it is where both of this feature's bugs lived and
+// `Ui` cannot be built without a terminal — a decision no test can reach is
+// one that gets its second chance in front of the user.
 fn body(
     thinking: &Thinking,
     scrollback: &[Row],
@@ -382,26 +382,26 @@ fn body(
     rows
 }
 
-/// A tool call still running, shown as one animated row in the live region
-/// until its result lands and the row scrolls up as a check or cross.
+// A tool call still running, shown as one animated row in the live region
+// until its result lands and the row scrolls up as a check or cross.
 struct RunTool {
     id: String,
     name: String,
     summary: String,
 }
 
-/// The one row a still-running tool occupies. The frame is the animation;
-/// `ToolEnd` and `abandon_tools` replace the row with a final line.
+// The one row a still-running tool occupies. The frame is the animation;
+// `ToolEnd` and `abandon_tools` replace the row with a final line.
 fn tool_row(frame: usize, name: &str, summary: &str) -> String {
     let frame = status::FRAMES[frame % status::FRAMES.len()];
     format!("{frame} {}", row::named(name, summary))
 }
 
 
-/// The transcript as rows, exactly as the live stream would have drawn them:
-/// prompts with their gutter, answers as markdown, tool calls as their result
-/// lines, reasoning as a foldable block. A rewind rebuilds the screen from
-/// this, so the view returns to the point the conversation did.
+// The transcript as rows, exactly as the live stream would have drawn them:
+// prompts with their gutter, answers as markdown, tool calls as their result
+// lines, reasoning as a foldable block. A rewind rebuilds the screen from
+// this, so the view returns to the point the conversation did.
 fn scrollback_from(
     session: &agent::session::Session,
     paint: &Paint,
@@ -507,7 +507,7 @@ fn scrollback_from(
     out
 }
 
-/// Everything the terminal shows, and nothing the session knows.
+// Everything the terminal shows, and nothing the session knows.
 struct Ui {
     screen: Screen,
     keys: Arc<Keys>,
@@ -585,8 +585,8 @@ struct Ui {
     scroll: usize,
 }
 
-/// One row either menu can offer: a completion of the line, or a message
-/// from the rewind selector to go back to.
+// One row either menu can offer: a completion of the line, or a message
+// from the rewind selector to go back to.
 #[derive(Clone)]
 enum MenuEntry {
     Completion(Candidate),
@@ -1308,13 +1308,13 @@ impl Ui {
 
 }
 
-/// What the status line should say the run has cost.
-///
-/// The turn in flight contributes only what the provider has already stated —
-/// the input count on the Anthropic wire, nothing at all on the OpenAI one —
-/// so its output is stood in for by the bytes that have arrived. Its measured
-/// figures are replaced, never added to, when its `TurnEnd` folds them into
-/// `settled`, or a turn's input would be counted twice.
+// What the status line should say the run has cost.
+//
+// The turn in flight contributes only what the provider has already stated —
+// the input count on the Anthropic wire, nothing at all on the OpenAI one —
+// so its output is stood in for by the bytes that have arrived. Its measured
+// figures are replaced, never added to, when its `TurnEnd` folds them into
+// `settled`, or a turn's input would be counted twice.
 fn counts(
     settled: &Usage,
     turn: &Usage,
@@ -1344,8 +1344,8 @@ pub struct Tui {
     totals: Totals,
 }
 
-/// crossterm reads blockingly, so the keyboard gets a thread of its own and
-/// reaches the loop as just another channel.
+// crossterm reads blockingly, so the keyboard gets a thread of its own and
+// reaches the loop as just another channel.
 fn reader() -> UnboundedReceiver<TermEvent> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     std::thread::spawn(move || {
@@ -1358,12 +1358,12 @@ fn reader() -> UnboundedReceiver<TermEvent> {
     rx
 }
 
-/// Where recalled prompts are kept between sessions.
+// Where recalled prompts are kept between sessions.
 fn history_path() -> Option<std::path::PathBuf> {
     tools::state::dir().map(|d| d.join("history"))
 }
 
-/// Enough to recall from without the file growing without bound.
+// Enough to recall from without the file growing without bound.
 const HISTORY_KEEP: usize = 1_000;
 
 impl Tui {

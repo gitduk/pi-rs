@@ -51,6 +51,19 @@ pub struct Request {
     pub tool_choice: ToolChoice,
 }
 
+impl Request {
+    /// The system prompt this request sends: the explicit field, else the
+    /// first system message in the transcript. Every transport puts it on the
+    /// wire in its own place, but all three resolve it the same way.
+    pub fn system_text(&self) -> Option<String> {
+        self.system.clone().or_else(|| {
+            self.messages.iter().find_map(|m| match m {
+                Message::System { content } => Some(content.clone()),
+                _ => None,
+            })
+        })
+    }
+}
 impl Effort {
     /// Fraction of the output budget handed to thinking. Anthropic requires the
     /// budget to stay below max_tokens, so this is a ratio, not a constant.

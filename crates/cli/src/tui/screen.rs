@@ -98,11 +98,11 @@ pub fn fit(line: &str, width: usize) -> Vec<String> {
     out
 }
 
-/// The escape sequence at the head of `chars`, appended to `out`; its SGR
-/// parameters when it is one. The introducer is consumed before the scan:
-/// `[` and `O` are themselves inside the final-byte range, so a scan that
-/// started on one would stop on it and leave the parameters to be counted
-/// as text.
+// The escape sequence at the head of `chars`, appended to `out`; its SGR
+// parameters when it is one. The introducer is consumed before the scan:
+// `[` and `O` are themselves inside the final-byte range, so a scan that
+// started on one would stop on it and leave the parameters to be counted
+// as text.
 fn eat_escape<'a, 'b>(chars: &mut Peekable<Chars<'a>>, out: &'b mut String) -> Option<&'b str> {
     let at = out.len();
     out.push('\x1b');
@@ -121,7 +121,7 @@ fn eat_escape<'a, 'b>(chars: &mut Peekable<Chars<'a>>, out: &'b mut String) -> O
         .and_then(|s| s.strip_suffix('m'))
 }
 
-/// Append one SGR parameter, separated from the ones before it.
+// Append one SGR parameter, separated from the ones before it.
 fn push_sgr(sgr: &mut String, p: &str) {
     if !sgr.is_empty() {
         sgr.push(';');
@@ -214,8 +214,8 @@ pub fn parse_sgr(params: &str, mut style: Style) -> Style {
     style
 }
 
-/// Write one fitted row into the buffer: style from the SGR escapes, one
-/// cell per character.
+// Write one fitted row into the buffer: style from the SGR escapes, one
+// cell per character.
 fn write_piece(piece: &str, x: u16, y: u16, buf: &mut Buffer) {
     let mut style = Style::default();
     let mut col = x;

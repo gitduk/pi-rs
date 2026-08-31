@@ -1,7 +1,7 @@
 use crate::{Body, Error, LinePos, Op, Patch, Section, Target};
 
-/// Where a body row must start. A model reaching for unified-diff habits writes
-/// `-old` or a bare context line; both are rejected by name.
+// Where a body row must start. A model reaching for unified-diff habits writes
+// `-old` or a bare context line; both are rejected by name.
 const ROW: char = '+';
 
 fn strip_quotes(s: &str) -> &str {
@@ -49,23 +49,23 @@ pub const FORMS: &[Form] = &[
     },
 ];
 
-/// What an address looks like, said whenever one does not.
-///
-/// One sentence answers every malformed address there is, including every
-/// spelling this grammar used to accept: those are not special cases needing
-/// their own advice, they are simply not addresses, and naming the forms says
-/// so along with everything else.
+// What an address looks like, said whenever one does not.
+//
+// One sentence answers every malformed address there is, including every
+// spelling this grammar used to accept: those are not special cases needing
+// their own advice, they are simply not addresses, and naming the forms says
+// so along with everything else.
 fn forms() -> String {
     let spelt: Vec<String> = FORMS.iter().map(|f| format!("`N{}`", f.suffix)).collect();
     let (last, rest) = spelt.split_last().map_or(("", &[][..]), |(l, r)| (l, r));
     format!("an address is {} or {last}", rest.join(", "))
 }
 
-/// One address, whatever shape it has.
-///
-/// `N` is a single line, `N-M` two or more, `N*` a construct. The one that
-/// takes no suffix is the commonest, so a bare number is an address: views
-/// print it and models write it without ceremony.
+// One address, whatever shape it has.
+//
+// `N` is a single line, `N-M` two or more, `N*` a construct. The one that
+// takes no suffix is the commonest, so a bare number is an address: views
+// print it and models write it without ceremony.
 impl Target {
     /// Read one back with no op and no patch line to blame it on.
     ///
@@ -88,10 +88,10 @@ impl std::fmt::Display for Target {
     }
 }
 
-/// `verb` is the op the address belongs to. Without it a patch whose `PUT` and
-/// `CUT` are both malformed draws the same complaint twice: the model corrects
-/// the first, the identical message comes back about the second, and nothing it
-/// can see says the fix landed.
+// `verb` is the op the address belongs to. Without it a patch whose `PUT` and
+// `CUT` are both malformed draws the same complaint twice: the model corrects
+// the first, the identical message comes back about the second, and nothing it
+// can see says the fix landed.
 fn addr(spec: &str, line: usize, verb: &str) -> Result<Target, Error> {
     let spec = spec.trim();
     let bad = |what: String| Error::Syntax { line, what };
@@ -148,15 +148,15 @@ fn register(rest: &str, line: usize) -> Result<Option<String>, Error> {
     }
 }
 
-/// Split `PUT <target><rest>` into the target and whatever follows it.
-/// Said when a body row sits under an op that takes none. A row in the wrong
-/// place is a different mistake from a row of the wrong shape, and the model
-/// that wrote each needs a different sentence.
+// Split `PUT <target><rest>` into the target and whatever follows it.
+// Said when a body row sits under an op that takes none. A row in the wrong
+// place is a different mistake from a row of the wrong shape, and the model
+// that wrote each needs a different sentence.
 const NO_BODY: &str = "`CUT`, `RM` and `MV` take no body rows: the range names what goes \
                        and nothing arrives. To write new content, use `PUT N:` or `PUT N-M:` with \
                        `+` rows.";
 
-/// Whether the op just parsed is one of those.
+// Whether the op just parsed is one of those.
 fn bodyless_before(sections: &[Section]) -> bool {
     matches!(
         sections.last().and_then(|s| s.ops.last()),
@@ -363,15 +363,15 @@ enum PutSite {
     After(LinePos),
 }
 
-/// The line `:UP` inserts above: a single line's, a range's start, a block's.
+// The line `:UP` inserts above: a single line's, a range's start, a block's.
 fn put_start(spec: &str, no: usize) -> Result<usize, Error> {
     match addr(spec, no, "PUT")? {
         Target::Range { start, .. } | Target::Block { line: start } => Ok(start),
     }
 }
 
-/// Where `:DOWN` inserts: a single line's, a range's end, or past a block's
-/// closing line — the one spot whose line number `addr` must find.
+// Where `:DOWN` inserts: a single line's, a range's end, or past a block's
+// closing line — the one spot whose line number `addr` must find.
 fn put_end(spec: &str, no: usize) -> Result<LinePos, Error> {
     match addr(spec, no, "PUT")? {
         Target::Range { end, .. } => Ok(LinePos::At(end)),
@@ -379,8 +379,8 @@ fn put_end(spec: &str, no: usize) -> Result<LinePos, Error> {
     }
 }
 
-/// Where a `PUT` lands once its direction is known: the address alone is a
-/// replacement; `:UP` and `:DOWN` turn it into an insertion point.
+// Where a `PUT` lands once its direction is known: the address alone is a
+// replacement; `:UP` and `:DOWN` turn it into an insertion point.
 fn put_site(spec: &str, dir: &str, no: usize) -> Result<PutSite, Error> {
     Ok(match dir {
         "" => PutSite::Replace(addr(spec, no, "PUT")?),

@@ -9,12 +9,12 @@ use futures::StreamExt;
 
 pub const PROMPT: &str = include_str!("../prompts/summarize.md");
 
-/// Per-block cap in the rendered history. A summarizer needs to know a file was
-/// read, not to re-read it.
+// Per-block cap in the rendered history. A summarizer needs to know a file was
+// read, not to re-read it.
 const BLOCK_CHARS: usize = 1_500;
 
-/// Total cap. The history being summarized is over budget by definition, so the
-/// request that summarizes it has to be bounded too.
+// Total cap. The history being summarized is over budget by definition, so the
+// request that summarizes it has to be bounded too.
 const TOTAL_CHARS: usize = 60_000;
 
 const MAX_SUMMARY_TOKENS: u32 = 2_000;

@@ -11,6 +11,7 @@ use crate::request::Request;
 use crate::stream::StreamEvent;
 
 pub mod anthropic;
+pub mod chat;
 pub mod openai;
 
 /// One exchange, from the request going out to the response coming back.

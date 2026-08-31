@@ -11,7 +11,7 @@ async fn run(tool: &dyn Tool, args: serde_json::Value, ctx: &Ctx) -> String {
     tool.execute(args, ctx).await.unwrap().flatten()
 }
 
-/// A file long enough to trigger the skeleton, with two real declarations in it.
+// A file long enough to trigger the skeleton, with two real declarations in it.
 fn long_rust() -> String {
     let filler: String = (0..320).map(|i| format!("// filler {i}\n")).collect();
     format!(

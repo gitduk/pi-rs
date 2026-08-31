@@ -12,8 +12,8 @@ fn item(task: &str, status: &str) -> serde_json::Value {
     json!({ "task": task, "status": status })
 }
 
-/// What the tool answers with. Not the list: that reaches the model as a note
-/// on the next request, recomputed from the stored plan.
+// What the tool answers with. Not the list: that reaches the model as a note
+// on the next request, recomputed from the stored plan.
 async fn write(c: &Ctx, items: Vec<serde_json::Value>) -> String {
     tools::todo::TodoTool
         .execute(json!({ "items": items }), c)
@@ -22,7 +22,7 @@ async fn write(c: &Ctx, items: Vec<serde_json::Value>) -> String {
         .flatten()
 }
 
-/// The plan as it now stands, the way the note and `/todo` render it.
+// The plan as it now stands, the way the note and `/todo` render it.
 async fn shown(c: &Ctx, items: Vec<serde_json::Value>) -> String {
     write(c, items).await;
     render(&c.todos.lock().unwrap())
@@ -134,9 +134,9 @@ async fn an_empty_list_says_so_instead_of_rendering_nothing() {
     assert!(shown(&c, vec![]).await.contains("the list is empty"));
 }
 
-/// The tool answers with a count, not the plan. Echoing the list here as well
-/// would leave one copy per call in the transcript, each stale the moment the
-/// next call lands — and the note already carries the current one.
+// The tool answers with a count, not the plan. Echoing the list here as well
+// would leave one copy per call in the transcript, each stale the moment the
+// next call lands — and the note already carries the current one.
 #[tokio::test]
 async fn the_tool_acknowledges_rather_than_repeating_the_list() {
     let (_d, c) = ctx();

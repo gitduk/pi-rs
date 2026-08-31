@@ -4,8 +4,8 @@ use serde_json::{Value, json};
 
 use crate::{Ctx, Tier, Tool, ToolError, ToolOutput};
 
-/// Beyond this many items the closed ones collapse; a finished list should not
-/// cost as much context as an active one.
+// Beyond this many items the closed ones collapse; a finished list should not
+// cost as much context as an active one.
 const SHOW_ALL_UNDER: usize = 20;
 const KEEP_CLOSED: usize = 3;
 

@@ -168,6 +168,11 @@ impl Reasoning {
                         return Replay::Encrypted { id, encrypted };
                     }
                 }
+                // Chat has no signed or encrypted reasoning either: the wire
+                // carries thinking as plain `reasoning_content`, which is not
+                // a signed/encrypted shape, so even the model's own blocks
+                // fall through to the replay_thinking policy below.
+                Format::Chat => {}
             }
         }
 

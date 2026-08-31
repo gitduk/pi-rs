@@ -24,8 +24,8 @@ pub enum Attr {
     Other(String),
 }
 
-/// Name in config, variant, SGR code — one row per named attribute, so adding
-/// one touches a single place instead of two parallel matches.
+// Name in config, variant, SGR code — one row per named attribute, so adding
+// one touches a single place instead of two parallel matches.
 const NAMED_ATTRS: &[(&str, Attr, &str)] = &[
     ("bold", Attr::Bold, "1"),
     ("dim", Attr::Dim, "2"),
@@ -370,7 +370,7 @@ fn default_prompt_color() -> Style {
     Style::color(Color::Rgb(0, 255, 255))
 }
 
-/// The input body: the terminal's own foreground until a config colours it.
+// The input body: the terminal's own foreground until a config colours it.
 fn default_input() -> Style {
     Style::attrs(&[])
 }
@@ -516,17 +516,17 @@ fn fence(line: &str) -> bool {
     line.trim_start().starts_with("```")
 }
 
-/// Where a heading's `#`s and their space end, if the line is one.
-///
-/// The space is what makes it a heading rather than a line that merely opens
-/// with a hash — which, in a tree full of attributes and shell comments, is
-/// most of them.
+// Where a heading's `#`s and their space end, if the line is one.
+//
+// The space is what makes it a heading rather than a line that merely opens
+// with a hash — which, in a tree full of attributes and shell comments, is
+// most of them.
 fn heading(body: &str) -> Option<usize> {
     let hashes = body.len() - body.trim_start_matches('#').len();
     ((1..=6).contains(&hashes) && body[hashes..].starts_with(' ')).then_some(hashes + 1)
 }
 
-/// Where a list item's marker ends, if the line opens with one.
+// Where a list item's marker ends, if the line opens with one.
 fn bullet(body: &str) -> Option<usize> {
     if body.starts_with("- ") || body.starts_with("* ") || body.starts_with("+ ") {
         return Some(2);
@@ -535,22 +535,22 @@ fn bullet(body: &str) -> Option<usize> {
     (digits > 0 && body[digits..].starts_with(". ")).then_some(digits + 2)
 }
 
-/// How deep emphasis may hold more emphasis.
-///
-/// Real markdown nests one level, at most two. The bound is not about taste: a
-/// span recurses on its own body, so a long enough line of `**`*` would put the
-/// stack in the hands of whatever the model wrote.
+// How deep emphasis may hold more emphasis.
+//
+// Real markdown nests one level, at most two. The bound is not about taste: a
+// span recurses on its own body, so a long enough line of `**`*` would put the
+// stack in the hands of whatever the model wrote.
 const NESTING: u8 = 3;
 
-/// The inline spans of one line: code, bold, italic.
-/// `under` is whatever styling is already open around `text`. A span closes
-/// with a reset — there is no escape for "bold off" that leaves the rest
-/// standing — so it has to re-open what it interrupted, or a code span inside
-/// bold ends the bold at the backtick and the sentence after it goes plain.
-///
-/// Whether a body is literal is a property of the mark, not of how the mark
-/// happens to be styled: a configured `emphasis` that matches `code` must not
-/// start swallowing the spans inside it.
+// The inline spans of one line: code, bold, italic.
+// `under` is whatever styling is already open around `text`. A span closes
+// with a reset — there is no escape for "bold off" that leaves the rest
+// standing — so it has to re-open what it interrupted, or a code span inside
+// bold ends the bold at the backtick and the sentence after it goes plain.
+//
+// Whether a body is literal is a property of the mark, not of how the mark
+// happens to be styled: a configured `emphasis` that matches `code` must not
+// start swallowing the spans inside it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SpanKind {
     /// Literal all the way down, no markup inside.
@@ -605,11 +605,11 @@ fn spans(text: &str, under: &str, depth: u8, theme: &Theme) -> String {
     out
 }
 
-/// One span at the head of `from`: its code, its text, and what follows it.
-///
-/// `_` is not a delimiter here. It is the word separator of every identifier in
-/// the tree, and a rule that italicises the middle of `saturating_sub` is worse
-/// than no italics at all.
+// One span at the head of `from`: its code, its text, and what follows it.
+//
+// `_` is not a delimiter here. It is the word separator of every identifier in
+// the tree, and a rule that italicises the middle of `saturating_sub` is worse
+// than no italics at all.
 fn span<'a, 'b>(
     from: &'a str,
     theme: &'b Theme,
@@ -855,8 +855,8 @@ impl Renderer {
     }
 }
 
-/// Says what was given up, not just how much. A silent shrink looks like the
-/// agent forgetting things for no reason.
+// Says what was given up, not just how much. A silent shrink looks like the
+// agent forgetting things for no reason.
 fn compaction_line(r: &agent::compact::Report) -> String {
     let mut parts = Vec::new();
     if r.superseded > 0 {

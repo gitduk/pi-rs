@@ -18,8 +18,8 @@ use agent::session::Session;
 use agent::{Agent, AgentError, Ceiling, Event};
 use tools::{Concurrency, Ctx, Registry, Tier, Tool, ToolError, ToolOutput, Workspace};
 
-/// Replays one scripted event list per turn, so the loop is exercised without
-/// a network.
+// Replays one scripted event list per turn, so the loop is exercised without
+// a network.
 struct Scripted {
     turns: Vec<Vec<StreamEvent>>,
     next: AtomicUsize,
@@ -124,9 +124,9 @@ async fn drive(
     (session, out, events)
 }
 
-/// Every result in the view, in order. One entry is one message now, so a
-/// turn's results arrive spread across several of them rather than packed into
-/// one — joining is the wire's business.
+// Every result in the view, in order. One entry is one message now, so a
+// turn's results arrive spread across several of them rather than packed into
+// one — joining is the wire's business.
 fn tool_results(msgs: &[Message]) -> Vec<&brain::message::ToolResult> {
     msgs.iter()
         .filter_map(|m| match m {
@@ -154,7 +154,7 @@ async fn a_turn_without_tool_calls_ends_the_run() {
     assert!(events.contains(&Event::TextDelta("done".into())));
 }
 
-/// A turn whose Done carries exactly this usage.
+// A turn whose Done carries exactly this usage.
 fn turn_reporting(body: &str, usage: Usage) -> Vec<StreamEvent> {
     let mut ev = text_turn(body);
     ev.pop();
@@ -353,7 +353,7 @@ async fn a_denied_tier_comes_back_as_a_result_not_an_abort() {
     );
 }
 
-/// Finishes after `delay_ms`, reporting its own name.
+// Finishes after `delay_ms`, reporting its own name.
 struct Sleeper {
     name: &'static str,
     delay_ms: u64,
@@ -496,8 +496,8 @@ async fn reasoning_deltas_reach_the_renderer_separately_from_text() {
     assert!(matches!(content[0], AssistantContent::Reasoning(_)));
 }
 
-/// Answers tool-bearing turns from a script and any tool-free turn — which is
-/// what a summarization request is — with a fixed summary.
+// Answers tool-bearing turns from a script and any tool-free turn — which is
+// what a summarization request is — with a fixed summary.
 struct WithSummarizer {
     turns: Vec<Vec<StreamEvent>>,
     next: AtomicUsize,
@@ -533,8 +533,8 @@ impl Transport for WithSummarizer {
     }
 }
 
-/// Weight in assistant prose, which omission cannot reclaim — only dropping the
-/// exchange does, and that is what the summarizer exists for.
+// Weight in assistant prose, which omission cannot reclaim — only dropping the
+// exchange does, and that is what the summarizer exists for.
 fn bulky_turn(id: &str) -> Vec<StreamEvent> {
     let mut ev = vec![
         StreamEvent::BlockStart {
@@ -564,10 +564,10 @@ fn bulky_turn(id: &str) -> Vec<StreamEvent> {
     ev
 }
 
-/// The bug this shape exists to prevent: both compaction paths used to price
-/// the summary with `self.spec`, so a cheap summarizer was billed at the
-/// expensive model's rates — twice over, silently, and only visible in a total
-/// that looked plausible.
+// The bug this shape exists to prevent: both compaction paths used to price
+// the summary with `self.spec`, so a cheap summarizer was billed at the
+// expensive model's rates — twice over, silently, and only visible in a total
+// that looked plausible.
 #[tokio::test]
 async fn a_summary_is_priced_by_the_model_that_wrote_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -713,7 +713,7 @@ async fn a_summarizer_that_fails_drops_the_history_without_failing_the_turn() {
     );
 }
 
-/// Fails the first `fail` attempts with `err`, then answers normally.
+// Fails the first `fail` attempts with `err`, then answers normally.
 struct Flaky {
     remaining: AtomicUsize,
     err: fn() -> brain::BrainError,
@@ -815,7 +815,7 @@ async fn retries_give_up_rather_than_hammering_forever() {
     );
 }
 
-/// Opens a stream and then never sends anything.
+// Opens a stream and then never sends anything.
 struct Wedged;
 
 #[async_trait]
@@ -868,7 +868,7 @@ fn call_message(id: &str) -> Message {
     }
 }
 
-/// Refuses oversized requests until the transcript shrinks below `fits`.
+// Refuses oversized requests until the transcript shrinks below `fits`.
 struct Picky {
     fits: usize,
     refusals: AtomicUsize,
@@ -952,8 +952,8 @@ async fn an_overflow_refusal_shrinks_the_transcript_and_retries() {
     assert_eq!(session.context().last().unwrap().text(), "fits now");
 }
 
-/// Refuses three ways in order — unnamed, named, unnamed — so what the second
-/// blind squeeze is measured against becomes visible in the warnings.
+// Refuses three ways in order — unnamed, named, unnamed — so what the second
+// blind squeeze is measured against becomes visible in the warnings.
 struct Mixed {
     calls: AtomicUsize,
     limit: usize,
@@ -984,10 +984,10 @@ impl Transport for Mixed {
     }
 }
 
-/// A blind squeeze shrinks the estimate the spec claimed. Once the provider
-/// names its real window that baseline is gone, so the discount goes with it —
-/// otherwise the run spends the rest of its life at 60% of a figure that was
-/// never a guess, while the warning says it refitted to the window.
+// A blind squeeze shrinks the estimate the spec claimed. Once the provider
+// names its real window that baseline is gone, so the discount goes with it —
+// otherwise the run spends the rest of its life at 60% of a figure that was
+// never a guess, while the warning says it refitted to the window.
 #[tokio::test]
 async fn a_named_window_supersedes_the_guesswork_that_preceded_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -1024,7 +1024,7 @@ async fn a_named_window_supersedes_the_guesswork_that_preceded_it() {
     assert!(blind[1].contains("60%"), "{}", blind[1]);
 }
 
-/// Refuses without saying how big the window is.
+// Refuses without saying how big the window is.
 struct Mute {
     fits: usize,
 }
@@ -1130,8 +1130,8 @@ async fn a_call_that_keeps_returning_the_same_thing_is_named() {
     );
 }
 
-/// The shape a session actually dies in: a tool the model cannot get the
-/// arguments right for, refused identically for as long as it is allowed to run.
+// The shape a session actually dies in: a tool the model cannot get the
+// arguments right for, refused identically for as long as it is allowed to run.
 #[tokio::test]
 async fn a_call_that_keeps_failing_the_same_way_is_named_sooner() {
     let dir = tempfile::tempdir().unwrap();
@@ -1207,8 +1207,8 @@ async fn a_call_whose_answer_changes_resets_the_count() {
     assert!(!noticed || std::fs::read_to_string(&path).unwrap() == "first\n");
 }
 
-/// Fails every call with a coded timeout, so the loop's code plumbing can be
-/// observed end to end.
+// Fails every call with a coded timeout, so the loop's code plumbing can be
+// observed end to end.
 struct Timeouter;
 
 #[async_trait]
@@ -1253,9 +1253,9 @@ async fn a_coded_tool_error_reaches_the_model_with_its_code() {
 
 }
 
-/// The plan reaches the model as a note, recomputed each turn — never as a
-/// message. Written into the transcript, turn 3's list is still there at turn
-/// 30 contradicting the current one, and both read as fact.
+// The plan reaches the model as a note, recomputed each turn — never as a
+// message. Written into the transcript, turn 3's list is still there at turn
+// 30 contradicting the current one, and both read as fact.
 #[tokio::test]
 async fn the_plan_rides_a_note_and_never_the_transcript() {
     let dir = tempfile::tempdir().unwrap();
@@ -1291,9 +1291,9 @@ async fn the_plan_rides_a_note_and_never_the_transcript() {
     assert_eq!(session.todos().len(), 2);
 }
 
-/// A rewind undoes work the plan says is done. Carrying it forward would tell
-/// the model six items are finished when two of them are not — in a note, as
-/// fact, every turn.
+// A rewind undoes work the plan says is done. Carrying it forward would tell
+// the model six items are finished when two of them are not — in a note, as
+// fact, every turn.
 #[test]
 fn rewinding_clears_a_plan_that_described_the_undone_work() {
     let mut s = agent::session::Session::new();

@@ -267,12 +267,12 @@ pub fn named(name: &str, summary: &str) -> String {
     }
 }
 
-/// A tool's start line: what an unanswered call keeps in the view.
+// A tool's start line: what an unanswered call keeps in the view.
 fn tool_start_line(name: &str, summary: &str) -> String {
     format!("→ {}", named(name, summary))
 }
 
-/// The count line a shut thinking block leaves in the scrollback.
+// The count line a shut thinking block leaves in the scrollback.
 fn thinking_summary(n: usize) -> String {
     let s = if n == 1 { "" } else { "s" };
     format!("thinking · {n} line{s}")

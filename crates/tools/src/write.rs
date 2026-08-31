@@ -49,7 +49,7 @@ fn numbered_throughout(text: &str) -> bool {
     any
 }
 
-/// Drop the `N:` from every line, once every line is known to carry one.
+// Drop the `N:` from every line, once every line is known to carry one.
 fn strip_numbers(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for line in text.lines() {

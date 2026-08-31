@@ -27,12 +27,12 @@ pub struct Stored {
     pub session: Session,
 }
 
-/// An archive read only as far as the listing needs.
-///
-/// The identity fields are required, exactly as `Stored` requires them, so a
-/// session that lists is a session that loads. Everything under them is
-/// optional and shallow: `serde` skips a field no struct here names without
-/// building it, and what it skips is the whole of the transcript.
+// An archive read only as far as the listing needs.
+//
+// The identity fields are required, exactly as `Stored` requires them, so a
+// session that lists is a session that loads. Everything under them is
+// optional and shallow: `serde` skips a field no struct here names without
+// building it, and what it skips is the whole of the transcript.
 #[derive(Deserialize)]
 struct Peek {
     id: String,

@@ -42,9 +42,9 @@ fn check_format(spec: &ModelSpec) -> Result<()> {
         ))),
     }
 }
-/// The one thing the wire cannot say. A `function_call_output` has no
-/// `is_error` — `status` is the item's own generation state — so a failure
-/// that is not marked in the text reads to the model as a result.
+// The one thing the wire cannot say. A `function_call_output` has no
+// `is_error` — `status` is the item's own generation state — so a failure
+// that is not marked in the text reads to the model as a result.
 const FAILED: &str = "[tool error]";
 
 fn encode_image(img: &Image) -> Value {
@@ -55,8 +55,8 @@ fn encode_image(img: &Image) -> Value {
     json!({ "type": "input_image", "image_url": url })
 }
 
-/// `output` takes a string or a content-block array; the array is what carries
-/// an image back, so a result without one stays a plain string.
+// `output` takes a string or a content-block array; the array is what carries
+// an image back, so a result without one stays a plain string.
 fn encode_tool_result(r: &ToolResult) -> Value {
     let has_image = r
         .content
@@ -89,8 +89,8 @@ fn encode_tool_result(r: &ToolResult) -> Value {
     })
 }
 
-/// Dress a stored reasoning block in this wire's shapes. Which way it leaves is
-/// `Reasoning::replay_for`'s call, shared with the estimate that sizes it.
+// Dress a stored reasoning block in this wire's shapes. Which way it leaves is
+// `Reasoning::replay_for`'s call, shared with the estimate that sizes it.
 fn encode_reasoning(r: &Reasoning, spec: &ModelSpec) -> Option<Value> {
     match r.replay_for(spec) {
         Replay::Encrypted { id, encrypted } => Some(json!({
@@ -114,8 +114,8 @@ fn assistant_text(text: &str) -> Value {
     })
 }
 
-/// Tool results are their own top-level items here, so a user turn holding both
-/// a result and prose leaves as two items — and in the order it held them.
+// Tool results are their own top-level items here, so a user turn holding both
+// a result and prose leaves as two items — and in the order it held them.
 fn encode_user(content: &[UserContent], out: &mut Vec<Value>) {
     let mut blocks: Vec<Value> = Vec::new();
     for b in content {
@@ -141,8 +141,8 @@ fn flush_user(blocks: &mut Vec<Value>, out: &mut Vec<Value>) {
     }
 }
 
-/// An assistant turn splits into reasoning, message and function_call items,
-/// in the order the model produced them. Consecutive text stays one message.
+// An assistant turn splits into reasoning, message and function_call items,
+// in the order the model produced them. Consecutive text stays one message.
 fn encode_assistant(content: &[AssistantContent], spec: &ModelSpec, out: &mut Vec<Value>) {
     let mut text = String::new();
     for b in content {
@@ -172,9 +172,9 @@ fn flush_assistant(text: &mut String, out: &mut Vec<Value>) {
     }
 }
 
-/// The `input` item array. Nothing joins: `input` is flat and has no
-/// alternation rule, so one entry leaves as one item — the opposite of the
-/// Anthropic encoder, and the reason the join is the encoder's job.
+// The `input` item array. Nothing joins: `input` is flat and has no
+// alternation rule, so one entry leaves as one item — the opposite of the
+// Anthropic encoder, and the reason the join is the encoder's job.
 fn encode(msgs: &[Message], spec: &ModelSpec, notes: &[String]) -> Vec<Value> {
     let mut out = Vec::new();
     for m in msgs {
@@ -219,12 +219,7 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
         "include": ["reasoning.encrypted_content"],
     });
 
-    let instructions = req.system.clone().or_else(|| {
-        req.messages.iter().find_map(|m| match m {
-            Message::System { content } => Some(content.clone()),
-            _ => None,
-        })
-    });
+    let instructions = req.system_text();
     if let Some(instructions) = instructions {
         body["instructions"] = json!(instructions);
     }
@@ -269,13 +264,13 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
 }
 
 
-/// `input_tokens` counts the cached prefix and the newly written one as well as
-/// the fresh tokens, so both come out of it. Subtracting only the read half —
-/// which is what the Chat Completions decoder did — bills the write twice.
-///
-/// `cache_write_tokens` is in OpenAI's own usage type but not every
-/// implementation fills it: DeepSeek's Responses endpoint sends only
-/// `cached_tokens`. Absent, it reads as zero and the arithmetic still balances.
+// `input_tokens` counts the cached prefix and the newly written one as well as
+// the fresh tokens, so both come out of it. Subtracting only the read half —
+// which is what the Chat Completions decoder did — bills the write twice.
+//
+// `cache_write_tokens` is in OpenAI's own usage type but not every
+// implementation fills it: DeepSeek's Responses endpoint sends only
+// `cached_tokens`. Absent, it reads as zero and the arithmetic still balances.
 fn usage_of(u: &Value) -> Usage {
     let details = &u["input_tokens_details"];
     let cache_read = details["cached_tokens"].as_u64().unwrap_or(0);
@@ -292,8 +287,8 @@ fn usage_of(u: &Value) -> Usage {
     }
 }
 
-/// Two levels, not one: a truncated turn is `status: "incomplete"` carrying the
-/// reason. Reading only the status would file it as a turn that ended.
+// Two levels, not one: a truncated turn is `status: "incomplete"` carrying the
+// reason. Reading only the status would file it as a turn that ended.
 fn stop_of(response: &Value) -> StopReason {
     if response["status"] != "incomplete" {
         return StopReason::EndTurn;
@@ -315,8 +310,8 @@ fn text_of(parts: &Value, key: &str) -> String {
         .collect()
 }
 
-/// The turn as the terminal frame states it. This is the authority: the deltas
-/// before it were for the screen.
+// The turn as the terminal frame states it. This is the authority: the deltas
+// before it were for the screen.
 fn read_output(
     output: &Value,
     origin: &str,
@@ -392,8 +387,8 @@ fn read_output(
     (content, invalid)
 }
 
-/// Responses events are typed and carry their own `output_index`, so the
-/// synthetic per-kind indices Chat Completions needed are gone.
+// Responses events are typed and carry their own `output_index`, so the
+// synthetic per-kind indices Chat Completions needed are gone.
 struct Decoder {
     origin: String,
     gaps: Shared,

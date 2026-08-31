@@ -3,8 +3,8 @@
 use crate::render::Paint;
 use unicode_width::UnicodeWidthChar;
 
-/// Columns the prompt marker occupies. Continuation rows are indented to match
-/// so a wrapped line stays aligned under the first.
+// Columns the prompt marker occupies. Continuation rows are indented to match
+// so a wrapped line stays aligned under the first.
 const GUTTER: usize = 2;
 const CONT: &str = "  ";
 
@@ -319,8 +319,8 @@ pub fn decode(body: &str) -> Vec<String> {
         .collect()
 }
 
-/// The nearest char boundary at or below `i`, so a column landing inside a
-/// multi-byte character does not split it.
+// The nearest char boundary at or below `i`, so a column landing inside a
+// multi-byte character does not split it.
 fn floor_boundary(s: &str, mut i: usize) -> usize {
     while i > 0 && !s.is_char_boundary(i) {
         i -= 1;

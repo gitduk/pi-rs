@@ -20,8 +20,8 @@ struct Args {
 
 pub struct Bash;
 
-/// SIGTERM the group, then SIGKILL whatever ignored it. A build killed outright
-/// can leave a corrupt output tree, so the polite signal goes first.
+// SIGTERM the group, then SIGKILL whatever ignored it. A build killed outright
+// can leave a corrupt output tree, so the polite signal goes first.
 #[cfg(unix)]
 async fn reap(group: Option<u32>) {
     // A freshly spawned pid can never equal our own group's id, and the filter
@@ -35,8 +35,8 @@ async fn reap(group: Option<u32>) {
     unsafe { libc::killpg(pid, libc::SIGKILL) };
 }
 
-/// Windows has no process group to signal: the direct child still dies with
-/// `kill_on_drop`, but its descendants outlive a timeout.
+// Windows has no process group to signal: the direct child still dies with
+// `kill_on_drop`, but its descendants outlive a timeout.
 #[cfg(not(unix))]
 #[cfg(not(unix))]
 async fn reap(_group: Option<u32>) {}

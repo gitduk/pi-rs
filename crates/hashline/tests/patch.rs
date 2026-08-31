@@ -5,8 +5,8 @@ use hashline::{
     parse, tag, unified_patch,
 };
 
-/// Explicit start→end pairs. hashline never parses source itself, so its own
-/// tests should not either.
+// Explicit start→end pairs. hashline never parses source itself, so its own
+// tests should not either.
 struct Fake(&'static [(usize, usize)]);
 
 impl Blocks for Fake {
@@ -19,7 +19,7 @@ fn files<'a>(pairs: &[(&'a str, &'a str)]) -> HashMap<&'a str, &'a str> {
     pairs.iter().copied().collect()
 }
 
-/// Apply `src` to a single file and return the new content.
+// Apply `src` to a single file and return the new content.
 fn edit(before: &str, ops: &str) -> Result<String, Error> {
     let src = format!("[a.rs#{}]\n{ops}", tag(before));
     let patch = parse(&src)?;
@@ -30,13 +30,13 @@ fn edit(before: &str, ops: &str) -> Result<String, Error> {
     }
 }
 
-/// Apply `ops` to a single file and return the whole plan, hunks and all.
+// Apply `ops` to a single file and return the whole plan, hunks and all.
 fn plan_for(before: &str, ops: &str) -> Plan {
     let src = format!("[a.rs#{}]\n{ops}", tag(before));
     apply(&parse(&src).unwrap(), &files(&[("a.rs", before)]), &NoBlocks).unwrap()
 }
 
-/// The unified patch `ops` produces against `before`, as a string.
+// The unified patch `ops` produces against `before`, as a string.
 fn patch_of(before: &str, ops: &str) -> String {
     let plan = plan_for(before, ops);
     unified_patch(&plan.changes, &files(&[("a.rs", before)]))
@@ -288,7 +288,7 @@ fn a_plus_row_under_a_bodyless_op_says_which_op() {
     assert!(err.contains("take no body rows"), "{err}");
 }
 
-/// Apply `ops` with a resolver that knows the given start→end pairs.
+// Apply `ops` with a resolver that knows the given start→end pairs.
 fn edit_blocks(before: &str, ops: &str, pairs: &'static [(usize, usize)]) -> Result<String, Error> {
     let src = format!("[a.rs#{}]\n{ops}", tag(before));
     let plan = apply(&parse(&src)?, &files(&[("a.rs", before)]), &Fake(pairs))?;

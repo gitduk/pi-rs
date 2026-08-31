@@ -52,9 +52,9 @@ pub struct Plan {
     pub changes: Vec<Change>,
 }
 
-/// Keeps a file's trailing-newline state, which `lines()` silently discards,
-/// and whether its rows end in `\r\n`, so new rows join with the same ending
-/// the file already has instead of mixing CRLF and LF.
+// Keeps a file's trailing-newline state, which `lines()` silently discards,
+// and whether its rows end in `\r\n`, so new rows join with the same ending
+// the file already has instead of mixing CRLF and LF.
 fn split(content: &str) -> (Vec<&str>, bool, bool) {
     if content.is_empty() {
         return (Vec::new(), true, false);
@@ -142,8 +142,8 @@ pub fn apply(patch: &Patch, files: &Files<'_>, blocks: &dyn Blocks) -> Result<Pl
     Ok(plan)
 }
 
-/// Turn every `N*` into the range it names. A construct that cannot be found is
-/// an error, never a guess: guessing here rewrites code nobody looked at.
+// Turn every `N*` into the range it names. A construct that cannot be found is
+// an error, never a guess: guessing here rewrites code nobody looked at.
 fn resolve(section: &Section, content: &str, blocks: &dyn Blocks) -> Result<Vec<Op>, Error> {
     let end_of = |line: usize| -> Result<usize, Error> {
         blocks
@@ -544,8 +544,8 @@ fn hunks(out: &mut String, old_path: &str, new_path: &str, old_content: &str, co
     }
 }
 
-/// Whether a hunk changes anything: a replacement whose body matches the lines
-/// it displaces is a write that wrote nothing, and no patch should name it.
+// Whether a hunk changes anything: a replacement whose body matches the lines
+// it displaces is a write that wrote nothing, and no patch should name it.
 fn changed(l: &Landed, lines: &[&str]) -> bool {
     let gave = lines
         .get(l.start.saturating_sub(1)..l.end)

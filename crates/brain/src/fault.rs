@@ -12,9 +12,9 @@ pub enum Fault {
     Permanent,
 }
 
-/// Account limits that arrive wearing a throttle's clothes. Checked first: a
-/// spent quota is usually an HTTP 429, and treating it as one burns money on
-/// retries that cannot succeed.
+// Account limits that arrive wearing a throttle's clothes. Checked first: a
+// spent quota is usually an HTTP 429, and treating it as one burns money on
+// retries that cannot succeed.
 const SPENT: &[&str] = &[
     "gousagelimiterror",
     "freeusagelimiterror",
@@ -28,8 +28,8 @@ const SPENT: &[&str] = &[
     "credit balance is too low",
 ];
 
-/// The window was exceeded. Wording differs per provider and none of it is
-/// derivable, so the list is empirical — borrowed from pi-mono's `overflow.ts`.
+// The window was exceeded. Wording differs per provider and none of it is
+// derivable, so the list is empirical — borrowed from pi-mono's `overflow.ts`.
 const OVERFLOW: &[&str] = &[
     "prompt is too long",
     "request_too_large",

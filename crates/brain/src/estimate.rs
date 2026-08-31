@@ -4,18 +4,18 @@ use crate::message::{
 use crate::model::ModelSpec;
 use crate::request::ToolDef;
 
-/// Bytes per token. Deliberately low: overestimating trips compaction a little
-/// early, underestimating trips a 400 from the provider mid-run.
+// Bytes per token. Deliberately low: overestimating trips compaction a little
+// early, underestimating trips a 400 from the provider mid-run.
 const BYTES_PER_TOKEN: usize = 3;
 
 /// Framing every message carries regardless of content.
 pub const MESSAGE_OVERHEAD: usize = 8;
 
-/// Framing a tool call or result carries beyond its payload.
+// Framing a tool call or result carries beyond its payload.
 const BLOCK_OVERHEAD: usize = 12;
 
-/// What an image costs once encoded. A crude constant beats no accounting: an
-/// unmeasured image is the one thing that blows a budget silently.
+// What an image costs once encoded. A crude constant beats no accounting: an
+// unmeasured image is the one thing that blows a budget silently.
 const IMAGE_TOKENS: usize = 1_500;
 
 /// A bound on what a string costs. Public because the system prompt and tool
@@ -33,7 +33,7 @@ pub fn bytes(n: usize) -> usize {
 
 use text as of;
 
-/// `<think>` and its closing tag, the wrapper a demoted block ships inside.
+// `<think>` and its closing tag, the wrapper a demoted block ships inside.
 const TAG_OVERHEAD: usize = 6;
 
 /// A bound on what a transcript costs to send to `spec`.
@@ -99,7 +99,7 @@ pub fn assistant_block(b: &AssistantContent, spec: &ModelSpec) -> usize {
     }
 }
 
-/// What the block weighs, replay ignored.
+// What the block weighs, replay ignored.
 fn whole_block(b: &AssistantContent) -> usize {
     match b {
         AssistantContent::Text(t) => of(&t.text),
@@ -117,12 +117,12 @@ fn whole_block(b: &AssistantContent) -> usize {
     }
 }
 
-/// What a prior reasoning block costs when replayed to `spec` — nothing at all
-/// on one that drops it.
-///
-/// Which way it replays is `Reasoning::replay_for`'s call, the same one both
-/// encoders ask; only the sizing is this function's. Summed per block rather
-/// than over the joined prose, so the bound stays the higher of the two.
+// What a prior reasoning block costs when replayed to `spec` — nothing at all
+// on one that drops it.
+//
+// Which way it replays is `Reasoning::replay_for`'s call, the same one both
+// encoders ask; only the sizing is this function's. Summed per block rather
+// than over the joined prose, so the bound stays the higher of the two.
 fn replayed_reasoning(r: &Reasoning, spec: &ModelSpec) -> usize {
     let text = || -> usize {
         r.content

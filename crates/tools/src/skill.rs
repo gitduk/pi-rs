@@ -59,11 +59,11 @@ impl SkillTool {
     }
 }
 
-/// How many of a skill's own files are worth naming. Past this the list stops
-/// being a way in and starts being the message.
+// How many of a skill's own files are worth naming. Past this the list stops
+// being a way in and starts being the message.
 const CAP: usize = 40;
 
-/// Paths under `dir`, relative to it, excluding `SKILL.md` itself.
+// Paths under `dir`, relative to it, excluding `SKILL.md` itself.
 fn sibling_files(dir: &std::path::Path) -> Vec<String> {
     fn walk(dir: &std::path::Path, base: &std::path::Path, out: &mut Vec<String>, depth: usize) {
         if depth > 3 {

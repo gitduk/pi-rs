@@ -18,11 +18,11 @@ pub struct Item {
     pub text: String,
 }
 
-/// The rows one construct occupies, and the row that names it.
-///
-/// The single answer to "what is the thing at this row", so that `block` and
-/// `outline` cannot drift: both are this function, reached from a row and from
-/// a node respectively.
+// The rows one construct occupies, and the row that names it.
+//
+// The single answer to "what is the thing at this row", so that `block` and
+// `outline` cannot drift: both are this function, reached from a row and from
+// a node respectively.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Extent {
     start: usize,
@@ -36,11 +36,11 @@ fn parse(lang: Lang, content: &str) -> Option<tree_sitter::Tree> {
     p.parse(content, None)
 }
 
-/// The last row holding any of `node`, 0-based.
-///
-/// A node stopping at column 0 stopped *at* that row's boundary, not inside it:
-/// a line comment swallows its own newline, and a markdown section closes where
-/// the next heading begins.
+// The last row holding any of `node`, 0-based.
+//
+// A node stopping at column 0 stopped *at* that row's boundary, not inside it:
+// a line comment swallows its own newline, and a markdown section closes where
+// the next heading begins.
 fn last_row(node: Node) -> usize {
     let end = node.end_position();
     if end.column == 0 && end.row > node.start_position().row {
@@ -50,12 +50,12 @@ fn last_row(node: Node) -> usize {
     }
 }
 
-/// Adjacent rows: an annotation binds to what starts on the row after it ends.
+// Adjacent rows: an annotation binds to what starts on the row after it ends.
 fn touches(a: Node, b: Node) -> bool {
     last_row(a) + 1 >= b.start_position().row
 }
 
-/// Whether `node` documents or decorates whatever it touches.
+// Whether `node` documents or decorates whatever it touches.
 fn annotates(lang: Lang, node: Node, src: &str) -> bool {
     lang.annotations().iter().any(|mark| match mark {
         Mark::Kind(kind) => node.kind() == *kind,
@@ -72,10 +72,10 @@ fn annotates(lang: Lang, node: Node, src: &str) -> bool {
     })
 }
 
-/// Past the annotations to the thing they are about.
-///
-/// Two shapes, one walk each: Rust's attributes precede the item as siblings,
-/// Python's decorators are the leading children of a wrapper node.
+// Past the annotations to the thing they are about.
+//
+// Two shapes, one walk each: Rust's attributes precede the item as siblings,
+// Python's decorators are the leading children of a wrapper node.
 fn subject<'t>(lang: Lang, node: Node<'t>, src: &str) -> Node<'t> {
     let mut n = node;
     while annotates(lang, n, src) {
@@ -100,8 +100,8 @@ fn subject<'t>(lang: Lang, node: Node<'t>, src: &str) -> Node<'t> {
     }
 }
 
-/// Out to the outermost node opening on the same row: `## Section` is a heading
-/// inside a section, and the section is what a reader means by it.
+// Out to the outermost node opening on the same row: `## Section` is a heading
+// inside a section, and the section is what a reader means by it.
 fn widen(node: Node) -> Node {
     let mut n = node;
     // The root opens on row 0, so climbing into it would make every line-1
@@ -128,7 +128,7 @@ fn extent(lang: Lang, node: Node, src: &str) -> Extent {
     }
 }
 
-/// The annotation immediately above `node`, if one is touching it.
+// The annotation immediately above `node`, if one is touching it.
 fn annotation_above<'t>(lang: Lang, node: Node<'t>, src: &str) -> Option<Node<'t>> {
     let prev = node.prev_named_sibling()?;
     (annotates(lang, prev, src) && touches(prev, node)).then_some(prev)
@@ -208,14 +208,14 @@ pub fn outline(lang: Lang, content: &str) -> Vec<Item> {
     out
 }
 
-/// `shown` is the span of the nearest declaration already listed, so a wrapper
-/// and the thing it wraps are not listed twice.
-///
-/// `export class C {…}` is two declared nodes opening and closing on the same
-/// rows — the export and the class — and the reader wants one line, not two.
-/// Suppressing by span rather than by node kind keeps the language tables
-/// honest: `export_statement` really is the declaration when it wraps something
-/// anonymous, and says so by being the only node with that span.
+// `shown` is the span of the nearest declaration already listed, so a wrapper
+// and the thing it wraps are not listed twice.
+//
+// `export class C {…}` is two declared nodes opening and closing on the same
+// rows — the export and the class — and the reader wants one line, not two.
+// Suppressing by span rather than by node kind keeps the language tables
+// honest: `export_statement` really is the declaration when it wraps something
+// anonymous, and says so by being the only node with that span.
 fn visit(
     node: Node,
     lang: Lang,

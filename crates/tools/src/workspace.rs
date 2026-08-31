@@ -10,8 +10,8 @@ pub struct Workspace {
     root: PathBuf,
 }
 
-/// Collapse `.` and `..` without touching the filesystem, so a path that does
-/// not exist yet still resolves.
+// Collapse `.` and `..` without touching the filesystem, so a path that does
+// not exist yet still resolves.
 fn normalize(p: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for c in p.components() {

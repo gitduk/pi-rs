@@ -89,8 +89,8 @@ fn encode_tool_result(r: &ToolResult) -> Value {
     block
 }
 
-/// Dress a stored reasoning block in this wire's shapes. Which way it leaves is
-/// `Reasoning::replay_for`'s call, shared with the estimate that sizes it.
+// Dress a stored reasoning block in this wire's shapes. Which way it leaves is
+// `Reasoning::replay_for`'s call, shared with the estimate that sizes it.
 fn encode_reasoning(r: &Reasoning, spec: &ModelSpec) -> Option<Value> {
     match r.replay_for(spec) {
         Replay::Signed { signature } => Some(json!({
@@ -143,9 +143,9 @@ fn encode_message(msg: &Message, spec: &ModelSpec) -> Option<Value> {
     }
 }
 
-/// Anthropic takes one `role:"user"` message per turn, so a turn's separate
-/// user entries join here. Responses wants them apart, which is why the join is
-/// the encoder's job and not the session view's.
+// Anthropic takes one `role:"user"` message per turn, so a turn's separate
+// user entries join here. Responses wants them apart, which is why the join is
+// the encoder's job and not the session view's.
 fn encode_messages(msgs: &[Message], spec: &ModelSpec) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
     for msg in msgs.iter().filter_map(|m| encode_message(m, spec)) {
@@ -162,11 +162,11 @@ fn encode_messages(msgs: &[Message], spec: &ModelSpec) -> Vec<Value> {
     out
 }
 
-/// Notes ride the tail of the last user message. A breakpoint caches up to and
-/// including the block it sits on, so anything after it is outside the cache —
-/// which is exactly where something that changes every turn belongs. Put them
-/// in `system` instead and every breakpoint in the message array sits behind
-/// content that just changed, so none of them ever hit.
+// Notes ride the tail of the last user message. A breakpoint caches up to and
+// including the block it sits on, so anything after it is outside the cache —
+// which is exactly where something that changes every turn belongs. Put them
+// in `system` instead and every breakpoint in the message array sits behind
+// content that just changed, so none of them ever hit.
 fn append_notes(messages: &mut [Value], notes: &[String]) {
     if notes.is_empty() {
         return;
@@ -219,12 +219,7 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
         _ => {}
     }
 
-    let system = req.system.clone().or_else(|| {
-        req.messages.iter().find_map(|m| match m {
-            Message::System { content } => Some(content.clone()),
-            _ => None,
-        })
-    });
+    let system = req.system_text();
     if let Some(system) = system {
         body["system"] = json!([{ "type": "text", "text": system }]);
     }

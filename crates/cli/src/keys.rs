@@ -315,7 +315,7 @@ impl Keys {
     }
 }
 
-/// A press written the way a config would write it.
+// A press written the way a config would write it.
 fn show(p: Press) -> String {
     let mut out = String::new();
     for (m, name) in [

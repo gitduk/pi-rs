@@ -42,13 +42,13 @@ impl Command {
     }
 }
 
-/// Every built-in command, once. `parse` still maps words to typed variants,
-/// but the help text and the completion list are generated from here — a new
-/// command that reached only one of the three was the bug this table prevents.
-///
-/// Nothing reads this directly except `commands`, which appends the skills to
-/// it. What a run answers to is settled when the workspace is known, not when
-/// the binary is built.
+// Every built-in command, once. `parse` still maps words to typed variants,
+// but the help text and the completion list are generated from here — a new
+// command that reached only one of the three was the bug this table prevents.
+//
+// Nothing reads this directly except `commands`, which appends the skills to
+// it. What a run answers to is settled when the workspace is known, not when
+// the binary is built.
 const BUILTIN: &[Command] = &[
     Command::builtin(
         "/new",
@@ -92,14 +92,14 @@ const BUILTIN: &[Command] = &[
     Command::builtin("/exit", "", "leave (Ctrl-D does the same)"),
 ];
 
-/// How wide a one-line description may be before it is cut.
+// How wide a one-line description may be before it is cut.
 const GIST: usize = 60;
 
-/// A description written for the model, cut down to a line for a list.
-///
-/// Two cuts, because they answer different questions: the first sentence is
-/// where the description stops being a summary, and the column is where the
-/// terminal stops having room.
+// A description written for the model, cut down to a line for a list.
+//
+// Two cuts, because they answer different questions: the first sentence is
+// where the description stops being a summary, and the column is where the
+// terminal stops having room.
 fn gist(description: &str) -> String {
     let first = description
         .split_once(". ")
@@ -257,7 +257,7 @@ pub fn complete(
     }
 }
 
-/// How much of a session's first prompt a list row or completion shows.
+// How much of a session's first prompt a list row or completion shows.
 const RESUME_WIDTH: usize = 60;
 
 /// A session and everything that outlives any one turn of it.
@@ -479,12 +479,12 @@ impl Repl {
     }
 }
 
-/// Enough about a model to choose between them: who serves it, how much it
-/// holds, and what it costs where that is known.
-///
-/// Takes the three pieces rather than a config entry, because the running model
-/// may never have been one — a name passed through with default numbers has no
-/// entry to read.
+// Enough about a model to choose between them: who serves it, how much it
+// holds, and what it costs where that is known.
+//
+// Takes the three pieces rather than a config entry, because the running model
+// may never have been one — a name passed through with default numbers has no
+// entry to read.
 fn summary(format: &str, window: u32, p: &brain::model::Pricing) -> String {
     let mut parts = vec![format.to_string(), format!("{}k", window / 1000)];
     if p.input_per_mtok > 0.0 || p.output_per_mtok > 0.0 {
@@ -496,11 +496,11 @@ fn summary(format: &str, window: u32, p: &brain::model::Pricing) -> String {
     parts.join(" · ")
 }
 
-/// What becomes of the transcript's reasoning once another model is reading it.
-///
-/// Only ever asked about a model that did not write it — the origin recorded on
-/// each block cannot match after a switch — so the signed path is out and one of
-/// these three is what the transport will do with it.
+// What becomes of the transcript's reasoning once another model is reading it.
+//
+// Only ever asked about a model that did not write it — the origin recorded on
+// each block cannot match after a switch — so the signed path is out and one of
+// these three is what the transport will do with it.
 fn demotion(replay: brain::model::ReplayThinking) -> &'static str {
     use brain::model::ReplayThinking as R;
     match replay {
@@ -509,11 +509,11 @@ fn demotion(replay: brain::model::ReplayThinking) -> &'static str {
     }
 }
 
-/// Whether the transcript holds any prior-turn reasoning at all.
-///
-/// Worth saying at a switch: it is the one part of the history that does not
-/// survive intact, and a model that suddenly reads its own earlier thinking as
-/// quoted prose is otherwise an unexplained change in tone.
+// Whether the transcript holds any prior-turn reasoning at all.
+//
+// Worth saying at a switch: it is the one part of the history that does not
+// survive intact, and a model that suddenly reads its own earlier thinking as
+// quoted prose is otherwise an unexplained change in tone.
 fn carries_reasoning(session: &agent::session::Session) -> bool {
     // The view, not every entry: what compaction has already dropped is not
     // going to reach the new model in any form, demoted or otherwise.
@@ -551,24 +551,24 @@ pub enum Cmd {
     },
 }
 
-/// Slash commands are recognized before anything reaches the model, so a line
-/// that merely starts with a slash never becomes a prompt by accident.
-/// A command that changed nothing, said once to the user and once to the
-/// journal. Nothing-happened is the hardest kind of bug to read back: the
-/// terminal has scrolled and the config on disk is whatever it is now.
+// Slash commands are recognized before anything reaches the model, so a line
+// that merely starts with a slash never becomes a prompt by accident.
+// A command that changed nothing, said once to the user and once to the
+// journal. Nothing-happened is the hardest kind of bug to read back: the
+// terminal has scrolled and the config on disk is whatever it is now.
 fn refused(what: &str, e: anyhow::Error) -> String {
     let detail = format!("{e:#}");
     tracing::warn!(target: "pi::session", command = what, error = %detail, "refused");
     detail
 }
 
-/// A skill command as a message the user could have typed, or why it could not
-/// be read.
-///
-/// The body goes in whole rather than as an instruction to go and fetch it:
-/// `/commit` says the user has already chosen those instructions, and a model
-/// that must call the `skill` tool to learn what it just agreed to has spent a
-/// turn on a decision that was made before it was asked.
+// A skill command as a message the user could have typed, or why it could not
+// be read.
+//
+// The body goes in whole rather than as an instruction to go and fetch it:
+// `/commit` says the user has already chosen those instructions, and a model
+// that must call the `skill` tool to learn what it just agreed to has spent a
+// turn on a decision that was made before it was asked.
 fn expanded(skill: &Skill, args: &str) -> Result<String, String> {
     let text = std::fs::read_to_string(skill.dir.join("SKILL.md")).map_err(|e| {
         let why = refused(&skill.name, anyhow::anyhow!("{}: {e}", skill.dir.display()));
@@ -594,8 +594,8 @@ fn expanded(skill: &Skill, args: &str) -> Result<String, String> {
     Ok(out)
 }
 
-/// The skill a word names, if it names one. A built-in never reaches here —
-/// `parse` has already turned those into their own variants.
+// The skill a word names, if it names one. A built-in never reaches here —
+// `parse` has already turned those into their own variants.
 fn skill_for<'a>(commands: &'a [Command], word: &str) -> Option<&'a Skill> {
     match &commands.iter().find(|c| c.word.as_ref() == word)?.source {
         Source::Skill(skill) => Some(skill),
@@ -603,7 +603,7 @@ fn skill_for<'a>(commands: &'a [Command], word: &str) -> Option<&'a Skill> {
     }
 }
 
-/// A word `parse` did not know: a skill to run, or a typo to name.
+// A word `parse` did not know: a skill to run, or a typo to name.
 fn dispatch(commands: &[Command], word: &str, args: &str) -> Step {
     let Some(skill) = skill_for(commands, word) else {
         return lines(format!("unknown command {word} — /help lists them"));
@@ -637,11 +637,11 @@ pub fn expand(commands: &[Command], line: &str) -> Option<Result<String, String>
     Some(expanded(skill_for(commands, &word)?, &args))
 }
 
-/// What a line starting with `!` asks to run, when it names a command.
-///
-/// `!` alone is prose (a prompt, like any other line); `!cmd` runs `cmd`.
-/// `!!cmd` keeps its second bang: in shell grammar `! cmd` negates the exit
-/// code, which is what a non-interactive shell will do with it.
+// What a line starting with `!` asks to run, when it names a command.
+//
+// `!` alone is prose (a prompt, like any other line); `!cmd` runs `cmd`.
+// `!!cmd` keeps its second bang: in shell grammar `! cmd` negates the exit
+// code, which is what a non-interactive shell will do with it.
 fn bash_command(line: &str) -> Option<&str> {
     let cmd = line.strip_prefix('!')?.trim();
     (!cmd.is_empty()).then_some(cmd)
@@ -672,7 +672,7 @@ pub fn parse(line: &str) -> Option<Cmd> {
     })
 }
 
-/// Whatever followed the command word.
+// Whatever followed the command word.
 fn rest(line: &str) -> String {
     line.trim_start()
         .split_once(char::is_whitespace)
@@ -706,7 +706,7 @@ fn lines(text: impl Into<String>) -> Step {
     Step::Handled(text.into().lines().map(str::to_string).collect())
 }
 
-/// How long ago a transcript was last saved, in human terms.
+// How long ago a transcript was last saved, in human terms.
 fn ago(secs: u64) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

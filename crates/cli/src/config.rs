@@ -157,9 +157,9 @@ pub struct ModelEntry {
     pub pricing: Pricing,
 }
 
-/// The shape a model gets when the file does not describe it. Written out
-/// rather than derived: `derive(Default)` would zero the window, and a zero
-/// window is a budget of nothing rather than a stated guess.
+// The shape a model gets when the file does not describe it. Written out
+// rather than derived: `derive(Default)` would zero the window, and a zero
+// window is a budget of nothing rather than a stated guess.
 impl Default for ModelEntry {
     fn default() -> Self {
         Self {
@@ -178,15 +178,18 @@ impl Default for ModelEntry {
 impl Config {
     /// The endpoint's shape, refused rather than guessed: naming the wrong one
     /// is a 400 on the first turn, and neither is a safer bet than the other.
+    /// The endpoint's shape, refused rather than guessed: naming the wrong one
+    /// is a 400 on the first turn, and neither is a safer bet than the other.
     fn format(&self) -> Result<Format> {
         let named = self
             .format
-            .context("`format` is required: \"anthropic\" or \"openai\"")?;
+            .context("`format` is required: \"anthropic\", \"openai\" or \"chat\"")?;
         Ok(match named {
             FormatArg::Anthropic => Format::Anthropic {
                 cache_control: self.cache_control,
             },
             FormatArg::Openai => Format::OpenAi,
+            FormatArg::Chat => Format::Chat,
         })
     }
 
@@ -241,7 +244,7 @@ impl Config {
                  \"adaptive\" (Claude 4.6 and later) or \"budget\" (4.5 and earlier)"
             ),
             (
-                Some(FormatArg::Openai),
+                Some(FormatArg::Openai | FormatArg::Chat),
                 Some(t @ (ThinkingControl::Adaptive | ThinkingControl::Budget)),
             ) => {
                 let named = match t {
@@ -477,9 +480,9 @@ fn parse(body: &str) -> Result<Config> {
     Ok(config)
 }
 
-/// A key that was removed rather than renamed. `deny_unknown_fields` refuses it
-/// already, but only by name — this says why, which is the part a file that
-/// worked yesterday actually needs.
+// A key that was removed rather than renamed. `deny_unknown_fields` refuses it
+// already, but only by name — this says why, which is the part a file that
+// worked yesterday actually needs.
 fn retired(body: &str) -> Result<()> {
     if body
         .lines()
@@ -494,9 +497,9 @@ fn retired(body: &str) -> Result<()> {
     Ok(())
 }
 
-/// The two shapes that came before this one. `deny_unknown_fields` would refuse
-/// them too, but with "unknown field `provider`" — true, and no help at all to
-/// someone holding a file that worked yesterday.
+// The two shapes that came before this one. `deny_unknown_fields` would refuse
+// them too, but with "unknown field `provider`" — true, and no help at all to
+// someone holding a file that worked yesterday.
 fn migrated(body: &str) -> Result<()> {
     // Matched as keys and tables, never as substrings: a comment that happens to
     // say "wire" is not a config in the old shape, and refusing a valid file is

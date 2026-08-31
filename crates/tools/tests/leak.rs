@@ -1,8 +1,8 @@
 use serde_json::json;
 use tools::{Ctx, Tool, Workspace};
 
-/// A shell that backgrounds a long sleeper and then waits. Killing only the
-/// shell leaves the sleeper running.
+// A shell that backgrounds a long sleeper and then waits. Killing only the
+// shell leaves the sleeper running.
 #[tokio::test]
 async fn a_timeout_takes_the_whole_process_group() {
     let dir = tempfile::tempdir().unwrap();

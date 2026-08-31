@@ -83,9 +83,9 @@ impl Estimated {
     }
 }
 
-/// Merging two of these is per-part, and a part left out of the merge reports a
-/// guess as measured. Written once here so a new part cannot be forgotten at
-/// one of the call sites.
+// Merging two of these is per-part, and a part left out of the merge reports a
+// guess as measured. Written once here so a new part cannot be forgotten at
+// one of the call sites.
 impl std::ops::BitOrAssign for Estimated {
     fn bitor_assign(&mut self, other: Self) {
         self.input |= other.input;
@@ -139,8 +139,8 @@ pub(crate) fn say(tx: &tokio::sync::mpsc::UnboundedSender<Event>, event: Event) 
     let _ = tx.send(event);
 }
 
-/// Deltas are the exception: they are the transcript, they arrive thousands at
-/// a time, and the transcript is saved beside the journal already.
+// Deltas are the exception: they are the transcript, they arrive thousands at
+// a time, and the transcript is saved beside the journal already.
 fn note(event: &Event) {
     match event {
         Event::TextDelta(_) | Event::ReasoningDelta(_) | Event::Usage(_) => {}

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use brain::model::{CacheControl, Format, ModelSpec};
 use brain::request::Effort;
-use brain::transport::{Transport, anthropic::Anthropic, openai::OpenAi};
+use brain::transport::{Transport, anthropic::Anthropic, chat::ChatCompletions, openai::OpenAi};
 use clap::{Parser, ValueEnum};
 use tokio::sync::mpsc;
 
@@ -25,6 +25,7 @@ mod tui;
 pub enum FormatArg {
     Anthropic,
     Openai,
+    Chat,
 }
 
 impl FormatArg {
@@ -36,6 +37,7 @@ impl FormatArg {
                 cache_control: CacheControl::Off,
             },
             FormatArg::Openai => Format::OpenAi,
+            FormatArg::Chat => Format::Chat,
         }
     }
 
@@ -175,15 +177,22 @@ pub struct Args {
     log: journal::LogLevel,
 }
 
-/// `configured` is the config's `api_key`; the format's environment variable
-/// (`{format}_API_KEY`) is the fallback. A key is never required: whichever
-/// is set rides along, and an endpoint that needs one answers with its own
-/// refusal.
+// `configured` is the config's `api_key`; the environment variable is the
+// fallback. The two OpenAI-family wires share `OPENAI_API_KEY`; Anthropic
+// takes `ANTHROPIC_API_KEY`. A key is never required: whichever is set rides
+// along, and an endpoint that needs one answers with its own refusal.
 fn transport_for(spec: &ModelSpec, configured: Option<String>) -> Arc<dyn Transport> {
-    let key = configured.or_else(|| std::env::var(format!("{}_API_KEY", spec.format.name())).ok());
+    let key = configured.or_else(|| {
+        let var = match spec.format {
+            Format::Chat | Format::OpenAi => "OPENAI_API_KEY",
+            Format::Anthropic { .. } => "ANTHROPIC_API_KEY",
+        };
+        std::env::var(var).ok()
+    });
     match spec.format {
         Format::Anthropic { .. } => Arc::new(Anthropic::new(key)),
         Format::OpenAi => Arc::new(OpenAi::new(key)),
+        Format::Chat => Arc::new(ChatCompletions::new(key)),
     }
 }
 
@@ -203,11 +212,11 @@ pub struct Dialled {
     pub warning: Option<String>,
 }
 
-/// Why this run wanted that model, for an endpoint that cannot serve it.
-///
-/// Every name resolves now — an unlisted one is passed through with default
-/// numbers — so the only way this fails is a config with no endpoint to send
-/// it to, and the useful half of that message is who asked.
+// Why this run wanted that model, for an endpoint that cannot serve it.
+//
+// Every name resolves now — an unlisted one is passed through with default
+// numbers — so the only way this fails is a config with no endpoint to send
+// it to, and the useful half of that message is who asked.
 fn unknown(model: &str, named_by: config::Origin) -> String {
     format!(
         "`{model}`, named by {}, cannot be reached — see examples/pi.toml",
@@ -269,7 +278,7 @@ pub fn dial(
     })
 }
 
-/// The prompt, or None when the run should ask for one.
+// The prompt, or None when the run should ask for one.
 fn read_prompt(args: &Args) -> Result<Option<String>> {
     if let Some(p) = &args.prompt {
         return Ok(Some(p.clone()));
@@ -398,8 +407,8 @@ pub fn resolve(
     })
 }
 
-/// Renders events by printing them, for every surface that is not the terminal
-/// one. Its own task so a slow write never holds the run up.
+// Renders events by printing them, for every surface that is not the terminal
+// one. Its own task so a slow write never holds the run up.
 fn paint(
     mut rx: mpsc::UnboundedReceiver<agent::Event>,
     quiet: bool,

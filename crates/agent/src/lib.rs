@@ -28,34 +28,34 @@ pub use event::{Estimated, Event, Totals};
 
 pub const DEFAULT_SYSTEM: &str = include_str!("../prompts/system.md");
 
-/// Identical answers before the loop is named. Two is not enough: a re-read
-/// after compaction is legitimate, and the content really is the same.
+// Identical answers before the loop is named. Two is not enough: a re-read
+// after compaction is legitimate, and the content really is the same.
 const REPEAT_LIMIT: usize = 2;
 
-/// Identical failures before the same is said. Lower, because none of that
-/// leeway applies: nothing legitimate re-sends, byte for byte, a call that just
-/// came back refused. Waiting for a third spends a turn learning what the
-/// second already showed — which is how a model that cannot get a tool's format
-/// right spends a whole session getting it wrong the same way.
+// Identical failures before the same is said. Lower, because none of that
+// leeway applies: nothing legitimate re-sends, byte for byte, a call that just
+// came back refused. Waiting for a third spends a turn learning what the
+// second already showed — which is how a model that cannot get a tool's format
+// right spends a whole session getting it wrong the same way.
 const FAILURE_LIMIT: usize = 1;
 
-/// Headroom for framing the estimate does not model. Compacting slightly early
-/// costs a little quality; compacting late costs the whole turn.
+// Headroom for framing the estimate does not model. Compacting slightly early
+// costs a little quality; compacting late costs the whole turn.
 const SAFETY_MARGIN: usize = 2_000;
 
-/// How hard to squeeze after the provider says the request did not fit. Our
-/// estimate was wrong by an unknown amount, so the correction is blunt.
+// How hard to squeeze after the provider says the request did not fit. Our
+// estimate was wrong by an unknown amount, so the correction is blunt.
 const SQUEEZE: f64 = 0.6;
 
-/// Attempts to shrink one turn before giving up on it.
+// Attempts to shrink one turn before giving up on it.
 const MAX_SQUEEZE: usize = 3;
 
-/// How far below our own count a reported input figure may sit before it stops
-/// being a count of the whole prompt. Deliberately generous: tokenizers
-/// disagree by tens of percent and our own count is a bound rather than a
-/// reading. An order of magnitude is neither — a host reporting two hundred
-/// tokens for a transcript we count in tens of thousands is answering a
-/// different question, and `fill_usage` says which one.
+// How far below our own count a reported input figure may sit before it stops
+// being a count of the whole prompt. Deliberately generous: tokenizers
+// disagree by tens of percent and our own count is a bound rather than a
+// reading. An order of magnitude is neither — a host reporting two hundred
+// tokens for a transcript we count in tens of thousands is answering a
+// different question, and `fill_usage` says which one.
 const SHORTFALL: u64 = 10;
 
 /// Retry schedule for a request the provider could not serve right now.
@@ -131,12 +131,12 @@ pub struct Agent {
     short_input_said: AtomicBool,
 }
 
-/// What each call last returned and how many times running, keyed by the call
-/// itself — its name and the arguments it was given.
+// What each call last returned and how many times running, keyed by the call
+// itself — its name and the arguments it was given.
 type Echoes = HashMap<(String, String), (String, usize)>;
 
-/// What a streamed call resolves to before anything runs. Deciding first keeps
-/// the result list aligned with the call list even when nothing executes.
+// What a streamed call resolves to before anything runs. Deciding first keeps
+// the result list aligned with the call list even when nothing executes.
 enum Action {
     Reject(String),
     Run(Arc<dyn tools::Tool>),
@@ -856,23 +856,23 @@ impl Agent {
     }
 }
 
-/// The scope a tool's own records land in, and what times it.
+// The scope a tool's own records land in, and what times it.
 fn ran(call: &ToolCall) -> tracing::Span {
     tracing::info_span!(target: "pi::tool", "tool", name = %call.name, call = %call.id)
 }
 
-/// Which way one call came back. The detection is the same either way; only the
-/// patience and the wording differ.
+// Which way one call came back. The detection is the same either way; only the
+// patience and the wording differ.
 #[derive(Clone, Copy, PartialEq)]
 enum Answer {
     Given,
     Failed,
 }
 
-/// A call that did not run, or ran and failed.
-///
-/// The notice goes inside the error body rather than beside it: a failure has
-/// no content blocks to append one to, and the model reads the body.
+// A call that did not run, or ran and failed.
+//
+// The notice goes inside the error body rather than beside it: a failure has
+// no content blocks to append one to, and the model reads the body.
 fn failed(call: &ToolCall, mut body: String, echoes: &mut Echoes) -> ToolResult {
     if let Some(notice) = repeat_notice(echoes, call, &body, Answer::Failed) {
         body.push_str(&notice);
@@ -880,13 +880,13 @@ fn failed(call: &ToolCall, mut body: String, echoes: &mut Echoes) -> ToolResult 
     ToolResult::error(call.id.clone(), &call.name, body)
 }
 
-/// Name a call that has come back identical too many times.
-///
-/// A model that keeps making the same call and getting the same thing back is
-/// stuck, and nothing else stops it — there is no turn limit, so saying so is
-/// the only brake. Failures count the same as answers: a patch refused
-/// for the same reason three running is the commonest way a session dies, and
-/// counting only the answers left exactly that case unnamed.
+// Name a call that has come back identical too many times.
+//
+// A model that keeps making the same call and getting the same thing back is
+// stuck, and nothing else stops it — there is no turn limit, so saying so is
+// the only brake. Failures count the same as answers: a patch refused
+// for the same reason three running is the commonest way a session dies, and
+// counting only the answers left exactly that case unnamed.
 fn repeat_notice(
     echoes: &mut Echoes,
     call: &ToolCall,
@@ -947,7 +947,7 @@ fn wedged(idle: std::time::Duration) -> AgentError {
     )))
 }
 
-/// Conventional exit code for a process killed by SIGINT.
+// Conventional exit code for a process killed by SIGINT.
 const INTERRUPTED: i32 = 130;
 
 /// First Ctrl-C cancels; a second one leaves.
