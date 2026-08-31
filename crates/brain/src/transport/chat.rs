@@ -85,13 +85,14 @@ fn encode_assistant(content: &[AssistantContent], spec: &ModelSpec, out: &mut Ve
     for b in content {
         match b {
             AssistantContent::Text(t) => text.push_str(&t.text),
-            AssistantContent::Reasoning(r) => match r.replay_for(spec) {
+            AssistantContent::Reasoning(r) => {
                 // Demoted reasoning ships as ` thinking`-wrapped prose, the
                 // same demotion the other wires do. Signed and encrypted are
                 // unreachable for this format, so only demotion ships.
-                Replay::Demoted => text.push_str(&tagged(&r.text())),
-                _ => {}
-            },
+                if let Replay::Demoted = r.replay_for(spec) {
+                    text.push_str(&tagged(&r.text()));
+                }
+            }
             AssistantContent::ToolCall(call) => calls.push(json!({
                 "id": call.id,
                 "type": "function",
