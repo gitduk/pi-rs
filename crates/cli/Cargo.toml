@@ -12,6 +12,7 @@ path = "src/main.rs"
 agent.workspace = true
 brain.workspace = true
 tools.workspace = true
+wechat.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tokio-util.workspace = true

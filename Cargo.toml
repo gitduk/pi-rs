@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "1.0.5"
+version = "1.0.7"
 edition = "2024"
 license = "MIT"
 
@@ -13,6 +13,7 @@ tools = { path = "crates/tools" }
 agent = { path = "crates/agent" }
 hashline = { path = "crates/hashline" }
 syntax = { path = "crates/syntax" }
+wechat = { path = "crates/wechat" }
 
 anyhow = "1"
 async-trait = "0.1"

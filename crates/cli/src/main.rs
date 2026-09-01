@@ -19,6 +19,7 @@ mod repl;
 mod session;
 mod settings;
 mod tui;
+mod wechat;
 
 /// The three below are both flags and config values, so a config file names a
 /// tier the same way the command line does.
@@ -559,7 +560,7 @@ async fn main() -> Result<()> {
         // side and the repaint goes out the other. Missing either, there is
         // nothing to hold still, and printing a line at a time is right.
         if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-            return tui::Tui::new(core, key_map)?.run(tx, rx).await;
+            return tui::Tui::new(core, key_map, wechat::Bridge::new())?.run(tx, rx).await;
         }
         let painter = paint(rx, quiet, std::sync::Arc::new(config.theme.clone()));
         let out = line::run(core, tx).await;

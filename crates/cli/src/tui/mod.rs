@@ -1371,6 +1371,7 @@ pub struct Tui {
     ui: Ui,
     keys: UnboundedReceiver<TermEvent>,
     totals: Totals,
+    bridge: crate::wechat::Bridge,
 }
 
 // crossterm reads blockingly, so the keyboard gets a thread of its own and
@@ -1396,7 +1397,7 @@ fn history_path() -> Option<std::path::PathBuf> {
 const HISTORY_KEEP: usize = 1_000;
 
 impl Tui {
-    pub fn new(core: Repl, keys: Arc<Keys>) -> Result<Self> {
+    pub fn new(core: Repl, keys: Arc<Keys>, bridge: crate::wechat::Bridge) -> Result<Self> {
         let paint = Paint::with_theme(true, Arc::new(core.config.theme.clone()));
         let mut ui = Ui::new(
             Screen::new()?,
@@ -1424,6 +1425,7 @@ impl Tui {
             ui,
             keys: reader(),
             totals: Totals::default(),
+            bridge,
         })
     }
 
@@ -1464,49 +1466,70 @@ impl Tui {
     ) -> Result<()> {
         loop {
             self.ui.flush();
-            let Some(key) = self.keys.recv().await else {
-                break;
-            };
-            let line = match self.ui.key(key, false) {
-                Act::Submit(line) => line,
-                Act::Quit => break,
-                Act::OpenRewind => {
-                    self.open_rewind();
-                    continue;
-                }
-                Act::Rewind(id) => {
-                    self.rewind_turn(id);
-                    continue;
-                }
-                Act::CommitSetting(path, value) => {
-                    match self.core.commit_file(&path, &value) {
-                        Ok(said) => {
-                            let rows = crate::settings::leaves(&self.core.file);
-                            self.ui.setting_paths =
-                                rows.iter().map(|(p, _)| p.clone()).collect();
-                            self.ui.scrollback.extend(said.into_iter().map(Row::notice));
-                            if let Some(panel) = &mut self.ui.settings {
-                                panel.refresh(rows);
-                                panel.finish_edit();
+            let line = if self.ui.queued.is_empty() {
+                tokio::select! {
+                    key = self.keys.recv() => match key {
+                        Some(key) => match self.ui.key(key, false) {
+                            Act::Submit(line) => Some(line),
+                            Act::Quit => break,
+                            Act::OpenRewind => {
+                                self.open_rewind();
+                                None
                             }
-                        }
-                        Err(why) => {
-                            if let Some(panel) = &mut self.ui.settings {
-                                panel.refuse(why);
+                            Act::Rewind(id) => {
+                                self.rewind_turn(id);
+                                None
                             }
+                            Act::CommitSetting(path, value) => {
+                                match self.core.commit_file(&path, &value) {
+                                    Ok(said) => {
+                                        let rows = crate::settings::leaves(&self.core.file);
+                                        self.ui.setting_paths =
+                                            rows.iter().map(|(p, _)| p.clone()).collect();
+                                        self.ui.scrollback
+                                            .extend(said.into_iter().map(Row::notice));
+                                        if let Some(panel) = &mut self.ui.settings {
+                                            panel.refresh(rows);
+                                            panel.finish_edit();
+                                        }
+                                    }
+                                    Err(why) => {
+                                        if let Some(panel) = &mut self.ui.settings {
+                                            panel.refuse(why);
+                                        }
+                                    }
+                                }
+                                None
+                            }
+                            Act::NewSession => {
+                                let Step::Swap(said) = self.core.command("/new", &self.totals)
+                                else {
+                                    unreachable!("ctrl+l twice reaches the /new branch");
+                                };
+                                self.land_swap(said);
+                                None
+                            }
+                            Act::Interrupt | Act::None => None,
+                        },
+                        None => break,
+                    },
+                    msg = self.bridge.rx.recv() => match msg {
+                        Some(crate::wechat::Inbound::Text { text }) => Some(text),
+                        Some(crate::wechat::Inbound::Stop) => {
+                            self.ui.say("nothing running to stop");
+                            None
                         }
-                    }
-                    continue;
+                        Some(crate::wechat::Inbound::Notice(text)) => {
+                            self.ui.say(text);
+                            None
+                        }
+                        None => None,
+                    },
                 }
-                Act::NewSession => {
-                    let Step::Swap(said) = self.core.command("/new", &self.totals) else {
-                        unreachable!("ctrl+l twice reaches the /new branch");
-                    };
-                    self.land_swap(said);
-                    continue;
-                }
-                Act::Interrupt | Act::None => continue,
+            } else {
+                Some(std::mem::take(&mut self.ui.queued).join("\n"))
             };
+            let Some(line) = line else { continue; };
             self.ui.submit(&line);
             // A fresh turn starts at the newest row: a view scrolled up to
             // read would otherwise stream the run's output out of sight.
@@ -1529,7 +1552,7 @@ impl Tui {
                     // exactly as an agent turn can be interrupted.
                     let cancel = CancellationToken::new();
                     let lines = {
-                        let Self { core, ui, keys, .. } = &mut self;
+                        let Self { core, ui, keys, bridge, .. } = &mut self;
                         let run = core.bash(&command, cancel.clone());
                         tokio::pin!(run);
                         loop {
@@ -1548,6 +1571,19 @@ impl Tui {
                                     Act::OpenRewind | Act::Rewind(_) | Act::NewSession => {}
                                     Act::CommitSetting(..) => {}
                                     Act::None => {}
+                                },
+                                msg = bridge.rx.recv() => match msg {
+                                    Some(crate::wechat::Inbound::Stop) => {
+                                        cancel.cancel();
+                                        ui.stopping = true;
+                                    }
+                                    Some(crate::wechat::Inbound::Text { text }) => {
+                                        ui.queued.push(text);
+                                    }
+                                    Some(crate::wechat::Inbound::Notice(text)) => {
+                                        ui.say(text);
+                                    }
+                                    None => {}
                                 },
                             }
                         }
@@ -1614,6 +1650,21 @@ impl Tui {
                                 .say(self.ui.paint.on(&self.ui.paint.theme.muted, &why));
                         }
                     }
+                }
+                Step::Wechat(cmd) => {
+                    let said = match cmd {
+                        repl::WechatCmd::Status => self.bridge.status(),
+                        repl::WechatCmd::On => match self.bridge.on().await {
+                            Ok(said) => said,
+                            Err(e) => {
+                                self.ui.say(format!("wechat: {e:#}"));
+                                Vec::new()
+                            }
+                        },
+                        repl::WechatCmd::Off => self.bridge.off(),
+                    };
+                    self.ui.scrollback
+                        .extend(said.into_iter().map(Row::notice));
                 }
                 Step::Prompt { send, mut typed } => {
                     let mut next = Some(send);
@@ -1715,7 +1766,7 @@ impl Tui {
         let out = {
             // Disjoint borrows: the run holds the session while the loop keeps
             // drawing and reading keys.
-            let Self { core, ui, keys, .. } = self;
+            let Self { core, ui, keys, bridge, .. } = self;
             let Repl { agent, session, .. } = core;
             let run = agent.run(session, &ctx, tx);
             tokio::pin!(run);
@@ -1724,7 +1775,10 @@ impl Tui {
                 ui.flush();
                 tokio::select! {
                     done = &mut run => break done,
-                    Some(event) = rx.recv() => ui.on_event(event),
+                    Some(event) = rx.recv() => {
+                        bridge.observe(&event).await;
+                        ui.on_event(event);
+                    }
                     Some(key) = keys.recv() => match ui.key(key, true) {
                         Act::Interrupt => { cancel.cancel(); ui.stopping = true; }
                         Act::Submit(line) => ui.queued.push(line),
@@ -1738,6 +1792,19 @@ impl Tui {
                         Act::CommitSetting(..) => {}
                         Act::None => {}
                     },
+                    msg = bridge.rx.recv() => match msg {
+                        Some(crate::wechat::Inbound::Stop) => {
+                            cancel.cancel();
+                            ui.stopping = true;
+                        }
+                        Some(crate::wechat::Inbound::Text { text }) => {
+                            ui.queued.push(text);
+                        }
+                        Some(crate::wechat::Inbound::Notice(text)) => {
+                            ui.say(text);
+                        }
+                        None => {}
+                    },
                     _ = tick.tick() => ui.spinner += 1,
                 }
             }
@@ -1745,6 +1812,7 @@ impl Tui {
 
         // Whatever the run posted on its way out still has to be shown.
         while let Ok(event) = rx.try_recv() {
+            self.bridge.observe(&event).await;
             self.ui.on_event(event);
         }
         self.ui.close();
@@ -1764,6 +1832,10 @@ impl Tui {
         // likeliest to want back; make the completion list see it.
         self.refresh_sessions();
 
+        // A stopped or failed turn never got its `Done`; whatever text had
+        // accumulated still has to reach the phone.
+        let cancelled = matches!(&out, Err(AgentError::Cancelled));
+        self.bridge.finish_turn(cancelled).await;
         match out {
             Ok(totals) => self.totals.merge(&totals),
             Err(AgentError::Cancelled) => self

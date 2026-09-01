@@ -111,7 +111,7 @@ through. `prompt.icon` is the one value that is neither colour nor attribute.
 A key that is not one of those is refused at load, like a misspelled compat
 key.
 
-`/help` `/new` `/resume` `/name` `/model` `/compact` `/reload` `/keys` `/log` `/todo` `/cost` `/exit`, and one
+`/help` `/new` `/resume` `/name` `/model` `/compact` `/reload` `/keys` `/log` `/todo` `/cost` `/wechat` `/exit`, and one
 more for every skill on disk. Typing `/` opens a list of what the line could
 still become; `↑` `↓` pick, `Tab` accepts, `Esc` dismisses it until the next
 keystroke. `/model` and `/resume` complete their arguments too: the model
@@ -150,6 +150,14 @@ model a session is on is a decision, not a preference, and `/model` is how it
 changes. There is no narrower `/reload keys` because there is nothing to save:
 an unchanged system prompt is the same string, so the provider's cache survives
 a reload that changed nothing.
+
+`/wechat on` bridges this session to WeChat: the first time it shows a QR to
+scan, then it long-polls the Weixin iLink bot API (no public port needed) and
+every message from that chat lands in this session as if typed here. The
+reply streams to the phone when the turn ends, tool calls appear as short
+lines, and `/stop` from the phone interrupts a running turn. `/wechat` reports
+the bridge's state; `/wechat off` disconnects. Credentials and the message
+cursor live in `~/.pi/wechat.json`.
 
 ### The journal
 

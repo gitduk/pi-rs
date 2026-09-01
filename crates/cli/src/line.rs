@@ -72,6 +72,9 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
                 let spent = turn(&mut core, send, typed, &tx).await;
                 totals.merge(&spent);
             }
+            Step::Wechat(_) => println!(
+                "wechat needs a terminal to show the login QR — run pi in a terminal"
+            ),
         }
     }
     Ok(())

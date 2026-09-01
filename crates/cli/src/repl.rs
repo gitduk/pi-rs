@@ -99,6 +99,11 @@ const BUILTIN: &[Command] = &[
         "[set <path> <value>]",
         "open the settings panel, or change one for this session",
     ),
+    Command::builtin(
+        "/wechat",
+        "[on|off]",
+        "bridge this session to WeChat (scan a QR on first connect)",
+    ),
     Command::builtin("/exit", "", "leave (Ctrl-D does the same)"),
 ];
 
@@ -719,6 +724,8 @@ pub enum Cmd {
     /// Everything after the word: a `set <path> <value>`, `get <path>`,
     /// `reset [path]`, or empty to open the panel.
     Settings(String),
+    /// The wechat bridge verb: "" = status, "on" = connect, "off" = disconnect.
+    Wechat(String),
     /// Not a built-in word. It may name a skill and it may name nothing; the
     /// command table settles that, and `parse` does not have it.
     Other {
@@ -841,6 +848,7 @@ pub fn parse(line: &str) -> Option<Cmd> {
         "/name" => Cmd::Name(rest(line)),
         "/compact" => Cmd::Compact(rest(line)),
         "/model" => Cmd::Model(rest(line)),
+        "/wechat" => Cmd::Wechat(rest(line)),
         "/settings" => Cmd::Settings(rest(line)),
         other => Cmd::Other {
             word: other.to_string(),
@@ -870,6 +878,9 @@ pub enum Step {
     },
     /// Needs the network, so the surface runs it and reports.
     Compact(Option<String>),
+    /// Starts or stops the wechat bridge. Needs the network, so the surface
+    /// runs it and reports — the same rule as `Compact`.
+    Wechat(WechatCmd),
     /// Dealt with here; these lines are what there is to show for it. Returned
     /// rather than printed because one surface prints and the other paints.
     Handled(Vec<String>),
@@ -877,6 +888,14 @@ pub enum Step {
     /// has to rebuild its view from the new one, not just show the lines.
     Swap(Vec<String>),
     Quit,
+}
+
+/// What `/wechat` asks the surface to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WechatCmd {
+    Status,
+    On,
+    Off,
 }
 
 fn lines(text: impl Into<String>) -> Step {
@@ -951,6 +970,14 @@ impl Repl {
                 self.switch(&name)
             }),
             Cmd::Other { word, args } => dispatch(&self.commands, &word, &args),
+            Cmd::Wechat(rest) => match rest.trim() {
+                "" => Step::Wechat(WechatCmd::Status),
+                "on" => Step::Wechat(WechatCmd::On),
+                "off" => Step::Wechat(WechatCmd::Off),
+                other => lines(format!(
+                    "unknown /wechat verb `{other}` — bare, on or off"
+                )),
+            },
             Cmd::Settings(rest) => self.settings(&rest),
         }
     }
@@ -1565,9 +1592,20 @@ mod tests {
             .unwrap()
             .as_secs();
         assert_eq!(ago(now), "just now");
+
         assert_eq!(ago(now - 120), "2m ago");
         assert_eq!(ago(now - 7200), "2h ago");
         assert_eq!(ago(now - 3 * 86400), "3d ago");
+    }
+
+    #[test]
+    fn the_wechat_verb_parses_and_others_are_named() {
+        assert_eq!(parse("/wechat"), Some(Cmd::Wechat(String::new())));
+        assert_eq!(parse("/wechat on"), Some(Cmd::Wechat("on".into())));
+        assert_eq!(parse("/wechat off"), Some(Cmd::Wechat("off".into())));
+        // A typo reaches the command layer as a literal, so it can be named
+        // rather than silently meaning "status".
+        assert_eq!(parse("/wechat oen"), Some(Cmd::Wechat("oen".into())));
     }
 
     #[test]
