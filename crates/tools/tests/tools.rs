@@ -311,7 +311,7 @@ async fn a_range_one_line_short_is_refused_rather_than_applied() {
     .unwrap_err();
     let said = err.to_string();
     // The row's own text: a bare line number invites a story about the parser.
-    assert!(said.contains("line 8 is `}`"), "{said}");
+    assert!(said.contains("line 8 of what this one produces is `}`"), "{said}");
     assert!(said.contains("Nothing was written"), "{said}");
 
     // Refused means refused: the file on disk is untouched.
@@ -600,8 +600,11 @@ async fn a_write_in_a_language_the_parser_does_not_know_is_not_gated() {
     assert!(out.contains("wrote 1 line"), "{out}");
 }
 
+// A second edit with no read between is worth keeping, so a patch built on
+// numbering an earlier edit moved is stopped once and handed the rows it should
+// have used — never a read turn, and never a quiet landing on the wrong line.
 #[tokio::test]
-async fn two_edits_in_a_row_need_no_re_read() {
+async fn a_second_edit_is_shown_the_numbering_its_own_first_edit_moved() {
     let (_d, c) = ctx();
     let path = c.workspace.root().join("a.rs");
     std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
@@ -611,14 +614,48 @@ async fn two_edits_in_a_row_need_no_re_read() {
         .unwrap();
     let tag = first.split('#').nth(1).unwrap().split(']').next().unwrap();
     let second = format!("[a.rs#{tag}]\nPUT 4:\n+THREE\n");
+
+    let err = tools::edit::Edit
+        .execute(json!({ "patch": second.clone() }), &c)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("renumbered from line 1 on"), "{err}");
+    // The rows themselves, so the retry costs no read.
+    assert!(err.contains("4:three"), "{err}");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "a\nb\ntwo\nthree\n",
+        "a refused patch writes nothing"
+    );
+
+    // Shown once is enough: the resend goes through against those numbers.
     tools::edit::Edit
         .execute(json!({ "patch": second }), &c)
         .await
         .unwrap();
-
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
         "a\nb\ntwo\nTHREE\n"
+    );
+}
+
+#[tokio::test]
+async fn an_edit_that_moves_no_line_leaves_the_numbering_alone() {
+    let (_d, c) = ctx();
+    let path = c.workspace.root().join("a.rs");
+    std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
+
+    let first = read_then_edit(&c, "a.rs", "PUT 1:\n+ONE\n").await.unwrap();
+    let tag = first.split('#').nth(1).unwrap().split(']').next().unwrap();
+    // One line for one: every address the model holds is still the right one.
+    tools::edit::Edit
+        .execute(json!({ "patch": format!("[a.rs#{tag}]\nPUT 3:\n+THREE\n") }), &c)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "ONE\ntwo\nTHREE\n"
     );
 }
 
@@ -738,12 +775,13 @@ async fn a_failing_command_previews_the_command_too() {
 #[tokio::test]
 async fn tools_whose_result_opens_with_content_need_no_explicit_preview() {
     let (_d, c) = ctx();
-    std::fs::write(c.workspace.root().join("a.rs"), "one\n").unwrap();
+    std::fs::create_dir(c.workspace.root().join("d")).unwrap();
+    std::fs::write(c.workspace.root().join("d/a.rs"), "one\n").unwrap();
     let out = tools::read::Read
-        .execute(json!({ "path": "a.rs" }), &c)
+        .execute(json!({ "path": "d" }), &c)
         .await
         .unwrap();
-    assert_eq!(out.preview(), format!("[a.rs#{}]", hashline::tag("one\n")));
+    assert_eq!(out.preview(), "d/");
 }
 
 #[tokio::test]
@@ -758,10 +796,45 @@ async fn a_ranged_read_previews_the_rows_that_came_back() {
         .execute(json!({ "path": "a.rs", "offset": 2, "limit": 10 }), &c)
         .await
         .unwrap();
-    assert_eq!(
-        out.preview(),
-        format!("[a.rs#{} 2-3]", hashline::tag(src))
-    );
+    assert_eq!(out.preview(), "[a.rs:2-3]");
+}
+
+// The two lines a read produces answer to different readers, and only one of
+// them can lose the tag: a patch names it, and there is nowhere else to get it.
+#[tokio::test]
+async fn the_tag_leaves_the_display_and_stays_in_what_the_model_reads() {
+    let (_d, c) = ctx();
+    let src = "one\ntwo\nthree\n";
+    std::fs::write(c.workspace.root().join("a.rs"), src).unwrap();
+    let long: String = (0..200).map(|i| format!("fn f{i}() {{\n    {i};\n}}\n")).collect();
+    std::fs::write(c.workspace.root().join("big.rs"), &long).unwrap();
+
+    for args in [
+        json!({ "path": "a.rs" }),
+        json!({ "path": "a.rs", "offset": 2, "limit": 1 }),
+        json!({ "path": "big.rs" }),
+    ] {
+        let out = tools::read::Read.execute(args.clone(), &c).await.unwrap();
+        assert!(!out.preview().contains('#'), "{args}: {}", out.preview());
+        let head = out.flatten().lines().next().unwrap().to_string();
+        assert!(head.contains('#'), "{args}: {head}");
+    }
+
+    // A read that returned no rows carries no tag on either side: there is
+    // nothing for a patch to anchor to, so both readers are people here.
+    let out = tools::read::Read
+        .execute(json!({ "path": "a.rs", "offset": 99 }), &c)
+        .await
+        .unwrap();
+    assert!(!out.preview().contains('#'), "{}", out.preview());
+    assert!(!out.flatten().contains('#'), "{}", out.flatten());
+
+    let out = tools::write::Write
+        .execute(json!({ "path": "b.rs", "content": "fn f() {}\n" }), &c)
+        .await
+        .unwrap();
+    assert!(!out.preview().contains('#'), "{}", out.preview());
+    assert!(out.flatten().contains(&format!("#{}", hashline::tag("fn f() {}\n"))));
 }
 
 #[tokio::test]
@@ -880,7 +953,13 @@ async fn read_spills_an_over_long_view_and_reads_it_back_by_locator() {
         .await
         .unwrap()
         .flatten();
-    assert!(out.contains("bytes omitted"), "{out}");
+    // Cut between rows, not at a byte offset: every line still carries the
+    // whole of the line it is numbered with.
+    assert!(out.contains("\n…\n"), "{out}");
+    for row in out.lines().filter(|l| l.starts_with(char::is_numeric)) {
+        let (n, text) = row.split_once(':').expect("every row is addressed");
+        assert_eq!(text, format!("line {n}"), "half a row survived: {row}");
+    }
     let locator = out
         .lines()
         .find_map(|l| l.strip_prefix("full output: ").and_then(|l| l.split(' ').next()))
@@ -1039,4 +1118,23 @@ async fn text_that_is_not_utf8_is_refused_rather_than_mangled() {
         "mojibake reached the model: {}",
         out.flatten()
     );
+}
+
+// `undecorate` strips a pasted-back header so a model that echoes read's output
+// into `write` does not save it as content. It recognises the shape by hand,
+// including the tag's width — which `hashline` decides. If the two ever part,
+// nothing complains: the header just starts being written into the file.
+#[tokio::test]
+async fn write_still_recognises_the_header_hashline_prints() {
+    let src = "one\ntwo\n";
+    let pasted = format!("{}\n{src}", hashline::header("a.rs", &hashline::tag(src)));
+    assert_eq!(tools::write::undecorate(&pasted), src);
+
+    let (_d, c) = ctx();
+    let path = c.workspace.root().join("a.rs");
+    tools::write::Write
+        .execute(json!({ "path": "a.rs", "content": pasted }), &c)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), src);
 }

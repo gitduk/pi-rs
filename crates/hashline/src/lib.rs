@@ -3,7 +3,9 @@ use std::collections::HashMap;
 mod apply;
 mod parse;
 
-pub use apply::{Change, Landed, Plan, apply, first_changed_line, unified_patch};
+pub use apply::{
+    Change, Landed, Plan, apply, first_changed_line, first_shifted_line, unified_patch,
+};
 pub use parse::{FORMS, Form, parse};
 
 /// Content hash shown as `[path#TAG]`. Recomputing it beats storing a snapshot
@@ -15,6 +17,14 @@ pub fn tag(content: &str) -> String {
         h = h.wrapping_mul(0x0100_0193);
     }
     format!("{:04X}", (h ^ (h >> 16)) & 0xFFFF)
+}
+
+/// `[path#TAG]` — how a view names the file it is showing, and how a patch
+/// names the file it edits. Printed here because this is the crate that reads
+/// it back: two `format!`s pointing opposite ways is how a view starts printing
+/// a header its own parser rejects.
+pub fn header(path: &str, tag: &str) -> String {
+    format!("[{path}#{tag}]")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,26 +42,28 @@ pub enum Target {
         start: usize,
         end: usize,
     },
-    /// `N*` — the construct opening at N, through wherever it closes, one of
-    /// the three address forms (`N`, `N-M`, `N*`); `:UP`/`:DOWN` belong to
-    /// `PUT`, not to an address.
+    /// `N*` — the whole construct at N, annotations above it included, so the
+    /// range it resolves to may begin above N. One of the three address forms
+    /// (`N`, `N-M`, `N*`); `:UP`/`:DOWN` belong to `PUT`, not to an address.
     Block {
         line: usize,
     },
 }
 
-/// Resolves `N*` to the construct's closing line. Injected rather than linked
-/// so this crate stays a pure function of its inputs.
+/// Resolves `N*` to the construct it names. Injected rather than linked so this
+/// crate stays a pure function of its inputs.
 pub trait Blocks {
-    /// Inclusive end line of the construct opening at `line`, if there is one.
-    fn end_of(&self, path: &str, content: &str, line: usize) -> Option<usize>;
+    /// The inclusive 1-based rows of the construct at `line`, if there is one.
+    /// Both ends: an annotation above the row belongs to what it annotates, so
+    /// the start may sit above `line`.
+    fn extent_of(&self, path: &str, content: &str, line: usize) -> Option<(usize, usize)>;
 }
 
 /// For callers with no parser. Every `N*` then reports that it cannot resolve.
 pub struct NoBlocks;
 
 impl Blocks for NoBlocks {
-    fn end_of(&self, _path: &str, _content: &str, _line: usize) -> Option<usize> {
+    fn extent_of(&self, _path: &str, _content: &str, _line: usize) -> Option<(usize, usize)> {
         None
     }
 }

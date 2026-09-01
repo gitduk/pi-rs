@@ -13,8 +13,8 @@ pub struct Landed {
     /// replaced is known here and nowhere after, since the file it was in has
     /// already been rewritten by the time anyone reads this.
     pub took: Vec<String>,
-    /// The 1-based line the displaced lines started at in the original file.
-    /// Meaningful only when `took` is non-empty; insertions set it to `start`.
+    /// The 1-based line this hunk acted on in the *original* file: where the
+    /// displaced lines began, or the line an insertion was anchored to.
     pub took_at: usize,
 }
 
@@ -145,9 +145,9 @@ pub fn apply(patch: &Patch, files: &Files<'_>, blocks: &dyn Blocks) -> Result<Pl
 // Turn every `N*` into the range it names. A construct that cannot be found is
 // an error, never a guess: guessing here rewrites code nobody looked at.
 fn resolve(section: &Section, content: &str, blocks: &dyn Blocks) -> Result<Vec<Op>, Error> {
-    let end_of = |line: usize| -> Result<usize, Error> {
+    let extent_of = |line: usize| -> Result<(usize, usize), Error> {
         blocks
-            .end_of(&section.path, content, line)
+            .extent_of(&section.path, content, line)
             .ok_or_else(|| Error::NoBlockAt {
                 path: section.path.clone(),
                 line,
@@ -156,10 +156,12 @@ fn resolve(section: &Section, content: &str, blocks: &dyn Blocks) -> Result<Vec<
     let as_range = |t: &Target| -> Result<Target, Error> {
         Ok(match *t {
             Target::Range { .. } => *t,
-            Target::Block { line } => Target::Range {
-                start: line,
-                end: end_of(line)?,
-            },
+            // Both ends from the resolver, so the annotations above `line` go
+            // with the construct rather than being left to duplicate.
+            Target::Block { line } => {
+                let (start, end) = extent_of(line)?;
+                Target::Range { start, end }
+            }
         })
     };
 
@@ -180,7 +182,7 @@ fn resolve(section: &Section, content: &str, blocks: &dyn Blocks) -> Result<Vec<
                     at: LinePos::AfterBlock(line),
                     body,
                 } => Op::InsertAfter {
-                    at: LinePos::At(end_of(*line)?),
+                    at: LinePos::At(extent_of(*line)?.1),
                     body: body.clone(),
                 },
                 other => other.clone(),
@@ -360,11 +362,15 @@ fn build(
                     .map(|l| l.to_string())
                     .collect();
                 record(&mut out, body.clone(), took, i, &mut landed);
+                // Anchored at the span's last line, which is the key it was
+                // filed under — not at the span's first. `took_at` is read as
+                // the original line a hunk acted on, and `i` names the wrong
+                // one whenever a `:DOWN` shares its anchor with a range's end.
                 record(
                     &mut out,
                     after.remove(end).unwrap_or_default(),
                     Vec::new(),
-                    i,
+                    *end,
                     &mut landed,
                 );
                 i = end + 1;
@@ -452,6 +458,21 @@ pub fn unified_patch(changes: &[Change], before: &HashMap<&str, &str>) -> String
         hunks(&mut out, old_path, new_path, old, content, landed);
     }
     out
+}
+
+/// The first *original* line whose number the changes moved: an address from
+/// the last read is good below it, wrong at or above it. None if nothing moved.
+pub fn first_shifted_line(changes: &[Change]) -> Option<usize> {
+    changes
+        .iter()
+        .filter_map(|change| match change {
+            Change::Remove { .. } => None,
+            Change::Write { landed, .. } | Change::Rename { landed, .. } => landed
+                .iter()
+                .find(|l| l.gave() != l.took.len())
+                .map(|l| l.took_at),
+        })
+        .min()
 }
 
 /// The first line the changes touch in the new file, for a reader to jump to.

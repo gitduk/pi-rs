@@ -3,8 +3,7 @@
 pub struct TreeSitter;
 
 impl hashline::Blocks for TreeSitter {
-    fn end_of(&self, path: &str, content: &str, line: usize) -> Option<usize> {
-        let lang = syntax::Lang::of(path)?;
-        syntax::block(lang, content, line).map(|(_, end)| end)
+    fn extent_of(&self, path: &str, content: &str, line: usize) -> Option<(usize, usize)> {
+        syntax::block(syntax::Lang::of(path)?, content, line)
     }
 }
