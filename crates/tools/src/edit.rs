@@ -6,8 +6,13 @@ use std::collections::HashMap;
 
 use crate::{Ctx, Tier, Tool, ToolError, ToolOutput};
 
-// How many landed lines to echo back per file before summarizing instead.
-const ECHO_LIMIT: usize = 40;
+// How many bytes of landed rows to echo back per file before showing each
+// hunk's ends instead of all of it. Bytes, not rows: forty rows of `}` and
+// forty rows of a wrapped call are the same budget and an order of magnitude
+// apart, and what a transcript pays for is the bytes.
+const ECHO_LIMIT: usize = 2_000;
+// Rows kept at each end of a hunk once a patch is past ECHO_LIMIT.
+const ECHO_ENDS: usize = 3;
 // Diff rows a run's display carries for one patch.
 const SKETCH_LIMIT: usize = 24;
 
@@ -50,6 +55,11 @@ line's `:DOWN` the file tail — delete with CUT, address only the lines that
 change, and leave unchanged lines out of the body. PUT N* is for a
 mostly-rewritten construct, not a one-line change.
 
+Every hunk in one patch names the numbers your last read showed, so six places
+changing is one call with six hunks. A second call is not wrong, but its
+addresses must come from what the first one printed back, not from that read:
+the lines below an edit that changed a line count have all moved.
+
 Body rows start with `+` and are copied verbatim, so `+` alone is a blank line
 and leading whitespace is preserved. Never write `-old` or bare context lines:
 the address says what goes, the body says what arrives. To delete lines and put
@@ -58,10 +68,10 @@ begins with `-` or `+` takes the prefix like any other: `- item` is written
 `+- item`. A body may be any length regardless of how many lines the address
 names.
 
-Rejected outright: a stale TAG, two hunks touching the same original line, an
-address past the end of the file, and a patch that would leave the file
-unparseable when it parsed before. Nothing is written unless every section
-applies."#;
+Rejected outright: a stale TAG, an address a previous edit renumbered, two hunks
+touching the same original line, an address past the end of the file, and a
+patch that would leave the file unparseable when it parsed before. Nothing is
+written unless every section applies."#;
 
 // One table row, wrapped under its own label rather than running off the side.
 //
@@ -112,7 +122,7 @@ fn format() -> &'static str {
 }
 
 fn echo(path: &str, before: &str, content: &str, landed: &[Landed]) -> String {
-    let mut out = format!("[{path}#{}]", hashline::tag(content));
+    let mut out = hashline::header(path, &hashline::tag(content));
     if landed.iter().all(|l| l.gave() == 0) {
         // A patch of pure CUTs lands nothing, and saying so describes what did
         // not happen. What did is the deletion, which is the whole point of the
@@ -129,30 +139,44 @@ fn echo(path: &str, before: &str, content: &str, landed: &[Landed]) -> String {
         return out;
     }
     let lines: Vec<&str> = content.lines().collect();
-    let total: usize = landed.iter().map(hashline::Landed::gave).sum();
     out.push('\n');
-    if total > ECHO_LIMIT {
-        for l in landed.iter().filter(|l| l.gave() > 0) {
-            out.push_str(&format!(
-                "… {} lines now at {}-{}\n",
-                l.gave(),
-                l.start,
-                l.end
-            ));
+    // Addressed the way a second edit would name it: the numbering moved, and
+    // a construct that grew has a new end.
+    let spans = crate::rows::spans(path, content);
+    let row = |out: &mut String, n: usize| {
+        if let Some(text) = lines.get(n - 1) {
+            crate::rows::line(out, n, &spans, text);
         }
+    };
+    // Rendered once, then measured, then assembled. Not built-whole-and-thrown
+    // away when it turns out too long, and not rendered twice to measure it
+    // either: a row costs an allocation to spell, and `addr` is where it goes.
+    let rendered: Vec<Vec<String>> = landed
+        .iter()
+        .map(|l| {
+            (l.start..=l.end)
+                .map(|n| {
+                    let mut r = String::new();
+                    row(&mut r, n);
+                    r
+                })
+                .collect()
+        })
+        .collect();
+    let total: usize = rendered.iter().flatten().map(String::len).sum();
+    if total <= ECHO_LIMIT {
+        rendered.iter().flatten().for_each(|r| out.push_str(r));
         return out;
     }
-    // What just landed, addressed the way a second edit would name it: the
-    // numbering moved, and a construct that grew has a new end.
-    let spans = crate::rows::spans(path, content);
-    for l in landed {
-        for n in l.start..=l.end {
-            if let Some(text) = lines.get(n - 1) {
-                out.push_str(&crate::rows::addr(n, &spans));
-                out.push_str(text);
-                out.push('\n');
-            }
+    for rows in &rendered {
+        // Whole anyway, where eliding would not actually save rows.
+        if rows.len() <= ECHO_ENDS * 2 + 1 {
+            rows.iter().for_each(|r| out.push_str(r));
+            continue;
         }
+        rows[..ECHO_ENDS].iter().for_each(|r| out.push_str(r));
+        out.push_str(&format!("… {} lines\n", rows.len() - ECHO_ENDS * 2));
+        rows[rows.len() - ECHO_ENDS..].iter().for_each(|r| out.push_str(r));
     }
     out
 }
@@ -188,16 +212,22 @@ fn broke_syntax(plan: &hashline::Plan, loaded: &HashMap<String, String>) -> Opti
             } => (to, loaded.get(from), content, Some(landed)),
             Change::Remove { .. } => continue,
         };
-        if let Some((row, text)) = crate::parses::broke(path, before.map(String::as_str), after) {
+        let before = before.map_or("", String::as_str);
+        let rows = crate::parses::broke_rows(path, Some(before), after);
+        if let Some(row) = nearest_row(&rows, landed) {
+            let text = crate::parses::row_text(after, row);
+            // Numbered in the result, not in the file: nothing was written, so
+            // the row is not one the model can go and read.
             let mut why = format!(
-                "{path} would not parse: line {row} is `{text}`, and it did \
-                 parse before this patch. A range that covers one line too few \
-                 or too many does exactly this. Re-read and check where the \
-                 construct actually ends. Nothing was written."
+                "{path} would not parse: it did before this patch, and line \
+                 {row} of what this one produces is `{text}`. A range that \
+                 covers one line too few or too many does exactly this. \
+                 Re-read and check where the construct actually ends. Nothing \
+                 was written."
             );
             if let Some(landed) = landed {
                 why.push('\n');
-                why.push_str(&hunk_help(after, landed));
+                why.push_str(&hunk_help(path, before, after, landed));
             }
             return Some(why);
         }
@@ -205,38 +235,73 @@ fn broke_syntax(plan: &hashline::Plan, loaded: &HashMap<String, String>) -> Opti
     None
 }
 
+// Which break to name first: the one closest to a line this patch wrote. A
+// stray brace makes the whole file one error node opening on row 1.
+fn nearest_row(rows: &[usize], landed: Option<&Vec<Landed>>) -> Option<usize> {
+    let Some(landed) = landed.filter(|l| !l.is_empty()) else {
+        return rows.first().copied();
+    };
+    let distance = |row: &usize| {
+        landed
+            .iter()
+            .map(|l| {
+                let (lo, hi) = (l.start.min(l.end), l.start.max(l.end));
+                row.saturating_sub(hi).max(lo.saturating_sub(*row))
+            })
+            .min()
+            .unwrap_or(0)
+    };
+    rows.iter().min_by_key(|row| (distance(row), **row)).copied()
+}
+
+// `N*` spelt out, but only where it resolves to more than the row itself.
+// Advice is followed, and `N*` on a one-row construct is `N` under another
+// name — a whole turn spent restating the failure.
+fn star(extents: &HashMap<usize, (usize, usize)>, line: usize) -> String {
+    match extents.get(&line) {
+        Some((start, end)) if end > start => format!(" or use `{line}*`"),
+        _ => String::new(),
+    }
+}
+
 // What the patch's own hunks point at, for a break that a bare "line N is
 // `}`" leaves the model to hunt down by itself. Each hunk shows the lines it
 // displaces (`took` — the file as it stands, since nothing has been written)
 // and any whose body nets a different brace count from what it displaces —
 // the shape an off-by-one range leaves behind.
-fn hunk_help(after: &str, landed: &[Landed]) -> String {
+fn hunk_help(path: &str, before: &str, after: &str, landed: &[Landed]) -> String {
+    // Hunks spelt out before the rest are summarised.
+    const SHOWN: usize = 6;
     let new: Vec<&str> = after.lines().collect();
+    let old: Vec<&str> = before.lines().collect();
     let mut out = String::from("The hunks, against the file as it stands:");
     let mut off = String::new();
-    for (i, l) in landed.iter().enumerate() {
+    // One parse for the whole message: the advice checks itself against what
+    // `N*` would actually resolve to, once per hunk.
+    let extents = syntax::Lang::of(path).map_or_else(HashMap::new, |l| syntax::extents(l, before));
+    for l in landed.iter().take(SHOWN) {
+        // The model's own numbering: nothing was written, so `took_at` is where
+        // it addressed, where `start` is where the hunk would have landed.
+        //
         // Whatever surface a hunk covers, its address prints the way the
         // grammar writes it — a single line as `N`, a span as `N-M` — so the
         // shapes the model sees in the help are the ones its parser takes.
+        let at = l.took_at;
         let addr = hashline::Target::Range {
-            start: l.start,
-            end: l.start + l.took.len().saturating_sub(1),
+            start: at,
+            end: at + l.took.len().saturating_sub(1),
         }
         .to_string();
-        if i < 6 {
-            if l.took.is_empty() {
-                out.push_str(&format!("\n  {addr}(insertion)"));
-            } else {
-                let cur = l
-                    .took
-                    .iter()
-                    .map(|s| crop(s, 60))
-                    .collect::<Vec<_>>()
-                    .join("\n    ");
-                out.push_str(&format!("\n  {addr}: `{cur}`"));
-            }
-        } else if i == 6 {
-            out.push_str(&format!("\n  … {} more", landed.len() - i));
+        if l.took.is_empty() {
+            out.push_str(&format!("\n  {addr}(insertion)"));
+        } else {
+            let cur = l
+                .took
+                .iter()
+                .map(|s| crop(s, 60))
+                .collect::<Vec<_>>()
+                .join("\n    ");
+            out.push_str(&format!("\n  {addr}: `{cur}`"));
         }
         let took: isize = l.took.iter().map(|s| brace_net(s)).sum();
         let gave: isize = hunk_rows(&new, l).iter().map(|s| brace_net(s)).sum();
@@ -244,27 +309,31 @@ fn hunk_help(after: &str, landed: &[Landed]) -> String {
             let mut line = format!(
                 "\n  {addr}: its body nets {gave}, the lines it displaces net {took}"
             );
-            // The brace count crossing zero again says where the construct the
-            // range opened at `start` actually ends — the number the model
-            // got wrong, stated instead of left to re-derive.
-            if let Some(e) = balanced_end(&new, l.start) {
-                let s = l.start;
-                if e > s {
+            // Where the construct the range opened at actually ends, read off
+            // the file the model will address — the number it got wrong,
+            // stated instead of left to re-derive.
+            if let Some(e) = balanced_end(&old, at) {
+                if e > at {
+                    let star = star(&extents, at);
                     line.push_str(&format!(
-                        "; it opens at {s} and balances at line {e} — cover to {e} or use `{s}*`"
+                        "; it opens at {at} and balances at line {e} — cover to {e}{star}"
                     ));
                 } else {
                     // The displaced lines never opened a brace the body fails
                     // to close: the hunk itself is the problem, and naming
                     // the line as both open and close would read as a
                     // contradiction.
+                    let star = star(&extents, e);
                     line.push_str(&format!(
-                        "; the imbalance sits at line {e} — replace or cut it, or use `{e}*`"
+                        "; the imbalance sits at line {e} — replace or cut it{star}"
                     ));
                 }
             }
             off.push_str(&line);
         }
+    }
+    if let Some(rest) = landed.len().checked_sub(SHOWN).filter(|n| *n > 0) {
+        out.push_str(&format!("\n  … {rest} more"));
     }
     if !off.is_empty() {
         out.push_str("\nBrace balance:");
@@ -410,11 +479,123 @@ fn sketch(changes: &[Change], loaded: &HashMap<String, String>) -> String {
         .join("\n")
 }
 
+// Refuse addresses this session's own earlier edits moved, and show the rows
+// they now sit on.
+//
+// An edit hands back the new tag, so the tag check passes while the numbers
+// behind it point one row off. Rejecting alone would cost a read turn every
+// time, and a second edit with no read between is a capability worth keeping —
+// so the refusal carries the numbering itself and clears the mark, leaving the
+// model to resend against what it has just been shown.
+fn renumbered(
+    patch: &hashline::Patch,
+    reals: &HashMap<String, std::path::PathBuf>,
+    loaded: &HashMap<String, String>,
+    ctx: &Ctx,
+) -> Option<String> {
+    const AROUND: usize = 3;
+    let mut out = String::new();
+    for section in &patch.sections {
+        let Some(real) = reals.get(&section.path) else {
+            continue;
+        };
+        let Some(from) = ctx.shifted_from(real) else {
+            continue;
+        };
+        let content = loaded.get(&section.path).map_or("", String::as_str);
+        // A tag that no longer matches is a bigger problem than numbering, and
+        // saying so is `apply`'s job; nothing here should pre-empt it.
+        if section.tag != hashline::tag(content) {
+            continue;
+        }
+        // The highest line any op reaches, not the lowest: one hunk below the
+        // shift does not make the ones above it safe, and a range is unsafe as
+        // soon as either end is.
+        let Some(highest) = section.ops.iter().filter_map(op_span).map(|(_, e)| e).max() else {
+            continue;
+        };
+        if highest < from {
+            continue;
+        }
+        ctx.forget_shift(real);
+        let lines: Vec<&str> = content.lines().collect();
+        let spans = crate::rows::spans(&section.path, content);
+        out.push_str(&format!(
+            "{} was renumbered from line {from} on by your own last edit — the TAG is \
+             current, the line numbers are not. Around the lines this patch names:\n",
+            section.path
+        ));
+        let mut shown: Vec<usize> = section
+            .ops
+            .iter()
+            .filter_map(op_span)
+            // Both ends clamped into the file: an edit that shortened it is
+            // exactly when an address runs past the end, and the tail is what
+            // the model needs to see there — not an empty window.
+            .flat_map(|(s, e)| {
+                let (s, e) = (s.min(lines.len()), e.min(lines.len()));
+                s.saturating_sub(AROUND).max(1)..=(e + AROUND).min(lines.len())
+            })
+            .collect();
+        shown.sort_unstable();
+        shown.dedup();
+        // Rendered before it is spent, so the budget is the bytes this actually
+        // costs rather than a guess at them. A patch whose hunks span most of a
+        // file asks for most of the file back, and this message exists to save
+        // a read turn, not to be one.
+        let rendered: Vec<(usize, String)> = shown
+            .into_iter()
+            .map(|n| {
+                let mut row = String::new();
+                crate::rows::line(&mut row, n, &spans, lines[n - 1]);
+                (n, row)
+            })
+            .collect();
+        let keep = crate::rows::fits(rendered.iter(), |(_, r)| r.len(), ECHO_LIMIT);
+        let mut last = 0;
+        for (n, row) in rendered.iter().take(keep) {
+            if *n > last + 1 {
+                out.push_str(crate::rows::GAP);
+            }
+            out.push_str(row);
+            last = *n;
+        }
+        if keep < rendered.len() {
+            out.push_str(crate::rows::GAP);
+        }
+        out.push_str("Rebuild the hunks against these numbers and send it again.");
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+// The original lines an op names, or None for one that names none.
+//
+// A `N*` is counted at N alone: where its construct closes is the resolver's
+// answer and this runs before the resolver. Under-reaching there costs a
+// refusal that did not fire, never one that fired wrongly.
+fn op_span(op: &hashline::Op) -> Option<(usize, usize)> {
+    use hashline::{LinePos, Op, Target};
+    let of = |t: &Target| match *t {
+        Target::Range { start, end } => (start, end),
+        Target::Block { line } => (line, line),
+    };
+    match op {
+        Op::Replace { target, .. } | Op::Cut { target, .. } => Some(of(target)),
+        // `1:UP` is the file head however the numbering moved.
+        Op::InsertBefore { line: 1, .. } => None,
+        Op::InsertBefore { line, .. } => Some((*line, *line)),
+        Op::InsertAfter { at, .. } => Some(match at {
+            LinePos::At(n) | LinePos::AfterBlock(n) => (*n, *n),
+        }),
+        Op::Remove | Op::Move { .. } => None,
+    }
+}
+
 // What each file's tag is right now, for a refusal that turned on one.
 fn tags(loaded: &HashMap<String, String>) -> String {
     let mut out: Vec<String> = loaded
         .iter()
-        .map(|(p, c)| format!("{p}#{}", hashline::tag(c)))
+        .map(|(p, c)| hashline::header(p, &hashline::tag(c)))
         .collect();
     out.sort();
     out.join(" ")
@@ -468,8 +649,10 @@ impl Tool for Edit {
         // one change would vanish with no error to show for it.
         let mut guards = Vec::new();
         let mut loaded: HashMap<String, String> = HashMap::new();
+        let mut reals: HashMap<String, std::path::PathBuf> = HashMap::new();
         for path in patch.paths() {
             let real = ctx.workspace.resolve(path, self.tier())?;
+            reals.insert(path.to_string(), real.clone());
             guards.push(ctx.lock_file(&real).await);
             let content = tokio::fs::read_to_string(&real).await.map_err(|e| {
                 ToolError::Invalid(format!(
@@ -477,6 +660,17 @@ impl Tool for Edit {
                 ))
             })?;
             loaded.insert(path.to_string(), content);
+        }
+
+        if let Some(why) = renumbered(&patch, &reals, &loaded, ctx) {
+            tracing::warn!(
+                target: "pi::edit",
+                stage = "shift",
+                error = %why,
+                patch = %args.patch,
+                "patch rejected"
+            );
+            return Err(ToolError::Invalid(why));
         }
 
         let view: HashMap<&str, &str> = loaded
@@ -509,6 +703,33 @@ impl Tool for Edit {
             return Err(ToolError::Invalid(why));
         }
 
+        // After the guards, since a rejected patch wrote nothing and moved no
+        // line. The report below hands back a fresh tag; this is what stops
+        // that tag from vouching for numbering it does not cover.
+        // Bookkeeping runs beside each write, never ahead of the batch: a
+        // failure partway through would otherwise leave the tracker describing
+        // a file that was never written.
+        //
+        // Both ends of a rename, since the model's numbers for the old path are
+        // the only ones it has for the new one. A path that no longer holds the
+        // file it was noted for is forgotten instead, or the note outlives the
+        // content and refuses edits to whatever is written there next.
+        let track = |change: &Change, gone: &[&String], moved: &[&String]| {
+            let resolve = |path: &&String| match reals.get(*path) {
+                // Every path but a rename's destination is already resolved.
+                Some(real) => Some(real.clone()),
+                None => ctx.workspace.resolve(path, self.tier()).ok(),
+            };
+            for real in gone.iter().filter_map(resolve) {
+                ctx.forget_shift(&real);
+            }
+            if let Some(from) = hashline::first_shifted_line(std::slice::from_ref(change)) {
+                for real in moved.iter().filter_map(resolve) {
+                    ctx.note_shift(&real, from);
+                }
+            }
+        };
+
         let mut report = String::new();
         for change in &plan.changes {
             match change {
@@ -522,17 +743,19 @@ impl Tool for Edit {
                     // believing a fix landed when nothing moved.
                     if loaded.get(path).is_some_and(|before| before == content) {
                         report.push_str(&format!(
-                            "[{path}#{}] unchanged — the patch matches what is already there\n",
-                            hashline::tag(content)
+                            "{} unchanged — the patch matches what is already there\n",
+                            hashline::header(path, &hashline::tag(content))
                         ));
                         continue;
                     }
                     tokio::fs::write(ctx.workspace.resolve(path, self.tier())?, content).await?;
+                    track(change, &[], &[path]);
                     let before = loaded.get(path).map_or("", String::as_str);
                     report.push_str(&echo(path, before, content, landed));
                 }
                 Change::Remove { path } => {
                     tokio::fs::remove_file(ctx.workspace.resolve(path, self.tier())?).await?;
+                    track(change, &[path], &[]);
                     report.push_str(&format!("removed {path}\n"));
                 }
                 Change::Rename {
@@ -547,6 +770,7 @@ impl Tool for Edit {
                     }
                     tokio::fs::write(&dest, content).await?;
                     tokio::fs::remove_file(ctx.workspace.resolve(from, self.tier())?).await?;
+                    track(change, &[from], &[to]);
                     report.push_str(&format!("{from} → "));
                     let before = loaded.get(from).map_or("", String::as_str);
                     report.push_str(&echo(to, before, content, landed));
@@ -562,14 +786,14 @@ mod tests {
 
     #[test]
     fn a_parse_break_shows_the_hunk_addresses() {
-        let before = "fn f() {\n    a;\n}\n\nfn g() {";
+        let src = "fn f() {\n    a;\n}\n\nfn g() {";
         let landed = vec![Landed {
             start: 5,
             end: 5,
             took: vec!["fn g() {".into()],
             took_at: 5,
         }];
-        let help = hunk_help(before, &landed);
+        let help = hunk_help("a.rs", src, src, &landed);
         assert!(help.contains("5"), "{help}");
         assert!(!help.contains("5-5"), "{help}");
         assert!(help.contains("fn g() {"), "{help}");
@@ -577,7 +801,23 @@ mod tests {
     }
 
     #[test]
+    fn a_hunk_is_addressed_where_the_model_wrote_it_not_where_it_landed() {
+        // An earlier hunk that grew moves every later one. Naming the landing
+        // row hands back a number the model cannot find in the file it read.
+        let before = "a\nb\nc\n";
+        let after = "A\nA\nb\nC\n";
+        let landed = vec![
+            Landed { start: 1, end: 2, took: vec!["a".into()], took_at: 1 },
+            Landed { start: 4, end: 4, took: vec!["c".into()], took_at: 3 },
+        ];
+        let help = hunk_help("a.rs", before, after, &landed);
+        assert!(help.contains("\n  3: `c`"), "{help}");
+        assert!(!help.contains("4: `c`"), "{help}");
+    }
+
+    #[test]
     fn a_body_with_one_brace_too_many_is_called_out() {
+        let before = "fn f() {\n}\n\n";
         let after = "fn f() {\n}\n}\n";
         let landed = vec![Landed {
             start: 3,
@@ -585,16 +825,18 @@ mod tests {
             took: vec![String::new()],
             took_at: 3,
         }];
-        let help = hunk_help(after, &landed);
+        let help = hunk_help("a.rs", before, after, &landed);
         assert!(help.contains("Brace balance:"), "{help}");
         assert!(help.contains("nets -1"), "{help}");
         assert!(help.contains("the imbalance sits at line 3"), "{help}");
-        assert!(help.contains("use `3*`"), "{help}");
+        // A blank line opens no construct, so `3*` would be `3` again — the
+        // advice that cost a turn every time it was followed.
+        assert!(!help.contains("3*"), "{help}");
     }
 
     #[test]
     fn a_short_range_is_told_where_the_construct_actually_ends() {
-        let after = "fn a() {\n    1\n}\n\nfn b() {\n    2\n}\n";
+        let src = "fn a() {\n    1\n}\n\nfn b() {\n    2\n}\n";
         // The body was dropped but the close stayed outside the range, so the
         // displaced brace never balances; the help says where it does.
         let landed = vec![Landed {
@@ -603,8 +845,27 @@ mod tests {
             took: vec!["fn b() {".into()],
             took_at: 5,
         }];
-        let help = hunk_help(after, &landed);
+        let help = hunk_help("a.rs", src, src, &landed);
         assert!(help.contains("opens at 5"), "{help}");
         assert!(help.contains("balances at line 7"), "{help}");
+        // Here `5*` does resolve, so it is worth offering.
+        assert!(help.contains("use `5*`"), "{help}");
+    }
+
+    #[test]
+    fn the_break_named_is_the_one_nearest_what_the_patch_wrote() {
+        let landed = vec![Landed {
+            start: 170,
+            end: 174,
+            took: vec!["x".into()],
+            took_at: 170,
+        }];
+        // A stray brace reports the whole file as one error opening on row 1.
+        assert_eq!(nearest_row(&[1, 171, 400], Some(&landed)), Some(171));
+        // Distance decides, not order: row 1 loses to anything closer.
+        assert_eq!(nearest_row(&[1, 300], Some(&landed)), Some(300));
+        assert_eq!(nearest_row(&[1], Some(&landed)), Some(1));
+        assert_eq!(nearest_row(&[1, 400], None), Some(1));
+        assert_eq!(nearest_row(&[], Some(&landed)), None);
     }
 }

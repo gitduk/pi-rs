@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use tree_sitter::{Node, Parser};
 
 mod lang;
@@ -79,7 +80,12 @@ fn annotates(lang: Lang, node: Node, src: &str) -> bool {
 fn subject<'t>(lang: Lang, node: Node<'t>, src: &str) -> Node<'t> {
     let mut n = node;
     while annotates(lang, n, src) {
-        match n.next_named_sibling().filter(|next| touches(n, *next)) {
+        // Not onto what the parser could not read: the walk would carry on past
+        // it to the next valid construct and report a span covering both.
+        match n
+            .next_named_sibling()
+            .filter(|next| touches(n, *next) && resolvable(*next))
+        {
             Some(next) => n = next,
             None => break,
         }
@@ -92,7 +98,8 @@ fn subject<'t>(lang: Lang, node: Node<'t>, src: &str) -> Node<'t> {
         let inner = kids
             .next()
             .filter(|first| annotates(lang, *first, src))
-            .and_then(|_| kids.find(|k| !annotates(lang, *k, src)));
+            .and_then(|_| kids.find(|k| !annotates(lang, *k, src)))
+            .filter(|inner| resolvable(*inner));
         match inner {
             Some(inner) => n = inner,
             None => return n,
@@ -107,7 +114,9 @@ fn widen(node: Node) -> Node {
     // The root opens on row 0, so climbing into it would make every line-1
     // construct the whole file.
     while let Some(p) = n.parent().filter(|p| p.parent().is_some()) {
-        if p.start_position().row != n.start_position().row {
+        // Nor out into an error node: climbing through one hands back the span
+        // the parser gave up on, which is not a construct anything may name.
+        if p.start_position().row != n.start_position().row || !resolvable(p) {
             break;
         }
         n = p;
@@ -134,6 +143,23 @@ fn annotation_above<'t>(lang: Lang, node: Node<'t>, src: &str) -> Option<Node<'t
     (annotates(lang, prev, src) && touches(prev, node)).then_some(prev)
 }
 
+// A node an address may name. What the parser could not read is not a
+// construct: `N*` over an error node replaces a span nobody looked at, and a
+// view that printed its range would be inviting exactly that.
+fn resolvable(node: Node) -> bool {
+    node.is_named() && !node.is_error() && !node.is_missing()
+}
+
+// Whether `node` displaces `best` as the construct opening on their shared row.
+//
+// One spelling of the rule for both walks below. They prune differently — one
+// row against every row — but a row's answer may not depend on which asked.
+fn widest(best: Option<Node>, node: Node, root: Node) -> bool {
+    node != root
+        && resolvable(node)
+        && best.is_none_or(|b| node.end_byte() - node.start_byte() > b.end_byte() - b.start_byte())
+}
+
 /// The construct that opens at `line`, as an inclusive 1-based range.
 ///
 /// Resolves to the *largest* node starting on that row: `fn foo() {` belongs to
@@ -151,12 +177,7 @@ pub fn block(lang: Lang, content: &str, line: usize) -> Option<(usize, usize)> {
     while let Some(node) = stack.pop() {
         // The root starts on row 0, so line 1 would otherwise resolve to the
         // entire file — a block op that replaces everything.
-        if node != root
-            && node.start_position().row == row
-            && node.is_named()
-            && best
-                .is_none_or(|b| node.end_byte() - node.start_byte() > b.end_byte() - b.start_byte())
-        {
+        if node.start_position().row == row && widest(best, node, root) {
             best = Some(node);
         }
         // A node ending before the row, or starting after it, holds nothing useful.
@@ -169,33 +190,76 @@ pub fn block(lang: Lang, content: &str, line: usize) -> Option<(usize, usize)> {
     Some((e.start, e.end))
 }
 
-/// The first row tree-sitter could not parse, 1-based, if any.
+/// What [`block`] answers for every row, in one parse: each row that opens a
+/// construct, mapped to that construct's full extent.
+pub fn extents(lang: Lang, content: &str) -> HashMap<usize, (usize, usize)> {
+    let Some(tree) = parse(lang, content) else {
+        return HashMap::new();
+    };
+    let root = tree.root_node();
+    // `block` picks the largest node opening on a row; the same node is found
+    // here by keeping the widest per row while the walk passes through.
+    let mut best: HashMap<usize, Node> = HashMap::new();
+    let mut cursor = root.walk();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        let row = node.start_position().row;
+        if widest(best.get(&row).copied(), node, root) {
+            best.insert(row, node);
+        }
+        stack.extend(node.children(&mut cursor));
+    }
+    best.into_iter()
+        .map(|(row, node)| {
+            let e = extent(lang, node, content);
+            (row + 1, (e.start, e.end))
+        })
+        .collect()
+}
+
+/// Every multi-row construct, as the row it opens on mapped to the row it
+/// closes on. Keyed by the extent's start, annotations included — the number a
+/// patch writes, which is not always the row that named it.
+pub fn spans(lang: Lang, content: &str) -> HashMap<usize, usize> {
+    extents(lang, content)
+        .into_values()
+        .filter(|(start, end)| end > start)
+        .collect()
+}
+
+/// Every row tree-sitter could not parse, 1-based and ascending.
 ///
-/// Every grammar accepts every input — a file it cannot read comes back as a
-/// tree with error and missing nodes rather than no tree at all — so this asks
-/// the tree, not the parser.
-pub fn first_error(lang: Lang, content: &str) -> Option<usize> {
-    let tree = parse(lang, content)?;
+/// All of them, not just the first: an unbalanced brace makes the whole file
+/// one error node opening on row 1, and the row worth reporting is the one
+/// nearest what the caller touched.
+pub fn error_rows(lang: Lang, content: &str) -> Vec<usize> {
+    let Some(tree) = parse(lang, content) else {
+        return Vec::new();
+    };
     let root = tree.root_node();
     // The common answer is "none", and that one is a flag read, not a walk.
     if !root.has_error() {
-        return None;
+        return Vec::new();
     }
     let mut cursor = root.walk();
     let mut stack = vec![root];
-    let mut first: Option<usize> = None;
+    let mut rows = Vec::new();
     while let Some(node) = stack.pop() {
         if node.is_error() || node.is_missing() {
-            let row = node.start_position().row + 1;
-            first = Some(first.map_or(row, |f: usize| f.min(row)));
+            rows.push(node.start_position().row + 1);
+            // An error node's children are whatever the grammar salvaged, not
+            // further failures; descending would report the same break twice.
             continue;
         }
         if node.has_error() {
             stack.extend(node.children(&mut cursor));
         }
     }
-    first
+    rows.sort_unstable();
+    rows.dedup();
+    rows
 }
+
 
 /// The file's declarations, in source order, nested by container.
 pub fn outline(lang: Lang, content: &str) -> Vec<Item> {
@@ -357,6 +421,66 @@ export default { port: 8080 };
         // Line 8 opens `pub fn new`, which closes on line 10.
         assert_eq!(block(Lang::Rust, RUST, 8), Some((8, 10)));
         assert_eq!(block(Lang::Rust, RUST, 7), Some((7, 13)));
+    }
+
+    // A view prints `spans` and a patch is resolved by `block`; the two
+    // disagreeing is a view printing an address that edits something else.
+    fn spans_match_block(lang: Lang, src: &str) {
+        let map = spans(lang, src);
+        for n in 1..=src.lines().count() {
+            let whole = block(lang, src, n).filter(|(s, e)| e > s);
+            match whole {
+                // Only the extent's own start is a key: a row inside a
+                // construct has no address of its own to print.
+                Some((s, e)) if s == n => assert_eq!(map.get(&n), Some(&e), "row {n} of\n{src}"),
+                _ => assert_eq!(map.get(&n), None, "row {n} of\n{src}"),
+            }
+        }
+    }
+
+    #[test]
+    fn spans_answer_what_block_answers_for_every_row() {
+        spans_match_block(Lang::Rust, RUST);
+        spans_match_block(Lang::TypeScript, TS);
+        spans_match_block(Lang::Python, "class Dog:\n    def bark(self):\n        return 1\n");
+    }
+
+    #[test]
+    fn spans_reach_inside_a_function_where_the_outline_does_not() {
+        // Every failure in the logs this was written for was a range ending
+        // one line off a construct the outline never listed.
+        let src = "\
+pub fn complete(word: &str) -> Vec<u8> {
+    match word {
+        \"a\" => one()
+            .two(),
+        _ => Vec::new(),
+    }
+}
+";
+        let map = spans(Lang::Rust, src);
+        assert_eq!(map.get(&1), Some(&7), "the fn");
+        assert_eq!(map.get(&2), Some(&6), "the match the outline cannot see");
+        assert_eq!(map.get(&3), Some(&4), "the arm that wraps");
+        assert!(!map.contains_key(&5), "a one-row arm needs no span");
+        spans_match_block(Lang::Rust, src);
+    }
+
+    #[test]
+    fn an_annotation_above_broken_code_does_not_reach_past_it() {
+        // The forward walk off `/// doc` lands on what the parser gave up on.
+        // Carrying on from there reached the next valid construct and reported
+        // a span covering both, so `1*` would have taken `good()` with it.
+        let src = "/// doc\n#[derive(\nfn good() {}\n";
+        assert_eq!(block(Lang::Rust, src, 1), Some((1, 1)));
+        assert!(spans(Lang::Rust, src).is_empty());
+    }
+
+    #[test]
+    fn nothing_the_parser_could_not_read_is_a_construct() {
+        let src = "one\ntwo\nthree\n";
+        assert!(spans(Lang::Rust, src).is_empty(), "one error node, not a span");
+        spans_match_block(Lang::Rust, src);
     }
 
     #[test]

@@ -29,17 +29,127 @@ fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_SNIFF).any(|b| *b == 0)
 }
 
-// Deliver the assembled view. Anything over the threshold is spilled and the
-// transcript keeps a bounded head and tail plus the locator.
-fn deliver(ctx: &Ctx, out: String) -> Result<ToolOutput, ToolError> {
-    match spill::write(ctx, &out)? {
-        None => Ok(ToolOutput::text(out)),
-        Some(s) => Ok(ToolOutput::text(format!(
-            "{}\n{}",
-            spill::prune(&out),
-            s.note()
-        ))),
+/// A numbered view, held as rows until the transcript's budget is spent on it.
+///
+/// The rows stay apart from the text they will become for two reasons that are
+/// really one: the budget is then spent in whole rows, so no row is cut through
+/// the middle and left carrying a line number it no longer holds; and the line
+/// naming what survived is read off the same decision that built the body.
+/// Naming it from what the caller *meant* to send is how it came to name rows
+/// the model was never shown.
+struct View {
+    /// The `[path#TAG]` line the model anchors a patch to.
+    head: String,
+    /// Each row as it prints — newline and all — beside the file line it holds.
+    rows: Vec<(usize, String)>,
+    /// What follows the rows: how much of the file is still unread.
+    note: String,
+    kind: Kind,
+}
+
+/// What the view is, which is what decides how it names itself. One field, not
+/// a `whole` flag beside an `outline` option: a skeleton is never a run of
+/// lines, and two flags can say it is.
+enum Kind {
+    /// A run of file lines; `whole` when they reached both ends of the file.
+    Lines { whole: bool },
+    /// A skeleton, and the length of the file it skips through.
+    Outline { lines: usize },
+}
+
+/// The rows a view keeps at each end when all of them will not fit. `None` when
+/// they do — the one value both the body and its name are read from.
+type Cut = Option<(usize, usize)>;
+
+impl View {
+    /// The view as the model reads it: every row, or the ends of them with
+    /// `cut`'s middle elided. One assembly, so the spill copy and the
+    /// transcript copy cannot come to disagree about anything but the middle.
+    fn text(&self, cut: Cut) -> String {
+        let total: usize = self.rows.iter().map(|(_, r)| r.len()).sum();
+        let mut out = String::with_capacity(self.head.len() + 1 + total + self.note.len());
+        out.push_str(&self.head);
+        out.push('\n');
+        let kept: Vec<&[(usize, String)]> = match cut {
+            None => vec![&self.rows],
+            Some((head, tail)) => vec![&self.rows[..head], &self.rows[self.rows.len() - tail..]],
+        };
+        for (i, span) in kept.iter().enumerate() {
+            if i > 0 {
+                out.push_str(crate::rows::GAP);
+            }
+            for (_, row) in *span {
+                out.push_str(row);
+            }
+        }
+        out.push_str(&self.note);
+        out
     }
+
+    // Whole rows from each end until the budget is gone. The alternative —
+    // cutting the assembled text at a byte offset — lands mid-row about as
+    // often as not, and half a line under a line number reads as content.
+    fn cut(&self) -> Cut {
+        let spent = self.head.len() + self.note.len() + crate::rows::GAP.len();
+        let room = spill::MAX_OUTPUT.saturating_sub(spent);
+        let total: usize = self.rows.iter().map(|(_, r)| r.len()).sum();
+        if total <= room {
+            return None;
+        }
+        let size = |(_, r): &&(usize, String)| r.len();
+        let head = crate::rows::fits(self.rows.iter(), size, room / 2);
+        let tail = crate::rows::fits(self.rows.iter().rev(), size, room / 2);
+        Some((head, tail.min(self.rows.len() - head)))
+    }
+
+    /// The one line a person sees, named from the rows the body actually holds.
+    fn shown(&self, rel: &str, cut: Cut) -> String {
+        if let Kind::Outline { lines } = self.kind {
+            let dropped = cut.map_or(String::new(), |(h, t)| {
+                format!(" · {} not shown", self.rows.len() - h - t)
+            });
+            return format!("[{rel}] {lines} lines · outline{dropped}");
+        }
+        if cut.is_none() && matches!(self.kind, Kind::Lines { whole: true }) {
+            return format!("[{rel}]");
+        }
+        let at = |i: usize| self.rows[i].0;
+        let last = self.rows.len() - 1;
+        let spans = match cut {
+            None => vec![(at(0), at(last))],
+            Some((h, t)) => vec![(at(0), at(h - 1)), (at(self.rows.len() - t), at(last))],
+        };
+        // Through `hashline`, which is the crate that reads addresses back: a
+        // single row is `N`, and `N-N` is a shape its own parser refuses.
+        let named: Vec<String> = spans
+            .iter()
+            .map(|(a, b)| hashline::Target::Range { start: *a, end: *b }.to_string())
+            .collect();
+        format!("[{rel}:{}]", named.join(crate::rows::GAP.trim_end()))
+    }
+}
+
+// Deliver the view: the model's copy, the whole of it spilled when it is too
+// long for the transcript, and the one line a person sees.
+//
+// Both halves from here, because they used to be spelt at each return and a
+// read has several: the tag belongs to one of them and kept turning up in the
+// other. What the model reads carries it — a patch names it and has nowhere
+// else to get it — and what a person reads never does.
+fn deliver(ctx: &Ctx, rel: &str, view: View) -> Result<ToolOutput, ToolError> {
+    // One length check decides both halves. Two — the transcript's budget and
+    // the spill threshold, each read off a differently assembled string — can
+    // disagree at the margin, and the margin is where rows get elided behind
+    // `…` with no locator to recover them from.
+    let full = view.text(None);
+    let Some(spilled) = spill::write(ctx, &full)? else {
+        return Ok(ToolOutput::text(full).with_preview(view.shown(rel, None)));
+    };
+    let cut = view.cut();
+    let mut body = view.text(cut);
+    body.push('\n');
+    body.push_str(&spilled.note());
+    Ok(ToolOutput::text(body).with_preview(view.shown(rel, cut)))
 }
 
 pub struct Read;
@@ -151,6 +261,14 @@ impl Tool for Read {
             }
         };
         let tag = tag(content);
+        // Not in the view any more, so recorded here: which version of a file
+        // the model was looking at is the whole story when an edit built on
+        // this read turns out to have addressed the wrong lines.
+        tracing::info!(target: "pi::read", path = %rel, tag = %tag, "read");
+        // The numbering about to be shown is the current one. A window read
+        // clears the whole file rather than its own rows: the case worth
+        // catching is an edit built with no read between it and the last one.
+        ctx.forget_shift(&path);
 
         let all: Vec<&str> = content.lines().collect();
 
@@ -164,23 +282,37 @@ impl Tool for Read {
                 // From the items already in hand: asking `rows::spans` here
                 // would parse the file a second time for the same answer.
                 let spans = crate::rows::of(&items);
-                let mut out = format!("[{rel}#{tag}] {} lines · outline\n", all.len());
-                for item in &items {
-                    // The span, not just the opening row: it is what an edit
-                    // names, and a skeleton is the only view of a long file
-                    // that shows where anything ends.
-                    out.push_str(&crate::rows::addr(item.line, &spans));
-                    for _ in 0..item.depth {
-                        out.push_str("  ");
-                    }
-                    out.push_str(&item.text);
-                    out.push('\n');
-                }
-                out.push_str(
-                    "… declarations only, each with the range that replaces it whole. \
-                     Read a range with offset and limit.\n",
+                let rows = items
+                    .iter()
+                    .map(|item| {
+                        // The span, not just the opening row: it is what an edit
+                        // names, and a skeleton is the only view of a long file
+                        // that shows where anything ends.
+                        let mut row = crate::rows::addr(item.line, &spans);
+                        for _ in 0..item.depth {
+                            row.push_str("  ");
+                        }
+                        row.push_str(&item.text);
+                        row.push('\n');
+                        (item.line, row)
+                    })
+                    .collect();
+                return deliver(
+                    ctx,
+                    &rel,
+                    View {
+                        head: format!(
+                            "{} {} lines · outline",
+                            hashline::header(&rel, &tag),
+                            all.len()
+                        ),
+                        rows,
+                        note: "… declarations only, each with the range that replaces it \
+                               whole. Read a range with offset and limit.\n"
+                            .into(),
+                        kind: Kind::Outline { lines: all.len() },
+                    },
                 );
-                return deliver(ctx, out);
             }
         }
 
@@ -190,41 +322,52 @@ impl Tool for Read {
 
         if start >= all.len() {
             return Ok(ToolOutput::useless(format!(
-                "[{rel}#{tag}]\nline {offset} is past the end ({} lines)",
+                "[{rel}] line {offset} is past the end ({} lines)",
                 all.len()
             )));
         }
 
         let end = (start + limit).min(all.len());
-        let mut out = format!("[{rel}#{tag}]\n");
         // A construct opening inside the window often closes outside it, and a
         // row that says where it ends is the difference between one read and
         // two.
         let spans = crate::rows::spans(&rel, content);
-        for (i, line) in all[start..end].iter().enumerate() {
-            let n = start + i + 1;
-            out.push_str(&crate::rows::addr(n, &spans));
-            if line.len() > MAX_LINE {
-                out.push_str(brain::slice::head_bytes(line, MAX_LINE));
-                out.push_str("… (line truncated)\n");
-            } else {
-                out.push_str(line);
-                out.push('\n');
-            }
-        }
-        if end < all.len() {
-            out.push_str(&format!(
-                "… {} more lines; re-read from {}\n",
-                all.len() - end,
-                end + 1
-            ));
-        }
-        // The progress line shows the rows that actually came back: offset
-        // may have been clamped, and the file may have ended first.
-        let mut output = deliver(ctx, out)?;
-        if ranged {
-            output = output.with_preview(format!("[{rel}#{tag} {}-{}]", start + 1, end));
-        }
-        Ok(output)
+        let rows = all[start..end]
+            .iter()
+            .enumerate()
+            .map(|(i, line)| {
+                let n = start + i + 1;
+                let mut row = String::new();
+                if line.len() > MAX_LINE {
+                    row.push_str(&crate::rows::addr(n, &spans));
+                    row.push_str(brain::slice::head_bytes(line, MAX_LINE));
+                    row.push_str("… (line truncated)\n");
+                } else {
+                    crate::rows::line(&mut row, n, &spans, line);
+                }
+                (n, row)
+            })
+            .collect();
+        let left = all.len() - end;
+        let note = if left > 0 {
+            let unit = if left == 1 { "line" } else { "lines" };
+            format!("… {left} more {unit}; re-read from {}\n", end + 1)
+        } else {
+            String::new()
+        };
+        deliver(
+            ctx,
+            &rel,
+            View {
+                head: hashline::header(&rel, &tag),
+                rows,
+                note,
+                // Both ends of the file reached. Whether a range was asked for
+                // does not come into it: what is named is what came back.
+                kind: Kind::Lines {
+                    whole: start == 0 && end == all.len(),
+                },
+            },
+        )
     }
 }

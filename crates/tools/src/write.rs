@@ -150,6 +150,14 @@ impl Tool for Write {
         ));
         tokio::fs::write(&tmp, &content).await?;
         tokio::fs::rename(&tmp, &path).await?;
+        // A file written whole is one the model knows the numbering of: it sent
+        // every line. Unless cleaning dropped one — a pasted-back `[path#TAG]`
+        // header goes here, and every row below it is one off what was sent.
+        if content.lines().count() == args.content.lines().count() {
+            ctx.forget_shift(&path);
+        } else {
+            ctx.note_shift(&path, 1);
+        }
 
         let mut note = "";
         #[cfg(unix)]
@@ -166,8 +174,17 @@ impl Tool for Write {
         let lines = content.lines().count();
         let unit = if lines == 1 { "line" } else { "lines" };
         let tag = hashline::tag(&content);
+        // Same split as read: the model's line names the version a patch
+        // anchors to, the display and the log do not need it in front of a
+        // person, and the log keeps it anyway for when an edit goes wrong.
+        tracing::info!(target: "pi::write", path = %rel, tag = %tag, "wrote");
         Ok(ToolOutput::text(format!(
-            "[{rel}#{tag}] wrote {lines} {unit}, {} bytes{note}",
+            "{} wrote {lines} {unit}, {} bytes{note}",
+            hashline::header(&rel, &tag),
+            content.len()
+        ))
+        .with_preview(format!(
+            "[{rel}] wrote {lines} {unit}, {} bytes{note}",
             content.len()
         )))
     }

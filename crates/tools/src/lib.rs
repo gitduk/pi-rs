@@ -163,6 +163,9 @@ pub struct Ctx {
     /// writers to one path otherwise read the same bytes, both succeed, and
     /// one change vanishes without anyone being told.
     pub file_locks: FileLocks,
+    /// The lowest line each file's own edits renumbered since it was last read.
+    /// The tag says the model knows the bytes; this, whether it knows where.
+    pub file_shifts: FileShifts,
     /// The session this context runs in. None in tests and for embedders;
     /// spills then land in the process temp directory.
     session: Option<String>,
@@ -175,6 +178,9 @@ pub type FileLocks =
 
 pub type FileLock = std::sync::Arc<tokio::sync::Mutex<()>>;
 
+pub type FileShifts =
+    std::sync::Arc<std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, usize>>>;
+
 impl Ctx {
     pub fn new(workspace: Workspace) -> Self {
         Self {
@@ -182,6 +188,7 @@ impl Ctx {
             cancel: tokio_util::sync::CancellationToken::new(),
             todos: Default::default(),
             file_locks: Default::default(),
+            file_shifts: Default::default(),
             session: None,
             spill_root: spill::default_root(None),
         }
@@ -222,6 +229,29 @@ impl Ctx {
     /// only locators of the shape our own writer mints are accepted.
     pub fn spill_path(&self, locator: &str) -> Result<std::path::PathBuf, ToolError> {
         spill::locate(&self.spill_root, locator)
+    }
+
+    /// Record that an edit renumbered `path` from `from` on. Kept at the lowest
+    /// line reported, since the model's addresses all date from one read.
+    pub fn note_shift(&self, path: &std::path::Path, from: usize) {
+        let mut map = self.file_shifts.lock().expect("file shifts poisoned");
+        let slot = map.entry(path.to_path_buf()).or_insert(from);
+        *slot = (*slot).min(from);
+    }
+
+    /// The lowest line of `path` that an edit has renumbered since the last
+    /// read of it. Addresses below it are still the ones the model was shown.
+    pub fn shifted_from(&self, path: &std::path::Path) -> Option<usize> {
+        let map = self.file_shifts.lock().expect("file shifts poisoned");
+        map.get(path).copied()
+    }
+
+    /// A read re-establishes the numbering, so nothing is stale any more.
+    pub fn forget_shift(&self, path: &std::path::Path) {
+        self.file_shifts
+            .lock()
+            .expect("file shifts poisoned")
+            .remove(path);
     }
 
     /// Hold this while mutating `path`. Keyed on the resolved path, so two

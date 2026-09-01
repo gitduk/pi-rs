@@ -199,19 +199,16 @@ impl Tool for Grep {
             if shown >= limit {
                 break;
             }
-            out.push_str(&format!("[{}#{}]\n", h.path, h.tag));
-            // The fourth view that prints an address, and the last one still
-            // printing a bare number the parser refuses. No spans: a match is
-            // rarely a construct's opening row, and an outline per hit file
-            // would cost a parse for a view that only points.
+            out.push_str(&format!("{}\n", hashline::header(&h.path, &h.tag)));
+            // The one view that prints addresses without spans: a match is
+            // rarely a construct's opening row, and a parse per hit file would
+            // cost more than a view that only points is worth.
             let spans = std::collections::HashMap::new();
             for (n, text) in &h.lines {
                 if shown >= limit {
                     break;
                 }
-                out.push_str(&crate::rows::addr(*n as usize, &spans));
-                out.push_str(text);
-                out.push('\n');
+                crate::rows::line(&mut out, *n as usize, &spans, text);
                 shown += 1;
             }
             if h.truncated {

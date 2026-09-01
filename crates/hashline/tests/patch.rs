@@ -2,16 +2,18 @@ use std::collections::HashMap;
 
 use hashline::{
     Blocks, Change, Error, LinePos, NoBlocks, Op, Plan, Target, apply, first_changed_line,
-    parse, tag, unified_patch,
+    first_shifted_line, header, parse, tag, unified_patch,
 };
 
-// Explicit start→end pairs. hashline never parses source itself, so its own
-// tests should not either.
-struct Fake(&'static [(usize, usize)]);
+// Explicit `naming row → extent` pairs. A real parser answers only for rows
+// that open something, and the extent it answers with may start above the row
+// named. hashline never parses source itself, so its own tests should not
+// either.
+struct Fake(&'static [(usize, (usize, usize))]);
 
 impl Blocks for Fake {
-    fn end_of(&self, _path: &str, _content: &str, line: usize) -> Option<usize> {
-        self.0.iter().find(|(s, _)| *s == line).map(|(_, e)| *e)
+    fn extent_of(&self, _path: &str, _content: &str, line: usize) -> Option<(usize, usize)> {
+        self.0.iter().find(|(at, _)| *at == line).map(|(_, e)| *e)
     }
 }
 
@@ -289,7 +291,11 @@ fn a_plus_row_under_a_bodyless_op_says_which_op() {
 }
 
 // Apply `ops` with a resolver that knows the given start→end pairs.
-fn edit_blocks(before: &str, ops: &str, pairs: &'static [(usize, usize)]) -> Result<String, Error> {
+fn edit_blocks(
+    before: &str,
+    ops: &str,
+    pairs: &'static [(usize, (usize, usize))],
+) -> Result<String, Error> {
     let src = format!("[a.rs#{}]\n{ops}", tag(before));
     let plan = apply(&parse(&src)?, &files(&[("a.rs", before)]), &Fake(pairs))?;
     match &plan.changes[0] {
@@ -302,31 +308,108 @@ fn edit_blocks(before: &str, ops: &str, pairs: &'static [(usize, usize)]) -> Res
 fn a_block_op_replaces_through_the_construct_it_names() {
     // `2*` covers lines 2-3; the body length is unrelated to the range.
     assert_eq!(
-        edit_blocks(SRC, "PUT 2*:\n+X\n", &[(2, 3)]).unwrap(),
+        edit_blocks(SRC, "PUT 2*:\n+X\n", &[(2, (2, 3))]).unwrap(),
         "one\nX\nfour\n"
     );
     assert_eq!(
-        edit_blocks(SRC, "CUT 2*\n", &[(2, 3)]).unwrap(),
+        edit_blocks(SRC, "CUT 2*\n", &[(2, (2, 3))]).unwrap(),
         "one\nfour\n"
     );
 }
 
 #[test]
+fn a_context_row_under_a_body_is_told_to_widen_not_to_delete() {
+    // The sequence this replaces: the row was called invalid, the model
+    // deleted it, and the next patch failed on the brace it had just dropped.
+    let err = edit(SRC, "PUT 2:\n+TWO\nthree\n").unwrap_err().to_string();
+    assert!(err.contains("widen the address"), "{err}");
+    // A row pasted out of a view is a different mistake and keeps its own
+    // advice; nothing was open above it to make it look like context.
+    let err = edit(SRC, "2: two\n").unwrap_err().to_string();
+    assert!(err.contains("a line from a read"), "{err}");
+    assert!(!err.contains("widen the address"), "{err}");
+}
+
+#[test]
+fn a_block_op_covers_the_annotations_the_resolver_gave_it() {
+    // Naming the construct's own row, not its doc comment's: the resolver
+    // reports the whole extent and the op must take all of it. Keeping only
+    // the end left the annotations in place, and a body that carried its own
+    // wrote them twice.
+    const ANNOTATED: &str = "///doc\nfn f() {\n}\ntail\n";
+    assert_eq!(
+        edit_blocks(ANNOTATED, "PUT 2*:\n+///new\n+fn f() {}\n", &[(2, (1, 3))]).unwrap(),
+        "///new\nfn f() {}\ntail\n"
+    );
+    // And the same extent whichever of its rows is named.
+    assert_eq!(
+        edit_blocks(ANNOTATED, "CUT 1*\n", &[(1, (1, 3))]).unwrap(),
+        "tail\n"
+    );
+}
+
+#[test]
+fn a_block_op_that_widens_onto_another_hunk_is_an_overlap() {
+    // The start moving up is what makes this reachable: `2*` looks clear of
+    // line 1 until the resolver reports the annotation above it.
+    let err = edit_blocks(SRC, "PUT 1:\n+a\nPUT 2*:\n+b\n", &[(2, (1, 3))]).unwrap_err();
+    assert!(matches!(err, Error::Overlap { .. }), "{err}");
+}
+
+#[test]
+fn an_insert_after_a_range_is_anchored_where_it_was_written() {
+    // `took_at` is the original line a hunk acted on, and two consumers read it
+    // as one: the shift boundary and the address a refusal prints back. A
+    // `:DOWN` sharing its anchor with the range's end is the case that named
+    // the range's start instead, reporting a shift above where anything moved.
+    let src = "[a.rs#(tag)]\nPUT 2-4:\n+A\n+B\n+C\nPUT 4:DOWN\n+tail\n"
+        .replace("(tag)", &tag(SRC));
+    let plan = apply(&parse(&src).unwrap(), &files(&[("a.rs", SRC)]), &NoBlocks).unwrap();
+    let Change::Write { landed, .. } = &plan.changes[0] else {
+        panic!("expected a write")
+    };
+    let inserted = landed.last().expect("the insertion");
+    assert_eq!(inserted.took_at, 4, "anchored at the range's end, not its start");
+    // The replace is one-for-one, so only the insertion moves anything.
+    assert_eq!(first_shifted_line(&plan.changes), Some(4));
+}
+
+#[test]
+fn a_shift_is_reported_only_when_numbering_actually_moved() {
+    let plan = |ops: &str| {
+        let src = format!("[a.rs#{}]\n{ops}", tag(SRC));
+        apply(&parse(&src).unwrap(), &files(&[("a.rs", SRC)]), &NoBlocks).unwrap()
+    };
+    // One-for-one: every address the model holds is still good.
+    assert_eq!(first_shifted_line(&plan("PUT 2:\n+TWO\n").changes), None);
+    // Original numbering, so it can be compared with what the model wrote.
+    assert_eq!(
+        first_shifted_line(&plan("PUT 2:\n+A\n+B\n").changes),
+        Some(2)
+    );
+    assert_eq!(first_shifted_line(&plan("CUT 3\n").changes), Some(3));
+    assert_eq!(
+        first_shifted_line(&plan("PUT 1:\n+ONE\nPUT 3:DOWN\n+x\n").changes),
+        Some(3)
+    );
+}
+
+#[test]
 fn an_insert_after_a_block_lands_past_its_closing_line() {
-    let out = edit_blocks(SRC, "PUT 2*:DOWN:\n+after\n", &[(2, 3)]).unwrap();
+    let out = edit_blocks(SRC, "PUT 2*:DOWN:\n+after\n", &[(2, (2, 3))]).unwrap();
     assert_eq!(out, "one\ntwo\nthree\nafter\nfour\n");
 }
 
 #[test]
 fn a_block_and_a_range_still_may_not_overlap() {
-    let err = edit_blocks(SRC, "PUT 1*:\n+a\nPUT 2:\n+b\n", &[(1, 2)]).unwrap_err();
+    let err = edit_blocks(SRC, "PUT 1*:\n+a\nPUT 2:\n+b\n", &[(1, (1, 2))]).unwrap_err();
     assert!(matches!(err, Error::Overlap { .. }), "{err}");
 }
 
 #[test]
 fn a_block_op_on_a_line_that_opens_nothing_is_rejected() {
     // Guessing here would rewrite code nobody looked at.
-    let err = edit_blocks(SRC, "PUT 3*:\n+x\n", &[(2, 3)]).unwrap_err();
+    let err = edit_blocks(SRC, "PUT 3*:\n+x\n", &[(2, (2, 3))]).unwrap_err();
     assert!(matches!(err, Error::NoBlockAt { line: 3, .. }), "{err}");
     assert!(
         err.to_string().contains("Name the lines with `N-M`"),
@@ -622,4 +705,17 @@ fn unified_patch_names_both_sides_of_a_rename() {
 fn first_changed_line_anchors_a_pure_deletion_before_it() {
     assert_eq!(first_changed_line(&plan_for(SRC, "CUT 4:\n").changes), Some(3));
     assert_eq!(first_changed_line(&plan_for(SRC, "CUT 1:\n").changes), Some(1));
+}
+
+#[test]
+fn what_prints_a_header_and_what_reads_one_are_the_same_grammar() {
+    // Seven views printed this shape by hand, and the model has to copy one
+    // back into a patch for an edit to land at all. A printer that drifts from
+    // this parser breaks editing with nothing to show for it.
+    for path in ["a.rs", "crates/x/src/lib.rs", "a b/c#d.rs"] {
+        let src = format!("{}\nPUT 1:\n+X\n", header(path, &tag(SRC)));
+        let patch = parse(&src).unwrap_or_else(|e| panic!("`{path}`: {e}"));
+        assert_eq!(patch.sections[0].path, path);
+        assert_eq!(patch.sections[0].tag, tag(SRC));
+    }
 }

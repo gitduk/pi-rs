@@ -198,7 +198,9 @@ pub fn parse(input: &str) -> Result<Patch, Error> {
             continue;
         }
 
-        // A row that is not `+` closes whatever body was open.
+        // A row that is not `+` closes whatever body was open. Whether one
+        // was open is what tells a stray verb apart from a context row.
+        let after_body = pending.is_some();
         if let Some((op_index, body)) = pending.take() {
             let section = sections.last_mut().expect("a body implies a section");
             match &mut section.ops[op_index] {
@@ -296,6 +298,14 @@ pub fn parse(input: &str) -> Result<Patch, Error> {
                 // which is exactly what happened to the one this replaces.
                 " — that is a line from a read, not an op. Name it as `PUT N:` / `PUT N-M:` \
                  or a block (`PUT N*:`), and put the new text in `+` rows."
+                    .into()
+            } else if after_body {
+                // A row the model wanted to keep, written the way a unified
+                // diff keeps one. Telling it only that the row is invalid got
+                // the row deleted and the construct left unbalanced.
+                " — a body has no context rows: it replaces exactly the lines the address \
+                 names. To keep this line, widen the address to cover it and write it as a \
+                 `+` row too."
                     .into()
             } else {
                 String::new()
