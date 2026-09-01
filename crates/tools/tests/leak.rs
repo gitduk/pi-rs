@@ -23,7 +23,8 @@ async fn a_timeout_takes_the_whole_process_group() {
         Ok(out) => panic!("expected a timeout error, got: {}", out.flatten()),
     };
     assert!(
-        err.to_string().contains("everything it spawned were killed"),
+        err.to_string()
+            .contains("everything it spawned were killed"),
         "{err}"
     );
     assert_eq!(err.code(), Some("TOOL_TIMEOUT"));

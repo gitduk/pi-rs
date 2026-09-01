@@ -120,7 +120,8 @@ named by its first question.
 
 `/new` starts a fresh session, keeping this one on disk; `ctrl+l` twice does
 the same (once clears the screen). `/resume` lists the sessions saved for this
-workspace, newest first, by the first thing each was asked, and `/resume <id>`
+workspace — one directory per project under `~/.pi/sessions/`, named by the
+path — newest first, by the first thing each was asked, and `/resume <id>`
 switches to one — the session you leave is saved first, so nothing is lost on
 the way out.
 

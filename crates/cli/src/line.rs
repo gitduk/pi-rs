@@ -84,10 +84,7 @@ async fn turn(
     tx: &UnboundedSender<Event>,
 ) -> Totals {
     core.session.send_prompt(prompt, typed);
-    let ctx = core
-        .ctx
-        .clone()
-        .with_cancel(agent::cancel_on_interrupt());
+    let ctx = core.ctx.clone().with_cancel(agent::cancel_on_interrupt());
     let out = core.agent.run(&mut core.session, &ctx, tx).await;
 
     // Saved either way: an interrupted turn is exactly the one worth keeping.

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::{IsTerminal as _, Read as _};
 use std::sync::Arc;
 
@@ -16,11 +17,12 @@ mod line;
 mod render;
 mod repl;
 mod session;
+mod settings;
 mod tui;
 
 /// The three below are both flags and config values, so a config file names a
 /// tier the same way the command line does.
-#[derive(Debug, Clone, Copy, ValueEnum, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, ValueEnum, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FormatArg {
     Anthropic,
@@ -50,7 +52,18 @@ impl FormatArg {
 
 /// Ordered, so a project file can lower the ceiling without being able to
 /// raise it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    ValueEnum,
+    serde::Deserialize,
+    serde::Serialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum TierArg {
     Read,
@@ -58,7 +71,7 @@ pub enum TierArg {
     Exec,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, ValueEnum, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EffortArg {
     Off,
@@ -323,6 +336,7 @@ pub fn resolve(
     root: &std::path::Path,
     config: &config::Config,
     project: &config::Project,
+    claimed: &BTreeMap<String, toml::Value>,
 ) -> Result<Resolved> {
     let mut notes = Vec::new();
 
@@ -363,6 +377,7 @@ pub fn resolve(
             effort: args.effort,
             tier: args.tier,
         },
+        claimed,
     );
     let tier = match settled.tier {
         TierArg::Read => tools::Tier::Read,
@@ -465,7 +480,7 @@ async fn main() -> Result<()> {
     };
     let dialled = dial(&args, &config, &named, named_by)?;
 
-    let resolved = resolve(&args, workspace.root(), &config, &project)?;
+    let resolved = resolve(&args, workspace.root(), &config, &project, &BTreeMap::new())?;
     // Ahead of the quiet check on purpose: see `Dialled::warning`.
     if let Some(warning) = &dialled.warning {
         eprintln!("\x1b[{}m{warning}\x1b[0m", config.theme.muted.codes());
@@ -535,6 +550,9 @@ async fn main() -> Result<()> {
             args: args.clone(),
             commands: std::sync::Arc::new(resolved.commands),
             context: resolved.context,
+            file: config::load_tree(args.config.as_deref())
+                .unwrap_or_else(|_| toml::Value::Table(Default::default())),
+            claimed: BTreeMap::new(),
             ctx,
         };
         // The live region needs the terminal at both ends: keys come in one
@@ -543,11 +561,7 @@ async fn main() -> Result<()> {
         if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
             return tui::Tui::new(core, key_map)?.run(tx, rx).await;
         }
-        let painter = paint(
-            rx,
-            quiet,
-            std::sync::Arc::new(config.theme.clone()),
-        );
+        let painter = paint(rx, quiet, std::sync::Arc::new(config.theme.clone()));
         let out = line::run(core, tx).await;
         let _ = painter.await;
         return out;
@@ -562,11 +576,7 @@ async fn main() -> Result<()> {
         None => prompt,
     };
 
-    let painter = paint(
-        rx,
-        quiet,
-        std::sync::Arc::new(config.theme.clone()),
-    );
+    let painter = paint(rx, quiet, std::sync::Arc::new(config.theme.clone()));
     let ctx = tools::Ctx::new(workspace)
         .with_session(&id)
         .with_cancel(agent::cancel_on_interrupt());

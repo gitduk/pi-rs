@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use agent::session::Session;
@@ -127,8 +128,9 @@ impl Store {
         Self { root: root.into() }
     }
 
-    pub fn path(&self, id: &str) -> PathBuf {
-        self.root.join(format!("{}.json", tools::state::file_stem(id)))
+    /// The directory one workspace's transcripts live in.
+    fn dir_of(&self, workspace: &Path) -> PathBuf {
+        self.root.join(tools::state::key_of(workspace))
     }
 
     /// `created` is the caller's because it is set once and never changes.
@@ -143,8 +145,9 @@ impl Store {
         created: u64,
         session: &Session,
     ) -> Result<PathBuf> {
-        std::fs::create_dir_all(&self.root)?;
-        let path = self.path(id);
+        let dir = self.dir_of(workspace);
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("{}.json", tools::state::file_stem(id)));
 
         let stored = Stored {
             id: id.to_string(),
@@ -168,37 +171,59 @@ impl Store {
         Ok(path)
     }
 
+    /// Load a transcript by id. `id` is unique across workspaces, so the
+    /// bucket is found by searching the store's directories rather than by
+    /// knowing which workspace saved it. Sessions saved before the bucketed
+    /// layout sit flat under the root; the search falls back to that path.
     pub fn load(&self, id: &str) -> Result<Stored> {
-        let path = self.path(id);
+        let name = format!("{}.json", tools::state::file_stem(id));
+        let mut match_: Option<PathBuf> = None;
+        if let Ok(entries) = std::fs::read_dir(&self.root) {
+            for entry in entries.flatten() {
+                let candidate = entry.path().join(&name);
+                if candidate.is_file() {
+                    match_ = Some(candidate);
+                    break;
+                }
+            }
+        }
+        let path = match match_ {
+            Some(p) => p,
+            None => {
+                let flat = self.root.join(&name);
+                if flat.is_file() {
+                    flat
+                } else {
+                    return Err(anyhow::anyhow!(
+                        "no session `{id}` in {}",
+                        self.root.display()
+                    ));
+                }
+            }
+        };
         let body = std::fs::read_to_string(&path)
             .with_context(|| format!("no session `{id}` at {}", path.display()))?;
         Ok(serde_json::from_str(&body)?)
     }
 
     /// Every session recorded for this workspace, newest first, read as
-    /// shallowly as the answer allows.
-    ///
-    /// A listing needs four fields and one sentence. Reading each archive as a
-    /// whole `Stored` to get them meant deserializing every reasoning block and
-    /// every tool result in every session — 44 MB on one developer's machine,
-    /// and it grows every day pi is used. `Peek` takes the same identity fields
-    /// `load` requires, so what the list accepts is exactly what can be
-    /// resumed; the entries below them are read shallowly, because their shape
-    /// is not the list's business.
+    /// shallowly as the answer allows. The legacy flat files under the root
+    /// are read too: a session saved before the bucketed layout would
+    /// otherwise vanish from `/resume` on upgrade.
     fn peek(&self, workspace: &Path) -> Vec<Peek> {
         let want = workspace.display().to_string();
-        let mut found: Vec<Peek> = std::fs::read_dir(&self.root)
+        let mut found: Vec<Peek> = std::fs::read_dir(self.dir_of(workspace))
             .into_iter()
             .flatten()
             .flatten()
+            // A session re-saved after the layout change lives in both
+            // places; the bucket copy is the newer one, so it wins the dedup.
+            .chain(std::fs::read_dir(&self.root).into_iter().flatten().flatten())
             .filter_map(|entry| {
                 if entry.path().extension().is_none_or(|e| e != "json") {
                     return None;
                 }
                 let body = std::fs::read_to_string(entry.path()).ok()?;
-                // Said rather than skipped. A transcript this build cannot read
-                // is still on disk, and swallowing it makes "unreadable" look
-                // exactly like "you have no sessions".
                 match serde_json::from_str::<Peek>(&body) {
                     Ok(peek) => (peek.workspace == want).then_some(peek),
                     Err(e) => {
@@ -213,6 +238,8 @@ impl Store {
                 }
             })
             .collect();
+        let mut seen = HashSet::new();
+        found.retain(|p| seen.insert(p.id.clone()));
         // Newest by last activity, not by creation. `/resume` is reached for
         // to pick up where you left off, and a session started last week and
         // worked on this morning is the one you mean.
@@ -256,7 +283,10 @@ impl Store {
 mod tests {
     #[test]
     fn an_id_cannot_walk_out_of_the_directory_it_names_a_file_in() {
-        assert_eq!(tools::state::file_stem("../../etc/cron.d/x"), "______etc_cron_d_x");
+        assert_eq!(
+            tools::state::file_stem("../../etc/cron.d/x"),
+            "______etc_cron_d_x"
+        );
         assert_eq!(tools::state::file_stem(".."), "__");
     }
 
@@ -273,11 +303,12 @@ mod tests {
     /// A stamp is seconds, so archives saved in one second tie, and a tie is
     /// settled by the id rather than by recency. Forced through the JSON
     /// because an entry's stamp is the session's to set, not a caller's.
-    fn touched_at(store: &Store, id: &str, at: u64) {
+    fn touched_at(store: &Store, workspace: &Path, id: &str, at: u64) {
+        let path = store.dir_of(workspace).join(format!("{}.json", id));
         let mut raw: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(store.path(id)).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         raw["entries"].as_array_mut().unwrap().last_mut().unwrap()["at"] = json!(at);
-        std::fs::write(store.path(id), serde_json::to_vec(&raw).unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
     }
 
     fn call(name: &str) -> Message {
@@ -291,11 +322,7 @@ mod tests {
     }
 
     fn results() -> Message {
-        Message::tool_results(vec![brain::message::ToolResult::text(
-            "c1",
-            "read",
-            "body",
-        )])
+        Message::tool_results(vec![brain::message::ToolResult::text("c1", "read", "body")])
     }
 
     #[test]
@@ -328,8 +355,14 @@ mod tests {
         let body = std::fs::read_to_string(&path).unwrap();
         let flat = serde_json::from_str::<serde_json::Value>(&body).unwrap();
         let flat = flat.as_object().unwrap();
-        assert!(flat.contains_key("entries"), "session must flatten to the top level");
-        assert!(!flat.contains_key("log"), "the nested `log` key must be gone");
+        assert!(
+            flat.contains_key("entries"),
+            "session must flatten to the top level"
+        );
+        assert!(
+            !flat.contains_key("log"),
+            "the nested `log` key must be gone"
+        );
         let back = store.load("t1").unwrap();
         assert_eq!(back.model, "test-model");
         assert_eq!(back.name.as_deref(), Some("the flaky test"));
@@ -394,15 +427,14 @@ mod tests {
         store
             .save("other", std::path::Path::new("/b"), "m", None, 1, &log)
             .unwrap();
+        // A second session in the same workspace, named `new` to sort after
+        // `old` by id — so only recency can put it first.
+        store
+            .save("new", std::path::Path::new("/a"), "m", None, 1, &log)
+            .unwrap();
 
-        let mut raw: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(store.path("old")).unwrap()).unwrap();
-        raw["id"] = json!("new");
-        std::fs::write(store.path("new"), serde_json::to_vec(&raw).unwrap()).unwrap();
-        // `new` is the newer of the two, and `old` sorts after it by id — so
-        // only recency can put it first.
-        touched_at(&store, "old", 100);
-        touched_at(&store, "new", 200);
+        touched_at(&store, std::path::Path::new("/a"), "old", 100);
+        touched_at(&store, std::path::Path::new("/a"), "new", 200);
 
         assert_eq!(store.latest(std::path::Path::new("/a")).unwrap().id, "new");
         assert_eq!(
@@ -434,9 +466,9 @@ mod tests {
         // Recency, decided on the field the sort reads. The expected order is
         // the reverse of the ids' own, so a list that fell back to breaking
         // ties by id would fail here rather than look right by accident.
-        touched_at(&store, "a", 300);
-        touched_at(&store, "b", 200);
-        touched_at(&store, "z", 100);
+        touched_at(&store, std::path::Path::new("/w"), "a", 300);
+        touched_at(&store, std::path::Path::new("/w"), "b", 200);
+        touched_at(&store, std::path::Path::new("/w"), "z", 100);
 
         let ids: Vec<String> = store
             .choices(std::path::Path::new("/w"))
@@ -466,13 +498,71 @@ mod tests {
             .unwrap();
         // A session that never got a prompt has nothing to resume to by name.
         store
-            .save("b", std::path::Path::new("/w"), "m", None, 1, &Session::new())
+            .save(
+                "b",
+                std::path::Path::new("/w"),
+                "m",
+                None,
+                1,
+                &Session::new(),
+            )
             .unwrap();
 
         let got = store.choices(std::path::Path::new("/w"));
         assert_eq!(got.len(), 2, "a session with no prompt is still resumable");
         let by = |id: &str| got.iter().find(|c| c.id == id).expect(id);
         assert_eq!(by("a").prompt, "why is the flaky test flaky?");
-        assert_eq!(by("b").prompt, "", "nothing to name it by, and that is fine");
+        assert_eq!(
+            by("b").prompt,
+            "",
+            "nothing to name it by, and that is fine"
+        );
+    }
+
+    #[test]
+    fn sessions_are_filed_under_a_workspace_bucket_named_by_sanitized_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::new(tmp.path());
+        let log = log_with(vec![Message::user("x")]);
+        store
+            .save("t", std::path::Path::new("/w"), "m", None, 1, &log)
+            .unwrap();
+
+        // The archive lives in the bucket, not flat under the store root.
+        let bucket = tmp.path().join("-w").join("t.json");
+        assert!(
+            bucket.is_file(),
+            "session must be filed under its workspace bucket"
+        );
+        assert!(
+            !tmp.path().join("t.json").exists(),
+            "no flat file beside the buckets"
+        );
+
+        // And it loads from the bucket by id alone.
+        assert_eq!(store.load("t").unwrap().id, "t");
+    }
+
+    #[test]
+    fn a_flat_archive_from_before_the_bucket_layout_still_loads_and_lists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::new(tmp.path());
+        let log = log_with(vec![Message::user("old session")]);
+        // The old layout wrote the archive straight under the root.
+        let flat = tmp.path().join("old.json");
+        let stored = Stored {
+            id: "old".into(),
+            workspace: "/w".into(),
+            model: "m".into(),
+            created: 1,
+            name: None,
+            session: log,
+        };
+        std::fs::write(&flat, serde_json::to_vec(&stored).unwrap()).unwrap();
+
+        assert_eq!(store.load("old").unwrap().id, "old");
+        let choices = store.choices(std::path::Path::new("/w"));
+        assert_eq!(choices.len(), 1, "{choices:?}");
+        assert_eq!(choices[0].id, "old");
     }
 }

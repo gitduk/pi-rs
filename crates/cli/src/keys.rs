@@ -369,7 +369,6 @@ impl Press {
     }
 }
 
-
 fn named(word: &str) -> Option<KeyCode> {
     Some(match word {
         "enter" | "return" => KeyCode::Enter,
@@ -595,7 +594,10 @@ mod tests {
             k.action(press("ctrl+a"), false, false),
             Some(Action::MoveLineEnd)
         );
-        assert_eq!(k.action(press("home"), false, false), Some(Action::MoveLineStart));
+        assert_eq!(
+            k.action(press("home"), false, false),
+            Some(Action::MoveLineStart)
+        );
     }
 
     #[test]
@@ -663,8 +665,10 @@ mod tests {
         assert_ne!(press("ctrl+shift+t"), press("ctrl+t"));
         assert_eq!(
             press("ctrl+shift+t"),
-            Press::of(KeyCode::Char('T'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)
-
+            Press::of(
+                KeyCode::Char('T'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            )
         );
         // Named keys keep it, so shift+enter stays expressible.
         assert_ne!(press("shift+enter"), press("enter"));

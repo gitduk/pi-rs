@@ -15,7 +15,11 @@ fn item(task: &str, status: &str) -> serde_json::Value {
 // What the tool answers with, which is the plan as it now stands: the model has
 // no other view of it.
 async fn run(c: &Ctx, args: serde_json::Value) -> String {
-    tools::todo::TodoTool.execute(args, c).await.unwrap().flatten()
+    tools::todo::TodoTool
+        .execute(args, c)
+        .await
+        .unwrap()
+        .flatten()
 }
 
 async fn err(c: &Ctx, args: serde_json::Value) -> ToolError {
@@ -87,7 +91,11 @@ async fn marking_one_item_doing_returns_the_previous_one_to_pending() {
     let (_d, c) = ctx();
     set(&c, vec![item("a", "in_progress"), item("b", "pending")]).await;
 
-    let out = run(&c, json!({ "op": "mark", "at": [2], "status": "in_progress" })).await;
+    let out = run(
+        &c,
+        json!({ "op": "mark", "at": [2], "status": "in_progress" }),
+    )
+    .await;
     // The item just named is the one in progress; the earlier one describes
     // work that has since been left.
     assert!(out.contains("1. [ ] a"), "{out}");
@@ -119,7 +127,10 @@ async fn an_out_of_range_number_changes_nothing() {
     assert!(e.to_string().contains("1 to 2"), "{e}");
 
     let held = c.todos.lock().unwrap();
-    assert!(held.iter().all(|t| t.status == TodoStatus::Pending), "{held:?}");
+    assert!(
+        held.iter().all(|t| t.status == TodoStatus::Pending),
+        "{held:?}"
+    );
 }
 
 #[tokio::test]
@@ -143,10 +154,18 @@ async fn marking_an_empty_list_says_to_write_one_first() {
 async fn an_op_missing_what_it_needs_says_which_field() {
     let (_d, c) = ctx();
     assert!(
-        err(&c, json!({ "op": "set" })).await.to_string().contains("`items`"),
+        err(&c, json!({ "op": "set" }))
+            .await
+            .to_string()
+            .contains("`items`"),
     );
     set(&c, vec![item("a", "pending")]).await;
-    assert!(err(&c, json!({ "op": "mark", "at": [1] })).await.to_string().contains("`status`"));
+    assert!(
+        err(&c, json!({ "op": "mark", "at": [1] }))
+            .await
+            .to_string()
+            .contains("`status`")
+    );
     assert!(
         err(&c, json!({ "op": "mark", "status": "done" }))
             .await
@@ -191,7 +210,11 @@ async fn showing_reads_the_plan_back_without_changing_it() {
 #[tokio::test]
 async fn showing_an_empty_plan_says_so_rather_than_failing() {
     let (_d, c) = ctx();
-    assert!(run(&c, json!({ "op": "show" })).await.contains("the list is empty"));
+    assert!(
+        run(&c, json!({ "op": "show" }))
+            .await
+            .contains("the list is empty")
+    );
 }
 
 #[tokio::test]
@@ -256,7 +279,10 @@ fn a_long_list_collapses_its_finished_work_without_renumbering() {
     // A finished task carries less than a pending one and should cost less.
     assert!(out.contains("… 22 finished"), "{out}");
     assert!(out.contains("26. [~] the live one"), "{out}");
-    assert!(out.contains("25. [x] done 24"), "recent closures still show: {out}");
+    assert!(
+        out.contains("25. [x] done 24"),
+        "recent closures still show: {out}"
+    );
     assert!(!out.contains("1. [x] done 0"), "{out}");
 }
 

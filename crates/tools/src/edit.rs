@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
-use crate::{Ctx, Tier, Tool, ToolError, ToolOutput};
+use crate::{Ctx, PatchError, Tier, Tool, ToolError, ToolOutput};
 
 // How many bytes of landed rows to echo back per file before showing each
 // hunk's ends instead of all of it. Bytes, not rows: forty rows of `}` and
@@ -176,7 +176,9 @@ fn echo(path: &str, before: &str, content: &str, landed: &[Landed]) -> String {
         }
         rows[..ECHO_ENDS].iter().for_each(|r| out.push_str(r));
         out.push_str(&format!("… {} lines\n", rows.len() - ECHO_ENDS * 2));
-        rows[rows.len() - ECHO_ENDS..].iter().for_each(|r| out.push_str(r));
+        rows[rows.len() - ECHO_ENDS..]
+            .iter()
+            .for_each(|r| out.push_str(r));
     }
     out
 }
@@ -251,7 +253,9 @@ fn nearest_row(rows: &[usize], landed: Option<&Vec<Landed>>) -> Option<usize> {
             .min()
             .unwrap_or(0)
     };
-    rows.iter().min_by_key(|row| (distance(row), **row)).copied()
+    rows.iter()
+        .min_by_key(|row| (distance(row), **row))
+        .copied()
 }
 
 // `N*` spelt out, but only where it resolves to more than the row itself.
@@ -306,9 +310,8 @@ fn hunk_help(path: &str, before: &str, after: &str, landed: &[Landed]) -> String
         let took: isize = l.took.iter().map(|s| brace_net(s)).sum();
         let gave: isize = hunk_rows(&new, l).iter().map(|s| brace_net(s)).sum();
         if took != gave {
-            let mut line = format!(
-                "\n  {addr}: its body nets {gave}, the lines it displaces net {took}"
-            );
+            let mut line =
+                format!("\n  {addr}: its body nets {gave}, the lines it displaces net {took}");
             // Where the construct the range opened at actually ends, read off
             // the file the model will address — the number it got wrong,
             // stated instead of left to re-derive.
@@ -641,7 +644,7 @@ impl Tool for Edit {
                 patch = %args.patch,
                 "patch rejected"
             );
-            ToolError::Invalid(e.to_string())
+            ToolError::Patch(PatchError::Malformed, e.to_string())
         })?;
 
         // Held for the whole patch: two edits to one file in the same turn would
@@ -670,7 +673,7 @@ impl Tool for Edit {
                 patch = %args.patch,
                 "patch rejected"
             );
-            return Err(ToolError::Invalid(why));
+            return Err(ToolError::Patch(PatchError::Renumbered, why));
         }
 
         let view: HashMap<&str, &str> = loaded
@@ -689,7 +692,7 @@ impl Tool for Edit {
                 patch = %args.patch,
                 "patch rejected"
             );
-            ToolError::Invalid(e.to_string())
+            ToolError::Patch(PatchError::Unbalanced, e.to_string())
         })?;
 
         if let Some(why) = broke_syntax(&plan, &loaded) {
@@ -700,7 +703,7 @@ impl Tool for Edit {
                 patch = %args.patch,
                 "patch rejected"
             );
-            return Err(ToolError::Invalid(why));
+            return Err(ToolError::Patch(PatchError::Unbalanced, why));
         }
 
         // After the guards, since a rejected patch wrote nothing and moved no
@@ -807,8 +810,18 @@ mod tests {
         let before = "a\nb\nc\n";
         let after = "A\nA\nb\nC\n";
         let landed = vec![
-            Landed { start: 1, end: 2, took: vec!["a".into()], took_at: 1 },
-            Landed { start: 4, end: 4, took: vec!["c".into()], took_at: 3 },
+            Landed {
+                start: 1,
+                end: 2,
+                took: vec!["a".into()],
+                took_at: 1,
+            },
+            Landed {
+                start: 4,
+                end: 4,
+                took: vec!["c".into()],
+                took_at: 3,
+            },
         ];
         let help = hunk_help("a.rs", before, after, &landed);
         assert!(help.contains("\n  3: `c`"), "{help}");

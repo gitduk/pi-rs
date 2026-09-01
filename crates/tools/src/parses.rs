@@ -32,5 +32,10 @@ pub(crate) fn broke(path: &str, before: Option<&str>, after: &str) -> Option<(us
 /// The row's own text, because a bare line number invites a story about why the
 /// parser is wrong instead of a look at the line.
 pub(crate) fn row_text(content: &str, row: usize) -> String {
-    content.lines().nth(row - 1).unwrap_or("").trim().to_string()
+    content
+        .lines()
+        .nth(row - 1)
+        .unwrap_or("")
+        .trim()
+        .to_string()
 }

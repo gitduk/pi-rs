@@ -99,14 +99,17 @@ const SECRET: [&str; 7] = [
     "bearer",
 ];
 
-fn secret(name: &str) -> bool {
+pub(crate) fn secret(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     SECRET.contains(&lower.as_str())
         || lower.ends_with("_key")
         || lower.ends_with("_token")
         || lower.ends_with("_secret")
 }
-
+/// The last segment of a dotted path, the way `secret` matches names.
+pub(crate) fn leaf(path: &str) -> &str {
+    path.rsplit('.').next().unwrap_or(path)
+}
 // Enough to tell two keys apart, not enough to reconstruct either. FNV-1a
 // because the question is only "is this the same string as last time".
 fn fingerprint(s: &str) -> String {

@@ -1086,14 +1086,12 @@ async fn a_call_that_keeps_returning_the_same_thing_is_named() {
         })
         .collect();
 
-    // The first repeat can be a legitimate re-read after compaction; by the
-    // third the model is just stuck.
-    assert!(!bodies[0].contains("same `read` call"), "{:?}", bodies[0]);
-    assert!(!bodies[1].contains("same `read` call"), "{:?}", bodies[1]);
+    // A read that keeps coming back with the same content is a legitimate
+    // re-read, not a loop: only an unbroken streak of failures is named.
     assert!(
-        bodies[2].contains("same `read` call with the same result, 3 times"),
+        bodies.iter().all(|b| !b.contains("same `read` call")),
         "{:?}",
-        bodies[2]
+        bodies
     );
 }
 
@@ -1139,6 +1137,52 @@ async fn a_call_that_keeps_failing_the_same_way_is_named_sooner() {
     );
     // And the notice rides inside the error the model reads, not beside it.
     assert!(bodies[1].starts_with("patch line 1"), "{:?}", bodies[1]);
+}
+
+// The failure mode a long session actually dies in: the patch keeps changing,
+// so the args-keyed echo never matches — but the refusal is the same one.
+// The loop-breaker must key on the refusal, or it stays silent forever.
+#[tokio::test]
+async fn a_failure_repeated_with_different_args_is_still_named() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "steady\n").unwrap();
+    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
+
+    // Same refusal, four different patch bodies — a model rewriting the patch
+    // and getting the same error back every time. The patch body varies so
+    // the args-keyed echo never matches; the refusal's first line is stable,
+    // which is the shape a real session takes.
+    let turns: Vec<Vec<StreamEvent>> = (0..3)
+        .map(|i| call_turn(&[("t", "edit", &format!(r#"{{"patch":"PUT 1:\n+variant {i}"}}"#))]))
+        .chain([text_turn("gave up")])
+        .collect();
+    let a = Agent::new(Scripted::new(turns), spec());
+
+    let (session, out, _) = drive(&a, &ctx, "edit it forever").await;
+    out.unwrap();
+
+    let bodies: Vec<String> = session
+        .context()
+        .iter()
+        .flat_map(|m| match m {
+            Message::User { content } => content
+                .iter()
+                .filter_map(|c| match c {
+                    UserContent::ToolResult(r) => Some(r.flatten_text()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        })
+        .collect();
+
+    assert!(bodies.len() >= 3, "bodies={:?}", bodies);
+    // The second refusal is already the whole story, whatever the patch said.
+    assert!(
+        bodies[1].contains("same `edit` call has now failed the same way 2 times"),
+        "bodies={:?}",
+        bodies[1]
+    );
 }
 
 #[tokio::test]

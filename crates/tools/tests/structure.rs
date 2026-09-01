@@ -183,7 +183,7 @@ async fn a_block_op_on_a_closing_brace_is_refused() {
         .execute(json!({ "patch": patch }), &c)
         .await
         .unwrap_err();
-    assert!(matches!(err, ToolError::Invalid(_)));
+    assert!(matches!(err, ToolError::Patch(_, _)), "{err:?}");
     assert!(err.to_string().contains("opens no construct"), "{err}");
     assert_eq!(
         std::fs::read_to_string(c.workspace.root().join("a.rs")).unwrap(),

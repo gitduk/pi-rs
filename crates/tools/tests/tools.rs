@@ -250,9 +250,7 @@ async fn edit_applies_a_patch_anchored_to_the_tag_read_returned() {
     let path = c.workspace.root().join("a.rs");
     std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
 
-    let report = read_then_edit(&c, "a.rs", "PUT 2:\n+TWO\n")
-        .await
-        .unwrap();
+    let report = read_then_edit(&c, "a.rs", "PUT 2:\n+TWO\n").await.unwrap();
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\nTWO\nthree\n");
     // The report must carry the new tag and the new numbering, or the model
     // has to re-read before it can edit again.
@@ -311,7 +309,10 @@ async fn a_range_one_line_short_is_refused_rather_than_applied() {
     .unwrap_err();
     let said = err.to_string();
     // The row's own text: a bare line number invites a story about the parser.
-    assert!(said.contains("line 8 of what this one produces is `}`"), "{said}");
+    assert!(
+        said.contains("line 8 of what this one produces is `}`"),
+        "{said}"
+    );
     assert!(said.contains("Nothing was written"), "{said}");
 
     // Refused means refused: the file on disk is untouched.
@@ -650,13 +651,13 @@ async fn an_edit_that_moves_no_line_leaves_the_numbering_alone() {
     let tag = first.split('#').nth(1).unwrap().split(']').next().unwrap();
     // One line for one: every address the model holds is still the right one.
     tools::edit::Edit
-        .execute(json!({ "patch": format!("[a.rs#{tag}]\nPUT 3:\n+THREE\n") }), &c)
+        .execute(
+            json!({ "patch": format!("[a.rs#{tag}]\nPUT 3:\n+THREE\n") }),
+            &c,
+        )
         .await
         .unwrap();
-    assert_eq!(
-        std::fs::read_to_string(&path).unwrap(),
-        "ONE\ntwo\nTHREE\n"
-    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "ONE\ntwo\nTHREE\n");
 }
 
 #[tokio::test]
@@ -796,7 +797,7 @@ async fn a_ranged_read_previews_the_rows_that_came_back() {
         .execute(json!({ "path": "a.rs", "offset": 2, "limit": 10 }), &c)
         .await
         .unwrap();
-    assert_eq!(out.preview(), "[a.rs:2-3]");
+    assert_eq!(out.preview(), "a.rs:2-3");
 }
 
 // The two lines a read produces answer to different readers, and only one of
@@ -806,7 +807,9 @@ async fn the_tag_leaves_the_display_and_stays_in_what_the_model_reads() {
     let (_d, c) = ctx();
     let src = "one\ntwo\nthree\n";
     std::fs::write(c.workspace.root().join("a.rs"), src).unwrap();
-    let long: String = (0..200).map(|i| format!("fn f{i}() {{\n    {i};\n}}\n")).collect();
+    let long: String = (0..200)
+        .map(|i| format!("fn f{i}() {{\n    {i};\n}}\n"))
+        .collect();
     std::fs::write(c.workspace.root().join("big.rs"), &long).unwrap();
 
     for args in [
@@ -834,7 +837,10 @@ async fn the_tag_leaves_the_display_and_stays_in_what_the_model_reads() {
         .await
         .unwrap();
     assert!(!out.preview().contains('#'), "{}", out.preview());
-    assert!(out.flatten().contains(&format!("#{}", hashline::tag("fn f() {}\n"))));
+    assert!(
+        out.flatten()
+            .contains(&format!("#{}", hashline::tag("fn f() {}\n")))
+    );
 }
 
 #[tokio::test]
@@ -927,7 +933,10 @@ async fn an_over_long_output_is_kept_somewhere_the_model_can_reach() {
     );
     let locator = out
         .lines()
-        .find_map(|l| l.strip_prefix("full output: ").and_then(|l| l.split(' ').next()))
+        .find_map(|l| {
+            l.strip_prefix("full output: ")
+                .and_then(|l| l.split(' ').next())
+        })
         .expect("the omitted middle must be recoverable");
     let whole = std::fs::read_to_string(c.spill_path(locator).unwrap()).unwrap();
     assert!(
@@ -962,7 +971,10 @@ async fn read_spills_an_over_long_view_and_reads_it_back_by_locator() {
     }
     let locator = out
         .lines()
-        .find_map(|l| l.strip_prefix("full output: ").and_then(|l| l.split(' ').next()))
+        .find_map(|l| {
+            l.strip_prefix("full output: ")
+                .and_then(|l| l.split(' ').next())
+        })
         .expect("the read view must be recoverable");
 
     // Reading the spill back re-numbers its lines: spill line 2 is `1:line 1`,
@@ -984,10 +996,7 @@ async fn a_spill_that_cannot_be_written_fails_loudly() {
     // A file where the session directory would go: create_dir_all cannot.
     std::fs::write(dir.path().join("spill"), "in the way").unwrap();
     let err = tools::bash::Bash
-        .execute(
-            json!({ "command": "printf 'z%.0s' $(seq 1 40000)" }),
-            &c,
-        )
+        .execute(json!({ "command": "printf 'z%.0s' $(seq 1 40000)" }), &c)
         .await
         .unwrap_err();
     assert_eq!(err.code(), Some("SPILL_FAILED"));

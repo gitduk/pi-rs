@@ -5,7 +5,7 @@ use std::sync::{Arc, OnceLock};
 use agent::Event;
 use anyhow::{Result, bail};
 use serde::de::{Error as _, MapAccess, Visitor};
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 const RESET: &str = "\x1b[0m";
 
 /// One text attribute: bold, dim, italic — whatever SGR can set besides colour.
@@ -71,6 +71,22 @@ impl<'de> Deserialize<'de> for Attr {
     }
 }
 
+impl Serialize for Attr {
+    fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        // The name, not `code()`: `code()` is the SGR parameter list, and a
+        // named attr must round-trip through the word it was written as.
+        let out = match self {
+            Attr::Other(rest) => rest.as_str(),
+            named => NAMED_ATTRS
+                .iter()
+                .find(|(_, attr, _)| attr == named)
+                .map(|(name, _, _)| *name)
+                .unwrap_or(""),
+        };
+        s.serialize_str(out)
+    }
+}
+
 /// A colour in one of the three spaces terminals mean, kept in the form the
 /// user wrote so a 256-colour choice survives on a terminal that has truecolour
 /// and vice versa.
@@ -123,6 +139,17 @@ impl Color {
 impl<'de> Deserialize<'de> for Color {
     fn deserialize<D: Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
         Color::parse(&String::deserialize(d)?).map_err(D::Error::custom)
+    }
+}
+
+impl Serialize for Color {
+    fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        let out = match self {
+            Color::Basic(n) => format!("{n}"),
+            Color::Indexed(n) => format!("38;5;{n}"),
+            Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+        };
+        s.serialize_str(&out)
     }
 }
 
@@ -237,6 +264,25 @@ impl<'de> Deserialize<'de> for Style {
     }
 }
 
+impl Serialize for Style {
+    fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        // The shorthand the user wrote — a colour string — only when the
+        // sgr list is empty; otherwise the full table. `rendered` never goes.
+        use serde::ser::SerializeStruct;
+        if self.sgr.is_empty()
+            && let Some(c) = &self.color
+        {
+            return c.serialize(s);
+        }
+        let mut st = s.serialize_struct("Style", 2)?;
+        if let Some(c) = &self.color {
+            st.serialize_field("color", c)?;
+        }
+        st.serialize_field("sgr", &self.sgr)?;
+        st.end()
+    }
+}
+
 /// The SGR behind every Style the terminal uses.
 ///
 /// Keys are grouped by what they style, not by colour: `diff.add` and
@@ -244,7 +290,7 @@ impl<'de> Deserialize<'de> for Style {
 /// without dragging the other along. `muted`, `heading` and `emphasis` are the
 /// text attributes markdown rendering opens; everything else is one Style each.
 /// `prompt.icon` is the single value that is neither colour nor attribute.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Theme {
     #[serde(default = "default_muted")]
@@ -270,7 +316,7 @@ pub struct Theme {
 const GREEN: Color = Color::Rgb(137, 210, 129);
 const RED: Color = Color::Rgb(252, 58, 75);
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Diff {
     #[serde(default = "default_add")]
@@ -288,7 +334,7 @@ impl Default for Diff {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Status {
     #[serde(default = "default_ok")]
@@ -306,7 +352,7 @@ impl Default for Status {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Menu {
     #[serde(default = "default_selected")]
@@ -321,7 +367,7 @@ impl Default for Menu {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Prompt {
     #[serde(default = "default_prompt_color")]
@@ -576,7 +622,11 @@ fn spans(text: &str, under: &str, depth: u8, theme: &Theme) -> String {
                     // Code span body is embedded raw into the ANSI output.
                     // Escape any literal ESC bytes so they don't inject
                     // spurious SGR sequences into the styled stream.
-                    if body.contains('\x1b') { body.replace('\x1b', "[ESC]") } else { body.to_string() }
+                    if body.contains('\x1b') {
+                        body.replace('\x1b', "[ESC]")
+                    } else {
+                        body.to_string()
+                    }
                 } else {
                     let joined = if under.is_empty() {
                         code.to_string()
@@ -696,7 +746,13 @@ pub fn spent(usage: &brain::stream::Usage, cost: f64) -> String {
 /// One function, called from both the live stream and the rebuild from the
 /// transcript. They used to render this differently, which is what a second
 /// producer buys you.
-pub fn result_rows(is_error: bool, name: &str, preview: &str, p: &Paint, width: usize) -> Vec<String> {
+pub fn result_rows(
+    is_error: bool,
+    name: &str,
+    preview: &str,
+    p: &Paint,
+    width: usize,
+) -> Vec<String> {
     let room = width.saturating_sub(2).max(20);
     let mark = if is_error {
         p.on(&p.theme.status.err, "✗")
@@ -704,7 +760,10 @@ pub fn result_rows(is_error: bool, name: &str, preview: &str, p: &Paint, width: 
         p.on(&p.theme.status.ok, "✓")
     };
     let (head, rest) = preview.split_once('\n').unwrap_or((preview, ""));
-    let mut out = vec![format!("{mark} {name} {}", p.on(&p.theme.muted, &clip(head, room)))];
+    let mut out = vec![format!(
+        "{mark} {name} {}",
+        p.on(&p.theme.muted, &clip(head, room))
+    )];
     out.extend(rest.lines().map(|row| {
         // The row number leads each diff row, so the mark is the second word;
         // colour beats reading the diff text.
@@ -733,9 +792,7 @@ pub fn describe(event: &Event, p: &Paint, width: usize) -> Option<String> {
             is_error,
             preview,
             ..
-        } => {
-            result_rows(*is_error, name, preview, p, width).join("\n")
-        }
+        } => result_rows(*is_error, name, preview, p, width).join("\n"),
         Event::ToolDenied { name, reason, .. } => {
             format!(
                 "{} {name} {}",
@@ -757,11 +814,7 @@ pub fn describe(event: &Event, p: &Paint, width: usize) -> Option<String> {
             p.on(&p.theme.status.err, "!"),
             p.on(&p.theme.muted, w)
         ),
-        Event::Done {
-            turns,
-            usage,
-            cost,
-        } => p.on(
+        Event::Done { turns, usage, cost } => p.on(
             &p.theme.muted,
             &format!("{turns} turns · {}", spent(usage, *cost)),
         ),
@@ -951,10 +1004,53 @@ pub fn summarize(args: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Markdown, Paint, describe, in_out, spent, summarize};
+    use super::{Attr, Color, Markdown, Paint, Style, describe, in_out, spent, summarize};
     use brain::stream::Usage;
     use serde_json::json;
+    use std::sync::OnceLock;
 
+    fn toml_round_trip<T>(value: &T) -> T
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+    {
+        let tree = toml::Value::try_from(value).unwrap();
+        T::deserialize(tree).unwrap()
+    }
+
+    #[test]
+    fn colors_round_trip_through_their_written_forms() {
+        assert_eq!(
+            toml_round_trip(&Color::Rgb(88, 166, 255)),
+            Color::Rgb(88, 166, 255)
+        );
+        assert_eq!(toml_round_trip(&Color::Indexed(196)), Color::Indexed(196));
+        assert_eq!(toml_round_trip(&Color::Basic(31)), Color::Basic(31));
+    }
+
+    #[test]
+    fn attrs_round_trip_through_their_written_forms() {
+        assert_eq!(toml_round_trip(&Attr::Bold), Attr::Bold);
+        assert_eq!(
+            toml_round_trip(&Attr::Other("8".into())),
+            Attr::Other("8".into())
+        );
+    }
+
+    #[test]
+    fn styles_round_trip_both_shapes() {
+        let short = Style {
+            color: Some(Color::Rgb(88, 166, 255)),
+            sgr: Vec::new(),
+            rendered: OnceLock::new(),
+        };
+        assert_eq!(toml_round_trip(&short), short);
+        let table = Style {
+            color: None,
+            sgr: vec![Attr::Bold, Attr::Other("4".into())],
+            rendered: OnceLock::new(),
+        };
+        assert_eq!(toml_round_trip(&table), table);
+    }
     #[test]
     fn a_patch_summarizes_to_the_files_it_touches() {
         let patch = "[a.rs#A1B2]\nPUT 1.=1:\n+x\n[b.rs#C3D4]\nRM\n";
@@ -963,8 +1059,7 @@ mod tests {
 
     #[test]
     fn consecutive_text_deltas_stay_on_one_line() {
-        let mut r =
-            super::Renderer::new(false, std::sync::Arc::new(super::Theme::default()));
+        let mut r = super::Renderer::new(false, std::sync::Arc::new(super::Theme::default()));
         r.on(agent::Event::TextDelta("There".into()));
         assert!(r.out_dirty, "an unterminated delta leaves the line open");
         r.on(agent::Event::TextDelta("'s a bug".into()));

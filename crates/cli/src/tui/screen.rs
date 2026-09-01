@@ -16,12 +16,12 @@ use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
 };
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
+use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::Widget;
-use ratatui::Terminal;
 use unicode_width::UnicodeWidthChar;
 
 const RESET: &str = "\x1b[0m";
@@ -353,13 +353,13 @@ impl Drop for Screen {
 
 #[cfg(test)]
 mod tests {
+    use super::{Rows, parse_sgr};
     use super::{fit, window};
-    use std::borrow::Cow;
-    use super::{parse_sgr, Rows};
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::widgets::Widget;
+    use std::borrow::Cow;
 
     #[test]
     fn a_row_always_stops_short_of_the_last_cell() {
@@ -425,7 +425,11 @@ mod tests {
         let indexed = "\x1b[38;5;0mabcdef\x1b[0m";
         assert_eq!(
             fit(indexed, 2),
-            vec!["\x1b[38;5;0mab\x1b[0m", "\x1b[38;5;0mcd\x1b[0m", "\x1b[38;5;0mef\x1b[0m"]
+            vec![
+                "\x1b[38;5;0mab\x1b[0m",
+                "\x1b[38;5;0mcd\x1b[0m",
+                "\x1b[38;5;0mef\x1b[0m"
+            ]
         );
     }
 
@@ -518,7 +522,12 @@ mod tests {
     /// The window's rows, plain, for a history of `lines` at width `width`.
     fn shown(lines: &[&str], width: usize, room: usize, scroll: usize) -> Vec<String> {
         let owned: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
-        let (rows, _) = window(owned.iter().map(|s| Cow::Borrowed(s.as_str())), width, room, scroll);
+        let (rows, _) = window(
+            owned.iter().map(|s| Cow::Borrowed(s.as_str())),
+            width,
+            room,
+            scroll,
+        );
         rows
     }
 

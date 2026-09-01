@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 
 use agent::session::Session;
 use agent::{Agent, Totals};
@@ -6,6 +7,10 @@ use tokio_util::sync::CancellationToken;
 use tools::skills::Skill;
 use tools::{Ctx, Tool, ToolError};
 
+use serde::Deserialize;
+
+use crate::config::Config;
+use crate::journal;
 use crate::session::{ResumeChoice, Store};
 
 /// Where a command came from, and so what running it means.
@@ -89,6 +94,11 @@ const BUILTIN: &[Command] = &[
         "what every key does, and the id to rebind it under",
     ),
     Command::builtin("/help", "", "this list"),
+    Command::builtin(
+        "/settings",
+        "[set <path> <value>]",
+        "open the settings panel, or change one for this session",
+    ),
     Command::builtin("/exit", "", "leave (Ctrl-D does the same)"),
 ];
 
@@ -203,6 +213,7 @@ pub fn complete(
     commands: &[Command],
     models: &[Choice],
     sessions: &[ResumeChoice],
+    setting_paths: &[String],
 ) -> Vec<Candidate> {
     if !line.starts_with('/') {
         return Vec::new();
@@ -253,6 +264,39 @@ pub fn complete(
                 more: false,
             })
             .collect(),
+        // `set`/`get`/`reset` complete the path; the value is up to the user.
+        "/settings" => {
+            let Some((sub, _)) = typed.split_once(char::is_whitespace) else {
+                let verbs = ["set", "get", "reset"];
+                return verbs
+                    .iter()
+                    .filter(|v| v.starts_with(typed))
+                    .map(|v| Candidate {
+                        show: v.to_string(),
+                        line: format!("/settings {v}"),
+                        help: String::new(),
+                        more: true,
+                    })
+                    .collect();
+            };
+            if !matches!(sub, "set" | "get" | "reset") {
+                return Vec::new();
+            }
+            let want = typed
+                .split_once(char::is_whitespace)
+                .map(|(_, p)| p)
+                .unwrap_or("");
+            setting_paths
+                .iter()
+                .filter(|p| p.starts_with(want) && !p.is_empty())
+                .map(|p| Candidate {
+                    show: p.clone(),
+                    line: format!("/settings {sub} {p}"),
+                    help: String::new(),
+                    more: false,
+                })
+                .collect()
+        }
         _ => Vec::new(),
     }
 }
@@ -294,6 +338,12 @@ pub struct Repl {
     /// holds the same table to complete against and re-reads it whenever this
     /// one is replaced.
     pub commands: std::sync::Arc<Vec<Command>>,
+    /// The config tree as last read from disk. `/settings` edits a copy of
+    /// this tree; `/reload` replaces it.
+    pub file: toml::Value,
+    /// What `/settings set` has claimed this run, by path. Replayed over
+    /// every reload so the claimed values keep winning over the file.
+    pub claimed: BTreeMap<String, toml::Value>,
     /// Carried across turns: the plan and the file locks outlive any one run.
     pub ctx: Ctx,
 }
@@ -312,21 +362,47 @@ impl Repl {
     /// plan, the name, the history, the model. Only what the config decides is
     /// replaced.
     pub fn reload(&mut self) -> Vec<String> {
-        let config = match crate::config::load(self.args.config.as_deref()) {
-            Ok(c) => c,
+        // Re-read the file tree; the claimed overrides stay.
+        let tree = match crate::config::load_tree(self.args.config.as_deref()) {
+            Ok(t) => t,
             Err(e) => return vec![format!("nothing reloaded — {}", refused("reload", e))],
         };
+        self.file = tree;
+        let mut said = self.rebuild();
+        // Name any claim that still shadows a line the file just changed.
+        for path in self.claimed.keys() {
+            if let Ok(old) = crate::settings::get(&self.file, path)
+                && old != &self.claimed[path]
+            {
+                said.push(format!(
+                    "{}: the file changed it, but /settings set is still shadowing it — /settings reset {path}",
+                    path
+                ));
+            }
+        }
+        said
+    }
+
+    /// Take this config as the one in force: recompute everything it decides
+    /// and swap it in. Whole or not at all — nothing is touched until all of
+    /// it has been computed. `/reload` reads the file first; `/settings`
+    /// hands over a tree it has just edited.
+    fn adopt(&mut self, config: Config) -> Vec<String> {
         let project = match crate::config::load_project(self.ctx.workspace.root()) {
             Ok(p) => p,
             Err(e) => return vec![format!("nothing reloaded — {}", refused("reload", e))],
         };
         let resolved =
-            match crate::resolve(&self.args, self.ctx.workspace.root(), &config, &project) {
+            match crate::resolve(
+                &self.args,
+                self.ctx.workspace.root(),
+                &config,
+                &project,
+                &self.claimed,
+            ) {
                 Ok(r) => r,
                 Err(e) => return vec![format!("nothing reloaded — {}", refused("reload", e))],
             };
-
-        let changed = resolved.system != self.agent.system;
         self.agent.registry = resolved.registry;
         self.agent.approver = std::sync::Arc::new(agent::Ceiling(resolved.tier));
         self.agent.system = resolved.system;
@@ -341,6 +417,35 @@ impl Repl {
         // preference. `/model` is how that one changes.
         self.config = std::sync::Arc::new(config);
 
+        // A spec change forces a re-dial; compare with the same `dial` call
+        // the running spec came from, so the command line's --base-url /
+        // --context overrides keep applying exactly as they do at startup.
+        let mut notes = Vec::new();
+        match crate::dial(
+            &self.args,
+            &self.config,
+            &self.agent.spec.model,
+            crate::config::Origin::Command,
+        ) {
+            Ok(dialled) if dialled.spec != self.agent.spec => {
+                self.agent.retarget(dialled.transport, dialled.spec);
+                notes.extend(
+                    dialled
+                        .notes
+                        .into_iter()
+                        .filter(|n| !n.starts_with("assuming a")),
+                );
+                notes.extend(dialled.warning);
+            }
+            // Same spec, nothing to change; a failed dial keeps the old
+            // transport but has to say so, or the config the model just
+            // accepted disagrees with the endpoint it still talks to.
+            Ok(_) => {}
+            Err(e) => notes.push(format!(
+                "`{}` not re-dialled — {}",
+                self.agent.spec.model, e
+            )),
+        }
         tracing::info!(
             target: "pi::session",
             models = self.config.names().len(),
@@ -348,20 +453,88 @@ impl Repl {
             commands = self.commands.len(),
             effort = ?self.agent.effort,
             system_bytes = self.agent.system.len(),
-            prompt_changed = changed,
             "reloaded"
         );
+        notes
+    }
 
-        let mut said = resolved.notes;
-        said.push(if changed {
-            // Worth saying: the prompt is what a provider caches, so a changed
-            // one starts the cache over. An unchanged one costs nothing, which
-            // is why there is no narrower `/reload keys`.
-            "reloaded — the instructions changed, so the prompt cache starts over".into()
-        } else {
-            "reloaded".into()
-        });
+    /// Recompute the config from the file tree plus the session's claimed
+    /// overrides, and adopt it.
+    fn rebuild(&mut self) -> Vec<String> {
+        let mut tree = self.file.clone();
+        for (path, value) in &self.claimed {
+            if let Err(e) = crate::settings::put(&mut tree, path, value.clone()) {
+                return vec![refused("settings", e)];
+            }
+        }
+        let config = match crate::config::Config::deserialize(tree) {
+            Ok(c) => c,
+            Err(e) => return vec![refused("settings", anyhow::anyhow!(e))],
+        };
+        self.adopt(config)
+    }
+
+    /// `/settings set`: try the write on a scratch tree first, so a bad value
+    /// touches nothing, then record it as a claim and rebuild.
+    pub fn edit(&mut self, path: &str, raw: &str) -> Vec<String> {
+        let mut scratch = self.file.clone();
+        let old = crate::settings::get(&scratch, path).ok().cloned();
+        if let Err(e) = crate::settings::set(&mut scratch, path, raw) {
+            return vec![refused("settings", e)];
+        }
+        let new = crate::settings::get(&scratch, path).unwrap().clone();
+        // Validate by deserializing the scratch tree, so a bad value never
+        // reaches the running config.
+        if let Err(e) = crate::config::Config::deserialize(scratch) {
+            return vec![refused("settings", anyhow::anyhow!(e))];
+        }
+        self.claimed.insert(path.to_string(), new);
+        let mut said = self.rebuild();
+        let old_shown = match &old {
+            Some(v) => mask_secret(path, v),
+            None => "<unset>".to_string(),
+        };
+        said.push(format!(
+            "{path}: {old_shown} → {}",
+            mask_secret(path, &self.claimed[path])
+        ));
         said
+    }
+
+    /// Drop a claim (`/settings reset path`), or all of them.
+    pub fn unclaim(&mut self, path: Option<&str>) -> Vec<String> {
+        match path {
+            Some(p) => {
+                self.claimed.remove(p);
+            }
+            None => self.claimed.clear(),
+        }
+        self.rebuild()
+    }
+
+    /// The settings panel's commit: write to the file, drop any claim on the
+    /// same path so the written value is what wins, and rebuild. Validation
+    /// happens on a scratch tree first; nothing is written or applied when it
+    /// fails.
+    pub fn commit_file(&mut self, path: &str, raw: &str) -> Result<Vec<String>, String> {
+        let mut scratch = self.file.clone();
+        crate::settings::set(&mut scratch, path, raw).map_err(|e| format!("{e:#}"))?;
+        let new = crate::settings::get(&scratch, path).unwrap().clone();
+        crate::config::Config::deserialize(scratch).map_err(|e| format!("{e:#}"))?;
+        let file = self
+            .args
+            .config
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .or_else(crate::config::global_path)
+            .ok_or_else(|| "no settings file to write".to_string())?;
+        crate::config::write(&file, path, new.clone()).map_err(|e| format!("{e:#}"))?;
+        self.claimed.remove(path);
+        self.file =
+            crate::config::load_tree(self.args.config.as_deref()).map_err(|e| format!("{e:#}"))?;
+        let mut said = self.rebuild();
+        said.push(format!("{path} = {} — written to the file", new));
+        Ok(said)
     }
 
     /// The models `/model` can reach, with what tells them apart.
@@ -543,6 +716,9 @@ pub enum Cmd {
     Compact(String),
     /// The name to move to, or empty to list what there is.
     Model(String),
+    /// Everything after the word: a `set <path> <value>`, `get <path>`,
+    /// `reset [path]`, or empty to open the panel.
+    Settings(String),
     /// Not a built-in word. It may name a skill and it may name nothing; the
     /// command table settles that, and `parse` does not have it.
     Other {
@@ -665,6 +841,7 @@ pub fn parse(line: &str) -> Option<Cmd> {
         "/name" => Cmd::Name(rest(line)),
         "/compact" => Cmd::Compact(rest(line)),
         "/model" => Cmd::Model(rest(line)),
+        "/settings" => Cmd::Settings(rest(line)),
         other => Cmd::Other {
             word: other.to_string(),
             args: rest(line),
@@ -774,7 +951,83 @@ impl Repl {
                 self.switch(&name)
             }),
             Cmd::Other { word, args } => dispatch(&self.commands, &word, &args),
+            Cmd::Settings(rest) => self.settings(&rest),
         }
+    }
+
+    /// `/settings` surface. An empty argument opens the panel (the TUI takes
+    /// over); `set`/`get`/`reset` are line commands.
+    fn settings(&mut self, rest: &str) -> Step {
+        let mut parts = rest.splitn(3, char::is_whitespace);
+        let verb = parts.next().unwrap_or("");
+        match verb {
+            "" => self.open_panel(),
+            "set" => {
+                let path = parts.next().unwrap_or("");
+                let value = parts.next().unwrap_or("");
+                if path.is_empty() || value.is_empty() {
+                    return lines("usage: /settings set <path> <value>");
+                }
+                Step::Handled(self.edit(path, value))
+            }
+            "get" => {
+                let path = parts.next().unwrap_or("");
+                if path.is_empty() {
+                    return lines("usage: /settings get <path>");
+                }
+                let tree = self.file.clone();
+                match crate::settings::get(&tree, path) {
+                    Ok(v) => {
+                        let shown = if journal::secret(journal::leaf(path)) {
+                            match v.as_str() {
+                                Some("") => "<unset>".to_string(),
+                                Some(_) => "<set>".to_string(),
+                                None => "<set>".to_string(),
+                            }
+                        } else {
+                            v.to_string()
+                        };
+                        lines(format!("{path} = {shown}"))
+                    }
+                    Err(e) => lines(refused("settings", e)),
+                }
+            }
+            "reset" => {
+                let path = parts.next().unwrap_or("");
+                if path.is_empty() {
+                    Step::Handled(self.unclaim(None))
+                } else {
+                    Step::Handled(self.unclaim(Some(path)))
+                }
+            }
+            other => lines(format!(
+                "unknown /settings verb `{other}` — set, get or reset"
+            )),
+        }
+    }
+
+    /// The bare `/settings`: the TUI's panel, or a read-only list when this
+    /// is not a terminal.
+    fn open_panel(&mut self) -> Step {
+        // The TUI intercepts bare `/settings` before it reaches here; the
+        // line surface can only list.
+        let mut out = Vec::new();
+        for (path, value) in crate::settings::leaves(&self.file) {
+            let shown = if journal::secret(journal::leaf(&path)) {
+                if value.is_empty() {
+                    "<unset>".to_string()
+                } else {
+                    "<set>".to_string()
+                }
+            } else {
+                value
+            };
+            out.push(format!("{path} = {shown}"));
+        }
+        if out.is_empty() {
+            out.push("nothing in ~/.pi/settings.toml yet".into());
+        }
+        Step::Handled(out)
     }
 
     /// Drop the in-memory conversation and open a fresh session under a new
@@ -903,12 +1156,11 @@ impl Repl {
         // the rebuilt scrollback printing `Ran \`git status\`` as a prompt,
         // with the output indented under it — the live path never did that,
         // because it had the typed line and the rebuild did not.
-        self.session.push_user(agent::session::UserBody::Aside(
-            agent::session::UserText {
+        self.session
+            .push_user(agent::session::UserBody::Aside(agent::session::UserText {
                 text,
                 shown: Some(format!("!{command}")),
-            },
-        ));
+            }));
         let mut said: Vec<String> = body
             .lines()
             // The tags wrap the model's copy; the terminal shows the output
@@ -920,6 +1172,18 @@ impl Repl {
             said.push(format!("warning: the transcript was not saved: {e}"));
         }
         said
+    }
+}
+
+// A secret value as a change line shows it: set or unset, never the value.
+fn mask_secret(path: &str, value: &toml::Value) -> String {
+    if journal::secret(journal::leaf(path)) {
+        match value.as_str() {
+            Some("") => "<unset>".to_string(),
+            Some(_) | None => "<set>".to_string(),
+        }
+    } else {
+        value.to_string()
     }
 }
 
@@ -968,7 +1232,7 @@ mod tests {
     }
 
     fn offered_from(line: &str, table: &[Command]) -> Vec<String> {
-        complete(line, table, &choices(), &[])
+        complete(line, table, &choices(), &[], &[])
             .into_iter()
             .map(|c| c.show)
             .collect()
@@ -1002,8 +1266,9 @@ mod tests {
     }
     #[test]
     fn accepting_a_command_that_wants_an_argument_leaves_room_for_one() {
-        let of =
-            |line: &str| -> Candidate { complete(line, &table(), &choices(), &[]).swap_remove(0) };
+        let of = |line: &str| -> Candidate {
+            complete(line, &table(), &choices(), &[], &[]).swap_remove(0)
+        };
         let name = of("/nam");
         assert_eq!((name.line.as_str(), name.more), ("/name", true));
         // Nothing follows /todo, so the caret should not be pushed past a space
@@ -1025,7 +1290,7 @@ mod tests {
         assert!(offered("/model flash and").is_empty());
         // Accepting one replaces the line, not just the word.
         assert_eq!(
-            complete("/model fla", &table(), &choices(), &[])[0].line,
+            complete("/model fla", &table(), &choices(), &[], &[])[0].line,
             "/model flash"
         );
     }
@@ -1034,7 +1299,7 @@ mod tests {
     fn a_config_with_no_models_offers_nothing_rather_than_every_command() {
         // choices() is empty when the file defines no model, and the argument
         // branch must not fall back to completing command words again.
-        assert!(complete("/model fl", &table(), &[], &[]).is_empty());
+        assert!(complete("/model fl", &table(), &[], &[], &[]).is_empty());
     }
 
     fn sessions() -> Vec<ResumeChoice> {
@@ -1056,7 +1321,7 @@ mod tests {
     fn the_sessions_complete_by_first_prompt_and_accept_the_id() {
         let sessions = sessions();
         let of = |line: &str| {
-            complete(line, &table(), &[], &sessions)
+            complete(line, &table(), &[], &sessions, &[])
                 .into_iter()
                 .map(|c| c.show)
                 .collect::<Vec<_>>()
@@ -1080,9 +1345,9 @@ mod tests {
             prompt: String::new(),
             created: 0,
         }];
-        assert!(complete("/resume ", &table(), &[], &quiet).is_empty());
+        assert!(complete("/resume ", &table(), &[], &quiet, &[]).is_empty());
         // Accepting replaces the line with the id, which is what /resume loads.
-        let got = &complete("/resume lint", &table(), &[], &sessions)[0];
+        let got = &complete("/resume lint", &table(), &[], &sessions, &[])[0];
         assert_eq!(got.line, "/resume 1756240000-200");
         assert!(!got.more);
     }
@@ -1234,7 +1499,6 @@ mod tests {
         assert_eq!(typed.as_deref(), Some("/commit"), "no trailing space");
     }
 
-
     #[test]
     fn a_skill_whose_file_has_gone_says_so_rather_than_prompting() {
         // Discovery ran at startup; the directory can be gone by now, and an
@@ -1355,10 +1619,21 @@ mod tests {
             shown: Some("!git status".into()),
         }));
 
-        let Entry::User { body: UserBody::Aside(t), .. } = &s.entries()[0] else {
+        let Entry::User {
+            body: UserBody::Aside(t),
+            ..
+        } = &s.entries()[0]
+        else {
             panic!("a text entry")
         };
-        assert!(t.text.contains("nothing to commit"), "the model reads the output");
-        assert_eq!(t.shown.as_deref(), Some("!git status"), "the reader sees the line");
+        assert!(
+            t.text.contains("nothing to commit"),
+            "the model reads the output"
+        );
+        assert_eq!(
+            t.shown.as_deref(),
+            Some("!git status"),
+            "the reader sees the line"
+        );
     }
 }

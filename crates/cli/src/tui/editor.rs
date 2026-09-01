@@ -62,12 +62,15 @@ impl Editor {
         self.at = self.history.len();
     }
 
-    /// Hand over the line and remember it.
-    pub fn take(&mut self) -> String {
+    /// Hand over the line, and remember it unless the caller says not to.
+    ///
+    /// `/settings set api_key …` must run without entering the recall list,
+    /// which is written to disk in the clear.
+    pub fn take(&mut self, remember: bool) -> String {
         let line = std::mem::take(&mut self.text);
         self.cursor = 0;
         // A line identical to the last is not worth a second history slot.
-        if !line.trim().is_empty() && self.history.last() != Some(&line) {
+        if remember && !line.trim().is_empty() && self.history.last() != Some(&line) {
             self.history.push(line.clone());
         }
         self.at = self.history.len();
@@ -231,7 +234,11 @@ impl Editor {
         // A line starting with `!` is a shell command; the bang takes the
         // prompt's place so the line reads `! cmd` rather than `› ! cmd`.
         let bang = self.text.starts_with('!');
-        let body = if bang { &self.text[1..] } else { self.text.as_str() };
+        let body = if bang {
+            &self.text[1..]
+        } else {
+            self.text.as_str()
+        };
         let cursor = if bang {
             self.cursor.saturating_sub(1)
         } else {
@@ -378,7 +385,7 @@ mod tests {
     #[test]
     fn up_browses_history_but_moves_the_caret_when_there_are_lines_to_move_through() {
         let mut e = typed("older");
-        e.take();
+        e.take(true);
         let mut e2 = e;
         e2.insert_str("draft");
         e2.up();
@@ -399,7 +406,11 @@ mod tests {
         let e = typed("!git status");
         let (rows, caret) = e.view(&paint(), 40);
         assert_eq!(rows[0], "! git status", "the bang takes the icon's place");
-        assert_eq!(caret, (0, 12), "GUTTER 2 + the ten characters of `git status`");
+        assert_eq!(
+            caret,
+            (0, 12),
+            "GUTTER 2 + the ten characters of `git status`"
+        );
 
         let plain = typed("git status");
         assert_eq!(plain.view(&paint(), 40).0[0], "› git status");
@@ -426,9 +437,9 @@ mod tests {
     #[test]
     fn history_does_not_keep_a_second_copy_of_a_repeated_line() {
         let mut e = typed("cargo test");
-        e.take();
+        e.take(true);
         e.insert_str("cargo test");
-        e.take();
+        e.take(true);
         assert_eq!(e.history.len(), 1);
     }
 
@@ -440,7 +451,11 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(caret, (1, 6), "the caret is past the end of the second row");
         e.home();
-        assert_eq!(e.view(&paint(), 6).1, (0, 2), "and back in the gutter's shadow");
+        assert_eq!(
+            e.view(&paint(), 6).1,
+            (0, 2),
+            "and back in the gutter's shadow"
+        );
     }
 
     #[test]

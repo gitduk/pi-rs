@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use brain::model::ModelSpec;
-use brain::message::{Message, ToolCall, ToolResult, ToolResultContent};
+use brain::message::{Message, ToolCall, ToolResult};
 use brain::request::{Effort, Request};
 use brain::stream::{Accumulator, StreamEvent};
 use brain::transport::Transport;
@@ -27,17 +27,10 @@ pub use event::{Event, Totals};
 
 pub const DEFAULT_SYSTEM: &str = include_str!("../prompts/system.md");
 
-// Identical answers before the loop is named. Two is not enough: a re-read
-// after compaction is legitimate, and the content really is the same.
-const REPEAT_LIMIT: usize = 2;
-
-// Identical failures before the same is said. Lower, because none of that
-// leeway applies: nothing legitimate re-sends, byte for byte, a call that just
-// came back refused. Waiting for a third spends a turn learning what the
-// second already showed — which is how a model that cannot get a tool's format
-// right spends a whole session getting it wrong the same way.
-const FAILURE_LIMIT: usize = 1;
-
+// A tool that fails twice in a row is named. One failure is ordinary — the
+// model reads the error and tries again; the second tells it nothing the
+// first did not, so there is no leeway the way there is for a re-read.
+const FAILURE_LIMIT: usize = 2;
 // Headroom for framing the estimate does not model. Compacting slightly early
 // costs a little quality; compacting late costs the whole turn.
 const SAFETY_MARGIN: usize = 2_000;
@@ -120,9 +113,11 @@ pub struct Agent {
     pub retry: Retry,
 }
 
-// What each call last returned and how many times running, keyed by the call
-// itself — its name and the arguments it was given.
-type Echoes = HashMap<(String, String), (String, usize)>;
+// Per-tool failure streaks across one run, so a loop can be named. Keyed by
+// tool and the stable code its error carries: a patch that keeps coming back
+// "would not parse" is one loop whatever the prose says, while a genuinely
+// different error starts a new count.
+type Failures = HashMap<(String, String), usize>;
 
 // What a streamed call resolves to before anything runs. Deciding first keeps
 // the result list aligned with the call list even when nothing executes.
@@ -160,9 +155,9 @@ impl Agent {
         tx: &UnboundedSender<Event>,
     ) -> Result<Totals, AgentError> {
         let mut totals = Totals::default();
-        // What each call last returned, so a loop can be named — naming it is
-        // the only thing that stops one.
-        let mut echoes = Echoes::new();
+        // How many times a tool has failed in a row, so a loop can be named —
+        // naming it is the only thing that stops one.
+        let mut failures: Failures = Failures::new();
 
         // A resumed session brings its plan back; the tool sees it as the list
         // it left behind rather than an empty one.
@@ -324,7 +319,7 @@ impl Agent {
                 .map(|i| (i.call.clone(), i.error.clone()))
                 .collect();
             let results = self
-                .run_calls(&calls, &bad, ctx, tx, &mut echoes)
+                .run_calls(&calls, &bad, ctx, tx, &mut failures)
                 .instrument(span.clone())
                 .await?;
             session.push_previewed(results);
@@ -604,7 +599,7 @@ impl Agent {
         bad: &HashMap<String, String>,
         ctx: &Ctx,
         tx: &UnboundedSender<Event>,
-        echoes: &mut Echoes,
+        failures: &mut Failures,
     ) -> Result<Vec<(ToolResult, Option<String>)>, AgentError> {
         let actions: Vec<Action> = calls
             .iter()
@@ -695,7 +690,7 @@ impl Agent {
             // content holds. The rebuild has no other way back to it.
             let mut sketched = None;
             let result = match (action, output) {
-                (Action::Reject(why), _) => failed(call, why.clone(), echoes),
+                (Action::Reject(why), _) => failed(call, why.clone(), None, failures),
                 (_, Some(Err(ToolError::Cancelled))) => return Err(AgentError::Cancelled),
                 (_, Some(Err(e))) => {
                     let mut body = e.to_string();
@@ -713,7 +708,7 @@ impl Agent {
                             preview: body.clone(),
                         },
                     );
-                    failed(call, body, echoes)
+                    failed(call, body, e.category(), failures)
                 }
                 (_, Some(Ok(out))) => {
                     sketched = out.preview.clone();
@@ -726,17 +721,11 @@ impl Agent {
                             preview: out.preview(),
                         },
                     );
-                    let body = out.flatten();
-                    let mut content = out.content;
-                    if let Some(notice) = repeat_notice(echoes, call, &body, Answer::Given) {
-                        content.push(ToolResultContent::Text(brain::message::Text {
-                            text: notice,
-                        }));
-                    }
+                    note_success(call, failures);
                     ToolResult {
                         call: call.id.clone(),
                         name: call.name.clone(),
-                        content,
+                        content: out.content,
                         is_error: false,
                         useless: out.useless,
                     }
@@ -750,88 +739,74 @@ impl Agent {
     }
 }
 
-// The scope a tool's own records land in, and what times it.
-fn ran(call: &ToolCall) -> tracing::Span {
-    tracing::info_span!(target: "pi::tool", "tool", name = %call.name, call = %call.id)
+// A success resets the failure streak for this tool — the loop-breaker only
+// names an unbroken run of failures — except for edit, whose every success is
+// a different file: landing one edit does not mean the next will land, and a
+// malformed-patch loop must keep being counted until the model actually
+// changes approach.
+fn note_success(call: &ToolCall, failures: &mut Failures) {
+    if call.name != "edit" {
+        failures.retain(|(name, _), _| name != &call.name);
+    }
 }
 
-// Which way one call came back. The detection is the same either way; only the
-// patience and the wording differ.
-#[derive(Clone, Copy, PartialEq)]
-enum Answer {
-    Given,
-    Failed,
+fn ran(call: &ToolCall) -> tracing::Span {
+    tracing::info_span!(target: "pi::tool", "tool", name = %call.name, call = %call.id)
 }
 
 // A call that did not run, or ran and failed.
 //
 // The notice goes inside the error body rather than beside it: a failure has
 // no content blocks to append one to, and the model reads the body.
-fn failed(call: &ToolCall, mut body: String, echoes: &mut Echoes) -> ToolResult {
-    if let Some(notice) = repeat_notice(echoes, call, &body, Answer::Failed) {
+fn failed(
+    call: &ToolCall,
+    mut body: String,
+    code: Option<&'static str>,
+    failures: &mut Failures,
+) -> ToolResult {
+    if let Some(notice) = too_many_failures(call, code, failures) {
         body.push_str(&notice);
     }
     ToolResult::error(call.id.clone(), &call.name, body)
 }
 
-// Name a call that has come back identical too many times.
-//
-// A model that keeps making the same call and getting the same thing back is
-// stuck, and nothing else stops it — there is no turn limit, so saying so is
-// the only brake. Failures count the same as answers: a patch refused
-// for the same reason three running is the commonest way a session dies, and
-// counting only the answers left exactly that case unnamed.
-fn repeat_notice(
-    echoes: &mut Echoes,
+// Name a tool whose failures are piling up. The count is per tool and per
+// stable error code, so the wording of the refusal — which a loop keeps
+// changing — never matters: a patch that keeps coming back refused the same
+// way is a loop, whatever the prose says, while a genuinely different error
+// starts a new count. Two failures is already the whole story; the second
+// tells the model nothing the first did not, so there is no leeway the way
+// there is for a re-read. Naming resets the count, so a mistake made long
+// after the loop was broken is not called the Nth repeat of it.
+fn too_many_failures(
     call: &ToolCall,
-    body: &str,
-    answer: Answer,
+    code: Option<&'static str>,
+    failures: &mut Failures,
 ) -> Option<String> {
-    // Arguments that would not parse arrive here as `{}` whatever they were, so
-    // a malformed call is told apart by the refusal it drew rather than by what
-    // it sent. That is the right grain: three calls that fail to parse the same
-    // way are one loop, whichever bytes produced them.
-    let key = (call.name.clone(), call.args.to_string());
-    // Explicit rather than `entry().or_insert()`: the first call must not be
-    // counted as a repeat of itself.
-    let Some(slot) = echoes.get_mut(&key) else {
-        echoes.insert(key, (body.to_string(), 0));
-        return None;
-    };
-    if slot.0 != body {
-        // A different answer: whatever the model was waiting for has happened.
-        *slot = (body.to_string(), 0);
+    let key = (
+        call.name.clone(),
+        code.map(str::to_owned).unwrap_or_default(),
+    );
+    let n = failures.entry(key).or_insert(0);
+    *n += 1;
+    if *n < FAILURE_LIMIT {
         return None;
     }
-    slot.1 += 1;
-    let seen = slot.1;
-    let limit = match answer {
-        Answer::Given => REPEAT_LIMIT,
-        Answer::Failed => FAILURE_LIMIT,
-    };
-    (seen >= limit).then(|| {
-        let times = seen + 1;
-        tracing::warn!(
-            target: "pi::tool",
-            tool = %call.name,
-            seen = times,
-            failed = answer == Answer::Failed,
-            "the same call keeps coming back the same way"
-        );
-        match answer {
-            Answer::Given => format!(
-                "\n[this is the same `{}` call with the same result, {times} times now. \
-                 Nothing has changed — try something else.]",
-                call.name
-            ),
-            Answer::Failed => format!(
-                "\n[the same `{}` call has now failed the same way {times} times. \
-                 Sending it again will not change the answer — change the call, \
-                 or reach the goal another way.]",
-                call.name
-            ),
-        }
-    })
+    let seen = *n;
+    *n = 0;
+    tracing::warn!(
+        target: "pi::tool",
+        tool = %call.name,
+        code = code.unwrap_or_default(),
+        seen,
+        "a tool keeps failing in a row"
+    );
+    Some(format!(
+        "\n[the same `{}` call has now failed the same way {seen} times. \
+         Sending it again will not change the answer — change the call, \
+         or reach the goal another way.]",
+        call.name
+    ))
 }
 
 fn wedged(idle: std::time::Duration) -> AgentError {
@@ -863,4 +838,72 @@ pub fn cancel_on_interrupt() -> CancellationToken {
         }
     });
     token
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use brain::message::ToolCall;
+
+    fn call(name: &str) -> ToolCall {
+        ToolCall {
+            id: format!("call_{name}"),
+            name: name.into(),
+            args: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn two_same_code_failures_are_named() {
+        let mut f = Failures::new();
+        assert!(too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f).is_none());
+        let n = too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f);
+        assert!(n.is_some(), "second same-code failure is named");
+        assert!(n.unwrap().contains("edit"));
+    }
+
+    #[test]
+    fn a_different_code_starts_a_fresh_count() {
+        let mut f = Failures::new();
+        too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f);
+        // A genuinely different error is a new situation, not a loop.
+        assert!(
+            too_many_failures(&call("edit"), Some("EDIT_RENUMBERED"), &mut f).is_none(),
+            "different code must not count against the old one"
+        );
+    }
+
+    #[test]
+    fn an_edit_success_does_not_clear_its_failure_streak() {
+        let mut f = Failures::new();
+        too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f);
+        note_success(&call("edit"), &mut f);
+        // Landing one edit does not mean the next will land, so its streak
+        // stays until the model changes approach.
+        assert!(f.contains_key(&("edit".into(), "EDIT_UNBALANCED".into())));
+    }
+
+    #[test]
+    fn a_success_clears_the_streak_for_any_other_tool() {
+        let mut f = Failures::new();
+        too_many_failures(&call("bash"), Some("BASH_TIMEOUT"), &mut f);
+        note_success(&call("bash"), &mut f);
+        assert!(f.is_empty(), "a bash success breaks the bash streak");
+    }
+
+    #[test]
+    fn a_failure_after_naming_starts_a_fresh_count() {
+        let mut f = Failures::new();
+        too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f);
+        assert!(
+            too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f).is_some(),
+            "two in a row are named"
+        );
+        // The naming reset the count: one isolated mistake after the loop was
+        // broken is a new situation, not the Nth repeat of the old one.
+        assert!(
+            too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f).is_none(),
+            "a single failure after naming must not be called a repeat"
+        );
+    }
 }

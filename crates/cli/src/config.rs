@@ -19,26 +19,27 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use brain::model::{
-    CacheControl, Format, ModelSpec, Pricing, ReplayThinking, ThinkingControl,
-};
-use serde::Deserialize;
+use brain::model::{CacheControl, Format, ModelSpec, Pricing, ReplayThinking, ThinkingControl};
+use serde::{Deserialize, Serialize};
 
-use crate::{EffortArg, TierArg, FormatArg};
+use crate::{EffortArg, FormatArg, TierArg};
 
 /// The user's own file: `~/.pi/settings.toml`.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// The endpoint this machine talks to. One, because pi talks to one at a
     /// time: a map of them made every model's name a `provider.model` pair,
     /// and that pair is what the config, the archive and the reasoning stamp
     /// each had to spell in their own way.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<FormatArg>,
     /// `$NAME` reads that environment variable; anything else is the key
     /// itself. A key that genuinely begins with `$` cannot be written literally
     /// — put it in a variable.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
     /// Anthropic only, and off unless someone measured it: an unknown top-level
     /// field is a 400 on some servers.
@@ -46,16 +47,21 @@ pub struct Config {
     pub cache_control: CacheControl,
 
     /// The model to run, as the endpoint names it: `deepseek-v4-flash`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// Who writes the summary when history is compacted. Defaults to `model`.
     ///
     /// Named for the job, not for a tier: `lite_model` would be a category with
     /// one member and no test for membership, and every task added after would
     /// have to argue about whether it qualifies.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub summarize_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<EffortArg>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tier: Option<TierArg>,
     /// Path to a file replacing the built-in system prompt.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
 
     /// Facts about a model the defaults get wrong, keyed by the model's own
@@ -75,7 +81,7 @@ pub struct Config {
 /// One key or several — `"ctrl+g"` and `["ctrl+g", "f5"]` both mean the same
 /// thing for an action with a single binding, and requiring the brackets for
 /// the common case would be noise.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum Binds {
     One(String),
@@ -111,7 +117,7 @@ impl Config {
 /// is `system`, which would let a checkout name any file on disk and have its
 /// contents sent to the provider. What is left can only pick among models the
 /// user has already defined and turn the dials on how hard the run works.
-#[derive(Debug, Default, Clone, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Project {
     pub model: Option<String>,
@@ -134,7 +140,7 @@ fn yes() -> bool {
 }
 
 /// One model. Every field here travels with the model whoever serves it.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelEntry {
     #[serde(default = "default_context")]
@@ -142,6 +148,7 @@ pub struct ModelEntry {
     #[serde(default = "default_output")]
     pub max_output_tokens: u32,
     /// How the model takes a thinking instruction, absent if it takes none.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingControl>,
     #[serde(default)]
     pub replay_thinking: ReplayThinking,
@@ -343,24 +350,32 @@ impl Config {
         }
     }
 
-    /// Flag, then project, then this file, then the built-in default.
+    /// `/settings` > flag > project > this file > the built-in default.
     ///
-    /// The tier is the exception: a project may only pull it down, so it is
-    /// applied as a ceiling after the rest of the chain has decided.
-    pub fn settle(&self, project: &Project, flags: Flags) -> Settled {
-        let tier = flags
-            .tier
-            .or(self.tier)
-            .unwrap_or(TierArg::Exec)
-            .min(project.max_tier.unwrap_or(TierArg::Exec));
-        Settled {
-            effort: flags
-                .effort
-                .or(project.effort)
-                .or(self.effort)
-                .unwrap_or(EffortArg::Off),
-            tier,
+    /// A key named in `claimed` was set by `/settings` this session, so it
+    /// skips the flag and the project: the config tree already carries the
+    /// claimed value. The tier keeps its ceiling — a project may only pull
+    /// it down, and `/settings` does not open that back door.
+    pub fn settle(
+        &self,
+        project: &Project,
+        flags: Flags,
+        claimed: &BTreeMap<String, toml::Value>,
+    ) -> Settled {
+        let effort = if claimed.contains_key("effort") {
+            self.effort
+        } else {
+            flags.effort.or(project.effort).or(self.effort)
         }
+        .unwrap_or(EffortArg::Off);
+        let tier = if claimed.contains_key("tier") {
+            self.tier
+        } else {
+            flags.tier.or(self.tier)
+        }
+        .unwrap_or(TierArg::Exec)
+        .min(project.max_tier.unwrap_or(TierArg::Exec));
+        Settled { effort, tier }
     }
 
     /// A resumed run stays on the model that produced the transcript, so `prior`
@@ -451,6 +466,25 @@ pub fn load(explicit: Option<&str>) -> Result<Config> {
     match std::fs::read_to_string(&path) {
         Ok(body) => parse(&body).with_context(|| format!("{}", path.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && !required => Ok(Config::default()),
+        Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
+    }
+}
+
+/// The file's tree, for `/settings` to walk and `/reload` to re-read.
+/// `None` when the config file is absent: the tree is then the empty table.
+pub fn load_tree(explicit: Option<&str>) -> Result<toml::Value> {
+    let (path, required) = match explicit {
+        Some(p) => (PathBuf::from(p), true),
+        None => match global_path() {
+            Some(p) => (p, false),
+            None => return Ok(toml::Value::Table(Default::default())),
+        },
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(body) => Ok(toml::from_str(&body).with_context(|| format!("{}", path.display()))?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !required => {
+            Ok(toml::Value::Table(Default::default()))
+        }
         Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
     }
 }
@@ -592,6 +626,66 @@ pub fn warn_if_exposed(path: &Path) -> Option<String> {
     None
 }
 
+/// Write one value at `path` in `settings.toml`, leaving every other byte —
+/// comments, blank lines, the rest of the tree — untouched.
+///
+/// The panel edits one field at a time, so this never re-serializes the whole
+/// file: a DOM round-trip would drop the comments that carry a measurement's
+/// provenance.
+pub fn write(path: &Path, dotted: &str, value: toml::Value) -> Result<()> {
+    let body = std::fs::read_to_string(path)?;
+    let mut doc = body
+        .parse::<toml_edit::DocumentMut>()
+        .context("the config file must stay valid TOML")?;
+    let segments = crate::settings::segments(dotted)?;
+    // Walk to the parent table, creating intermediate tables as needed.
+    let mut table = doc.as_table_mut();
+    let last = segments[segments.len() - 1].clone();
+    for seg in &segments[..segments.len() - 1] {
+        if !table.contains_key(seg) {
+            table.insert(seg, toml_edit::Item::Table(toml_edit::Table::new()));
+        }
+        let item = table
+            .get_mut(seg)
+            .ok_or_else(|| anyhow::anyhow!("no table `{seg}`"))?;
+        table = item
+            .as_table_mut()
+            .ok_or_else(|| anyhow::anyhow!("`{seg}` is not a table"))?;
+    }
+    table.insert(&last, toml_edit::Item::Value(to_edit_value(&value)));
+    // Atomic: write a sibling temp file, then rename over the real one.
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, doc.to_string())?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+// toml_edit's own value type has no From<toml::Value>, so build it by hand.
+// Tables and arrays recurse; scalars map straight across.
+fn to_edit_value(value: &toml::Value) -> toml_edit::Value {
+    use toml_edit::Value;
+    match value {
+        toml::Value::String(s) => Value::from(s.as_str()),
+        toml::Value::Integer(i) => Value::from(*i),
+        toml::Value::Float(f) => Value::from(*f),
+        toml::Value::Boolean(b) => Value::from(*b),
+        toml::Value::Datetime(d) => Value::from(d.to_string()),
+        toml::Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(to_edit_value)
+                .collect(),
+        ),
+        toml::Value::Table(map) => {
+            let mut t = toml_edit::InlineTable::new();
+            for (k, v) in map {
+                t.insert(k, to_edit_value(v));
+            }
+            Value::InlineTable(t)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -630,6 +724,16 @@ output_per_mtok = 0
         assert_eq!(spec.pricing.output_per_mtok, 0.0);
     }
 
+    // The tree /settings walks must be the config itself, not a lossy view of
+    // it.
+    #[test]
+    fn config_round_trips_through_a_value_tree() {
+        let before: Config = toml::from_str(SAMPLE).unwrap();
+        let tree = toml::Value::try_from(&before).unwrap();
+        let after = Config::deserialize(tree).unwrap();
+        assert_eq!(before, after);
+    }
+
     #[test]
     fn the_shipped_example_parses() {
         // It is the file people copy from; a stale key in it fails on their
@@ -663,7 +767,9 @@ output_per_mtok = 0
             )
         }
 
-        let err = parse(&config("anthropic", "effort")).unwrap_err().to_string();
+        let err = parse(&config("anthropic", "effort"))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("adaptive") && err.contains("budget"), "{err}");
 
         for name in ["adaptive", "budget"] {
@@ -671,7 +777,11 @@ output_per_mtok = 0
             assert!(err.contains(name) && err.contains("effort"), "{err}");
         }
 
-        for (wire, thinking) in [("anthropic", "adaptive"), ("anthropic", "budget"), ("openai", "effort")] {
+        for (wire, thinking) in [
+            ("anthropic", "adaptive"),
+            ("anthropic", "budget"),
+            ("openai", "effort"),
+        ] {
             assert!(parse(&config(wire, thinking)).is_ok(), "{wire}/{thinking}");
         }
     }
@@ -728,7 +838,13 @@ output_per_mtok = 0
         let older = "[models.flash]\nbase_url = \"http://x/v1\"\nwire = \"openai\"\n";
         let e = parse(older).unwrap_err().to_string();
         // Every rename it might be holding is named, not just the section.
-        for hint in ["wire", "api_key_env", "wire_id", "thinking_replay", "cache_control"] {
+        for hint in [
+            "wire",
+            "api_key_env",
+            "wire_id",
+            "thinking_replay",
+            "cache_control",
+        ] {
             assert!(e.contains(hint), "{hint} unmentioned: {e}");
         }
     }
@@ -779,7 +895,11 @@ output_per_mtok = 0
         // The shape is a typo today and every day after, so it is caught at
         // load; the value is not read until the provider is actually used.
         let bad = parse(&one("openai", "api_key = \"$not a name\"\n"));
-        assert!(bad.unwrap_err().to_string().contains("environment variable"));
+        assert!(
+            bad.unwrap_err()
+                .to_string()
+                .contains("environment variable")
+        );
 
         // A `$NAME` that is not set means no key: the request goes out without
         // one, and the endpoint's response is what says so.
@@ -792,13 +912,10 @@ output_per_mtok = 0
         assert!(parse("").unwrap().models.is_empty());
     }
 
-
     #[test]
     fn a_key_that_is_not_a_setting_is_refused_rather_than_ignored() {
         // A silently dropped key looks like a setting that does not work.
-        let e = parse("modle = \"x\"\n")
-            .unwrap_err()
-            .to_string();
+        let e = parse("modle = \"x\"\n").unwrap_err().to_string();
         assert!(e.contains("modle"), "{e}");
     }
 
@@ -815,17 +932,17 @@ output_per_mtok = 0
         let p = parse_project("model = \"flash\"\neffort = \"low\"\n").unwrap();
         let c = Config::default();
         assert_eq!(c.model(&p, None, None).unwrap().0, "flash");
-        assert!(matches!(c.settle(&p, Flags::default()).effort, EffortArg::Low));
+        assert!(matches!(
+            c.settle(&p, Flags::default(), &BTreeMap::new()).effort,
+            EffortArg::Low
+        ));
     }
 
     #[test]
     fn a_config_still_capping_turns_is_told_the_cap_is_gone() {
         // `deny_unknown_fields` would refuse it either way; what is asserted
         // here is that the message says what happened to the key.
-        for body in [
-            "max_turns = 100\n",
-            "model = \"flash\"\nmax_turns = 100\n",
-        ] {
+        for body in ["max_turns = 100\n", "model = \"flash\"\nmax_turns = 100\n"] {
             for e in [
                 parse(body).unwrap_err().to_string(),
                 parse_project(body).unwrap_err().to_string(),
@@ -852,10 +969,16 @@ output_per_mtok = 0
     fn a_project_lowers_the_tier_and_cannot_raise_it() {
         let c: Config = parse("tier = \"write\"\n").unwrap();
         let down = parse_project("max_tier = \"read\"\n").unwrap();
-        assert_eq!(c.settle(&down, Flags::default()).tier, TierArg::Read);
+        assert_eq!(
+            c.settle(&down, Flags::default(), &BTreeMap::new()).tier,
+            TierArg::Read
+        );
 
         let up = parse_project("max_tier = \"exec\"\n").unwrap();
-        assert_eq!(c.settle(&up, Flags::default()).tier, TierArg::Write);
+        assert_eq!(
+            c.settle(&up, Flags::default(), &BTreeMap::new()).tier,
+            TierArg::Write
+        );
     }
 
     #[test]
@@ -866,11 +989,29 @@ output_per_mtok = 0
             effort: Some(EffortArg::High),
             tier: Some(TierArg::Exec),
         };
-        let s = c.settle(&p, flags);
+        let s = c.settle(&p, flags, &BTreeMap::new());
         assert!(matches!(s.effort, EffortArg::High));
         // Not even --tier exec gets past a checkout that declared itself
         // read-only; passing --tier is not reading the repository's file.
         assert_eq!(s.tier, TierArg::Read);
+    }
+
+    #[test]
+    fn a_claimed_value_skips_the_flag_and_the_project() {
+        let c = parse("effort = \"low\"\ntier = \"write\"\n").unwrap();
+        let p = parse_project("effort = \"medium\"\nmax_tier = \"exec\"\n").unwrap();
+        let flags = Flags {
+            effort: Some(EffortArg::High),
+            tier: Some(TierArg::Exec),
+        };
+        // `/settings set` claims the key this session: the tree already
+        // carries it, so the flag and the project must both stand down.
+        let mut claimed = BTreeMap::new();
+        claimed.insert("effort".into(), toml::Value::String("low".into()));
+        claimed.insert("tier".into(), toml::Value::String("write".into()));
+        let s = c.settle(&p, flags, &claimed);
+        assert!(matches!(s.effort, EffortArg::Low));
+        assert_eq!(s.tier, TierArg::Write);
     }
 
     #[test]
@@ -932,10 +1073,7 @@ output_per_mtok = 0
     #[test]
     fn two_models_and_no_default_still_has_to_be_told() {
         // There is no defensible pick among them, and alphabetical is not one.
-        let two = one(
-            "openai",
-            "[models.a]\n[models.b]\n",
-        );
+        let two = one("openai", "[models.a]\n[models.b]\n");
         let c = parse(&two).unwrap();
         assert_eq!(c.model(&Project::default(), None, None), None);
     }
@@ -1035,4 +1173,31 @@ output_per_mtok = 0
             .to_string();
         assert!(e.contains("move.line.start"), "{e}");
     }
+}
+
+#[test]
+fn write_touches_one_value_and_leaves_the_rest_bytes_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.toml");
+    let body = r#"# kept
+base_url = "http://x"
+
+[models.flash]
+context_window = 1_000_000
+
+[models.flash.pricing]
+input_per_mtok = 0.14
+"#;
+    std::fs::write(&path, body).unwrap();
+    write(
+        &path,
+        "models.flash.pricing.input_per_mtok",
+        toml::Value::Float(0.22),
+    )
+    .unwrap();
+    let out = std::fs::read_to_string(&path).unwrap();
+    assert!(out.contains("# kept"), "comment dropped: {out}");
+    assert!(out.contains("\n\n"), "blank line dropped: {out}");
+    assert!(out.contains("input_per_mtok = 0.22"), "{out}");
+    assert!(out.contains("context_window = 1_000_000"), "{out}");
 }

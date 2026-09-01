@@ -2,7 +2,7 @@
 //! that names files inside it. Shared by the transcript store in `cli` and the
 //! spill layer in `tools`, which both need the same answer without a cycle.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The pi root: `$PI_HOME` when set, else `~/.pi`.
 pub fn dir() -> Option<PathBuf> {
@@ -32,9 +32,40 @@ pub fn file_stem(id: &str) -> String {
     }
 }
 
+/// A path as a single directory name, for grouping a machine's state by
+/// workspace. The same shape Claude Code uses for its project buckets:
+/// `/` and every other character a directory name may not take become `-`,
+/// so `/home/u/pi-rs` is `-home-u-pi-rs`. Distinct from `file_stem` (which
+/// mints `_` for the same characters) because the two name different things:
+/// a file a session owns, and the bucket that groups them.
+pub fn key_of(path: &Path) -> String {
+    path.display()
+        .to_string()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{dir, file_stem};
+    use super::{dir, file_stem, key_of};
+    use std::path::Path;
+
+    #[test]
+    fn a_workspace_key_is_its_slash_path_with_separators_dashed() {
+        assert_eq!(
+            key_of(Path::new("/home/wukaige/pi-rs")),
+            "-home-wukaige-pi-rs"
+        );
+        assert_eq!(key_of(Path::new("/")), "-");
+        assert_eq!(key_of(Path::new(".")), "-");
+    }
 
     #[test]
     fn a_real_id_is_its_own_stem() {
@@ -54,7 +85,10 @@ mod tests {
         unsafe {
             std::env::set_var("PI_HOME", "/srv/pi");
         }
-        assert_eq!(dir().map(|d| d.display().to_string()), Some("/srv/pi".into()));
+        assert_eq!(
+            dir().map(|d| d.display().to_string()),
+            Some("/srv/pi".into())
+        );
         match prior {
             Some(v) => unsafe { std::env::set_var("PI_HOME", v) },
             None => unsafe { std::env::remove_var("PI_HOME") },

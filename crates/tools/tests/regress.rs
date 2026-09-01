@@ -8,7 +8,11 @@ fn ctx() -> (tempfile::TempDir, Ctx) {
 }
 
 async fn show(c: &Ctx, path: &str) -> String {
-    tools::read::Read.execute(json!({"path": path}), c).await.unwrap().flatten()
+    tools::read::Read
+        .execute(json!({"path": path}), c)
+        .await
+        .unwrap()
+        .flatten()
 }
 
 async fn edit(c: &Ctx, patch: String) -> Result<String, String> {
@@ -87,11 +91,19 @@ async fn the_echo_budget_is_spent_in_bytes_not_rows() {
     // Fifty narrow rows: over the row count that used to elide, nowhere near
     // the bytes that do.
     std::fs::write(&path, &src).unwrap();
-    let body: String = (1..=50).map(|i| format!("+    let y{i} = {i};\n")).collect();
-    let out = edit(&c, format!("[a.rs#{}]\nPUT 2-61:\n{body}", hashline::tag(&src)))
-        .await
-        .unwrap();
-    assert!(!out.contains("… "), "narrow rows are cheap; echo them:\n{out}");
+    let body: String = (1..=50)
+        .map(|i| format!("+    let y{i} = {i};\n"))
+        .collect();
+    let out = edit(
+        &c,
+        format!("[a.rs#{}]\nPUT 2-61:\n{body}", hashline::tag(&src)),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !out.contains("… "),
+        "narrow rows are cheap; echo them:\n{out}"
+    );
     assert!(out.contains("51:    let y50 = 50;"), "{out}");
 
     // Forty wide ones: fewer rows than above, three times the bytes. A second file, because the
@@ -100,12 +112,24 @@ async fn the_echo_budget_is_spent_in_bytes_not_rows() {
     let wide: String = (1..=40)
         .map(|i| format!("+    let y{i} = compute(&state, {i}, \"a rather long argument\");\n"))
         .collect();
-    let out = edit(&c, format!("[b.rs#{}]\nPUT 2-61:\n{wide}", hashline::tag(&src)))
-        .await
-        .unwrap();
-    assert!(out.contains("2:    let y1 = compute"), "head of the hunk:\n{out}");
-    assert!(out.contains("41:    let y40 = compute"), "tail of the hunk:\n{out}");
-    assert!(out.contains("… 34 lines"), "and what it stood in for:\n{out}");
+    let out = edit(
+        &c,
+        format!("[b.rs#{}]\nPUT 2-61:\n{wide}", hashline::tag(&src)),
+    )
+    .await
+    .unwrap();
+    assert!(
+        out.contains("2:    let y1 = compute"),
+        "head of the hunk:\n{out}"
+    );
+    assert!(
+        out.contains("41:    let y40 = compute"),
+        "tail of the hunk:\n{out}"
+    );
+    assert!(
+        out.contains("… 34 lines"),
+        "and what it stood in for:\n{out}"
+    );
 }
 
 // From ~/.pi/logs/1788141625-3348974 turn 103: the break was reported at line 1
@@ -113,18 +137,27 @@ async fn the_echo_budget_is_spent_in_bytes_not_rows() {
 #[tokio::test]
 async fn the_break_reported_is_the_one_near_the_hunk() {
     let (_d, c) = ctx();
-    let filler: String = (0..40).map(|i| format!("fn f{i}() {{\n    {i};\n}}\n")).collect();
+    let filler: String = (0..40)
+        .map(|i| format!("fn f{i}() {{\n    {i};\n}}\n"))
+        .collect();
     let src = format!("//! Header.\n{filler}");
     std::fs::write(c.workspace.root().join("a.rs"), &src).unwrap();
     // Replace `fn f30() {` … `30;` and drop the opening brace's partner.
     let at = 2 + 30 * 3;
     let err = edit(
         &c,
-        format!("[a.rs#{}]\nPUT {at}-{}:\n+fn f30() {{\n+    30;\n+}}\n+extra();\n", hashline::tag(&src), at + 1),
+        format!(
+            "[a.rs#{}]\nPUT {at}-{}:\n+fn f30() {{\n+    30;\n+}}\n+extra();\n",
+            hashline::tag(&src),
+            at + 1
+        ),
     )
     .await
     .unwrap_err();
-    assert!(!err.contains("//! Header."), "must not point at the file head:\n{err}");
+    assert!(
+        !err.contains("//! Header."),
+        "must not point at the file head:\n{err}"
+    );
 }
 
 // From ~/.pi/logs/1788141625-3348974 turn 4→5: the bare `}` was called invalid,
@@ -134,9 +167,12 @@ async fn a_kept_line_written_as_context_is_told_to_widen() {
     let (_d, c) = ctx();
     let src = "fn f() {\n    a();\n}\n";
     std::fs::write(c.workspace.root().join("a.rs"), src).unwrap();
-    let err = edit(&c, format!("[a.rs#{}]\nPUT 2:\n+    b();\n}}\n", hashline::tag(src)))
-        .await
-        .unwrap_err();
+    let err = edit(
+        &c,
+        format!("[a.rs#{}]\nPUT 2:\n+    b();\n}}\n", hashline::tag(src)),
+    )
+    .await
+    .unwrap_err();
     assert!(err.contains("widen the address"), "{err}");
 }
 
@@ -189,14 +225,30 @@ async fn a_write_re_establishes_numbering_unless_cleaning_moved_it() {
     let write = |body: &'static str| {
         tools::write::Write.execute(json!({"path": "a.rs", "content": body}), &c)
     };
-    let tag_of = |out: &str| out.split('#').nth(1).unwrap().split(']').next().unwrap().to_string();
+    let tag_of = |out: &str| {
+        out.split('#')
+            .nth(1)
+            .unwrap()
+            .split(']')
+            .next()
+            .unwrap()
+            .to_string()
+    };
 
     // An earlier edit left a shift note; writing the file whole answers it.
-    edit(&c, format!("[a.rs#{}]\nPUT 1:\n+A\n+B\n", hashline::tag("one\ntwo\nthree\n")))
+    edit(
+        &c,
+        format!(
+            "[a.rs#{}]\nPUT 1:\n+A\n+B\n",
+            hashline::tag("one\ntwo\nthree\n")
+        ),
+    )
+    .await
+    .unwrap();
+    let tag = tag_of(&write("one\ntwo\nTHREE\n").await.unwrap().flatten());
+    edit(&c, format!("[a.rs#{tag}]\nPUT 3:\n+DONE\n"))
         .await
         .unwrap();
-    let tag = tag_of(&write("one\ntwo\nTHREE\n").await.unwrap().flatten());
-    edit(&c, format!("[a.rs#{tag}]\nPUT 3:\n+DONE\n")).await.unwrap();
     assert_eq!(
         std::fs::read_to_string(c.workspace.root().join("a.rs")).unwrap(),
         "one\ntwo\nDONE\n"
@@ -205,7 +257,9 @@ async fn a_write_re_establishes_numbering_unless_cleaning_moved_it() {
     // A body with read's own header pasted back: cleaning drops that row, so
     // the rows the model counted are one off the rows on disk.
     let tag = tag_of(&write("[a.rs#0000]\nx\ny\n").await.unwrap().flatten());
-    let err = edit(&c, format!("[a.rs#{tag}]\nPUT 2:\n+Y\n")).await.unwrap_err();
+    let err = edit(&c, format!("[a.rs#{tag}]\nPUT 2:\n+Y\n"))
+        .await
+        .unwrap_err();
     assert!(err.contains("renumbered from line 1 on"), "{err}");
 }
 
@@ -216,21 +270,29 @@ async fn a_removed_file_takes_its_shift_note_with_it() {
     let (_d, c) = ctx();
     let src = "one\ntwo\nthree\nfour\n";
     std::fs::write(c.workspace.root().join("a.rs"), src).unwrap();
-    edit(&c, format!("[a.rs#{}]\nPUT 1:\n+A\n+B\n", hashline::tag(src)))
-        .await
-        .unwrap();
+    edit(
+        &c,
+        format!("[a.rs#{}]\nPUT 1:\n+A\n+B\n", hashline::tag(src)),
+    )
+    .await
+    .unwrap();
 
     let now = std::fs::read_to_string(c.workspace.root().join("a.rs")).unwrap();
-    edit(&c, format!("[a.rs#{}]\nRM\n", hashline::tag(&now))).await.unwrap();
+    edit(&c, format!("[a.rs#{}]\nRM\n", hashline::tag(&now)))
+        .await
+        .unwrap();
     let fresh = "1\n2\n3\n";
     tools::write::Write
         .execute(json!({"path": "a.rs", "content": fresh}), &c)
         .await
         .unwrap();
     // Nothing about this file has ever shifted.
-    edit(&c, format!("[a.rs#{}]\nPUT 3:\n+THREE\n", hashline::tag(fresh)))
-        .await
-        .unwrap();
+    edit(
+        &c,
+        format!("[a.rs#{}]\nPUT 3:\n+THREE\n", hashline::tag(fresh)),
+    )
+    .await
+    .unwrap();
 }
 
 // One hunk below the shift does not vouch for the ones above it.
@@ -240,9 +302,12 @@ async fn a_patch_is_refused_when_any_hunk_reaches_into_moved_numbering() {
     let src = "one\ntwo\nthree\nfour\nfive\n";
     let path = c.workspace.root().join("a.rs");
     std::fs::write(&path, src).unwrap();
-    let out = edit(&c, format!("[a.rs#{}]\nPUT 2:\n+TWO\n+TWO-B\n", hashline::tag(src)))
-        .await
-        .unwrap();
+    let out = edit(
+        &c,
+        format!("[a.rs#{}]\nPUT 2:\n+TWO\n+TWO-B\n", hashline::tag(src)),
+    )
+    .await
+    .unwrap();
     let after = std::fs::read_to_string(&path).unwrap();
     let tag = out.split('#').nth(1).unwrap().split(']').next().unwrap();
 
@@ -251,7 +316,11 @@ async fn a_patch_is_refused_when_any_hunk_reaches_into_moved_numbering() {
         .await
         .unwrap_err();
     assert!(err.contains("renumbered from line 2 on"), "{err}");
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), after, "nothing written");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        after,
+        "nothing written"
+    );
 }
 
 // The refusal is only worth a turn if it carries the numbering. An edit that
@@ -268,9 +337,14 @@ async fn the_refusal_shows_rows_even_when_the_address_is_past_the_end() {
     let tag = out.split('#').nth(1).unwrap().split(']').next().unwrap();
 
     // The file is three lines now; line 6 came from the read before the cut.
-    let err = edit(&c, format!("[a.rs#{tag}]\nPUT 6:\n+SIX\n")).await.unwrap_err();
+    let err = edit(&c, format!("[a.rs#{tag}]\nPUT 6:\n+SIX\n"))
+        .await
+        .unwrap_err();
     assert!(err.contains("renumbered from line 1 on"), "{err}");
-    assert!(err.contains("3:six"), "the tail, not an empty window:\n{err}");
+    assert!(
+        err.contains("3:six"),
+        "the tail, not an empty window:\n{err}"
+    );
 }
 
 // The display and the body are two projections of one decision, so a row named
@@ -302,9 +376,9 @@ async fn the_display_names_exactly_the_rows_the_body_holds() {
             .lines()
             .filter_map(|l| l.split_once(':').and_then(|(n, _)| n.parse().ok()))
             .collect();
-        let named = shown.split_once(':').map_or(String::new(), |(_, r)| {
-            r.trim_end_matches(']').to_string()
-        });
+        let named = shown
+            .split_once(':')
+            .map_or(String::new(), |(_, r)| r.trim_end_matches(']').to_string());
         if named.is_empty() {
             // No window named means the file arrived whole and uncut.
             assert_eq!(held.len(), src_lines(&c, &args), "{args}: {shown}");
@@ -328,7 +402,10 @@ async fn the_display_names_exactly_the_rows_the_body_holds() {
             })
             .collect();
         for n in &held {
-            assert!(widest.contains(n), "{args}: body has {n}, {shown} does not name it");
+            assert!(
+                widest.contains(n),
+                "{args}: body has {n}, {shown} does not name it"
+            );
         }
     }
 }
@@ -358,7 +435,9 @@ async fn nothing_is_elided_without_somewhere_to_recover_it_from() {
     let path = c.workspace.root().join("a.txt");
 
     // Rows of a fixed width, then one whose width walks the whole boundary.
-    let bulk: String = (1..=880).map(|i| format!("{i:04} xxxxxxxxxxxxxxxxxxxxxxxx\n")).collect();
+    let bulk: String = (1..=880)
+        .map(|i| format!("{i:04} xxxxxxxxxxxxxxxxxxxxxxxx\n"))
+        .collect();
     let (mut elided, mut whole) = (false, false);
     for pad in 0..900 {
         std::fs::write(&path, format!("{bulk}{}\n", "y".repeat(pad))).unwrap();
@@ -377,7 +456,10 @@ async fn nothing_is_elided_without_somewhere_to_recover_it_from() {
             whole = true;
         }
     }
-    assert!(elided && whole, "the sweep never crossed the budget; widen it");
+    assert!(
+        elided && whole,
+        "the sweep never crossed the budget; widen it"
+    );
 }
 
 // The refusal exists to save a read turn, not to be one: a patch whose hunks
@@ -386,15 +468,22 @@ async fn nothing_is_elided_without_somewhere_to_recover_it_from() {
 async fn the_renumber_refusal_is_budgeted_like_every_other_view() {
     let (_d, c) = ctx();
     let path = c.workspace.root().join("a.txt");
-    let src: String = (1..=400).map(|i| format!("row {i} of the file\n")).collect();
+    let src: String = (1..=400)
+        .map(|i| format!("row {i} of the file\n"))
+        .collect();
     std::fs::write(&path, &src).unwrap();
 
-    let out = edit(&c, format!("[a.txt#{}]\nPUT 2:\n+A\n+B\n", hashline::tag(&src)))
-        .await
-        .unwrap();
+    let out = edit(
+        &c,
+        format!("[a.txt#{}]\nPUT 2:\n+A\n+B\n", hashline::tag(&src)),
+    )
+    .await
+    .unwrap();
     let tag = out.split('#').nth(1).unwrap().split(']').next().unwrap();
     // One hunk over nearly the whole file, addressed on the moved numbering.
-    let err = edit(&c, format!("[a.txt#{tag}]\nPUT 3-390:\n+x\n")).await.unwrap_err();
+    let err = edit(&c, format!("[a.txt#{tag}]\nPUT 3-390:\n+x\n"))
+        .await
+        .unwrap_err();
 
     assert!(err.contains("renumbered from line 2 on"), "{err}");
     assert!(err.contains("Rebuild the hunks"), "{err}");

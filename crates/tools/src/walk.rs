@@ -47,11 +47,7 @@ pub fn walker(ws: &Workspace, root: &Path) -> ignore::WalkBuilder {
 
 /// Resolve an optional subdirectory argument to a walk root. The walk may
 /// leave the workspace when the calling tool is `Tier::Read`.
-pub fn root_of(
-    ws: &Workspace,
-    path: &Option<String>,
-    tier: Tier,
-) -> Result<PathBuf, ToolError> {
+pub fn root_of(ws: &Workspace, path: &Option<String>, tier: Tier) -> Result<PathBuf, ToolError> {
     match path {
         Some(p) => ws.resolve(p, tier),
         None => Ok(ws.root().to_path_buf()),

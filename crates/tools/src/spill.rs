@@ -91,8 +91,7 @@ pub fn write(ctx: &Ctx, body: &str) -> Result<Option<SpillRef>, ToolError> {
     // wrong permissions: a crash between write and chmod would leave the
     // file's contents world-readable beside a 0600 transcript.
     let tmp = path.with_extension("log.tmp");
-    std::fs::write(&tmp, body)
-        .map_err(|e| ToolError::Spill(format!("{}: {e}", tmp.display())))?;
+    std::fs::write(&tmp, body).map_err(|e| ToolError::Spill(format!("{}: {e}", tmp.display())))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

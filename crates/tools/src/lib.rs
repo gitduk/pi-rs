@@ -52,10 +52,28 @@ pub enum Concurrency {
     Exclusive,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// Why a patch was refused, for the loop to group repeat failures by.
+pub enum PatchError {
+    /// The patch does not follow the edit format (bad op, `-` rows, ...).
+    Malformed,
+    /// The file's own last edit moved the line numbers the patch addresses.
+    Renumbered,
+    /// The file as patched would not parse / compile.
+    Unbalanced,
+}
+
+
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
+    /// A refusal whose prose the model reads, plus the category the loop
+    /// groups repeat failures by when the prose alone keeps changing.
     #[error("{0}")]
     Invalid(String),
+
+    /// A refusal tagged with its `PatchError`, for the same purpose.
+    #[error("{1}")]
+    Patch(PatchError, String),
 
     /// The one failure the loop must not hand back to the model.
     #[error("cancelled")]
@@ -80,7 +98,7 @@ pub enum ToolError {
 }
 
 impl ToolError {
-    /// A stable code the model can branch on, where one exists. The loop
+    /// The stable code the model can branch on, where one exists. The loop
     /// appends it to the result as `[code: {code}]`; codes never change for a
     /// given failure, whatever the prose says.
     pub fn code(&self) -> Option<&'static str> {
@@ -88,6 +106,21 @@ impl ToolError {
             ToolError::Timeout { .. } => Some("TOOL_TIMEOUT"),
             ToolError::Spill(_) => Some("SPILL_FAILED"),
             _ => None,
+        }
+    }
+
+    /// The stable category the loop groups repeat failures by, where one
+    /// exists. Unlike `code`, this never reaches the model — it exists only
+    /// to tell "the same failure" from "a genuinely new one" when the prose
+    /// keeps changing. A `None` here falls back to grouping by tool name.
+    pub fn category(&self) -> Option<&'static str> {
+        match self {
+            ToolError::Patch(kind, _) => Some(match kind {
+                PatchError::Malformed => "EDIT_MALFORMED",
+                PatchError::Renumbered => "EDIT_RENUMBERED",
+                PatchError::Unbalanced => "EDIT_UNBALANCED",
+            }),
+            _ => self.code(),
         }
     }
 }

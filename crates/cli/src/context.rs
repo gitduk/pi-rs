@@ -157,7 +157,10 @@ mod tests {
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         let deep = repo.join("a/b");
         std::fs::create_dir_all(&deep).unwrap();
-        assert!(paths(&deep, None, None).is_empty(), "leaked past the repo root");
+        assert!(
+            paths(&deep, None, None).is_empty(),
+            "leaked past the repo root"
+        );
     }
 
     #[test]

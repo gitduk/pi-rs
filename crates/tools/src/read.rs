@@ -108,10 +108,10 @@ impl View {
             let dropped = cut.map_or(String::new(), |(h, t)| {
                 format!(" · {} not shown", self.rows.len() - h - t)
             });
-            return format!("[{rel}] {lines} lines · outline{dropped}");
+            return format!("{rel} {lines} lines · outline{dropped}");
         }
         if cut.is_none() && matches!(self.kind, Kind::Lines { whole: true }) {
-            return format!("[{rel}]");
+            return rel.to_string();
         }
         let at = |i: usize| self.rows[i].0;
         let last = self.rows.len() - 1;
@@ -125,7 +125,7 @@ impl View {
             .iter()
             .map(|(a, b)| hashline::Target::Range { start: *a, end: *b }.to_string())
             .collect();
-        format!("[{rel}:{}]", named.join(crate::rows::GAP.trim_end()))
+        format!("{rel}:{}", named.join(crate::rows::GAP.trim_end()))
     }
 }
 
@@ -322,7 +322,7 @@ impl Tool for Read {
 
         if start >= all.len() {
             return Ok(ToolOutput::useless(format!(
-                "[{rel}] line {offset} is past the end ({} lines)",
+                "{rel} line {offset} is past the end ({} lines)",
                 all.len()
             )));
         }
