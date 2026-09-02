@@ -2,15 +2,16 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use agent::session::Session;
-use agent::{Agent, Totals};
+use agent::Totals;
 use tokio_util::sync::CancellationToken;
 use tools::skills::Skill;
-use tools::{Ctx, Tool, ToolError};
+use tools::{Tool, ToolError};
 
 use serde::Deserialize;
 
 use crate::config::Config;
 use crate::journal;
+use crate::lane::Lane;
 use crate::session::{ResumeChoice, Store, Stored};
 
 /// Where a command came from, and so what running it means.
@@ -334,38 +335,6 @@ const RESUME_WIDTH: usize = 60;
 ///
 /// Both surfaces hold one of these and differ only in how they read a line and
 /// where they put what comes back.
-/// One checkout being worked in: the conversation, what it runs against, and
-/// where it lands. Everything here is decided by the workspace root, so two
-/// trees hold two of these and share nothing but the fields on `Repl`.
-pub struct Lane {
-    /// Shared so a run can take it with it: `Agent::run` needs only `&self`,
-    /// and a turn outlives the borrow the surface could lend it. `/model` and
-    /// `/reload` write through `Arc::make_mut`, so a run in flight keeps the
-    /// agent it started on — which is what they meant all along.
-    pub agent: std::sync::Arc<Agent>,
-    pub session: Session,
-    pub id: String,
-    /// When this session began. Held rather than read back: it is set once and
-    /// never changes, and going to disk for it made every save parse the whole
-    /// transcript to recover one integer.
-    pub created: u64,
-    /// What the user calls this session, if anything.
-    pub name: Option<String>,
-    /// The instruction files this run stands on, named as a person would.
-    /// Shown under the banner; rebuilt by `/reload` like everything else the
-    /// config decides.
-    pub context: Vec<String>,
-    /// Carried across turns: the plan and the file locks outlive any one run.
-    pub ctx: Ctx,
-    /// Whether a run has the session right now. It is taken for the length of
-    /// a turn, and the empty one left in its place reads exactly like a session
-    /// with nothing in it — which is a different thing to anyone asking.
-    pub running: bool,
-    /// Which worktree the session is in, or None in the repository's own
-    /// checkout. Held so the status line can say where the work is landing.
-    pub worktree: Option<String>,
-}
-
 pub struct Repl {
     pub store: Store,
     /// Held so `/keys` can show what is actually in force, overrides included.
@@ -653,9 +622,9 @@ impl Repl {
             spec.model,
             summary(spec.format.name(), spec.context_window, &spec.pricing)
         ));
-        // Mid-run the transcript is away with the turn, which is writing this
+        // An absent transcript is one a run has, and it is writing this
         // model's reasoning into it as we speak — so say it either way.
-        if self.lane.running || carries_reasoning(&self.lane.session) {
+        if self.lane.session.as_ref().is_none_or(carries_reasoning) {
             said.push(demotion(spec.replay_thinking).into());
         }
         tracing::info!(
@@ -693,15 +662,40 @@ impl Repl {
     /// Save the transcript. Called after every turn: an interrupted one is
     /// exactly the one worth keeping.
     pub fn save(&self) -> anyhow::Result<()> {
+        // Away with a run, which saves it itself on the way back.
+        let Some(session) = &self.lane.session else {
+            return Ok(());
+        };
         self.store.save(
             &self.lane.id,
             self.lane.ctx.workspace.root(),
             &self.lane.agent.spec.model,
             self.lane.name.as_deref(),
             self.lane.created,
-            &self.lane.session,
+            session,
         )?;
         Ok(())
+    }
+
+    /// Shrink the transcript, or None when there was nothing to shrink — and
+    /// likewise when a run has it, which is why `/compact` is refused then.
+    ///
+    /// Here rather than at each surface: both asked the agent directly, and
+    /// both had to reach past the lane for the session to do it.
+    pub async fn compact_now(
+        &mut self,
+        focus: Option<&str>,
+    ) -> Option<(agent::compact::Report, Totals)> {
+        let session = self.lane.session.as_mut()?;
+        self.lane.agent.compact_now(session, focus).await
+    }
+
+    /// What the transcript occupies now, for the line that says why there was
+    /// nothing to compact. Zero while a run has it.
+    pub fn tokens_now(&self) -> usize {
+        self.lane.session.as_ref().map_or(0, |s| {
+            brain::estimate::tokens(&s.context(), &self.lane.agent.spec)
+        })
     }
 
     /// Rewind the conversation to an entry and write the shorter transcript
@@ -711,10 +705,15 @@ impl Repl {
     /// pairing wrong, and a menu row that went stale against the transcript
     /// falls through to removing nothing.
     pub fn rewind_to(&mut self, entry: agent::session::EntryId) -> anyhow::Result<Rewound> {
-        let unsent = self.lane.session.unsent_text(entry);
+        // A rewind is refused while a run has the transcript, so this is the
+        // idle path; without it there is nothing to go back through.
+        let Some(session) = &mut self.lane.session else {
+            return Ok(Rewound::Nothing);
+        };
+        let unsent = session.unsent_text(entry);
         let removed = match unsent {
-            Some(_) => self.lane.session.rollback_before(entry),
-            None => self.lane.session.rollback_to(entry),
+            Some(_) => session.rollback_before(entry),
+            None => session.rollback_to(entry),
         };
         if removed == 0 {
             return Ok(Rewound::Nothing);
@@ -1230,7 +1229,7 @@ impl Repl {
     }
 
     fn fresh_session(&mut self, said: &str) -> Vec<String> {
-        self.lane.session = Session::default();
+        self.lane.session = Some(Session::default());
         // A name identifies one session; carried over it would name two, which
         // is what `/name` exists to prevent.
         self.lane.name = None;
@@ -1243,10 +1242,11 @@ impl Repl {
     /// Parting with what is being left is the caller's; they differ on when.
     fn adopt_session(&mut self, stored: Stored) -> Vec<String> {
         let (id, name, created) = (stored.id.clone(), stored.name.clone(), stored.created);
-        self.lane.session = stored.into_session();
+        let session = stored.into_session();
         self.lane.name = name;
         // Left as it was, the live copy would overwrite the plan just restored.
-        self.lane.ctx.set_todos(self.lane.session.todos().to_vec());
+        self.lane.ctx.set_todos(session.todos().to_vec());
+        self.lane.session = Some(session);
         self.becomes(id, created);
         let mut said = vec![format!("resumed {}", self.lane.id)];
         if let Some(name) = self.lane.name.as_deref() {
@@ -1283,7 +1283,7 @@ impl Repl {
         }
         // Against the root it belongs to, so before the move, not after.
         // An empty session — nothing said yet — has nothing to keep.
-        if !self.lane.session.is_empty()
+        if self.lane.session.as_ref().is_some_and(|s| !s.is_empty())
             && let Err(e) = self.save()
         {
             tracing::warn!(target: "pi::session", error = %e, "the leaving session was not saved");
@@ -1398,7 +1398,7 @@ impl Repl {
     fn resume(&mut self, id: &str) -> Result<Vec<String>, String> {
         // The session being left has to survive too, or /resume throws it
         // away. An empty one — just opened, nothing said — has nothing to keep.
-        if !self.lane.session.is_empty()
+        if self.lane.session.as_ref().is_some_and(|s| !s.is_empty())
             && let Err(e) = self.save()
         {
             tracing::warn!(target: "pi::session", error = %e, "resume could not save the leaving session");
@@ -1436,11 +1436,14 @@ impl Repl {
         // the rebuilt scrollback printing `Ran \`git status\`` as a prompt,
         // with the output indented under it — the live path never did that,
         // because it had the typed line and the rebuild did not.
-        self.lane.session
-            .push_user(agent::session::UserBody::Aside(agent::session::UserText {
+        // `!` is queued while a run has the transcript, so it lands here with
+        // the session at home.
+        if let Some(session) = &mut self.lane.session {
+            session.push_user(agent::session::UserBody::Aside(agent::session::UserText {
                 text,
                 shown: Some(format!("!{command}")),
             }));
+        }
         let mut said: Vec<String> = body
             .lines()
             // The tags wrap the model's copy; the terminal shows the output

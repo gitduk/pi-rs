@@ -48,12 +48,7 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
                     println!("{line}");
                 }
             }
-            Step::Compact(focus) => match core
-                .lane
-                .agent
-                .compact_now(&mut core.lane.session, focus.as_deref())
-                .await
-            {
+            Step::Compact(focus) => match core.compact_now(focus.as_deref()).await {
                 Some((report, spent)) => {
                     totals.merge(&spent);
                     println!("compacted {} → {} tokens", report.before, report.after);
@@ -63,10 +58,7 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
                 }
                 None => {
                     let held = core.lane.agent.kept_tokens().unwrap_or(0);
-                    let now = brain::estimate::tokens(
-                        &core.lane.session.context(),
-                        &core.lane.agent.spec,
-                    );
+                    let now = core.tokens_now();
                     println!(
                         "nothing to compact — {now} tokens, all inside the {held} kept as working context"
                     );
@@ -90,9 +82,15 @@ async fn turn(
     typed: Option<String>,
     tx: &UnboundedSender<Event>,
 ) -> Totals {
-    core.lane.session.send_prompt(prompt, typed);
+    // Lent for the length of the turn and put back after, the same shape the
+    // terminal uses — here there is no loop to free, only one owner throughout.
+    let Some(mut session) = core.lane.session.take() else {
+        return Totals::default();
+    };
+    session.send_prompt(prompt, typed);
     let ctx = core.lane.ctx.clone().with_cancel(agent::cancel_on_interrupt());
-    let out = core.lane.agent.run(&mut core.lane.session, &ctx, tx).await;
+    let out = core.lane.agent.run(&mut session, &ctx, tx).await;
+    core.lane.session = Some(session);
 
     // Saved either way: an interrupted turn is exactly the one worth keeping.
     if let Err(e) = core.save() {

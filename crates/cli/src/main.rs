@@ -13,6 +13,7 @@ mod config;
 mod context;
 mod journal;
 mod keys;
+mod lane;
 mod line;
 mod render;
 mod repl;
@@ -557,10 +558,9 @@ async fn main() -> Result<()> {
             file: config::load_tree(args.config.as_deref())
                 .unwrap_or_else(|_| toml::Value::Table(Default::default())),
             claimed: BTreeMap::new(),
-            lane: repl::Lane {
+            lane: lane::Lane {
                 agent: std::sync::Arc::new(ag),
-                running: false,
-                session: carried,
+                session: Some(carried),
                 id,
                 created,
                 name,

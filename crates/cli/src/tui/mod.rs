@@ -1617,8 +1617,10 @@ impl Tui {
         }
         // A resumed session shows its transcript from the start: the whole
         // screen is rebuildable now, so there is no reason to hide it.
-        if !core.lane.session.is_empty() {
-            ui.rebuild(&core.lane.session);
+        if let Some(session) = &core.lane.session
+            && !session.is_empty()
+        {
+            ui.rebuild(session);
         }
         Ok(Self {
             core,
@@ -1654,7 +1656,9 @@ impl Tui {
     /// instead of keeping the old conversation up, and the completion list
     /// follows.
     fn land_swap(&mut self, said: Vec<String>) {
-        self.ui.rebuild(&self.core.lane.session);
+        if let Some(session) = &self.core.lane.session {
+            self.ui.rebuild(session);
+        }
         // `at` forgets both lists, so it stands in for `refresh_sessions`: a
         // swap that did not move repeats the root, and drops them either way.
         self.ui.lists.at(self.core.lane.ctx.workspace.root());
@@ -1812,12 +1816,7 @@ impl Tui {
                     // message someone can still take back.
                     self.ui.view.started = Some(Instant::now());
                     self.ui.view.committed = true;
-                    let done = self
-                        .core
-                        .lane
-                        .agent
-                        .compact_now(&mut self.core.lane.session, focus.as_deref())
-                        .await;
+                    let done = self.core.compact_now(focus.as_deref()).await;
                     self.ui.view.started = None;
                     match done {
                         Some((report, spent)) => {
@@ -1830,10 +1829,7 @@ impl Tui {
                         }
                         None => {
                             let held = self.core.lane.agent.kept_tokens().unwrap_or(0);
-                            let now = brain::estimate::tokens(
-                                &self.core.lane.session.context(),
-                                &self.core.lane.agent.spec,
-                            );
+                            let now = self.core.tokens_now();
                             let why = format!(
                                 "nothing to compact — {now} tokens, all inside the {held} \
                                  kept as working context"
@@ -1885,7 +1881,9 @@ impl Tui {
                 // whole view from it, so the screen returns to the node the
                 // conversation did instead of keeping the forgotten turns.
                 // It clears anything said before it: hence the notice after.
-                self.ui.rebuild(&self.core.lane.session);
+                if let Some(session) = &self.core.lane.session {
+                    self.ui.rebuild(session);
+                }
                 let said = match outcome {
                     // Unsent is half-typed, not gone: naming where the
                     // transcript ends would name the wrong thing.
@@ -1903,7 +1901,8 @@ impl Tui {
                             .core
                             .lane
                             .session
-                            .last_node()
+                            .as_ref()
+                            .and_then(|s| s.last_node())
                             .map(|n| render::clip(n.show(), 60))
                             .filter(|t| !t.is_empty())
                             .map(|t| format!(" — the transcript now ends at {t}"))
@@ -1928,7 +1927,9 @@ impl Tui {
             .core
             .lane
             .session
-            .rewind_nodes()
+            .as_ref()
+            .map(|s| s.rewind_nodes())
+            .unwrap_or_default()
             .into_iter()
             .map(|node| MenuEntry::Message {
                 id: node.id(),
@@ -1957,7 +1958,12 @@ impl Tui {
         tx: &UnboundedSender<Event>,
         rx: &mut UnboundedReceiver<Event>,
     ) {
-        self.core.lane.session.send_prompt(prompt, typed);
+        // Lent to the run for the length of the turn. Only the loop that owns
+        // it starts a turn, so it is never away when one begins.
+        let Some(mut carried) = self.core.lane.session.take() else {
+            return;
+        };
+        carried.send_prompt(prompt, typed);
         let cancel = CancellationToken::new();
         let ctx = self.core.lane.ctx.clone().with_cancel(cancel.clone());
 
@@ -1980,8 +1986,6 @@ impl Tui {
         // is what frees the loop: nothing of the session is borrowed while the
         // turn works, so a command typed into it can be answered on the spot.
         let agent = self.core.lane.agent.clone();
-        let mut carried = std::mem::take(&mut self.core.lane.session);
-        self.core.lane.running = true;
         let joined = {
             let Self { core, ui, keys, bridge, totals } = self;
             let sent = tx.clone();
@@ -2036,10 +2040,9 @@ impl Tui {
 
         // The task carried the transcript. Only a panic in it loses that copy,
         // and then the save below must not put the empty one in its place.
-        self.core.lane.running = false;
         let (recovered, out) = match joined {
             Ok((session, out)) => {
-                self.core.lane.session = session;
+                self.core.lane.session = Some(session);
                 (true, out)
             }
             // The task carried the whole transcript, not just this turn, and a
@@ -2049,8 +2052,9 @@ impl Tui {
             // rather than the turn.
             Err(e) => match self.core.store.load(&self.core.lane.id) {
                 Ok(stored) => {
-                    self.core.lane.session = stored.into_session();
-                    self.core.lane.ctx.set_todos(self.core.lane.session.todos().to_vec());
+                    let session = stored.into_session();
+                    self.core.lane.ctx.set_todos(session.todos().to_vec());
+                    self.core.lane.session = Some(session);
                     self.ui.say(format!(
                         "the run did not finish: {e} — back to the transcript as last saved"
                     ));
@@ -2113,7 +2117,9 @@ impl Tui {
 
         // Last: the rebuild clears the "stopped" this turn printed, and the
         // cancel was the mechanism here rather than news.
-        if unsend && let Some(id) = self.core.lane.session.last_ask() {
+        if unsend
+            && let Some(id) = self.core.lane.session.as_ref().and_then(|s| s.last_ask())
+        {
             self.rewind_turn(id);
         }
     }
