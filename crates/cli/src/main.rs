@@ -399,6 +399,8 @@ pub fn resolve(
             .with_context(|| format!("cannot read system prompt {path}"))?,
         None => agent::DEFAULT_SYSTEM.to_string(),
     };
+    // The system prompt's "relative to it" needs the workspace named.
+    system.push_str(&context::workspace(root));
     // Appended rather than sent as a message: these are standing instructions,
     // they do not change within a run, and the system prompt is the part of the
     // request a provider will cache.
