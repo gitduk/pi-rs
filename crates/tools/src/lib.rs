@@ -245,6 +245,23 @@ impl Ctx {
         self
     }
 
+    /// Move to another workspace, dropping what the last one was keyed by.
+    ///
+    /// The locks and the shifts name files by absolute path, so every entry
+    /// belongs to the tree being left and none of them describes the new one.
+    /// Coupled here rather than at the caller: which fields the root decides is
+    /// this struct's to know, and a third one added later would otherwise have
+    /// to be remembered from another crate.
+    pub fn relocate(&mut self, workspace: Workspace) {
+        self.workspace = workspace;
+        if let Ok(mut held) = self.file_locks.lock() {
+            held.clear();
+        }
+        if let Ok(mut held) = self.file_shifts.lock() {
+            held.clear();
+        }
+    }
+
     /// Where spills land, overriding the session default. Tests and alternate
     /// hosts point this at a directory of their own instead of the user's.
     pub fn with_spill_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {

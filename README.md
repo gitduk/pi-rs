@@ -132,12 +132,12 @@ through. `prompt.icon` is the one value that is neither colour nor attribute.
 A key that is not one of those is refused at load, like a misspelled compat
 key.
 
-`/help` `/new` `/resume` `/name` `/model` `/compact` `/reload` `/keys` `/log` `/todo` `/cost` `/wechat` `/exit`, and one
-more for every skill on disk. Typing `/` opens a list of what the line could
-still become; `↑` `↓` pick, `Tab` accepts, `Esc` dismisses it until the next
-keystroke. `/model` and `/resume` complete their arguments too: the model
-name is the tedious part the config already knows, and a saved session is
-named by its first question.
+`/help` `/new` `/resume` `/name` `/model` `/worktree` `/compact` `/reload` `/keys` `/log` `/todo` `/cost` `/wechat` `/exit`,
+and one more for every skill on disk. Typing `/` opens a list of what the line
+could still become; `↑` `↓` pick, `Tab` accepts, `Esc` dismisses it until the
+next keystroke. `/model`, `/resume` and `/worktree` complete their arguments
+too: the model name is the tedious part the config already knows, a saved
+session is named by its first question, and a checkout by its branch.
 
 `/new` starts a fresh session, keeping this one on disk; `ctrl+l` twice does
 the same (once clears the screen). `/resume` lists the sessions saved for this
@@ -145,6 +145,24 @@ workspace — one directory per project under `~/.pi/sessions/`, named by the
 path — newest first, by the first thing each was asked, and `/resume <id>`
 switches to one — the session you leave is saved first, so nothing is lost on
 the way out.
+
+`/worktree <name>` works in another checkout of the same repository:
+`.worktrees/<name>`, on a branch of that name — created if it is not there and
+reused if it is, so asking twice means "go there". Git will not check one
+branch out twice, so the alternative to a branch per worktree is a detached
+HEAD, where commits are reachable only through the reflog; that is not a state
+to leave parallel work in. `/worktree` on its own lists the checkouts, each
+with the branch it is on and a mark against the one in use — the repository's
+own is in that list under its directory name, which is how you get back out.
+
+The session does not come along. A transcript holds workspace-relative paths,
+so under another root the same string names a different file, and a saved
+session belongs to one workspace — so a move starts a fresh one, and the
+session left behind is saved where it was. Everything the workspace decides is
+re-read on the way and the move lands only if all of it resolves: the standing
+instructions, the skills, the project's `.pi.toml`. What `/resume` offers
+follows too, because sessions are stored per workspace — each checkout keeps
+its own history.
 
 A line that starts with `!` is a shell command, not a prompt: `! git status`
 runs it and shows the output, and the command and its result are recorded in

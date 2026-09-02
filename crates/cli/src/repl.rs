@@ -66,6 +66,11 @@ const BUILTIN: &[Command] = &[
         "list this workspace's sessions, or switch to one",
     ),
     Command::builtin(
+        "/worktree",
+        "[name]",
+        "list this repository's worktrees, or work in one",
+    ),
+    Command::builtin(
         "/name",
         "[text]",
         "call this session something you will recognise",
@@ -183,7 +188,8 @@ fn help(commands: &[Command]) -> Vec<String> {
     out
 }
 
-/// A model the prompt can complete to, and what tells it apart from the others.
+/// Something the prompt can complete to — a model, a worktree — and what tells
+/// it apart from the others.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Choice {
     pub name: String,
@@ -209,16 +215,18 @@ pub struct Candidate {
 /// What the line could still become: a command while its word is being typed,
 /// then that command's own argument once the word is settled.
 ///
-/// Two commands have arguments worth completing: `/model` against the models
-/// in the config, and `/resume` against the workspace's saved sessions. A
-/// prompt is prose and a focus phrase is prose; guessing at either is worse
-/// than leaving it alone.
+/// The commands with arguments worth completing are the ones whose argument is
+/// a name out of a known set: `/model` against the config's models, `/resume`
+/// against the workspace's saved sessions, `/worktree` against the
+/// repository's checkouts. A prompt is prose and a focus phrase is prose;
+/// guessing at either is worse than leaving it alone.
 pub fn complete(
     line: &str,
     commands: &[Command],
     models: &[Choice],
     sessions: &[ResumeChoice],
     setting_paths: &[String],
+    worktrees: &[Choice],
 ) -> Vec<Candidate> {
     if !line.starts_with('/') {
         return Vec::new();
@@ -250,6 +258,19 @@ pub fn complete(
                 show: m.name.clone(),
                 line: format!("/model {}", m.name),
                 help: m.note.clone(),
+                more: false,
+            })
+            .collect(),
+        // A name may hold a slash (`feat/one`), so unlike a model it is not
+        // settled by the first word — only whitespace after it settles it.
+        "/worktree" if typed.contains(char::is_whitespace) => Vec::new(),
+        "/worktree" => worktrees
+            .iter()
+            .filter(|w| w.name.starts_with(typed) && w.name != typed)
+            .map(|w| Candidate {
+                show: w.name.clone(),
+                line: format!("/worktree {}", w.name),
+                help: w.note.clone(),
                 more: false,
             })
             .collect(),
@@ -351,6 +372,9 @@ pub struct Repl {
     pub claimed: BTreeMap<String, toml::Value>,
     /// Carried across turns: the plan and the file locks outlive any one run.
     pub ctx: Ctx,
+    /// Which worktree the session is in, or None in the repository's own
+    /// checkout. Held so the status line can say where the work is landing.
+    pub worktree: Option<String>,
 }
 
 impl Repl {
@@ -392,22 +416,29 @@ impl Repl {
     /// and swap it in. Whole or not at all — nothing is touched until all of
     /// it has been computed. `/reload` reads the file first; `/settings`
     /// hands over a tree it has just edited.
-    fn adopt(&mut self, config: Config) -> Vec<String> {
-        let project = match crate::config::load_project(self.ctx.workspace.root()) {
+    fn adopt(
+        &mut self,
+        config: Config,
+        into: Option<tools::Workspace>,
+    ) -> Result<Vec<String>, String> {
+        let root = into
+            .as_ref()
+            .map_or(self.ctx.workspace.root(), |ws| ws.root())
+            .to_path_buf();
+        let failed = |e| Err(format!("nothing reloaded — {}", refused("reload", e)));
+        let project = match crate::config::load_project(&root) {
             Ok(p) => p,
-            Err(e) => return vec![format!("nothing reloaded — {}", refused("reload", e))],
+            Err(e) => return failed(e),
         };
-        let resolved =
-            match crate::resolve(
-                &self.args,
-                self.ctx.workspace.root(),
-                &config,
-                &project,
-                &self.claimed,
-            ) {
-                Ok(r) => r,
-                Err(e) => return vec![format!("nothing reloaded — {}", refused("reload", e))],
-            };
+        let resolved = match crate::resolve(&self.args, &root, &config, &project, &self.claimed) {
+            Ok(r) => r,
+            Err(e) => return failed(e),
+        };
+        // Only here, with everything computed: a workspace whose config or
+        // skills will not resolve leaves the session where it already was.
+        if let Some(ws) = into {
+            self.ctx.relocate(ws);
+        }
         self.agent.registry = resolved.registry;
         self.agent.approver = std::sync::Arc::new(agent::Ceiling(resolved.tier));
         self.agent.system = resolved.system;
@@ -460,23 +491,29 @@ impl Repl {
             system_bytes = self.agent.system.len(),
             "reloaded"
         );
-        notes
+        Ok(notes)
     }
 
     /// Recompute the config from the file tree plus the session's claimed
     /// overrides, and adopt it.
     fn rebuild(&mut self) -> Vec<String> {
+        self.rebuild_into(None).unwrap_or_else(|why| vec![why])
+    }
+
+    /// The same, moving the session to another workspace as part of it. The
+    /// move lands only if everything the new root decides resolves.
+    fn rebuild_into(&mut self, into: Option<tools::Workspace>) -> Result<Vec<String>, String> {
         let mut tree = self.file.clone();
         for (path, value) in &self.claimed {
             if let Err(e) = crate::settings::put(&mut tree, path, value.clone()) {
-                return vec![refused("settings", e)];
+                return Err(refused("settings", e));
             }
         }
         let config = match crate::config::Config::deserialize(tree) {
             Ok(c) => c,
-            Err(e) => return vec![refused("settings", anyhow::anyhow!(e))],
+            Err(e) => return Err(refused("settings", anyhow::anyhow!(e))),
         };
-        self.adopt(config)
+        self.adopt(config, into)
     }
 
     /// `/settings set`: try the write on a scratch tree first, so a bad value
@@ -731,6 +768,8 @@ pub enum Cmd {
     Compact(String),
     /// The name to move to, or empty to list what there is.
     Model(String),
+    /// The worktree to work in, or empty to list what there is.
+    Worktree(String),
     /// Everything after the word: a `set <path> <value>`, `get <path>`,
     /// `reset [path]`, or empty to open the panel.
     Settings(String),
@@ -858,6 +897,7 @@ pub fn parse(line: &str) -> Option<Cmd> {
         "/name" => Cmd::Name(rest(line)),
         "/compact" => Cmd::Compact(rest(line)),
         "/model" => Cmd::Model(rest(line)),
+        "/worktree" => Cmd::Worktree(rest(line)),
         "/wechat" => Cmd::Wechat(rest(line)),
         "/settings" => Cmd::Settings(rest(line)),
         other => Cmd::Other {
@@ -990,6 +1030,16 @@ impl Repl {
             } else {
                 self.switch(&name)
             }),
+            Cmd::Worktree(name) => {
+                if name.is_empty() {
+                    Step::Handled(self.worktree_listing())
+                } else {
+                    match self.enter_worktree(&name) {
+                        Ok(said) => Step::Swap(said),
+                        Err(why) => Step::Handled(vec![why]),
+                    }
+                }
+            }
             Cmd::Other { word, args } => dispatch(&self.commands, &word, &args),
             Cmd::Wechat(rest) => match rest.trim() {
                 "" => Step::Wechat(WechatCmd::Status),
@@ -1103,6 +1153,85 @@ impl Repl {
             held.clear();
         }
         vec![format!("{said} {}", self.id)]
+    }
+
+    /// `/worktree <name>`: create or reuse a checkout of this repository and
+    /// move the session into it.
+    ///
+    /// The transcript stays behind. Paths in it are workspace-relative, so
+    /// under another root the same string names a different file; the file
+    /// locks and edit shifts are keyed by absolute path, and a saved session
+    /// belongs to one workspace bucket. Carrying it over would leave the model
+    /// reasoning about two trees at once.
+    fn enter_worktree(&mut self, name: &str) -> Result<Vec<String>, String> {
+        let from = self.ctx.workspace.root().to_path_buf();
+        let (tree, how) = match crate::worktree::enter(&from, name) {
+            Ok(found) => found,
+            Err(e) => return Err(refused("worktree", e)),
+        };
+        // Built before the comparison: both sides are then canonical, and a
+        // path git and the workspace spell differently is still one directory.
+        let ws = match tools::Workspace::new(&tree.path) {
+            Ok(ws) => ws,
+            Err(e) => {
+                let what = format!("{}: {e}", tree.path.display());
+                return Err(refused("worktree", anyhow::anyhow!(what)));
+            }
+        };
+        if ws.root() == from {
+            return Err(format!("already in {}", tree.name));
+        }
+        // Against the root it belongs to, so before the move, not after.
+        // An empty session — nothing said yet — has nothing to keep.
+        if !self.session.is_empty()
+            && let Err(e) = self.save()
+        {
+            tracing::warn!(target: "pi::session", error = %e, "the leaving session was not saved");
+        }
+        let mut said = self.rebuild_into(Some(ws))?;
+        self.worktree = (!tree.main).then(|| tree.name.clone());
+        let on = tree.branch.as_deref().unwrap_or("a detached HEAD");
+        said.push(match how {
+            crate::worktree::Entered::Created => format!("{} — new, on new branch {on}", tree.name),
+            crate::worktree::Entered::Checkout => {
+                format!("{} — new, on existing branch {on}", tree.name)
+            }
+            crate::worktree::Entered::Existing => format!("{} — on {on}", tree.name),
+        });
+        said.push(tree.path.display().to_string());
+        said.extend(self.fresh_session("started"));
+        Ok(said)
+    }
+
+    /// The checkouts `/worktree` can move to, the repository's own first, the
+    /// one the session is in marked.
+    fn worktree_listing(&self) -> Vec<String> {
+        let here = self.ctx.workspace.root();
+        let trees = match crate::worktree::list(here) {
+            Ok(t) => t,
+            Err(e) => return vec![refused("worktree", e)],
+        };
+        // By containment rather than equality: a run started in a subdirectory
+        // is still in that checkout, and it is the one to mark.
+        let at = crate::worktree::holding(&trees, here).map(|t| t.path.clone());
+        let width = trees
+            .iter()
+            .map(|t| unicode_width::UnicodeWidthStr::width(t.name.as_str()))
+            .max()
+            .unwrap_or(0);
+        let mut out: Vec<String> = trees
+            .iter()
+            .map(|t| {
+                let mark = if at.as_ref() == Some(&t.path) { "*" } else { " " };
+                let on = t.branch.as_deref().unwrap_or("detached HEAD");
+                format!("{mark} {}  {on}", crate::render::pad(&t.name, width))
+            })
+            .collect();
+        out.push(format!(
+            "/worktree <name> works in one, creating it under {}/ if it is not there",
+            crate::worktree::DIR
+        ));
+        out
     }
 
     /// The sessions `/resume` can switch to, newest first, the one running
@@ -1280,7 +1409,7 @@ mod tests {
     }
 
     fn offered_from(line: &str, table: &[Command]) -> Vec<String> {
-        complete(line, table, &choices(), &[], &[])
+        complete(line, table, &choices(), &[], &[], &[])
             .into_iter()
             .map(|c| c.show)
             .collect()
@@ -1305,6 +1434,58 @@ mod tests {
     }
 
     #[test]
+    fn worktrees_complete_by_name_and_carry_the_branch_they_are_on() {
+        let trees = [
+            Choice {
+                name: "pi-rs".into(),
+                note: "master".into(),
+            },
+            Choice {
+                name: "feature-one".into(),
+                note: "feature-one".into(),
+            },
+            Choice {
+                name: "feat/two".into(),
+                note: "feat/two".into(),
+            },
+        ];
+        let offered = |line: &str| -> Vec<String> {
+            complete(line, &table(), &[], &[], &[], &trees)
+                .into_iter()
+                .map(|c| c.line)
+                .collect()
+        };
+        assert_eq!(
+            offered("/worktree fe"),
+            ["/worktree feature-one", "/worktree feat/two"]
+        );
+        assert_eq!(offered("/worktree featu"), ["/worktree feature-one"]);
+        // A name may hold a slash, so the argument is not settled until a
+        // space follows it — `feat/` still has somewhere to go.
+        assert_eq!(offered("/worktree feat/"), ["/worktree feat/two"]);
+        // Typed in full there is nothing left to offer, and past it the line
+        // is no longer a name.
+        assert!(offered("/worktree feature-one").is_empty());
+        assert!(offered("/worktree feature-one and").is_empty());
+        // The branch is what tells two checkouts apart when the names do not.
+        let all = complete("/worktree ", &table(), &[], &[], &[], &trees);
+        assert_eq!(all.len(), 3);
+        assert_eq!((all[0].show.as_str(), all[0].help.as_str()), ("pi-rs", "master"));
+    }
+
+    #[test]
+    fn the_worktree_word_takes_a_name_and_nothing_else_does() {
+        assert!(matches!(
+            parse("/worktree feature-one"),
+            Some(Cmd::Worktree(name)) if name == "feature-one"
+        ));
+        // Bare, it is the listing.
+        assert!(matches!(parse("/worktree"), Some(Cmd::Worktree(name)) if name.is_empty()));
+        // Not a built-in word: the command table settles what it is.
+        assert!(matches!(parse("/worktrees"), Some(Cmd::Other { .. })));
+    }
+
+    #[test]
     fn an_exact_word_stays_first_when_it_prefixes_another() {
         // `/news` is a skill here; `/new` typed in full keeps first place in
         // the menu, so Tab accepts the built-in rather than sliding onto news.
@@ -1315,7 +1496,7 @@ mod tests {
     #[test]
     fn accepting_a_command_that_wants_an_argument_leaves_room_for_one() {
         let of = |line: &str| -> Candidate {
-            complete(line, &table(), &choices(), &[], &[]).swap_remove(0)
+            complete(line, &table(), &choices(), &[], &[], &[]).swap_remove(0)
         };
         let name = of("/nam");
         assert_eq!((name.line.as_str(), name.more), ("/name", true));
@@ -1338,7 +1519,7 @@ mod tests {
         assert!(offered("/model flash and").is_empty());
         // Accepting one replaces the line, not just the word.
         assert_eq!(
-            complete("/model fla", &table(), &choices(), &[], &[])[0].line,
+            complete("/model fla", &table(), &choices(), &[], &[], &[])[0].line,
             "/model flash"
         );
     }
@@ -1347,7 +1528,7 @@ mod tests {
     fn a_config_with_no_models_offers_nothing_rather_than_every_command() {
         // choices() is empty when the file defines no model, and the argument
         // branch must not fall back to completing command words again.
-        assert!(complete("/model fl", &table(), &[], &[], &[]).is_empty());
+        assert!(complete("/model fl", &table(), &[], &[], &[], &[]).is_empty());
     }
 
     fn sessions() -> Vec<ResumeChoice> {
@@ -1369,7 +1550,7 @@ mod tests {
     fn the_sessions_complete_by_first_prompt_and_accept_the_id() {
         let sessions = sessions();
         let of = |line: &str| {
-            complete(line, &table(), &[], &sessions, &[])
+            complete(line, &table(), &[], &sessions, &[], &[])
                 .into_iter()
                 .map(|c| c.show)
                 .collect::<Vec<_>>()
@@ -1393,9 +1574,9 @@ mod tests {
             prompt: String::new(),
             created: 0,
         }];
-        assert!(complete("/resume ", &table(), &[], &quiet, &[]).is_empty());
+        assert!(complete("/resume ", &table(), &[], &quiet, &[], &[]).is_empty());
         // Accepting replaces the line with the id, which is what /resume loads.
-        let got = &complete("/resume lint", &table(), &[], &sessions, &[])[0];
+        let got = &complete("/resume lint", &table(), &[], &sessions, &[], &[])[0];
         assert_eq!(got.line, "/resume 1756240000-200");
         assert!(!got.more);
     }

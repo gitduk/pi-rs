@@ -90,38 +90,69 @@ enum Act {
     NewSession,
     Quit,
 }
-// What `/resume <name>` completes against, read the first time a completion
-// asks for it.
+// What the workspace-dependent completions answer with, each read the first
+// time one is asked for.
 //
-// Lazy because reading it means opening every archive for this workspace, and
-// most runs never type `/resume` at all — reading it up front was the whole of
-// a noticeable startup pause. `/resume` with no argument does not come through
-// here; it asks the store directly, as it always did.
-struct Sessions {
+// Lazy because reading the sessions means opening every archive for this
+// workspace and listing the worktrees forks git, while most runs type neither
+// `/resume` nor `/worktree` — reading them up front was the whole of a
+// noticeable startup pause. Neither command's bare form comes through here;
+// both ask directly, as they always did.
+struct Lists {
     store: crate::session::Store,
     workspace: std::path::PathBuf,
-    read: std::cell::OnceCell<Vec<ResumeChoice>>,
+    sessions: std::cell::OnceCell<Vec<ResumeChoice>>,
+    worktrees: std::cell::OnceCell<Vec<Choice>>,
 }
 
-impl Sessions {
+impl Lists {
     fn new(store: crate::session::Store, workspace: std::path::PathBuf) -> Self {
         Self {
             store,
             workspace,
-            read: std::cell::OnceCell::new(),
+            sessions: std::cell::OnceCell::new(),
+            worktrees: std::cell::OnceCell::new(),
         }
     }
 
-    fn get(&self) -> &[ResumeChoice] {
-        self.read
+    fn sessions(&self) -> &[ResumeChoice] {
+        self.sessions
             .get_or_init(|| self.store.choices(&self.workspace))
     }
 
-    /// A turn or a switch can change what the list would say. Dropped rather
-    /// than recomputed: whoever asks next pays, and most of the time nobody
-    /// does.
+    /// The checkouts named with the branch each is on. Empty outside a git
+    /// repository, which is where it belongs: `/worktree` has nothing to offer
+    /// there.
+    fn worktrees(&self) -> &[Choice] {
+        self.worktrees.get_or_init(|| {
+            crate::worktree::list(&self.workspace)
+                .map(|trees| {
+                    trees
+                        .into_iter()
+                        .map(|t| Choice {
+                            note: t.branch.unwrap_or_else(|| "detached HEAD".into()),
+                            name: t.name,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+    }
+
+    /// A turn or a switch can change what either list would say — a session
+    /// saved, a worktree the model added. Dropped rather than recomputed:
+    /// whoever asks next pays, and most of the time nobody does.
     fn forget(&mut self) {
-        self.read.take();
+        self.sessions.take();
+        self.worktrees.take();
+    }
+
+    /// Point at a workspace, dropping what the last one answered with. Both
+    /// lists are keyed by it, so after a `/worktree` move neither is merely
+    /// stale — each is another tree's.
+    fn at(&mut self, workspace: &std::path::Path) {
+        self.workspace = workspace.to_path_buf();
+        self.forget();
     }
 }
 
@@ -545,7 +576,11 @@ struct Ui {
     /// What `/model` can complete to. A copy rather than a borrow of the
     /// config: the loop holds the session mutably while it draws.
     choices: Vec<Choice>,
-    sessions: Sessions,
+    lists: Lists,
+    /// Which worktree the session is working in, or None in the repository's
+    /// own checkout. The status line says it, so the tree being edited is
+    /// visible without asking.
+    worktree: Option<String>,
     /// The instruction files named in the opening block, kept so `/reload`
     /// onto a new theme can rebuild it.
     context: Vec<String>,
@@ -630,7 +665,7 @@ impl Ui {
         keys: Arc<Keys>,
         choices: Vec<Choice>,
         commands: Arc<Vec<Command>>,
-        sessions: Sessions,
+        lists: Lists,
         context: &[String],
         paint: Paint,
     ) -> Self {
@@ -645,7 +680,8 @@ impl Ui {
             keys,
             choices,
             commands,
-            sessions,
+            lists,
+            worktree: None,
             context: context.to_vec(),
             opened,
             editor,
@@ -694,6 +730,7 @@ impl Ui {
             compactions: self.compactions,
             queued: self.queued.len(),
             model: &self.model,
+            worktree: self.worktree.as_deref(),
             // Only a finished run states these, and it brings its own.
             cost: None,
             turns: None,
@@ -820,6 +857,7 @@ impl Ui {
                 self.close();
                 if let Some(mut snap) = crate::status::Snapshot::of_done(&event) {
                     snap.model = &self.model;
+                    snap.worktree = self.worktree.as_deref();
                     // Still running as far as the screen is concerned: `turn`
                     // clears this only once the loop returns.
                     snap.elapsed = self.started.map(|s| s.elapsed());
@@ -904,8 +942,9 @@ impl Ui {
             self.editor.text(),
             &self.commands,
             &self.choices,
-            self.sessions.get(),
+            self.lists.sessions(),
             &self.setting_paths,
+            self.lists.worktrees(),
         )
         .into_iter()
         .rev()
@@ -1477,7 +1516,10 @@ impl Tui {
             keys,
             core.choices(),
             core.commands.clone(),
-            Sessions::new(core.store.clone(), core.ctx.workspace.root().to_path_buf()),
+            Lists::new(
+                core.store.clone(),
+                core.ctx.workspace.root().to_path_buf(),
+            ),
             &core.context,
             paint,
         );
@@ -1485,6 +1527,7 @@ impl Tui {
             .into_iter()
             .map(|(p, _)| p)
             .collect();
+        ui.worktree = core.worktree.clone();
         ui.live = core.config.status.live.clone();
         ui.done = core.config.status.done.clone();
         ui.model = core.agent.spec.model.clone();
@@ -1522,7 +1565,7 @@ impl Tui {
     /// rather than recomputed: whoever asks next pays, and most of the time
     /// nobody does.
     fn refresh_sessions(&mut self) {
-        self.ui.sessions.forget();
+        self.ui.lists.forget();
     }
 
     /// A `/new` or a `/resume` replaced the session — the transcript is the
@@ -1531,7 +1574,10 @@ impl Tui {
     /// follows.
     fn land_swap(&mut self, said: Vec<String>) {
         self.ui.rebuild(&self.core.session);
-        self.refresh_sessions();
+        // `at` forgets both lists, so it stands in for `refresh_sessions`: a
+        // swap that did not move repeats the root, and drops them either way.
+        self.ui.lists.at(self.core.ctx.workspace.root());
+        self.ui.worktree = self.core.worktree.clone();
         self.ui.scrollback.extend(said.into_iter().map(Row::notice));
     }
 

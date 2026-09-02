@@ -111,9 +111,10 @@ replay_thinking = "tagged"
 #   compacted  compacted 2×, left out when the run never shrank the transcript
 #   queued     2 queued — lines submitted while the run worked
 #   model      deepseek-v4-flash
+#   worktree   feature-one, left out in the repository's own checkout
 #
 # A part with nothing to say is left out rather than shown empty, so a line
 # that asks for `cost` against an unpriced model simply does not carry it.
 # `esc to stop` is not a part: a run that can be interrupted always says so.
-live = ["elapsed", "in_out", "ctx", "queued"]
-done = ["turns", "in_out", "cache", "ctx", "compacted", "cost"]
+live = ["elapsed", "in_out", "ctx", "queued", "worktree"]
+done = ["turns", "in_out", "cache", "ctx", "compacted", "cost", "worktree"]
