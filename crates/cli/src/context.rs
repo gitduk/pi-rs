@@ -40,6 +40,11 @@ pub fn short(path: &Path, root: &Path) -> String {
     }
     path.display().to_string()
 }
+/// The anchor for "every path is relative to it": the model needs to know
+/// which directory that is before the rest of the system prompt makes sense.
+pub fn workspace(root: &Path) -> String {
+    format!("\n\n<workspace path=\"{}\"/>", root.display())
+}
 
 /// Every instructions file that applies, most general first.
 ///
@@ -102,12 +107,22 @@ fn from(workspace: &Path, home: Option<&Path>, root: Option<&Path>) -> Loaded {
 
 #[cfg(test)]
 mod tests {
-    use super::{from, paths};
+    use super::{from, paths, workspace};
     use std::path::Path;
 
     fn write(path: &Path, body: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn the_anchor_names_the_workspace_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        assert_eq!(
+            workspace(root),
+            format!("\n\n<workspace path=\"{}\"/>", root.display())
+        );
     }
 
     #[test]
