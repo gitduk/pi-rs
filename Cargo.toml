@@ -39,3 +39,9 @@ clap = { version = "4", features = ["derive", "env"] }
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+# Lockstep releases: every crate shares one version and one vX.Y.Z tag
+[workspace.metadata.release]
+shared-version = true
+tag-name = "v{{version}}"
+publish = false
