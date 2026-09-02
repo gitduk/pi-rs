@@ -146,7 +146,7 @@ CDN 上所有文件 AES-128-ECB 加密。上传流程：生成随机 AES-128 key
 3. **错误结构。** 响应带 `ret` 与可选的 `errcode`/`errmsg`；`sendmessage` 只查 `ret`，getupdates 查 `ret` **或** `errcode`。**token 失效码 = -14**（`STALE_TOKEN_ERRCODE`），参考实现暂停会话 1 小时。**已按此实现**：-14 → 清 token + 本地提示「/wechat off 再 on 重新扫码」，桥停止。
 4. **`context_token`。** 按消息下发、回复必须逐字回带；参考实现按 (bot_id, user_id) 持久化复用，**没有 TTL 处理**——文档担心的「隔两小时失效」在参考实现里不存在对应逻辑，即按「复用上次入站的 token」处理。**已按此实现**：状态文件存最后一个入站的 `context_token`，sendmessage 原样回带。
 5. **`sendtyping`/`getconfig` schema。** `getconfig` body = `{ ilink_user_id, context_token, base_info }` → 响应 `{ ret, typing_ticket }`；`sendtyping` body = `{ ilink_user_id, typing_ticket, status: 1|2, base_info }`（1=开始输入，2=取消）。ticket 按用户缓存、24h 内随机刷新（`WeixinConfigManager`），**无周期性续发逻辑**。**已按此实现**：turn 开始 typing on、turn 结束 typing off，ticket 缓存复用。
-6. **消息长度/分片。** 参考实现**没有任何分片**，文本原样放进一个 `text_item` 发出去。**已按此实现**（超长被截断或报错属于服务端行为，未实测；如需分片再改）。
+6. **消息长度/分片。** 参考实现**没有任何分片**，文本原样放进一个 `text_item` 发出去。服务端真实上限**至今未实测**，超长是截断还是报错也不知道。**已改为在桥侧分片**（见第 5 节第 7 条）：2000 字节是我们自己选的保守下限，不是协议已知的上限——实测出真实数字后应回填这里并调整 `MESSAGE_LIMIT`。
 7. **`item_list` 多 text_item。** 参考实现 text 永远单 item（媒体才多 item 且每个 item 单独发一个请求）。**已按此实现**：一次 sendmessage 一个文本 item。
 8. **`group_id`。** v2.4.8 的入站解析里没有 group 分支，`ChatType` 恒为 `"direct"`；消息结构含 `seq`/`message_id`/`create_time_ms`/`session_id` 等字段。**已按此实现**：所有 wire 类型不 `deny_unknown_fields`，多出的字段（含未来的 `group_id`）静默忽略，不会炸反序列化。
 9. **长轮询行为。** 服务端 hold ≤35s；客户端 35s 超时按**空结果**处理（参考实现的 `getUpdates` 对 AbortError 返回 `{ret:0, msgs:[], get_updates_buf: 旧值}`）。网络错误退避：**2s 重试，连续 3 次后 30s**（`monitor.js` 的 `RETRY_DELAY_MS`/`BACKOFF_DELAY_MS`），非指数退避。服务端可返回 `longpolling_timeout_ms` 调整下次 hold 时长。**已按此实现**。
@@ -255,6 +255,9 @@ Some(inbound) = wechat_rx.recv() => { /* 与 Act::Submit 相同的处理 */ }
 4. ✅ `Cmd::Wechat(String)` / `Step::Wechat(WechatCmd)` + `BUILTIN` 表 + `parse` + `Repl::command` 分支；`cargo check` 报出的两处 surface match（line.rs / tui/mod.rs）已补齐。
 5. ✅ `crates/cli/src/wechat.rs` 桥：入站走 `ui.queued`（turn 内）或直接提交（空闲）、`/stop`/`/esc` 在入站处特判、出站 `observe(&Event)` 按 4.5 的策略发送、`Done`/中断时 flush。
 6. ✅ TUI 接线完成。`line.rs` 侧按原设计降级：`/wechat on|off` 打印「需要终端显示二维码」，`/wechat` 报 off（line.rs 没有屏幕画 QR，见 handoff 说明）。
+7. ✅ 出站分片：`send_line` 把超过 `MESSAGE_LIMIT`（2000 字节）的消息切成带 `(n/m)` 标记的多条，优先切段落、其次行、其次空格，都够不着才按字符硬切（硬切不吃缩进，代码块能原样拼回）。同一条消息的各片在同一个任务里顺序发、片间停 `PIECE_INTERVAL`（500ms，2.8 节的限速假设），中途失败即停并在本地终端报出第几片断的。工具行也走这条路径，因此同样受分片保护。
+   出站任务串成一条链（`Bridge::last_send`，新任务先 `await` 上一个）：分片前一次 `send_line` 只发一个请求，乱序窗口是网络延迟量级、看不见；分片后一条消息要发好几秒，上一 turn 的尾片会被下一 turn 的第一条工具行插队，`(n/m)` 标记的意义正好被抵消。链保证 FIFO，surface 仍不被阻塞（发送照旧在 spawn 里）。`/wechat off` 同时取消这条链（`Bridge::outbound` 令牌，片间 sleep 也参与 select；手上那一片已发出的 HTTP 请求不可中断，最多多发这一片），否则「已停止」之后手机还会继续收几秒——同样是分片把既有的毫秒级窗口撑成了秒级。
+   顺带补掉一个既有缺口：surface 无条件调 `observe`（`tui/mod.rs:1779`/`:1815`，无 alive 守卫），而 `off` 不清凭据（凭据不该随 off 丢），于是 off 之后新的工具行和回复照发。`send_line` 与 `typing` 各加一道 `alive()` 守卫，`off` 顺手把 `typing_on` 归位——否则 off/on 之后的第一个 turn 收不到输入指示。**这两条都无法单测**——workspace 无 HTTP mock（第 3 节第 16 条），只经代码审阅。
 ---
 
 ## 6. 已否决的方案（不要重新提出）
