@@ -290,6 +290,14 @@ impl Ctx {
         spill::locate(&self.spill_root, locator)
     }
 
+    /// Replace the plan the todo tool reads and writes. The loop records this
+    /// copy back into the running session, over whatever that session held.
+    pub fn set_todos(&self, items: Vec<todo::Todo>) {
+        if let Ok(mut held) = self.todos.lock() {
+            *held = items;
+        }
+    }
+
     /// Record that an edit renumbered `path` from `from` on. Kept at the lowest
     /// line reported, since the model's addresses all date from one read.
     pub fn note_shift(&self, path: &std::path::Path, from: usize) {

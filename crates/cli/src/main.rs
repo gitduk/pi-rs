@@ -545,6 +545,9 @@ async fn main() -> Result<()> {
         // Before `id` moves into the Repl: the context borrows it to name the
         // session its spills belong to.
         let ctx = tools::Ctx::new(workspace).with_session(&id);
+        // The resumed session brings its plan; an empty live copy would be
+        // recorded back over it at the end of the first turn.
+        ctx.set_todos(carried.todos().to_vec());
         let core = repl::Repl {
             agent: ag,
             store,
@@ -600,6 +603,9 @@ async fn main() -> Result<()> {
     let ctx = tools::Ctx::new(workspace)
         .with_session(&id)
         .with_cancel(agent::cancel_on_interrupt());
+    // The resumed session brings its plan; an empty live copy would be
+    // recorded back over it at the end of the run.
+    ctx.set_todos(carried.todos().to_vec());
 
     // Always through the log: a loaded session whose view happens to be empty
     // still has history worth keeping, and `resume` handles an empty session.

@@ -696,6 +696,9 @@ impl Repl {
         if removed == 0 {
             return Ok(Rewound::Nothing);
         }
+        // The rollback dropped the session's plan for describing work this
+        // rewind undid; the live copy would be recorded straight back over it.
+        self.ctx.set_todos(Vec::new());
         self.save()?;
         Ok(match unsent {
             Some(text) => Rewound::Unsent(text),
@@ -1152,9 +1155,7 @@ impl Repl {
         // is what `/name` exists to prevent.
         self.name = None;
         self.becomes(crate::session::new_id(), crate::session::now());
-        if let Ok(mut held) = self.ctx.todos.lock() {
-            held.clear();
-        }
+        self.ctx.set_todos(Vec::new());
         vec![format!("{said} {}", self.id)]
     }
 
@@ -1164,11 +1165,8 @@ impl Repl {
         let (id, name, created) = (stored.id.clone(), stored.name.clone(), stored.created);
         self.session = stored.into_session();
         self.name = name;
-        // The live copy the todo tool writes and the loop records back into the
-        // session; left as it was, it would overwrite the plan just restored.
-        if let Ok(mut held) = self.ctx.todos.lock() {
-            *held = self.session.todos().to_vec();
-        }
+        // Left as it was, the live copy would overwrite the plan just restored.
+        self.ctx.set_todos(self.session.todos().to_vec());
         self.becomes(id, created);
         let mut said = vec![format!("resumed {}", self.id)];
         if let Some(name) = self.name.as_deref() {
