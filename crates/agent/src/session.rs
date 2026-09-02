@@ -98,6 +98,14 @@ pub struct UserText {
     pub shown: Option<String>,
 }
 
+impl UserText {
+    /// What to put in front of a person. One question, answered here rather
+    /// than at each call site, where the answers drift.
+    pub fn shown_text(&self) -> &str {
+        self.shown.as_deref().unwrap_or(&self.text)
+    }
+}
+
 /// The user side, one block per entry. Splitting them is what lets compaction
 /// address a single tool result — or a single pasted command's output —
 /// without touching what sits beside it.
@@ -197,6 +205,59 @@ impl Entry {
             AssistantContent::ToolCall(c) => Some(c),
             _ => None,
         })
+    }
+}
+
+/// One place the conversation can be rewound to.
+///
+/// The two are not one operation with a flag. Going back to something the
+/// user said means unsending it: the message leaves the transcript and its
+/// text returns to the editor, because half the reason to rewind is to ask
+/// it differently. Going back to an answer keeps the answer — that is the
+/// state the conversation carries on from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Node {
+    Ask { id: EntryId, show: String },
+    Reply { id: EntryId, show: String },
+}
+
+impl Node {
+    pub fn id(&self) -> EntryId {
+        match self {
+            Node::Ask { id, .. } | Node::Reply { id, .. } => *id,
+        }
+    }
+
+    pub fn show(&self) -> &str {
+        match self {
+            Node::Ask { show, .. } | Node::Reply { show, .. } => show,
+        }
+    }
+}
+
+/// What an assistant turn said, when it said anything at all.
+fn said(blocks: &[AssistantContent]) -> Option<String> {
+    blocks.iter().find_map(|b| match b {
+        AssistantContent::Text(t) if !t.text.trim().is_empty() => Some(t.text.clone()),
+        _ => None,
+    })
+}
+
+/// The place this entry offers to go back to, or `None` when it is not one.
+fn node_of(entry: &Entry) -> Option<Node> {
+    match entry {
+        Entry::User {
+            id,
+            body: UserBody::Prompt(t) | UserBody::Aside(t),
+            ..
+        } => Some(Node::Ask {
+            id: *id,
+            show: t.shown_text().to_string(),
+        }),
+        Entry::Assistant { id, blocks, .. } => {
+            said(blocks).map(|show| Node::Reply { id: *id, show })
+        }
+        _ => None,
     }
 }
 
@@ -407,41 +468,80 @@ impl Session {
     /// with a different answer, and the resume listing asks that one against
     /// the archive without loading it.
     ///
+    /// Assistant turns are here too, but only the ones that said something. A
+    /// turn holding nothing but tool calls is a step of the work rather than a
+    /// place in the conversation, and a menu listing every one of them is a
+    /// menu nobody can find anything in.
+    ///
     /// Reads `history`, not `view`: a prompt compaction dropped is still one
     /// the user asked, so the rewind menu can reach it — and rewinding past a
     /// compaction entry truncates that too, which undoes the compaction and
     /// brings the content back. It also keeps the session's name from changing
     /// the first time its opening turn is compacted away.
-    pub fn prompts(&self) -> Vec<(EntryId, String)> {
-        self.entries
-            .iter()
-            .filter_map(|e| match e {
-                Entry::User {
-                    id,
-                    body: UserBody::Prompt(t) | UserBody::Aside(t),
-                    ..
-                } => Some((*id, t.shown.clone().unwrap_or_else(|| t.text.clone()))),
-                _ => None,
-            })
-            .collect()
+    pub fn rewind_nodes(&self) -> Vec<Node> {
+        self.entries.iter().filter_map(node_of).collect()
     }
 
+    /// Where the transcript ends now, which is what a rewind's notice names.
+    /// Walks back to the first one instead of building the whole list.
+    pub fn last_node(&self) -> Option<Node> {
+        self.entries.iter().rev().find_map(node_of)
+    }
 
-    /// Rewind to an entry: everything after it is removed from the session,
-    /// and returns how many entries that was.
+    /// The text to hand back to the editor when this entry is unsent; `None`
+    /// for anything the user did not say, which is what tells the two rewind
+    /// semantics apart.
+    pub fn unsent_text(&self, entry: EntryId) -> Option<String> {
+        self.entries
+            .iter()
+            .find(|e| e.id() == entry)
+            .and_then(|e| match e {
+                Entry::User {
+                    body: UserBody::Prompt(t) | UserBody::Aside(t),
+                    ..
+                } => Some(t.shown_text().to_string()),
+                _ => None,
+            })
+    }
+
+    /// The last question the user asked, when there is one to take back.
+    ///
+    /// Prompts only: a `!` command's output is not something anyone sent, and
+    /// unsending it would put a line back in the editor that was never typed
+    /// as a question.
+    pub fn last_ask(&self) -> Option<EntryId> {
+        self.entries.iter().rev().find_map(|e| match e {
+            Entry::User {
+                id,
+                body: UserBody::Prompt(_),
+                ..
+            } => Some(*id),
+            _ => None,
+        })
+    }
+
+    /// Rewind to an entry, keeping it: everything after it is removed from the
+    /// session, and returns how many entries that was.
     ///
     /// Removed, not compacted: a compaction only records what the model stopped
     /// seeing, while this deletes. A `Compaction` entry caught in the cut takes
     /// its record with it, so the content that pass dropped comes back.
     pub fn rollback_to(&mut self, entry: EntryId) -> usize {
-        let Some(keep) = self
-            .entries
-            .iter()
-            .position(|e| e.id() == entry)
-            .map(|i| i + 1)
-        else {
+        self.truncate(entry, true)
+    }
+
+    /// Rewind to just before an entry: it goes too, along with everything
+    /// after it. What unsending a message does — the message has to leave the
+    /// transcript, or the editor and the model both hold it.
+    pub fn rollback_before(&mut self, entry: EntryId) -> usize {
+        self.truncate(entry, false)
+    }
+
+    fn truncate(&mut self, entry: EntryId, keep: bool) -> usize {
+        let Some(at) = self.entries.iter().position(|e| e.id() == entry) else {
             return 0;
         };
+        let keep = at + usize::from(keep);
         let removed = self.entries.len() - keep;
         self.entries.truncate(keep);
         // The plan described work this rewind just undid. Carrying it forward
@@ -701,7 +801,7 @@ pub fn omitted_block(body: &UserBody, notice: &str) -> UserContent {
 mod tests {
 
     use super::*;
-    use brain::message::{Text as MsgText, ToolResult};
+    use brain::message::{Text as MsgText, ToolCall, ToolResult};
 
     /// The contract the Anthropic encoder's join is written against: what a
     /// turn holds arrives as separate messages, and joining them is the wire's
@@ -747,7 +847,7 @@ mod tests {
         assert!(!s.view().iter().any(|seen| seen.id() == first));
         assert!(s.out_of_view().contains(&first));
         assert_eq!(s.history().count(), 4, "nothing left the transcript");
-        assert_eq!(s.prompts().first().map(|(id, _)| *id), Some(first));
+        assert_eq!(s.rewind_nodes().first().map(Node::id), Some(first));
     }
 
     /// And because the menu can still name it, rewinding to it truncates the
@@ -763,11 +863,64 @@ mod tests {
             ..Default::default()
         });
 
-        assert!(s.prompts().iter().any(|(id, _)| *id == first), "the menu must reach it");
+        assert!(s.rewind_nodes().iter().any(|n| n.id() == first), "the menu must reach it");
         s.rollback_to(second);
 
         assert!(!s.out_of_view().contains(&first), "the compaction went with the rewind");
         assert!(s.view().iter().any(|seen| seen.id() == first));
+    }
+
+    /// Unsending is the other half of the rewind: the message itself has to
+    /// leave, or the editor holds a line the model is still being sent.
+    #[test]
+    fn unsending_a_message_takes_it_out_of_the_transcript() {
+        let mut s = Session::new();
+        s.prompt("the first thing");
+        s.push_assistant(vec![AssistantContent::Text(MsgText { text: "done".into() })]);
+        let second = s.prompt("teh typo one");
+        s.push_assistant(vec![AssistantContent::Text(MsgText { text: "answering".into() })]);
+
+        assert_eq!(s.unsent_text(second).as_deref(), Some("teh typo one"));
+        assert_eq!(s.last_ask(), Some(second));
+        assert_eq!(s.rollback_before(second), 2, "the message and the answer to it");
+        assert!(!s.history().any(|e| e.id() == second));
+        assert_eq!(s.rewind_nodes().len(), 2, "the first turn, both halves");
+    }
+
+    /// A turn that only called tools is a step of the work; the menu offering
+    /// one row per `read` is a menu nothing can be found in.
+    #[test]
+    fn only_answers_reach_the_rewind_menu() {
+        let mut s = Session::new();
+        let ask = s.prompt("read it");
+        s.push_assistant(vec![AssistantContent::ToolCall(ToolCall {
+            id: "c1".into(),
+            name: "read".into(),
+            args: serde_json::json!({ "path": "f.rs" }),
+        })]);
+        s.push_results(vec![ToolResult::text("c1", "read", "a")]);
+        s.push_assistant(vec![AssistantContent::Text(MsgText { text: "it says a".into() })]);
+
+        let nodes = s.rewind_nodes();
+        assert_eq!(nodes.len(), 2, "the question and the answer, not the call");
+        assert_eq!(nodes[0].id(), ask);
+        assert!(matches!(nodes[1], Node::Reply { .. }));
+        assert_eq!(nodes[1].show(), "it says a");
+    }
+
+    /// Rewinding to an answer is the opposite call: the answer stays, and the
+    /// conversation continues from it.
+    #[test]
+    fn rewinding_to_an_answer_keeps_it() {
+        let mut s = Session::new();
+        s.prompt("go");
+        s.push_assistant(vec![AssistantContent::Text(MsgText { text: "here".into() })]);
+        let reply = s.rewind_nodes().pop().map(|n| n.id()).expect("an answer");
+        s.prompt("and then");
+
+        assert_eq!(s.rollback_to(reply), 1);
+        assert!(s.history().any(|e| e.id() == reply), "the answer stays");
+        assert_eq!(s.unsent_text(reply), None, "nothing goes back to the editor");
     }
 
     /// The one user message that legitimately carries more than one block.

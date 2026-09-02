@@ -644,16 +644,26 @@ impl Repl {
         Ok(())
     }
 
-    /// Rewind the conversation to a user message and write the shorter
-    /// transcript back. How many entries were removed from it; an unknown id
-    /// removes nothing.
-    pub fn rewind_to(&mut self, user: agent::session::EntryId) -> anyhow::Result<usize> {
-        let removed = self.session.rollback_to(user);
+    /// Rewind the conversation to an entry and write the shorter transcript
+    /// back.
+    ///
+    /// The entry decides which of the two it is — the caller cannot get the
+    /// pairing wrong, and a menu row that went stale against the transcript
+    /// falls through to removing nothing.
+    pub fn rewind_to(&mut self, entry: agent::session::EntryId) -> anyhow::Result<Rewound> {
+        let unsent = self.session.unsent_text(entry);
+        let removed = match unsent {
+            Some(_) => self.session.rollback_before(entry),
+            None => self.session.rollback_to(entry),
+        };
         if removed == 0 {
-            return Ok(0);
+            return Ok(Rewound::Nothing);
         }
         self.save()?;
-        Ok(removed)
+        Ok(match unsent {
+            Some(text) => Rewound::Unsent(text),
+            None => Rewound::Kept,
+        })
     }
 }
 
@@ -864,12 +874,23 @@ fn rest(line: &str) -> String {
         .map_or(String::new(), |(_, r)| r.trim().to_string())
 }
 
+/// What a rewind did. Which one it is says whether the entry was unsent or
+/// kept, rather than leaving that to be read off whether a string was there.
+pub enum Rewound {
+    /// The id named nothing the transcript still holds.
+    Nothing,
+    /// The entry stayed, and what followed it went.
+    Kept,
+    /// The entry went too, and its text belongs back in the editor.
+    Unsent(String),
+}
+
 pub enum Step {
     /// A `!` command to run. The surface executes it and records the result,
     /// because only it can await; `Repl::bash` does the actual work.
     Bash(String),
     /// What to send, and — when a skill expanded into it — the line that was
-    /// typed. `prompts()` reads the second: a rewind menu offering four
+    /// typed. `rewind_nodes()` reads the second: a rewind menu offering four
     /// thousand characters of `SKILL.md` is offering the wrong thing, and so
     /// is a session named after one.
     Prompt {
