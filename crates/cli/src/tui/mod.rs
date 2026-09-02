@@ -616,6 +616,9 @@ struct Ui {
     stopping: bool,
     /// Rows the view is scrolled up by. Zero shows the newest rows.
     scroll: usize,
+    /// The last measurement of a scrolled-up view: item counts then, and the
+    /// rows they wrapped to. A reflow in place (resize, fold-all) re-bases.
+    counted: Option<(usize, usize, usize)>,
     /// The segments each line shows, in the order the config named them.
     live: Vec<crate::status::Segment>,
     done: Vec<crate::status::Segment>,
@@ -711,6 +714,7 @@ impl Ui {
             turn: Usage::default(),
             stopping: false,
             scroll: 0,
+            counted: None,
             live: crate::status::default_live(),
             done: crate::status::default_done(),
             ctx: None,
@@ -1085,6 +1089,22 @@ impl Ui {
             .saturating_sub(editor_h + menu_h)
             .max(1);
         let live = self.live(hist_view);
+
+        // While the view is scrolled up, rows the bottom gained since the
+        // last measurement fold back into `scroll`, keeping the window put.
+        if self.scroll > 0 {
+            let items = (self.scrollback.len(), live.len());
+            // A frame whose item counts match the last measurement has not
+            // grown — nothing to fold, and no reason to re-wrap the history.
+            if self.counted.is_none_or(|(sb, lv, _)| (sb, lv) != items) {
+                let total = self.scrollback_rows(width) + live.len();
+                self.scroll =
+                    absorb_growth(self.scroll, self.counted.map(|(_, _, t)| t), total);
+                self.counted = Some((items.0, items.1, total));
+            }
+        } else {
+            self.counted = None;
+        }
         // Measured in rows, not lines: a line wider than the terminal wraps
         // into several, and counting lines here would put more rows in the
         // area than fit — pushing the newest ones off the bottom, underneath
@@ -1131,6 +1151,13 @@ impl Ui {
         });
     }
 
+    /// Rows the scrollback renders to at this width, wraps included.
+    fn scrollback_rows(&self, width: usize) -> usize {
+        ScrollbackRows::new(&self.scrollback, &self.paint, width)
+            .map(|line| screen::fit(&line, width).len())
+            .sum()
+    }
+
     /// Rebuild the history from the transcript, forgetting everything the old
     /// drawing showed: a rewind changes what the conversation is, and the
     /// screen has to show the new one, not the old one with a note on it.
@@ -1167,6 +1194,9 @@ impl Ui {
         let key = match event {
             TermEvent::Resize(w, h) => {
                 self.screen.resized(w, h);
+                // Re-measuring starts at the new width: the re-wrap is a
+                // change of layout, not output, and must not move the view.
+                self.counted = None;
                 return Act::None;
             }
             TermEvent::Paste(text) => {
@@ -1375,6 +1405,8 @@ impl Ui {
                 // the switch with them: one key presses the whole screen to a
                 // single state.
                 self.thinking.flip_all(&mut self.scrollback);
+                // A fold-all reflows blocks above the view too; re-baseline.
+                self.counted = None;
             }
 
             Some(Action::MenuAccept) => {
@@ -1475,6 +1507,14 @@ impl Ui {
             self.editor.clear();
         }
         Act::None
+    }
+}
+// Scroll for the same window one frame later: growth since `last` folds
+// back into the offset so the window keeps its place; `None` re-bases.
+fn absorb_growth(scroll: usize, last: Option<usize>, total: usize) -> usize {
+    match last {
+        Some(last) => scroll.saturating_add_signed(total as isize - last as isize),
+        None => scroll,
     }
 }
 
@@ -2024,10 +2064,13 @@ impl Tui {
 
 #[cfg(test)]
 mod tests {
-    use super::{secret_settings_set, Cow, Row, ScrollbackRows, Thinking, body, scrollback_from, tool_row};
+    use super::{
+        Cow, Row, ScrollbackRows, Thinking, absorb_growth, body, scrollback_from,
+        secret_settings_set, tool_row,
+    };
     use crate::render::Markdown;
     use crate::render::Paint;
-
+    use crate::tui::screen;
 
     #[test]
     fn a_secret_settings_set_is_detected_by_its_path() {
@@ -2522,5 +2565,72 @@ mod tests {
         scrollback.push(block(2, 1, t.birth_fold()));
         assert!(scrollback[0].folded() == Some(true));
         assert!(scrollback[1].folded() == Some(false));
+    }
+
+    /// One frame of the scrolled-up view: what the window shows, through the
+    /// same growth absorption `flush` applies.
+    fn frame(
+        content: &[String],
+        room: usize,
+        scroll: &mut usize,
+        last_total: &mut Option<usize>,
+    ) -> Vec<String> {
+        let total = content.len();
+        *scroll = absorb_growth(*scroll, *last_total, total);
+        let (rows, s) = screen::window(
+            content.iter().map(|s| Cow::Borrowed(s.as_str())),
+            80,
+            room,
+            *scroll,
+        );
+        *scroll = s;
+        *last_total = Some(total);
+        rows
+    }
+
+    #[test]
+    fn a_scrolled_up_view_holds_until_the_user_scrolls_back() {
+        // Scrolled two rows up from ten rows of history, rows 5-8 stay put
+        // as output arrives below; only the user's own scroll moves them.
+        let mut content: Vec<String> = (1..=10).map(|n| n.to_string()).collect();
+        let (room, mut scroll, mut last_total) = (4usize, 0usize, None);
+        scroll = scroll.saturating_add(2);
+        let first = frame(&content, room, &mut scroll, &mut last_total);
+        assert_eq!(first, vec!["5", "6", "7", "8"]);
+        for n in 11..=15 {
+            content.push(n.to_string());
+            assert_eq!(
+                frame(&content, room, &mut scroll, &mut last_total),
+                first,
+                "row {n} arriving moved the scrolled-up window"
+            );
+        }
+        scroll = scroll.saturating_sub(1);
+        assert_eq!(
+            frame(&content, room, &mut scroll, &mut last_total),
+            vec!["6", "7", "8", "9"]
+        );
+    }
+
+    #[test]
+    fn rows_gone_below_the_window_leave_the_view_put() {
+        // Rows removed below the window shrink the tail; the negative delta
+        // is absorbed like a positive one and the window stays put.
+        let mut content: Vec<String> = (1..=10).map(|n| n.to_string()).collect();
+        let (room, mut scroll, mut last_total) = (4usize, 0usize, None);
+        scroll = scroll.saturating_add(2);
+        assert_eq!(
+            frame(&content, room, &mut scroll, &mut last_total),
+            vec!["5", "6", "7", "8"]
+        );
+        for n in 11..=15 {
+            content.push(n.to_string());
+            frame(&content, room, &mut scroll, &mut last_total);
+        }
+        content.truncate(10);
+        assert_eq!(
+            frame(&content, room, &mut scroll, &mut last_total),
+            vec!["5", "6", "7", "8"]
+        );
     }
 }
