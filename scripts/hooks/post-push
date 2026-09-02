@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# post-push hook: build and publish locally after a push to master.
+set -euo pipefail
+if [ -t 0 ]; then exit 0; fi
+grep -q 'refs/heads/master' || exit 0
+exec "$(git rev-parse --show-toplevel)/scripts/release-on-push.sh"

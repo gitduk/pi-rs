@@ -20,6 +20,20 @@ cargo build --release          # target/release/pi
 Nothing to install and nothing to configure at build time. There is no
 `PATH` entry created for you; symlink it where you want it.
 
+## Release
+
+Releases are built and published locally, not on CI. Pushing to `master` runs
+the `post-push` hook: it builds the binary, and if the `[workspace.package]`
+version is not tagged on origin yet, tags it and uploads the binary via
+`gh release create --generate-notes`. An already-tagged version is a no-op, so
+routine pushes skip the build.
+
+The hook is not version-controlled; install it on a fresh clone with:
+
+```bash
+install -m 755 scripts/hooks/post-push .git/hooks/post-push
+```
+
 ## Configure
 
 There is **no built-in list of models**. A hand-written catalog goes stale the
