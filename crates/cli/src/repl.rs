@@ -1134,7 +1134,7 @@ impl Repl {
                     Step::Handled(self.worktree_listing())
                 } else {
                     match self.enter_worktree(&name) {
-                        Ok(said) => Step::Swap(said),
+                        Ok(step) => step,
                         Err(why) => Step::Handled(vec![why]),
                     }
                 }
@@ -1280,7 +1280,7 @@ impl Repl {
     /// same string names a different file, and the file locks and edit shifts
     /// are keyed by absolute path. Coming back therefore resumes what was being
     /// said in that tree, not an empty page.
-    fn enter_worktree(&mut self, name: &str) -> Result<Vec<String>, String> {
+    fn enter_worktree(&mut self, name: &str) -> Result<Step, String> {
         let from = self.lane_mut().ctx.workspace.root().to_path_buf();
         let (tree, how) = match crate::worktree::enter(&from, name) {
             Ok(found) => found,
@@ -1298,28 +1298,91 @@ impl Repl {
         if ws.root() == from {
             return Err(format!("already in {}", tree.name));
         }
+        let on = tree.branch.as_deref().unwrap_or("a detached HEAD");
+        let mut said = vec![
+            match how {
+                crate::worktree::Entered::Created => {
+                    format!("{} — new, on new branch {on}", tree.name)
+                }
+                crate::worktree::Entered::Checkout => {
+                    format!("{} — new, on existing branch {on}", tree.name)
+                }
+                crate::worktree::Entered::Existing => format!("{} — on {on}", tree.name),
+            },
+            tree.path.display().to_string(),
+        ];
+
+        // Already open: going back to a tree is going back to the lane that
+        // holds it, transcript, screen and all. Nothing is rebuilt.
+        if let Some(i) = self
+            .lanes
+            .iter()
+            .position(|lane| lane.ctx.workspace.root() == ws.root())
+        {
+            self.current = i;
+            said.push(format!("back in {}", self.lane().id));
+            // Handled, not a swap: the lane's screen is parked as it was left,
+            // and rebuilding it from the transcript would throw that away.
+            return Ok(Step::Handled(said));
+        }
+
         // Against the root it belongs to, so before the move, not after.
         // An empty session — nothing said yet — has nothing to keep.
-        if self.lane_mut().session.as_ref().is_some_and(|s| !s.is_empty())
+        if self.lane().session.as_ref().is_some_and(|s| !s.is_empty())
             && let Err(e) = self.save()
         {
             tracing::warn!(target: "pi::session", error = %e, "the leaving session was not saved");
         }
-        let mut said = self.rebuild_into(Some(ws))?;
-        self.lane_mut().worktree = (!tree.main).then(|| tree.name.clone());
-        let on = tree.branch.as_deref().unwrap_or("a detached HEAD");
-        said.push(match how {
-            crate::worktree::Entered::Created => format!("{} — new, on new branch {on}", tree.name),
-            crate::worktree::Entered::Checkout => {
-                format!("{} — new, on existing branch {on}", tree.name)
-            }
-            crate::worktree::Entered::Existing => format!("{} — on {on}", tree.name),
+        said.extend(self.open_lane(ws, (!tree.main).then(|| tree.name.clone()))?);
+        Ok(Step::Swap(said))
+    }
+
+    /// Open a checkout as a lane of its own, and put it in front.
+    ///
+    /// Whole or not at all, like every other path that reads a config: a tree
+    /// whose config or skills will not resolve leaves the run where it was.
+    fn open_lane(
+        &mut self,
+        ws: tools::Workspace,
+        worktree: Option<String>,
+    ) -> Result<Vec<String>, String> {
+        let root = ws.root().to_path_buf();
+        let failed = |e| format!("nothing opened — {}", refused("worktree", e));
+        let project = crate::config::load_project(&root).map_err(failed)?;
+        let resolved =
+            crate::resolve(&self.args, &root, &self.config, &project, &self.claimed).map_err(failed)?;
+
+        // The model travels; what the root decides does not. A switch changes
+        // trees, and which model is answering was a decision made elsewhere.
+        let mut ag = (*self.lane().agent).clone();
+        ag.registry = resolved.registry;
+        ag.approver = std::sync::Arc::new(agent::Ceiling(resolved.tier));
+        ag.system = resolved.system;
+        ag.effort = resolved.effort;
+
+        // Built rather than cloned from the lane being left: `Ctx` shares its
+        // file locks and edit shifts through an `Arc`, so a cloned one would
+        // clear that lane's along with its own the first time it relocated.
+        self.lanes.push(Lane {
+            agent: std::sync::Arc::new(ag),
+            session: Some(Session::default()),
+            id: String::new(),
+            created: 0,
+            name: None,
+            context: resolved.context,
+            ctx: tools::Ctx::new(ws),
+            worktree,
         });
-        said.push(tree.path.display().to_string());
+        self.current = self.lanes.len() - 1;
+        // A skill can belong to one tree and not another, so what a slash
+        // answers to follows the move, exactly as it did before lanes.
+        self.keys = std::sync::Arc::new(resolved.keys);
+        self.commands = std::sync::Arc::new(resolved.commands);
+
         // Asked with the root the next save will file under, so a tree is found
         // by the same key it was stored by.
-        let found = self.store.latest(self.lane().ctx.workspace.root());
-        said.extend(match found {
+        let found = self.store.latest(&root);
+        Ok(match found {
             Ok(stored) => self.adopt_session(stored),
             Err(e) => {
                 // Nothing recorded for this tree is the ordinary case; an
@@ -1327,8 +1390,7 @@ impl Repl {
                 tracing::debug!(target: "pi::session", error = %e, "no session to resume in this worktree");
                 self.fresh_session("started")
             }
-        });
-        Ok(said)
+        })
     }
 
     /// The checkouts `/worktree` can move to, the repository's own first, the

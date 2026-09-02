@@ -636,9 +636,44 @@ struct Ui {
     /// The segments each line shows, in the order the config named them.
     live: Vec<crate::status::Segment>,
     done: Vec<crate::status::Segment>,
-    /// The lane in front. One for now; the surface shows one at a time
-    /// either way.
+    /// What the screen is showing: the view belonging to `Repl::current`.
+    ///
+    /// A field rather than an index into `parked`, so it keeps the disjoint
+    /// borrow every method here relies on — `self.view.scrollback` beside
+    /// `self.paint` is two fields, where a lookup would be all of `self`.
     view: View,
+    /// The views of every other lane, by the same index `Repl::lanes` uses.
+    /// The entry for the lane in front is None: its view is `view`, on loan to
+    /// the screen until the next switch puts it back.
+    parked: Vec<Option<View>>,
+}
+
+impl Ui {
+    /// Put the view on screen back where it belongs and take another's out.
+    /// Rows, scroll position and this run's numbers all travel with it, so a
+    /// lane comes back exactly as it was left rather than redrawn from its
+    /// transcript.
+    fn show(&mut self, was: usize, now: usize) {
+        if was == now {
+            return;
+        }
+        let leaving = std::mem::take(&mut self.view);
+        if let Some(slot) = self.parked.get_mut(was) {
+            *slot = Some(leaving);
+        }
+        // A lane opened this moment has no view yet, and an empty one is what
+        // a lane nobody has said anything in looks like.
+        self.view = self
+            .parked
+            .get_mut(now)
+            .and_then(Option::take)
+            .unwrap_or_default();
+    }
+
+    /// Make room for a lane that has just been opened.
+    fn opened_lane(&mut self) {
+        self.parked.push(None);
+    }
 }
 
 // One row either menu can offer: a completion of the line, or a message
@@ -708,6 +743,7 @@ impl Ui {
             spinner: 0,
             live: crate::status::default_live(),
             done: crate::status::default_done(),
+            parked: vec![None],
             // Everything else about a lane starts empty, which is what a lane
             // nobody has said anything in yet looks like.
             view: View {
@@ -1655,6 +1691,22 @@ impl Tui {
     /// source of truth again — so the screen is rebuilt from the new one
     /// instead of keeping the old conversation up, and the completion list
     /// follows.
+    /// Bring the screen into step with the lanes after a command: a lane just
+    /// opened needs a slot, and a switch needs its view back on screen and the
+    /// workspace-keyed lists pointed at its root.
+    fn reconcile(&mut self, was: usize) {
+        while self.ui.parked.len() < self.core.lanes.len() {
+            self.ui.opened_lane();
+        }
+        if was == self.core.current {
+            return;
+        }
+        self.ui.show(was, self.core.current);
+        // The view brought its own worktree name and model back with it; only
+        // the lists are the terminal's, and they are keyed by workspace.
+        self.ui.lists.at(self.core.lane().ctx.workspace.root());
+    }
+
     fn land_swap(&mut self, said: Vec<String>) {
         if let Some(session) = &self.core.lane_mut().session {
             self.ui.rebuild(session);
@@ -1755,7 +1807,10 @@ impl Tui {
                 self.ui.settings = Some(settings::Panel::new(rows));
                 continue;
             }
-            match self.core.command(&line, &self.totals) {
+            let was = self.core.current;
+            let step = self.core.command(&line, &self.totals);
+            self.reconcile(was);
+            match step {
                 Step::Quit => break,
                 Step::Bash(command) => {
                     // The command runs off the key loop so Esc can stop it,
