@@ -1147,3 +1147,29 @@ async fn write_still_recognises_the_header_hashline_prints() {
         .unwrap();
     assert_eq!(std::fs::read_to_string(&path).unwrap(), src);
 }
+
+#[tokio::test]
+async fn an_edit_without_patch_says_what_the_one_argument_is() {
+    let (_d, c) = ctx();
+    let err = tools::edit::Edit
+        .execute(json!({}), &c)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("missing field `patch`"), "{err}");
+    assert!(err.contains("takes a single argument"), "{err}");
+    assert!(err.contains("[path#TAG]"), "{err}");
+}
+
+#[tokio::test]
+async fn a_todo_without_op_lists_the_ops_it_takes() {
+    let (_d, c) = ctx();
+    let err = tools::todo::TodoTool
+        .execute(json!({}), &c)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("missing field `op`"), "{err}");
+    assert!(err.contains("`set`"), "{err}");
+    assert!(err.contains("`show`"), "{err}");
+}
