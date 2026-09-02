@@ -43,6 +43,22 @@ struct State {
 /// call dozens of tools and each one as its own message would flood it.
 const TOOL_INTERVAL: Duration = Duration::from_secs(5);
 
+/// The byte budget for one outbound message. The protocol documents no limit
+/// and the reference implementation never splits, so this is a floor we chose,
+/// not a ceiling anyone published. Bytes rather than characters: nothing says
+/// whether the server counts UTF-8 bytes or UTF-16 units, and for the CJK an
+/// answer is likely to contain, bytes are the smaller of the two budgets.
+const MESSAGE_LIMIT: usize = 2000;
+
+/// Room held back for the `(n/m)` marker so a piece plus its marker still fits
+/// the budget. Ten bytes at three digits a side, rounded up.
+const MARKER_RESERVE: usize = 12;
+
+/// The pause between pieces of one split message. The terms of use let the
+/// server rate-limit, and a burst is what a rate limiter watches for; at this
+/// length the reader cannot tell.
+const PIECE_INTERVAL: Duration = Duration::from_millis(500);
+
 /// What `/wechat` alone reports when the bridge is idle.
 pub const OFF_MESSAGE: &str = "wechat: off — /wechat on to connect";
 
@@ -72,6 +88,13 @@ pub struct Bridge {
     typing_on: bool,
     /// Orders the indicator's on/off sends and caches the per-peer ticket.
     typing: Arc<Mutex<Typing>>,
+    /// The outbound task last spawned. The next one awaits it, so a split
+    /// answer's tail cannot be overtaken by the next turn's first notice.
+    last_send: Option<JoinHandle<()>>,
+    /// Stops the chain above. A single send was over before `off` could
+    /// matter; a split one runs for seconds, and until this the phone kept
+    /// receiving pieces after the bridge had reported itself stopped.
+    outbound: CancellationToken,
 }
 
 impl Bridge {
@@ -95,6 +118,8 @@ impl Bridge {
             last_tool: None,
             typing_on: false,
             typing: Arc::new(Mutex::new(Typing::default())),
+            last_send: None,
+            outbound: CancellationToken::new(),
         }
     }
 
@@ -141,6 +166,10 @@ impl Bridge {
             abort.cancel();
         }
         self.task = None;
+        self.outbound.cancel();
+        self.outbound = CancellationToken::new();
+        self.last_send = None;
+        self.typing_on = false;
         self.out.clear();
         self.flushed = false;
         vec!["wechat bridge stopped — /wechat on to reconnect".into()]
@@ -156,11 +185,11 @@ impl Bridge {
                 self.typing(true).await;
             }
             Event::TextDelta(text) => self.out.push_str(text),
-            Event::ToolStart { name, .. } => {
+            Event::ToolStart { name, args, .. } => {
                 let now = Instant::now();
                 if self.last_tool.is_none_or(|t| now.duration_since(t) >= TOOL_INTERVAL) {
                     self.last_tool = Some(now);
-                    self.send_line(&format!("⚙ {name}")).await;
+                    self.send_line(&tool_line(name, args)).await;
                 }
             }
             Event::ToolEnd {
@@ -224,6 +253,11 @@ impl Bridge {
     /// local terminal rather than vanishing: the terms of use allow the
     /// server to rate-limit or block, and that has to be visible here.
     async fn send_line(&mut self, text: &str) {
+        // The surface calls `observe` whether or not the bridge is on, and
+        // `off` keeps the credentials, so an ended bridge would keep sending.
+        if !self.alive() {
+            return;
+        }
         let (token, peer, context_token) = {
             let s = self.state.lock().await;
             (s.token.clone(), s.peer.clone(), s.context_token.clone())
@@ -234,14 +268,37 @@ impl Bridge {
         let context_token = context_token.unwrap_or_default();
         let client = self.client_for().await;
         let tx = self.tx.clone();
-        let text = text.to_string();
-        tokio::spawn(async move {
-            if let Err(e) = client.send_text(&token, &peer, &context_token, &text).await {
-                let _ = tx.send(Inbound::Notice(format!(
-                    "wechat send failed: {e:#} — the phone may not have messaged this bot yet"
-                )));
+        let pieces = split(text, MESSAGE_LIMIT);
+        let previous = self.last_send.take();
+        let stop = self.outbound.clone();
+        let handle = tokio::spawn(async move {
+            if let Some(previous) = previous {
+                let _ = previous.await;
+            }
+            let total = pieces.len();
+            for (i, piece) in pieces.into_iter().enumerate() {
+                if stop.is_cancelled() {
+                    break;
+                }
+                if i > 0 {
+                    tokio::select! {
+                        () = tokio::time::sleep(PIECE_INTERVAL) => {}
+                        () = stop.cancelled() => break,
+                    }
+                }
+                // A later piece without the ones before it reads as garbage,
+                // so a failed send ends the message rather than skipping a hole.
+                if let Err(e) = client.send_text(&token, &peer, &context_token, &piece).await {
+                    let part =
+                        if total > 1 { format!(" (piece {}/{total})", i + 1) } else { String::new() };
+                    let _ = tx.send(Inbound::Notice(format!(
+                        "wechat send failed{part}: {e:#} — the phone may not have messaged this bot yet"
+                    )));
+                    break;
+                }
             }
         });
+        self.last_send = Some(handle);
     }
 
     /// The client for the base the session currently talks to. A redirected
@@ -267,7 +324,7 @@ impl Bridge {
     /// send can never stall the surface. Best effort: no ticket, no effect;
     /// a failed send only leaves the local mark stale.
     async fn typing(&mut self, on: bool) {
-        if self.typing_on == on {
+        if !self.alive() || self.typing_on == on {
             return;
         }
         self.typing_on = on;
@@ -518,6 +575,78 @@ fn backoff(failures: &mut u32) -> Duration {
     }
 }
 
+/// The one-line tool notice the phone gets, same shape as the TUI's own
+/// `describe`: the name plus the argument the summary picked out. Empty args
+/// collapse to the bare name so the line never ends on a stray space.
+fn tool_line(name: &str, args: &serde_json::Value) -> String {
+    match crate::render::summarize(args) {
+        summary if summary.is_empty() => format!("⚙ {name}"),
+        summary => format!("⚙ {name} {summary}"),
+    }
+}
+
+/// Cut an outbound message into pieces that each fit `limit` bytes. One that
+/// already fits comes back whole and unmarked; anything longer is marked
+/// `(n/m)`, so a reader on the phone can tell a message still arriving from one
+/// that ended — a send the server blocks reports on the local terminal only,
+/// and the phone would otherwise see a truncated answer as the whole answer.
+fn split(text: &str, limit: usize) -> Vec<String> {
+    // Against the real limit, not the loop's smaller budget: text that fits
+    // unmarked should go out unmarked rather than become two marked pieces.
+    if text.len() <= limit {
+        return vec![text.to_string()];
+    }
+    let budget = limit.saturating_sub(MARKER_RESERVE).max(1);
+    let mut pieces = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        if rest.len() <= budget {
+            pieces.push(rest.to_string());
+            break;
+        }
+        let (cut, skip) = boundary(rest, budget);
+        pieces.push(rest[..cut].to_string());
+        rest = &rest[cut + skip..];
+    }
+    let total = pieces.len();
+    if total > 1 {
+        for (i, piece) in pieces.iter_mut().enumerate() {
+            piece.insert_str(0, &format!("({}/{total}) ", i + 1));
+        }
+    }
+    pieces
+}
+
+/// Where to end a piece that overflows `budget`, and how many separator bytes
+/// to drop after it: the last paragraph break within reach, else the last line
+/// break, else the last space, else the last character boundary. A hard cut
+/// drops nothing — indentation inside a code block is content, and the halves
+/// have to rejoin exactly. A boundary in the first half of the budget is worse
+/// than no boundary at all: taking it doubles the number of messages.
+///
+/// The cut is never zero: a budget shorter than the first character would
+/// otherwise leave the caller's loop exactly where it started, forever.
+fn boundary(rest: &str, budget: usize) -> (usize, usize) {
+    let first = rest.chars().next().map_or(1, char::len_utf8);
+    let mut end = budget.max(first);
+    while end > first && !rest.is_char_boundary(end) {
+        end -= 1;
+    }
+    let head = &rest[..end];
+    for sep in ["\n\n", "\n", " "] {
+        let Some(i) = head.rfind(sep).filter(|&i| i > end / 2) else {
+            continue;
+        };
+        let skip = if sep == " " {
+            1
+        } else {
+            rest[i..].bytes().take_while(|b| matches!(b, b'\n' | b'\r')).count()
+        };
+        return (i, skip);
+    }
+    (end, 0)
+}
+
 fn state_path() -> Option<PathBuf> {
     tools::state::dir().map(|d| d.join("wechat.json"))
 }
@@ -566,5 +695,69 @@ mod tests {
             assert!(matches!(stop.trim(), "/stop" | "/esc"));
         }
         assert!(!matches!("stop the run".trim(), "/stop" | "/esc"));
+    }
+
+    #[test]
+    fn a_message_within_the_budget_goes_out_whole_and_unmarked() {
+        let text = "short enough";
+        assert_eq!(split(text, 100), vec![text.to_string()]);
+    }
+
+    #[test]
+    fn a_long_message_breaks_at_paragraphs_and_carries_its_count() {
+        let para = "x".repeat(60);
+        let text = format!("{para}\n\n{para}\n\n{para}");
+        let pieces = split(&text, 100);
+        assert_eq!(pieces.len(), 3);
+        for (i, piece) in pieces.iter().enumerate() {
+            assert!(piece.starts_with(&format!("({}/3) ", i + 1)), "{piece}");
+            assert!(piece.len() <= 100, "{} bytes", piece.len());
+            assert!(piece.ends_with('x'), "the break ate content: {piece}");
+        }
+    }
+
+    #[test]
+    fn a_run_with_no_boundary_is_cut_on_a_character_and_rejoins_exactly() {
+        let text = "中".repeat(200);
+        let pieces = split(&text, 100);
+        assert!(pieces.len() > 1);
+        let rejoined: String = pieces
+            .iter()
+            .map(|p| p.split_once(") ").expect("marker").1)
+            .collect();
+        assert_eq!(rejoined, text);
+    }
+
+    #[test]
+    fn a_hard_cut_keeps_the_indentation_it_lands_on() {
+        let text = format!("{}\n    indented tail", "x".repeat(120));
+        let pieces = split(&text, 60);
+        let tail = pieces.last().expect("a piece");
+        assert!(tail.ends_with("    indented tail"), "{tail}");
+    }
+
+    #[test]
+    fn a_budget_shorter_than_one_character_still_advances() {
+        let pieces = split("中文中文", 1);
+        assert_eq!(pieces.len(), 4);
+    }
+
+    #[test]
+    fn a_boundary_too_early_in_the_budget_is_not_worth_taking() {
+        // The only newline sits at byte 5; cutting there would send a
+        // five-byte message and leave the rest just as long as before.
+        let text = format!("head\n{}", "x".repeat(200));
+        let pieces = split(&text, 100);
+        assert!(pieces[0].len() > 50, "{}", pieces[0]);
+    }
+
+    #[test]
+    fn a_tool_line_carries_the_summarized_argument() {
+        let args = serde_json::json!({ "path": "crates/cli/src/wechat.rs" });
+        assert_eq!(
+            tool_line("edit", &args),
+            "⚙ edit crates/cli/src/wechat.rs"
+        );
+        assert_eq!(tool_line("read", &serde_json::json!({})), "⚙ read");
     }
 }
