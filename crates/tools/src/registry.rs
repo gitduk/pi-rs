@@ -31,7 +31,6 @@ impl Registry {
             .with(crate::edit::Edit)
             .with(crate::grep::Grep)
             .with(crate::glob::Glob)
-            .with(crate::todo::TodoTool)
             .with(crate::bash::Bash)
     }
 

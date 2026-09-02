@@ -86,7 +86,6 @@ const BUILTIN: &[Command] = &[
         "[focus]",
         "summarize everything but what you are working on now",
     ),
-    Command::builtin("/todo", "", "show the current plan"),
     Command::builtin("/cost", "", "what this session has spent so far"),
     Command::builtin(
         "/reload",
@@ -744,9 +743,6 @@ impl Repl {
         if removed == 0 {
             return Ok(Rewound::Nothing);
         }
-        // The rollback dropped the session's plan for describing work this
-        // rewind undid; the live copy would be recorded straight back over it.
-        self.lane_mut().ctx.set_todos(Vec::new());
         self.save()?;
         Ok(match unsent {
             Some(text) => Rewound::Unsent(text),
@@ -806,7 +802,6 @@ fn carries_reasoning(session: &agent::session::Session) -> bool {
 pub enum Cmd {
     Exit,
     Help,
-    Todo,
     Cost,
     New,
     Keys,
@@ -869,7 +864,7 @@ impl Cmd {
         match self {
             // Answered from the config, the key map or the surface's own
             // totals — none of which the run is holding.
-            Cmd::Help | Cmd::Keys | Cmd::Log | Cmd::Cost | Cmd::Todo | Cmd::Name(_) => Fate::Now,
+            Cmd::Help | Cmd::Keys | Cmd::Log | Cmd::Cost | Cmd::Name(_) => Fate::Now,
             // Both write through `Arc::make_mut`, so the run in flight keeps
             // the agent it started on and the next one picks up the change.
             Cmd::Reload | Cmd::Model(_) => Fate::Now,
@@ -995,7 +990,6 @@ pub fn parse(line: &str) -> Option<Cmd> {
     Some(match word {
         "/exit" | "/quit" => Cmd::Exit,
         "/help" => Cmd::Help,
-        "/todo" => Cmd::Todo,
         "/cost" => Cmd::Cost,
         "/new" => Cmd::New,
         "/resume" => Cmd::Resume(rest(line)),
@@ -1109,9 +1103,6 @@ impl Repl {
                 Some(p) => format!("{}", p.display()),
                 None => "not recording — --log is off, or the file would not open".into(),
             }),
-            // The live copy, not the session's: mid-run the session is away
-            // with the turn, and this is the list the tool is writing anyway.
-            Cmd::Todo => lines(tools::todo::render(&self.lane_mut().ctx.todos())),
             Cmd::Cost => lines(crate::render::spent(&totals.usage, totals.cost)),
             Cmd::New => Step::Swap(self.fresh_session("started")),
             Cmd::Resume(name) => {
@@ -1262,7 +1253,6 @@ impl Repl {
         // is what `/name` exists to prevent.
         self.lane_mut().name = None;
         self.becomes(crate::session::new_id(), crate::session::now());
-        self.lane_mut().ctx.set_todos(Vec::new());
         vec![format!("{said} {}", self.lane_mut().id)]
     }
 
@@ -1272,8 +1262,6 @@ impl Repl {
         let (id, name, created) = (stored.id.clone(), stored.name.clone(), stored.created);
         let session = stored.into_session();
         self.lane_mut().name = name;
-        // Left as it was, the live copy would overwrite the plan just restored.
-        self.lane_mut().ctx.set_todos(session.todos().to_vec());
         self.lane_mut().session = Some(session);
         self.becomes(id, created);
         let mut said = vec![format!("resumed {}", self.lane_mut().id)];
@@ -1387,8 +1375,7 @@ impl Repl {
             events,
             inbox,
             pending: Vec::new(),
-            run: None,
-            ended: None,
+            turn: crate::lane::Turn::Idle,
         });
         self.current = self.lanes.len() - 1;
         // A skill can belong to one tree and not another, so what a slash
@@ -1702,10 +1689,10 @@ mod tests {
         };
         let name = of("/nam");
         assert_eq!((name.line.as_str(), name.more), ("/name", true));
-        // Nothing follows /todo, so the caret should not be pushed past a space
+        // Nothing follows /cost, so the caret should not be pushed past a space
         // the user then has to delete.
-        let todo = of("/tod");
-        assert_eq!((todo.line.as_str(), todo.more), ("/todo", false));
+        let cost = of("/cos");
+        assert_eq!((cost.line.as_str(), cost.more), ("/cost", false));
     }
 
     #[test]
@@ -1974,7 +1961,6 @@ mod tests {
     fn slash_words_are_commands_and_prose_is_not() {
         assert_eq!(parse("/exit"), Some(Cmd::Exit));
         assert_eq!(parse("/quit"), Some(Cmd::Exit));
-        assert_eq!(parse("/todo"), Some(Cmd::Todo));
         assert_eq!(parse("fix the bug"), None);
         assert_eq!(parse(""), None);
     }
@@ -2020,7 +2006,6 @@ mod tests {
 
     #[test]
     fn trailing_words_do_not_break_a_command() {
-        assert_eq!(parse("/todo please"), Some(Cmd::Todo));
     }
 
     #[test]

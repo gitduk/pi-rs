@@ -30,7 +30,7 @@ use crate::journal;
 use crate::keys::{Action, Keys, Press};
 use crate::render::Style as ThemeStyle;
 use crate::render::{self, Markdown, Paint};
-use crate::lane::{Ended, Running};
+use crate::lane::Turn;
 use crate::repl::{self, Candidate, Choice, Command, Fate, Repl, Rewound, Step};
 use crate::session::ResumeChoice;
 use editor::Editor;
@@ -1587,16 +1587,16 @@ fn land_handled(ui: &mut Ui, core: &Repl, lines: Vec<String>) {
 // to the loop's own dispatch, so a command takes the same path whether or not
 // a run is under way — and a `/worktree` that opens a lane is landed by the
 // same code that lands it from an idle prompt.
-fn admit(ui: &mut Ui, line: String) -> Option<String> {
+fn admit(ui: &mut Ui, line: String) -> Wake {
     match crate::repl::fate_of(&line) {
-        Fate::Now => Some(line),
+        Fate::Now => Wake::Line(line),
         Fate::Queued => {
             ui.view.queued.push(line);
-            None
+            Wake::Nothing
         }
         Fate::Refused(why) => {
             ui.say(why.to_string());
-            None
+            Wake::Nothing
         }
     }
 }
@@ -1606,11 +1606,24 @@ fn admit(ui: &mut Ui, line: String) -> Option<String> {
 /// The transcript comes home this way rather than through a `JoinHandle`, so
 /// one channel serves every lane and nothing has to poll a growing list of
 /// them. `session` is None only when the run panicked and took its copy down.
+/// What woke the loop this time round. One value out of the select rather than
+/// a pair of optional locals, so what happened is read in one place.
+enum Wake {
+    /// A line to run — from a key, from the phone, or from the queue a lane
+    /// kept while it was working.
+    Line(String),
+    /// A turn ended and has to be settled, whichever lane it belongs to.
+    Turn(Done),
+    /// Something only the screen cares about.
+    Nothing,
+}
+
 struct Done {
     lane: usize,
-    session: Option<Session>,
-    /// None when the run panicked rather than returned.
-    out: Option<Result<Totals, AgentError>>,
+    /// The transcript back, and how the turn went. None when the run panicked
+    /// and took its copy of the transcript down with it — one field, because
+    /// those two are never separately absent.
+    ran: Option<(Session, Result<Totals, AgentError>)>,
 }
 
 pub struct Tui {
@@ -1731,7 +1744,7 @@ impl Tui {
             self.ui.on_event(event);
         }
         // And the end of it, if it reached one out of sight.
-        if let Some(Ended { out }) = self.core.lane_mut().ended.take() {
+        if let Turn::Ended(out) = std::mem::replace(&mut self.core.lane_mut().turn, Turn::Idle) {
             self.close_run(out);
         }
     }
@@ -1759,18 +1772,52 @@ impl Tui {
                     self.bridge.observe(&event).await;
                     self.ui.on_event(event);
                 } else {
-                    self.core.lanes[at].pending.push(event);
+                    // Deltas arrive thousands at a time and the backlog is
+                    // replayed in one go: a run of them folded into one keeps
+                    // it the size of what was written rather than of how many
+                    // pieces it came in, and the view cannot tell the two apart.
+                    let held = &mut self.core.lanes[at].pending;
+                    let folded = match (held.last_mut(), &event) {
+                        (Some(Event::TextDelta(prev)), Event::TextDelta(next)) => {
+                            prev.push_str(next);
+                            true
+                        }
+                        (Some(Event::ReasoningDelta(prev)), Event::ReasoningDelta(next)) => {
+                            prev.push_str(next);
+                            true
+                        }
+                        _ => false,
+                    };
+                    if !folded {
+                        held.push(event);
+                    }
                 }
             }
         }
     }
 
+    /// Say something about a lane on the screen the user is actually looking
+    /// at. A lane that is not in front names itself first, or the notice reads
+    /// as news about whichever tree happens to be up.
+    fn say_of(&mut self, lane: usize, what: String) {
+        let text = if lane == self.core.current {
+            what
+        } else {
+            let whose = self.core.lanes[lane]
+                .worktree
+                .as_deref()
+                .unwrap_or("the main checkout");
+            format!("{whose}: {what}")
+        };
+        self.ui.say(text);
+    }
+
     /// Stop the run in front, if there is one. `unsend` also takes the prompt
     /// back once it has stopped.
     fn stop_current(&mut self, unsend: bool) {
-        if let Some(run) = &mut self.core.lane_mut().run {
-            run.cancel.cancel();
-            run.unsend = unsend;
+        if let Turn::Running { cancel, unsend: take_back } = &mut self.core.lane_mut().turn {
+            cancel.cancel();
+            *take_back = unsend;
             self.ui.view.stopping = true;
         }
     }
@@ -1785,39 +1832,37 @@ impl Tui {
         // handle per lane: the loop waits on it like any other source.
         let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel::<Done>();
         let mut tick = tokio::time::interval(crate::status::SPIN);
+        // The branch is off while nothing runs, so the interval falls behind
+        // the clock; bursting to catch up would spin the loop the moment a run
+        // starts. One late tick, then the ordinary cadence.
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             self.serve_lanes().await;
             self.ui.flush();
             let running = self.core.lane().is_running();
             let anywhere = self.core.lanes.iter().any(|lane| lane.is_running());
-            // Settled after the select rather than inside it: settling needs
-            // all of `self`, and the other sources are still borrowed there.
-            let mut ended: Option<Done> = None;
             // A queued line waits for the lane it was typed at to come free.
-            let line = if self.ui.view.queued.is_empty() || running {
+            let woke = if self.ui.view.queued.is_empty() || running {
                 tokio::select! {
-                    Some(done) = done_rx.recv() => {
-                        ended = Some(done);
-                        None
-                    }
+                    Some(done) = done_rx.recv() => Wake::Turn(done),
                     // Only while something is running: an idle loop waking ten
                     // times a second is a spinner with nothing to spin.
                     _ = tick.tick(), if anywhere => {
                         self.ui.spinner += 1;
-                        None
+                        Wake::Nothing
                     }
                     key = self.keys.recv() => match key {
                         Some(key) => match self.ui.key(key, running) {
                             Act::Submit(line) if running => admit(&mut self.ui, line),
-                            Act::Submit(line) => Some(line),
+                            Act::Submit(line) => Wake::Line(line),
                             Act::Quit => break,
                             Act::OpenRewind => {
                                 self.open_rewind();
-                                None
+                                Wake::Nothing
                             }
                             Act::Rewind(id) => {
                                 self.rewind_turn(id);
-                                None
+                                Wake::Nothing
                             }
                             Act::CommitSetting(path, value) => {
                                 match self.core.commit_file(&path, &value) {
@@ -1838,7 +1883,7 @@ impl Tui {
                                         }
                                     }
                                 }
-                                None
+                                Wake::Nothing
                             }
                             Act::NewSession => {
                                 let Step::Swap(said) = self.core.command("/new", &self.totals)
@@ -1846,51 +1891,54 @@ impl Tui {
                                     unreachable!("ctrl+l twice reaches the /new branch");
                                 };
                                 self.land_swap(said);
-                                None
+                                Wake::Nothing
                             }
                             // Only the lane in front: esc is a reflex, and a
                             // reflex must not reach what is out of sight.
                             Act::Interrupt => {
                                 self.stop_current(false);
-                                None
+                                Wake::Nothing
                             }
                             Act::Unsend => {
                                 self.stop_current(true);
-                                None
+                                Wake::Nothing
                             }
-                            Act::None => None,
+                            Act::None => Wake::Nothing,
                         },
                         None => break,
                     },
                     msg = self.bridge.rx.recv() => match msg {
                         Some(crate::wechat::Inbound::Text { text }) => {
                             // The phone types at the lane in front, like a hand.
-                            if running { admit(&mut self.ui, text) } else { Some(text) }
+                            if running { admit(&mut self.ui, text) } else { Wake::Line(text) }
                         }
                         Some(crate::wechat::Inbound::Stop) => {
                             self.ui.say("nothing running to stop");
-                            None
+                            Wake::Nothing
                         }
                         Some(crate::wechat::Inbound::Notice(text)) => {
                             self.ui.say(text);
-                            None
+                            Wake::Nothing
                         }
-                        None => None,
+                        None => Wake::Nothing,
                     },
                 }
             } else {
                 // One at a time. Joined, a command and a prompt become one
                 // line, and `parse` reads only its first word — so whichever
                 // came first decided what both of them were.
-                Some(self.ui.view.queued.remove(0))
+                Wake::Line(self.ui.view.queued.remove(0))
             };
-            // Out here, where all of `self` is free again: settling puts a
-            // transcript back, saves it and may draw the end of the run.
-            if let Some(done) = ended {
-                self.settle(done).await;
-                continue;
-            }
-            let Some(line) = line else { continue; };
+            // Out here, where all of `self` is free again: settling needs all
+            // of it, and inside the select the other sources are still borrowed.
+            let line = match woke {
+                Wake::Turn(done) => {
+                    self.settle(done).await;
+                    continue;
+                }
+                Wake::Nothing => continue,
+                Wake::Line(line) => line,
+            };
             self.ui.submit(&line);
             // A fresh turn starts at the newest row: a view scrolled up to
             // read would otherwise stream the run's output out of sight.
@@ -2143,23 +2191,15 @@ impl Tui {
             let out = std::panic::AssertUnwindSafe(agent.run(&mut carried, &ctx, &sent))
                 .catch_unwind()
                 .await;
-            let _ = match out {
-                Ok(out) => done.send(Done {
-                    lane,
-                    session: Some(carried),
-                    out: Some(out),
-                }),
-                Err(_) => done.send(Done {
-                    lane,
-                    session: None,
-                    out: None,
-                }),
-            };
+            let _ = done.send(Done {
+                lane,
+                ran: out.ok().map(|out| (carried, out)),
+            });
         });
-        self.core.lane_mut().run = Some(Running {
+        self.core.lane_mut().turn = Turn::Running {
             cancel,
             unsend: false,
-        });
+        };
     }
 
     /// A turn has ended. Put the transcript back and save it, whichever lane it
@@ -2168,37 +2208,35 @@ impl Tui {
     /// The saving cannot wait — a lane the user never returns to still has to
     /// have its work on disk — but nothing about drawing it does.
     async fn settle(&mut self, done: Done) {
-        let Done { lane, session, out } = done;
-        let unsend = self
-            .core
-            .lanes
-            .get_mut(lane)
-            .and_then(|l| l.run.take())
-            .is_some_and(|r| r.unsend);
+        let Done { lane, ran } = done;
+        let unsend = match self.core.lanes.get_mut(lane) {
+            Some(held) => match std::mem::replace(&mut held.turn, Turn::Idle) {
+                Turn::Running { unsend, .. } => unsend,
+                _ => false,
+            },
+            None => false,
+        };
 
         // The task carried the whole transcript, not just this turn, and a
         // panic in it dropped that copy. The archive is the last good one;
         // carrying the empty stand-in forward would save it over the real one
         // at the end of the next turn, which loses the conversation rather
         // than the turn.
-        let recovered = match session {
-            Some(session) => {
-                let held = &mut self.core.lanes[lane];
-                held.ctx.set_todos(session.todos().to_vec());
-                held.session = Some(session);
-                true
+        let (recovered, out) = match ran {
+            Some((session, out)) => {
+                self.core.lanes[lane].session = Some(session);
+                (true, out)
             }
             None => {
                 let id = self.core.lanes[lane].id.clone();
                 match self.core.store.load(&id) {
                     Ok(stored) => {
-                        let session = stored.into_session();
-                        let held = &mut self.core.lanes[lane];
-                        held.ctx.set_todos(session.todos().to_vec());
-                        held.session = Some(session);
-                        self.ui
-                            .say("the run did not finish — back to the transcript as last saved");
-                        true
+                        self.core.lanes[lane].session = Some(stored.into_session());
+                        self.say_of(
+                            lane,
+                            "the run did not finish — back to the transcript as last saved".into(),
+                        );
+                        (true, Err(AgentError::Cancelled))
                     }
                     // Nothing to go back to and nothing safe to write: what a
                     // panic in the run did before it had a task to happen in.
@@ -2217,14 +2255,12 @@ impl Tui {
         if recovered
             && let Err(e) = self.core.save_lane(lane)
         {
-            self.ui
-                .say(format!("warning: the transcript was not saved: {e}"));
+            self.say_of(lane, format!("warning: the transcript was not saved: {e}"));
         }
         // The save put the session on disk, the one `/resume` is likeliest to
         // want back; make the completion list see it.
         self.refresh_sessions();
 
-        let out = out.unwrap_or(Err(AgentError::Cancelled));
         let cancelled = matches!(&out, Err(AgentError::Cancelled));
         if lane == self.core.current {
             self.bridge.finish_turn(cancelled).await;
@@ -2236,7 +2272,7 @@ impl Tui {
         // Out of sight: what the run left to draw waits with it, and the lane
         // says so in the bar until someone looks.
         if lane != self.core.current {
-            self.core.lanes[lane].ended = Some(Ended { out });
+            self.core.lanes[lane].turn = Turn::Ended(out);
             return;
         }
         self.close_run(out);
@@ -2287,7 +2323,7 @@ mod tests {
         assert!(secret_settings_set("/settings set models.flash.api_key x"));
         assert!(!secret_settings_set("/settings set models.flash.context_window 1000"));
         assert!(!secret_settings_set("/settings get api_key"));
-        assert!(!secret_settings_set("/todo show"));
+        assert!(!secret_settings_set("/cost"));
     }
     /// Both scrollback producers draw block ids from one counter. They used
     /// not to: a rebuilt block was always `0`, which held only while nothing

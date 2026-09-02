@@ -7,24 +7,27 @@ use tokio_util::sync::CancellationToken;
 
 use tools::Ctx;
 
-/// How a turn ended, kept until the screen is looking at this lane and can
-/// show it. A lane that finished out of sight has news, not a redraw.
-pub struct Ended {
-    pub out: Result<Totals, agent::AgentError>,
+/// Where this lane's turn stands.
+///
+/// One value rather than a flag beside an outcome: a lane is idle, or running,
+/// or holding the end of a run nobody has seen — never two of those, and the
+/// compiler is what should say so.
+pub enum Turn {
+    /// Nothing running, nothing waiting to be looked at.
+    Idle,
+    /// A run under way.
+    Running {
+        /// What `esc` cancels, and only for the lane in front.
+        cancel: CancellationToken,
+        /// Esc caught the prompt on its way out: stop the run, then unsend it.
+        /// Set while the run works, acted on when it ends.
+        unsend: bool,
+    },
+    /// A run that ended while this lane was out of sight, kept until the screen
+    /// is looking at it and can show how it went.
+    Ended(Result<Totals, agent::AgentError>),
 }
 
-/// A turn under way in one lane.
-pub struct Running {
-    /// What `esc` cancels, and only for the lane in front.
-    pub cancel: CancellationToken,
-    /// Esc caught the prompt on its way out: stop the run, then unsend it.
-    /// Set while the run works, acted on when it ends.
-    pub unsend: bool,
-}
-
-/// One checkout being worked in: the conversation, what it runs against, and
-/// where it lands. Everything here is decided by the workspace root, so two
-/// trees hold two of these and share nothing but the fields on `Repl`.
 pub struct Lane {
     /// Shared so a run can take it with it: `Agent::run` needs only `&self`,
     /// and a turn outlives the borrow the surface could lend it. `/model` and
@@ -60,10 +63,8 @@ pub struct Lane {
     /// What arrived while nobody was looking, in order, waiting to be replayed
     /// into the view the moment this lane comes back to the front.
     pub pending: Vec<Event>,
-    /// The turn under way, if there is one.
-    pub run: Option<Running>,
-    /// A turn that ended out of sight, waiting to be shown.
-    pub ended: Option<Ended>,
+    /// Where this lane's turn stands.
+    pub turn: Turn,
 }
 
 impl Lane {
@@ -75,6 +76,6 @@ impl Lane {
 
     /// Whether a run has this lane's transcript right now.
     pub fn is_running(&self) -> bool {
-        self.run.is_some()
+        matches!(self.turn, Turn::Running { .. })
     }
 }

@@ -35,7 +35,6 @@ mod rows;
 pub mod skill;
 pub mod skills;
 pub mod spill;
-pub mod todo;
 pub mod walk;
 pub mod workspace;
 pub mod write;
@@ -198,9 +197,6 @@ impl ToolOutput {
 pub struct Ctx {
     pub workspace: Workspace,
     pub cancel: tokio_util::sync::CancellationToken,
-    /// The agent's plan. Shared so the tool can write it and the loop can record
-    /// it into the session, without the tool knowing a session exists.
-    pub todos: std::sync::Arc<std::sync::Mutex<Vec<todo::Todo>>>,
     /// One lock per file. Tools in the same turn run concurrently, and two
     /// writers to one path otherwise read the same bytes, both succeed, and
     /// one change vanishes without anyone being told.
@@ -228,7 +224,6 @@ impl Ctx {
         Self {
             workspace,
             cancel: tokio_util::sync::CancellationToken::new(),
-            todos: Default::default(),
             file_locks: Default::default(),
             file_shifts: Default::default(),
             session: None,
@@ -288,20 +283,6 @@ impl Ctx {
     /// only locators of the shape our own writer mints are accepted.
     pub fn spill_path(&self, locator: &str) -> Result<std::path::PathBuf, ToolError> {
         spill::locate(&self.spill_root, locator)
-    }
-
-    /// The plan as it stands right now, rather than as the running session last
-    /// recorded it. Named like `Session::todos`, which is the same list later.
-    pub fn todos(&self) -> Vec<todo::Todo> {
-        self.todos.lock().map(|held| held.clone()).unwrap_or_default()
-    }
-
-    /// Replace the plan the todo tool reads and writes. The loop records this
-    /// copy back into the running session, over whatever that session held.
-    pub fn set_todos(&self, items: Vec<todo::Todo>) {
-        if let Ok(mut held) = self.todos.lock() {
-            *held = items;
-        }
     }
 
     /// Record that an edit renumbered `path` from `from` on. Kept at the lowest

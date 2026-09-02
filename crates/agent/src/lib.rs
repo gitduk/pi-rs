@@ -160,11 +160,6 @@ impl Agent {
         // naming it is the only thing that stops one.
         let mut failures: Failures = Failures::new();
 
-        // A resumed session brings its plan back; the tool sees it as the list
-        // it left behind rather than an empty one.
-        if let Ok(mut held) = ctx.todos.lock() {
-            *held = session.todos().to_vec();
-        }
 
         // Our token estimate is a bound, not a measurement. When the provider
         // says otherwise, this is what carries the correction forward.
@@ -344,19 +339,9 @@ impl Agent {
                 .instrument(span.clone())
                 .await?;
             session.push_previewed(results);
-            self.record_todos(session, ctx);
         }
 
         unreachable!("an unlimited run can only leave by returning inside the loop")
-    }
-
-    /// Fold a plan the todo tool wrote into the session, so it survives a
-    /// resume and `mark` has the list its numbers refer to.
-    fn record_todos(&self, session: &mut Session, ctx: &Ctx) {
-        let Ok(held) = ctx.todos.lock() else {
-            return;
-        };
-        session.set_todos(held.clone());
     }
 
     /// Shrink the transcript to `budget` if it is over, recording what went,
