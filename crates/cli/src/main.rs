@@ -549,22 +549,24 @@ async fn main() -> Result<()> {
         // recorded back over it at the end of the first turn.
         ctx.set_todos(carried.todos().to_vec());
         let core = repl::Repl {
-            agent: ag,
             store,
-            session: carried,
-            id,
-            created,
-            name,
             keys: key_map.clone(),
             config: config.clone(),
             args: args.clone(),
             commands: std::sync::Arc::new(resolved.commands),
-            context: resolved.context,
             file: config::load_tree(args.config.as_deref())
                 .unwrap_or_else(|_| toml::Value::Table(Default::default())),
             claimed: BTreeMap::new(),
-            worktree: worktree::current(&root),
-            ctx,
+            lane: repl::Lane {
+                agent: ag,
+                session: carried,
+                id,
+                created,
+                name,
+                context: resolved.context,
+                worktree: worktree::current(&root),
+                ctx,
+            },
         };
         // The live region needs the terminal at both ends: keys come in one
         // side and the repaint goes out the other. Missing either, there is

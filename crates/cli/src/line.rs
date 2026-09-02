@@ -49,8 +49,9 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
                 }
             }
             Step::Compact(focus) => match core
+                .lane
                 .agent
-                .compact_now(&mut core.session, focus.as_deref())
+                .compact_now(&mut core.lane.session, focus.as_deref())
                 .await
             {
                 Some((report, spent)) => {
@@ -61,8 +62,11 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
                     }
                 }
                 None => {
-                    let held = core.agent.kept_tokens().unwrap_or(0);
-                    let now = brain::estimate::tokens(&core.session.context(), &core.agent.spec);
+                    let held = core.lane.agent.kept_tokens().unwrap_or(0);
+                    let now = brain::estimate::tokens(
+                        &core.lane.session.context(),
+                        &core.lane.agent.spec,
+                    );
                     println!(
                         "nothing to compact — {now} tokens, all inside the {held} kept as working context"
                     );
@@ -86,9 +90,9 @@ async fn turn(
     typed: Option<String>,
     tx: &UnboundedSender<Event>,
 ) -> Totals {
-    core.session.send_prompt(prompt, typed);
-    let ctx = core.ctx.clone().with_cancel(agent::cancel_on_interrupt());
-    let out = core.agent.run(&mut core.session, &ctx, tx).await;
+    core.lane.session.send_prompt(prompt, typed);
+    let ctx = core.lane.ctx.clone().with_cancel(agent::cancel_on_interrupt());
+    let out = core.lane.agent.run(&mut core.lane.session, &ctx, tx).await;
 
     // Saved either way: an interrupted turn is exactly the one worth keeping.
     if let Err(e) = core.save() {

@@ -334,9 +334,11 @@ const RESUME_WIDTH: usize = 60;
 ///
 /// Both surfaces hold one of these and differ only in how they read a line and
 /// where they put what comes back.
-pub struct Repl {
+/// One checkout being worked in: the conversation, what it runs against, and
+/// where it lands. Everything here is decided by the workspace root, so two
+/// trees hold two of these and share nothing but the fields on `Repl`.
+pub struct Lane {
     pub agent: Agent,
-    pub store: Store,
     pub session: Session,
     pub id: String,
     /// When this session began. Held rather than read back: it is set once and
@@ -345,6 +347,19 @@ pub struct Repl {
     pub created: u64,
     /// What the user calls this session, if anything.
     pub name: Option<String>,
+    /// The instruction files this run stands on, named as a person would.
+    /// Shown under the banner; rebuilt by `/reload` like everything else the
+    /// config decides.
+    pub context: Vec<String>,
+    /// Carried across turns: the plan and the file locks outlive any one run.
+    pub ctx: Ctx,
+    /// Which worktree the session is in, or None in the repository's own
+    /// checkout. Held so the status line can say where the work is landing.
+    pub worktree: Option<String>,
+}
+
+pub struct Repl {
+    pub store: Store,
     /// Held so `/keys` can show what is actually in force, overrides included.
     pub keys: std::sync::Arc<crate::keys::Keys>,
     /// The config in force, as opposed to the one on disk. `/model` picks from
@@ -353,10 +368,6 @@ pub struct Repl {
     /// The command line, kept because it outranks the config and so has to be
     /// re-applied over every reload.
     pub args: std::sync::Arc<crate::Args>,
-    /// The instruction files this run stands on, named as a person would.
-    /// Shown under the banner; rebuilt by `/reload` like everything else the
-    /// config decides.
-    pub context: Vec<String>,
     /// What a slash answers to, built-ins and skills together. Rebuilt by
     /// `/reload`, because a skill can appear between one turn and the next.
     ///
@@ -370,11 +381,9 @@ pub struct Repl {
     /// What `/settings set` has claimed this run, by path. Replayed over
     /// every reload so the claimed values keep winning over the file.
     pub claimed: BTreeMap<String, toml::Value>,
-    /// Carried across turns: the plan and the file locks outlive any one run.
-    pub ctx: Ctx,
-    /// Which worktree the session is in, or None in the repository's own
-    /// checkout. Held so the status line can say where the work is landing.
-    pub worktree: Option<String>,
+    /// The checkout being worked in. One for now; the surface shows one at a
+    /// time either way.
+    pub lane: Lane,
 }
 
 impl Repl {
@@ -423,7 +432,7 @@ impl Repl {
     ) -> Result<Vec<String>, String> {
         let root = into
             .as_ref()
-            .map_or(self.ctx.workspace.root(), |ws| ws.root())
+            .map_or(self.lane.ctx.workspace.root(), |ws| ws.root())
             .to_path_buf();
         let failed = |e| Err(format!("nothing reloaded — {}", refused("reload", e)));
         let project = match crate::config::load_project(&root) {
@@ -437,13 +446,13 @@ impl Repl {
         // Only here, with everything computed: a workspace whose config or
         // skills will not resolve leaves the session where it already was.
         if let Some(ws) = into {
-            self.ctx.relocate(ws);
+            self.lane.ctx.relocate(ws);
         }
-        self.agent.registry = resolved.registry;
-        self.agent.approver = std::sync::Arc::new(agent::Ceiling(resolved.tier));
-        self.agent.system = resolved.system;
-        self.agent.effort = resolved.effort;
-        self.context = resolved.context;
+        self.lane.agent.registry = resolved.registry;
+        self.lane.agent.approver = std::sync::Arc::new(agent::Ceiling(resolved.tier));
+        self.lane.agent.system = resolved.system;
+        self.lane.agent.effort = resolved.effort;
+        self.lane.context = resolved.context;
         self.keys = std::sync::Arc::new(resolved.keys);
         // A skill can appear between one turn and the next, so the table of
         // what a slash answers to is recomputed like everything else here.
@@ -460,11 +469,11 @@ impl Repl {
         match crate::dial(
             &self.args,
             &self.config,
-            &self.agent.spec.model,
+            &self.lane.agent.spec.model,
             crate::config::Origin::Command,
         ) {
-            Ok(dialled) if dialled.spec != self.agent.spec => {
-                self.agent.retarget(dialled.transport, dialled.spec);
+            Ok(dialled) if dialled.spec != self.lane.agent.spec => {
+                self.lane.agent.retarget(dialled.transport, dialled.spec);
                 notes.extend(
                     dialled
                         .notes
@@ -479,7 +488,7 @@ impl Repl {
             Ok(_) => {}
             Err(e) => notes.push(format!(
                 "`{}` not re-dialled — {}",
-                self.agent.spec.model, e
+                self.lane.agent.spec.model, e
             )),
         }
         tracing::info!(
@@ -487,8 +496,8 @@ impl Repl {
             models = self.config.names().len(),
             rebound_keys = self.config.keys.len(),
             commands = self.commands.len(),
-            effort = ?self.agent.effort,
-            system_bytes = self.agent.system.len(),
+            effort = ?self.lane.agent.effort,
+            system_bytes = self.lane.agent.system.len(),
             "reloaded"
         );
         Ok(notes)
@@ -613,7 +622,7 @@ impl Repl {
         ) {
             Ok(d) => d,
             Err(e) => {
-                let held = self.agent.spec.model.clone();
+                let held = self.lane.agent.spec.model.clone();
                 return vec![format!("still on {held} — {}", refused("switch", e))];
             }
         };
@@ -622,8 +631,8 @@ impl Repl {
         // lands on need not be the same string. Comparing the typed one would
         // re-dial the model already running and then announce a reasoning
         // demotion that never happened.
-        if dialled.spec.model == self.agent.spec.model {
-            return vec![format!("already on {}", self.agent.spec.model)];
+        if dialled.spec.model == self.lane.agent.spec.model {
+            return vec![format!("already on {}", self.lane.agent.spec.model)];
         }
         let mut said: Vec<String> = dialled.warning.into_iter().chain(dialled.notes).collect();
         let spec = &dialled.spec;
@@ -632,24 +641,24 @@ impl Repl {
             spec.model,
             summary(spec.format.name(), spec.context_window, &spec.pricing)
         ));
-        if carries_reasoning(&self.session) {
+        if carries_reasoning(&self.lane.session) {
             said.push(demotion(spec.replay_thinking).into());
         }
         tracing::info!(
             target: "pi::session",
-            from = %self.agent.spec.model,
+            from = %self.lane.agent.spec.model,
             to = %spec.model,
             format = spec.format.name(),
             context_window = spec.context_window,
             "model switched"
         );
-        self.agent.retarget(dialled.transport, dialled.spec);
+        self.lane.agent.retarget(dialled.transport, dialled.spec);
         said
     }
 
     /// What `/model` on its own shows.
     fn listing(&self) -> Vec<String> {
-        let here = &self.agent.spec.model;
+        let here = &self.lane.agent.spec.model;
         let choices = self.choices();
         if choices.is_empty() {
             return vec![
@@ -671,12 +680,12 @@ impl Repl {
     /// exactly the one worth keeping.
     pub fn save(&self) -> anyhow::Result<()> {
         self.store.save(
-            &self.id,
-            self.ctx.workspace.root(),
-            &self.agent.spec.model,
-            self.name.as_deref(),
-            self.created,
-            &self.session,
+            &self.lane.id,
+            self.lane.ctx.workspace.root(),
+            &self.lane.agent.spec.model,
+            self.lane.name.as_deref(),
+            self.lane.created,
+            &self.lane.session,
         )?;
         Ok(())
     }
@@ -688,17 +697,17 @@ impl Repl {
     /// pairing wrong, and a menu row that went stale against the transcript
     /// falls through to removing nothing.
     pub fn rewind_to(&mut self, entry: agent::session::EntryId) -> anyhow::Result<Rewound> {
-        let unsent = self.session.unsent_text(entry);
+        let unsent = self.lane.session.unsent_text(entry);
         let removed = match unsent {
-            Some(_) => self.session.rollback_before(entry),
-            None => self.session.rollback_to(entry),
+            Some(_) => self.lane.session.rollback_before(entry),
+            None => self.lane.session.rollback_to(entry),
         };
         if removed == 0 {
             return Ok(Rewound::Nothing);
         }
         // The rollback dropped the session's plan for describing work this
         // rewind undid; the live copy would be recorded straight back over it.
-        self.ctx.set_todos(Vec::new());
+        self.lane.ctx.set_todos(Vec::new());
         self.save()?;
         Ok(match unsent {
             Some(text) => Rewound::Unsent(text),
@@ -1004,7 +1013,7 @@ impl Repl {
                 Some(p) => format!("{}", p.display()),
                 None => "not recording — --log is off, or the file would not open".into(),
             }),
-            Cmd::Todo => lines(tools::todo::render(self.session.todos())),
+            Cmd::Todo => lines(tools::todo::render(self.lane.session.todos())),
             Cmd::Cost => lines(crate::render::spent(&totals.usage, totals.cost)),
             Cmd::New => Step::Swap(self.fresh_session("started")),
             Cmd::Resume(name) => {
@@ -1019,11 +1028,11 @@ impl Repl {
             }
             Cmd::Name(name) => {
                 if name.is_empty() {
-                    self.name = None;
-                    lines(format!("{} is unnamed again", self.id))
+                    self.lane.name = None;
+                    lines(format!("{} is unnamed again", self.lane.id))
                 } else {
-                    let said = format!("{} is now “{name}”", self.id);
-                    self.name = Some(name);
+                    let said = format!("{} is now “{name}”", self.lane.id);
+                    self.lane.name = Some(name);
                     lines(said)
                 }
             }
@@ -1141,35 +1150,35 @@ impl Repl {
     /// that got missed, and a resumed session was then re-dated on its next
     /// save with the stamp of the session it had just left.
     fn becomes(&mut self, id: String, created: u64) {
-        self.id = id;
-        self.created = created;
-        crate::journal::switched(&self.id);
+        self.lane.id = id;
+        self.lane.created = created;
+        crate::journal::switched(&self.lane.id);
         // Spills are filed under the session id; a session has to own its own
         // namespace or the one before it keeps swallowing them.
-        self.ctx = self.ctx.clone().with_session(&self.id);
+        self.lane.ctx = self.lane.ctx.clone().with_session(&self.lane.id);
     }
 
     fn fresh_session(&mut self, said: &str) -> Vec<String> {
-        self.session = Session::default();
+        self.lane.session = Session::default();
         // A name identifies one session; carried over it would name two, which
         // is what `/name` exists to prevent.
-        self.name = None;
+        self.lane.name = None;
         self.becomes(crate::session::new_id(), crate::session::now());
-        self.ctx.set_todos(Vec::new());
-        vec![format!("{said} {}", self.id)]
+        self.lane.ctx.set_todos(Vec::new());
+        vec![format!("{said} {}", self.lane.id)]
     }
 
     /// Take a stored transcript as the running one — entries, name, id, plan.
     /// Parting with what is being left is the caller's; they differ on when.
     fn adopt_session(&mut self, stored: Stored) -> Vec<String> {
         let (id, name, created) = (stored.id.clone(), stored.name.clone(), stored.created);
-        self.session = stored.into_session();
-        self.name = name;
+        self.lane.session = stored.into_session();
+        self.lane.name = name;
         // Left as it was, the live copy would overwrite the plan just restored.
-        self.ctx.set_todos(self.session.todos().to_vec());
+        self.lane.ctx.set_todos(self.lane.session.todos().to_vec());
         self.becomes(id, created);
-        let mut said = vec![format!("resumed {}", self.id)];
-        if let Some(name) = self.name.as_deref() {
+        let mut said = vec![format!("resumed {}", self.lane.id)];
+        if let Some(name) = self.lane.name.as_deref() {
             said.push(format!("“{name}”"));
         }
         said
@@ -1184,7 +1193,7 @@ impl Repl {
     /// are keyed by absolute path. Coming back therefore resumes what was being
     /// said in that tree, not an empty page.
     fn enter_worktree(&mut self, name: &str) -> Result<Vec<String>, String> {
-        let from = self.ctx.workspace.root().to_path_buf();
+        let from = self.lane.ctx.workspace.root().to_path_buf();
         let (tree, how) = match crate::worktree::enter(&from, name) {
             Ok(found) => found,
             Err(e) => return Err(refused("worktree", e)),
@@ -1203,13 +1212,13 @@ impl Repl {
         }
         // Against the root it belongs to, so before the move, not after.
         // An empty session — nothing said yet — has nothing to keep.
-        if !self.session.is_empty()
+        if !self.lane.session.is_empty()
             && let Err(e) = self.save()
         {
             tracing::warn!(target: "pi::session", error = %e, "the leaving session was not saved");
         }
         let mut said = self.rebuild_into(Some(ws))?;
-        self.worktree = (!tree.main).then(|| tree.name.clone());
+        self.lane.worktree = (!tree.main).then(|| tree.name.clone());
         let on = tree.branch.as_deref().unwrap_or("a detached HEAD");
         said.push(match how {
             crate::worktree::Entered::Created => format!("{} — new, on new branch {on}", tree.name),
@@ -1221,7 +1230,7 @@ impl Repl {
         said.push(tree.path.display().to_string());
         // Asked with the root the next save will file under, so a tree is found
         // by the same key it was stored by.
-        let found = self.store.latest(self.ctx.workspace.root());
+        let found = self.store.latest(self.lane.ctx.workspace.root());
         said.extend(match found {
             Ok(stored) => self.adopt_session(stored),
             Err(e) => {
@@ -1237,7 +1246,7 @@ impl Repl {
     /// The checkouts `/worktree` can move to, the repository's own first, the
     /// one the session is in marked.
     fn worktree_listing(&self) -> Vec<String> {
-        let here = self.ctx.workspace.root();
+        let here = self.lane.ctx.workspace.root();
         let trees = match crate::worktree::list(here) {
             Ok(t) => t,
             Err(e) => return vec![refused("worktree", e)],
@@ -1268,7 +1277,7 @@ impl Repl {
     /// The sessions `/resume` can switch to, newest first, the one running
     /// now marked.
     fn resume_listing(&self) -> Vec<String> {
-        let list = self.store.choices(self.ctx.workspace.root());
+        let list = self.store.choices(self.lane.ctx.workspace.root());
         if list.is_empty() {
             return vec![
                 "no sessions recorded for this workspace".into(),
@@ -1285,7 +1294,7 @@ impl Repl {
                 } else {
                     crate::render::clip(&s.prompt, RESUME_WIDTH)
                 };
-                (s.id == self.id, text, s.created)
+                (s.id == self.lane.id, text, s.created)
             })
             .collect();
         let width = shown
@@ -1318,7 +1327,7 @@ impl Repl {
     fn resume(&mut self, id: &str) -> Result<Vec<String>, String> {
         // The session being left has to survive too, or /resume throws it
         // away. An empty one — just opened, nothing said — has nothing to keep.
-        if !self.session.is_empty()
+        if !self.lane.session.is_empty()
             && let Err(e) = self.save()
         {
             tracing::warn!(target: "pi::session", error = %e, "resume could not save the leaving session");
@@ -1333,7 +1342,7 @@ impl Repl {
     /// surface hands in a token so Ctrl-C (line mode) or Esc (terminal) can
     /// stop the command instead of leaving the caller stuck for the timeout.
     pub async fn bash(&mut self, command: &str, cancel: CancellationToken) -> Vec<String> {
-        let ctx = self.ctx.clone().with_cancel(cancel);
+        let ctx = self.lane.ctx.clone().with_cancel(cancel);
         let out = tools::bash::Bash
             .execute(serde_json::json!({ "command": command }), &ctx)
             .await;
@@ -1356,7 +1365,7 @@ impl Repl {
         // the rebuilt scrollback printing `Ran \`git status\`` as a prompt,
         // with the output indented under it — the live path never did that,
         // because it had the typed line and the rebuild did not.
-        self.session
+        self.lane.session
             .push_user(agent::session::UserBody::Aside(agent::session::UserText {
                 text,
                 shown: Some(format!("!{command}")),
