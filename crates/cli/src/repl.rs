@@ -365,6 +365,14 @@ pub struct Repl {
 }
 
 impl Repl {
+    /// Put the lane in front's key map and command table in force. A skill
+    /// belongs to one tree and not another, and so does a rebound key; leaving
+    /// the last lane's in place had this one answering to another tree's.
+    fn in_force(&mut self) {
+        self.keys = self.lane().keys.clone();
+        self.commands = self.lane().commands.clone();
+    }
+
     /// The checkout in front. Indexing is safe by construction: `lanes` is
     /// never empty and nothing removes from it, so `current` always names one.
     pub fn lane(&self) -> &Lane {
@@ -415,15 +423,8 @@ impl Repl {
     /// and swap it in. Whole or not at all — nothing is touched until all of
     /// it has been computed. `/reload` reads the file first; `/settings`
     /// hands over a tree it has just edited.
-    fn adopt(
-        &mut self,
-        config: Config,
-        into: Option<tools::Workspace>,
-    ) -> Result<Vec<String>, String> {
-        let root = into
-            .as_ref()
-            .map_or(self.lane_mut().ctx.workspace.root(), |ws| ws.root())
-            .to_path_buf();
+    fn adopt(&mut self, config: Config) -> Result<Vec<String>, String> {
+        let root = self.lane().ctx.workspace.root().to_path_buf();
         let failed = |e| Err(format!("nothing reloaded — {}", refused("reload", e)));
         let project = match crate::config::load_project(&root) {
             Ok(p) => p,
@@ -433,11 +434,9 @@ impl Repl {
             Ok(r) => r,
             Err(e) => return failed(e),
         };
-        // Only here, with everything computed: a workspace whose config or
-        // skills will not resolve leaves the session where it already was.
-        if let Some(ws) = into {
-            self.lane_mut().ctx.relocate(ws);
-        }
+        // Only here, with everything computed: a config or a skill set that
+        // will not resolve leaves what is running exactly as it was.
+        //
         // One `make_mut`: a run in flight holds the other reference, so this
         // is where the copy is taken, and taking it four times copies thrice
         // over.
@@ -447,10 +446,12 @@ impl Repl {
         ag.system = resolved.system;
         ag.effort = resolved.effort;
         self.lane_mut().context = resolved.context;
-        self.keys = std::sync::Arc::new(resolved.keys);
         // A skill can appear between one turn and the next, so the table of
-        // what a slash answers to is recomputed like everything else here.
-        self.commands = std::sync::Arc::new(resolved.commands);
+        // what a slash answers to is recomputed like everything else here —
+        // onto the lane it belongs to, then into force.
+        self.lane_mut().keys = std::sync::Arc::new(resolved.keys);
+        self.lane_mut().commands = std::sync::Arc::new(resolved.commands);
+        self.in_force();
         // The running model is deliberately not re-dialled: a reload re-reads
         // preferences, and which model this session is on was a decision, not a
         // preference. `/model` is how that one changes.
@@ -500,12 +501,11 @@ impl Repl {
     /// Recompute the config from the file tree plus the session's claimed
     /// overrides, and adopt it.
     fn rebuild(&mut self) -> Vec<String> {
-        self.rebuild_into(None).unwrap_or_else(|why| vec![why])
+        self.rebuilt().unwrap_or_else(|why| vec![why])
     }
 
-    /// The same, moving the session to another workspace as part of it. The
-    /// move lands only if everything the new root decides resolves.
-    fn rebuild_into(&mut self, into: Option<tools::Workspace>) -> Result<Vec<String>, String> {
+    /// The same, saying why when nothing could be adopted.
+    fn rebuilt(&mut self) -> Result<Vec<String>, String> {
         let mut tree = self.file.clone();
         for (path, value) in &self.claimed {
             if let Err(e) = crate::settings::put(&mut tree, path, value.clone()) {
@@ -516,7 +516,7 @@ impl Repl {
             Ok(c) => c,
             Err(e) => return Err(refused("settings", anyhow::anyhow!(e))),
         };
-        self.adopt(config, into)
+        self.adopt(config)
     }
 
     /// `/settings set`: try the write on a scratch tree first, so a bad value
@@ -1328,6 +1328,7 @@ impl Repl {
             .position(|lane| lane.ctx.workspace.root() == ws.root())
         {
             self.current = i;
+            self.in_force();
             said.push(format!("back in {}", self.lane().id));
             // Handled, not a swap: the lane's screen is parked as it was left,
             // and rebuilding it from the transcript would throw that away.
@@ -1373,6 +1374,8 @@ impl Repl {
             name: None,
             context: resolved.context,
             ctx: tools::Ctx::new(ws),
+            keys: std::sync::Arc::new(resolved.keys),
+            commands: std::sync::Arc::new(resolved.commands),
             worktree,
             events,
             inbox,
@@ -1380,10 +1383,7 @@ impl Repl {
             turn: crate::lane::Turn::Idle,
         });
         self.current = self.lanes.len() - 1;
-        // A skill can belong to one tree and not another, so what a slash
-        // answers to follows the move, exactly as it did before lanes.
-        self.keys = std::sync::Arc::new(resolved.keys);
-        self.commands = std::sync::Arc::new(resolved.commands);
+        self.in_force();
 
         // Asked with the root the next save will file under, so a tree is found
         // by the same key it was stored by.

@@ -69,6 +69,11 @@ pub struct Lane {
     pub pending: Vec<Event>,
     /// Where this lane's turn stands.
     pub turn: Turn,
+    /// What a slash answers to here, and the key map in force. Both are what
+    /// this root's config and skills resolved to, so they travel with the lane
+    /// rather than with the run — a tree switched back to answers to its own.
+    pub keys: std::sync::Arc<crate::keys::Keys>,
+    pub commands: std::sync::Arc<Vec<crate::repl::Command>>,
 }
 
 impl Lane {
@@ -76,6 +81,20 @@ impl Lane {
     /// nothing it posts can land on another screen.
     pub fn channel() -> (UnboundedSender<Event>, UnboundedReceiver<Event>) {
         unbounded_channel()
+    }
+
+    /// Take the end of a run this lane has been holding, if it is holding one.
+    ///
+    /// Only when it is: a lane still working must keep its `Running`, or the
+    /// token `esc` reaches and the request to unsend go with it.
+    pub fn take_ended(&mut self) -> Option<(Result<Totals, agent::AgentError>, bool)> {
+        match self.turn {
+            Turn::Ended { .. } => match std::mem::replace(&mut self.turn, Turn::Idle) {
+                Turn::Ended { out, unsend } => Some((out, unsend)),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     /// Whether a run has this lane's transcript right now.

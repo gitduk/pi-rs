@@ -1736,6 +1736,11 @@ impl Tui {
         // The view brought its own worktree name and model back with it; only
         // the lists are the terminal's, and they are keyed by workspace.
         self.ui.lists.at(self.core.lane().ctx.workspace.root());
+        // A view built for a lane opened later starts empty; the instruction
+        // files it stands on are the lane's, and a theme rebuild reads them.
+        if self.ui.view.context.is_empty() {
+            self.ui.view.context = self.core.lane().context.clone();
+        }
         // What this lane's run posted while nobody was looking, in the order it
         // arrived. Not through the bridge: the phone follows the lane in front,
         // and replaying an hour of another one into it would be a second
@@ -1744,9 +1749,7 @@ impl Tui {
             self.ui.on_event(event);
         }
         // And the end of it, if it reached one out of sight.
-        if let Turn::Ended { out, unsend } =
-            std::mem::replace(&mut self.core.lane_mut().turn, Turn::Idle)
-        {
+        if let Some((out, unsend)) = self.core.lane_mut().take_ended() {
             self.close_run(out);
             // Esc asked for the prompt back before the screen moved on. The
             // asking does not go stale because the answer arrived late.
@@ -1865,14 +1868,18 @@ impl Tui {
                             Act::Submit(line) if running => admit(&mut self.ui, line),
                             Act::Submit(line) => Wake::Line(line),
                             Act::Quit => break,
-                            Act::OpenRewind => {
+                            // Refused while the lane in front is working, as
+                            // they were before one loop served both states: all
+                            // three reach for a transcript the run is holding.
+                            Act::OpenRewind if !running => {
                                 self.open_rewind();
                                 Wake::Nothing
                             }
-                            Act::Rewind(id) => {
+                            Act::Rewind(id) if !running => {
                                 self.rewind_turn(id);
                                 Wake::Nothing
                             }
+                            Act::OpenRewind | Act::Rewind(_) => Wake::Nothing,
                             Act::CommitSetting(path, value) => {
                                 match self.core.commit_file(&path, &value) {
                                     Ok(said) => {
@@ -1894,7 +1901,7 @@ impl Tui {
                                 }
                                 Wake::Nothing
                             }
-                            Act::NewSession => {
+                            Act::NewSession if !running => {
                                 let Step::Swap(said) = self.core.command("/new", &self.totals)
                                 else {
                                     unreachable!("ctrl+l twice reaches the /new branch");
@@ -1902,6 +1909,9 @@ impl Tui {
                                 self.land_swap(said);
                                 Wake::Nothing
                             }
+                            // `/new` typed as a line is refused mid-run by
+                            // `Fate`; the key has to be refused by hand.
+                            Act::NewSession => Wake::Nothing,
                             // Only the lane in front: esc is a reflex, and a
                             // reflex must not reach what is out of sight.
                             Act::Interrupt => {
@@ -1922,7 +1932,11 @@ impl Tui {
                             if running { admit(&mut self.ui, text) } else { Wake::Line(text) }
                         }
                         Some(crate::wechat::Inbound::Stop) => {
-                            self.ui.say("nothing running to stop");
+                            if running {
+                                self.stop_current(false);
+                            } else {
+                                self.ui.say("nothing running to stop");
+                            }
                             Wake::Nothing
                         }
                         Some(crate::wechat::Inbound::Notice(text)) => {

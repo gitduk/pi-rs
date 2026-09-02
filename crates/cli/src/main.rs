@@ -545,6 +545,9 @@ async fn main() -> Result<()> {
     let Some(prompt) = prompt else {
         // Before `id` moves into the Repl: the context borrows it to name the
         // session its spills belong to.
+        // Held on the lane as well as in force: a switch back to this tree has
+        // to put its own key map and command table back, not the last one's.
+        let commands = std::sync::Arc::new(resolved.commands);
         let ctx = tools::Ctx::new(workspace).with_session(&id);
         let (events, inbox) = lane::Lane::channel();
         let core = repl::Repl {
@@ -552,7 +555,7 @@ async fn main() -> Result<()> {
             keys: key_map.clone(),
             config: config.clone(),
             args: args.clone(),
-            commands: std::sync::Arc::new(resolved.commands),
+            commands: commands.clone(),
             file: config::load_tree(args.config.as_deref())
                 .unwrap_or_else(|_| toml::Value::Table(Default::default())),
             claimed: BTreeMap::new(),
@@ -570,6 +573,8 @@ async fn main() -> Result<()> {
                 inbox,
                 pending: Vec::new(),
                 turn: lane::Turn::Idle,
+                keys: key_map.clone(),
+                commands,
             }],
         };
         // The live region needs the terminal at both ends: keys come in one
