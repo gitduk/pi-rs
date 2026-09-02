@@ -1,8 +1,26 @@
 //! One checkout being worked in, and everything the workspace root decides.
 
-use agent::Agent;
 use agent::session::Session;
+use agent::{Agent, Event, Totals};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio_util::sync::CancellationToken;
+
 use tools::Ctx;
+
+/// How a turn ended, kept until the screen is looking at this lane and can
+/// show it. A lane that finished out of sight has news, not a redraw.
+pub struct Ended {
+    pub out: Result<Totals, agent::AgentError>,
+}
+
+/// A turn under way in one lane.
+pub struct Running {
+    /// What `esc` cancels, and only for the lane in front.
+    pub cancel: CancellationToken,
+    /// Esc caught the prompt on its way out: stop the run, then unsend it.
+    /// Set while the run works, acted on when it ends.
+    pub unsend: bool,
+}
 
 /// One checkout being worked in: the conversation, what it runs against, and
 /// where it lands. Everything here is decided by the workspace root, so two
@@ -33,4 +51,30 @@ pub struct Lane {
     /// Which worktree the session is in, or None in the repository's own
     /// checkout. Held so the status line can say where the work is landing.
     pub worktree: Option<String>,
+    /// Where this lane's runs post what they are doing. One channel per lane,
+    /// so an event needs no label to say which screen it belongs on.
+    pub events: UnboundedSender<Event>,
+    /// The other end. Drained by the loop, into the view when this lane is in
+    /// front and into `pending` when it is not.
+    pub inbox: UnboundedReceiver<Event>,
+    /// What arrived while nobody was looking, in order, waiting to be replayed
+    /// into the view the moment this lane comes back to the front.
+    pub pending: Vec<Event>,
+    /// The turn under way, if there is one.
+    pub run: Option<Running>,
+    /// A turn that ended out of sight, waiting to be shown.
+    pub ended: Option<Ended>,
+}
+
+impl Lane {
+    /// A lane is born with its own channel: nothing else can post to it, and
+    /// nothing it posts can land on another screen.
+    pub fn channel() -> (UnboundedSender<Event>, UnboundedReceiver<Event>) {
+        unbounded_channel()
+    }
+
+    /// Whether a run has this lane's transcript right now.
+    pub fn is_running(&self) -> bool {
+        self.run.is_some()
+    }
 }

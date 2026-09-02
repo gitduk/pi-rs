@@ -546,6 +546,7 @@ async fn main() -> Result<()> {
         // Before `id` moves into the Repl: the context borrows it to name the
         // session its spills belong to.
         let ctx = tools::Ctx::new(workspace).with_session(&id);
+        let (events, inbox) = lane::Lane::channel();
         // The resumed session brings its plan; an empty live copy would be
         // recorded back over it at the end of the first turn.
         ctx.set_todos(carried.todos().to_vec());
@@ -568,13 +569,18 @@ async fn main() -> Result<()> {
                 context: resolved.context,
                 worktree: worktree::current(&root),
                 ctx,
+                events,
+                inbox,
+                pending: Vec::new(),
+                run: None,
+                ended: None,
             }],
         };
         // The live region needs the terminal at both ends: keys come in one
         // side and the repaint goes out the other. Missing either, there is
         // nothing to hold still, and printing a line at a time is right.
         if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-            return tui::Tui::new(core, key_map, wechat::Bridge::new())?.run(tx, rx).await;
+            return tui::Tui::new(core, key_map, wechat::Bridge::new())?.run().await;
         }
         let painter = paint(
             rx,

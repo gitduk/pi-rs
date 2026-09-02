@@ -1580,6 +1580,7 @@ dependencies = [
  "brain",
  "clap",
  "crossterm",
+ "futures",
  "ratatui",
  "serde",
  "serde_json",

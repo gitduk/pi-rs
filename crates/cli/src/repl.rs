@@ -676,16 +676,25 @@ impl Repl {
     /// Save the transcript. Called after every turn: an interrupted one is
     /// exactly the one worth keeping.
     pub fn save(&self) -> anyhow::Result<()> {
+        self.save_lane(self.current)
+    }
+
+    /// The same for a lane that is not in front: a run that ended out of sight
+    /// still has to reach disk, and it is not the screen's turn that decides.
+    pub fn save_lane(&self, at: usize) -> anyhow::Result<()> {
         // Away with a run, which saves it itself on the way back.
-        let Some(session) = &self.lane().session else {
+        let Some(lane) = self.lanes.get(at) else {
+            return Ok(());
+        };
+        let Some(session) = &lane.session else {
             return Ok(());
         };
         self.store.save(
-            &self.lane().id,
-            self.lane().ctx.workspace.root(),
-            &self.lane().agent.spec.model,
-            self.lane().name.as_deref(),
-            self.lane().created,
+            &lane.id,
+            lane.ctx.workspace.root(),
+            &lane.agent.spec.model,
+            lane.name.as_deref(),
+            lane.created,
             session,
         )?;
         Ok(())
@@ -867,7 +876,9 @@ impl Cmd {
             // Bare, these only list what there is.
             Cmd::Resume(name) | Cmd::Worktree(name) if name.trim().is_empty() => Fate::Now,
             Cmd::Resume(_) => Fate::Refused("/resume would replace the transcript this run is writing — esc first"),
-            Cmd::Worktree(_) => Fate::Refused("/worktree would move the tree this run is working in — esc first"),
+            // A lane of its own to move to, and the one being left keeps
+            // working in the tree it was already in.
+            Cmd::Worktree(_) => Fate::Now,
             Cmd::New => Fate::Refused("/new would replace the transcript this run is writing — esc first"),
             Cmd::Compact(_) => Fate::Refused("/compact rewrites the transcript this run is writing — esc first"),
             // `set`/`get`/`reset` are lines; bare opens a panel, which wants
@@ -1352,6 +1363,7 @@ impl Repl {
         let resolved =
             crate::resolve(&self.args, &root, &self.config, &project, &self.claimed).map_err(failed)?;
 
+        let (events, inbox) = Lane::channel();
         // The model travels; what the root decides does not. A switch changes
         // trees, and which model is answering was a decision made elsewhere.
         let mut ag = (*self.lane().agent).clone();
@@ -1372,6 +1384,11 @@ impl Repl {
             context: resolved.context,
             ctx: tools::Ctx::new(ws),
             worktree,
+            events,
+            inbox,
+            pending: Vec::new(),
+            run: None,
+            ended: None,
         });
         self.current = self.lanes.len() - 1;
         // A skill can belong to one tree and not another, so what a slash
