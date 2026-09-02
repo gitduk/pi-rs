@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Sync Cargo.lock with the manifests before committing. Runs only when a
+# manifest is staged: the lock change belongs in the same commit as the
+# manifest change that caused it.
+cd "$(git rev-parse --show-toplevel)"
+
+if ! git diff --cached --name-only | grep -qE '(^|/)Cargo\.toml$'; then
+  exit 0
+fi
+
+# Without --locked this rewrites Cargo.lock in place; a no-op when it is
+# already in sync. Faster than cargo build, which only produces a binary.
+cargo metadata --format-version 1 >/dev/null
+git add Cargo.lock

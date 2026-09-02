@@ -28,9 +28,16 @@ version is not tagged on origin yet, tags it and uploads the binary via
 `gh release create --generate-notes`. An already-tagged version is a no-op, so
 routine pushes skip the build.
 
-The hook is not version-controlled; install it on a fresh clone with:
+A `pre-commit` hook keeps `Cargo.lock` in sync with the manifests: whenever a
+`Cargo.toml` is staged, it rewrites the lock file and stages it, so a version
+bump can be committed without a manual `cargo build` in between.
+
+
+The hooks are not version-controlled; install them on a fresh clone with:
+
 
 ```bash
+install -m 755 scripts/hooks/pre-commit .git/hooks/pre-commit
 install -m 755 scripts/hooks/post-push .git/hooks/post-push
 ```
 
