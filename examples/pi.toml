@@ -96,3 +96,24 @@ replay_thinking = "tagged"
 "menu.accept"   = ["tab"]
 "menu.next"     = ["down", "ctrl+n"]
 "menu.previous" = ["up", "ctrl+p"]
+
+[status]
+# Which parts each status line shows, in this order. The running line is the
+# one that repaints under the spinner; the finished line is printed once a
+# turn ends and stays in the scrollback. Naming neither keeps these defaults.
+#
+#   elapsed    3s / 2m05s — the running line only; nothing times a pipe
+#   in_out     8.4k in / 390 out, a dash for a half the provider never stated
+#   cache      41.2k cached, left out when nothing was read from cache
+#   cost       $0.0012, left out when the model carries no pricing
+#   turns      2 turns — the finished line only
+#   ctx        ctx 54/743.4k, the transcript against what it may occupy
+#   compacted  compacted 2×, left out when the run never shrank the transcript
+#   queued     2 queued — lines submitted while the run worked
+#   model      deepseek-v4-flash
+#
+# A part with nothing to say is left out rather than shown empty, so a line
+# that asks for `cost` against an unpriced model simply does not carry it.
+# `esc to stop` is not a part: a run that can be interrupted always says so.
+live = ["elapsed", "in_out", "ctx", "queued"]
+done = ["turns", "in_out", "cache", "ctx", "compacted", "cost"]

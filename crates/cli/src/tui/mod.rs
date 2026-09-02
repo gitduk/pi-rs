@@ -11,7 +11,6 @@ mod editor;
 mod row;
 mod screen;
 mod settings;
-mod status;
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -398,7 +397,7 @@ struct RunTool {
 // The one row a still-running tool occupies. The frame is the animation;
 // `ToolEnd` and `abandon_tools` replace the row with a final line.
 fn tool_row(frame: usize, name: &str, summary: &str) -> String {
-    let frame = status::FRAMES[frame % status::FRAMES.len()];
+    let frame = crate::status::FRAMES[frame % crate::status::FRAMES.len()];
     format!("{frame} {}", row::named(name, summary))
 }
 
@@ -578,6 +577,17 @@ struct Ui {
     stopping: bool,
     /// Rows the view is scrolled up by. Zero shows the newest rows.
     scroll: usize,
+    /// The segments each line shows, in the order the config named them.
+    live: Vec<crate::status::Segment>,
+    done: Vec<crate::status::Segment>,
+    /// What the last request occupied against what it may. From the loop, not
+    /// measured here: this line repaints ten times a second.
+    ctx: Option<(usize, usize)>,
+    /// Shrinks so far this run.
+    compactions: usize,
+    /// The model in force. Copied in before the run borrows the agent, which
+    /// is what puts it out of reach for the rest of the turn.
+    model: String,
 }
 
 // One row either menu can offer: a completion of the line, or a message
@@ -654,6 +664,28 @@ impl Ui {
             turn: Usage::default(),
             stopping: false,
             scroll: 0,
+            live: crate::status::default_live(),
+            done: crate::status::default_done(),
+            ctx: None,
+            compactions: 0,
+            model: String::new(),
+        }
+    }
+
+    /// The values both lines draw on, as this surface currently knows them.
+    fn snapshot(&self) -> crate::status::Snapshot<'_> {
+        crate::status::Snapshot {
+            elapsed: self.started.map(|s| s.elapsed()),
+            input: self.settled.input + self.turn.input,
+            output: self.settled.output + self.turn.output,
+            cache_read: self.settled.cache_read + self.turn.cache_read,
+            ctx: self.ctx,
+            compactions: self.compactions,
+            queued: self.queued.len(),
+            model: &self.model,
+            // Only a finished run states these, and it brings its own.
+            cost: None,
+            turns: None,
         }
     }
 
@@ -764,6 +796,21 @@ impl Ui {
                 self.turn = Usage::default();
             }
             Event::TurnStart { .. } => {}
+            Event::Context { used, budget } => self.ctx = Some((*used, *budget)),
+            Event::Done { .. } => {
+                self.close();
+                if let Some(mut snap) = crate::status::Snapshot::of_done(&event) {
+                    snap.model = &self.model;
+                    // Still running as far as the screen is concerned: `turn`
+                    // clears this only once the loop returns.
+                    snap.elapsed = self.started.map(|s| s.elapsed());
+                    let line = crate::status::line(&self.done, &snap);
+                    if !line.is_empty() {
+                        let said = self.paint.on(&self.paint.theme.muted, &line);
+                        self.scrollback.push(Row::notice(said));
+                    }
+                }
+            }
             // A call's two events are one line here: the start takes a row in
             // the live region (where the spinner can animate it), and the end
             // scrolls that row up as its ✓/✗ line. Parallel calls each hold a
@@ -790,6 +837,9 @@ impl Ui {
                     .push(Row::result(!is_error, name.clone(), preview.clone()));
             }
             _ => {
+                if matches!(event, Event::Compacted(_)) {
+                    self.compactions += 1;
+                }
                 self.close();
                 if let Some(said) = render::describe(&event, &self.paint, self.screen.usable()) {
                     // Row by row: a scrollback line is written with a carriage
@@ -906,14 +956,24 @@ impl Ui {
             &self.paint,
         ));
 
-        if let Some(since) = self.started {
-            let line = status::line(
-                self.spinner,
-                since.elapsed(),
-                &counts(&self.settled, &self.turn),
-                self.queued.len(),
-                self.stopping,
+        if self.started.is_some() {
+            let mut parts = crate::status::parts(&self.live, &self.snapshot());
+            // Not a segment: a run that can be stopped has to say so, and a
+            // config that left it out would strand the user mid-turn.
+            parts.push(
+                if self.stopping {
+                    "stopping…"
+                } else {
+                    "esc to stop"
+                }
+                .to_string(),
             );
+            let spin = if self.stopping {
+                "·"
+            } else {
+                crate::status::FRAMES[self.spinner % crate::status::FRAMES.len()]
+            };
+            let line = format!("{spin} {}", parts.join(" · "));
             rows.extend(screen::fit(
                 &self.paint.on(&self.paint.theme.muted, &line),
                 width,
@@ -1353,19 +1413,6 @@ impl Ui {
     }
 }
 
-// What the status line should say the run has cost.
-//
-// Only the parts the provider has stated: the input count on the Anthropic
-// wire, nothing at all on the OpenAI one. Unstated parts are left out rather
-// than stood in for by bytes we counted, so a number on the line is always a
-// measurement.
-fn counts(settled: &Usage, turn: &Usage) -> status::Counts {
-    status::Counts {
-        input: settled.input + turn.input,
-        output: settled.output + turn.output,
-    }
-}
-
 pub struct Tui {
     core: Repl,
     ui: Ui,
@@ -1412,6 +1459,9 @@ impl Tui {
             .into_iter()
             .map(|(p, _)| p)
             .collect();
+        ui.live = core.config.status.live.clone();
+        ui.done = core.config.status.done.clone();
+        ui.model = core.agent.spec.model.clone();
         if let Some(prior) = history_path().and_then(|p| std::fs::read_to_string(p).ok()) {
             ui.editor.seed_history(editor::decode(&prior));
         }
@@ -1762,6 +1812,10 @@ impl Tui {
         // previous run's totals.
         self.ui.settled = Usage::default();
         self.ui.turn = Usage::default();
+        self.ui.compactions = 0;
+        // Read while the agent is still reachable: the run borrows it for the
+        // rest of this turn, and `/model` may have replaced it since the last.
+        self.ui.model = self.core.agent.spec.model.clone();
 
         let out = {
             // Disjoint borrows: the run holds the session while the loop keeps
@@ -1770,7 +1824,7 @@ impl Tui {
             let Repl { agent, session, .. } = core;
             let run = agent.run(session, &ctx, tx);
             tokio::pin!(run);
-            let mut tick = tokio::time::interval(status::SPIN);
+            let mut tick = tokio::time::interval(crate::status::SPIN);
             loop {
                 ui.flush();
                 tokio::select! {
@@ -1854,10 +1908,9 @@ impl Tui {
 
 #[cfg(test)]
 mod tests {
-    use super::{secret_settings_set, Cow, Row, ScrollbackRows, Thinking, body, counts, scrollback_from, tool_row};
+    use super::{secret_settings_set, Cow, Row, ScrollbackRows, Thinking, body, scrollback_from, tool_row};
     use crate::render::Markdown;
     use crate::render::Paint;
-    use brain::stream::Usage;
 
 
     #[test]
@@ -2327,35 +2380,6 @@ mod tests {
             &Paint::new(false),
         );
         assert_eq!(rows.len(), 3);
-    }
-
-    #[test]
-    fn a_turn_that_has_only_started_shows_its_stated_input_and_no_output() {
-        // The Anthropic wire states the input count before the first token and
-        // the output count only at the end; what has not been said stays out.
-        let turn = Usage {
-            input: 8_400,
-            ..Default::default()
-        };
-        let c = counts(&Usage::default(), &turn);
-        assert_eq!((c.input, c.output), (8_400, 0));
-    }
-
-    #[test]
-    fn a_later_turn_adds_to_what_the_earlier_ones_stated() {
-        // The turn in flight contributes only what the provider has already
-        // said; an unstated output stays out rather than being stood in for.
-        let settled = Usage {
-            input: 10_000,
-            output: 600,
-            ..Default::default()
-        };
-        let turn = Usage {
-            input: 2_000,
-            ..Default::default()
-        };
-        let c = counts(&settled, &turn);
-        assert_eq!((c.input, c.output), (12_000, 600));
     }
 
     #[test]

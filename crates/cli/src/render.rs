@@ -733,8 +733,8 @@ pub fn spent(usage: &brain::stream::Usage, cost: f64) -> String {
 ///
 /// Both surfaces call this: a tool call has to read the same in a pipe as in
 /// the terminal, and two copies of the wording would drift on the first edit.
-/// Events that are a fragment rather than a line — the two deltas — are the
-/// caller's to place, and return None.
+/// None is the caller's to place: the two deltas, which are a fragment rather
+/// than a line, and `Done`, which is a status line the surface composes itself.
 /// A run's line for one event, and for a tool that offers one, the rows of
 /// detail under it.
 ///
@@ -814,10 +814,8 @@ pub fn describe(event: &Event, p: &Paint, width: usize) -> Option<String> {
             p.on(&p.theme.status.err, "!"),
             p.on(&p.theme.muted, w)
         ),
-        Event::Done { turns, usage, cost } => p.on(
-            &p.theme.muted,
-            &format!("{turns} turns · {}", spent(usage, *cost)),
-        ),
+        // Done is a status line rather than an event's wording, and the two
+        // surfaces render it from their own configured segments.
         _ => return None,
     })
 }
@@ -825,6 +823,10 @@ pub fn describe(event: &Event, p: &Paint, width: usize) -> Option<String> {
 pub struct Renderer {
     paint: Paint,
     quiet: bool,
+    /// The segments this surface ends a run with, and the model to name if it
+    /// was asked for. A pipe times nothing, so `elapsed` has nothing to say.
+    done: Vec<crate::status::Segment>,
+    model: String,
     thinking: bool,
     /// Each stream is tracked separately: they share a terminal when both are
     /// a tty, but only the dirty one may be terminated when piped apart.
@@ -833,10 +835,17 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(quiet: bool, theme: Arc<Theme>) -> Self {
+    pub fn new(
+        quiet: bool,
+        theme: Arc<Theme>,
+        done: Vec<crate::status::Segment>,
+        model: String,
+    ) -> Self {
         Self {
             paint: Paint::with_theme(std::io::stderr().is_terminal(), theme),
             quiet,
+            done,
+            model,
             thinking: false,
             out_dirty: false,
             err_dirty: false,
@@ -863,6 +872,17 @@ impl Renderer {
                 print!("{d}");
                 self.out_dirty = !d.ends_with('\n');
                 let _ = std::io::stdout().flush();
+            }
+            Event::Done { .. } if !self.quiet => {
+                self.end_thinking();
+                self.settle();
+                if let Some(mut snap) = crate::status::Snapshot::of_done(&event) {
+                    snap.model = &self.model;
+                    let line = crate::status::line(&self.done, &snap);
+                    if !line.is_empty() {
+                        eprintln!("{}", self.paint.on(&self.paint.theme.muted, &line));
+                    }
+                }
             }
             // Worth seeing even under --quiet: the run did less than it was asked.
             Event::ToolDenied { .. } => {
@@ -1004,7 +1024,7 @@ pub fn summarize(args: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Attr, Color, Markdown, Paint, Style, describe, in_out, spent, summarize};
+    use super::{Attr, Color, Markdown, Paint, Style, in_out, spent, summarize};
     use brain::stream::Usage;
     use serde_json::json;
     use std::sync::OnceLock;
@@ -1059,7 +1079,12 @@ mod tests {
 
     #[test]
     fn consecutive_text_deltas_stay_on_one_line() {
-        let mut r = super::Renderer::new(false, std::sync::Arc::new(super::Theme::default()));
+        let mut r = super::Renderer::new(
+            false,
+            std::sync::Arc::new(super::Theme::default()),
+            crate::status::default_done(),
+            String::new(),
+        );
         r.on(agent::Event::TextDelta("There".into()));
         assert!(r.out_dirty, "an unterminated delta leaves the line open");
         r.on(agent::Event::TextDelta("'s a bug".into()));
@@ -1253,31 +1278,6 @@ mod tests {
         assert_eq!(spent(&Usage::default(), 0.0), "- in / - out");
     }
 
-    #[test]
-    fn a_done_line_with_measured_usage_carries_the_bill() {
-        let e = agent::Event::Done {
-            turns: 2,
-            usage: Usage {
-                input: 8_400,
-                output: 390,
-                ..Default::default()
-            },
-            cost: 0.0012,
-        };
-        let s = describe(&e, &Paint::new(false), 100).unwrap();
-        assert_eq!(s, "2 turns · 8.4k in / 390 out · $0.0012");
-    }
-
-    #[test]
-    fn a_done_line_with_nothing_reported_shows_the_dashes() {
-        // A host that reported none of its usage: the line says the turns and
-        // shows the gaps as dashes rather than hiding them.
-        let e = agent::Event::Done {
-            turns: 3,
-            usage: Usage::default(),
-            cost: 0.0,
-        };
-        let s = describe(&e, &Paint::new(false), 100).unwrap();
-        assert_eq!(s, "3 turns · - in / - out");
-    }
+    // The done line moved to `status`, where both surfaces render it from
+    // their own segments; its wording is tested there.
 }

@@ -27,6 +27,12 @@ pub enum Event {
     },
     /// The transcript was shrunk to fit before this turn was sent.
     Compacted(crate::compact::Report),
+    /// What the transcript occupies against what it may, for the request just
+    /// sent. Ours rather than the provider's: this is what compaction acts on.
+    Context {
+        used: usize,
+        budget: usize,
+    },
     /// The request failed in a way worth another attempt.
     Retrying {
         attempt: usize,
@@ -51,6 +57,11 @@ pub enum Event {
         turns: usize,
         usage: Usage,
         cost: f64,
+        /// What the transcript occupied against what it was allowed to, in
+        /// tokens, for the request that ended the run.
+        ctx: (usize, usize),
+        /// How many times the transcript was shrunk to fit during this run.
+        compactions: usize,
     },
 }
 
@@ -99,6 +110,8 @@ pub(crate) fn say(tx: &tokio::sync::mpsc::UnboundedSender<Event>, event: Event) 
 fn note(event: &Event) {
     match event {
         Event::TextDelta(_) | Event::ReasoningDelta(_) | Event::Usage(_) => {}
+        // The loop's own "sending" record carries these two already.
+        Event::Context { .. } => {}
         Event::TurnStart { turn } => tracing::info!(target: "pi::loop", turn, "turn start"),
         Event::ToolStart { id, name, args } => {
             tracing::info!(target: "pi::tool", call = %id, tool = %name, "call");

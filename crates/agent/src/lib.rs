@@ -170,6 +170,9 @@ impl Agent {
         let mut scale = 1.0f64;
         // A window the provider named, which outranks whatever the spec says.
         let mut hard: Option<usize> = None;
+        // Across the whole run, not the turn: a status line that reset this
+        // every turn would report "not compacted" for a run that just was.
+        let mut compactions = 0usize;
 
         for turn in 1.. {
             say(tx, Event::TurnStart { turn });
@@ -180,18 +183,28 @@ impl Agent {
             // Kept past the retry loop: the fallback below prices what was
             // actually sent, which a squeeze or a compaction may have changed.
             let mut sent;
+            // Kept for the same reason the transcript is: what the status line
+            // reports as the window's state has to be the request that ran.
+            let mut budget;
+            let mut used;
 
             let done = loop {
-                let budget = ((hard.unwrap_or_else(|| self.budget()) as f64) * scale) as usize;
-                sent = self
+                budget = ((hard.unwrap_or_else(|| self.budget()) as f64) * scale) as usize;
+                let (messages, shrunk) = self
                     .maybe_compact(session, budget, squeezes > 0, &mut totals, tx)
                     .instrument(span.clone())
                     .await;
+                sent = messages;
+                if shrunk {
+                    compactions += 1;
+                }
+                used = brain::estimate::tokens(&sent, &self.spec);
+                say(tx, Event::Context { used, budget });
                 tracing::debug!(
                     target: "pi::loop",
                     parent: &span,
                     messages = sent.len(),
-                    estimated = brain::estimate::tokens(&sent, &self.spec),
+                    estimated = used,
                     budget,
                     squeezes,
                     scale,
@@ -308,6 +321,13 @@ impl Agent {
                         turns: turn,
                         usage: totals.usage,
                         cost: totals.cost,
+                        // Re-measured rather than reused: `used` is what went
+                        // out, and the reply landed in the session since.
+                        ctx: (
+                            brain::estimate::tokens(&session.context(), &self.spec),
+                            budget,
+                        ),
+                        compactions,
                     },
                 );
                 return Ok(totals);
@@ -352,20 +372,19 @@ impl Agent {
         urgent: bool,
         totals: &mut Totals,
         tx: &UnboundedSender<Event>,
-    ) -> Vec<Message> {
+    ) -> (Vec<Message>, bool) {
         let measured = session.context();
         let Some(policy) = &self.compaction else {
-            return measured;
+            return (measured, false);
         };
         if brain::estimate::tokens(&measured, &self.spec) <= budget {
-            return measured;
+            return (measured, false);
         }
         // Holding the working tail back is a preference; fitting at all is not.
         // Once the provider has refused the request, the tail yields.
-        let policy = if urgent {
-            compact::Policy { protect_tail: 0, ..Policy::default() }
-        } else {
-            *policy
+        let policy = compact::Policy {
+            protect_tail: if urgent { 0 } else { self.tail_within(budget) },
+            ..*policy
         };
         let (mut record, mut report) = compact::plan(session, &self.spec, budget, &policy);
         if !record.dropped.is_empty() && self.summarize {
@@ -379,17 +398,25 @@ impl Agent {
         // A pass that reclaimed nothing is not news; reporting it every turn
         // buries the ones that did.
         if !report.touched() {
-            return measured;
+            return (measured, false);
         }
         session.record(record);
         say(tx, Event::Compacted(report));
         // It changed, so the measurement above is stale.
-        session.context()
+        (session.context(), true)
     }
 
     /// What a manual compaction leaves alone, when there is one.
     pub fn kept_tokens(&self) -> Option<usize> {
-        self.compaction.map(|p| p.protect_tail)
+        self.compaction.is_some().then(|| self.tail_within(self.budget()))
+    }
+
+    /// The working tail to hold back, against a transcript budget of `budget`.
+    ///
+    /// A flat 16k is a seventh of a 114k budget and more than a 9k one holds,
+    /// and a tail the size of the budget leaves the drop tier nothing to take.
+    fn tail_within(&self, budget: usize) -> usize {
+        self.compaction.map_or(0, |p| p.protect_tail.min(budget / 4))
     }
 
     /// Compact now, at the user's word rather than the window's.
@@ -404,8 +431,10 @@ impl Agent {
         session: &mut Session,
         focus: Option<&str>,
     ) -> Option<(compact::Report, Totals)> {
-        let policy = self.compaction?;
-        let (mut record, mut report) = compact::plan(session, &self.spec, policy.protect_tail, &policy);
+        let base = self.compaction?;
+        let tail = self.tail_within(self.budget());
+        let policy = compact::Policy { protect_tail: tail, ..base };
+        let (mut record, mut report) = compact::plan(session, &self.spec, tail, &policy);
         let mut spent = Totals::default();
         if !record.dropped.is_empty() && self.summarize {
             let (used, priced) = self

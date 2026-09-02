@@ -76,6 +76,9 @@ pub struct Config {
     /// The SGR codes behind every colour the terminal uses.
     #[serde(default)]
     pub theme: crate::render::Theme,
+    /// Which parts the running and the finished status lines show.
+    #[serde(default)]
+    pub status: crate::status::Lines,
 }
 
 /// One key or several — `"ctrl+g"` and `["ctrl+g", "f5"]` both mean the same

@@ -18,6 +18,7 @@ mod render;
 mod repl;
 mod session;
 mod settings;
+mod status;
 mod tui;
 mod wechat;
 
@@ -429,9 +430,11 @@ fn paint(
     mut rx: mpsc::UnboundedReceiver<agent::Event>,
     quiet: bool,
     theme: std::sync::Arc<render::Theme>,
+    done: Vec<status::Segment>,
+    model: String,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut r = render::Renderer::new(quiet, theme);
+        let mut r = render::Renderer::new(quiet, theme, done, model);
         while let Some(event) = rx.recv().await {
             r.on(event);
         }
@@ -562,7 +565,13 @@ async fn main() -> Result<()> {
         if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
             return tui::Tui::new(core, key_map, wechat::Bridge::new())?.run(tx, rx).await;
         }
-        let painter = paint(rx, quiet, std::sync::Arc::new(config.theme.clone()));
+        let painter = paint(
+            rx,
+            quiet,
+            std::sync::Arc::new(config.theme.clone()),
+            config.status.done.clone(),
+            model_id.clone(),
+        );
         let out = line::run(core, tx).await;
         let _ = painter.await;
         return out;
@@ -577,7 +586,13 @@ async fn main() -> Result<()> {
         None => prompt,
     };
 
-    let painter = paint(rx, quiet, std::sync::Arc::new(config.theme.clone()));
+    let painter = paint(
+        rx,
+        quiet,
+        std::sync::Arc::new(config.theme.clone()),
+        config.status.done.clone(),
+        model_id.clone(),
+    );
     let ctx = tools::Ctx::new(workspace)
         .with_session(&id)
         .with_cancel(agent::cancel_on_interrupt());

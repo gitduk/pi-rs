@@ -619,6 +619,40 @@ use brain::message::Text as _Text;
         );
     }
 
+    // A flat 16k tail against a 9k budget protects more than the budget holds,
+    // so every tier that reaches only what precedes the tail reaches nothing.
+    #[test]
+    fn a_small_window_keeps_room_to_compact_into() {
+        let a = agent_with(20_000, 64_000);
+        let mut s = Session::with_prompt("go");
+        for i in 0..14 {
+            s.push_assistant(vec![AssistantContent::ToolCall(ToolCall {
+                id: format!("c{i}"),
+                name: "read".into(),
+                args: json!({ "path": format!("f{i}.rs") }),
+            })]);
+            s.push_user(UserBody::Result {
+                result: ToolResult::text(format!("c{i}"), "read", big(4_000)),
+                preview: None,
+            });
+        }
+        let budget = a.budget();
+        assert!(
+            brain::estimate::tokens(&s.context(), &a.spec) > budget,
+            "the transcript has to start over budget for this to mean anything"
+        );
+
+        let policy = agent::Policy {
+            protect_tail: a.kept_tokens().expect("compaction is on"),
+            ..agent::Policy::default()
+        };
+        let (_record, report) = agent::compact::plan(&s, &a.spec, budget, &policy);
+        assert!(
+            !report.still_over,
+            "the tail left nothing to reclaim: {report:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_short_transcript_has_nothing_to_compact() {
         let a = agent_with(200_000, 32_000);
