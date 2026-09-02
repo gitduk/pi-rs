@@ -21,6 +21,7 @@ mod settings;
 mod status;
 mod tui;
 mod wechat;
+mod worktree;
 
 /// The three below are both flags and config values, so a config file names a
 /// tier the same way the command line does.
@@ -557,6 +558,7 @@ async fn main() -> Result<()> {
             file: config::load_tree(args.config.as_deref())
                 .unwrap_or_else(|_| toml::Value::Table(Default::default())),
             claimed: BTreeMap::new(),
+            worktree: worktree::current(&root),
             ctx,
         };
         // The live region needs the terminal at both ends: keys come in one

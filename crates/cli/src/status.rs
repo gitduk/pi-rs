@@ -39,6 +39,9 @@ pub struct Snapshot<'a> {
     pub compactions: usize,
     pub queued: usize,
     pub model: &'a str,
+    /// The worktree the session is working in, or None in the repository's own
+    /// checkout.
+    pub worktree: Option<&'a str>,
 }
 
 impl Snapshot<'_> {
@@ -81,6 +84,7 @@ pub enum Segment {
     Compacted,
     Queued,
     Model,
+    Worktree,
 }
 
 impl Segment {
@@ -113,6 +117,9 @@ impl Segment {
             Segment::Queued => format!("{} queued", s.queued),
             Segment::Model if s.model.is_empty() => return None,
             Segment::Model => s.model.to_string(),
+            // Absent in the repository's own checkout, so the line reads as it
+            // always did for anyone not using worktrees.
+            Segment::Worktree => s.worktree?.to_string(),
         })
     }
 }
@@ -155,6 +162,7 @@ pub fn default_live() -> Vec<Segment> {
         Segment::InOut,
         Segment::Ctx,
         Segment::Queued,
+        Segment::Worktree,
     ]
 }
 
@@ -168,6 +176,7 @@ pub fn default_done() -> Vec<Segment> {
         Segment::Ctx,
         Segment::Compacted,
         Segment::Cost,
+        Segment::Worktree,
     ]
 }
 
@@ -187,6 +196,7 @@ mod tests {
             compactions: 2,
             queued: 1,
             model: "deepseek-v4-flash",
+            worktree: Some("feature-one"),
         }
     }
 
