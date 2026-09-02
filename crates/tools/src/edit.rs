@@ -15,6 +15,11 @@ const ECHO_LIMIT: usize = 2_000;
 const ECHO_ENDS: usize = 3;
 // Diff rows a run's display carries for one patch.
 const SKETCH_LIMIT: usize = 24;
+// What a call that omits the argument is told, so it resends `patch`
+// instead of staring at a bare serde error for a field it never named.
+const ARGS_HINT: &str = "`edit` takes a single argument, `patch`: a string of \
+    one or more `[path#TAG]` sections, each a header line followed by op lines \
+    like `PUT 3:`. Send the whole call again with `patch`.";
 
 #[derive(Deserialize)]
 struct Args {
@@ -632,7 +637,7 @@ impl Tool for Edit {
     }
 
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
-        let args: Args = crate::parse_args(args)?;
+        let args: Args = crate::parse_args_hinted(args, ARGS_HINT)?;
         // The rejected patch itself, because the message alone never says what
         // the model actually wrote — and a model that gets the format wrong
         // gets it wrong the same way for the rest of the session.

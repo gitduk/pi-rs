@@ -8,6 +8,11 @@ use crate::{Ctx, Tier, Tool, ToolError, ToolOutput};
 // cost as much context as an active one.
 const SHOW_ALL_UNDER: usize = 20;
 const KEEP_CLOSED: usize = 3;
+// What a call that omits or misspells `op` is told: the ops and the fields
+// each takes, so the resend is shaped right the first time.
+const ARGS_HINT: &str = "the arguments are flat: `op` is required and one of \
+    `set`, `mark`, `clear`, `show`, plus the fields that op needs (`items` for \
+    set; `at` and `status` for mark; none for clear or show)";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -291,7 +296,7 @@ impl Tool for TodoTool {
     }
 
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
-        let args: Args = crate::parse_args(args)?;
+        let args: Args = crate::parse_args_hinted(args, ARGS_HINT)?;
         let (shown, open) = {
             let mut held = ctx.todos.lock().expect("todo list poisoned");
             apply(&mut held, args)?;

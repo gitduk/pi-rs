@@ -14,6 +14,15 @@ where
     serde_path_to_error::deserialize(&mut de).map_err(|e| serde::de::Error::custom(e.to_string()))
 }
 
+/// Parse a tool's arguments; on failure, append `hint` after the serde error
+/// so the model sees what the tool takes, not just which field it missed.
+pub fn parse_args_hinted<T>(args: Value, hint: &str) -> Result<T, ToolError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    parse_args(args).map_err(|e| ToolError::Invalid(format!("json: {e} — {hint}")))
+}
+
 pub mod bash;
 pub mod blocks;
 pub mod edit;
