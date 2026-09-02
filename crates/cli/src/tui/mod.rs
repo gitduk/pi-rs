@@ -1590,7 +1590,7 @@ fn history_path() -> Option<std::path::PathBuf> {
 const HISTORY_KEEP: usize = 1_000;
 
 impl Tui {
-    pub fn new(core: Repl, keys: Arc<Keys>, bridge: crate::wechat::Bridge) -> Result<Self> {
+    pub fn new(mut core: Repl, keys: Arc<Keys>, bridge: crate::wechat::Bridge) -> Result<Self> {
         let paint = Paint::with_theme(true, Arc::new(core.config.theme.clone()));
         let mut ui = Ui::new(
             Screen::new()?,
@@ -1599,25 +1599,25 @@ impl Tui {
             core.commands.clone(),
             Lists::new(
                 core.store.clone(),
-                core.lane.ctx.workspace.root().to_path_buf(),
+                core.lane_mut().ctx.workspace.root().to_path_buf(),
             ),
-            &core.lane.context,
+            &core.lane_mut().context,
             paint,
         );
         ui.setting_paths = crate::settings::leaves(&core.file)
             .into_iter()
             .map(|(p, _)| p)
             .collect();
-        ui.view.worktree = core.lane.worktree.clone();
+        ui.view.worktree = core.lane_mut().worktree.clone();
         ui.live = core.config.status.live.clone();
         ui.done = core.config.status.done.clone();
-        ui.view.model = core.lane.agent.spec.model.clone();
+        ui.view.model = core.lane_mut().agent.spec.model.clone();
         if let Some(prior) = history_path().and_then(|p| std::fs::read_to_string(p).ok()) {
             ui.editor.seed_history(editor::decode(&prior));
         }
         // A resumed session shows its transcript from the start: the whole
         // screen is rebuildable now, so there is no reason to hide it.
-        if let Some(session) = &core.lane.session
+        if let Some(session) = &core.lane_mut().session
             && !session.is_empty()
         {
             ui.rebuild(session);
@@ -1656,13 +1656,13 @@ impl Tui {
     /// instead of keeping the old conversation up, and the completion list
     /// follows.
     fn land_swap(&mut self, said: Vec<String>) {
-        if let Some(session) = &self.core.lane.session {
+        if let Some(session) = &self.core.lane_mut().session {
             self.ui.rebuild(session);
         }
         // `at` forgets both lists, so it stands in for `refresh_sessions`: a
         // swap that did not move repeats the root, and drops them either way.
-        self.ui.lists.at(self.core.lane.ctx.workspace.root());
-        self.ui.view.worktree = self.core.lane.worktree.clone();
+        self.ui.lists.at(self.core.lane_mut().ctx.workspace.root());
+        self.ui.view.worktree = self.core.lane_mut().worktree.clone();
         self.ui.view.scrollback.extend(said.into_iter().map(Row::notice));
     }
 
@@ -1828,7 +1828,7 @@ impl Tui {
                             }
                         }
                         None => {
-                            let held = self.core.lane.agent.kept_tokens().unwrap_or(0);
+                            let held = self.core.lane_mut().agent.kept_tokens().unwrap_or(0);
                             let now = self.core.tokens_now();
                             let why = format!(
                                 "nothing to compact — {now} tokens, all inside the {held} \
@@ -1881,7 +1881,7 @@ impl Tui {
                 // whole view from it, so the screen returns to the node the
                 // conversation did instead of keeping the forgotten turns.
                 // It clears anything said before it: hence the notice after.
-                if let Some(session) = &self.core.lane.session {
+                if let Some(session) = &self.core.lane_mut().session {
                     self.ui.rebuild(session);
                 }
                 let said = match outcome {
@@ -1899,7 +1899,7 @@ impl Tui {
                     Rewound::Kept | Rewound::Nothing => {
                         let at = self
                             .core
-                            .lane
+                            .lane_mut()
                             .session
                             .as_ref()
                             .and_then(|s| s.last_node())
@@ -1925,7 +1925,7 @@ impl Tui {
     fn open_rewind(&mut self) {
         let rows: Vec<MenuEntry> = self
             .core
-            .lane
+            .lane_mut()
             .session
             .as_ref()
             .map(|s| s.rewind_nodes())
@@ -1960,12 +1960,12 @@ impl Tui {
     ) {
         // Lent to the run for the length of the turn. Only the loop that owns
         // it starts a turn, so it is never away when one begins.
-        let Some(mut carried) = self.core.lane.session.take() else {
+        let Some(mut carried) = self.core.lane_mut().session.take() else {
             return;
         };
         carried.send_prompt(prompt, typed);
         let cancel = CancellationToken::new();
-        let ctx = self.core.lane.ctx.clone().with_cancel(cancel.clone());
+        let ctx = self.core.lane_mut().ctx.clone().with_cancel(cancel.clone());
 
         self.ui.view.started = Some(Instant::now());
         self.ui.view.committed = false;
@@ -1977,7 +1977,7 @@ impl Tui {
         self.ui.view.compactions = 0;
         // Read while the agent is still reachable: the run borrows it for the
         // rest of this turn, and `/model` may have replaced it since the last.
-        self.ui.view.model = self.core.lane.agent.spec.model.clone();
+        self.ui.view.model = self.core.lane_mut().agent.spec.model.clone();
 
         // Set inside the run's borrow, acted on after it: unsending has to
         // touch the session, and the run is holding it.
@@ -1985,7 +1985,7 @@ impl Tui {
         // The run takes the session with it and hands it back at the end. That
         // is what frees the loop: nothing of the session is borrowed while the
         // turn works, so a command typed into it can be answered on the spot.
-        let agent = self.core.lane.agent.clone();
+        let agent = self.core.lane_mut().agent.clone();
         let joined = {
             let Self { core, ui, keys, bridge, totals } = self;
             let sent = tx.clone();
@@ -2042,7 +2042,7 @@ impl Tui {
         // and then the save below must not put the empty one in its place.
         let (recovered, out) = match joined {
             Ok((session, out)) => {
-                self.core.lane.session = Some(session);
+                self.core.lane_mut().session = Some(session);
                 (true, out)
             }
             // The task carried the whole transcript, not just this turn, and a
@@ -2050,11 +2050,11 @@ impl Tui {
             // carrying the empty stand-in forward would save it over the real
             // one at the end of the next turn, which loses the conversation
             // rather than the turn.
-            Err(e) => match self.core.store.load(&self.core.lane.id) {
+            Err(e) => match self.core.store.load(&self.core.lane().id) {
                 Ok(stored) => {
                     let session = stored.into_session();
-                    self.core.lane.ctx.set_todos(session.todos().to_vec());
-                    self.core.lane.session = Some(session);
+                    self.core.lane_mut().ctx.set_todos(session.todos().to_vec());
+                    self.core.lane_mut().session = Some(session);
                     self.ui.say(format!(
                         "the run did not finish: {e} — back to the transcript as last saved"
                     ));
@@ -2118,7 +2118,7 @@ impl Tui {
         // Last: the rebuild clears the "stopped" this turn printed, and the
         // cancel was the mechanism here rather than news.
         if unsend
-            && let Some(id) = self.core.lane.session.as_ref().and_then(|s| s.last_ask())
+            && let Some(id) = self.core.lane_mut().session.as_ref().and_then(|s| s.last_ask())
         {
             self.rewind_turn(id);
         }

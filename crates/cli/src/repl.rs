@@ -358,9 +358,23 @@ pub struct Repl {
     /// What `/settings set` has claimed this run, by path. Replayed over
     /// every reload so the claimed values keep winning over the file.
     pub claimed: BTreeMap<String, toml::Value>,
-    /// The checkout being worked in. One for now; the surface shows one at a
-    /// time either way.
-    pub lane: Lane,
+    /// Every checkout open in this run, in the order they were opened. The
+    /// main one is first, because that is where a run starts.
+    pub lanes: Vec<Lane>,
+    /// Which of them is in front. The surface shows one at a time.
+    pub current: usize,
+}
+
+impl Repl {
+    /// The checkout in front. Indexing is safe by construction: `lanes` is
+    /// never empty and nothing removes from it, so `current` always names one.
+    pub fn lane(&self) -> &Lane {
+        &self.lanes[self.current]
+    }
+
+    pub fn lane_mut(&mut self) -> &mut Lane {
+        &mut self.lanes[self.current]
+    }
 }
 
 impl Repl {
@@ -409,7 +423,7 @@ impl Repl {
     ) -> Result<Vec<String>, String> {
         let root = into
             .as_ref()
-            .map_or(self.lane.ctx.workspace.root(), |ws| ws.root())
+            .map_or(self.lane_mut().ctx.workspace.root(), |ws| ws.root())
             .to_path_buf();
         let failed = |e| Err(format!("nothing reloaded — {}", refused("reload", e)));
         let project = match crate::config::load_project(&root) {
@@ -423,17 +437,17 @@ impl Repl {
         // Only here, with everything computed: a workspace whose config or
         // skills will not resolve leaves the session where it already was.
         if let Some(ws) = into {
-            self.lane.ctx.relocate(ws);
+            self.lane_mut().ctx.relocate(ws);
         }
         // One `make_mut`: a run in flight holds the other reference, so this
         // is where the copy is taken, and taking it four times copies thrice
         // over.
-        let ag = std::sync::Arc::make_mut(&mut self.lane.agent);
+        let ag = std::sync::Arc::make_mut(&mut self.lane_mut().agent);
         ag.registry = resolved.registry;
         ag.approver = std::sync::Arc::new(agent::Ceiling(resolved.tier));
         ag.system = resolved.system;
         ag.effort = resolved.effort;
-        self.lane.context = resolved.context;
+        self.lane_mut().context = resolved.context;
         self.keys = std::sync::Arc::new(resolved.keys);
         // A skill can appear between one turn and the next, so the table of
         // what a slash answers to is recomputed like everything else here.
@@ -450,11 +464,11 @@ impl Repl {
         match crate::dial(
             &self.args,
             &self.config,
-            &self.lane.agent.spec.model,
+            &self.lane().agent.spec.model,
             crate::config::Origin::Command,
         ) {
-            Ok(dialled) if dialled.spec != self.lane.agent.spec => {
-                std::sync::Arc::make_mut(&mut self.lane.agent).retarget(dialled.transport, dialled.spec);
+            Ok(dialled) if dialled.spec != self.lane().agent.spec => {
+                std::sync::Arc::make_mut(&mut self.lane_mut().agent).retarget(dialled.transport, dialled.spec);
                 notes.extend(
                     dialled
                         .notes
@@ -469,7 +483,7 @@ impl Repl {
             Ok(_) => {}
             Err(e) => notes.push(format!(
                 "`{}` not re-dialled — {}",
-                self.lane.agent.spec.model, e
+                self.lane_mut().agent.spec.model, e
             )),
         }
         tracing::info!(
@@ -477,8 +491,8 @@ impl Repl {
             models = self.config.names().len(),
             rebound_keys = self.config.keys.len(),
             commands = self.commands.len(),
-            effort = ?self.lane.agent.effort,
-            system_bytes = self.lane.agent.system.len(),
+            effort = ?self.lane().agent.effort,
+            system_bytes = self.lane().agent.system.len(),
             "reloaded"
         );
         Ok(notes)
@@ -603,7 +617,7 @@ impl Repl {
         ) {
             Ok(d) => d,
             Err(e) => {
-                let held = self.lane.agent.spec.model.clone();
+                let held = self.lane_mut().agent.spec.model.clone();
                 return vec![format!("still on {held} — {}", refused("switch", e))];
             }
         };
@@ -612,8 +626,8 @@ impl Repl {
         // lands on need not be the same string. Comparing the typed one would
         // re-dial the model already running and then announce a reasoning
         // demotion that never happened.
-        if dialled.spec.model == self.lane.agent.spec.model {
-            return vec![format!("already on {}", self.lane.agent.spec.model)];
+        if dialled.spec.model == self.lane_mut().agent.spec.model {
+            return vec![format!("already on {}", self.lane_mut().agent.spec.model)];
         }
         let mut said: Vec<String> = dialled.warning.into_iter().chain(dialled.notes).collect();
         let spec = &dialled.spec;
@@ -624,24 +638,24 @@ impl Repl {
         ));
         // An absent transcript is one a run has, and it is writing this
         // model's reasoning into it as we speak — so say it either way.
-        if self.lane.session.as_ref().is_none_or(carries_reasoning) {
+        if self.lane_mut().session.as_ref().is_none_or(carries_reasoning) {
             said.push(demotion(spec.replay_thinking).into());
         }
         tracing::info!(
             target: "pi::session",
-            from = %self.lane.agent.spec.model,
+            from = %self.lane_mut().agent.spec.model,
             to = %spec.model,
             format = spec.format.name(),
             context_window = spec.context_window,
             "model switched"
         );
-        std::sync::Arc::make_mut(&mut self.lane.agent).retarget(dialled.transport, dialled.spec);
+        std::sync::Arc::make_mut(&mut self.lane_mut().agent).retarget(dialled.transport, dialled.spec);
         said
     }
 
     /// What `/model` on its own shows.
     fn listing(&self) -> Vec<String> {
-        let here = &self.lane.agent.spec.model;
+        let here = &self.lane().agent.spec.model;
         let choices = self.choices();
         if choices.is_empty() {
             return vec![
@@ -663,15 +677,15 @@ impl Repl {
     /// exactly the one worth keeping.
     pub fn save(&self) -> anyhow::Result<()> {
         // Away with a run, which saves it itself on the way back.
-        let Some(session) = &self.lane.session else {
+        let Some(session) = &self.lane().session else {
             return Ok(());
         };
         self.store.save(
-            &self.lane.id,
-            self.lane.ctx.workspace.root(),
-            &self.lane.agent.spec.model,
-            self.lane.name.as_deref(),
-            self.lane.created,
+            &self.lane().id,
+            self.lane().ctx.workspace.root(),
+            &self.lane().agent.spec.model,
+            self.lane().name.as_deref(),
+            self.lane().created,
             session,
         )?;
         Ok(())
@@ -686,15 +700,18 @@ impl Repl {
         &mut self,
         focus: Option<&str>,
     ) -> Option<(agent::compact::Report, Totals)> {
-        let session = self.lane.session.as_mut()?;
-        self.lane.agent.compact_now(session, focus).await
+        // One borrow of the lane, two of its fields: they are disjoint, and
+        // asking twice would not be.
+        let lane = self.lane_mut();
+        let session = lane.session.as_mut()?;
+        lane.agent.compact_now(session, focus).await
     }
 
     /// What the transcript occupies now, for the line that says why there was
     /// nothing to compact. Zero while a run has it.
     pub fn tokens_now(&self) -> usize {
-        self.lane.session.as_ref().map_or(0, |s| {
-            brain::estimate::tokens(&s.context(), &self.lane.agent.spec)
+        self.lane().session.as_ref().map_or(0, |s| {
+            brain::estimate::tokens(&s.context(), &self.lane().agent.spec)
         })
     }
 
@@ -707,7 +724,7 @@ impl Repl {
     pub fn rewind_to(&mut self, entry: agent::session::EntryId) -> anyhow::Result<Rewound> {
         // A rewind is refused while a run has the transcript, so this is the
         // idle path; without it there is nothing to go back through.
-        let Some(session) = &mut self.lane.session else {
+        let Some(session) = &mut self.lane_mut().session else {
             return Ok(Rewound::Nothing);
         };
         let unsent = session.unsent_text(entry);
@@ -720,7 +737,7 @@ impl Repl {
         }
         // The rollback dropped the session's plan for describing work this
         // rewind undid; the live copy would be recorded straight back over it.
-        self.lane.ctx.set_todos(Vec::new());
+        self.lane_mut().ctx.set_todos(Vec::new());
         self.save()?;
         Ok(match unsent {
             Some(text) => Rewound::Unsent(text),
@@ -1083,7 +1100,7 @@ impl Repl {
             }),
             // The live copy, not the session's: mid-run the session is away
             // with the turn, and this is the list the tool is writing anyway.
-            Cmd::Todo => lines(tools::todo::render(&self.lane.ctx.todos())),
+            Cmd::Todo => lines(tools::todo::render(&self.lane_mut().ctx.todos())),
             Cmd::Cost => lines(crate::render::spent(&totals.usage, totals.cost)),
             Cmd::New => Step::Swap(self.fresh_session("started")),
             Cmd::Resume(name) => {
@@ -1098,11 +1115,11 @@ impl Repl {
             }
             Cmd::Name(name) => {
                 if name.is_empty() {
-                    self.lane.name = None;
-                    lines(format!("{} is unnamed again", self.lane.id))
+                    self.lane_mut().name = None;
+                    lines(format!("{} is unnamed again", self.lane_mut().id))
                 } else {
-                    let said = format!("{} is now “{name}”", self.lane.id);
-                    self.lane.name = Some(name);
+                    let said = format!("{} is now “{name}”", self.lane_mut().id);
+                    self.lane_mut().name = Some(name);
                     lines(said)
                 }
             }
@@ -1220,22 +1237,22 @@ impl Repl {
     /// that got missed, and a resumed session was then re-dated on its next
     /// save with the stamp of the session it had just left.
     fn becomes(&mut self, id: String, created: u64) {
-        self.lane.id = id;
-        self.lane.created = created;
-        crate::journal::switched(&self.lane.id);
+        self.lane_mut().id = id;
+        self.lane_mut().created = created;
+        crate::journal::switched(&self.lane_mut().id);
         // Spills are filed under the session id; a session has to own its own
         // namespace or the one before it keeps swallowing them.
-        self.lane.ctx = self.lane.ctx.clone().with_session(&self.lane.id);
+        self.lane_mut().ctx = self.lane_mut().ctx.clone().with_session(&self.lane_mut().id);
     }
 
     fn fresh_session(&mut self, said: &str) -> Vec<String> {
-        self.lane.session = Some(Session::default());
+        self.lane_mut().session = Some(Session::default());
         // A name identifies one session; carried over it would name two, which
         // is what `/name` exists to prevent.
-        self.lane.name = None;
+        self.lane_mut().name = None;
         self.becomes(crate::session::new_id(), crate::session::now());
-        self.lane.ctx.set_todos(Vec::new());
-        vec![format!("{said} {}", self.lane.id)]
+        self.lane_mut().ctx.set_todos(Vec::new());
+        vec![format!("{said} {}", self.lane_mut().id)]
     }
 
     /// Take a stored transcript as the running one — entries, name, id, plan.
@@ -1243,13 +1260,13 @@ impl Repl {
     fn adopt_session(&mut self, stored: Stored) -> Vec<String> {
         let (id, name, created) = (stored.id.clone(), stored.name.clone(), stored.created);
         let session = stored.into_session();
-        self.lane.name = name;
+        self.lane_mut().name = name;
         // Left as it was, the live copy would overwrite the plan just restored.
-        self.lane.ctx.set_todos(session.todos().to_vec());
-        self.lane.session = Some(session);
+        self.lane_mut().ctx.set_todos(session.todos().to_vec());
+        self.lane_mut().session = Some(session);
         self.becomes(id, created);
-        let mut said = vec![format!("resumed {}", self.lane.id)];
-        if let Some(name) = self.lane.name.as_deref() {
+        let mut said = vec![format!("resumed {}", self.lane_mut().id)];
+        if let Some(name) = self.lane_mut().name.as_deref() {
             said.push(format!("“{name}”"));
         }
         said
@@ -1264,7 +1281,7 @@ impl Repl {
     /// are keyed by absolute path. Coming back therefore resumes what was being
     /// said in that tree, not an empty page.
     fn enter_worktree(&mut self, name: &str) -> Result<Vec<String>, String> {
-        let from = self.lane.ctx.workspace.root().to_path_buf();
+        let from = self.lane_mut().ctx.workspace.root().to_path_buf();
         let (tree, how) = match crate::worktree::enter(&from, name) {
             Ok(found) => found,
             Err(e) => return Err(refused("worktree", e)),
@@ -1283,13 +1300,13 @@ impl Repl {
         }
         // Against the root it belongs to, so before the move, not after.
         // An empty session — nothing said yet — has nothing to keep.
-        if self.lane.session.as_ref().is_some_and(|s| !s.is_empty())
+        if self.lane_mut().session.as_ref().is_some_and(|s| !s.is_empty())
             && let Err(e) = self.save()
         {
             tracing::warn!(target: "pi::session", error = %e, "the leaving session was not saved");
         }
         let mut said = self.rebuild_into(Some(ws))?;
-        self.lane.worktree = (!tree.main).then(|| tree.name.clone());
+        self.lane_mut().worktree = (!tree.main).then(|| tree.name.clone());
         let on = tree.branch.as_deref().unwrap_or("a detached HEAD");
         said.push(match how {
             crate::worktree::Entered::Created => format!("{} — new, on new branch {on}", tree.name),
@@ -1301,7 +1318,7 @@ impl Repl {
         said.push(tree.path.display().to_string());
         // Asked with the root the next save will file under, so a tree is found
         // by the same key it was stored by.
-        let found = self.store.latest(self.lane.ctx.workspace.root());
+        let found = self.store.latest(self.lane().ctx.workspace.root());
         said.extend(match found {
             Ok(stored) => self.adopt_session(stored),
             Err(e) => {
@@ -1317,7 +1334,7 @@ impl Repl {
     /// The checkouts `/worktree` can move to, the repository's own first, the
     /// one the session is in marked.
     fn worktree_listing(&self) -> Vec<String> {
-        let here = self.lane.ctx.workspace.root();
+        let here = self.lane().ctx.workspace.root();
         let trees = match crate::worktree::list(here) {
             Ok(t) => t,
             Err(e) => return vec![refused("worktree", e)],
@@ -1348,7 +1365,7 @@ impl Repl {
     /// The sessions `/resume` can switch to, newest first, the one running
     /// now marked.
     fn resume_listing(&self) -> Vec<String> {
-        let list = self.store.choices(self.lane.ctx.workspace.root());
+        let list = self.store.choices(self.lane().ctx.workspace.root());
         if list.is_empty() {
             return vec![
                 "no sessions recorded for this workspace".into(),
@@ -1365,7 +1382,7 @@ impl Repl {
                 } else {
                     crate::render::clip(&s.prompt, RESUME_WIDTH)
                 };
-                (s.id == self.lane.id, text, s.created)
+                (s.id == self.lane().id, text, s.created)
             })
             .collect();
         let width = shown
@@ -1398,7 +1415,7 @@ impl Repl {
     fn resume(&mut self, id: &str) -> Result<Vec<String>, String> {
         // The session being left has to survive too, or /resume throws it
         // away. An empty one — just opened, nothing said — has nothing to keep.
-        if self.lane.session.as_ref().is_some_and(|s| !s.is_empty())
+        if self.lane_mut().session.as_ref().is_some_and(|s| !s.is_empty())
             && let Err(e) = self.save()
         {
             tracing::warn!(target: "pi::session", error = %e, "resume could not save the leaving session");
@@ -1413,7 +1430,7 @@ impl Repl {
     /// surface hands in a token so Ctrl-C (line mode) or Esc (terminal) can
     /// stop the command instead of leaving the caller stuck for the timeout.
     pub async fn bash(&mut self, command: &str, cancel: CancellationToken) -> Vec<String> {
-        let ctx = self.lane.ctx.clone().with_cancel(cancel);
+        let ctx = self.lane_mut().ctx.clone().with_cancel(cancel);
         let out = tools::bash::Bash
             .execute(serde_json::json!({ "command": command }), &ctx)
             .await;
@@ -1438,7 +1455,7 @@ impl Repl {
         // because it had the typed line and the rebuild did not.
         // `!` is queued while a run has the transcript, so it lands here with
         // the session at home.
-        if let Some(session) = &mut self.lane.session {
+        if let Some(session) = &mut self.lane_mut().session {
             session.push_user(agent::session::UserBody::Aside(agent::session::UserText {
                 text,
                 shown: Some(format!("!{command}")),

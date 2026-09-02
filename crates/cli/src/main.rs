@@ -558,7 +558,8 @@ async fn main() -> Result<()> {
             file: config::load_tree(args.config.as_deref())
                 .unwrap_or_else(|_| toml::Value::Table(Default::default())),
             claimed: BTreeMap::new(),
-            lane: lane::Lane {
+            current: 0,
+            lanes: vec![lane::Lane {
                 agent: std::sync::Arc::new(ag),
                 session: Some(carried),
                 id,
@@ -567,7 +568,7 @@ async fn main() -> Result<()> {
                 context: resolved.context,
                 worktree: worktree::current(&root),
                 ctx,
-            },
+            }],
         };
         // The live region needs the terminal at both ends: keys come in one
         // side and the repaint goes out the other. Missing either, there is

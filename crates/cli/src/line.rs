@@ -57,7 +57,7 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
                     }
                 }
                 None => {
-                    let held = core.lane.agent.kept_tokens().unwrap_or(0);
+                    let held = core.lane_mut().agent.kept_tokens().unwrap_or(0);
                     let now = core.tokens_now();
                     println!(
                         "nothing to compact — {now} tokens, all inside the {held} kept as working context"
@@ -84,13 +84,13 @@ async fn turn(
 ) -> Totals {
     // Lent for the length of the turn and put back after, the same shape the
     // terminal uses — here there is no loop to free, only one owner throughout.
-    let Some(mut session) = core.lane.session.take() else {
+    let Some(mut session) = core.lane_mut().session.take() else {
         return Totals::default();
     };
     session.send_prompt(prompt, typed);
-    let ctx = core.lane.ctx.clone().with_cancel(agent::cancel_on_interrupt());
-    let out = core.lane.agent.run(&mut session, &ctx, tx).await;
-    core.lane.session = Some(session);
+    let ctx = core.lane_mut().ctx.clone().with_cancel(agent::cancel_on_interrupt());
+    let out = core.lane_mut().agent.run(&mut session, &ctx, tx).await;
+    core.lane_mut().session = Some(session);
 
     // Saved either way: an interrupted turn is exactly the one worth keeping.
     if let Err(e) = core.save() {
