@@ -1,10 +1,12 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use agent::session::Session;
 /// The clock this crate dates transcripts by — the session's own, so a file
 /// and the entries inside it are never stamped by two.
 pub use agent::session::now;
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
@@ -119,8 +121,12 @@ impl Default for Store {
     }
 }
 
+/// A new session id. Without the counter, two minted in one second share an id
+/// and with it one archive file, where the second silently replaces the first.
 pub fn new_id() -> String {
-    format!("{}-{}", now(), std::process::id())
+    static MINTED: AtomicU64 = AtomicU64::new(0);
+    let nth = MINTED.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{}-{nth}", now(), std::process::id())
 }
 
 impl Store {
@@ -281,6 +287,12 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn two_ids_minted_in_one_second_are_still_two_ids() {
+        // Same second, same pid: everything but the counter is equal.
+        assert_ne!(new_id(), new_id());
+    }
+
     #[test]
     fn an_id_cannot_walk_out_of_the_directory_it_names_a_file_in() {
         assert_eq!(
