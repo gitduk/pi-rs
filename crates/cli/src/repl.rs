@@ -11,7 +11,7 @@ use serde::Deserialize;
 
 use crate::config::Config;
 use crate::journal;
-use crate::session::{ResumeChoice, Store};
+use crate::session::{ResumeChoice, Store, Stored};
 
 /// Where a command came from, and so what running it means.
 #[derive(Clone)]
@@ -1148,6 +1148,9 @@ impl Repl {
 
     fn fresh_session(&mut self, said: &str) -> Vec<String> {
         self.session = Session::default();
+        // A name identifies one session; carried over it would name two, which
+        // is what `/name` exists to prevent.
+        self.name = None;
         self.becomes(crate::session::new_id(), crate::session::now());
         if let Ok(mut held) = self.ctx.todos.lock() {
             held.clear();
@@ -1155,14 +1158,33 @@ impl Repl {
         vec![format!("{said} {}", self.id)]
     }
 
+    /// Take a stored transcript as the running one — entries, name, id, plan.
+    /// Parting with what is being left is the caller's; they differ on when.
+    fn adopt_session(&mut self, stored: Stored) -> Vec<String> {
+        let (id, name, created) = (stored.id.clone(), stored.name.clone(), stored.created);
+        self.session = stored.into_session();
+        self.name = name;
+        // The live copy the todo tool writes and the loop records back into the
+        // session; left as it was, it would overwrite the plan just restored.
+        if let Ok(mut held) = self.ctx.todos.lock() {
+            *held = self.session.todos().to_vec();
+        }
+        self.becomes(id, created);
+        let mut said = vec![format!("resumed {}", self.id)];
+        if let Some(name) = self.name.as_deref() {
+            said.push(format!("“{name}”"));
+        }
+        said
+    }
+
     /// `/worktree <name>`: create or reuse a checkout of this repository and
     /// move the session into it.
     ///
-    /// The transcript stays behind. Paths in it are workspace-relative, so
-    /// under another root the same string names a different file; the file
-    /// locks and edit shifts are keyed by absolute path, and a saved session
-    /// belongs to one workspace bucket. Carrying it over would leave the model
-    /// reasoning about two trees at once.
+    /// Each tree keeps its own transcript rather than one transcript following
+    /// the move: paths in it are workspace-relative, so under another root the
+    /// same string names a different file, and the file locks and edit shifts
+    /// are keyed by absolute path. Coming back therefore resumes what was being
+    /// said in that tree, not an empty page.
     fn enter_worktree(&mut self, name: &str) -> Result<Vec<String>, String> {
         let from = self.ctx.workspace.root().to_path_buf();
         let (tree, how) = match crate::worktree::enter(&from, name) {
@@ -1199,7 +1221,18 @@ impl Repl {
             crate::worktree::Entered::Existing => format!("{} — on {on}", tree.name),
         });
         said.push(tree.path.display().to_string());
-        said.extend(self.fresh_session("started"));
+        // Asked with the root the next save will file under, so a tree is found
+        // by the same key it was stored by.
+        let found = self.store.latest(self.ctx.workspace.root());
+        said.extend(match found {
+            Ok(stored) => self.adopt_session(stored),
+            Err(e) => {
+                // Nothing recorded for this tree is the ordinary case; an
+                // archive that will not load is not, and says so only here.
+                tracing::debug!(target: "pi::session", error = %e, "no session to resume in this worktree");
+                self.fresh_session("started")
+            }
+        });
         Ok(said)
     }
 
@@ -1293,15 +1326,7 @@ impl Repl {
             tracing::warn!(target: "pi::session", error = %e, "resume could not save the leaving session");
         }
         let stored = self.store.load(id).map_err(|e| refused("resume", e))?;
-        let (resumed_id, name, created) = (stored.id.clone(), stored.name.clone(), stored.created);
-        self.session = stored.into_session();
-        self.name = name;
-        self.becomes(resumed_id, created);
-        let mut said = vec![format!("resumed {}", self.id)];
-        if let Some(name) = self.name.as_deref() {
-            said.push(format!("“{name}”"));
-        }
-        Ok(said)
+        Ok(self.adopt_session(stored))
     }
 
     /// Run what `!` named: show the output, and record the command and its
