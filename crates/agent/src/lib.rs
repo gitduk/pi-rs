@@ -92,6 +92,7 @@ pub enum AgentError {
 }
 
 
+#[derive(Clone)]
 pub struct Agent {
     pub transport: Arc<dyn Transport>,
     pub spec: ModelSpec,

@@ -290,6 +290,12 @@ impl Ctx {
         spill::locate(&self.spill_root, locator)
     }
 
+    /// The plan as it stands right now, rather than as the running session last
+    /// recorded it. Named like `Session::todos`, which is the same list later.
+    pub fn todos(&self) -> Vec<todo::Todo> {
+        self.todos.lock().map(|held| held.clone()).unwrap_or_default()
+    }
+
     /// Replace the plan the todo tool reads and writes. The loop records this
     /// copy back into the running session, over whatever that session held.
     pub fn set_todos(&self, items: Vec<todo::Todo>) {

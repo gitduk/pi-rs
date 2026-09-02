@@ -29,7 +29,7 @@ use crate::journal;
 use crate::keys::{Action, Keys, Press};
 use crate::render::Style as ThemeStyle;
 use crate::render::{self, Markdown, Paint};
-use crate::repl::{self, Candidate, Choice, Command, Lane, Repl, Rewound, Step};
+use crate::repl::{self, Candidate, Choice, Command, Fate, Repl, Rewound, Step};
 use crate::session::ResumeChoice;
 use editor::Editor;
 use ratatui::layout::{Constraint, Layout};
@@ -1514,6 +1514,51 @@ fn absorb_growth(scroll: usize, last: Option<usize>, total: usize) -> usize {
     }
 }
 
+// What a `Step::Handled` leaves behind: its lines, and whatever the command
+// changed under the surface. A free function because a run in flight lands
+// them from inside its own borrow, where `self` is in pieces.
+fn land_handled(ui: &mut Ui, core: &Repl, lines: Vec<String>) {
+    ui.view.scrollback.extend(lines.into_iter().map(Row::notice));
+    // The key map lives in two places; a reload has to reach both or the
+    // screen keeps answering to the old bindings.
+    if !Arc::ptr_eq(&ui.keys, &core.keys) {
+        ui.keys = core.keys.clone();
+    }
+    // Likewise the completion list: /reload is allowed to define models — and
+    // skills — the last one did not.
+    ui.choices = core.choices();
+    if ui.paint.theme.as_ref() != &core.config.theme {
+        ui.set_theme(Arc::new(core.config.theme.clone()));
+    }
+    if !Arc::ptr_eq(&ui.commands, &core.commands) {
+        ui.commands = core.commands.clone();
+    }
+    // The config tree changed under a reload; the `/settings` completion list
+    // follows it.
+    ui.setting_paths = crate::settings::leaves(&core.file)
+        .into_iter()
+        .map(|(p, _)| p)
+        .collect();
+}
+
+// A line submitted while the run works. What it may do is settled before it
+// runs: `command` cannot be asked and then ignored, because asking is doing.
+fn submitted(core: &mut Repl, ui: &mut Ui, totals: &Totals, line: String) {
+    match crate::repl::fate_of(&line) {
+        Fate::Refused(why) => ui.say(why.to_string()),
+        Fate::Queued => ui.view.queued.push(line),
+        Fate::Now => {
+            ui.submit(&line);
+            // `fate` admits only `Handled` here. Anything else has already had
+            // its effect by now, so the line must not go back on the queue —
+            // running it again is the one thing worse than not showing it.
+            if let Step::Handled(said) = core.command(&line, totals) {
+                land_handled(ui, core, said);
+            }
+        }
+    }
+}
+
 pub struct Tui {
     core: Repl,
     ui: Ui,
@@ -1685,7 +1730,10 @@ impl Tui {
                     },
                 }
             } else {
-                Some(std::mem::take(&mut self.ui.view.queued).join("\n"))
+                // One at a time. Joined, a command and a prompt become one
+                // line, and `parse` reads only its first word — so whichever
+                // came first decided what both of them were.
+                Some(self.ui.view.queued.remove(0))
             };
             let Some(line) = line else { continue; };
             self.ui.submit(&line);
@@ -1757,32 +1805,7 @@ impl Tui {
                         .extend(lines.into_iter().map(Row::notice));
                 }
                 Step::Swap(said) => self.land_swap(said),
-                Step::Handled(lines) => {
-                    self.ui
-                        .view
-                        .scrollback
-                        .extend(lines.into_iter().map(Row::notice));
-                    // The key map lives in two places; a reload has to reach
-                    // both or the screen keeps answering to the old bindings.
-                    if !Arc::ptr_eq(&self.ui.keys, &self.core.keys) {
-                        self.ui.keys = self.core.keys.clone();
-                    }
-                    // Likewise the completion list: /reload is allowed to
-                    // define models — and skills — the last one did not.
-                    self.ui.choices = self.core.choices();
-                    if self.ui.paint.theme.as_ref() != &self.core.config.theme {
-                        self.ui.set_theme(Arc::new(self.core.config.theme.clone()));
-                    }
-                    if !Arc::ptr_eq(&self.ui.commands, &self.core.commands) {
-                        self.ui.commands = self.core.commands.clone();
-                    }
-                    // The config tree changed under a reload; the `/settings`
-                    // completion list follows it.
-                    self.ui.setting_paths = crate::settings::leaves(&self.core.file)
-                        .into_iter()
-                        .map(|(p, _)| p)
-                        .collect();
-                }
+                Step::Handled(lines) => land_handled(&mut self.ui, &self.core, lines),
                 Step::Compact(focus) => {
                     // Long enough to want the spinner, so it borrows the run's.
                     // Committed with it: a compaction is work under way, not a
@@ -1835,21 +1858,11 @@ impl Tui {
                     self.ui.view.scrollback
                         .extend(said.into_iter().map(Row::notice));
                 }
-                Step::Prompt { send, mut typed } => {
-                    let mut next = Some(send);
-                    // Anything submitted while the run worked becomes the next
-                    // prompt rather than waiting for the user to send it again.
-                    // `typed` belongs to the first turn only: what was queued
-                    // after it is already what the user wrote.
-                    while let Some(prompt) = next.take() {
-                        self.turn(prompt, typed.take(), &tx, &mut rx).await;
-                        if !self.ui.view.queued.is_empty() {
-                            let queued = std::mem::take(&mut self.ui.view.queued).join("\n");
-                            self.ui.submit(&queued);
-                            next = Some(queued);
-                        }
-                    }
-                }
+                // What was submitted while the run worked is taken up by the
+                // top of this loop, one entry at a time and each read as what
+                // it is. Draining it here instead meant everything queued
+                // became the next prompt, whatever it had been typed as.
+                Step::Prompt { send, typed } => self.turn(send, typed, &tx, &mut rx).await,
             }
         }
         self.save_history();
@@ -1963,13 +1976,19 @@ impl Tui {
         // Set inside the run's borrow, acted on after it: unsending has to
         // touch the session, and the run is holding it.
         let mut unsend = false;
-        let out = {
-            // Disjoint borrows: the run holds the session while the loop keeps
-            // drawing and reading keys.
-            let Self { core, ui, keys, bridge, .. } = self;
-            let Lane { agent, session, .. } = &mut core.lane;
-            let run = agent.run(session, &ctx, tx);
-            tokio::pin!(run);
+        // The run takes the session with it and hands it back at the end. That
+        // is what frees the loop: nothing of the session is borrowed while the
+        // turn works, so a command typed into it can be answered on the spot.
+        let agent = self.core.lane.agent.clone();
+        let mut carried = std::mem::take(&mut self.core.lane.session);
+        self.core.lane.running = true;
+        let joined = {
+            let Self { core, ui, keys, bridge, totals } = self;
+            let sent = tx.clone();
+            let mut run = tokio::spawn(async move {
+                let out = agent.run(&mut carried, &ctx, &sent).await;
+                (carried, out)
+            });
             let mut tick = tokio::time::interval(crate::status::SPIN);
             loop {
                 ui.flush();
@@ -1986,7 +2005,7 @@ impl Tui {
                             ui.view.stopping = true;
                             unsend = true;
                         }
-                        Act::Submit(line) => ui.view.queued.push(line),
+                        Act::Submit(line) => submitted(core, ui, totals, line),
                         // Nothing else can stop a run that will not stop.
                         Act::Quit => {
                             ui.screen.leave();
@@ -2003,7 +2022,7 @@ impl Tui {
                             ui.view.stopping = true;
                         }
                         Some(crate::wechat::Inbound::Text { text }) => {
-                            ui.view.queued.push(text);
+                            submitted(core, ui, totals, text);
                         }
                         Some(crate::wechat::Inbound::Notice(text)) => {
                             ui.say(text);
@@ -2013,6 +2032,39 @@ impl Tui {
                     _ = tick.tick() => ui.spinner += 1,
                 }
             }
+        };
+
+        // The task carried the transcript. Only a panic in it loses that copy,
+        // and then the save below must not put the empty one in its place.
+        self.core.lane.running = false;
+        let (recovered, out) = match joined {
+            Ok((session, out)) => {
+                self.core.lane.session = session;
+                (true, out)
+            }
+            // The task carried the whole transcript, not just this turn, and a
+            // panic in it dropped that copy. The archive is the last good one;
+            // carrying the empty stand-in forward would save it over the real
+            // one at the end of the next turn, which loses the conversation
+            // rather than the turn.
+            Err(e) => match self.core.store.load(&self.core.lane.id) {
+                Ok(stored) => {
+                    self.core.lane.session = stored.into_session();
+                    self.core.lane.ctx.set_todos(self.core.lane.session.todos().to_vec());
+                    self.ui.say(format!(
+                        "the run did not finish: {e} — back to the transcript as last saved"
+                    ));
+                    (true, Ok(Totals::default()))
+                }
+                // Nothing to go back to and nothing safe to write: what a panic
+                // in the run did before it had a task to happen inside of.
+                Err(why) => {
+                    self.ui.screen.leave();
+                    eprintln!("the run did not finish: {e}");
+                    eprintln!("and the transcript could not be read back: {why}");
+                    std::process::exit(70);
+                }
+            },
         };
 
         // Whatever the run posted on its way out still has to be shown.
@@ -2027,8 +2079,12 @@ impl Tui {
         self.ui.abandon_tools();
         self.ui.view.started = None;
 
-        // Saved either way: an interrupted turn is exactly the one worth keeping.
-        if let Err(e) = self.core.save() {
+        // Saved either way: an interrupted turn is exactly the one worth
+        // keeping. Not when the transcript never came back, though — the empty
+        // one standing in for it would land on top of what is on disk.
+        if recovered
+            && let Err(e) = self.core.save()
+        {
             self.ui
                 .say(format!("warning: the transcript was not saved: {e}"));
         }

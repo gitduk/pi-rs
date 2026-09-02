@@ -338,7 +338,11 @@ const RESUME_WIDTH: usize = 60;
 /// where it lands. Everything here is decided by the workspace root, so two
 /// trees hold two of these and share nothing but the fields on `Repl`.
 pub struct Lane {
-    pub agent: Agent,
+    /// Shared so a run can take it with it: `Agent::run` needs only `&self`,
+    /// and a turn outlives the borrow the surface could lend it. `/model` and
+    /// `/reload` write through `Arc::make_mut`, so a run in flight keeps the
+    /// agent it started on — which is what they meant all along.
+    pub agent: std::sync::Arc<Agent>,
     pub session: Session,
     pub id: String,
     /// When this session began. Held rather than read back: it is set once and
@@ -353,6 +357,10 @@ pub struct Lane {
     pub context: Vec<String>,
     /// Carried across turns: the plan and the file locks outlive any one run.
     pub ctx: Ctx,
+    /// Whether a run has the session right now. It is taken for the length of
+    /// a turn, and the empty one left in its place reads exactly like a session
+    /// with nothing in it — which is a different thing to anyone asking.
+    pub running: bool,
     /// Which worktree the session is in, or None in the repository's own
     /// checkout. Held so the status line can say where the work is landing.
     pub worktree: Option<String>,
@@ -448,10 +456,14 @@ impl Repl {
         if let Some(ws) = into {
             self.lane.ctx.relocate(ws);
         }
-        self.lane.agent.registry = resolved.registry;
-        self.lane.agent.approver = std::sync::Arc::new(agent::Ceiling(resolved.tier));
-        self.lane.agent.system = resolved.system;
-        self.lane.agent.effort = resolved.effort;
+        // One `make_mut`: a run in flight holds the other reference, so this
+        // is where the copy is taken, and taking it four times copies thrice
+        // over.
+        let ag = std::sync::Arc::make_mut(&mut self.lane.agent);
+        ag.registry = resolved.registry;
+        ag.approver = std::sync::Arc::new(agent::Ceiling(resolved.tier));
+        ag.system = resolved.system;
+        ag.effort = resolved.effort;
         self.lane.context = resolved.context;
         self.keys = std::sync::Arc::new(resolved.keys);
         // A skill can appear between one turn and the next, so the table of
@@ -473,7 +485,7 @@ impl Repl {
             crate::config::Origin::Command,
         ) {
             Ok(dialled) if dialled.spec != self.lane.agent.spec => {
-                self.lane.agent.retarget(dialled.transport, dialled.spec);
+                std::sync::Arc::make_mut(&mut self.lane.agent).retarget(dialled.transport, dialled.spec);
                 notes.extend(
                     dialled
                         .notes
@@ -641,7 +653,9 @@ impl Repl {
             spec.model,
             summary(spec.format.name(), spec.context_window, &spec.pricing)
         ));
-        if carries_reasoning(&self.lane.session) {
+        // Mid-run the transcript is away with the turn, which is writing this
+        // model's reasoning into it as we speak — so say it either way.
+        if self.lane.running || carries_reasoning(&self.lane.session) {
             said.push(demotion(spec.replay_thinking).into());
         }
         tracing::info!(
@@ -652,7 +666,7 @@ impl Repl {
             context_window = spec.context_window,
             "model switched"
         );
-        self.lane.agent.retarget(dialled.transport, dialled.spec);
+        std::sync::Arc::make_mut(&mut self.lane.agent).retarget(dialled.transport, dialled.spec);
         said
     }
 
@@ -793,6 +807,61 @@ pub enum Cmd {
         word: String,
         args: String,
     },
+}
+
+/// What a line may do while a turn is in flight.
+///
+/// Read off the parsed command rather than off the `Step` it produces:
+/// `command` has already had its effect by the time it hands one back, so a
+/// `Step` can say what happened but never whether it should have.
+#[derive(Debug)]
+pub enum Fate {
+    /// Touches nothing the run is standing on.
+    Now,
+    /// Goes to the model, or needs the surface free, so it waits.
+    Queued,
+    /// Would move what the run stands on. Says this rather than doing it.
+    Refused(&'static str),
+}
+
+/// What a submitted line may do while a turn is in flight.
+///
+/// A line naming nothing is a prompt, and a prompt waits — so anything `parse`
+/// does not recognise is `Queued`.
+pub fn fate_of(line: &str) -> Fate {
+    parse(line).map_or(Fate::Queued, |cmd| cmd.fate())
+}
+
+impl Cmd {
+    /// Exhaustive on purpose, with no catch-all arm: a command added without an
+    /// answer here should fail to compile rather than default to one.
+    ///
+    /// What it cannot check is an existing arm's body: `Reload` and `Model` are
+    /// `Now` because they write through `Arc::make_mut`, and `Todo` because it
+    /// reads `ctx`, not the session. An arm that starts reading `lane.session`
+    /// breaks this quietly — the session is away for the length of a run.
+    pub fn fate(&self) -> Fate {
+        match self {
+            // Answered from the config, the key map or the surface's own
+            // totals — none of which the run is holding.
+            Cmd::Help | Cmd::Keys | Cmd::Log | Cmd::Cost | Cmd::Todo | Cmd::Name(_) => Fate::Now,
+            // Both write through `Arc::make_mut`, so the run in flight keeps
+            // the agent it started on and the next one picks up the change.
+            Cmd::Reload | Cmd::Model(_) => Fate::Now,
+            // Bare, these only list what there is.
+            Cmd::Resume(name) | Cmd::Worktree(name) if name.trim().is_empty() => Fate::Now,
+            Cmd::Resume(_) => Fate::Refused("/resume would replace the transcript this run is writing — esc first"),
+            Cmd::Worktree(_) => Fate::Refused("/worktree would move the tree this run is working in — esc first"),
+            Cmd::New => Fate::Refused("/new would replace the transcript this run is writing — esc first"),
+            Cmd::Compact(_) => Fate::Refused("/compact rewrites the transcript this run is writing — esc first"),
+            // `set`/`get`/`reset` are lines; bare opens a panel, which wants
+            // the surface to itself.
+            Cmd::Settings(rest) if !rest.trim().is_empty() => Fate::Now,
+            Cmd::Settings(_) => Fate::Queued,
+            // A skill is a prompt; the bridge and the exit want the surface.
+            Cmd::Exit | Cmd::Wechat(_) | Cmd::Other { .. } => Fate::Queued,
+        }
+    }
 }
 
 // Slash commands are recognized before anything reaches the model, so a line
@@ -1013,7 +1082,9 @@ impl Repl {
                 Some(p) => format!("{}", p.display()),
                 None => "not recording — --log is off, or the file would not open".into(),
             }),
-            Cmd::Todo => lines(tools::todo::render(self.lane.session.todos())),
+            // The live copy, not the session's: mid-run the session is away
+            // with the turn, and this is the list the tool is writing anyway.
+            Cmd::Todo => lines(tools::todo::render(&self.lane.ctx.todos())),
             Cmd::Cost => lines(crate::render::spent(&totals.usage, totals.cost)),
             Cmd::New => Step::Swap(self.fresh_session("started")),
             Cmd::Resume(name) => {

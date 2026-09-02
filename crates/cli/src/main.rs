@@ -558,7 +558,8 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|_| toml::Value::Table(Default::default())),
             claimed: BTreeMap::new(),
             lane: repl::Lane {
-                agent: ag,
+                agent: std::sync::Arc::new(ag),
+                running: false,
                 session: carried,
                 id,
                 created,
