@@ -16,7 +16,7 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::time::Instant;
 
-use agent::session::{Entry as LogEntry, EntryId, UserBody};
+use agent::session::{Entry as LogEntry, EntryId, Node, UserBody};
 use agent::{AgentError, Event, Totals};
 use anyhow::Result;
 use brain::message::{AssistantContent, ReasoningContent};
@@ -29,7 +29,7 @@ use crate::journal;
 use crate::keys::{Action, Keys, Press};
 use crate::render::Style as ThemeStyle;
 use crate::render::{self, Markdown, Paint};
-use crate::repl::{self, Candidate, Choice, Command, Repl, Step};
+use crate::repl::{self, Candidate, Choice, Command, Repl, Rewound, Step};
 use crate::session::ResumeChoice;
 use editor::Editor;
 use ratatui::layout::{Constraint, Layout};
@@ -76,10 +76,12 @@ enum Act {
     None,
     Submit(String),
     Interrupt,
-    /// The rewind selector wants the session's user messages.
+    /// The rewind selector wants everywhere the session can go back to.
     OpenRewind,
-    /// A message chosen from the rewind selector: the conversation rewinds
-    /// there, that message kept and everything after it forgotten.
+    /// Esc caught a prompt on its way out: stop the run, then unsend it.
+    Unsend,
+    /// A row chosen from the rewind selector: the conversation rewinds there,
+    /// and what the row was decides whether it is kept or unsent.
     Rewind(EntryId),
     /// The settings panel submitted an edited value.
     CommitSetting(String, String),
@@ -445,8 +447,7 @@ fn scrollback_from(
         match entry {
             LogEntry::User { body, .. } => match body {
                 UserBody::Prompt(t) | UserBody::Aside(t) => {
-                    let shown = t.shown.as_deref().unwrap_or(&t.text);
-                    out.extend(Row::prompt(shown, prompt, bang_prompt, paint));
+                    out.extend(Row::prompt(t.shown_text(), prompt, bang_prompt, paint));
                 }
                 UserBody::Result { result: r, preview } => {
                     out.push(Row::stored_result(r, preview.as_deref()));
@@ -568,6 +569,9 @@ struct Ui {
     /// while it is open it replaces the completion list in the same rows.
     rewind: Vec<MenuEntry>,
     started: Option<Instant>,
+    /// Whether this run has produced anything yet — a word, a thought, a call.
+    /// Once it has, Esc means stop rather than unsend.
+    committed: bool,
     spinner: usize,
     /// Turns of this run that have already reported their totals.
     settled: Usage,
@@ -595,7 +599,13 @@ struct Ui {
 #[derive(Clone)]
 enum MenuEntry {
     Completion(Candidate),
-    Message { id: EntryId, show: String },
+    /// `help` says who a row belongs to: two rows of prose read alike, and
+    /// which one it is decides whether picking it unsends or continues from.
+    Message {
+        id: EntryId,
+        show: String,
+        help: &'static str,
+    },
 }
 
 impl MenuEntry {
@@ -609,7 +619,7 @@ impl MenuEntry {
     fn help(&self) -> &str {
         match self {
             MenuEntry::Completion(c) => &c.help,
-            MenuEntry::Message { .. } => "",
+            MenuEntry::Message { help, .. } => help,
         }
     }
 }
@@ -659,6 +669,7 @@ impl Ui {
             setting_paths: Vec::new(),
             settings: None,
             started: None,
+            committed: false,
             spinner: 0,
             settled: Usage::default(),
             turn: Usage::default(),
@@ -779,6 +790,14 @@ impl Ui {
     }
 
     fn on_event(&mut self, event: Event) {
+        // Anything the model produces spends the chance to unsend: past this
+        // the prompt has been answered, not merely sent.
+        if matches!(
+            event,
+            Event::TextDelta(_) | Event::ReasoningDelta(_) | Event::ToolStart { .. }
+        ) {
+            self.committed = true;
+        }
         match &event {
             Event::TextDelta(d) => self.write(d, false),
             Event::ReasoningDelta(d) => self.write(d, true),
@@ -1243,7 +1262,14 @@ impl Ui {
                     }
                 }
             }
-            Some(Action::RunInterrupt) => return Act::Interrupt,
+            Some(Action::RunInterrupt) => {
+                // Esc before the model has moved means "I didn't mean to send
+                // that"; an empty editor, or unsending overwrites a line.
+                if self.editor.is_empty() && self.started.is_some() && !self.committed {
+                    return Act::Unsend;
+                }
+                return Act::Interrupt;
+            }
             Some(Action::Rewind) => {
                 // Double Esc with an empty line opens the rewind selector.
                 // The first press only arms it; the second, inside the
@@ -1559,7 +1585,7 @@ impl Tui {
                                 self.land_swap(said);
                                 None
                             }
-                            Act::Interrupt | Act::None => None,
+                            Act::Interrupt | Act::Unsend | Act::None => None,
                         },
                         None => break,
                     },
@@ -1610,7 +1636,12 @@ impl Tui {
                             tokio::select! {
                                 done = &mut run => break done,
                                 Some(key) = keys.recv() => match ui.key(key, true) {
-                                    Act::Interrupt => { cancel.cancel(); ui.stopping = true; }
+                                    // A `!` command has no prompt to take back,
+                                    // so unsending here is only a stop.
+                                    Act::Interrupt | Act::Unsend => {
+                                        cancel.cancel();
+                                        ui.stopping = true;
+                                    }
                                     Act::Submit(line) => ui.queued.push(line),
                                     // Nothing else can stop a command that will not stop.
                                     Act::Quit => {
@@ -1670,7 +1701,10 @@ impl Tui {
                 }
                 Step::Compact(focus) => {
                     // Long enough to want the spinner, so it borrows the run's.
+                    // Committed with it: a compaction is work under way, not a
+                    // message someone can still take back.
                     self.ui.started = Some(Instant::now());
+                    self.ui.committed = true;
                     let done = self
                         .core
                         .agent
@@ -1737,32 +1771,49 @@ impl Tui {
         Ok(())
     }
 
-    /// A message chosen from the rewind selector: cut the transcript there
-    /// and say what is left.
+    /// Cut the transcript at an entry — chosen from the selector, or the
+    /// prompt an Esc took back — and say what is left.
     fn rewind_turn(&mut self, id: EntryId) {
         match self.core.rewind_to(id) {
-            Ok(0) => {
+            Ok(Rewound::Nothing) => {
                 self.ui.say(
                     self.ui
                         .paint
                         .on(&self.ui.paint.theme.muted, "nothing to rewind to"),
                 );
             }
-            Ok(_) => {
+            Ok(outcome) => {
                 // The transcript is the source of truth again: rebuild the
                 // whole view from it, so the screen returns to the node the
                 // conversation did instead of keeping the forgotten turns.
+                // It clears anything said before it: hence the notice after.
                 self.ui.rebuild(&self.core.session);
-                let tail = self.core.session.prompts().pop().map(|(_, text)| text);
-                let at = tail
-                    .filter(|t| !t.is_empty())
-                    .map(|t| format!(" — the transcript now ends at {}", render::clip(&t, 60)))
-                    .unwrap_or_default();
-                self.ui.say(
-                    self.ui
-                        .paint
-                        .on(&self.ui.paint.theme.muted, &format!("rewound{at}")),
-                );
+                let said = match outcome {
+                    // Unsent is half-typed, not gone: naming where the
+                    // transcript ends would name the wrong thing.
+                    // Cancelling takes long enough to type into, and a line
+                    // started meanwhile is the newer intent.
+                    Rewound::Unsent(_) if !self.ui.editor.is_empty() => {
+                        "unsent — the line you were typing stands; Up recalls it".to_string()
+                    }
+                    Rewound::Unsent(text) => {
+                        self.ui.editor.set_line(&text);
+                        "unsent — the message is back in the editor".to_string()
+                    }
+                    Rewound::Kept | Rewound::Nothing => {
+                        let at = self
+                            .core
+                            .session
+                            .last_node()
+                            .map(|n| render::clip(n.show(), 60))
+                            .filter(|t| !t.is_empty())
+                            .map(|t| format!(" — the transcript now ends at {t}"))
+                            .unwrap_or_default();
+                        format!("rewound{at}")
+                    }
+                };
+                self.ui
+                    .say(self.ui.paint.on(&self.ui.paint.theme.muted, &said));
             }
             Err(e) => {
                 self.ui
@@ -1771,17 +1822,21 @@ impl Tui {
         }
     }
 
-    /// Open the rewind selector on every user message the conversation can
-    /// go back to.
+    /// Open the rewind selector on every point the conversation can go back
+    /// to: what the user asked, and what the model answered.
     fn open_rewind(&mut self) {
         let rows: Vec<MenuEntry> = self
             .core
             .session
-            .prompts()
+            .rewind_nodes()
             .into_iter()
-            .map(|(id, text)| MenuEntry::Message {
-                id,
-                show: render::clip(&text, 60),
+            .map(|node| MenuEntry::Message {
+                id: node.id(),
+                show: render::clip(node.show(), 60),
+                help: match node {
+                    Node::Ask { .. } => "you — unsends it",
+                    Node::Reply { .. } => "model — carries on from here",
+                },
             })
             .collect();
         if rows.is_empty() {
@@ -1807,6 +1862,7 @@ impl Tui {
         let ctx = self.core.ctx.clone().with_cancel(cancel.clone());
 
         self.ui.started = Some(Instant::now());
+        self.ui.committed = false;
         self.ui.stopping = false;
         // Per-run figures: a new prompt's status line must not start from the
         // previous run's totals.
@@ -1817,6 +1873,9 @@ impl Tui {
         // rest of this turn, and `/model` may have replaced it since the last.
         self.ui.model = self.core.agent.spec.model.clone();
 
+        // Set inside the run's borrow, acted on after it: unsending has to
+        // touch the session, and the run is holding it.
+        let mut unsend = false;
         let out = {
             // Disjoint borrows: the run holds the session while the loop keeps
             // drawing and reading keys.
@@ -1835,6 +1894,11 @@ impl Tui {
                     }
                     Some(key) = keys.recv() => match ui.key(key, true) {
                         Act::Interrupt => { cancel.cancel(); ui.stopping = true; }
+                        Act::Unsend => {
+                            cancel.cancel();
+                            ui.stopping = true;
+                            unsend = true;
+                        }
                         Act::Submit(line) => ui.queued.push(line),
                         // Nothing else can stop a run that will not stop.
                         Act::Quit => {
@@ -1902,6 +1966,12 @@ impl Tui {
                 );
                 self.ui.say(text);
             }
+        }
+
+        // Last: the rebuild clears the "stopped" this turn printed, and the
+        // cancel was the mechanism here rather than news.
+        if unsend && let Some(id) = self.core.session.last_ask() {
+            self.rewind_turn(id);
         }
     }
 }

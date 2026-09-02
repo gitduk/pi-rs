@@ -222,14 +222,14 @@ pub const BINDINGS: &[Binding] = &[
         action: A::RunInterrupt,
         when: W::Run,
         keys: &["esc"],
-        note: "",
+        note: "before the model answers, it takes the prompt back to the editor",
     },
     Binding {
         id: "conversation.rewind",
         action: A::Rewind,
         when: W::Editor,
         keys: &["esc"],
-        note: "twice with an empty line to rewind to a message",
+        note: "twice with an empty line to go back to a message or an answer",
     },
     Binding {
         id: "view.scroll-up",
