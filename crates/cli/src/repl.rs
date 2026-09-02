@@ -387,7 +387,7 @@ impl Repl {
     /// when nothing is applied.
     ///
     /// What the session owns is untouched by construction: the transcript, the
-    /// plan, the name, the history, the model. Only what the config decides is
+    /// name, the history, the model. Only what the config decides is
     /// replaced.
     pub fn reload(&mut self) -> Vec<String> {
         // Re-read the file tree; the claimed overrides stay.
@@ -857,9 +857,9 @@ impl Cmd {
     /// answer here should fail to compile rather than default to one.
     ///
     /// What it cannot check is an existing arm's body: `Reload` and `Model` are
-    /// `Now` because they write through `Arc::make_mut`, and `Todo` because it
-    /// reads `ctx`, not the session. An arm that starts reading `lane.session`
-    /// breaks this quietly — the session is away for the length of a run.
+    /// `Now` because they write through `Arc::make_mut`, not because anything
+    /// says so. An arm that starts reading `lane.session` breaks this quietly —
+    /// the session is away for the length of a run.
     pub fn fate(&self) -> Fate {
         match self {
             // Answered from the config, the key map or the surface's own
@@ -1229,8 +1229,6 @@ impl Repl {
         Step::Handled(out)
     }
 
-    /// Drop the in-memory conversation and open a fresh session under a new
-    /// id. The plan goes too; the old transcript stays on disk.
     /// Become the session this id names: the stamp that dates it, the journal
     /// it writes to, and the namespace its spills are filed under.
     ///
@@ -1247,6 +1245,8 @@ impl Repl {
         self.lane_mut().ctx = self.lane_mut().ctx.clone().with_session(&self.lane_mut().id);
     }
 
+    /// Drop the in-memory conversation and open a fresh session under a new
+    /// id. The old transcript stays on disk.
     fn fresh_session(&mut self, said: &str) -> Vec<String> {
         self.lane_mut().session = Some(Session::default());
         // A name identifies one session; carried over it would name two, which
@@ -1256,7 +1256,7 @@ impl Repl {
         vec![format!("{said} {}", self.lane_mut().id)]
     }
 
-    /// Take a stored transcript as the running one — entries, name, id, plan.
+    /// Take a stored transcript as the running one — entries, name and id.
     /// Parting with what is being left is the caller's; they differ on when.
     fn adopt_session(&mut self, stored: Stored) -> Vec<String> {
         let (id, name, created) = (stored.id.clone(), stored.name.clone(), stored.created);
@@ -1311,6 +1311,15 @@ impl Repl {
             tree.path.display().to_string(),
         ];
 
+        // Against the root it belongs to, so before the move, not after. An
+        // empty session — nothing said yet — has nothing to keep, and one a run
+        // has is saved by the run.
+        if self.lane().session.as_ref().is_some_and(|s| !s.is_empty())
+            && let Err(e) = self.save()
+        {
+            tracing::warn!(target: "pi::session", error = %e, "the leaving session was not saved");
+        }
+
         // Already open: going back to a tree is going back to the lane that
         // holds it, transcript, screen and all. Nothing is rebuilt.
         if let Some(i) = self
@@ -1325,13 +1334,6 @@ impl Repl {
             return Ok(Step::Handled(said));
         }
 
-        // Against the root it belongs to, so before the move, not after.
-        // An empty session — nothing said yet — has nothing to keep.
-        if self.lane().session.as_ref().is_some_and(|s| !s.is_empty())
-            && let Err(e) = self.save()
-        {
-            tracing::warn!(target: "pi::session", error = %e, "the leaving session was not saved");
-        }
         said.extend(self.open_lane(ws, (!tree.main).then(|| tree.name.clone()))?);
         Ok(Step::Swap(said))
     }

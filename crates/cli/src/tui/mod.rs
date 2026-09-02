@@ -1744,8 +1744,17 @@ impl Tui {
             self.ui.on_event(event);
         }
         // And the end of it, if it reached one out of sight.
-        if let Turn::Ended(out) = std::mem::replace(&mut self.core.lane_mut().turn, Turn::Idle) {
+        if let Turn::Ended { out, unsend } =
+            std::mem::replace(&mut self.core.lane_mut().turn, Turn::Idle)
+        {
             self.close_run(out);
+            // Esc asked for the prompt back before the screen moved on. The
+            // asking does not go stale because the answer arrived late.
+            if unsend
+                && let Some(id) = self.core.lane().session.as_ref().and_then(|s| s.last_ask())
+            {
+                self.rewind_turn(id);
+            }
         }
     }
 
@@ -2208,6 +2217,11 @@ impl Tui {
     /// The saving cannot wait — a lane the user never returns to still has to
     /// have its work on disk — but nothing about drawing it does.
     async fn settle(&mut self, done: Done) {
+        // The run posts its last events and only then says it is over, so both
+        // are in flight at once and the end can win the race. Take what is
+        // waiting before closing anything, or a tool row still open is frozen
+        // as abandoned and the elapsed figure is read off a cleared clock.
+        self.serve_lanes().await;
         let Done { lane, ran } = done;
         let unsend = match self.core.lanes.get_mut(lane) {
             Some(held) => match std::mem::replace(&mut held.turn, Turn::Idle) {
@@ -2272,7 +2286,7 @@ impl Tui {
         // Out of sight: what the run left to draw waits with it, and the lane
         // says so in the bar until someone looks.
         if lane != self.core.current {
-            self.core.lanes[lane].turn = Turn::Ended(out);
+            self.core.lanes[lane].turn = Turn::Ended { out, unsend };
             return;
         }
         self.close_run(out);

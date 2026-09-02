@@ -25,7 +25,11 @@ pub enum Turn {
     },
     /// A run that ended while this lane was out of sight, kept until the screen
     /// is looking at it and can show how it went.
-    Ended(Result<Totals, agent::AgentError>),
+    Ended {
+        out: Result<Totals, agent::AgentError>,
+        /// Esc asked for the prompt back while this was still running.
+        unsend: bool,
+    },
 }
 
 pub struct Lane {
@@ -49,7 +53,7 @@ pub struct Lane {
     /// Shown under the banner; rebuilt by `/reload` like everything else the
     /// config decides.
     pub context: Vec<String>,
-    /// Carried across turns: the plan and the file locks outlive any one run.
+    /// Carried across turns: the file locks and edit shifts outlive any one run.
     pub ctx: Ctx,
     /// Which worktree the session is in, or None in the repository's own
     /// checkout. Held so the status line can say where the work is landing.
