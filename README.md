@@ -336,7 +336,7 @@ numbers amount to.
 | `brain` | 2.7k | messages, wires, streams, faults, estimates |
 | `agent` | 3.9k | the turn loop, compaction, the session |
 | `tools` | 3.8k | the tool set and the tiered workspace gate |
-| `cli` | 6.2k | terminal, config, sessions, the journal |
+| `pi` | 6.2k | terminal, config, sessions, the journal |
 | `hashline` | 1.2k | the patch format — pure, no IO |
 | `syntax` | 0.4k | tree-sitter outlines for eight languages |
 
