@@ -622,6 +622,8 @@ async fn main() -> Result<()> {
     session.send_prompt(prompt, None);
     let outcome = ag.run(&mut session, &ctx, &tx).await;
 
+    session.note_outcome(&outcome);
+
     drop(tx);
     let _ = painter.await;
 

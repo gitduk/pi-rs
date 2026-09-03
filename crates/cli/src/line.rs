@@ -90,6 +90,8 @@ async fn turn(
     session.send_prompt(prompt, typed);
     let ctx = core.lane_mut().ctx.clone().with_cancel(agent::cancel_on_interrupt());
     let out = core.lane_mut().agent.run(&mut session, &ctx, tx).await;
+
+    session.note_outcome(&out);
     core.lane_mut().session = Some(session);
 
     // Saved either way: an interrupted turn is exactly the one worth keeping.
