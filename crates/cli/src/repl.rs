@@ -1390,7 +1390,9 @@ impl Repl {
         };
         // Built before the comparison: both sides are then canonical, and a
         // path git and the workspace spell differently is still one directory.
-        let ws = match tools::Workspace::new(&tree.path) {
+        let ws = match tools::Workspace::new(&tree.path)
+            .and_then(|ws| ws.with_write_roots(&self.config.write_roots))
+        {
             Ok(ws) => ws,
             Err(e) => {
                 let what = format!("{}: {e}", tree.path.display());

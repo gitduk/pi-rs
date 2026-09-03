@@ -497,7 +497,8 @@ async fn main() -> Result<()> {
     let prompt = read_prompt(&args)?;
     let config = Arc::new(config::load(args.config.as_deref())?);
 
-    let workspace = tools::Workspace::new(&args.cwd)
+    let workspace = tools::Workspace::new(&args.cwd)?
+        .with_write_roots(&config.write_roots)
         .with_context(|| format!("cannot use {} as a workspace", args.cwd))?;
     let project = config::load_project(workspace.root())?;
 
@@ -678,6 +679,8 @@ async fn main() -> Result<()> {
     let mut session = carried;
     session.send_prompt(prompt, None);
     let outcome = ag.run(&mut session, &ctx, &tx).await;
+
+    session.note_outcome(&outcome);
 
     drop(tx);
     let _ = painter.await;

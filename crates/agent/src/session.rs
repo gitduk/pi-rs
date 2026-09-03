@@ -4,6 +4,7 @@ use brain::message::{
     AssistantContent, Image, Message, Text, ToolCall, ToolResult, ToolResultContent, UserContent,
 };
 use serde::{Deserialize, Serialize};
+use crate::{AgentError, Totals};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct EntryId(pub u64);
@@ -126,6 +127,14 @@ pub enum UserBody {
     /// what let a `!cargo test` be dropped out from under the `fix that` that
     /// referred to it.
     Aside(UserText),
+
+    /// Machine-authored text meant for the model, not the person: what the
+    /// session says about a run that ended without answering its prompt. It
+    /// opens no round and names no session, and it is omittable, like an
+    /// [`Aside`] — but unlike one it is not the user's words, so nothing may
+    /// treat it as theirs: no rewind node, nothing an unsend hands back to
+    /// the editor. That one difference is why it is a variant of its own.
+    Note(UserText),
     /// The result, and what the screen showed for it when that is more than the
     /// result's own first line — the rows an edit sketched, which the stored
     /// content does not contain.
@@ -299,7 +308,30 @@ pub struct Session {
     entries: Vec<Entry>,
     #[serde(default)]
     next: u64,
+    /// Why the last run ended unanswered. Saved, so a resumed session still
+    /// knows; cleared by the next prompt, and by a rewind that cuts the round
+    /// it describes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    interrupted: Option<StopCause>,
 }
+
+/// Why the most recent run ended before its prompt was answered, if it did.
+/// The transcript alone cannot say whether the stop was the user's or the
+/// run's own, so the caller records it here and the next prompt carries it on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum StopCause {
+    /// The user asked the run to stop: Esc, `/stop`, an interrupt.
+    User,
+    /// It died on its own — an error or a crash — and no more is known.
+    Other,
+}
+
+/// What the model is told after a run the user stopped.
+const STOPPED_BY_USER: &str = "The user stopped the previous run before it finished. Treat the \
+     request it was working on as cancelled; the message below is what to act on.";
+/// What the model is told after a run that died for an unknown reason.
+const STOPPED_UNKNOWN: &str = "The previous run ended before it finished, for an unknown \
+     reason. Treat the request it was working on as unresolved; the message below is what to act on.";
 
 impl Session {
     pub fn new() -> Self {
@@ -391,12 +423,32 @@ impl Session {
         id
     }
 
+    /// Fold how the run that just ended went into the next prompt: a run that
+    /// did not answer its prompt records why, for [`Session::send_prompt`] to
+    /// name; one that answered records nothing.
+    pub fn note_outcome(&mut self, outcome: &Result<Totals, AgentError>) {
+        match outcome {
+            Ok(_) => {}
+            Err(AgentError::Cancelled) => self.interrupted = Some(StopCause::User),
+            Err(_) => self.interrupted = Some(StopCause::Other),
+        }
+    }
+
+    /// Feed a cause straight in, for tests shaping a session by hand.
+    #[cfg(test)]
+    fn mark_stopped(&mut self, cause: StopCause) {
+        self.interrupted = Some(cause);
+    }
+
     /// Continue with a new prompt, repairing a turn that may have died
     /// mid-call. An assistant turn whose tool calls were never answered would
     /// make the next request invalid (a `tool_use` with no `tool_result`);
     /// each is closed with a result naming the interruption instead — the model
     /// is told a person stopped it rather than that the call failed, which are
-    /// different things to answer. The prompt is appended as its own entry.
+    /// different things to answer. A run that ended unanswered is named too,
+    /// but only when the caller says why: the transcript cannot tell a user
+    /// stop from a crash, and the note must not guess. The prompt is appended
+    /// as its own entry.
     /// `shown` is what the user typed, when that differs from what the model
     /// is sent — a `!cmd` line becomes the command *and its output*, and the
     /// screen has to show the line, not the transcript of running it.
@@ -433,6 +485,18 @@ impl Session {
                 ),
                 preview: None,
             });
+        }
+        // The run that just ended may have died unanswered; the caller said
+        // why, and the model is told rather than left to read the shape.
+        if let Some(cause) = self.interrupted.take() {
+            let text = match cause {
+                StopCause::User => STOPPED_BY_USER,
+                StopCause::Other => STOPPED_UNKNOWN,
+            };
+            self.push_user(UserBody::Note(UserText {
+                text: text.to_string(),
+                shown: None,
+            }));
         }
         self.push_user(UserBody::Prompt(UserText {
             text: prompt.into(),
@@ -523,6 +587,9 @@ impl Session {
         let keep = at + usize::from(keep);
         let removed = self.entries.len() - keep;
         self.entries.truncate(keep);
+        // The marker described the round the cut just removed; keeping it
+        // would name a death the transcript no longer shows.
+        self.interrupted = None;
         removed
     }
 
@@ -745,7 +812,7 @@ impl Session {
 
 pub fn user_block(body: &UserBody) -> UserContent {
     match body {
-        UserBody::Prompt(t) | UserBody::Aside(t) => UserContent::Text(Text {
+        UserBody::Prompt(t) | UserBody::Aside(t) | UserBody::Note(t) => UserContent::Text(Text {
             text: t.text.clone(),
         }),
         UserBody::Result { result: r, .. } => UserContent::ToolResult(r.clone()),
@@ -880,6 +947,163 @@ mod tests {
         assert_eq!(nodes[0].id(), ask);
         assert!(matches!(nodes[1], Node::Reply { .. }));
         assert_eq!(nodes[1].show(), "it says a");
+    }
+
+    /// The caller records why the last run died; the next prompt carries the
+    /// cause on to the model instead of leaving it to read the shape.
+    #[test]
+    fn a_user_stop_is_named_before_the_next_prompt() {
+        let mut s = Session::new();
+        s.prompt("version up");
+        s.mark_stopped(StopCause::User);
+
+        s.send_prompt("delete the branch", None);
+
+        let entries = s.entries();
+        assert_eq!(entries.len(), 3, "prompt, the note, the new prompt");
+        assert_eq!(
+            match &entries[1] {
+                Entry::User { body: UserBody::Note(t), .. } => t.text.as_str(),
+                other => panic!("expected the stop note, got {other:?}"),
+            },
+            STOPPED_BY_USER
+        );
+        assert!(matches!(&entries[2], Entry::User { body: UserBody::Prompt(_), .. }));
+
+        // One note per dead run: the send that followed consumed the marker.
+        s.send_prompt("and now this", None);
+        assert_eq!(s.entries().len(), 4, "no second note");
+    }
+
+    /// The note is the session's words, not the user's: it stays out of the
+    /// rewind menu, nothing an unsend hands to the editor, and the model
+    /// still reads it beside the next prompt.
+    #[test]
+    fn a_stop_note_is_model_only_and_not_rewindable() {
+        let mut s = Session::new();
+        s.prompt("version up");
+        s.mark_stopped(StopCause::User);
+        s.send_prompt("delete the branch", None);
+
+        let entries = s.entries();
+        let note = entries[1].id();
+        assert_eq!(s.unsent_text(note), None, "not the user's words to take back");
+        assert_eq!(
+            s.rewind_nodes().len(),
+            2,
+            "the two asks only — the note is not a place to rewind to"
+        );
+        let reaches_the_model = s.context().iter().any(|m| {
+            matches!(
+                m,
+                Message::User { content } if content.iter().any(|b| {
+                    matches!(b, UserContent::Text(t) if t.text.contains(STOPPED_BY_USER))
+                })
+            )
+        });
+        assert!(reaches_the_model, "the note is sent with the new prompt");
+
+        // The note travels with the archive, and comes back whole.
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Session = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, s);
+    }
+
+    /// A run that died on its own is named as such, not blamed on the user.
+    #[test]
+    fn an_unknown_stop_is_not_blamed_on_the_user() {
+        let mut s = Session::new();
+        s.prompt("version up");
+        s.push_assistant(vec![AssistantContent::ToolCall(ToolCall {
+            id: "c1".into(),
+            name: "bash".into(),
+            args: serde_json::json!({ "command": "grep" }),
+        })]);
+        s.push_results(vec![ToolResult::text("c1", "bash", "1.1.1")]);
+        s.mark_stopped(StopCause::Other);
+
+        s.send_prompt("delete the branch", None);
+
+        let entries = s.entries();
+        assert_eq!(entries.len(), 5, "prompt, tool work, the note, the new prompt");
+        assert_eq!(
+            match &entries[3] {
+                Entry::User { body: UserBody::Note(t), .. } => t.text.as_str(),
+                other => panic!("expected the stop note, got {other:?}"),
+            },
+            STOPPED_UNKNOWN
+        );
+        assert!(matches!(&entries[4], Entry::User { body: UserBody::Prompt(_), .. }));
+    }
+
+    /// An answered run leaves no marker, and a clean send stays clean.
+    #[test]
+    fn a_run_that_finished_adds_no_note() {
+        let mut s = Session::new();
+        s.prompt("go");
+        s.push_assistant(vec![AssistantContent::ToolCall(ToolCall {
+            id: "c1".into(),
+            name: "read".into(),
+            args: serde_json::json!({}),
+        })]);
+        s.push_results(vec![ToolResult::text("c1", "read", "a")]);
+        s.push_assistant(vec![AssistantContent::Text(MsgText { text: "it says a".into() })]);
+
+        s.send_prompt("and now this", None);
+
+        let entries = s.entries();
+        assert_eq!(entries.len(), 5, "no note: prompt, call, result, reply, prompt");
+        assert!(
+            !entries
+                .iter()
+                .any(|e| matches!(e, Entry::User { body: UserBody::Note(_), .. })),
+            "an answered round adds no note"
+        );
+    }
+
+    /// A rewind cuts the round the marker described; the marker goes with it.
+    #[test]
+    fn rewinding_drops_the_stop_marker() {
+        let mut s = Session::new();
+        let ask = s.prompt("the task");
+        s.push_assistant(vec![AssistantContent::ToolCall(ToolCall {
+            id: "c1".into(),
+            name: "bash".into(),
+            args: serde_json::json!({}),
+        })]);
+        s.mark_stopped(StopCause::User);
+        s.rollback_before(ask);
+
+        s.send_prompt("a fresh start", None);
+
+        let entries = s.entries();
+        assert_eq!(entries.len(), 1, "only the new prompt follows the rewind");
+        assert!(matches!(&entries[0], Entry::User { body: UserBody::Prompt(_), .. }));
+    }
+
+    /// The mapping the callers rely on: an answer records nothing, a stop the
+    /// user asked for records itself.
+    #[test]
+    fn note_outcome_tells_an_answer_from_a_user_stop() {
+        let mut answered = Session::new();
+        answered.prompt("go");
+        answered.note_outcome(&Ok(crate::Totals::default()));
+        answered.send_prompt("and now this", None);
+        assert_eq!(answered.entries().len(), 2, "no note after an answer");
+
+        let mut stopped = Session::new();
+        stopped.prompt("go");
+        stopped.note_outcome(&Err(crate::AgentError::Cancelled));
+        stopped.send_prompt("and now this", None);
+        let entries = stopped.entries();
+        assert_eq!(entries.len(), 3, "prompt, the note, the new prompt");
+        assert_eq!(
+            match &entries[1] {
+                Entry::User { body: UserBody::Note(t), .. } => t.text.as_str(),
+                other => panic!("expected the note aside, got {other:?}"),
+            },
+            STOPPED_BY_USER
+        );
     }
 
     /// Rewinding to an answer is the opposite call: the answer stays, and the

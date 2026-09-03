@@ -64,6 +64,12 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
 
+    /// Absolute directories the write tools may reach beyond the workspace
+    /// root. Only this user-level file can set them: a cloned `pi.toml`
+    /// must not be able to lower its own boundary.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub write_roots: Vec<String>,
+
     /// Facts about a model the defaults get wrong, keyed by the model's own
     /// name. Every field has a default, so a model needs an entry only where
     /// it differs — and needs none at all to be usable.
@@ -982,6 +988,17 @@ output_per_mtok = 0
             c.settle(&up, Flags::default(), &BTreeMap::new()).tier,
             TierArg::Write
         );
+    }
+
+    #[test]
+    fn write_roots_parse_from_the_user_config_only() {
+        let c: Config = parse("write_roots = [\"/tmp\", \"/home/me/scratch\"]\n").unwrap();
+        assert_eq!(
+            c.write_roots,
+            vec!["/tmp".to_string(), "/home/me/scratch".to_string()]
+        );
+        // A cloned pi.toml cannot widen its own write boundary.
+        assert!(parse_project("write_roots = [\"/etc\"]\n").is_err());
     }
 
     #[test]

@@ -23,8 +23,6 @@ use tools::{Concurrency, Ctx, Registry, Tier, Tool, ToolError, ToolOutput, Works
 struct Scripted {
     turns: Vec<Vec<StreamEvent>>,
     next: AtomicUsize,
-    /// What rode each request but never entered the session.
-    notes: std::sync::Mutex<Vec<Vec<String>>>,
 }
 
 impl Scripted {
@@ -32,7 +30,6 @@ impl Scripted {
         Arc::new(Self {
             turns,
             next: AtomicUsize::new(0),
-            notes: std::sync::Mutex::new(Vec::new()),
         })
     }
 }
@@ -43,9 +40,8 @@ impl Transport for Scripted {
     async fn stream(
         &self,
         _spec: &ModelSpec,
-        req: &Request,
+        _req: &Request,
     ) -> brain::Result<BoxStream<'static, brain::Result<StreamEvent>>> {
-        self.notes.lock().unwrap().push(req.notes.clone());
         let i = self.next.fetch_add(1, Ordering::SeqCst);
         let events = self.turns.get(i).cloned().unwrap_or_default();
         Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
@@ -279,6 +275,13 @@ async fn every_call_gets_a_result_even_when_nothing_runs() {
     );
     assert!(
         results[2].flatten_text().contains("not valid JSON"),
+        "{:?}",
+        results[2]
+    );
+    // The model's own text rides back in the rejection, or it can only guess
+    // at what failed to parse from the column number.
+    assert!(
+        results[2].flatten_text().contains(r#"you sent: {"path": "#),
         "{:?}",
         results[2]
     );

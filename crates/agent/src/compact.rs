@@ -137,6 +137,9 @@ impl<'a> Item<'a> {
                 // downstream waits on — and the variant is what makes the two
                 // answerable apart at all.
                 UserBody::Aside(_) => true,
+                // A note is the same half: machine prose nothing downstream
+                // waits on once the run it explains is past.
+                UserBody::Note(_) => true,
                 UserBody::Prompt(_) | UserBody::Image(_) => false,
             },
             _ => false,

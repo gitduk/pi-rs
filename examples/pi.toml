@@ -48,6 +48,13 @@ tier   = "exec"                  # read | write | exec
 # is what the tools were written against.
 # system = "~/.pi/system.md"
 
+# Absolute directories the write/edit tools may reach besides the workspace
+# root. Entries must be absolute; a directory that does not exist yet is
+# created on first write. Empty by default: write tools stay inside the
+# workspace. Read tools already reach anywhere. Only this file can set it —
+# a cloned pi.toml may not lower the boundary.
+# write_roots = ["/tmp", "/home/wukaige/scratch"]
+
 # ---------------------------------------------------------------------------
 # Facts about a model the defaults get wrong.
 #

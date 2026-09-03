@@ -4,7 +4,7 @@ use std::sync::Arc;
 use brain::model::ModelSpec;
 use brain::message::{Message, ToolCall, ToolResult};
 use brain::request::{Effort, Request};
-use brain::stream::{Accumulator, StreamEvent};
+use brain::stream::{Accumulator, InvalidToolArgs, StreamEvent};
 use brain::transport::Transport;
 use futures::StreamExt;
 use tokio::sync::mpsc::UnboundedSender;
@@ -42,6 +42,11 @@ const SQUEEZE: f64 = 0.6;
 
 // Attempts to shrink one turn before giving up on it.
 const MAX_SQUEEZE: usize = 3;
+
+// How much of a failed argument blob rides back to the model and the log.
+// Longer blobs show a window around serde's column, not the head: the parse
+// fails where the text stopped, and that is usually the tail.
+const MAX_INVALID_ARGS_SHOWN: usize = 400;
 
 /// Retry schedule for a request the provider could not serve right now.
 #[derive(Debug, Clone, Copy)]
@@ -333,7 +338,7 @@ impl Agent {
             let bad: HashMap<_, _> = done
                 .invalid
                 .iter()
-                .map(|i| (i.call.clone(), i.error.clone()))
+                .map(|i| (i.call.clone(), i.clone()))
                 .collect();
             let results = self
                 .run_calls(&calls, &bad, ctx, tx, &mut failures)
@@ -612,7 +617,7 @@ impl Agent {
     async fn run_calls(
         &self,
         calls: &[ToolCall],
-        bad: &HashMap<String, String>,
+        bad: &HashMap<String, InvalidToolArgs>,
         ctx: &Ctx,
         tx: &UnboundedSender<Event>,
         failures: &mut Failures,
@@ -620,9 +625,20 @@ impl Agent {
         let actions: Vec<Action> = calls
             .iter()
             .map(|c| {
-                if let Some(err) = bad.get(&c.id) {
+                if let Some(invalid) = bad.get(&c.id) {
+                    let snippet = invalid_args_snippet(&invalid.raw, &invalid.error);
+                    tracing::warn!(
+                        target: "pi::wire",
+                        call = %c.id,
+                        name = %c.name,
+                        error = %invalid.error,
+                        raw = %snippet,
+                        "tool arguments were not valid JSON"
+                    );
                     return Action::Reject(format!(
-                        "arguments were not valid JSON ({err}); send the whole object again"
+                        "arguments were not valid JSON ({}); you sent: {snippet}; \
+                         send the whole object again",
+                        invalid.error,
                     ));
                 }
                 let Some(tool) = self.registry.get(&c.name) else {
@@ -768,6 +784,36 @@ fn note_success(call: &ToolCall, failures: &mut Failures) {
 
 fn ran(call: &ToolCall) -> tracing::Span {
     tracing::info_span!(target: "pi::tool", "tool", name = %call.name, call = %call.id)
+}
+
+// One failed argument blob as shown to the model and the journal: the whole
+// text when it fits, else a window around serde's column. serde numbers the
+// column from 1 over the trimmed bytes; windowing in chars is close enough,
+// and an error that names no column falls back to the tail.
+fn invalid_args_snippet(raw: &str, err: &str) -> String {
+    let chars: Vec<char> = raw.chars().collect();
+    if chars.len() <= MAX_INVALID_ARGS_SHOWN {
+        return raw.to_string();
+    }
+    let column = err
+        .rsplit_once("column ")
+        .and_then(|(_, n)| n.trim().parse::<usize>().ok())
+        .unwrap_or(chars.len())
+        .saturating_sub(1)
+        .min(chars.len());
+    let half = MAX_INVALID_ARGS_SHOWN / 2;
+    let to = (column.saturating_sub(half) + MAX_INVALID_ARGS_SHOWN).min(chars.len());
+    let from = to - MAX_INVALID_ARGS_SHOWN;
+
+    let mut out = String::new();
+    if from > 0 {
+        out.push('…');
+    }
+    out.extend(chars[from..to].iter());
+    if to < chars.len() {
+        out.push('…');
+    }
+    out
 }
 
 // A call that did not run, or ran and failed.
@@ -921,5 +967,38 @@ mod tests {
             too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f).is_none(),
             "a single failure after naming must not be called a repeat"
         );
+    }
+
+    #[test]
+    fn short_invalid_args_are_shown_whole() {
+        let raw = r#"{"path": "#;
+        assert_eq!(
+            invalid_args_snippet(raw, "EOF while parsing an object at line 1 column 9"),
+            raw
+        );
+    }
+
+    #[test]
+    fn long_invalid_args_center_on_the_failing_column() {
+        let raw = format!(r#"{{"path":"{}"}}"#, "a".repeat(600));
+        // Column at the very end: the window must reach the tail, hiding the
+        // head where the parse already succeeded.
+        let tail = invalid_args_snippet(&raw, "control character found in string at line 1 column 611");
+        assert!(tail.starts_with('…'), "{tail}");
+        assert!(tail.ends_with('}'), "{tail}");
+        assert!(tail.chars().count() <= MAX_INVALID_ARGS_SHOWN + 1, "{tail}");
+        // Column near the start: the window must keep the head and hide the
+        // tail instead.
+        let head = invalid_args_snippet(&raw, "expected value at line 1 column 2");
+        assert!(head.starts_with('{'), "{head}");
+        assert!(head.ends_with('…'), "{head}");
+    }
+
+    #[test]
+    fn long_invalid_args_without_a_column_fall_back_to_the_tail() {
+        let raw = format!(r#"{{"path":"{}"}}"#, "b".repeat(600));
+        let snippet = invalid_args_snippet(&raw, "not valid JSON");
+        assert!(snippet.ends_with('}'), "{snippet}");
+        assert!(snippet.starts_with('…'), "{snippet}");
     }
 }

@@ -164,12 +164,13 @@ impl Default for Lines {
     }
 }
 
-/// What the live line shows when the config names nothing: what it showed
-/// before this was configurable, plus the context it never had.
+/// The live line when the config names nothing: elapsed, the counts, the cache
+/// read so far, context, queued work, and the worktree.
 pub fn default_live() -> Vec<Segment> {
     vec![
         Segment::Elapsed,
         Segment::InOut,
+        Segment::Cache,
         Segment::Ctx,
         Segment::Queued,
         Segment::Worktree,
@@ -296,6 +297,14 @@ mod tests {
         assert!(parts(&[Segment::Cost], &s).is_empty());
     }
 
+#[test]
+fn the_default_live_line_shows_what_has_been_read_from_cache() {
+    let s = full();
+    assert_eq!(
+        line(&default_live(), &s),
+        "2m05s · 8.4k in / 390 out · 41.2k cached · ctx 72.4k/114.0k · 1 queued · feature-one"
+    );
+}
     #[test]
     fn a_finished_run_reads_as_the_line_it_ends_with() {
         let e = agent::Event::Done {

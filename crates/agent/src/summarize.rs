@@ -45,6 +45,9 @@ pub fn render(earlier: &[&str], entries: &[&Entry]) -> String {
                 UserBody::Aside(t) => {
                     lines.push(format!("[user ran] {}", clip(&t.text, BLOCK_CHARS)))
                 }
+                // A note is a directive for the one turn it opened; by the
+                // time a summary carries it, it is stale.
+                UserBody::Note(_) => {}
                 UserBody::Image(_) => lines.push("[user] (image)".into()),
                 UserBody::Result { result: r, .. } => {
                     let mark = if r.is_error { " error" } else { "" };

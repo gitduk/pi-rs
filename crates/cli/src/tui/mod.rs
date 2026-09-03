@@ -462,6 +462,14 @@ fn scrollback_from(
                 UserBody::Prompt(t) | UserBody::Aside(t) => {
                     out.extend(Row::prompt(t.shown_text(), prompt, bang_prompt, paint));
                 }
+                // Machine prose, not the user's line: rebuilt in the muted
+                // voice of a screen notice rather than under the prompt
+                // gutter.
+                UserBody::Note(t) => {
+                    for line in t.shown_text().lines() {
+                        out.push(Row::notice(paint.on(&paint.theme.muted, line)));
+                    }
+                }
                 UserBody::Result { result: r, preview } => {
                     out.push(Row::stored_result(r, preview.as_deref()));
                 }
@@ -2498,6 +2506,10 @@ impl Tui {
             None => false,
         };
 
+        // Only a run that came back says why it ended; the archive rebuild
+        // below has the same transcript and knows nothing about the run.
+        let ran_back = ran.is_some();
+
         // The task carried the whole transcript, not just this turn, and a
         // panic in it dropped that copy. The archive is the last good one;
         // carrying the empty stand-in forward would save it over the real one
@@ -2536,6 +2548,15 @@ impl Tui {
                 }
             }
         };
+
+        // A panic never came back, and Esc that took the prompt back produced
+        // nothing to misread as a task: neither has anything to tell.
+        if ran_back
+            && !unsend
+            && let Some(session) = self.core.lanes[lane].session.as_mut()
+        {
+            session.note_outcome(&out);
+        }
 
         // Saved either way: an interrupted turn is exactly the one worth
         // keeping. Not when the transcript never came back, though — the empty
