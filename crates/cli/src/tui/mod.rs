@@ -616,6 +616,10 @@ struct Ui {
     /// The rewind selector's rows, session order, newest last. Empty is closed;
     /// while it is open it replaces the completion list in the same rows.
     rewind: Vec<MenuEntry>,
+    /// The lane picker's rows. Empty is closed; like `rewind` it replaces the
+    /// completion list, but unlike it, it opens while a run is in flight —
+    /// leaving for another checkout is the whole point of being able to.
+    picker: Vec<MenuEntry>,
     spinner: usize,
     /// The segments each line shows, in the order the config named them.
     live: Vec<crate::status::Segment>,
@@ -663,6 +667,20 @@ impl Ui {
     }
 }
 
+/// What to call a checkout. The root answers to its directory name, as
+/// `worktree list` already names it — a fixed word would collide with a
+/// checkout that happens to be called that.
+fn lane_name(lane: &crate::lane::Lane) -> String {
+    lane.worktree.clone().unwrap_or_else(|| {
+        lane.ctx
+            .workspace
+            .root()
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    })
+}
+
 /// How a lane shows in the bottom bar.
 ///
 /// `Done`/`Failed` are unread marks, not history: the tool rows' ✓ stays for
@@ -695,20 +713,27 @@ enum MenuEntry {
         show: String,
         help: &'static str,
     },
+    /// A checkout to work in — one that already has a lane, or one that does
+    /// not yet. Picking either is the same intent: `/worktree <name>`.
+    Lane {
+        name: String,
+        show: String,
+        help: &'static str,
+    },
 }
 
 impl MenuEntry {
     fn show(&self) -> &str {
         match self {
             MenuEntry::Completion(c) => &c.show,
-            MenuEntry::Message { show, .. } => show,
+            MenuEntry::Message { show, .. } | MenuEntry::Lane { show, .. } => show,
         }
     }
 
     fn help(&self) -> &str {
         match self {
             MenuEntry::Completion(c) => &c.help,
-            MenuEntry::Message { help, .. } => help,
+            MenuEntry::Message { help, .. } | MenuEntry::Lane { help, .. } => help,
         }
     }
 }
@@ -745,6 +770,7 @@ impl Ui {
             last_interrupt: None,
             last_esc: None,
             rewind: Vec::new(),
+            picker: Vec::new(),
             setting_paths: Vec::new(),
             settings: None,
             spinner: 0,
@@ -968,6 +994,9 @@ impl Ui {
     /// conversation can be rewound to. Never during a run, when the editor is
     /// a queue, not a command line.
     fn menu(&self) -> Vec<MenuEntry> {
+        if !self.picker.is_empty() {
+            return self.picker.clone();
+        }
         if self.view.started.is_some() {
             return Vec::new();
         }
@@ -1355,6 +1384,20 @@ impl Ui {
         // A key that is not one of the selector's own closes it first: it
         // means "drop this and keep typing", the way editing the line
         // dismisses the completion list.
+        if !self.picker.is_empty()
+            && !matches!(
+                bound,
+                Some(
+                    Action::MenuDismiss
+                        | Action::MenuAccept
+                        | Action::MenuNext
+                        | Action::MenuPrevious
+                        | Action::LineSubmit
+                )
+            )
+        {
+            self.picker.clear();
+        }
         if !self.rewind.is_empty()
             && !matches!(
                 bound,
@@ -1380,6 +1423,11 @@ impl Ui {
                     Some(MenuEntry::Message { id, .. }) => {
                         self.rewind.clear();
                         return Intent::Rewind(id);
+                    }
+                    Some(MenuEntry::Lane { name, .. }) => {
+                        self.picker.clear();
+                        self.editor.take(false);
+                        return Intent::Worktree(name);
                     }
                     Some(MenuEntry::Completion(c)) => {
                         let line = c.line;
@@ -1428,6 +1476,7 @@ impl Ui {
                 }
                 return Intent::None;
             }
+            Some(Action::LanePick) => return Intent::OpenPicker,
             Some(Action::AppClearScreen) => {
                 // One press clears the screen; a second, inside the window,
                 // starts a fresh session and rebuilds the screen empty.
@@ -1492,6 +1541,11 @@ impl Ui {
                         self.rewind.clear();
                         return Intent::Rewind(id);
                     }
+                    Some(MenuEntry::Lane { name, .. }) => {
+                        self.picker.clear();
+                        self.editor.take(false);
+                        return Intent::Worktree(name);
+                    }
                     Some(MenuEntry::Completion(c)) => {
                         self.editor.set_line(&c.line);
                         // Something still expected after it wants a space first.
@@ -1513,9 +1567,13 @@ impl Ui {
                 let at = self.picked.unwrap_or(n).min(n);
                 self.picked = Some(at.saturating_sub(1));
             }
+            // Answered in the first match, which returns; named here because
+            // this one has no catch-all and should not grow one.
+            Some(Action::LanePick) => {}
             Some(Action::MenuDismiss) => {
-                let was_rewind = !self.rewind.is_empty();
+                let was_rewind = !self.rewind.is_empty() || !self.picker.is_empty();
                 self.rewind.clear();
+                self.picker.clear();
                 // The completion list is recorded against the text, so any
                 // edit brings it back: this means "not that", not "never
                 // again". The rewind selector dismisses without recording,
@@ -1854,6 +1912,54 @@ impl Tui {
         }
     }
 
+    /// The checkouts to pick from: the lanes already open, then the worktrees
+    /// that have none. Both kinds of row carry the same intent, so entering a
+    /// tree for the first time costs no more than returning to one — which is
+    /// the whole reason this is not just a list of lanes.
+    fn open_picker(&mut self) {
+        let current = self.core.current;
+        let mut rows: Vec<MenuEntry> = self
+            .core
+            .lanes
+            .iter()
+            .enumerate()
+            .map(|(at, lane)| {
+                let name = lane_name(lane);
+                let sign = if at == current {
+                    "›"
+                } else {
+                    match &lane.turn {
+                        Turn::Running { .. } => "⠿",
+                        Turn::Ended { out: Ok(_), .. } => "✓",
+                        Turn::Ended { out: Err(_), .. } => "✗",
+                        Turn::Idle => " ",
+                    }
+                };
+                MenuEntry::Lane {
+                    show: format!("{sign} {name}"),
+                    help: if at == current { "in front" } else { "open" },
+                    name,
+                }
+            })
+            .collect();
+        let open: Vec<String> = self.core.lanes.iter().map(lane_name).collect();
+        let rest: Vec<MenuEntry> = self
+            .ui
+            .lists
+            .worktrees()
+            .iter()
+            .filter(|c| !open.contains(&c.name))
+            .map(|c| MenuEntry::Lane {
+                show: format!("  {}", c.name),
+                help: "not opened yet",
+                name: c.name.clone(),
+            })
+            .collect();
+        rows.extend(rest);
+        self.ui.picker = rows;
+        self.ui.picked = None;
+    }
+
     /// Rebuild the bottom bar from the lanes, before every draw. A run that
     /// ended out of sight has to reach the screen without anyone asking, and
     /// this is the only thing that looks.
@@ -1877,17 +1983,7 @@ impl Tui {
                         Turn::Idle => Mark::Idle,
                     }
                 },
-                // The root answers to its directory name, as `worktree list`
-                // already names it — a fixed word here collides with a
-                // checkout that happens to be called that.
-                name: lane.worktree.clone().unwrap_or_else(|| {
-                    lane.ctx
-                        .workspace
-                        .root()
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default()
-                }),
+                name: lane_name(lane),
             })
             .collect();
     }
@@ -2051,6 +2147,10 @@ impl Tui {
                 }
                 Intent::Unsend => {
                     self.stop_current(true);
+                    continue;
+                }
+                Intent::OpenPicker => {
+                    self.open_picker();
                     continue;
                 }
                 Intent::OpenRewind => {
