@@ -19,6 +19,7 @@ pub mod compact;
 pub mod event;
 pub mod session;
 pub mod summarize;
+pub mod task;
 
 pub use approval::{Approver, Ceiling, Decision};
 pub use compact::Policy;

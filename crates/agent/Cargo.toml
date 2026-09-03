@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 brain.workspace = true
 tools.workspace = true
 futures.workspace = true
