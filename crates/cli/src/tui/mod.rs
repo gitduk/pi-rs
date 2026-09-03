@@ -2589,6 +2589,9 @@ impl Tui {
     /// have its work on disk — but nothing about drawing it does.
     async fn settle_run(&mut self, done: Done, unsend: bool) {
         let Done { lane, ran, kind } = done;
+        // Only a turn is a request the model was working on, and only a turn's
+        // ending is worth telling it about.
+        let was_turn = matches!(kind, Kind::Turn);
         // A `!` brings its lines home to be shown here; a turn's reached the
         // view as events, and a compact never arrives at this function.
         let said = match kind {
@@ -2614,9 +2617,12 @@ impl Tui {
         };
 
         // A panic never came back, and Esc that took the prompt back produced
-        // nothing to misread as a task: neither has anything to tell.
+        // nothing to misread as a task: neither has anything to tell. Nor does
+        // a `!` the user stopped — the shell command was theirs, and calling
+        // it a cancelled run tells the model to abandon a request it never had.
         if ran_back
             && !unsend
+            && was_turn
             && let Some(session) = self.core.lanes[lane].session.as_mut()
         {
             session.note_outcome(&out);
@@ -3467,5 +3473,43 @@ mod tests {
                 "a panicked {what} left its lane running"
             );
         }
+    }
+
+    /// A `!` the user stopped is not a cancelled request. Telling the model
+    /// otherwise sends it a note about a task it never had, and the note says
+    /// to treat that phantom request as cancelled.
+    #[tokio::test]
+    async fn a_stopped_bash_does_not_tell_the_model_a_request_was_cancelled() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let stopped = |kind: super::Kind| {
+            let dir = dir.path().to_path_buf();
+            async move {
+                let mut tui = surface(&dir);
+                let mut session = agent::session::Session::new();
+                session.prompt("the task the user actually asked for");
+                tui.settle(super::Done {
+                    lane: 0,
+                    kind,
+                    ran: Some((session, Err(agent::AgentError::Cancelled))),
+                })
+                .await;
+                let mut back = tui.core.lanes[0].session.take().expect("the transcript back");
+                back.send_prompt(String::from("now something else"), None::<String>);
+                format!("{:?}", back.entries())
+            }
+        };
+
+        let after_bash = stopped(super::Kind::Bash(vec!["some output".into()])).await;
+        assert!(
+            !after_bash.contains("stopped the previous run"),
+            "a stopped `!` is the user's own command, not a request the model owes: {after_bash}"
+        );
+
+        // The turn it was borrowed from still says so, or the fix went too far.
+        let after_turn = stopped(super::Kind::Turn).await;
+        assert!(
+            after_turn.contains("stopped the previous run"),
+            "a stopped turn still has to be named: {after_turn}"
+        );
     }
 }

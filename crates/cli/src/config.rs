@@ -64,8 +64,9 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
 
-    /// Absolute directories the write tools may reach beyond the workspace
-    /// root. Only this user-level file can set them: a cloned `pi.toml`
+    /// Absolute directories every tool above the read tier may reach beyond
+    /// the workspace root — `bash` may work in one, not only `write` and
+    /// `edit`. Only this user-level file can set them: a cloned `pi.toml`
     /// must not be able to lower its own boundary.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub write_roots: Vec<String>,
