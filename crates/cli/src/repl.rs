@@ -335,6 +335,10 @@ const RESUME_WIDTH: usize = 60;
 /// where they put what comes back.
 pub struct Repl {
     pub store: Store,
+    /// What subagents have spent, waiting to be counted. They run inside a
+    /// tool call, so their tokens are not in the run's own figures — and D5
+    /// says an uncounted run is the one thing that cannot be tolerated.
+    pub subagents: std::sync::Arc<std::sync::Mutex<agent::Totals>>,
     /// Held so `/keys` can show what is actually in force, overrides included.
     pub keys: std::sync::Arc<crate::keys::Keys>,
     /// The config in force, as opposed to the one on disk. `/model` picks from
@@ -429,7 +433,7 @@ impl Repl {
             Ok(p) => p,
             Err(e) => return failed(e),
         };
-        let resolved = match crate::resolve(&self.args, &root, &config, &project, &self.claimed) {
+        let mut resolved = match crate::resolve(&self.args, &root, &config, &project, &self.claimed) {
             Ok(r) => r,
             Err(e) => return failed(e),
         };
@@ -439,11 +443,14 @@ impl Repl {
         // One `make_mut`: a run in flight holds the other reference, so this
         // is where the copy is taken, and taking it four times copies thrice
         // over.
+        let home = crate::subagent::Filed::armed(
+            self.store.clone(),
+            self.lane().ctx.workspace.root().to_path_buf(),
+            self.lane().agent.spec.model.clone(),
+            self.subagents.clone(),
+        );
         let ag = std::sync::Arc::make_mut(&mut self.lane_mut().agent);
-        ag.registry = resolved.registry;
-        ag.approver = std::sync::Arc::new(agent::Ceiling(resolved.tier));
-        ag.system = resolved.system;
-        ag.effort = resolved.effort;
+        crate::arm(ag, &mut resolved, home);
         self.lane_mut().context = resolved.context;
         // A skill can appear between one turn and the next, so the table of
         // what a slash answers to is recomputed like everything else here —
@@ -1424,17 +1431,20 @@ impl Repl {
         let root = ws.root().to_path_buf();
         let failed = |e| format!("nothing opened — {}", refused("worktree", e));
         let project = crate::config::load_project(&root).map_err(failed)?;
-        let resolved =
+        let mut resolved =
             crate::resolve(&self.args, &root, &self.config, &project, &self.claimed).map_err(failed)?;
 
         let (events, inbox) = Lane::channel();
         // The model travels; what the root decides does not. A switch changes
         // trees, and which model is answering was a decision made elsewhere.
+        let home = crate::subagent::Filed::armed(
+            self.store.clone(),
+            ws.root().to_path_buf(),
+            self.lane().agent.spec.model.clone(),
+            self.subagents.clone(),
+        );
         let mut ag = (*self.lane().agent).clone();
-        ag.registry = resolved.registry;
-        ag.approver = std::sync::Arc::new(agent::Ceiling(resolved.tier));
-        ag.system = resolved.system;
-        ag.effort = resolved.effort;
+        crate::arm(&mut ag, &mut resolved, home);
 
         // Built rather than cloned from the lane being left: `Ctx` shares its
         // file locks and edit shifts through an `Arc`, so a cloned one would

@@ -2556,6 +2556,15 @@ impl Tui {
         if let Ok(totals) = &out {
             self.totals.merge(totals);
         }
+        // Whatever subagents spent inside that run. Drained rather than read,
+        // so the same tokens cannot be counted twice — and taken here rather
+        // than at `/cost`, because a lane left running out of sight has to
+        // have its children's spending land too.
+        if let Ok(mut held) = self.core.subagents.lock() {
+            let theirs = std::mem::take(&mut *held);
+            drop(held);
+            self.totals.merge(&theirs);
+        }
 
         // A `!` command's output comes home whole rather than as events, so
         // this is the only place it can reach the view that asked for it.

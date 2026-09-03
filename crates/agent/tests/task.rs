@@ -368,3 +368,44 @@ async fn esc_reaches_through_the_child_and_ends_the_callers_turn() {
         "esc ends the whole turn, not just the child: {out:?}"
     );
 }
+
+#[tokio::test]
+async fn the_child_gets_no_tool_the_parent_was_denied() {
+    // The parent is built with `probe` only, as `--tools` would leave it. The
+    // child is cloned from that, so a restriction the user asked for cannot be
+    // stepped around by delegating — which would otherwise make `task` a way
+    // to get back everything `--tools` took away.
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace::new(dir.path()).unwrap();
+    let seen = Arc::new(Seen::default());
+    let kept = Arc::new(Kept::default());
+    let mut parent = Agent::new(
+        Arc::new(Scripted {
+            turns: vec![
+                call_turn("c1", "task", r#"{"prompt":"try it"}"#),
+                call_turn("c2", "sleeper", "{}"),
+                text_turn("could not"),
+                text_turn("nor could I"),
+            ],
+            next: AtomicUsize::new(0),
+        }),
+        spec(),
+    );
+    parent.registry = Registry::new().with(Probe {
+        seen: seen.clone(),
+        trip: None,
+    });
+    parent.registry = parent
+        .registry
+        .clone()
+        .with(Task::new(&parent, kept.clone()));
+
+    let _ = drive(&parent, &Ctx::new(ws), "go").await;
+
+    let sessions = kept.sessions.lock().unwrap();
+    assert!(
+        sessions[0].1.contains("no tool named"),
+        "the child inherited the parent's restriction: {}",
+        sessions[0].1
+    );
+}

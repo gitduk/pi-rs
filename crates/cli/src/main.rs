@@ -18,6 +18,7 @@ mod line;
 mod render;
 mod repl;
 mod session;
+mod subagent;
 mod settings;
 mod status;
 mod tui;
@@ -315,6 +316,32 @@ fn read_prompt(args: &Args) -> Result<Option<String>> {
 
 /// Everything the config and the workspace decide, as opposed to what the
 /// command line fixed for the whole run. `/reload` recomputes exactly this.
+/// Put what `resolve` settled onto an agent, and hang the subagent tool off the
+/// result.
+///
+/// One function for the three places that do this, because the last step is
+/// order-dependent in a way that is easy to get wrong on the fourth: `Task`
+/// clones the agent it is handed, so it can only be built once the registry,
+/// the ceiling and the system prompt are already in place. A child built any
+/// earlier inherits a half-made parent.
+///
+/// Takes the fields it installs out of `from`, which the callers do not read
+/// again — the rest of `Resolved` is theirs.
+pub fn arm(
+    ag: &mut agent::Agent,
+    from: &mut Resolved,
+    home: std::sync::Arc<dyn agent::task::Home>,
+) {
+    ag.registry = std::mem::take(&mut from.registry);
+    ag.approver = std::sync::Arc::new(agent::Ceiling(from.tier));
+    ag.system = std::mem::take(&mut from.system);
+    ag.effort = from.effort;
+    ag.registry = ag
+        .registry
+        .clone()
+        .with(agent::task::Task::new(ag, home));
+}
+
 pub struct Resolved {
     pub registry: tools::Registry,
     pub system: String,
@@ -436,9 +463,10 @@ fn paint(
     theme: std::sync::Arc<render::Theme>,
     done: Vec<status::Segment>,
     model: String,
+    subagents: std::sync::Arc<std::sync::Mutex<agent::Totals>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut r = render::Renderer::new(quiet, theme, done, model);
+        let mut r = render::Renderer::new(quiet, theme, done, model).counting(subagents);
         while let Some(event) = rx.recv().await {
             r.on(event);
         }
@@ -488,7 +516,7 @@ async fn main() -> Result<()> {
     };
     let dialled = dial(&args, &config, &named, named_by)?;
 
-    let resolved = resolve(&args, workspace.root(), &config, &project, &BTreeMap::new())?;
+    let mut resolved = resolve(&args, workspace.root(), &config, &project, &BTreeMap::new())?;
     // Ahead of the quiet check on purpose: see `Dialled::warning`.
     if let Some(warning) = &dialled.warning {
         eprintln!("\x1b[{}m{warning}\x1b[0m", config.theme.muted.codes());
@@ -498,17 +526,25 @@ async fn main() -> Result<()> {
             eprintln!("\x1b[{}m{note}\x1b[0m", config.theme.muted.codes());
         }
     }
-    let key_map = std::sync::Arc::new(resolved.keys);
-
     // Captured before the spec and workspace move into the agent and context.
     let root = workspace.root().to_path_buf();
     let model_id = dialled.spec.model.clone();
 
+    let subagents: Arc<std::sync::Mutex<agent::Totals>> = Default::default();
     let mut ag = agent::Agent::new(dialled.transport, dialled.spec);
-    ag.registry = resolved.registry;
-    ag.approver = Arc::new(agent::Ceiling(resolved.tier));
-    ag.system = resolved.system;
-    ag.effort = resolved.effort;
+    arm(
+        &mut ag,
+        &mut resolved,
+        subagent::Filed::armed(
+            store.clone(),
+            root.clone(),
+            model_id.clone(),
+            subagents.clone(),
+        ),
+    );
+    // After `arm`, which needs the whole of `resolved`: this takes a field out
+    // of it.
+    let key_map = std::sync::Arc::new(resolved.keys);
     if args.no_compact {
         ag.compaction = None;
     }
@@ -552,6 +588,7 @@ async fn main() -> Result<()> {
         let (events, inbox) = lane::Lane::channel();
         let core = repl::Repl {
             store,
+            subagents: subagents.clone(),
             keys: key_map.clone(),
             config: config.clone(),
             args: args.clone(),
@@ -589,6 +626,7 @@ async fn main() -> Result<()> {
             std::sync::Arc::new(config.theme.clone()),
             config.status.done.clone(),
             model_id.clone(),
+            subagents.clone(),
         );
         let out = line::run(core, tx).await;
         let _ = painter.await;
@@ -610,6 +648,7 @@ async fn main() -> Result<()> {
         std::sync::Arc::new(config.theme.clone()),
         config.status.done.clone(),
         model_id.clone(),
+        subagents.clone(),
     );
     let ctx = tools::Ctx::new(workspace)
         .with_session(&id)

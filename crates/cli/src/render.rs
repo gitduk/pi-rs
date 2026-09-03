@@ -832,6 +832,10 @@ pub struct Renderer {
     /// a tty, but only the dirty one may be terminated when piped apart.
     out_dirty: bool,
     err_dirty: bool,
+    /// What subagents spent, waiting to be folded into the closing line. None
+    /// where nobody can send one, which is every surface but the two that
+    /// print through this.
+    subagents: Option<Arc<std::sync::Mutex<agent::Totals>>>,
 }
 
 impl Renderer {
@@ -849,7 +853,19 @@ impl Renderer {
             thinking: false,
             out_dirty: false,
             err_dirty: false,
+            subagents: None,
         }
+    }
+
+    /// What subagents have spent, to be folded into the line this prints at the
+    /// end of a run.
+    ///
+    /// They work inside a tool call, so not one of their tokens is in the run's
+    /// own figures — and a run nobody can see is one thing, a run nobody can
+    /// price is another.
+    pub fn counting(mut self, spent: Arc<std::sync::Mutex<agent::Totals>>) -> Self {
+        self.subagents = Some(spent);
+        self
     }
 
     /// Answer text goes to stdout so it pipes; everything else is progress and
@@ -878,6 +894,18 @@ impl Renderer {
                 self.settle();
                 if let Some(mut snap) = crate::status::Snapshot::of_done(&event) {
                     snap.model = &self.model;
+                    // Taken, not read: whatever is added here must not be
+                    // added again by the next run's line.
+                    let theirs = self
+                        .subagents
+                        .as_ref()
+                        .and_then(|held| held.lock().ok())
+                        .map(|mut held| std::mem::take(&mut *held))
+                        .unwrap_or_default();
+                    snap.input += theirs.usage.input;
+                    snap.output += theirs.usage.output;
+                    snap.cache_read += theirs.usage.cache_read;
+                    snap.cost = snap.cost.map(|c| c + theirs.cost);
                     let line = crate::status::line(&self.done, &snap);
                     if !line.is_empty() {
                         eprintln!("{}", self.paint.on(&self.paint.theme.muted, &line));
