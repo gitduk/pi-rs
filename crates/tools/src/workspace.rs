@@ -2,12 +2,14 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::{Tier, ToolError};
 
-/// The workspace root every relative tool path is resolved against.
-/// Absolute paths pass through untouched; nothing else in this crate calls
-/// the filesystem directly.
+/// The workspace root every relative tool path is resolved against. Absolute
+/// paths pass through untouched; nothing else in this crate calls the
+/// filesystem directly. `write_roots` widen the write boundary to extra
+/// absolute directories the user configured.
 #[derive(Debug, Clone)]
 pub struct Workspace {
     root: PathBuf,
+    write_roots: Vec<PathBuf>,
 }
 
 // Collapse `.` and `..` without touching the filesystem, so a path that does
@@ -26,11 +28,58 @@ fn normalize(p: &Path) -> PathBuf {
     out
 }
 
+// Canonicalize the deepest existing ancestor of `path` and push the rest back
+// on. Two paths built this way are equal when they name the same directory,
+// existing or not: an existing symlink is resolved away, and a component that
+// does not exist yet cannot be a link.
+fn real_until_missing(p: &Path) -> PathBuf {
+    let mut ancestor = p;
+    let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
+    loop {
+        match ancestor.canonicalize() {
+            Ok(real) => {
+                let mut out = real;
+                for name in tail.iter().rev() {
+                    out.push(name);
+                }
+                return out;
+            }
+            Err(_) => match (ancestor.file_name(), ancestor.parent()) {
+                (Some(name), Some(parent)) => {
+                    tail.push(name);
+                    ancestor = parent;
+                }
+                _ => return p.to_path_buf(),
+            },
+        }
+    }
+}
+
 impl Workspace {
     pub fn new(root: impl AsRef<Path>) -> std::io::Result<Self> {
         Ok(Self {
             root: root.as_ref().canonicalize()?,
+            write_roots: Vec::new(),
         })
+    }
+
+    /// Widen the write boundary to extra absolute directories. Entries must
+    /// be absolute; one that does not exist yet is fine — the write tool
+    /// creates it on first use. Each is reduced the way `resolve` reduces a
+    /// target, so an existing symlink cannot sneak a narrower root past the
+    /// check.
+    pub fn with_write_roots(mut self, extra: &[impl AsRef<Path>]) -> std::io::Result<Self> {
+        for dir in extra {
+            let dir = dir.as_ref();
+            if !dir.is_absolute() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("`write_roots` entries must be absolute: {}", dir.display()),
+                ));
+            }
+            self.write_roots.push(real_until_missing(dir));
+        }
+        Ok(self)
     }
 
     pub fn root(&self) -> &Path {
@@ -40,10 +89,11 @@ impl Workspace {
     /// Resolve a model-supplied path. Relative paths join the workspace
     /// root; absolute paths are used as-is. The tier sets the boundary:
     /// `Tier::Read` may reach anywhere on the filesystem; write and exec
-    /// tools must stay inside the workspace, and a path that would escape
-    /// it is refused. Canonicalizing the deepest existing ancestor is what
-    /// stops a symlink from pointing outside the workspace; the remaining
-    /// components cannot be links because they do not exist.
+    /// tools must stay inside the workspace root or a configured write root,
+    /// and a path that would escape both is refused. Canonicalizing the
+    /// deepest existing ancestor is what stops a symlink from pointing
+    /// outside the boundary; the remaining components cannot be links because
+    /// they do not exist.
     pub fn resolve(&self, input: &str, tier: Tier) -> Result<PathBuf, ToolError> {
         if input.is_empty() {
             return Err(ToolError::Invalid("empty path".into()));
@@ -56,29 +106,16 @@ impl Workspace {
         };
         let target = normalize(&joined);
 
-        let mut ancestor = target.as_path();
-        let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
-        let real = loop {
-            match ancestor.canonicalize() {
-                Ok(real) => break real,
-                Err(_) => match (ancestor.file_name(), ancestor.parent()) {
-                    (Some(name), Some(parent)) => {
-                        tail.push(name);
-                        ancestor = parent;
-                    }
-                    _ => return Err(ToolError::Escape(input.into())),
-                },
-            }
-        };
-
-        let mut resolved = real;
-        for name in tail.iter().rev() {
-            resolved.push(name);
-        }
-        if tier != Tier::Read && !resolved.starts_with(&self.root) {
+        let resolved = real_until_missing(&target);
+        if tier != Tier::Read && !self.allows(&resolved) {
             return Err(ToolError::Escape(input.into()));
         }
         Ok(resolved)
+    }
+
+    fn allows(&self, path: &Path) -> bool {
+        path.starts_with(&self.root)
+            || self.write_roots.iter().any(|root| path.starts_with(root))
     }
 
     /// Workspace-relative form for display. Absolute paths would let the model
@@ -167,5 +204,47 @@ mod tests {
             ws.resolve("escape/secret", Tier::Read).unwrap(),
             outside.path().join("secret")
         );
+    }
+
+    #[test]
+    fn a_configured_write_root_is_reachable() {
+        let (_d, ws) = ws();
+        let outside = tempfile::tempdir().unwrap();
+        let ws = ws.with_write_roots(&[outside.path()]).unwrap();
+        let p = ws
+            .resolve(&format!("{}/x.txt", outside.path().display()), Tier::Write)
+            .unwrap();
+        assert_eq!(p, outside.path().join("x.txt"));
+    }
+
+    #[test]
+    fn a_path_under_no_configured_root_stays_refused() {
+        let (_d, ws) = ws();
+        let allowed = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let ws = ws.with_write_roots(&[allowed.path()]).unwrap();
+        assert!(matches!(
+            ws.resolve(&format!("{}/x.txt", other.path().display()), Tier::Write),
+            Err(ToolError::Escape(_))
+        ));
+    }
+
+    #[test]
+    fn a_write_root_may_not_exist_yet() {
+        let (_d, ws) = ws();
+        let outside = tempfile::tempdir().unwrap();
+        let root = outside.path().join("scratch");
+        let ws = ws.with_write_roots(&[&root]).unwrap();
+        let p = ws
+            .resolve(&format!("{}/x.txt", root.display()), Tier::Write)
+            .unwrap();
+        assert_eq!(p, root.join("x.txt"));
+    }
+
+    #[test]
+    fn a_relative_write_root_is_refused() {
+        let (_d, ws) = ws();
+        let err = ws.with_write_roots(&["relative"]).unwrap_err();
+        assert!(err.to_string().contains("absolute"), "{err}");
     }
 }
