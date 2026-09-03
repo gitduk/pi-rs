@@ -630,6 +630,9 @@ struct Ui {
     /// The entry for the lane in front is None: its view is `view`, on loan to
     /// the screen until the next switch puts it back.
     parked: Vec<Option<View>>,
+    /// What the bottom bar says, in lane order. Empty until there is a second
+    /// lane, and the bar is absent with it.
+    tabs: Vec<Tab>,
 }
 
 impl Ui {
@@ -658,6 +661,26 @@ impl Ui {
     fn opened_lane(&mut self) {
         self.parked.push(None);
     }
+}
+
+/// How a lane shows in the bottom bar.
+///
+/// `Done`/`Failed` are unread marks, not history: the tool rows' ✓ stays for
+/// good, this one goes the moment you look at the lane it belongs to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mark {
+    Front,
+    Running,
+    Done,
+    Failed,
+    Idle,
+}
+
+/// One lane as the bar shows it, rebuilt before every draw — the bar is a view
+/// of state the surface does not own.
+struct Tab {
+    mark: Mark,
+    name: String,
 }
 
 // One row either menu can offer: a completion of the line, or a message
@@ -728,6 +751,7 @@ impl Ui {
             live: crate::status::default_live(),
             done: crate::status::default_done(),
             parked: vec![None],
+            tabs: Vec::new(),
             // Everything else about a lane starts empty, which is what a lane
             // nobody has said anything in yet looks like.
             view: View {
@@ -1061,6 +1085,31 @@ impl Ui {
         rows
     }
 
+    /// The bottom bar, or None when there is nothing it could say. One lane is
+    /// the whole surface, and a bar naming it is a row spent on nothing.
+    fn lane_bar(&self, width: usize) -> Option<String> {
+        if self.tabs.len() < 2 {
+            return None;
+        }
+        let spin = crate::status::FRAMES[self.spinner % crate::status::FRAMES.len()];
+        let theme = &self.paint.theme;
+        let painted: Vec<String> = self
+            .tabs
+            .iter()
+            .map(|tab| {
+                let (sign, style) = match tab.mark {
+                    Mark::Front => ("›", &theme.prompt.color),
+                    Mark::Running => (spin, &theme.muted),
+                    Mark::Done => ("✓", &theme.status.ok),
+                    Mark::Failed => ("✗", &theme.status.err),
+                    Mark::Idle => (" ", &theme.muted),
+                };
+                self.paint.on(style, &format!("{sign} {}", tab.name))
+            })
+            .collect();
+        Some(render::clip(&painted.join("   "), width))
+    }
+
     fn set_theme(&mut self, theme: Arc<render::Theme>) {
         self.paint.theme = theme;
         self.prompt = Self::paint_prompt(&self.paint, &self.paint.theme.prompt.icon);
@@ -1078,12 +1127,14 @@ impl Ui {
     fn flush(&mut self) {
         let menu = self.menu();
         let width = self.screen.usable();
+        let bar = self.lane_bar(width);
+        let bar_h = usize::from(bar.is_some());
         let (input, caret) = self.editor.view(&self.paint, width);
         // A paste taller than the terminal must not push the editor area off
         // the bottom; the editor scrolls to keep the caret's row visible.
         let editor_h = input
             .len()
-            .min((self.screen.height as usize).saturating_sub(1));
+            .min((self.screen.height as usize).saturating_sub(1 + bar_h));
         let editor_top = (caret.0 as usize + 1).saturating_sub(editor_h);
         let input_view: Vec<String> = input.into_iter().skip(editor_top).take(editor_h).collect();
         let caret_in_view = (caret.0 as usize).saturating_sub(editor_top);
@@ -1094,7 +1145,9 @@ impl Ui {
         let panel = self.settings.as_ref().map(|p| p.view(&self.paint, width));
         let panel_h = panel.as_ref().map(|v| v.len()).unwrap_or(0);
         let menu_h = if panel.is_some() {
-            panel_h.min((self.screen.height as usize).saturating_sub(editor_h + 1))
+            panel_h.min(
+                (self.screen.height as usize).saturating_sub(editor_h + bar_h + 1),
+            )
         } else if menu.is_empty() {
             0
         } else {
@@ -1142,10 +1195,13 @@ impl Ui {
         let highlight = self.rat_style(&self.paint.theme.menu.selected);
         let _ = self.screen.draw(|frame| {
             let area = frame.area();
+            // The bar is last, so its row number never moves: a menu opening
+            // or a pasted line growing the editor must not make it jump.
             let chunks = Layout::vertical([
                 Constraint::Fill(1),
                 Constraint::Length(menu_h as u16),
                 Constraint::Length(editor_h as u16),
+                Constraint::Length(bar_h as u16),
             ])
             .split(area);
             let (main, menu_area, editor_area) = (chunks[0], chunks[1], chunks[2]);
@@ -1162,6 +1218,9 @@ impl Ui {
                 );
             }
             frame.render_widget(Rows(&input_view), editor_area);
+            if let Some(bar) = &bar {
+                frame.render_widget(Rows(std::slice::from_ref(bar)), chunks[3]);
+            }
             let caret_row = editor_area.y + caret_in_view as u16;
             frame.set_cursor_position((caret.1, caret_row));
         });
@@ -1795,6 +1854,44 @@ impl Tui {
         }
     }
 
+    /// Rebuild the bottom bar from the lanes, before every draw. A run that
+    /// ended out of sight has to reach the screen without anyone asking, and
+    /// this is the only thing that looks.
+    fn refresh_tabs(&mut self) {
+        let current = self.core.current;
+        self.ui.tabs = self
+            .core
+            .lanes
+            .iter()
+            .enumerate()
+            .map(|(at, lane)| Tab {
+                // In front is in front, whatever it is doing: the run row above
+                // already says whether this one is working.
+                mark: if at == current {
+                    Mark::Front
+                } else {
+                    match &lane.turn {
+                        Turn::Running { .. } => Mark::Running,
+                        Turn::Ended { out: Ok(_), .. } => Mark::Done,
+                        Turn::Ended { out: Err(_), .. } => Mark::Failed,
+                        Turn::Idle => Mark::Idle,
+                    }
+                },
+                // The root answers to its directory name, as `worktree list`
+                // already names it — a fixed word here collides with a
+                // checkout that happens to be called that.
+                name: lane.worktree.clone().unwrap_or_else(|| {
+                    lane.ctx
+                        .workspace
+                        .root()
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                }),
+            })
+            .collect();
+    }
+
     /// Say something about a lane on the screen the user is actually looking
     /// at. A lane that is not in front names itself first, or the notice reads
     /// as news about whichever tree happens to be up.
@@ -1890,6 +1987,7 @@ impl Tui {
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             self.serve_lanes().await;
+            self.refresh_tabs();
             self.ui.flush();
             let running = self.core.lane().is_running();
             let anywhere = self.core.lanes.iter().any(|lane| lane.is_running());
