@@ -122,13 +122,6 @@ fn replayed_reasoning(r: &Reasoning, spec: &ModelSpec) -> usize {
     }
 }
 
-/// Notes ride outside the transcript — appended by the encoder, never stored —
-/// so nothing walking the messages ever sees them. They come out of the same
-/// budget all the same.
-pub fn notes(notes: &[String]) -> usize {
-    notes.iter().map(|n| of(n)).sum()
-}
-
 /// Tool schemas ride on every request, so they come out of the same budget the
 /// transcript does.
 pub fn tool_defs(tools: &[ToolDef]) -> usize {
