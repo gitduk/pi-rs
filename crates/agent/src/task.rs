@@ -56,10 +56,14 @@ impl Task {
 
     /// Build the subagent from the one that will call it: same transport, same
     /// model, same ceiling, its own prompt, and no `task` in its registry.
-    pub fn new(parent: &Agent, home: Arc<dyn Home>) -> Self {
+    ///
+    /// `standing` is what the checkout says — the workspace anchor and the
+    /// instruction files. It travels with the tree, not with the caller, and
+    /// the child edits that same tree.
+    pub fn new(parent: &Agent, home: Arc<dyn Home>, standing: &str) -> Self {
         let mut agent = parent.clone();
-        agent.registry = parent.registry.clone().without(Self::NAME);
-        agent.system = PROMPT.to_string();
+        agent.registry = std::mem::take(&mut agent.registry).without(Self::NAME);
+        agent.system = format!("{PROMPT}{standing}");
         Self {
             agent: Arc::new(agent),
             home,
@@ -170,20 +174,19 @@ impl Tool for Task {
             }
             heard
         });
-        // Trips the same token as the turn cap, so both endings unwind the run
-        // the way Esc does instead of dropping it mid-await.
-        let clock = tokio::spawn({
-            let stop = stop.clone();
-            let deadline = self.deadline;
-            async move {
-                tokio::time::sleep(deadline).await;
-                stop.cancel();
-            }
-        });
-
         let mut session = Session::with_prompt(args.prompt);
-        let ran = self.agent.run(&mut session, &child, &tx).await;
-        clock.abort();
+        // Trips the same token as the turn cap rather than dropping the
+        // future, so both endings unwind the run the way Esc does.
+        let ran = {
+            let mut run = std::pin::pin!(self.agent.run(&mut session, &child, &tx));
+            match tokio::time::timeout(self.deadline, &mut run).await {
+                Ok(ran) => ran,
+                Err(_) => {
+                    stop.cancel();
+                    run.await
+                }
+            }
+        };
         // The collector ends when the last sender goes, and `run` held one.
         drop(tx);
         let heard = heard.await.unwrap_or_default();
@@ -209,11 +212,10 @@ impl Tool for Task {
         };
 
         Ok(ToolOutput::text(answer(&heard, cut.as_deref())).with_preview(format!(
-            "{} turn{} · {} in / {} out",
+            "{} turn{} · {}",
             heard.turns,
             if heard.turns == 1 { "" } else { "s" },
-            heard.spent.usage.input,
-            heard.spent.usage.output
+            brain::count::in_out(heard.spent.usage.input, heard.spent.usage.output)
         )))
     }
 }

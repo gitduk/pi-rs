@@ -382,6 +382,17 @@ impl Repl {
         &self.lanes[self.current]
     }
 
+    /// Where a subagent started in this lane files what it did and what it
+    /// spent. Root and model vary — a `/worktree` moves one, a `/model` the
+    /// other — and the rest never does.
+    fn home(
+        &self,
+        root: std::path::PathBuf,
+        model: String,
+    ) -> std::sync::Arc<dyn agent::task::Home> {
+        crate::subagent::Filed::armed(self.store.clone(), root, model, self.subagents.clone())
+    }
+
     pub fn lane_mut(&mut self) -> &mut Lane {
         &mut self.lanes[self.current]
     }
@@ -443,15 +454,11 @@ impl Repl {
         // One `make_mut`: a run in flight holds the other reference, so this
         // is where the copy is taken, and taking it four times copies thrice
         // over.
-        let home = crate::subagent::Filed::armed(
-            self.store.clone(),
-            self.lane().ctx.workspace.root().to_path_buf(),
-            self.lane().agent.spec.model.clone(),
-            self.subagents.clone(),
-        );
+        let home = self.home(root.clone(), self.lane().agent.spec.model.clone());
         let ag = std::sync::Arc::make_mut(&mut self.lane_mut().agent);
         crate::arm(ag, &mut resolved, home);
         self.lane_mut().context = resolved.context;
+        self.lane_mut().standing = resolved.standing;
         // A skill can appear between one turn and the next, so the table of
         // what a slash answers to is recomputed like everything else here —
         // onto the lane it belongs to, then into force.
@@ -474,7 +481,7 @@ impl Repl {
             crate::config::Origin::Command,
         ) {
             Ok(dialled) if dialled.spec != self.lane().agent.spec => {
-                std::sync::Arc::make_mut(&mut self.lane_mut().agent).retarget(dialled.transport, dialled.spec);
+                self.retarget(dialled.transport, dialled.spec);
                 notes.extend(
                     dialled
                         .notes
@@ -654,8 +661,24 @@ impl Repl {
             context_window = spec.context_window,
             "model switched"
         );
-        std::sync::Arc::make_mut(&mut self.lane_mut().agent).retarget(dialled.transport, dialled.spec);
+        self.retarget(dialled.transport, dialled.spec);
         said
+    }
+
+    /// Point this lane at a new endpoint, and rebuild the subagent behind it.
+    ///
+    /// `Task` holds a snapshot of the agent it was built from, so a retarget
+    /// that stopped at the lane would leave the child on the old provider —
+    /// with the old key — while the status line named the new model.
+    fn retarget(&mut self, transport: std::sync::Arc<dyn brain::Transport>, spec: brain::ModelSpec) {
+        let home = self.home(
+            self.lane().ctx.workspace.root().to_path_buf(),
+            spec.model.clone(),
+        );
+        let standing = self.lane().standing.clone();
+        let ag = std::sync::Arc::make_mut(&mut self.lane_mut().agent);
+        ag.retarget(transport, spec);
+        crate::hang(ag, home, &standing);
     }
 
     /// What `/model` on its own shows.
@@ -1437,12 +1460,7 @@ impl Repl {
         let (events, inbox) = Lane::channel();
         // The model travels; what the root decides does not. A switch changes
         // trees, and which model is answering was a decision made elsewhere.
-        let home = crate::subagent::Filed::armed(
-            self.store.clone(),
-            ws.root().to_path_buf(),
-            self.lane().agent.spec.model.clone(),
-            self.subagents.clone(),
-        );
+        let home = self.home(root.clone(), self.lane().agent.spec.model.clone());
         let mut ag = (*self.lane().agent).clone();
         crate::arm(&mut ag, &mut resolved, home);
 
@@ -1456,6 +1474,7 @@ impl Repl {
             created: 0,
             name: None,
             context: resolved.context,
+            standing: resolved.standing,
             ctx: tools::Ctx::new(ws),
             keys: std::sync::Arc::new(resolved.keys),
             commands: std::sync::Arc::new(resolved.commands),

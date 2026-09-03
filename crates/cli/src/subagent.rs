@@ -67,7 +67,18 @@ impl Home for Filed {
 
     fn spent(&self, totals: &Totals) {
         if let Ok(mut held) = self.spent.lock() {
-            held.add(&totals.usage, totals.cost);
+            held.merge(totals);
         }
     }
+}
+
+/// Take what subagents have spent, and leave the tally empty.
+///
+/// Taken, not read, and in one place because more than one surface folds it in:
+/// a figure read twice is a figure counted twice.
+pub fn drain(spent: &Mutex<Totals>) -> Totals {
+    spent
+        .lock()
+        .map(|mut held| std::mem::take(&mut *held))
+        .unwrap_or_default()
 }

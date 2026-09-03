@@ -20,6 +20,8 @@ use tools::{Ctx, FileLocks, FileShifts, Registry, Tier, Tool, ToolError, ToolOut
 struct Scripted {
     turns: Vec<Vec<StreamEvent>>,
     next: AtomicUsize,
+    /// Every system prompt that went out, parent's and child's alike.
+    saw: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 #[async_trait]
@@ -27,13 +29,19 @@ impl Transport for Scripted {
     async fn stream(
         &self,
         _spec: &ModelSpec,
-        _req: &Request,
+        req: &Request,
     ) -> brain::Result<BoxStream<'static, brain::Result<StreamEvent>>> {
+        if let Some(system) = &req.system {
+            self.saw.lock().unwrap().push(system.clone());
+        }
         let i = self.next.fetch_add(1, Ordering::SeqCst);
         let events = self.turns.get(i).cloned().unwrap_or_default();
         Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
     }
 }
+
+/// What a checkout says to whoever works in it, as `resolve` composes it.
+const STANDING: &str = "\n\n<workspace path=\"/anywhere\"/>\nnever touch infra/\n";
 
 fn text_turn(body: &str) -> Vec<StreamEvent> {
     vec![
@@ -165,10 +173,7 @@ impl Home for Kept {
             .push((id.to_string(), format!("{:?}", session.entries())));
     }
     fn spent(&self, totals: &Totals) {
-        let mut held = self.spent.lock().unwrap();
-        held.usage.input += totals.usage.input;
-        held.usage.output += totals.usage.output;
-        held.cost += totals.cost;
+        self.spent.lock().unwrap().merge(totals);
     }
 }
 
@@ -193,6 +198,7 @@ fn rigged(
         Arc::new(Scripted {
             turns,
             next: AtomicUsize::new(0),
+            saw: Arc::default(),
         }),
         spec(),
     );
@@ -202,7 +208,7 @@ fn rigged(
             seen: seen.clone(),
             trip: esc.then(|| ctx.cancel.clone()),
         });
-    let task = Task::new(&parent, kept.clone()).with_limits(max_turns, deadline);
+    let task = Task::new(&parent, kept.clone(), STANDING).with_limits(max_turns, deadline);
     parent.registry = parent.registry.clone().with(task);
     (dir, parent, ctx, seen, kept)
 }
@@ -388,6 +394,7 @@ async fn the_child_gets_no_tool_the_parent_was_denied() {
                 text_turn("nor could I"),
             ],
             next: AtomicUsize::new(0),
+            saw: Arc::default(),
         }),
         spec(),
     );
@@ -398,7 +405,7 @@ async fn the_child_gets_no_tool_the_parent_was_denied() {
     parent.registry = parent
         .registry
         .clone()
-        .with(Task::new(&parent, kept.clone()));
+        .with(Task::new(&parent, kept.clone(), STANDING));
 
     let _ = drive(&parent, &Ctx::new(ws), "go").await;
 
@@ -407,5 +414,46 @@ async fn the_child_gets_no_tool_the_parent_was_denied() {
         sessions[0].1.contains("no tool named"),
         "the child inherited the parent's restriction: {}",
         sessions[0].1
+    );
+}
+
+#[tokio::test]
+async fn the_child_is_told_what_the_checkout_says() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace::new(dir.path()).unwrap();
+    let kept = Arc::new(Kept::default());
+    let saw: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let mut parent = Agent::new(
+        Arc::new(Scripted {
+            turns: vec![
+                call_turn("c1", "task", r#"{"prompt":"go"}"#),
+                text_turn("done"),
+                text_turn("the subagent is done"),
+            ],
+            next: AtomicUsize::new(0),
+            saw: saw.clone(),
+        }),
+        spec(),
+    );
+    parent.system = format!("You are a coding agent.{STANDING}");
+    parent.registry = parent
+        .registry
+        .clone()
+        .with(Task::new(&parent, kept.clone(), STANDING));
+
+    let _ = drive(&parent, &Ctx::new(ws), "go").await;
+
+    let saw = saw.lock().unwrap();
+    let child = saw
+        .iter()
+        .find(|s| s.contains("You are a subagent"))
+        .expect("the child asked for a turn");
+    assert!(
+        child.contains("<workspace path=\"/anywhere\"/>") && child.contains("never touch infra/"),
+        "the child stands on the same checkout as its caller: {child}"
+    );
+    assert!(
+        !child.contains("You are a coding agent"),
+        "but not on its caller's prompt: {child}"
     );
 }

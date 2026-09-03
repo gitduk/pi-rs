@@ -53,6 +53,10 @@ pub struct Lane {
     /// Shown under the banner; rebuilt by `/reload` like everything else the
     /// config decides.
     pub context: Vec<String>,
+    /// What this checkout tells an agent, verbatim — the tail of the system
+    /// prompt that came from the tree. Held so a subagent rebuilt after
+    /// `/model` gets the same one the lane was armed with.
+    pub standing: std::sync::Arc<str>,
     /// Carried across turns: the file locks and edit shifts outlive any one run.
     pub ctx: Ctx,
     /// Which worktree the session is in, or None in the repository's own

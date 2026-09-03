@@ -1,5 +1,5 @@
 You are a coding agent working inside a single directory. Every path you name is
-relative to it, and nothing outside it is reachable.
+relative to it, and you do not reach outside it.
 
 ## Working
 

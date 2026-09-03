@@ -314,16 +314,12 @@ fn read_prompt(args: &Args) -> Result<Option<String>> {
     Ok(Some(body))
 }
 
-/// Everything the config and the workspace decide, as opposed to what the
-/// command line fixed for the whole run. `/reload` recomputes exactly this.
 /// Put what `resolve` settled onto an agent, and hang the subagent tool off the
 /// result.
 ///
-/// One function for the three places that do this, because the last step is
-/// order-dependent in a way that is easy to get wrong on the fourth: `Task`
-/// clones the agent it is handed, so it can only be built once the registry,
-/// the ceiling and the system prompt are already in place. A child built any
-/// earlier inherits a half-made parent.
+/// **Call it last.** `Task` clones the agent it is handed, so any field set
+/// after this is one the child does not have — which is how the startup path
+/// once gave the parent `--no-compact` and `--retries` and the child neither.
 ///
 /// Takes the fields it installs out of `from`, which the callers do not read
 /// again — the rest of `Resolved` is theirs.
@@ -336,15 +332,34 @@ pub fn arm(
     ag.approver = std::sync::Arc::new(agent::Ceiling(from.tier));
     ag.system = std::mem::take(&mut from.system);
     ag.effort = from.effort;
-    ag.registry = ag
-        .registry
-        .clone()
-        .with(agent::task::Task::new(ag, home));
+    hang(ag, home, &from.standing);
 }
 
+/// Hang a subagent off an agent that is otherwise ready, replacing any it
+/// already carries.
+///
+/// Separate from `arm` because `Task` keeps a snapshot of the parent: anything
+/// that changes the parent afterwards — `/model` re-dialling the transport —
+/// has to build a new one, or the child goes on talking to the old endpoint
+/// with the old key.
+pub fn hang(
+    ag: &mut agent::Agent,
+    home: std::sync::Arc<dyn agent::task::Home>,
+    standing: &str,
+) {
+    let task = agent::task::Task::new(ag, home, standing);
+    ag.registry = std::mem::take(&mut ag.registry).with(task);
+}
+
+/// Everything the config and the workspace decide, as opposed to what the
+/// command line fixed for the whole run. `/reload` recomputes exactly this.
 pub struct Resolved {
     pub registry: tools::Registry,
     pub system: String,
+    /// The tail of `system` that belongs to the checkout rather than to the
+    /// assistant: the workspace anchor and the instruction files. Kept apart
+    /// because the subagent has its own prompt but the same tree.
+    pub standing: std::sync::Arc<str>,
     pub tier: tools::Tier,
     pub effort: Effort,
     pub keys: keys::Keys,
@@ -428,7 +443,7 @@ pub fn resolve(
         None => agent::DEFAULT_SYSTEM.to_string(),
     };
     // The system prompt's "relative to it" needs the workspace named.
-    system.push_str(&context::workspace(root));
+    let mut standing = context::workspace(root);
     // Appended rather than sent as a message: these are standing instructions,
     // they do not change within a run, and the system prompt is the part of the
     // request a provider will cache.
@@ -440,12 +455,14 @@ pub fn resolve(
             .iter()
             .map(|p| context::short(p, root))
             .collect();
-        system.push_str(&loaded.text);
+        standing.push_str(&loaded.text);
     }
+    system.push_str(&standing);
 
     Ok(Resolved {
         registry,
         system,
+        standing: standing.into(),
         tier,
         effort,
         keys: config.key_map()?,
@@ -466,7 +483,7 @@ fn paint(
     subagents: std::sync::Arc<std::sync::Mutex<agent::Totals>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut r = render::Renderer::new(quiet, theme, done, model).counting(subagents);
+        let mut r = render::Renderer::new(quiet, theme, done, model, subagents);
         while let Some(event) = rx.recv().await {
             r.on(event);
         }
@@ -532,19 +549,6 @@ async fn main() -> Result<()> {
 
     let subagents: Arc<std::sync::Mutex<agent::Totals>> = Default::default();
     let mut ag = agent::Agent::new(dialled.transport, dialled.spec);
-    arm(
-        &mut ag,
-        &mut resolved,
-        subagent::Filed::armed(
-            store.clone(),
-            root.clone(),
-            model_id.clone(),
-            subagents.clone(),
-        ),
-    );
-    // After `arm`, which needs the whole of `resolved`: this takes a field out
-    // of it.
-    let key_map = std::sync::Arc::new(resolved.keys);
     if args.no_compact {
         ag.compaction = None;
     }
@@ -562,6 +566,20 @@ async fn main() -> Result<()> {
     }
     ag.retry.attempts = args.retries;
     ag.retry.idle = std::time::Duration::from_secs(args.idle_timeout.max(1));
+    // Last, so the child is cloned from an agent that is finished.
+    arm(
+        &mut ag,
+        &mut resolved,
+        subagent::Filed::armed(
+            store.clone(),
+            root.clone(),
+            model_id.clone(),
+            subagents.clone(),
+        ),
+    );
+    // After `arm`, which needs the whole of `resolved`: this takes a field out
+    // of it.
+    let key_map = std::sync::Arc::new(resolved.keys);
 
     let (tx, rx) = mpsc::unbounded_channel();
     let quiet = args.quiet;
@@ -604,6 +622,7 @@ async fn main() -> Result<()> {
                 created,
                 name,
                 context: resolved.context,
+                standing: resolved.standing,
                 worktree: worktree::current(&root),
                 ctx,
                 events,
