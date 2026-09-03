@@ -31,7 +31,7 @@ use crate::keys::{Action, Keys, Press};
 use crate::render::Style as ThemeStyle;
 use crate::render::{self, Markdown, Paint};
 use crate::lane::Turn;
-use crate::repl::{self, Candidate, Choice, Command, Fate, Repl, Rewound, Step};
+use crate::repl::{self, Candidate, Choice, Command, Fate, Intent, Repl, Rewound, Step};
 use crate::session::ResumeChoice;
 use editor::Editor;
 use ratatui::layout::{Constraint, Layout};
@@ -63,34 +63,14 @@ fn double_tap(last: &mut Option<Instant>, now: Instant) -> bool {
 // A `/settings set <path> <value>` whose path names a secret: the value must
 // not enter the recall history, which is written to disk in the clear.
 fn secret_settings_set(line: &str) -> bool {
-    match repl::parse(line) {
-        Some(repl::Cmd::Settings(rest)) => {
+    match repl::read(line) {
+        Intent::Settings(rest) => {
             let mut parts = rest.splitn(3, char::is_whitespace);
             matches!(parts.next(), Some("set"))
                 && parts.next().is_some_and(|p| journal::secret(journal::leaf(p)))
         }
         _ => false,
     }
-}
-// What a key press asked the loop to do. Every press redraws regardless.
-#[derive(Debug, PartialEq, Eq)]
-enum Act {
-    None,
-    Submit(String),
-    Interrupt,
-    /// The rewind selector wants everywhere the session can go back to.
-    OpenRewind,
-    /// Esc caught a prompt on its way out: stop the run, then unsend it.
-    Unsend,
-    /// A row chosen from the rewind selector: the conversation rewinds there,
-    /// and what the row was decides whether it is kept or unsent.
-    Rewind(EntryId),
-    /// The settings panel submitted an edited value.
-    CommitSetting(String, String),
-    /// `ctrl+l` twice: a fresh session, the old one kept on disk, and the
-    /// screen is rebuilt from the empty one.
-    NewSession,
-    Quit,
 }
 // What the workspace-dependent completions answer with, each read the first
 // time one is asked for.
@@ -560,8 +540,10 @@ struct View {
     /// replaces its row with the ✓/✗ line in scrollback, so a call that never
     /// answered would leave a spinning row behind; `abandon_tools` clears it.
     tools: Vec<RunTool>,
-    /// Lines submitted while the run was working.
-    queued: Vec<String>,
+    /// What arrived while the run was working, kept as intents rather than
+    /// lines: their fate was settled at the door, and re-reading them on the
+    /// way out would ask a question that has already been answered.
+    queued: Vec<Intent>,
     /// Which worktree the session is working in, or None in the repository's
     /// own checkout. The status line says it, so the tree being edited is
     /// visible without asking.
@@ -1224,19 +1206,19 @@ impl Ui {
         self.view.thinking.fold_previous(&mut self.view.scrollback);
     }
 
-    fn key(&mut self, event: TermEvent, running: bool) -> Act {
+    fn key(&mut self, event: TermEvent, running: bool) -> Intent {
         let key = match event {
             TermEvent::Resize(w, h) => {
                 self.screen.resized(w, h);
                 // Re-measuring starts at the new width: the re-wrap is a
                 // change of layout, not output, and must not move the view.
                 self.view.counted = None;
-                return Act::None;
+                return Intent::None;
             }
             TermEvent::Paste(text) => {
                 self.last_esc = None;
                 self.editor.insert_str(&text.replace('\r', "\n"));
-                return Act::None;
+                return Intent::None;
             }
             TermEvent::Mouse(mouse) => {
                 match mouse.kind {
@@ -1244,7 +1226,7 @@ impl Ui {
                     MouseEventKind::ScrollDown => self.scroll_view(false, 1),
                     _ => {}
                 }
-                return Act::None;
+                return Intent::None;
             }
             // Windows reports both press and release; acting on each would
             // double every keystroke. Any key other than Esc breaks the
@@ -1256,7 +1238,7 @@ impl Ui {
                 }
                 k
             }
-            _ => return Act::None,
+            _ => return Intent::None,
         };
         let press = Press::of(key.code, key.modifiers);
         // The panel counts as a menu: its own keys are the Menu bindings, and
@@ -1270,27 +1252,27 @@ impl Ui {
             match bound {
                 Some(Action::MenuNext) => {
                     panel.next();
-                    return Act::None;
+                    return Intent::None;
                 }
                 Some(Action::MenuPrevious) => {
                     panel.previous();
-                    return Act::None;
+                    return Intent::None;
                 }
                 Some(Action::MenuAccept) => {
                     if panel.editing() {
                         let (path, _) = panel.rows[panel.at].clone();
                         let value = panel.editing_value().to_string();
-                        return Act::CommitSetting(path, value);
+                        return Intent::CommitSetting(path, value);
                     } else {
                         panel.begin_edit();
-                        return Act::None;
+                        return Intent::None;
                     }
                 }
                 Some(Action::MenuDismiss) => {
                     if panel.dismiss() {
                         self.settings = None;
                     }
-                    return Act::None;
+                    return Intent::None;
                 }
                 _ => {
                     // Printable keys edit the panel's value; everything else
@@ -1305,7 +1287,7 @@ impl Ui {
                         } else if matches!(bound, Some(Action::DeleteCharBack)) {
                             panel.backspace();
                         }
-                        return Act::None;
+                        return Intent::None;
                     }
                 }
             }
@@ -1338,7 +1320,7 @@ impl Ui {
                 match self.highlighted() {
                     Some(MenuEntry::Message { id, .. }) => {
                         self.rewind.clear();
-                        return Act::Rewind(id);
+                        return Intent::Rewind(id);
                     }
                     Some(MenuEntry::Completion(c)) => {
                         let line = c.line;
@@ -1347,9 +1329,9 @@ impl Ui {
                         // as a stray prompt later.
                         self.editor.take(true);
                         return if line.trim().is_empty() {
-                            Act::None
+                            Intent::None
                         } else {
-                            Act::Submit(line)
+                            Intent::Submit(line)
                         };
                     }
                     None => {
@@ -1358,9 +1340,9 @@ impl Ui {
                         let remember = !secret_settings_set(self.editor.text());
                         let typed = self.editor.take(remember);
                         return if typed.trim().is_empty() {
-                            Act::None
+                            Intent::None
                         } else {
-                            Act::Submit(typed)
+                            Intent::Submit(typed)
                         };
                     }
                 }
@@ -1369,23 +1351,23 @@ impl Ui {
                 // Esc before the model has moved means "I didn't mean to send
                 // that"; an empty editor, or unsending overwrites a line.
                 if self.editor.is_empty() && self.view.started.is_some() && !self.view.committed {
-                    return Act::Unsend;
+                    return Intent::Unsend;
                 }
-                return Act::Interrupt;
+                return Intent::Interrupt;
             }
             Some(Action::Rewind) => {
                 // Double Esc with an empty line opens the rewind selector.
                 // The first press only arms it; the second, inside the
                 // window, asks the loop for the session's messages.
                 if !self.editor.is_empty() {
-                    return Act::None;
+                    return Intent::None;
                 }
                 let now = Instant::now();
                 if double_tap(&mut self.last_esc, now) {
                     self.last_esc = None;
-                    return Act::OpenRewind;
+                    return Intent::OpenRewind;
                 }
-                return Act::None;
+                return Intent::None;
             }
             Some(Action::AppClearScreen) => {
                 // One press clears the screen; a second, inside the window,
@@ -1393,17 +1375,19 @@ impl Ui {
                 let now = Instant::now();
                 if double_tap(&mut self.last_l, now) {
                     self.last_l = None;
-                    return Act::NewSession;
+                    return Intent::New;
                 }
                 self.screen.clear();
-                return Act::None;
+                return Intent::None;
             }
             Some(Action::AppExit) => {
-                return if self.editor.is_empty() && !running {
-                    Act::Quit
+                // No `running` check: leaving is one intent whatever is in
+                // flight, and `admit` gives it one answer.
+                return if self.editor.is_empty() {
+                    Intent::Quit
                 } else {
                     self.editor.delete();
-                    Act::None
+                    Intent::None
                 };
             }
             _ => {}
@@ -1447,7 +1431,7 @@ impl Ui {
                 match self.highlighted() {
                     Some(MenuEntry::Message { id, .. }) => {
                         self.rewind.clear();
-                        return Act::Rewind(id);
+                        return Intent::Rewind(id);
                     }
                     Some(MenuEntry::Completion(c)) => {
                         self.editor.set_line(&c.line);
@@ -1500,7 +1484,7 @@ impl Ui {
                 | Action::AppClearScreen,
             ) => unreachable!("handled scrollback"),
         }
-        Act::None
+        Intent::None
     }
 
     /// Nudge the scrolled history window by `step` rows, up or down.
@@ -1525,12 +1509,12 @@ impl Ui {
     /// One key, three meanings, and the escalation travels with the binding
     /// rather than with Ctrl-C: stop the run, clear the line, or — pressed
     /// twice inside the window — leave.
-    fn interrupt_or_clear(&mut self, running: bool) -> Act {
+    fn interrupt_or_clear(&mut self, running: bool) -> Intent {
         if double_tap(&mut self.last_interrupt, Instant::now()) {
-            return Act::Quit;
+            return Intent::Quit;
         }
         if running {
-            return Act::Interrupt;
+            return Intent::Interrupt;
         }
         if self.editor.is_empty() {
             self.say(
@@ -1540,7 +1524,7 @@ impl Ui {
         } else {
             self.editor.clear();
         }
-        Act::None
+        Intent::None
     }
 }
 // Scroll for the same window one frame later: growth since `last` folds
@@ -1587,19 +1571,6 @@ fn land_handled(ui: &mut Ui, core: &Repl, lines: Vec<String>) {
 // to the loop's own dispatch, so a command takes the same path whether or not
 // a run is under way — and a `/worktree` that opens a lane is landed by the
 // same code that lands it from an idle prompt.
-fn admit(ui: &mut Ui, line: String) -> Wake {
-    match crate::repl::fate_of(&line) {
-        Fate::Now => Wake::Line(line),
-        Fate::Queued => {
-            ui.view.queued.push(line);
-            Wake::Nothing
-        }
-        Fate::Refused(why) => {
-            ui.say(why.to_string());
-            Wake::Nothing
-        }
-    }
-}
 
 /// A turn that has ended, on its way back to the loop that started it.
 ///
@@ -1609,13 +1580,14 @@ fn admit(ui: &mut Ui, line: String) -> Wake {
 /// What woke the loop this time round. One value out of the select rather than
 /// a pair of optional locals, so what happened is read in one place.
 enum Wake {
-    /// A line to run — from a key, from the phone, or from the queue a lane
-    /// kept while it was working.
-    Line(String),
+    /// Something to carry out, once the select's borrows are gone.
+    Do(Intent),
     /// A turn ended and has to be settled, whichever lane it belongs to.
     Turn(Done),
     /// Something only the screen cares about.
     Nothing,
+    /// Leave. Not a `break` at the arm: the way out has lanes to settle.
+    Leave,
 }
 
 struct Done {
@@ -1657,6 +1629,11 @@ fn reader() -> UnboundedReceiver<TermEvent> {
     });
     rx
 }
+
+/// How long leaving waits for the runs it just cancelled. Long enough for a
+/// turn to notice the token, short enough that a wedged one does not hold the
+/// terminal hostage.
+const EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
 // Where recalled prompts are kept between sessions.
 fn history_path() -> Option<std::path::PathBuf> {
@@ -1834,14 +1811,67 @@ impl Tui {
         self.ui.say(text);
     }
 
+    /// The one gate every input passes: a key, the phone, or an intent coming
+    /// back off the queue, so two ways of asking the same thing cannot get two
+    /// different answers.
+    ///
+    /// The answer is in two halves and they live apart on purpose: whether a
+    /// run is in flight is state, and is read here; what an intent may do while
+    /// one is, is a property of the intent, and `fate` holds it. An idle lane
+    /// admits everything, which is why `fate` never has to mention idleness.
+    fn admit(&mut self, intent: Intent) -> Wake {
+        if !self.core.lane().is_running() {
+            return Wake::Do(intent);
+        }
+        match intent.fate() {
+            Fate::Now => Wake::Do(intent),
+            Fate::Queued => {
+                self.ui.view.queued.push(intent);
+                Wake::Nothing
+            }
+            Fate::Refused(why) => {
+                self.ui.say(why.to_string());
+                Wake::Nothing
+            }
+        }
+    }
+
+    /// Write one edited value from the settings panel, and show the panel what
+    /// became of it.
+    fn commit_setting(&mut self, path: &str, value: &str) {
+        match self.core.commit_file(path, value) {
+            Ok(said) => {
+                let rows = crate::settings::leaves(&self.core.file);
+                self.ui.setting_paths = rows.iter().map(|(p, _)| p.clone()).collect();
+                self.ui
+                    .view
+                    .scrollback
+                    .extend(said.into_iter().map(Row::notice));
+                if let Some(panel) = &mut self.ui.settings {
+                    panel.refresh(rows);
+                    panel.finish_edit();
+                }
+            }
+            Err(why) => {
+                if let Some(panel) = &mut self.ui.settings {
+                    panel.refuse(why);
+                }
+            }
+        }
+    }
+
     /// Stop the run in front, if there is one. `unsend` also takes the prompt
     /// back once it has stopped.
     fn stop_current(&mut self, unsend: bool) {
-        if let Turn::Running { cancel, unsend: take_back } = &mut self.core.lane_mut().turn {
-            cancel.cancel();
-            *take_back = unsend;
-            self.ui.view.stopping = true;
-        }
+        // Said here rather than at the callers: the state is the only thing
+        // that knows, and every way of asking to stop arrives through it.
+        let Turn::Running { cancel, unsend: take_back } = &mut self.core.lane_mut().turn else {
+            self.ui.say("nothing running to stop");
+            return;
+        };
+        cancel.cancel();
+        *take_back = unsend;
+        self.ui.view.stopping = true;
     }
 
     /// Drive the terminal until the user leaves.
@@ -1863,7 +1893,7 @@ impl Tui {
             self.ui.flush();
             let running = self.core.lane().is_running();
             let anywhere = self.core.lanes.iter().any(|lane| lane.is_running());
-            // A queued line waits for the lane it was typed at to come free.
+            // A queued intent waits for the lane it was aimed at to come free.
             let woke = if self.ui.view.queued.is_empty() || running {
                 // Every branch must be cancel-safe: a loser is dropped mid-poll.
                 // `recv()` and `tick()` are; a blocking read gets its own thread.
@@ -1876,81 +1906,20 @@ impl Tui {
                         Wake::Nothing
                     }
                     key = self.keys.recv() => match key {
-                        Some(key) => match self.ui.key(key, running) {
-                            Act::Submit(line) if running => admit(&mut self.ui, line),
-                            Act::Submit(line) => Wake::Line(line),
-                            Act::Quit => break,
-                            // Refused while the lane in front is working, as
-                            // they were before one loop served both states: all
-                            // three reach for a transcript the run is holding.
-                            Act::OpenRewind if !running => {
-                                self.open_rewind();
-                                Wake::Nothing
-                            }
-                            Act::Rewind(id) if !running => {
-                                self.rewind_turn(id);
-                                Wake::Nothing
-                            }
-                            Act::OpenRewind | Act::Rewind(_) => Wake::Nothing,
-                            Act::CommitSetting(path, value) => {
-                                match self.core.commit_file(&path, &value) {
-                                    Ok(said) => {
-                                        let rows = crate::settings::leaves(&self.core.file);
-                                        self.ui.setting_paths =
-                                            rows.iter().map(|(p, _)| p.clone()).collect();
-                                        self.ui.view.scrollback
-                                            .extend(said.into_iter().map(Row::notice));
-                                        if let Some(panel) = &mut self.ui.settings {
-                                            panel.refresh(rows);
-                                            panel.finish_edit();
-                                        }
-                                    }
-                                    Err(why) => {
-                                        if let Some(panel) = &mut self.ui.settings {
-                                            panel.refuse(why);
-                                        }
-                                    }
-                                }
-                                Wake::Nothing
-                            }
-                            Act::NewSession if !running => {
-                                let Step::Swap(said) = self.core.command("/new", &self.totals)
-                                else {
-                                    unreachable!("ctrl+l twice reaches the /new branch");
-                                };
-                                self.land_swap(said);
-                                Wake::Nothing
-                            }
-                            // `/new` typed as a line is refused mid-run by
-                            // `Fate`; the key has to be refused by hand.
-                            Act::NewSession => Wake::Nothing,
-                            // Only the lane in front: esc is a reflex, and a
-                            // reflex must not reach what is out of sight.
-                            Act::Interrupt => {
-                                self.stop_current(false);
-                                Wake::Nothing
-                            }
-                            Act::Unsend => {
-                                self.stop_current(true);
-                                Wake::Nothing
-                            }
-                            Act::None => Wake::Nothing,
-                        },
-                        None => break,
+                        Some(key) => {
+                            let intent = self.ui.key(key, running);
+                            self.admit(intent)
+                        }
+                        None => Wake::Leave,
                     },
                     msg = self.bridge.rx.recv() => match msg {
+                        // The phone types at the lane in front, like a hand,
+                        // and its `/stop` is esc. Same intents, same gate, so
+                        // they cannot drift apart.
                         Some(crate::wechat::Inbound::Text { text }) => {
-                            // The phone types at the lane in front, like a hand.
-                            if running { admit(&mut self.ui, text) } else { Wake::Line(text) }
+                            self.admit(Intent::Submit(text))
                         }
-                        Some(crate::wechat::Inbound::Stop) => {
-                            if running {
-                                self.stop_current(false);
-                            } else {
-                                self.ui.say("nothing running to stop");
-                            }
-                            Wake::Nothing
-                        }
+                        Some(crate::wechat::Inbound::Stop) => self.admit(Intent::Interrupt),
                         Some(crate::wechat::Inbound::Notice(text)) => {
                             self.ui.say(text);
                             Wake::Nothing
@@ -1959,38 +1928,70 @@ impl Tui {
                     },
                 }
             } else {
-                // One at a time. Joined, a command and a prompt become one
-                // line, and `parse` reads only its first word — so whichever
-                // came first decided what both of them were.
-                Wake::Line(self.ui.view.queued.remove(0))
+                // One at a time, each still the intent it was read as. Joined
+                // as lines, a command and a prompt became one line and `read`
+                // saw only the first word.
+                Wake::Do(self.ui.view.queued.remove(0))
             };
-            // Out here, where all of `self` is free again: settling needs all
-            // of it, and inside the select the other sources are still borrowed.
-            let line = match woke {
+            // Out here, where all of `self` is free again.
+            let intent = match woke {
                 Wake::Turn(done) => {
                     self.settle(done).await;
                     continue;
                 }
                 Wake::Nothing => continue,
-                Wake::Line(line) => line,
+                Wake::Leave => break,
+                Wake::Do(intent) => intent,
             };
-            self.ui.submit(&line);
-            // A fresh turn starts at the newest row: a view scrolled up to
-            // read would otherwise stream the run's output out of sight.
-            self.ui.view.scroll = 0;
-            // Written per line rather than on the way out: quitting with two
-            // Ctrl-Cs skips every tidy exit path there is.
-            self.save_history();
+            // What the surface answers for itself: the screen, the keyboard
+            // and the process are not `Repl`'s to move.
+            let intent = match intent {
+                Intent::None => continue,
+                Intent::Interrupt => {
+                    self.stop_current(false);
+                    continue;
+                }
+                Intent::Unsend => {
+                    self.stop_current(true);
+                    continue;
+                }
+                Intent::OpenRewind => {
+                    self.open_rewind();
+                    continue;
+                }
+                Intent::Rewind(id) => {
+                    self.rewind_turn(id);
+                    continue;
+                }
+                Intent::CommitSetting(path, value) => {
+                    self.commit_setting(&path, &value);
+                    continue;
+                }
+                // A submitted line is echoed and remembered, and only then
+                // read — the echo wants the text, which reading spends.
+                Intent::Submit(line) => {
+                    self.ui.submit(&line);
+                    // A fresh turn starts at the newest row: a view scrolled up
+                    // to read would otherwise stream output out of sight.
+                    self.ui.view.scroll = 0;
+                    // Written per line rather than on the way out: quitting
+                    // with two Ctrl-Cs skips every tidy exit path there is.
+                    self.save_history();
+                    crate::repl::read(&line)
+                }
+                // A key that means a command — `ctrl+l` twice is `/new` —
+                // arrives already read.
+                ready => ready,
+            };
             // Bare `/settings` opens the panel instead of going through the
             // line command's read-only list.
-            if matches!(crate::repl::parse(&line), Some(crate::repl::Cmd::Settings(rest)) if rest.is_empty())
-            {
+            if matches!(intent, Intent::Settings(ref rest) if rest.trim().is_empty()) {
                 let rows = crate::settings::leaves(&self.core.file);
                 self.ui.settings = Some(settings::Panel::new(rows));
                 continue;
             }
             let was = self.core.current;
-            let step = self.core.command(&line, &self.totals);
+            let step = self.core.run(intent, &self.totals);
             self.reconcile(was);
             match step {
                 Step::Quit => break,
@@ -2049,7 +2050,48 @@ impl Tui {
             }
         }
         self.save_history();
+        self.settle_all(&mut done_rx).await;
         Ok(())
+    }
+
+    /// Stop every lane still working and settle it, so leaving cannot drop a
+    /// transcript that lives in a task.
+    ///
+    /// Cancelling, not waiting for the work to finish: a run stops at its next
+    /// cancellation point, which is the wait Esc already asks of anyone. The
+    /// deadline is for the run that will not stop — what is on disk is then the
+    /// last save, which is what leaving without this gave every time.
+    async fn settle_all(&mut self, done: &mut UnboundedReceiver<Done>) {
+        let mut left = 0;
+        for lane in &self.core.lanes {
+            if let Turn::Running { cancel, .. } = &lane.turn {
+                cancel.cancel();
+                left += 1;
+            }
+        }
+        if left == 0 {
+            return;
+        }
+        self.ui.say("stopping — saving what the runs have written");
+        self.ui.flush();
+        let waited = tokio::time::timeout(EXIT_GRACE, async {
+            while left > 0 {
+                match done.recv().await {
+                    Some(ended) => {
+                        self.settle(ended).await;
+                        left -= 1;
+                    }
+                    None => break,
+                }
+            }
+        })
+        .await;
+        if waited.is_err() {
+            // On the terminal we are about to give back: a transcript that did
+            // not come home is one the user should know is short.
+            self.ui.screen.leave();
+            eprintln!("{left} run(s) did not stop in time; their last save is what is on disk");
+        }
     }
 
     /// Cut the transcript at an entry — chosen from the selector, or the
@@ -2237,6 +2279,7 @@ impl Tui {
             unsend: false,
         };
     }
+
     /// A turn has ended. Put the transcript back and save it, whichever lane it
     /// belongs to; show the end of it only when that lane is the one on screen.
     ///

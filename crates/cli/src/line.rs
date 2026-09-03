@@ -36,7 +36,7 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
             continue;
         }
 
-        match core.command(line, &totals) {
+        match core.run(crate::repl::read(line), &totals) {
             Step::Quit => break,
             Step::Bash(command) => {
                 // Awaited in place: this surface has nothing else to serve

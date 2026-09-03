@@ -796,37 +796,68 @@ fn carries_reasoning(session: &agent::session::Session) -> bool {
     })
 }
 
-/// What a line at the prompt asks for.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Cmd {
-    Exit,
+/// What an input asked the loop to do, whatever it arrived as.
+///
+/// One vocabulary for the keyboard, the phone and a typed line, so the same
+/// intent gets the same answer however it was expressed.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Intent {
+    /// Nothing for the loop: the press changed only what `Ui` owns.
+    None,
+    /// A line the user submitted, not yet read. The one raw variant, because
+    /// the screen echoes the text and the queue holds it — parsing it at the
+    /// door would throw away what both of them need. `read` says what it is.
+    Submit(String),
+
+    // What `read` makes of a submitted line.
+    /// Prose for the model.
+    Prompt(String),
+    /// What `!` named.
+    Bash(String),
     Help,
-    Cost,
-    New,
     Keys,
-    Reload,
     Log,
+    Cost,
+    Reload,
+    Name(String),
     /// The session to switch to, or empty to list what there is.
     Resume(String),
-    Name(String),
     /// Everything after the word focuses the summary.
     Compact(String),
     /// The name to move to, or empty to list what there is.
     Model(String),
-    /// The worktree to work in, or empty to list what there is.
+    /// The name to work in, or empty to list what there is.
     Worktree(String),
-    /// Everything after the word: a `set <path> <value>`, `get <path>`,
-    /// `reset [path]`, or empty to open the panel.
+    /// A `set <path> <value>`, `get <path>`, `reset [path]`, or empty to open
+    /// the panel.
     Settings(String),
-    /// The wechat bridge verb: "" = status, "on" = connect, "off" = disconnect.
+    /// The wechat verb: "" = status, "on" = connect, "off" = disconnect.
     Wechat(String),
     /// Not a built-in word. It may name a skill and it may name nothing; the
-    /// command table settles that, and `parse` does not have it.
-    Other {
-        word: String,
-        args: String,
-    },
+    /// command table settles that, and `read` does not have it.
+    Other { word: String, args: String },
+    /// `/new`, and `ctrl+l` twice: a fresh session, the old one kept on disk,
+    /// and the screen rebuilt from the empty one. One variant, because they
+    /// are one intent however it was expressed.
+    New,
+    // Only a key can ask for these: there is no line that says them.
+    /// The rewind selector wants everywhere the session can go back to.
+    OpenRewind,
+    /// A row chosen from the rewind selector: the conversation rewinds there,
+    /// and what the row was decides whether it is kept or unsent.
+    Rewind(agent::session::EntryId),
+    /// The settings panel submitted an edited value.
+    CommitSetting(String, String),
+    /// Esc caught a prompt on its way out: stop the run, then unsend it.
+    Unsend,
+    /// Leave now — `/exit`, `/quit`, `ctrl+d`, a double `ctrl+c`. One intent,
+    /// so the four of them cannot answer differently.
+    Quit,
+
+    // A key or the phone.
+    Interrupt,
 }
+
 
 /// What a line may do while a turn is in flight.
 ///
@@ -843,16 +874,9 @@ pub enum Fate {
     Refused(&'static str),
 }
 
-/// What a submitted line may do while a turn is in flight.
-///
-/// A line naming nothing is a prompt, and a prompt waits — so anything `parse`
-/// does not recognise is `Queued`.
-pub fn fate_of(line: &str) -> Fate {
-    parse(line).map_or(Fate::Queued, |cmd| cmd.fate())
-}
 
-impl Cmd {
-    /// Exhaustive on purpose, with no catch-all arm: a command added without an
+impl Intent {
+    /// Exhaustive on purpose, with no catch-all arm: an intent added without an
     /// answer here should fail to compile rather than default to one.
     ///
     /// What it cannot check is an existing arm's body: `Reload` and `Model` are
@@ -863,24 +887,50 @@ impl Cmd {
         match self {
             // Answered from the config, the key map or the surface's own
             // totals — none of which the run is holding.
-            Cmd::Help | Cmd::Keys | Cmd::Log | Cmd::Cost | Cmd::Name(_) => Fate::Now,
+            Intent::Help | Intent::Keys | Intent::Log | Intent::Cost | Intent::Name(_) => Fate::Now,
             // Both write through `Arc::make_mut`, so the run in flight keeps
             // the agent it started on and the next one picks up the change.
-            Cmd::Reload | Cmd::Model(_) => Fate::Now,
+            Intent::Reload | Intent::Model(_) => Fate::Now,
             // Bare, these only list what there is.
-            Cmd::Resume(name) | Cmd::Worktree(name) if name.trim().is_empty() => Fate::Now,
-            Cmd::Resume(_) => Fate::Refused("/resume would replace the transcript this run is writing — esc first"),
+            Intent::Resume(name) | Intent::Worktree(name) if name.trim().is_empty() => Fate::Now,
+            Intent::Resume(_) => Fate::Refused(
+                "/resume would replace the transcript this run is writing — esc first",
+            ),
             // A lane of its own to move to, and the one being left keeps
             // working in the tree it was already in.
-            Cmd::Worktree(_) => Fate::Now,
-            Cmd::New => Fate::Refused("/new would replace the transcript this run is writing — esc first"),
-            Cmd::Compact(_) => Fate::Refused("/compact rewrites the transcript this run is writing — esc first"),
+            Intent::Worktree(_) => Fate::Now,
+            Intent::New => Fate::Refused(
+                "/new would replace the transcript this run is writing — esc first",
+            ),
+            Intent::Compact(_) => Fate::Refused(
+                "/compact rewrites the transcript this run is writing — esc first",
+            ),
             // `set`/`get`/`reset` are lines; bare opens a panel, which wants
             // the surface to itself.
-            Cmd::Settings(rest) if !rest.trim().is_empty() => Fate::Now,
-            Cmd::Settings(_) => Fate::Queued,
-            // A skill is a prompt; the bridge and the exit want the surface.
-            Cmd::Exit | Cmd::Wechat(_) | Cmd::Other { .. } => Fate::Queued,
+            Intent::Settings(rest) if !rest.trim().is_empty() => Fate::Now,
+            Intent::Settings(_) => Fate::Queued,
+            // A skill is a prompt, and the bridge wants the surface.
+            Intent::Wechat(_) | Intent::Other { .. } => Fate::Queued,
+            // Prose waits for the run that is already talking to the model.
+            Intent::Prompt(_) => Fate::Queued,
+            // A `!` files its result in the transcript, which the run has.
+            Intent::Bash(_) => Fate::Queued,
+            // The raw variant: its fate is the fate of what it turns out to be.
+            // `read` never answers `Submit`, so this ends.
+            Intent::Submit(line) => read(line).fate(),
+            // Both reach for the transcript, and the run is holding it.
+            Intent::OpenRewind | Intent::Rewind(_) => Fate::Refused(
+                "rewinding needs the transcript this run is writing — esc first",
+            ),
+            // Writes the settings file and rebuilds through `Arc::make_mut`,
+            // like `/settings set`, which is the same act from a panel.
+            Intent::CommitSetting(..) => Fate::Now,
+            // Guarded where they land rather than here: `stop_current` acts
+            // only on a lane that is actually running.
+            Intent::Interrupt | Intent::Unsend => Fate::Now,
+            // Leaving is never refused: a hung run must not trap the user.
+            Intent::Quit => Fate::Now,
+            Intent::None => Fate::Now,
         }
     }
 }
@@ -965,7 +1015,7 @@ fn dispatch(commands: &[Command], word: &str, args: &str) -> Step {
 /// mistake for an unrecoverable one. The model can ask what `/comit` meant; a
 /// user whose sentence was rejected has to reword it.
 pub fn expand(commands: &[Command], line: &str) -> Option<Result<String, String>> {
-    let Cmd::Other { word, args } = parse(line)? else {
+    let Intent::Other { word, args } = read(line) else {
         return None;
     };
     Some(expanded(skill_for(commands, &word)?, &args))
@@ -981,31 +1031,40 @@ fn bash_command(line: &str) -> Option<&str> {
     (!cmd.is_empty()).then_some(cmd)
 }
 
-pub fn parse(line: &str) -> Option<Cmd> {
-    let word = line.split_whitespace().next()?;
-    if !word.starts_with('/') {
-        return None;
+/// What a submitted line is asking for. Total on purpose: every line means
+/// something, and a line naming no command is prose for the model.
+///
+/// `!` is read before the slash words, because a shell command is not one.
+pub fn read(line: &str) -> Intent {
+    if let Some(command) = bash_command(line) {
+        return Intent::Bash(command.to_string());
     }
-    Some(match word {
-        "/exit" | "/quit" => Cmd::Exit,
-        "/help" => Cmd::Help,
-        "/cost" => Cmd::Cost,
-        "/new" => Cmd::New,
-        "/resume" => Cmd::Resume(rest(line)),
-        "/keys" => Cmd::Keys,
-        "/reload" => Cmd::Reload,
-        "/log" => Cmd::Log,
-        "/name" => Cmd::Name(rest(line)),
-        "/compact" => Cmd::Compact(rest(line)),
-        "/model" => Cmd::Model(rest(line)),
-        "/worktree" => Cmd::Worktree(rest(line)),
-        "/wechat" => Cmd::Wechat(rest(line)),
-        "/settings" => Cmd::Settings(rest(line)),
-        other => Cmd::Other {
+    let Some(word) = line.split_whitespace().next() else {
+        return Intent::Prompt(line.to_string());
+    };
+    if !word.starts_with('/') {
+        return Intent::Prompt(line.to_string());
+    }
+    match word {
+        "/exit" | "/quit" => Intent::Quit,
+        "/help" => Intent::Help,
+        "/cost" => Intent::Cost,
+        "/new" => Intent::New,
+        "/resume" => Intent::Resume(rest(line)),
+        "/keys" => Intent::Keys,
+        "/reload" => Intent::Reload,
+        "/log" => Intent::Log,
+        "/name" => Intent::Name(rest(line)),
+        "/compact" => Intent::Compact(rest(line)),
+        "/model" => Intent::Model(rest(line)),
+        "/worktree" => Intent::Worktree(rest(line)),
+        "/wechat" => Intent::Wechat(rest(line)),
+        "/settings" => Intent::Settings(rest(line)),
+        other => Intent::Other {
             word: other.to_string(),
             args: rest(line),
         },
-    })
+    }
 }
 
 // Whatever followed the command word.
@@ -1083,28 +1142,37 @@ fn ago(secs: u64) -> String {
 }
 
 impl Repl {
-    pub fn command(&mut self, line: &str, totals: &Totals) -> Step {
-        if let Some(command) = bash_command(line) {
-            return Step::Bash(command.to_string());
-        }
-        let Some(cmd) = parse(line) else {
-            return Step::Prompt {
-                send: line.to_string(),
-                typed: None,
-            };
-        };
-        match cmd {
-            Cmd::Exit => Step::Quit,
-            Cmd::Help => Step::Handled(help(&self.commands)),
-            Cmd::Keys => Step::Handled(self.keys.listing()),
-            Cmd::Reload => Step::Handled(self.reload()),
-            Cmd::Log => lines(match crate::journal::path() {
+    /// Carry out an intent, or say what the surface must do to carry it out.
+    ///
+    /// Exhaustive with no catch-all, like `Intent::fate`: the arms a surface
+    /// answers for itself are named rather than swept up, so a new intent has
+    /// to say which side of that line it falls on.
+    pub fn run(&mut self, intent: Intent, totals: &Totals) -> Step {
+        match intent {
+            Intent::Bash(command) => Step::Bash(command),
+            Intent::Prompt(send) => Step::Prompt { send, typed: None },
+            // Unreachable by construction: `read` never makes these, and the
+            // surface acts on them before it gets here. The arm earns its keep
+            // anyway — it is what makes the exhaustiveness check bite, so a new
+            // intent has to say which side of this line it falls on.
+            Intent::Submit(_)
+            | Intent::None
+            | Intent::Interrupt
+            | Intent::Unsend
+            | Intent::OpenRewind
+            | Intent::Rewind(_)
+            | Intent::CommitSetting(..) => Step::Handled(Vec::new()),
+            Intent::Quit => Step::Quit,
+            Intent::Help => Step::Handled(help(&self.commands)),
+            Intent::Keys => Step::Handled(self.keys.listing()),
+            Intent::Reload => Step::Handled(self.reload()),
+            Intent::Log => lines(match crate::journal::path() {
                 Some(p) => format!("{}", p.display()),
                 None => "not recording — --log is off, or the file would not open".into(),
             }),
-            Cmd::Cost => lines(crate::render::spent(&totals.usage, totals.cost)),
-            Cmd::New => Step::Swap(self.fresh_session("started")),
-            Cmd::Resume(name) => {
+            Intent::Cost => lines(crate::render::spent(&totals.usage, totals.cost)),
+            Intent::New => Step::Swap(self.fresh_session("started")),
+            Intent::Resume(name) => {
                 if name.is_empty() {
                     Step::Handled(self.resume_listing())
                 } else {
@@ -1114,7 +1182,7 @@ impl Repl {
                     }
                 }
             }
-            Cmd::Name(name) => {
+            Intent::Name(name) => {
                 if name.is_empty() {
                     self.lane_mut().name = None;
                     lines(format!("{} is unnamed again", self.lane_mut().id))
@@ -1124,13 +1192,13 @@ impl Repl {
                     lines(said)
                 }
             }
-            Cmd::Compact(focus) => Step::Compact(Some(focus).filter(|f| !f.is_empty())),
-            Cmd::Model(name) => Step::Handled(if name.is_empty() {
+            Intent::Compact(focus) => Step::Compact(Some(focus).filter(|f| !f.is_empty())),
+            Intent::Model(name) => Step::Handled(if name.is_empty() {
                 self.listing()
             } else {
                 self.switch(&name)
             }),
-            Cmd::Worktree(name) => {
+            Intent::Worktree(name) => {
                 if name.is_empty() {
                     Step::Handled(self.worktree_listing())
                 } else {
@@ -1140,8 +1208,8 @@ impl Repl {
                     }
                 }
             }
-            Cmd::Other { word, args } => dispatch(&self.commands, &word, &args),
-            Cmd::Wechat(rest) => match rest.trim() {
+            Intent::Other { word, args } => dispatch(&self.commands, &word, &args),
+            Intent::Wechat(rest) => match rest.trim() {
                 "" => Step::Wechat(WechatCmd::Status),
                 "on" => Step::Wechat(WechatCmd::On),
                 "off" => Step::Wechat(WechatCmd::Off),
@@ -1149,7 +1217,7 @@ impl Repl {
                     "unknown /wechat verb `{other}` — bare, on or off"
                 )),
             },
-            Cmd::Settings(rest) => self.settings(&rest),
+            Intent::Settings(rest) => self.settings(&rest),
         }
     }
 
@@ -1490,6 +1558,7 @@ impl Repl {
         let stored = self.store.load(id).map_err(|e| refused("resume", e))?;
         Ok(self.adopt_session(stored))
     }
+
 }
 
 /// What a `!` command left behind, kept apart because the two are easy to
@@ -1567,8 +1636,8 @@ fn mask_secret(path: &str, value: &toml::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        BUILTIN, Candidate, Choice, Cmd, Command, ResumeChoice, Source, Step, ago, bash_command,
-        commands, complete, dispatch, expand, gist, help, parse,
+        BUILTIN, Candidate, Choice, Command, Fate, Intent, ResumeChoice, Source, Step, ago,
+        bash_command, commands, complete, dispatch, expand, gist, help, read,
     };
     use agent::session::{Entry, Session, UserBody, UserText};
     use tools::skills::Skill;
@@ -1579,7 +1648,7 @@ mod tests {
         // without reaching `parse` would offer to complete into nothing.
         for c in BUILTIN {
             assert!(
-                !matches!(parse(&c.word), Some(Cmd::Other { .. }) | None),
+                !matches!(read(&c.word), Intent::Other { .. } | Intent::Prompt(_)),
                 "{} is listed but does not parse",
                 c.word
             );
@@ -1676,13 +1745,13 @@ mod tests {
     #[test]
     fn the_worktree_word_takes_a_name_and_nothing_else_does() {
         assert!(matches!(
-            parse("/worktree feature-one"),
-            Some(Cmd::Worktree(name)) if name == "feature-one"
+            read("/worktree feature-one"),
+            Intent::Worktree(name) if name == "feature-one"
         ));
         // Bare, it is the listing.
-        assert!(matches!(parse("/worktree"), Some(Cmd::Worktree(name)) if name.is_empty()));
+        assert!(matches!(read("/worktree"), Intent::Worktree(name) if name.is_empty()));
         // Not a built-in word: the command table settles what it is.
-        assert!(matches!(parse("/worktrees"), Some(Cmd::Other { .. })));
+        assert!(matches!(read("/worktrees"), Intent::Other { .. }));
     }
 
     #[test]
@@ -1817,14 +1886,14 @@ mod tests {
 
     #[test]
     fn a_skill_command_keeps_what_follows_it() {
-        // `parse` has no table, so a skill and a typo are the same shape here
+        // `read` has no table, so a skill and a typo are the same shape here
         // and only the caller can tell them apart.
         assert_eq!(
-            parse("/commit fix the flaky test"),
-            Some(Cmd::Other {
+            read("/commit fix the flaky test"),
+            Intent::Other {
                 word: "/commit".into(),
                 args: "fix the flaky test".into()
-            })
+            }
         );
     }
 
@@ -1832,11 +1901,11 @@ mod tests {
     fn a_typo_is_named_rather_than_sent_to_the_model() {
         // Otherwise `/tood` becomes a prompt and the model has to guess.
         assert_eq!(
-            parse("/tood"),
-            Some(Cmd::Other {
+            read("/tood"),
+            Intent::Other {
                 word: "/tood".into(),
                 args: String::new()
-            })
+            }
         );
     }
 
@@ -1968,21 +2037,98 @@ mod tests {
         assert!(expand(&table, "fix the flaky test").is_none());
     }
 
+    // The gate, table by table. Every input reaches `fate`, so these stand in
+    // for the key presses and phone messages that used to be answered by hand
+    // in the loop — where nothing could test them without a terminal.
+
+    #[test]
+    fn a_key_and_a_line_that_mean_the_same_thing_are_one_intent() {
+        // `ctrl+l` twice returns `Intent::New` directly. This is the other
+        // half: the typed word lands on the same variant, so there is no
+        // second value for `fate` to answer differently about.
+        assert_eq!(read("/new"), Intent::New);
+    }
+
+    #[test]
+    fn a_submitted_line_inherits_the_fate_of_what_it_says() {
+        for line in ["/new", "/log", "/compact keep this", "fix the bug", "!ls", "/nope"] {
+            assert_eq!(
+                format!("{:?}", Intent::Submit(line.into()).fate()),
+                format!("{:?}", read(line).fate()),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn leaving_is_never_refused() {
+        // One intent for `/exit`, `/quit`, ctrl+d and a double ctrl+c — the
+        // words are checked with the rest of the table — and it always
+        // proceeds: a wedged run must not be able to trap the user.
+        assert!(matches!(Intent::Quit.fate(), Fate::Now));
+    }
+
+    #[test]
+    fn reaching_for_the_transcript_is_refused_while_a_run_holds_it() {
+        for intent in [
+            Intent::New,
+            Intent::Resume("1756240000-1".into()),
+            Intent::Compact(String::new()),
+            Intent::OpenRewind,
+        ] {
+            assert!(
+                matches!(intent.fate(), Fate::Refused(_)),
+                "{intent:?} should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn what_the_run_is_not_standing_on_goes_through() {
+        for intent in [
+            Intent::Log,
+            Intent::Cost,
+            Intent::Help,
+            Intent::Keys,
+            Intent::Reload,
+            Intent::Model(String::new()),
+            Intent::Worktree("tree".into()),
+            Intent::Interrupt,
+            Intent::Unsend,
+            Intent::CommitSetting("a.b".into(), "1".into()),
+        ] {
+            assert!(matches!(intent.fate(), Fate::Now), "{intent:?} should proceed");
+        }
+    }
+
+    #[test]
+    fn what_wants_the_model_or_the_surface_waits() {
+        for intent in [
+            Intent::Prompt("hello".into()),
+            Intent::Bash("ls".into()),
+            Intent::Settings(String::new()),
+            Intent::Wechat("on".into()),
+            Intent::Other { word: "/commit".into(), args: String::new() },
+        ] {
+            assert!(matches!(intent.fate(), Fate::Queued), "{intent:?} should wait");
+        }
+    }
+
     #[test]
     fn slash_words_are_commands_and_prose_is_not() {
-        assert_eq!(parse("/exit"), Some(Cmd::Exit));
-        assert_eq!(parse("/quit"), Some(Cmd::Exit));
-        assert_eq!(parse("fix the bug"), None);
-        assert_eq!(parse(""), None);
+        assert_eq!(read("/exit"), Intent::Quit);
+        assert_eq!(read("/quit"), Intent::Quit);
+        assert_eq!(read("fix the bug"), Intent::Prompt("fix the bug".into()));
+        assert_eq!(read(""), Intent::Prompt(String::new()));
     }
 
     #[test]
     fn resume_parse() {
         // Bare, /resume lists; a word names the session to switch to.
-        assert_eq!(parse("/resume"), Some(Cmd::Resume(String::new())));
+        assert_eq!(read("/resume"), Intent::Resume(String::new()));
         assert_eq!(
-            parse("/resume 1756240000-123"),
-            Some(Cmd::Resume("1756240000-123".into()))
+            read("/resume 1756240000-123"),
+            Intent::Resume("1756240000-123".into())
         );
     }
 
@@ -2001,18 +2147,18 @@ mod tests {
 
     #[test]
     fn the_wechat_verb_parses_and_others_are_named() {
-        assert_eq!(parse("/wechat"), Some(Cmd::Wechat(String::new())));
-        assert_eq!(parse("/wechat on"), Some(Cmd::Wechat("on".into())));
-        assert_eq!(parse("/wechat off"), Some(Cmd::Wechat("off".into())));
+        assert_eq!(read("/wechat"), Intent::Wechat(String::new()));
+        assert_eq!(read("/wechat on"), Intent::Wechat("on".into()));
+        assert_eq!(read("/wechat off"), Intent::Wechat("off".into()));
         // A typo reaches the command layer as a literal, so it can be named
         // rather than silently meaning "status".
-        assert_eq!(parse("/wechat oen"), Some(Cmd::Wechat("oen".into())));
+        assert_eq!(read("/wechat oen"), Intent::Wechat("oen".into()));
     }
 
     #[test]
     fn a_prompt_that_merely_mentions_a_slash_stays_a_prompt() {
-        assert_eq!(parse("what does /help do?"), None);
-        assert_eq!(parse("read src/main.rs"), None);
+        assert_eq!(read("what does /help do?"), Intent::Prompt("what does /help do?".into()));
+        assert_eq!(read("read src/main.rs"), Intent::Prompt("read src/main.rs".into()));
     }
 
     #[test]
@@ -2022,16 +2168,16 @@ mod tests {
     #[test]
     fn a_command_that_takes_words_keeps_all_of_them() {
         assert_eq!(
-            parse("/name the flaky test"),
-            Some(Cmd::Name("the flaky test".into()))
+            read("/name the flaky test"),
+            Intent::Name("the flaky test".into())
         );
         assert_eq!(
-            parse("/compact  keep the parser work "),
-            Some(Cmd::Compact("keep the parser work".into()))
+            read("/compact  keep the parser work "),
+            Intent::Compact("keep the parser work".into())
         );
         // Bare, they mean clear and unfocused respectively.
-        assert_eq!(parse("/name"), Some(Cmd::Name(String::new())));
-        assert_eq!(parse("/compact"), Some(Cmd::Compact(String::new())));
+        assert_eq!(read("/name"), Intent::Name(String::new()));
+        assert_eq!(read("/compact"), Intent::Compact(String::new()));
     }
 
     #[test]
