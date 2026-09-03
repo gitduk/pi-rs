@@ -807,10 +807,6 @@ pub struct Renderer {
     /// a tty, but only the dirty one may be terminated when piped apart.
     out_dirty: bool,
     err_dirty: bool,
-    /// What subagents spent, waiting to be folded into the closing line. They
-    /// work inside a tool call, so not one of their tokens is in the run's own
-    /// figures — and a run nobody can price is worse than one nobody can see.
-    subagents: Arc<std::sync::Mutex<agent::Totals>>,
 }
 
 impl Renderer {
@@ -819,7 +815,6 @@ impl Renderer {
         theme: Arc<Theme>,
         done: Vec<crate::status::Segment>,
         model: String,
-        subagents: Arc<std::sync::Mutex<agent::Totals>>,
     ) -> Self {
         Self {
             paint: Paint::with_theme(std::io::stderr().is_terminal(), theme),
@@ -829,7 +824,6 @@ impl Renderer {
             thinking: false,
             out_dirty: false,
             err_dirty: false,
-            subagents,
         }
     }
 
@@ -859,7 +853,6 @@ impl Renderer {
                 self.settle();
                 if let Some(mut snap) = crate::status::Snapshot::of_done(&event) {
                     snap.model = &self.model;
-                    snap.add(&crate::subagent::drain(&self.subagents));
                     let line = crate::status::line(&self.done, &snap);
                     if !line.is_empty() {
                         eprintln!("{}", self.paint.on(&self.paint.theme.muted, &line));
@@ -1066,7 +1059,6 @@ mod tests {
             std::sync::Arc::new(super::Theme::default()),
             crate::status::default_done(),
             String::new(),
-            std::sync::Arc::default(),
         );
         r.on(agent::Event::TextDelta("There".into()));
         assert!(r.out_dirty, "an unterminated delta leaves the line open");

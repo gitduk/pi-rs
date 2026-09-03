@@ -32,16 +32,21 @@ impl SpillRef {
     }
 }
 
-/// Where spills live when the caller named no session: the process temp
-/// directory, so tests and embedders never touch the user's state.
-pub fn default_root(session: Option<&str>) -> PathBuf {
-    match session {
-        Some(ns) => state::dir()
-            .unwrap_or_else(|| std::env::temp_dir().join("pi-state"))
-            .join("spill")
-            .join(ns),
-        None => std::env::temp_dir().join("pi-spill"),
-    }
+/// The root every session shares: the pi state directory's `spill` tree.
+/// Spills land under it in each session's own directory — parent and child
+/// reach the same root, so a locator minted inside a subagent's run resolves
+/// from its parent's. Without a state directory (no `$PI_HOME`/`$HOME`) the
+/// process temp directory stands in.
+pub fn shared() -> PathBuf {
+    state::dir()
+        .unwrap_or_else(|| std::env::temp_dir().join("pi-spill"))
+        .join("spill")
+}
+
+/// Where spills live when no session is in force — tests and embedders never
+/// touch the user's state.
+pub fn temp() -> PathBuf {
+    std::env::temp_dir().join("pi-spill")
 }
 
 /// Resolve an opaque `spill:<ns>/<n>` locator to the file it names. Both parts
@@ -163,6 +168,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_locator_written_by_one_session_reads_in_another() {
+        use crate::{Ctx, Workspace};
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("spill");
+        let ws = Workspace::new(dir.path()).unwrap();
+        // Parent and child reach the same root; the session only picks the
+        // directory the spill is filed under.
+        let child = Ctx::new(ws.clone())
+            .with_session("p-1-task-0")
+            .with_spill_root(root.clone());
+        let parent = Ctx::new(ws).with_session("p-1").with_spill_root(root);
+
+        let big = "x".repeat(super::MAX_OUTPUT + 1);
+        let spilled = super::write(&child, &big).unwrap().expect("over the cap");
+        assert_eq!(
+            std::fs::read_to_string(parent.spill_path(&spilled.locator).unwrap()).unwrap(),
+            big
+        );
+    }
     #[test]
     fn prune_leaves_a_small_body_untouched() {
         let body = "small";

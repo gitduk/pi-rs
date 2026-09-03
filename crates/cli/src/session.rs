@@ -30,6 +30,21 @@ pub struct Stored {
     pub session: Session,
 }
 
+/// A save as its parts, borrowed. `Stored` owns a deep copy of the session;
+/// serializing through this keeps the same file without ever building one —
+/// `save` is called from inside tool calls, several subagents at once.
+#[derive(Serialize)]
+struct StoredRef<'a> {
+    id: &'a str,
+    workspace: String,
+    model: &'a str,
+    created: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<&'a str>,
+    #[serde(flatten)]
+    session: &'a Session,
+}
+
 // An archive read only as far as the listing needs.
 //
 // The identity fields are required, exactly as `Stored` requires them, so a
@@ -155,24 +170,36 @@ impl Store {
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(format!("{}.json", tools::state::file_stem(id)));
 
-        let stored = Stored {
-            id: id.to_string(),
-            workspace: workspace.display().to_string(),
-            model: model.to_string(),
-            created,
-            name: name.map(str::to_string),
-            session: session.clone(),
-        };
-
         // Rename, so a crash mid-write cannot leave a truncated transcript.
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(&stored)?)?;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            // The transcript holds prompts and file contents.
+            // The transcript holds prompts and file contents. Chmodded before
+            // the write, not after: no moment when the data sits world-readable.
             let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
         }
+        // Serialized by reference, straight into the file: a transcript is
+        // megabytes by the end, and a `Stored` clone plus a `to_vec` buffer is
+        // a second full copy that several parallel subagents each pay for.
+        let stored = StoredRef {
+            id,
+            workspace: workspace.display().to_string(),
+            model,
+            created,
+            name,
+            session,
+        };
+        use std::io::Write;
+        let mut out = std::io::BufWriter::new(file);
+        serde_json::to_writer_pretty(&mut out, &stored)?;
+        out.flush()?;
+        drop(out);
         std::fs::rename(&tmp, &path)?;
         Ok(path)
     }

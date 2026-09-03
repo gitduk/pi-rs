@@ -65,6 +65,8 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
             Step::Compact(focus) => match core.compact_now(focus.as_deref()).await {
                 Some((report, spent)) => {
                     totals.merge(&spent);
+                    core.lane_mut().totals.merge(&spent);
+
                     println!("compacted {} → {} tokens", report.before, report.after);
                     if let Err(e) = core.save() {
                         eprintln!("warning: the transcript was not saved: {e}");
@@ -81,6 +83,8 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
             Step::Prompt { send, typed } => {
                 let spent = turn(&mut core, send, typed, &tx).await;
                 totals.merge(&spent);
+                core.lane_mut().totals.merge(&spent);
+
             }
             Step::Wechat(_) => println!(
                 "wechat needs a terminal to show the login QR — run pi in a terminal"

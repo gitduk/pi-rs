@@ -159,21 +159,17 @@ impl Tool for Sleeper {
 
 #[derive(Default)]
 struct Kept {
-    spent: std::sync::Mutex<Totals>,
-    /// The child's whole transcript, which is the only way anything outside it
-    /// can see what it was allowed to do.
+    /// The child's whole transcript, the only way anything outside it can see
+    /// what it was allowed to do.
     sessions: std::sync::Mutex<Vec<(String, String)>>,
 }
 
 impl Home for Kept {
-    fn keep(&self, id: &str, session: &Session) {
+    fn keep(&self, id: &str, session: Session) {
         self.sessions
             .lock()
             .unwrap()
             .push((id.to_string(), format!("{:?}", session.entries())));
-    }
-    fn spent(&self, totals: &Totals) {
-        self.spent.lock().unwrap().merge(totals);
     }
 }
 
@@ -232,18 +228,23 @@ async fn the_child_answers_into_the_parents_transcript() {
         text_turn("there are four files"),
         text_turn("the subagent says four"),
     ]);
-    let (session, _out) = drive(&agent, &ctx, "how many files").await;
+    let (session, out) = drive(&agent, &ctx, "how many files").await;
+
+    // D5: the child's spend rides home on the tool result, so the parent's run
+    // pays for it — the parent's and child's two turns are 3000 in / 20 out.
+    let totals = out.expect("the parent's run ends");
+    assert_eq!(
+        (totals.usage.input, totals.usage.output),
+        (3_000, 20),
+        "the run that called the child counts its spend: {totals:?}"
+    );
+    assert!(totals.cost > 0.0, "{totals:?}");
 
     let transcript = format!("{:?}", session.entries());
     assert!(
         transcript.contains("there are four files"),
         "the child's last words are the tool result: {transcript}"
     );
-
-    // D5: what it spent has to arrive, or three parallel children cost nothing.
-    let spent = kept.spent.lock().unwrap();
-    assert!(spent.usage.input > 0 && spent.usage.output > 0, "{spent:?}");
-
     // D7: one transcript filed, under a namespace of the child's own.
     let sessions = kept.sessions.lock().unwrap();
     assert_eq!(sessions.len(), 1, "one child, one transcript");

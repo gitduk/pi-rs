@@ -26,6 +26,14 @@ pub enum When {
     Editor,
 }
 
+/// Which layers are up when a key is pressed. One value rather than two bare
+/// booleans — both are usually live at once, and a swapped pair compiles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Layers {
+    pub menu: bool,
+    pub run: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Action {
     InsertNewline,
@@ -505,16 +513,16 @@ impl Keys {
     }
 
     /// What this press means, given what is on screen.
-    pub fn action(&self, press: Press, menu_open: bool, running: bool) -> Option<Action> {
-        let mut layers = Vec::with_capacity(3);
-        if menu_open {
-            layers.push(When::Menu);
+    pub fn action(&self, press: Press, layers: Layers) -> Option<Action> {
+        let mut live = Vec::with_capacity(3);
+        if layers.menu {
+            live.push(When::Menu);
         }
-        if running {
-            layers.push(When::Run);
+        if layers.run {
+            live.push(When::Run);
         }
-        layers.push(When::Editor);
-        if let hit @ Some(_) = layers
+        live.push(When::Editor);
+        if let hit @ Some(_) = live
             .iter()
             .find_map(|w| self.map.get(&(*w, press)).copied())
         {
@@ -529,7 +537,7 @@ impl Keys {
                 mods: press.mods - KeyModifiers::SHIFT,
                 ..press
             };
-            return layers
+            return live
                 .iter()
                 .find_map(|w| self.map.get(&(*w, bare)).copied());
         }
@@ -548,7 +556,7 @@ mod tests {
         let keys = Keys::resolve(&BTreeMap::new()).unwrap();
         for (menu, running) in [(false, false), (false, true), (true, true)] {
             assert_eq!(
-                keys.action(press("ctrl+t"), menu, running),
+                keys.action(press("ctrl+t"), Layers { menu, run: running }),
                 Some(Action::ThinkFold),
                 "menu={menu} running={running}"
             );
@@ -566,7 +574,7 @@ mod tests {
         // spelling the parser cannot read cannot reach the table unnoticed.
         let keys = Keys::resolve(&BTreeMap::new()).unwrap();
         assert_eq!(
-            keys.action(press("ctrl+w"), false, false),
+            keys.action(press("ctrl+w"), Layers::default()),
             Some(Action::DeleteWordBack)
         );
     }
@@ -577,18 +585,18 @@ mod tests {
         // flat table has no way to say so.
         let k = Keys::default();
         assert_eq!(
-            k.action(press("up"), true, false),
+            k.action(press("up"), Layers { menu: true, run: false }),
             Some(Action::MenuPrevious)
         );
         assert_eq!(
-            k.action(press("up"), false, false),
+            k.action(press("up"), Layers::default()),
             Some(Action::HistoryOlder)
         );
         assert_eq!(
-            k.action(press("esc"), true, true),
+            k.action(press("esc"), Layers { menu: true, run: true }),
             Some(Action::MenuDismiss)
         );
-        assert_eq!(k.action(press("esc"), false, false), Some(Action::Rewind));
+        assert_eq!(k.action(press("esc"), Layers::default()), Some(Action::Rewind));
     }
 
     #[test]
@@ -599,11 +607,11 @@ mod tests {
         o.insert("move.line.end".to_string(), vec!["ctrl+a".to_string()]);
         let k = Keys::resolve(&o).unwrap();
         assert_eq!(
-            k.action(press("ctrl+a"), false, false),
+            k.action(press("ctrl+a"), Layers::default()),
             Some(Action::MoveLineEnd)
         );
         assert_eq!(
-            k.action(press("home"), false, false),
+            k.action(press("home"), Layers::default()),
             Some(Action::MoveLineStart)
         );
     }
@@ -629,11 +637,11 @@ mod tests {
         );
         let k = Keys::resolve(&o).unwrap();
         assert_eq!(
-            k.action(press("ctrl+b"), false, false),
+            k.action(press("ctrl+b"), Layers::default()),
             Some(Action::ScrollPageUp)
         );
         assert_eq!(
-            k.action(press("pageup"), false, false),
+            k.action(press("pageup"), Layers::default()),
             Some(Action::ScrollPageUp)
         );
     }
@@ -645,10 +653,10 @@ mod tests {
         o.insert("move.line.start".to_string(), vec!["f1".to_string()]);
         let k = Keys::resolve(&o).unwrap();
         assert_eq!(
-            k.action(press("f1"), false, false),
+            k.action(press("f1"), Layers::default()),
             Some(Action::MoveLineStart)
         );
-        assert_eq!(k.action(press("home"), false, false), None);
+        assert_eq!(k.action(press("home"), Layers::default()), None);
     }
 
     #[test]
@@ -688,12 +696,12 @@ mod tests {
         // falls back, so the key does the same thing everywhere.
         let keys = Keys::default();
         assert_eq!(
-            keys.action(press("ctrl+shift+w"), false, false),
+            keys.action(press("ctrl+shift+w"), Layers::default()),
             Some(Action::DeleteWordBack)
         );
         // A binding that owns the shift press wins over the fallback.
         assert_eq!(
-            keys.action(press("ctrl+shift+t"), false, false),
+            keys.action(press("ctrl+shift+t"), Layers::default()),
             Some(Action::ThinkFoldAll)
         );
     }
@@ -705,15 +713,15 @@ mod tests {
         // stays bound too, so the degrade has a reachable alternate.
         let keys = Keys::default();
         assert_eq!(
-            keys.action(press("ctrl+shift+t"), false, false),
+            keys.action(press("ctrl+shift+t"), Layers::default()),
             Some(Action::ThinkFoldAll)
         );
         assert_eq!(
-            keys.action(press("alt+t"), false, false),
+            keys.action(press("alt+t"), Layers::default()),
             Some(Action::ThinkFoldAll)
         );
         assert_eq!(
-            keys.action(press("ctrl+t"), false, false),
+            keys.action(press("ctrl+t"), Layers::default()),
             Some(Action::ThinkFold)
         );
     }

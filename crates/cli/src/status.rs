@@ -70,15 +70,6 @@ impl Snapshot<'_> {
         })
     }
 
-    /// Fold in spending that happened inside the run but not as a turn of it —
-    /// a subagent's. Here beside `of_done` because it is the same mapping, and
-    /// a segment added to one is a segment missing from the other.
-    pub fn add(&mut self, more: &agent::Totals) {
-        self.input += more.usage.input;
-        self.output += more.usage.output;
-        self.cache_read += more.usage.cache_read;
-        self.cost = self.cost.map(|c| c + more.cost);
-    }
 }
 
 /// One part of a status line. These are the names the config lists.

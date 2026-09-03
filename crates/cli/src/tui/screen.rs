@@ -271,8 +271,20 @@ impl Widget for Rows<'_> {
     }
 }
 
+/// The terminal this screen draws on. An enum rather than a generic so the
+/// backend stays out of `Screen`'s type — and out of `Ui`'s and `Tui`'s with
+/// it, which is the whole reason the surface was untestable.
+enum Term {
+    Live(Terminal<CrosstermBackend<Stdout>>),
+    /// An in-memory grid. It never enters raw mode or the alternate screen, so
+    /// `leave` has nothing to undo — which is what keeps a test off the
+    /// terminal the test runner itself is using.
+    #[cfg(test)]
+    Test(Terminal<ratatui::backend::TestBackend>),
+}
+
 pub struct Screen {
-    terminal: Terminal<CrosstermBackend<Stdout>>,
+    term: Term,
     pub width: u16,
     pub height: u16,
 }
@@ -304,10 +316,22 @@ impl Screen {
         let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
         let size = terminal.size()?;
         Ok(Self {
-            terminal,
+            term: Term::Live(terminal),
             width: size.width,
             height: size.height,
         })
+    }
+
+    /// A screen backed by an in-memory grid, for tests that drive the surface
+    /// without a terminal to drive it on.
+    #[cfg(test)]
+    pub fn test(width: u16, height: u16) -> Self {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        Self {
+            term: Term::Test(Terminal::new(backend).expect("an in-memory terminal")),
+            width,
+            height,
+        }
     }
 
     pub fn usable(&self) -> usize {
@@ -323,20 +347,45 @@ impl Screen {
     /// diffs it against the last frame, so only the rows that changed reach
     /// the terminal.
     pub fn draw(&mut self, f: impl FnOnce(&mut ratatui::Frame<'_>)) -> std::io::Result<()> {
-        self.terminal.draw(|frame| f(frame))?;
+        match &mut self.term {
+            Term::Live(t) => {
+                t.draw(|frame| f(frame))?;
+            }
+            // Drawing into memory cannot fail: its error type is `Infallible`.
+            #[cfg(test)]
+            Term::Test(t) => {
+                let _ = t.draw(|frame| f(frame));
+            }
+        }
         Ok(())
     }
 
     /// Wipe the screen and start again at the top.
     pub fn clear(&mut self) {
-        let _ = self.terminal.clear();
+        match &mut self.term {
+            Term::Live(t) => {
+                let _ = t.clear();
+            }
+            #[cfg(test)]
+            Term::Test(t) => {
+                let _ = t.clear();
+            }
+        }
     }
 
     /// Give the terminal back: leave the alternate screen and restore raw.
+    /// Nothing to give back when nothing was taken, so a test screen is a
+    /// no-op here — it must not disable raw mode on the runner's own terminal.
     pub fn leave(&mut self) {
-        let _ = self.terminal.show_cursor();
+        if !matches!(self.term, Term::Live(_)) {
+            return;
+        }
+        // Straight to stdout rather than through the terminal's backend, which
+        // is the same thing it writes to and the same way the panic hook above
+        // restores it.
         let _ = crossterm::execute!(
-            self.terminal.backend_mut(),
+            std::io::stdout(),
+            crossterm::cursor::Show,
             LeaveAlternateScreen,
             DisableBracketedPaste,
             DisableMouseCapture

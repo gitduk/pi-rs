@@ -400,14 +400,28 @@ impl JournalLayer {
     }
 }
 
-// The span path a record sits under, outermost first: `turn>tool`.
+// The span path a record sits under, outermost first, with the session of
+// each run's own span in brackets: `turn[p]>tool>task[c]>turn[c]>tool`.
+// Parallel subagents share every span name; the bracketed id is what files
+// a record under the run that made it.
 fn path_of<S>(span: &tracing_subscriber::registry::SpanRef<'_, S>) -> String
 where
     S: for<'a> LookupSpan<'a>,
 {
     span.scope()
         .from_root()
-        .map(|s| s.name())
+        .map(|s| {
+            let who = s
+                .extensions()
+                .get::<Scope>()
+                .and_then(|sc| sc.fields.get("session"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            match who {
+                Some(id) => format!("{}[{id}]", s.name()),
+                None => s.name().to_string(),
+            }
+        })
         .collect::<Vec<_>>()
         .join(">")
 }
@@ -480,19 +494,30 @@ where
     /// spans exist: "which step was slow" is not answerable from events alone.
     fn on_close(&self, id: tracing::Id, ctx: Context<'_, S>) {
         let Some(span) = ctx.span(&id) else { return };
-        let ext = span.extensions();
-        let Some(scope) = ext.get::<Scope>() else {
-            return;
+        // Released before `path_of` and the walk below, which read this same
+        // span's extensions again: a recursive read can deadlock.
+        let opened = {
+            let ext = span.extensions();
+            match ext.get::<Scope>() {
+                Some(scope) => scope.opened,
+                None => return,
+            }
         };
         // Named for the span, not for the crate the span was opened in: the
         // whole point of the record is which step finished.
         let mut rec = self.head(span.metadata(), "pi::span", path_of(&span));
-        for (k, v) in &scope.fields {
-            rec.insert(k.clone(), v.clone());
+        // Enclosing scopes first, own fields last, like an event's record:
+        // a tool's close then keeps the turn and session it ran under.
+        for s in span.scope().from_root() {
+            if let Some(sc) = s.extensions().get::<Scope>() {
+                for (k, v) in &sc.fields {
+                    rec.insert(k.clone(), v.clone());
+                }
+            }
         }
         rec.insert(
             "dur_ms".into(),
-            Value::from(scope.opened.elapsed().as_millis() as u64),
+            Value::from(opened.elapsed().as_millis() as u64),
         );
         rec.insert("msg".into(), Value::String(format!("{} done", span.name())));
         self.journal.write(rec);
@@ -738,6 +763,59 @@ mod tests {
         // Its own fields too, which is what lets a tool's close record name
         // the tool rather than only the kind of span it was.
         assert_eq!(out[1]["turn"], 3);
+    }
+
+    #[test]
+    fn records_are_filed_under_the_run_that_made_them() {
+        // One parent turn calling three subagents, the span shape `task.rs`
+        // makes. All three share every span name; the session is the id.
+
+        let out = recorded(LogLevel::Info, || {
+            let parent = tracing::info_span!(target: "pi::t", "turn", turn = 1, session = "p-1");
+            let _parent = parent.enter();
+            tracing::info!(target: "pi::t", "the parent's own record");
+            let tool = tracing::info_span!(target: "pi::t", "tool", name = "task", call = "c0");
+            let _tool = tool.enter();
+            for n in 0..3 {
+                let id = format!("p-1-task-{n}");
+                let task = tracing::info_span!(target: "pi::t", "task", session = %id);
+                let _task = task.enter();
+                let turn = tracing::info_span!(target: "pi::t", "turn", turn = 1, session = %id);
+                let _turn = turn.enter();
+                tracing::info!(target: "pi::t", tool = "bash", "a subagent's record");
+                drop(_turn);
+                drop(_task);
+            }
+            drop(_tool);
+            drop(_parent);
+        });
+
+        let by_session = |id: &str| -> Vec<&Value> {
+            out.iter().filter(|r| r["session"] == id).collect()
+        };
+
+        // Each child leaves three records, and every one carries its id in
+        // the body and in the path that files it.
+        for n in 0..3 {
+            let id = format!("p-1-task-{n}");
+            let recs = by_session(&id);
+            assert_eq!(recs.len(), 3, "child {n} keeps its three records: {out:?}");
+            for r in recs {
+                let path = r["in"].as_str().unwrap();
+                assert!(
+                    path.contains(&format!("task[{id}]")),
+                    "child {n} is filed under its own span: {path}"
+                );
+            }
+        }
+
+        // The parent's own records stay its own: none inherits a child's id.
+        let recs = by_session("p-1");
+        assert_eq!(recs.len(), 3, "the parent keeps its own three: {out:?}");
+        for r in recs {
+            let path = r["in"].as_str().unwrap();
+            assert!(!path.contains("task-"), "the parent's records: {path}");
+        }
     }
 
     #[test]

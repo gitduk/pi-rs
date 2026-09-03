@@ -180,7 +180,14 @@ impl Agent {
             say(tx, Event::TurnStart { turn });
             // Entered around each await rather than held across them: a guard
             // spanning an await point labels whatever else the runtime polls.
-            let span = tracing::info_span!(target: "pi::loop", "turn", turn);
+            // A run and its subagents share one journal, and the spans of
+            // parallel children are indistinguishable by name alone.
+            let span = tracing::info_span!(
+                target: "pi::loop",
+                "turn",
+                turn,
+                session = %ctx.spill_namespace(),
+            );
             let mut squeezes = 0usize;
             // Kept past the retry loop: the fallback below prices what was
             // actually sent, which a squeeze or a compaction may have changed.
@@ -341,7 +348,7 @@ impl Agent {
                 .map(|i| (i.call.clone(), i.clone()))
                 .collect();
             let results = self
-                .run_calls(&calls, &bad, ctx, tx, &mut failures)
+                .run_calls(&calls, &bad, ctx, tx, &mut failures, &mut totals)
                 .instrument(span.clone())
                 .await?;
             session.push_previewed(results);
@@ -614,6 +621,9 @@ impl Agent {
 
     /// Every call gets exactly one result, in call order: an unanswered
     /// `tool_use` makes the next request invalid on both wires.
+    ///
+    /// `spent` is where a nested call's costs land — a subagent's whole run —
+    /// so the run that called it reports them.
     async fn run_calls(
         &self,
         calls: &[ToolCall],
@@ -621,6 +631,7 @@ impl Agent {
         ctx: &Ctx,
         tx: &UnboundedSender<Event>,
         failures: &mut Failures,
+        spent: &mut Totals,
     ) -> Result<Vec<(ToolResult, Option<String>)>, AgentError> {
         let actions: Vec<Action> = calls
             .iter()
@@ -743,6 +754,9 @@ impl Agent {
                     failed(call, body, e.category(), failures)
                 }
                 (_, Some(Ok(out))) => {
+                    // A nested run's spend belongs to the run that called it:
+                    // folded in here, it reaches `Event::Done` and the return.
+                    spent.merge(&out.spent);
                     sketched = out.preview.clone();
                     say(
                         tx,

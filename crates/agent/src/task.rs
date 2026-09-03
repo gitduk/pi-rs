@@ -10,20 +10,19 @@ use tools::{Ctx, Tier, Tool, ToolError, ToolOutput};
 use crate::event::{Event, Totals};
 use crate::session::Session;
 use crate::{Agent, AgentError};
+use tracing::Instrument as _;
 
 pub const PROMPT: &str = include_str!("../prompts/task.md");
 
 /// Where a finished subagent's work goes.
 ///
-/// This layer says what it needs and the surface provides it: the store and the
-/// reckoning both live out there, and reaching them from here would mean
-/// knowing what a workspace directory or a status line is.
+/// This layer says what it needs and the surface provides it; what a child
+/// spent travels back on the tool result instead.
 pub trait Home: Send + Sync {
     /// A subagent has no screen, so its transcript is the only account of what
-    /// it did. Called once, whether the run finished or was cut short.
-    fn keep(&self, id: &str, session: &Session);
-    /// What it spent. Held by the implementor, because the same side reads it.
-    fn spent(&self, totals: &Totals);
+    /// it did. Called once with the whole transcript, whether the run finished
+    /// or was cut short.
+    fn keep(&self, id: &str, session: Session);
 }
 
 /// Ids only have to be distinct inside one process; the parent's own namespace
@@ -175,10 +174,21 @@ impl Tool for Task {
             heard
         });
         let mut session = Session::with_prompt(args.prompt);
+        // One span for the whole child, so the journal can file its records
+        // under it rather than lose them among its siblings'.
+        let child_span = tracing::info_span!(
+            target: "pi::task",
+            "task",
+            session = %child.spill_namespace(),
+        );
         // Trips the same token as the turn cap rather than dropping the
         // future, so both endings unwind the run the way Esc does.
         let ran = {
-            let mut run = std::pin::pin!(self.agent.run(&mut session, &child, &tx));
+            let mut run = std::pin::pin!(
+                self.agent
+                    .run(&mut session, &child, &tx)
+                    .instrument(child_span)
+            );
             match tokio::time::timeout(self.deadline, &mut run).await {
                 Ok(ran) => ran,
                 Err(_) => {
@@ -191,8 +201,7 @@ impl Tool for Task {
         drop(tx);
         let heard = heard.await.unwrap_or_default();
 
-        self.home.spent(&heard.spent);
-        self.home.keep(&id, &session);
+        self.home.keep(&id, session);
 
         let cut = match ran {
             Ok(_) => None,
@@ -211,12 +220,16 @@ impl Tool for Task {
             Err(why) => return Err(ToolError::Invalid(format!("task: {why}"))),
         };
 
-        Ok(ToolOutput::text(answer(&heard, cut.as_deref())).with_preview(format!(
-            "{} turn{} · {}",
-            heard.turns,
-            if heard.turns == 1 { "" } else { "s" },
-            brain::count::in_out(heard.spent.usage.input, heard.spent.usage.output)
-        )))
+        // The child's whole spend rides home on the result, where the parent's
+        // run counts it — the surface never had a handle to drain.
+        Ok(ToolOutput::text(answer(&heard, cut.as_deref()))
+            .with_preview(format!(
+                "{} turn{} · {}",
+                heard.turns,
+                if heard.turns == 1 { "" } else { "s" },
+                brain::count::in_out(heard.spent.usage.input, heard.spent.usage.output)
+            ))
+            .with_spent(heard.spent))
     }
 }
 

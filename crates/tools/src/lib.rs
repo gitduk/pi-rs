@@ -141,6 +141,9 @@ pub struct ToolOutput {
     /// One line for a progress display. Set it when the first line of the
     /// result is structure rather than content.
     pub preview: Option<String>,
+    /// What this call cost that the caller has not counted: a nested run's
+    /// totals, carried back on the result that ended it.
+    pub spent: brain::Totals,
 }
 
 impl ToolOutput {
@@ -151,11 +154,19 @@ impl ToolOutput {
             })],
             useless: false,
             preview: None,
+            spent: brain::Totals::default(),
         }
     }
 
     pub fn with_preview(mut self, line: impl Into<String>) -> Self {
         self.preview = Some(line.into());
+        self
+    }
+
+    /// Report what this call cost beyond its own turn, for the caller's run
+    /// to count.
+    pub fn with_spent(mut self, spent: brain::Totals) -> Self {
+        self.spent = spent;
         self
     }
 
@@ -227,7 +238,7 @@ impl Ctx {
             file_locks: Default::default(),
             file_shifts: Default::default(),
             session: None,
-            spill_root: spill::default_root(None),
+            spill_root: spill::temp(),
         }
     }
 }
@@ -240,12 +251,15 @@ impl Ctx {
         self
     }
 
-    /// Name the session, and with it the directory spills are kept in. A
-    /// resumed session keeps its id, so its new spills rejoin the old ones.
+    /// Name the session, and with it the directory its spills are filed
+    /// under. The root itself is shared by every session — a subagent's
+    /// spills sit under its own name in that same tree, so the parent can
+    /// read them back — and a resumed session keeps its id so its new spills
+    /// rejoin the old ones.
     pub fn with_session(mut self, id: impl Into<String>) -> Self {
         let ns = state::file_stem(&id.into());
         self.session = Some(ns.clone());
-        self.spill_root = spill::default_root(Some(&ns));
+        self.spill_root = spill::shared();
         self
     }
 

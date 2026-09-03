@@ -1339,9 +1339,13 @@ impl Ui {
         let press = Press::of(key.code, key.modifiers);
         // The panel counts as a menu: its own keys are the Menu bindings, and
         // `menu()` is empty while it is open, so the layer has to be forced on.
-        let bound = self
-            .keys
-            .action(press, self.settings.is_some() || !self.menu().is_empty(), running);
+        let bound = self.keys.action(
+            press,
+            crate::keys::Layers {
+                menu: self.settings.is_some() || !self.menu().is_empty(),
+                run: running,
+            },
+        );
 
         // The settings panel owns the menu keys while it is open.
         if let Some(panel) = &mut self.settings {
@@ -1715,28 +1719,54 @@ enum Wake {
     Leave,
 }
 
+/// What kind of job a finished `Done` was, carrying what only that kind
+/// leaves behind — so no arm can be built holding another's.
+enum Kind {
+    /// A turn: the agent loop ran, and `ran` says how it went. Its output
+    /// reached the view through the lane's event channel as it happened.
+    Turn,
+    /// A `!` command, and the lines it printed. They come home whole rather
+    /// than as events, so settling is the only place they can be shown.
+    ///
+    /// Kept apart from a turn's silence because `Bridge` is one accumulator
+    /// for the whole surface, filled by whichever turn is streaming and
+    /// emptied only by `Event::TurnStart`; a `!` emits no events, so letting
+    /// one speak for the bridge flushes another lane's half-written answer to
+    /// the phone as though it were finished.
+    Bash(Vec<String>),
+    /// A `/compact`, and what it shrank and spent. None means the transcript
+    /// already fit — or, with a cancelled `ran`, that nobody ever looked.
+    Compact(Option<(agent::compact::Report, Totals)>),
+}
+/// A job that ran off the loop, reporting back to the loop that started it.
+///
+/// The transcript comes home this way rather than through a `JoinHandle`, so
+/// one channel serves every lane and nothing has to poll a growing list of
+/// them. `ran` is None only when the job panicked and took its copy down.
 struct Done {
     lane: usize,
-    /// The transcript back, and how the turn went. None when the run panicked
-    /// and took its copy of the transcript down with it — one field, because
-    /// those two are never separately absent.
+    kind: Kind,
+    /// The transcript back, and how the job went. None when it panicked and
+    /// took its copy down with it — one field, because those two are never
+    /// separately absent.
     ran: Option<(Session, Result<Totals, AgentError>)>,
-    /// What a `!` command printed — and, by being `Some` at all, that it was
-    /// one. A turn is `None`: its output reached the view through the lane's
-    /// event channel as it happened.
-    ///
-    /// The distinction is load-bearing, not decoration. `Bridge` is one
-    /// accumulator for the whole surface, filled by whichever turn is
-    /// streaming and emptied only by `Event::TurnStart`; a `!` emits no
-    /// events, so letting one speak for the bridge flushes another lane's
-    /// half-written answer to the phone as though it were finished.
-    said: Option<Vec<String>>,
+}
+
+/// Run `job` off the loop, turning a panic into a `None` the settle side can
+/// act on. One guard for every task that carries the transcript, so the
+/// panic contract is written once: a job that never reports leaves its lane
+/// looking "working" forever.
+async fn guard<F, T>(job: F) -> Option<T>
+where
+    F: std::future::Future<Output = T>,
+{
+    std::panic::AssertUnwindSafe(job).catch_unwind().await.ok()
 }
 
 pub struct Tui {
     core: Repl,
     ui: Ui,
-    keys: UnboundedReceiver<TermEvent>,
+    events: UnboundedReceiver<TermEvent>,
     totals: Totals,
     bridge: crate::wechat::Bridge,
 }
@@ -1804,10 +1834,38 @@ impl Tui {
         Ok(Self {
             core,
             ui,
-            keys: reader(),
+            events: reader(),
             totals: Totals::default(),
             bridge,
         })
+    }
+
+    /// A surface on an in-memory screen, for tests that drive the loop's
+    /// settle side. No reader thread and no history file: the terminal the
+    /// test runner owns is not this test's to touch.
+    #[cfg(test)]
+    fn on_test_screen(mut core: Repl, keys: Arc<Keys>) -> Self {
+        let paint = Paint::with_theme(false, Arc::new(core.config.theme.clone()));
+        let ui = Ui::new(
+            screen::Screen::test(80, 24),
+            keys,
+            core.choices(),
+            core.commands.clone(),
+            Lists::new(
+                core.store.clone(),
+                core.lane_mut().ctx.workspace.root().to_path_buf(),
+            ),
+            &core.lane_mut().context,
+            paint,
+        );
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        Self {
+            core,
+            ui,
+            events: rx,
+            totals: Totals::default(),
+            bridge: crate::wechat::Bridge::new(),
+        }
     }
 
     /// Best effort: losing a recall list is not worth a message on the way out.
@@ -2107,7 +2165,7 @@ impl Tui {
                         self.ui.spinner += 1;
                         Wake::Nothing
                     }
-                    key = self.keys.recv() => match key {
+                    key = self.events.recv() => match key {
                         Some(key) => {
                             let intent = self.ui.key(key, running);
                             self.admit(intent)
@@ -2204,38 +2262,12 @@ impl Tui {
                 Step::Bash(command) => self.start_bash(command, &done_tx),
                 Step::Swap(said) => self.land_swap(said),
                 Step::Handled(lines) => land_handled(&mut self.ui, &self.core, lines),
-                Step::Compact(focus) => {
-                    // Long enough to want the spinner, so it borrows the run's.
-                    // Committed with it: a compaction is work under way, not a
-                    // message someone can still take back.
-                    self.ui.view.started = Some(Instant::now());
-                    self.ui.view.committed = true;
-                    let done = self.core.compact_now(focus.as_deref()).await;
-                    self.ui.view.started = None;
-                    match done {
-                        Some((report, spent)) => {
-                            self.totals.merge(&spent);
-                            self.ui.on_event(Event::Compacted(report));
-                            if let Err(e) = self.core.save() {
-                                self.ui
-                                    .say(format!("warning: the transcript was not saved: {e}"));
-                            }
-                        }
-                        None => {
-                            let held = self.core.lane_mut().agent.kept_tokens().unwrap_or(0);
-                            let now = self.core.tokens_now();
-                            let why = format!(
-                                "nothing to compact — {now} tokens, all inside the {held} \
-                                 kept as working context"
-                            );
-                            self.ui
-                                .say(self.ui.paint.on(&self.ui.paint.theme.muted, &why));
-                        }
-                    }
-                }
+                Step::Compact(focus) => self.start_compact(focus, &done_tx),
                 Step::Wechat(cmd) => {
                     let said = match cmd {
                         repl::WechatCmd::Status => self.bridge.status(),
+                        // Only local locks and a client build await here; the
+                        // login and long poll already run in their own tasks.
                         repl::WechatCmd::On => match self.bridge.on().await {
                             Ok(said) => said,
                             Err(e) => {
@@ -2391,6 +2423,18 @@ impl Tui {
     /// The run keeps the transcript for its length and posts what it is doing
     /// to that lane's own channel, so the loop is free to draw, read keys and
     /// serve the other lanes — including this one after the screen moves on.
+    /// Hand the view over to a job about to start: the clock runs, and the
+    /// per-run figures start from nothing rather than from the last run's.
+    /// `committed` says whether the prompt behind it can still be taken back.
+    fn arm_view(&mut self, committed: bool) {
+        self.ui.view.started = Some(Instant::now());
+        self.ui.view.committed = committed;
+        self.ui.view.stopping = false;
+        self.ui.view.settled = Usage::default();
+        self.ui.view.turn = Usage::default();
+        self.ui.view.compactions = 0;
+    }
+
     fn start_turn(&mut self, prompt: String, typed: Option<String>, done: &UnboundedSender<Done>) {
         // Lent to the run for the length of the turn. A lane with a run under
         // way refuses another, so the only way it is missing here is the lane
@@ -2403,14 +2447,7 @@ impl Tui {
         let cancel = CancellationToken::new();
         let ctx = self.core.lane_mut().ctx.clone().with_cancel(cancel.clone());
 
-        self.ui.view.started = Some(Instant::now());
-        self.ui.view.committed = false;
-        self.ui.view.stopping = false;
-        // Per-run figures: a new prompt's status line must not start from the
-        // previous run's totals.
-        self.ui.view.settled = Usage::default();
-        self.ui.view.turn = Usage::default();
-        self.ui.view.compactions = 0;
+        self.arm_view(false);
         // Read while the agent is still reachable: `/model` may replace it
         // while this run works, and the run keeps the one it started on.
         self.ui.view.model = self.core.lane_mut().agent.spec.model.clone();
@@ -2420,16 +2457,11 @@ impl Tui {
         let lane = self.core.current;
         let done = done.clone();
         tokio::spawn(async move {
-            // Caught rather than left to unwind: the task is carrying the whole
-            // transcript, and the loop can put back what was last saved only if
-            // it hears that the run is over.
-            let out = std::panic::AssertUnwindSafe(agent.run(&mut carried, &ctx, &sent))
-                .catch_unwind()
-                .await;
+            let out = guard(agent.run(&mut carried, &ctx, &sent)).await;
             let _ = done.send(Done {
                 lane,
-                ran: out.ok().map(|out| (carried, out)),
-                said: None,
+                kind: Kind::Turn,
+                ran: out.map(|out| (carried, out)),
             });
         });
         self.core.lane_mut().turn = Turn::Running {
@@ -2450,35 +2482,33 @@ impl Tui {
         };
         let cancel = CancellationToken::new();
         let ctx = self.core.lane_mut().ctx.clone().with_cancel(cancel.clone());
-        self.ui.view.started = Some(Instant::now());
-        // Load-bearing: it forecloses `Intent::Unsend`, the only writer of
+        // Committed forecloses `Intent::Unsend`, the only writer of
         // `Turn::Running.unsend`, which a `!` has no prompt to honour.
-        self.ui.view.committed = true;
-        self.ui.view.stopping = false;
-        // A shell command spends nothing. Left alone, the line it now shows
-        // would carry the last turn's tokens for as long as this one runs.
-        self.ui.view.settled = Usage::default();
-        self.ui.view.turn = Usage::default();
-        self.ui.view.compactions = 0;
+        self.arm_view(true);
 
         let lane = self.core.current;
         let done = done.clone();
         tokio::spawn(async move {
-            // Caught for the reason a turn's panic is: the task holds the whole
-            // transcript, and a lane whose run never reports stays "working".
-            let out = std::panic::AssertUnwindSafe(async move {
+            let out = guard(async move {
                 let out = crate::repl::run_bash(&ctx, &command).await;
+                // Esc that stopped the `!` is a cancelled run too; `ran` says
+                // so instead of a success that spent nothing.
+                let ran = if ctx.cancel.is_cancelled() {
+                    Err(AgentError::Cancelled)
+                } else {
+                    Ok(Totals::default())
+                };
                 crate::repl::record_bash(&mut carried, &command, out.text);
-                (carried, out.said)
+                (carried, ran, out.said)
             })
-            .catch_unwind()
             .await;
-            let (ran, said) = match out {
-                // No tokens spent, so no totals to report; the output is `said`.
-                Ok((carried, said)) => (Some((carried, Ok(Totals::default()))), Some(said)),
-                Err(_) => (None, Some(Vec::new())),
+            // A panic printed nothing anyone can still show; the empty lines
+            // and the missing transcript say the same thing from both sides.
+            let (kind, ran) = match out {
+                Some((carried, ran, said)) => (Kind::Bash(said), Some((carried, ran))),
+                None => (Kind::Bash(Vec::new()), None),
             };
-            let _ = done.send(Done { lane, ran, said });
+            let _ = done.send(Done { lane, kind, ran });
         });
         self.core.lane_mut().turn = Turn::Running {
             cancel,
@@ -2486,24 +2516,84 @@ impl Tui {
         };
     }
 
-    /// A turn has ended. Put the transcript back and save it, whichever lane it
-    /// belongs to; show the end of it only when that lane is the one on screen.
-    ///
-    /// The saving cannot wait — a lane the user never returns to still has to
-    /// have its work on disk — but nothing about drawing it does.
+    /// Run a `/compact` off the loop. It can spend real time — summarising
+    /// what it drops is a model call — and the lane must keep drawing and
+    /// serving the others meanwhile.
+    fn start_compact(&mut self, focus: Option<String>, done: &UnboundedSender<Done>) {
+        let Some(mut carried) = self.core.lane_mut().session.take() else {
+            self.ui.say("this checkout has no transcript — /new or /resume first");
+            return;
+        };
+        let cancel = CancellationToken::new();
+        // Work under way like any turn's, and nothing anyone can take back.
+        self.arm_view(true);
+
+        let agent = self.core.lane_mut().agent.clone();
+        let lane = self.core.current;
+        let done = done.clone();
+        let stop = cancel.clone();
+        tokio::spawn(async move {
+            let out = guard(async move {
+                // Dropped mid-flight, not signalled: `compact_now` writes to
+                // the transcript only once every await is behind it.
+                let ran = tokio::select! {
+                    got = agent.compact_now(&mut carried, focus.as_deref()) => Ok(got),
+                    _ = stop.cancelled() => Err(AgentError::Cancelled),
+                };
+                (carried, ran)
+            })
+            .await;
+            // A report only exists where the pass ran to the end: `Ok(None)`
+            // is a transcript that already fit, `Err` one nobody looked at.
+            let (kind, ran) = match out {
+                Some((carried, Ok(got))) => {
+                    (Kind::Compact(got), Some((carried, Ok(Totals::default()))))
+                }
+                Some((carried, Err(e))) => (Kind::Compact(None), Some((carried, Err(e)))),
+                None => (Kind::Compact(None), None),
+            };
+            let _ = done.send(Done { lane, kind, ran });
+        });
+        self.core.lane_mut().turn = Turn::Running {
+            cancel,
+            unsend: false,
+        };
+    }
+
+    /// A job came home. Every kind settles on the lane that lent it the
+    /// transcript, whichever lane is on screen by the time it lands.
     async fn settle(&mut self, done: Done) {
         // The run posts its last events and only then says it is over, so both
         // are in flight at once and the end can win the race. Take what is
         // waiting before closing anything, or a tool row still open is frozen
         // as abandoned and the elapsed figure is read off a cleared clock.
         self.serve_lanes().await;
-        let Done { lane, ran, said } = done;
-        let unsend = match self.core.lanes.get_mut(lane) {
-            Some(held) => match std::mem::replace(&mut held.turn, Turn::Idle) {
-                Turn::Running { unsend, .. } => unsend,
-                _ => false,
-            },
-            None => false,
+        // Here rather than in the arms below, so a kind added later cannot
+        // forget it and leave the lane queueing prompts it will never run.
+        let unsend = self
+            .core
+            .lanes
+            .get_mut(done.lane)
+            .is_some_and(crate::lane::Lane::finish);
+        match done.kind {
+            Kind::Turn | Kind::Bash(_) => self.settle_run(done, unsend).await,
+            Kind::Compact(_) => self.settle_compact(done).await,
+        }
+    }
+
+    /// A turn or a `!` has ended. Put the transcript back and save it,
+    /// whichever lane it belongs to; show the end of it only when that lane
+    /// is the one on screen.
+    ///
+    /// The saving cannot wait — a lane the user never returns to still has to
+    /// have its work on disk — but nothing about drawing it does.
+    async fn settle_run(&mut self, done: Done, unsend: bool) {
+        let Done { lane, ran, kind } = done;
+        // A `!` brings its lines home to be shown here; a turn's reached the
+        // view as events, and a compact never arrives at this function.
+        let said = match kind {
+            Kind::Bash(lines) => Some(lines),
+            _ => None,
         };
 
         // Only a run that came back says why it ended; the archive rebuild
@@ -2520,33 +2610,7 @@ impl Tui {
                 self.core.lanes[lane].session = Some(session);
                 (true, out)
             }
-            None => {
-                let id = self.core.lanes[lane].id.clone();
-                match self.core.store.load(&id) {
-                    Ok(stored) => {
-                        self.core.lanes[lane].session = Some(stored.into_session());
-                        self.say_of(
-                            lane,
-                            "the run did not finish — back to the transcript as last saved".into(),
-                        );
-                        (true, Err(AgentError::Cancelled))
-                    }
-                    // Nothing to go back to and nothing safe to write. The
-                    // lane stays without a transcript and refuses work until
-                    // `/new` or `/resume` gives it one — where exiting here
-                    // would take every other lane's unsaved run with it.
-                    Err(why) => {
-                        self.say_of(
-                            lane,
-                            format!(
-                                "the run did not finish and its transcript could not be read \
-                                 back ({why}) — /new or /resume to use this checkout again"
-                            ),
-                        );
-                        (false, Err(AgentError::Cancelled))
-                    }
-                }
-            }
+            None => (self.recover_session(lane, "run"), Err(AgentError::Cancelled)),
         };
 
         // A panic never came back, and Esc that took the prompt back produced
@@ -2574,14 +2638,13 @@ impl Tui {
         if said.is_none() && lane == self.core.current {
             self.bridge.finish_turn(cancelled).await;
         }
+        // The run's totals (its subagents' included) land on the lane it ran
+        // in, and on the surface's grand total, so `/cost` can split the bill.
+
         if let Ok(totals) = &out {
+            self.core.lanes[lane].totals.merge(totals);
             self.totals.merge(totals);
         }
-        // Whatever subagents spent inside that run — taken here rather than at
-        // `/cost`, because a lane left running out of sight has to have its
-        // children's spending land too.
-        self.totals
-            .merge(&crate::subagent::drain(&self.core.subagents));
 
         // A `!` command's output comes home whole rather than as events, so
         // this is the only place it can reach the view that asked for it.
@@ -2605,6 +2668,85 @@ impl Tui {
             && let Some(id) = self.core.lane().session.as_ref().and_then(|s| s.last_ask())
         {
             self.rewind_turn(id);
+        }
+    }
+
+    /// Put back the archive when the job that borrowed the live transcript
+    /// never returned it, naming the job as `verb`. Says whether the lane now
+    /// holds something safe to write over its save — without one it refuses
+    /// work until `/new`, where exiting would cost every other lane its run.
+    fn recover_session(&mut self, lane: usize, verb: &str) -> bool {
+        let id = self.core.lanes[lane].id.clone();
+        match self.core.store.load(&id) {
+            Ok(stored) => {
+                self.core.lanes[lane].session = Some(stored.into_session());
+                self.say_of(
+                    lane,
+                    format!("the {verb} did not finish — back to the transcript as last saved"),
+                );
+                true
+            }
+            Err(why) => {
+                self.say_of(
+                    lane,
+                    format!(
+                        "the {verb} did not finish and its transcript could not be read back \
+                         ({why}) — /new or /resume to use this checkout again"
+                    ),
+                );
+                false
+            }
+        }
+    }
+
+    /// A `/compact` has finished: put the transcript back, and show what the
+    /// pass did — or say there was nothing to shrink.
+    async fn settle_compact(&mut self, done: Done) {
+        let Done { lane, ran, kind } = done;
+        let Kind::Compact(report) = kind else {
+            unreachable!("only a compact settles here")
+        };
+        let stopped = matches!(&ran, Some((_, Err(AgentError::Cancelled))));
+        // The lane it was started on may not be the one on screen any more;
+        // give it back its transcript either way.
+        let back = match ran {
+            Some((session, _)) => {
+                self.core.lanes[lane].session = Some(session);
+                true
+            }
+            None => self.recover_session(lane, "compaction"),
+        };
+
+        if let Some((report, spent)) = report {
+            self.core.lanes[lane].totals.merge(&spent);
+            self.totals.merge(&spent);
+            let _ = self.core.lanes[lane].events.send(Event::Compacted(report));
+            if back
+                && let Err(e) = self.core.save_lane(lane)
+            {
+                self.say_of(lane, format!("warning: the transcript was not saved: {e}"));
+            }
+            self.refresh_sessions();
+        } else if stopped {
+            // Nothing was written, so there is nothing to report and nothing
+            // to save — only the same word a stopped turn ends on.
+            self.say_of(lane, self.ui.paint.on(&self.ui.paint.theme.muted, "stopped"));
+        } else if back {
+            let held = self.core.lanes[lane].agent.kept_tokens().unwrap_or(0);
+            let now = self.core.tokens_now_at(lane);
+            self.say_of(
+                lane,
+                format!(
+                    "nothing to compact — {now} tokens, all inside the {held} kept as working context"
+                ),
+            );
+        }
+        // The spinner was borrowed for the pass; give the owning view its
+        // clock back, whichever lane that is now.
+        if lane == self.core.current {
+            self.ui.view.started = None;
+        } else if let Some(Some(view)) = self.ui.parked.get_mut(lane) {
+            view.started = None;
         }
     }
 
@@ -3202,5 +3344,128 @@ mod tests {
             frame(&content, room, &mut scroll, &mut last_total),
             vec!["5", "6", "7", "8"]
         );
+    }
+
+    // ---------------------------------------------------------- settling
+
+    /// A lane wired up enough to be settled: a real transcript, a real agent,
+    /// and a `Turn::Running` standing in for the job that is about to report.
+    fn running_lane(dir: &std::path::Path) -> crate::lane::Lane {
+        struct Mute;
+        #[async_trait::async_trait]
+        impl brain::Transport for Mute {
+            async fn stream(
+                &self,
+                _spec: &brain::model::ModelSpec,
+                _req: &brain::request::Request,
+            ) -> brain::Result<
+                futures::stream::BoxStream<'static, brain::Result<brain::stream::StreamEvent>>,
+            > {
+                Ok(Box::pin(futures::stream::empty()))
+            }
+        }
+        let ws = tools::Workspace::new(dir).expect("a workspace");
+        let spec = brain::model::ModelSpec {
+            model: "m".into(),
+            base_url: "http://localhost".into(),
+            format: brain::model::Format::Anthropic {
+                cache_control: brain::model::CacheControl::Off,
+            },
+            context_window: 200_000,
+            max_output_tokens: 8_000,
+            vision: false,
+            thinking: None,
+            accepts_temperature: true,
+            can_force_tool: true,
+            replay_thinking: brain::model::ReplayThinking::Tagged,
+            pricing: brain::model::Pricing::default(),
+        };
+        let (events, inbox) = crate::lane::Lane::channel();
+        crate::lane::Lane {
+            agent: std::sync::Arc::new(agent::Agent::new(std::sync::Arc::new(Mute), spec)),
+            session: None,
+            id: "s1".into(),
+            created: 0,
+            name: None,
+            totals: agent::Totals::default(),
+            context: Vec::new(),
+            standing: std::sync::Arc::from(""),
+            ctx: tools::Ctx::new(ws),
+            worktree: None,
+            events,
+            inbox,
+            pending: Vec::new(),
+            // What every `start_*` leaves behind while its job runs.
+            turn: crate::lane::Turn::Running {
+                cancel: tokio_util::sync::CancellationToken::new(),
+                unsend: false,
+            },
+            keys: std::sync::Arc::new(crate::keys::Keys::default()),
+            commands: std::sync::Arc::new(Vec::new()),
+        }
+    }
+
+    fn surface(dir: &std::path::Path) -> super::Tui {
+        let keys = std::sync::Arc::new(crate::keys::Keys::default());
+        let core = crate::repl::Repl {
+            store: crate::session::Store::new(dir.join("state")),
+            keys: keys.clone(),
+            config: std::sync::Arc::new(crate::config::Config::default()),
+            args: std::sync::Arc::new(<crate::Args as clap::Parser>::parse_from(["pi"])),
+            commands: std::sync::Arc::new(Vec::new()),
+            file: toml::Value::Table(Default::default()),
+            claimed: Default::default(),
+            lanes: vec![running_lane(dir)],
+            current: 0,
+        };
+        super::Tui::on_test_screen(core, keys)
+    }
+
+    /// The bug this guards: `/compact` used to settle without ever putting the
+    /// lane back to `Idle`, and a lane left `Running` queues every later
+    /// prompt into a queue that only drains once it is not running — so the
+    /// checkout was wedged for good. Every kind has to come back idle.
+    #[tokio::test]
+    async fn every_kind_of_job_leaves_its_lane_idle() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let kinds = || {
+            vec![
+                ("turn", super::Kind::Turn),
+                ("bash", super::Kind::Bash(vec!["out".into()])),
+                ("compact", super::Kind::Compact(None)),
+                (
+                    "compact with a report",
+                    super::Kind::Compact(Some((
+                        agent::compact::Report::default(),
+                        agent::Totals::default(),
+                    ))),
+                ),
+            ]
+        };
+        for (what, kind) in kinds() {
+            let mut tui = surface(dir.path());
+            tui.settle(super::Done {
+                lane: 0,
+                kind,
+                ran: Some((
+                    agent::session::Session::default(),
+                    Ok(agent::Totals::default()),
+                )),
+            })
+            .await;
+            assert!(
+                !tui.core.lanes[0].is_running(),
+                "a {what} left its lane running"
+            );
+        }
+        // And the same when the job panicked and brought no transcript home.
+        for (what, kind) in kinds() {
+            let mut tui = surface(dir.path());
+            tui.settle(super::Done { lane: 0, kind, ran: None }).await;
+            assert!(
+                !tui.core.lanes[0].is_running(),
+                "a panicked {what} left its lane running"
+            );
+        }
     }
 }

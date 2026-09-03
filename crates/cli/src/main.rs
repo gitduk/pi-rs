@@ -332,7 +332,7 @@ pub fn arm(
     ag.approver = std::sync::Arc::new(agent::Ceiling(from.tier));
     ag.system = std::mem::take(&mut from.system);
     ag.effort = from.effort;
-    hang(ag, home, &from.standing);
+    hang(ag, home, &from.standing, from.task);
 }
 
 /// Hang a subagent off an agent that is otherwise ready, replacing any it
@@ -342,19 +342,65 @@ pub fn arm(
 /// that changes the parent afterwards — `/model` re-dialling the transport —
 /// has to build a new one, or the child goes on talking to the old endpoint
 /// with the old key.
+///
+/// `task` is false when `--tools` did not name it: the subagent is a tool the
+/// model may call, and an explicit tool list is exactly that list.
 pub fn hang(
     ag: &mut agent::Agent,
     home: std::sync::Arc<dyn agent::task::Home>,
     standing: &str,
+    task: bool,
 ) {
-    let task = agent::task::Task::new(ag, home, standing);
-    ag.registry = std::mem::take(&mut ag.registry).with(task);
+    if task {
+        let task = agent::task::Task::new(ag, home, standing);
+        ag.registry = std::mem::take(&mut ag.registry).with(task);
+    }
+}
+
+/// Every name `--tools` accepts, for the line that says one was not one. The
+/// two hung tools are as nameable as the builtins and have to be listed with
+/// them, or the message tells the user to drop the very name it just refused.
+fn known_tools() -> Vec<String> {
+    let mut all: Vec<String> = tools::Registry::builtin()
+        .names()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    all.push(agent::task::Task::NAME.to_string());
+    all.push(tools::skill::NAME.to_string());
+    all.sort();
+    all
+}
+
+/// The `--tools` names `restrict` sees: the builtins, minus the two tools
+/// attached after it, which `restrict` would otherwise reject as unknown.
+fn restrict_request(names: &[String]) -> Vec<String> {
+    let hung = [agent::task::Task::NAME, tools::skill::NAME];
+    names
+        .iter()
+        .filter(|n| !hung.contains(&n.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// Whether the model may call `tool`: no `--tools` means everything; an
+/// explicit list is exactly the tools it names.
+pub(crate) fn wants_tool(names: &[String], tool: &str) -> bool {
+    names.is_empty() || names.iter().any(|n| n == tool)
+}
+
+/// Whether the subagent tool is in force, for the callers without a `Resolved`.
+pub(crate) fn wants_task(names: &[String]) -> bool {
+    wants_tool(names, agent::task::Task::NAME)
 }
 
 /// Everything the config and the workspace decide, as opposed to what the
 /// command line fixed for the whole run. `/reload` recomputes exactly this.
 pub struct Resolved {
     pub registry: tools::Registry,
+    /// Whether the subagent tool is in force — false when `--tools` named it
+    /// not. `registry` cannot carry this: `hang` runs after `restrict`.
+    pub task: bool,
     pub system: String,
     /// The tail of `system` that belongs to the checkout rather than to the
     /// assistant: the workspace anchor and the instruction files. Kept apart
@@ -387,12 +433,12 @@ pub fn resolve(
     let mut notes = Vec::new();
 
     let mut registry = tools::Registry::builtin();
+    // The two tools attached after `restrict` are not in the builtin list it
+    // knows, so they are taken out here and decided by the same list below.
+    let restrict_to = restrict_request(&args.tools);
     if !args.tools.is_empty() {
-        registry = registry.restrict(&args.tools).map_err(|bad| {
-            anyhow::anyhow!(
-                "no tool named `{bad}`; known: {}",
-                tools::Registry::builtin().names().join(", ")
-            )
+        registry = registry.restrict(&restrict_to).map_err(|bad| {
+            anyhow::anyhow!("no tool named `{bad}`; known: {}", known_tools().join(", "))
         })?;
     }
     let skills = if args.no_skills {
@@ -413,7 +459,7 @@ pub fn resolve(
     // type and a body the model can load, and both read the same list.
     let commands = repl::commands(&skills, &mut notes);
     let tool = tools::skill::SkillTool::new(skills);
-    if !tool.is_empty() {
+    if !tool.is_empty() && wants_tool(&args.tools, tools::skill::NAME) {
         registry = registry.with(tool);
     }
 
@@ -461,6 +507,7 @@ pub fn resolve(
 
     Ok(Resolved {
         registry,
+        task: wants_task(&args.tools),
         system,
         standing: standing.into(),
         tier,
@@ -480,10 +527,9 @@ fn paint(
     theme: std::sync::Arc<render::Theme>,
     done: Vec<status::Segment>,
     model: String,
-    subagents: std::sync::Arc<std::sync::Mutex<agent::Totals>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut r = render::Renderer::new(quiet, theme, done, model, subagents);
+        let mut r = render::Renderer::new(quiet, theme, done, model);
         while let Some(event) = rx.recv().await {
             r.on(event);
         }
@@ -497,8 +543,8 @@ async fn main() -> Result<()> {
     let prompt = read_prompt(&args)?;
     let config = Arc::new(config::load(args.config.as_deref())?);
 
-    let workspace = tools::Workspace::new(&args.cwd)?
-        .with_write_roots(&config.write_roots)
+    let workspace = tools::Workspace::new(&args.cwd)
+        .and_then(|ws| ws.with_write_roots(&config.write_roots))
         .with_context(|| format!("cannot use {} as a workspace", args.cwd))?;
     let project = config::load_project(workspace.root())?;
 
@@ -548,7 +594,6 @@ async fn main() -> Result<()> {
     let root = workspace.root().to_path_buf();
     let model_id = dialled.spec.model.clone();
 
-    let subagents: Arc<std::sync::Mutex<agent::Totals>> = Default::default();
     let mut ag = agent::Agent::new(dialled.transport, dialled.spec);
     if args.no_compact {
         ag.compaction = None;
@@ -571,12 +616,7 @@ async fn main() -> Result<()> {
     arm(
         &mut ag,
         &mut resolved,
-        subagent::Filed::armed(
-            store.clone(),
-            root.clone(),
-            model_id.clone(),
-            subagents.clone(),
-        ),
+        subagent::Filed::armed(store.clone(), root.clone(), model_id.clone()),
     );
     // After `arm`, which needs the whole of `resolved`: this takes a field out
     // of it.
@@ -607,7 +647,6 @@ async fn main() -> Result<()> {
         let (events, inbox) = lane::Lane::channel();
         let core = repl::Repl {
             store,
-            subagents: subagents.clone(),
             keys: key_map.clone(),
             config: config.clone(),
             args: args.clone(),
@@ -622,6 +661,8 @@ async fn main() -> Result<()> {
                 id,
                 created,
                 name,
+                totals: agent::Totals::default(),
+
                 context: resolved.context,
                 standing: resolved.standing,
                 worktree: worktree::current(&root),
@@ -638,7 +679,11 @@ async fn main() -> Result<()> {
         // side and the repaint goes out the other. Missing either, there is
         // nothing to hold still, and printing a line at a time is right.
         if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-            return tui::Tui::new(core, key_map, wechat::Bridge::new())?.run().await;
+            let out = tui::Tui::new(core, key_map, wechat::Bridge::new())?.run().await;
+            // Subagents handed their transcripts to a background save; wait
+            // for those to land before the runtime goes with them.
+            subagent::flush().await;
+            return out;
         }
         let painter = paint(
             rx,
@@ -646,10 +691,10 @@ async fn main() -> Result<()> {
             std::sync::Arc::new(config.theme.clone()),
             config.status.done.clone(),
             model_id.clone(),
-            subagents.clone(),
         );
         let out = line::run(core, tx).await;
         let _ = painter.await;
+        subagent::flush().await;
         return out;
     };
 
@@ -668,7 +713,6 @@ async fn main() -> Result<()> {
         std::sync::Arc::new(config.theme.clone()),
         config.status.done.clone(),
         model_id.clone(),
-        subagents.clone(),
     );
     let ctx = tools::Ctx::new(workspace)
         .with_session(&id)
@@ -703,6 +747,10 @@ async fn main() -> Result<()> {
         _ => {}
     }
 
+    // Above both ways out below: one exits the process outright, and a stopped
+    // run is the one whose subagents were cut short with a save in flight.
+    subagent::flush().await;
+
     // A run the user stopped is not a failure of the run; scripts should be
     // able to tell the two apart.
     if matches!(outcome, Err(agent::AgentError::Cancelled)) {
@@ -721,4 +769,68 @@ async fn main() -> Result<()> {
     }
     outcome?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{restrict_request, wants_task, wants_tool};
+
+    fn named(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn no_tools_means_everything() {
+        let none: Vec<String> = Vec::new();
+        assert!(wants_task(&none) && wants_tool(&none, tools::skill::NAME));
+        assert!(restrict_request(&none).is_empty());
+    }
+
+    #[test]
+    fn an_explicit_list_is_exactly_the_tools_it_names() {
+        let only = named(&["read"]);
+        assert!(!wants_task(&only), "task is not on the list");
+        assert!(!wants_tool(&only, tools::skill::NAME), "skill is not on the list");
+        assert_eq!(restrict_request(&only), only);
+    }
+
+    #[test]
+    fn task_and_skill_can_be_named_instead_of_implicit() {
+        let with_task = named(&["read", "task"]);
+        assert!(wants_task(&with_task));
+        assert!(!wants_tool(&with_task, tools::skill::NAME));
+        assert_eq!(restrict_request(&with_task), named(&["read"]));
+
+        let with_skill = named(&["read", "skill"]);
+        assert!(!wants_task(&with_skill));
+        assert!(wants_tool(&with_skill, tools::skill::NAME));
+        assert_eq!(restrict_request(&with_skill), named(&["read"]));
+    }
+
+    /// The refusal has to offer the names it accepts, `task` and `skill`
+    /// included — they are nameable in `--tools` but not in the builtin list.
+    #[test]
+    fn the_known_list_names_every_tool_tools_accepts() {
+        let known = super::known_tools();
+        for wanted in ["read", "bash", agent::task::Task::NAME, tools::skill::NAME] {
+            assert!(known.iter().any(|n| n == wanted), "{wanted} in {known:?}");
+        }
+        let mut sorted = known.clone();
+        sorted.sort();
+        assert_eq!(known, sorted, "listed in an order a reader can scan");
+    }
+
+    #[test]
+    fn hung_tools_never_reach_restrict_but_typos_still_do() {
+        let only_task = named(&["task"]);
+        assert!(wants_task(&only_task));
+        assert!(restrict_request(&only_task).is_empty());
+
+        let typo = named(&["readd"]);
+        assert_eq!(
+            restrict_request(&typo),
+            typo,
+            "a name that is not a hung tool stays where restrict can reject it"
+        );
+    }
 }

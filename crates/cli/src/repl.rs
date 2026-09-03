@@ -335,10 +335,6 @@ const RESUME_WIDTH: usize = 60;
 /// where they put what comes back.
 pub struct Repl {
     pub store: Store,
-    /// What subagents have spent, waiting to be counted. They run inside a
-    /// tool call, so their tokens are not in the run's own figures — and D5
-    /// says an uncounted run is the one thing that cannot be tolerated.
-    pub subagents: std::sync::Arc<std::sync::Mutex<agent::Totals>>,
     /// Held so `/keys` can show what is actually in force, overrides included.
     pub keys: std::sync::Arc<crate::keys::Keys>,
     /// The config in force, as opposed to the one on disk. `/model` picks from
@@ -382,15 +378,15 @@ impl Repl {
         &self.lanes[self.current]
     }
 
-    /// Where a subagent started in this lane files what it did and what it
-    /// spent. Root and model vary — a `/worktree` moves one, a `/model` the
-    /// other — and the rest never does.
+    /// Where a subagent started in this lane files what it did. Root and model
+    /// vary — a `/worktree` moves one, a `/model` the other — and the rest
+    /// never does.
     fn home(
         &self,
         root: std::path::PathBuf,
         model: String,
     ) -> std::sync::Arc<dyn agent::task::Home> {
-        crate::subagent::Filed::armed(self.store.clone(), root, model, self.subagents.clone())
+        crate::subagent::Filed::armed(self.store.clone(), root, model)
     }
 
     pub fn lane_mut(&mut self) -> &mut Lane {
@@ -676,9 +672,10 @@ impl Repl {
             spec.model.clone(),
         );
         let standing = self.lane().standing.clone();
+        let task = crate::wants_task(&self.args.tools);
         let ag = std::sync::Arc::make_mut(&mut self.lane_mut().agent);
         ag.retarget(transport, spec);
-        crate::hang(ag, home, &standing);
+        crate::hang(ag, home, &standing, task);
     }
 
     /// What `/model` on its own shows.
@@ -747,9 +744,52 @@ impl Repl {
     /// What the transcript occupies now, for the line that says why there was
     /// nothing to compact. Zero while a run has it.
     pub fn tokens_now(&self) -> usize {
-        self.lane().session.as_ref().map_or(0, |s| {
-            brain::estimate::tokens(&s.context(), &self.lane().agent.spec)
-        })
+        self.tokens_now_at(self.current)
+    }
+
+    /// The same for a named lane: a compaction that finishes after the screen
+    /// has moved on still has to say what it found.
+    pub fn tokens_now_at(&self, at: usize) -> usize {
+        let Some(lane) = self.lanes.get(at) else {
+            return 0;
+        };
+        lane.session
+            .as_ref()
+            .map_or(0, |s| brain::estimate::tokens(&s.context(), &lane.agent.spec))
+    }
+
+    /// What `/cost` answers: one line per lane that has spent, then the
+    /// total. A single lane keeps the old one-line answer — its label would
+    /// only echo the total back.
+    ///
+    /// Lanes are picked by tokens, not by price: an unpriced model spends
+    /// real context for $0.0000, and picking by cost would list none of them.
+    fn cost_lines(&self, total: &Totals) -> Vec<String> {
+        let spent = |t: &Totals| crate::render::spent(&t.usage, t.cost);
+        let billed: Vec<(usize, &Lane)> = self
+            .lanes
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.totals.usage.input + l.totals.usage.output > 0)
+            .collect();
+        if billed.len() < 2 {
+            return vec![spent(total)];
+        }
+        // The same figures per lane as the single-lane answer gives for the
+        // run: tokens, cache, and price, not the price alone.
+        let mut lines: Vec<String> = billed
+            .iter()
+            .map(|(i, l)| {
+                let name = l
+                    .name
+                    .clone()
+                    .or_else(|| l.worktree.clone())
+                    .unwrap_or_else(|| format!("#{}", i + 1));
+                format!("{name}: {}", spent(&l.totals))
+            })
+            .collect();
+        lines.push(format!("total: {}", spent(total)));
+        lines
     }
 
     /// Rewind the conversation to an entry and write the shorter transcript
@@ -890,7 +930,6 @@ pub enum Intent {
     Interrupt,
 }
 
-
 /// What a line may do while a turn is in flight.
 ///
 /// Read off the parsed command rather than off the `Step` it produces:
@@ -905,7 +944,6 @@ pub enum Fate {
     /// Would move what the run stands on. Says this rather than doing it.
     Refused(&'static str),
 }
-
 
 impl Intent {
     /// Exhaustive on purpose, with no catch-all arm: an intent added without an
@@ -1206,7 +1244,7 @@ impl Repl {
                 Some(p) => format!("{}", p.display()),
                 None => "not recording — --log is off, or the file would not open".into(),
             }),
-            Intent::Cost => lines(crate::render::spent(&totals.usage, totals.cost)),
+            Intent::Cost => Step::Handled(self.cost_lines(totals)),
             Intent::New => Step::Swap(self.fresh_session("started")),
             Intent::Resume(name) => {
                 if name.is_empty() {
@@ -1475,6 +1513,8 @@ impl Repl {
             id: String::new(),
             created: 0,
             name: None,
+            totals: Totals::default(),
+
             context: resolved.context,
             standing: resolved.standing,
             ctx: tools::Ctx::new(ws),
@@ -2256,5 +2296,246 @@ mod tests {
             Some("!git status"),
             "the reader sees the line"
         );
+    }
+
+    /// One lane with the given totals, enough for `/cost` to bill.
+    fn billed_lane(name: &str, input: u64, output: u64, cost: f64) -> crate::lane::Lane {
+        let dir = std::env::temp_dir();
+        let ws = tools::Workspace::new(&dir).expect("a workspace");
+        let (events, inbox) = crate::lane::Lane::channel();
+        let mut totals = agent::Totals::default();
+        totals.add(
+            &brain::stream::Usage {
+                input,
+                output,
+                ..Default::default()
+            },
+            cost,
+        );
+        crate::lane::Lane {
+            agent: std::sync::Arc::new(agent::Agent::new(
+                std::sync::Arc::new(Recording {
+                    saw: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                }),
+                test_spec("m"),
+            )),
+            session: None,
+            id: name.into(),
+            created: 0,
+            name: Some(name.to_string()),
+            totals,
+            context: Vec::new(),
+            standing: std::sync::Arc::from(""),
+            ctx: tools::Ctx::new(ws),
+            worktree: None,
+            events,
+            inbox,
+            pending: Vec::new(),
+            turn: crate::lane::Turn::Idle,
+            keys: std::sync::Arc::new(crate::keys::Keys::default()),
+            commands: std::sync::Arc::new(Vec::new()),
+        }
+    }
+
+    fn costed(lanes: Vec<crate::lane::Lane>, total: &agent::Totals) -> Vec<String> {
+        let keys = std::sync::Arc::new(crate::keys::Keys::default());
+        let core = crate::repl::Repl {
+            store: crate::session::Store::new(std::env::temp_dir().join("pi-cost-test")),
+            keys: keys.clone(),
+            config: std::sync::Arc::new(crate::config::Config::default()),
+            args: std::sync::Arc::new(<crate::Args as clap::Parser>::parse_from(["pi"])),
+            commands: std::sync::Arc::new(Vec::new()),
+            file: toml::Value::Table(Default::default()),
+            claimed: Default::default(),
+            lanes,
+            current: 0,
+        };
+        core.cost_lines(total)
+    }
+
+    /// Two lanes get a line each, and each line carries the same figures the
+    /// single-lane answer gives — tokens, not the price alone.
+    #[test]
+    fn cost_splits_by_lane_with_the_tokens_each_spent() {
+        let mut total = agent::Totals::default();
+        total.add(
+            &brain::stream::Usage {
+                input: 3_000,
+                output: 300,
+                ..Default::default()
+            },
+            0.05,
+        );
+        let lines = costed(
+            vec![
+                billed_lane("main", 1_000, 100, 0.01),
+                billed_lane("feature", 2_000, 200, 0.04),
+            ],
+            &total,
+        );
+        assert_eq!(lines.len(), 3, "two lanes and a total: {lines:?}");
+        assert!(lines[0].starts_with("main: "), "{lines:?}");
+        assert!(lines[1].starts_with("feature: "), "{lines:?}");
+        assert!(lines[2].starts_with("total: "), "{lines:?}");
+        // The regression: a per-lane line used to be the dollar figure alone.
+        for line in &lines {
+            assert!(
+                line.contains("in") || line.contains("out") || line.contains("k"),
+                "a line has to carry its tokens, not just money: {line}"
+            );
+        }
+    }
+
+    /// An unpriced model still spends context. Billing by cost listed none of
+    /// them and collapsed the answer to a single line that said nothing.
+    #[test]
+    fn lanes_on_an_unpriced_model_still_split() {
+        let mut total = agent::Totals::default();
+        total.add(
+            &brain::stream::Usage {
+                input: 3_000,
+                output: 300,
+                ..Default::default()
+            },
+            0.0,
+        );
+        let lines = costed(
+            vec![
+                billed_lane("main", 1_000, 100, 0.0),
+                billed_lane("feature", 2_000, 200, 0.0),
+            ],
+            &total,
+        );
+        assert_eq!(lines.len(), 3, "free is still spent: {lines:?}");
+    }
+
+    /// A lane that never ran is not a line: the total already says it.
+    #[test]
+    fn a_lane_that_spent_nothing_is_not_billed() {
+        let mut total = agent::Totals::default();
+        total.add(
+            &brain::stream::Usage {
+                input: 1_000,
+                output: 100,
+                ..Default::default()
+            },
+            0.01,
+        );
+        let lines = costed(
+            vec![
+                billed_lane("main", 1_000, 100, 0.01),
+                billed_lane("untouched", 0, 0, 0.0),
+            ],
+            &total,
+        );
+        assert_eq!(lines.len(), 1, "one billed lane keeps the one-line answer");
+    }
+
+    /// A transport that records the model each request asks for, and answers
+    /// one empty turn.
+    struct Recording {
+        saw: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl brain::Transport for Recording {
+        async fn stream(
+            &self,
+            spec: &brain::model::ModelSpec,
+            _req: &brain::request::Request,
+        ) -> brain::Result<futures::stream::BoxStream<'static, brain::Result<brain::stream::StreamEvent>>>
+        {
+            self.saw.lock().unwrap().push(spec.model.clone());
+            let done = Ok(brain::stream::StreamEvent::Done {
+                stop: brain::stream::StopReason::EndTurn,
+                usage: brain::stream::Usage::default(),
+            });
+            Ok(Box::pin(futures::stream::iter(std::iter::once(done))))
+        }
+    }
+
+    fn test_spec(model: &str) -> brain::model::ModelSpec {
+        brain::model::ModelSpec {
+            model: model.into(),
+            base_url: "http://localhost".into(),
+            format: brain::model::Format::Anthropic {
+                cache_control: brain::model::CacheControl::Off,
+            },
+            context_window: 200_000,
+            max_output_tokens: 8_000,
+            vision: true,
+            thinking: Some(brain::model::ThinkingControl::Budget),
+            accepts_temperature: true,
+            can_force_tool: true,
+            replay_thinking: brain::model::ReplayThinking::Tagged,
+            pricing: brain::model::Pricing {
+                input_per_mtok: 1.0,
+                output_per_mtok: 2.0,
+                ..Default::default()
+            },
+        }
+    }
+
+    /// `/model` retargets the lane's agent and rebuilds the subagent behind
+    /// it; the rebuild has to carry the new endpoint and model, or a child
+    /// called after the switch keeps talking to the old one with the old key.
+    #[tokio::test]
+    async fn retarget_rebuilds_the_subagent_on_the_new_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = tools::Workspace::new(dir.path()).unwrap();
+        let store = crate::session::Store::new(dir.path().join("state"));
+
+        let old_saw = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let old_transport = std::sync::Arc::new(Recording { saw: old_saw.clone() });
+        let agent = agent::Agent::new(old_transport, test_spec("model-a"));
+
+        let keys = std::sync::Arc::new(crate::keys::Keys::default());
+        let commands = std::sync::Arc::new(Vec::<crate::repl::Command>::new());
+        let (events, inbox) = crate::lane::Lane::channel();
+        let lane = crate::lane::Lane {
+            agent: std::sync::Arc::new(agent),
+            session: Some(agent::session::Session::default()),
+            id: "s1".into(),
+            created: 0,
+            name: None,
+            context: Vec::new(),
+            standing: std::sync::Arc::from("standing"),
+            totals: agent::Totals::default(),
+            ctx: tools::Ctx::new(ws),
+            worktree: None,
+            events,
+            inbox,
+            pending: Vec::new(),
+            turn: crate::lane::Turn::Idle,
+            keys: keys.clone(),
+            commands: commands.clone(),
+        };
+        let mut core = crate::repl::Repl {
+            store,
+            keys: keys.clone(),
+            config: std::sync::Arc::new(crate::config::Config::default()),
+            args: std::sync::Arc::new(<crate::Args as clap::Parser>::parse_from(["pi"])),
+            commands,
+            file: toml::Value::Table(Default::default()),
+            claimed: Default::default(),
+            lanes: vec![lane],
+            current: 0,
+        };
+
+        let new_saw = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let new_transport = std::sync::Arc::new(Recording { saw: new_saw.clone() });
+        core.retarget(new_transport, test_spec("model-b"));
+
+        let task = core.lane().agent.registry.get(agent::task::Task::NAME).unwrap();
+        let ctx = tools::Ctx::new(core.lane().ctx.workspace.clone());
+        task.execute(serde_json::json!({ "prompt": "go" }), &ctx).await.unwrap();
+
+        let saw = new_saw.lock().unwrap();
+        assert!(
+            saw.iter().any(|m| m == "model-b"),
+            "the child asks the new model: {saw:?}"
+        );
+        assert!(!saw.iter().any(|m| m == "model-a"), "{saw:?}");
+        assert!(old_saw.lock().unwrap().is_empty(), "the old endpoint is gone");
     }
 }

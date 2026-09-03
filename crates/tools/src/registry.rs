@@ -23,7 +23,8 @@ impl Registry {
         Self::default()
     }
 
-    /// The three tools an agent cannot work without.
+    /// The tools an agent cannot work without. `task` and `skill` are not
+    /// among them: both are hung on afterwards, by whoever can build them.
     pub fn builtin() -> Self {
         Self::new()
             .with(crate::read::Read)

@@ -25,6 +25,11 @@ pub enum Turn {
     },
     /// A run that ended while this lane was out of sight, kept until the screen
     /// is looking at it and can show how it went.
+    ///
+    /// Only for work that can be finished off on the view in front: closing a
+    /// partial stream, landing animated tool rows, `say` without a prefix. A
+    /// job with none of those settles where it ended instead, or its report
+    /// waits on a screen that may never come back.
     Ended {
         out: Result<Totals, agent::AgentError>,
         /// Esc asked for the prompt back while this was still running.
@@ -47,6 +52,11 @@ pub struct Lane {
     /// never changes, and going to disk for it made every save parse the whole
     /// transcript to recover one integer.
     pub created: u64,
+    /// What this lane's finished runs have cost, in and out and in money.
+    /// Per lane, not per surface: with lanes working off-screen the surface
+    /// that shows the bill has to be able to say which lane ran it up.
+    pub totals: Totals,
+
     /// What the user calls this session, if anything.
     pub name: Option<String>,
     /// The instruction files this run stands on, named as a person would.
@@ -98,6 +108,16 @@ impl Lane {
                 _ => None,
             },
             _ => None,
+        }
+    }
+
+    /// A job has given this lane's transcript back, saying whether it wants
+    /// the prompt back too. The one place `Running` ends: a lane left in it
+    /// queues every later prompt and never drains.
+    pub fn finish(&mut self) -> bool {
+        match std::mem::replace(&mut self.turn, Turn::Idle) {
+            Turn::Running { unsend, .. } => unsend,
+            _ => false,
         }
     }
 

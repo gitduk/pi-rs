@@ -1,3 +1,6 @@
+// Kept here so the agent's public name (`agent::Totals`) survives the move:
+// the type now lives in `brain`, where `tools` can carry it on a `ToolOutput`.
+pub use brain::totals::Totals;
 use brain::stream::Usage;
 
 /// What the loop reports as it runs. A renderer consumes these; the loop never
@@ -63,32 +66,6 @@ pub enum Event {
         /// How many times the transcript was shrunk to fit during this run.
         compactions: usize,
     },
-}
-
-/// What a run has cost, per turn and in total.
-///
-/// The usage figures are the provider's own, verbatim: a field the host left
-/// out reads as zero, and a surface that shows a count treats that as "not
-/// reported", never as a real zero.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct Totals {
-    pub usage: Usage,
-    pub cost: f64,
-}
-
-impl Totals {
-    pub fn add(&mut self, usage: &Usage, cost: f64) {
-        self.usage.input += usage.input;
-        self.usage.output += usage.output;
-        self.usage.cache_read += usage.cache_read;
-        self.usage.cache_write += usage.cache_write;
-        self.cost += cost;
-    }
-
-    /// Fold another run's totals in whole.
-    pub fn merge(&mut self, other: &Self) {
-        self.add(&other.usage, other.cost);
-    }
 }
 
 /// Say it to the user, and to the journal, in that order and in one call.

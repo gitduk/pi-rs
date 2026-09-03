@@ -158,6 +158,14 @@ impl Tool for Bash {
             body.push_str(&format!("{}\n", s.note()));
         }
         if code != 0 {
+            if git_lock(&stderr) {
+                // Two lanes committing at once collide on shared `.git/*.lock`;
+                // the raw fatal reads as a broken repository, not a busy one.
+                body.push_str(
+                    "note: git could not take a `.lock` — another lane or process is writing \
+                     this repository; let it finish and retry\n",
+                );
+            }
             body.push_str(&format!("exit {code}\n"));
         }
         if body.is_empty() {
@@ -168,5 +176,26 @@ impl Tool for Bash {
         // structure, not text.
         let preview = args.command.split('\n').next().unwrap_or_default();
         Ok(ToolOutput::text(body).with_preview(preview))
+    }
+}
+
+/// Whether a failed run tripped over git's own locking.
+fn git_lock(stderr: &str) -> bool {
+    (stderr.contains(".lock") && stderr.contains("fatal"))
+        || stderr.contains("Another git process seems to be running")
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_git_lock_failure_is_recognised() {
+        let index = "fatal: Unable to create '/w/.git/index.lock': File exists.";
+        let head = "fatal: cannot lock ref 'HEAD': Unable to create '/w/.git/HEAD.lock': File exists.";
+        let other = "Another git process seems to be running in this repository";
+        let not = "fatal: not a git repository (or any of the parent directories): .git";
+        for busy in [index, head, other] {
+            assert!(super::git_lock(busy), "{busy}");
+        }
+        assert!(!super::git_lock(not));
     }
 }

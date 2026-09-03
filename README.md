@@ -273,11 +273,13 @@ and refusing it to catch a typo is the worse trade.
 
 ## What it does
 
-**Tools.** `read` `write` `edit` `glob` `grep` `bash` `skill`.
+**Tools.** `read` `write` `edit` `glob` `grep` `bash` `skill` `task`.
 Each declares a tier — read, write or exec — and `--tier` caps the run. Every
 path is resolved against the workspace root through the deepest existing
 ancestor, so a symlink cannot walk out. `bash` gets its own process group and a
-SIGTERM-then-SIGKILL timeout.
+SIGTERM-then-SIGKILL timeout. `--tools read,bash` restricts the model to that
+list; `task` (a subagent) and `skill` are tools like the rest, so an explicit
+list must name them to keep them.
 
 **Edits** are line-anchored patches with content-hash anchors, applied against
 original line numbers so an earlier hunk never shifts a later one. A stale

@@ -1123,15 +1123,15 @@ output_per_mtok = 0
         let k = c.key_map().unwrap();
         let press = crate::keys::parse;
         assert_eq!(
-            k.action(press("ctrl+g").unwrap(), false, false),
+            k.action(press("ctrl+g").unwrap(), crate::keys::Layers::default()),
             Some(crate::keys::Action::AppClearScreen)
         );
         assert_eq!(
-            k.action(press("f5").unwrap(), false, false),
+            k.action(press("f5").unwrap(), crate::keys::Layers::default()),
             Some(crate::keys::Action::MoveLineStart)
         );
         // Replaced, so the default it displaced is gone.
-        assert_eq!(k.action(press("ctrl+l").unwrap(), false, false), None);
+        assert_eq!(k.action(press("ctrl+l").unwrap(), crate::keys::Layers::default()), None);
     }
 
     #[test]

@@ -32,4 +32,5 @@ serde_path_to_error.workspace = true
 ratatui = "0.30.2"
 
 [dev-dependencies]
+async-trait.workspace = true
 tempfile = "3"
