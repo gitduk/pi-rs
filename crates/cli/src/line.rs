@@ -39,7 +39,21 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
         match core.command(line, &totals) {
             Step::Quit => break,
             Step::Bash(command) => {
-                for line in core.bash(&command, agent::cancel_on_interrupt()).await {
+                // Awaited in place: this surface has nothing else to serve
+                // while it runs, where the TUI spawns it and keeps drawing.
+                let ctx = core
+                    .lane_mut()
+                    .ctx
+                    .clone()
+                    .with_cancel(agent::cancel_on_interrupt());
+                let out = crate::repl::run_bash(&ctx, &command).await;
+                if let Some(session) = core.lane_mut().session.as_mut() {
+                    crate::repl::record_bash(session, &command, out.text);
+                }
+                if let Err(e) = core.save() {
+                    eprintln!("warning: the transcript was not saved: {e}");
+                }
+                for line in out.said {
                     println!("{line}");
                 }
             }

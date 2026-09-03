@@ -1624,6 +1624,16 @@ struct Done {
     /// and took its copy of the transcript down with it — one field, because
     /// those two are never separately absent.
     ran: Option<(Session, Result<Totals, AgentError>)>,
+    /// What a `!` command printed — and, by being `Some` at all, that it was
+    /// one. A turn is `None`: its output reached the view through the lane's
+    /// event channel as it happened.
+    ///
+    /// The distinction is load-bearing, not decoration. `Bridge` is one
+    /// accumulator for the whole surface, filled by whichever turn is
+    /// streaming and emptied only by `Event::TurnStart`; a `!` emits no
+    /// events, so letting one speak for the bridge flushes another lane's
+    /// half-written answer to the phone as though it were finished.
+    said: Option<Vec<String>>,
 }
 
 pub struct Tui {
@@ -1855,6 +1865,8 @@ impl Tui {
             let anywhere = self.core.lanes.iter().any(|lane| lane.is_running());
             // A queued line waits for the lane it was typed at to come free.
             let woke = if self.ui.view.queued.is_empty() || running {
+                // Every branch must be cancel-safe: a loser is dropped mid-poll.
+                // `recv()` and `tick()` are; a blocking read gets its own thread.
                 tokio::select! {
                     Some(done) = done_rx.recv() => Wake::Turn(done),
                     // Only while something is running: an idle loop waking ten
@@ -1982,57 +1994,7 @@ impl Tui {
             self.reconcile(was);
             match step {
                 Step::Quit => break,
-                Step::Bash(command) => {
-                    // The command runs off the key loop so Esc can stop it,
-                    // exactly as an agent turn can be interrupted.
-                    let cancel = CancellationToken::new();
-                    let lines = {
-                        let Self { core, ui, keys, bridge, .. } = &mut self;
-                        let run = core.bash(&command, cancel.clone());
-                        tokio::pin!(run);
-                        loop {
-                            ui.flush();
-                            tokio::select! {
-                                done = &mut run => break done,
-                                Some(key) = keys.recv() => match ui.key(key, true) {
-                                    // A `!` command has no prompt to take back,
-                                    // so unsending here is only a stop.
-                                    Act::Interrupt | Act::Unsend => {
-                                        cancel.cancel();
-                                        ui.view.stopping = true;
-                                    }
-                                    Act::Submit(line) => ui.view.queued.push(line),
-                                    // Nothing else can stop a command that will not stop.
-                                    Act::Quit => {
-                                        ui.screen.leave();
-                                        std::process::exit(130)
-                                    }
-                                    // Esc means interrupt while the run is in flight.
-                                    Act::OpenRewind | Act::Rewind(_) | Act::NewSession => {}
-                                    Act::CommitSetting(..) => {}
-                                    Act::None => {}
-                                },
-                                msg = bridge.rx.recv() => match msg {
-                                    Some(crate::wechat::Inbound::Stop) => {
-                                        cancel.cancel();
-                                        ui.view.stopping = true;
-                                    }
-                                    Some(crate::wechat::Inbound::Text { text }) => {
-                                        ui.view.queued.push(text);
-                                    }
-                                    Some(crate::wechat::Inbound::Notice(text)) => {
-                                        ui.say(text);
-                                    }
-                                    None => {}
-                                },
-                            }
-                        }
-                    };
-                    self.ui
-                        .view
-                        .scrollback
-                        .extend(lines.into_iter().map(Row::notice));
-                }
+                Step::Bash(command) => self.start_bash(command, &done_tx),
                 Step::Swap(said) => self.land_swap(said),
                 Step::Handled(lines) => land_handled(&mut self.ui, &self.core, lines),
                 Step::Compact(focus) => {
@@ -2183,8 +2145,10 @@ impl Tui {
     /// serve the other lanes — including this one after the screen moves on.
     fn start_turn(&mut self, prompt: String, typed: Option<String>, done: &UnboundedSender<Done>) {
         // Lent to the run for the length of the turn. A lane with a run under
-        // way refuses another, so it is never away when one begins.
+        // way refuses another, so the only way it is missing here is the lane
+        // whose transcript a panic took and whose archive would not read back.
         let Some(mut carried) = self.core.lane_mut().session.take() else {
+            self.ui.say("this checkout has no transcript — /new or /resume first");
             return;
         };
         carried.send_prompt(prompt, typed);
@@ -2217,6 +2181,7 @@ impl Tui {
             let _ = done.send(Done {
                 lane,
                 ran: out.ok().map(|out| (carried, out)),
+                said: None,
             });
         });
         self.core.lane_mut().turn = Turn::Running {
@@ -2225,6 +2190,53 @@ impl Tui {
         };
     }
 
+    /// Run a `!` command the way a turn runs: off the loop, so the screen stays
+    /// live and the lane can be left to it.
+    ///
+    /// It borrows the transcript like a turn, and for the same reason: the
+    /// result is filed in it, and nothing else may replace it meanwhile.
+    fn start_bash(&mut self, command: String, done: &UnboundedSender<Done>) {
+        let Some(mut carried) = self.core.lane_mut().session.take() else {
+            self.ui.say("this checkout has no transcript — /new or /resume first");
+            return;
+        };
+        let cancel = CancellationToken::new();
+        let ctx = self.core.lane_mut().ctx.clone().with_cancel(cancel.clone());
+        self.ui.view.started = Some(Instant::now());
+        // Load-bearing: it forecloses `Intent::Unsend`, the only writer of
+        // `Turn::Running.unsend`, which a `!` has no prompt to honour.
+        self.ui.view.committed = true;
+        self.ui.view.stopping = false;
+        // A shell command spends nothing. Left alone, the line it now shows
+        // would carry the last turn's tokens for as long as this one runs.
+        self.ui.view.settled = Usage::default();
+        self.ui.view.turn = Usage::default();
+        self.ui.view.compactions = 0;
+
+        let lane = self.core.current;
+        let done = done.clone();
+        tokio::spawn(async move {
+            // Caught for the reason a turn's panic is: the task holds the whole
+            // transcript, and a lane whose run never reports stays "working".
+            let out = std::panic::AssertUnwindSafe(async move {
+                let out = crate::repl::run_bash(&ctx, &command).await;
+                crate::repl::record_bash(&mut carried, &command, out.text);
+                (carried, out.said)
+            })
+            .catch_unwind()
+            .await;
+            let (ran, said) = match out {
+                // No tokens spent, so no totals to report; the output is `said`.
+                Ok((carried, said)) => (Some((carried, Ok(Totals::default()))), Some(said)),
+                Err(_) => (None, Some(Vec::new())),
+            };
+            let _ = done.send(Done { lane, ran, said });
+        });
+        self.core.lane_mut().turn = Turn::Running {
+            cancel,
+            unsend: false,
+        };
+    }
     /// A turn has ended. Put the transcript back and save it, whichever lane it
     /// belongs to; show the end of it only when that lane is the one on screen.
     ///
@@ -2236,7 +2248,7 @@ impl Tui {
         // waiting before closing anything, or a tool row still open is frozen
         // as abandoned and the elapsed figure is read off a cleared clock.
         self.serve_lanes().await;
-        let Done { lane, ran } = done;
+        let Done { lane, ran, said } = done;
         let unsend = match self.core.lanes.get_mut(lane) {
             Some(held) => match std::mem::replace(&mut held.turn, Turn::Idle) {
                 Turn::Running { unsend, .. } => unsend,
@@ -2266,12 +2278,19 @@ impl Tui {
                         );
                         (true, Err(AgentError::Cancelled))
                     }
-                    // Nothing to go back to and nothing safe to write: what a
-                    // panic in the run did before it had a task to happen in.
+                    // Nothing to go back to and nothing safe to write. The
+                    // lane stays without a transcript and refuses work until
+                    // `/new` or `/resume` gives it one — where exiting here
+                    // would take every other lane's unsaved run with it.
                     Err(why) => {
-                        self.ui.screen.leave();
-                        eprintln!("the run did not finish, and the transcript could not be read back: {why}");
-                        std::process::exit(70);
+                        self.say_of(
+                            lane,
+                            format!(
+                                "the run did not finish and its transcript could not be read \
+                                 back ({why}) — /new or /resume to use this checkout again"
+                            ),
+                        );
+                        (false, Err(AgentError::Cancelled))
                     }
                 }
             }
@@ -2290,11 +2309,22 @@ impl Tui {
         self.refresh_sessions();
 
         let cancelled = matches!(&out, Err(AgentError::Cancelled));
-        if lane == self.core.current {
+        if said.is_none() && lane == self.core.current {
             self.bridge.finish_turn(cancelled).await;
         }
         if let Ok(totals) = &out {
             self.totals.merge(totals);
+        }
+
+        // A `!` command's output comes home whole rather than as events, so
+        // this is the only place it can reach the view that asked for it.
+        if let Some(said) = said.filter(|lines| !lines.is_empty()) {
+            let rows = said.into_iter().map(Row::notice);
+            if lane == self.core.current {
+                self.ui.view.scrollback.extend(rows);
+            } else if let Some(Some(view)) = self.ui.parked.get_mut(lane) {
+                view.scrollback.extend(rows);
+            }
         }
 
         // Out of sight: what the run left to draw waits with it, and the lane

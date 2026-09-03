@@ -3,7 +3,6 @@ use std::collections::BTreeMap;
 
 use agent::session::Session;
 use agent::Totals;
-use tokio_util::sync::CancellationToken;
 use tools::skills::Skill;
 use tools::{Tool, ToolError};
 
@@ -1028,8 +1027,8 @@ pub enum Rewound {
 }
 
 pub enum Step {
-    /// A `!` command to run. The surface executes it and records the result,
-    /// because only it can await; `Repl::bash` does the actual work.
+    /// A `!` command to run. The surface runs and records it, because only it
+    /// can await; `run_bash` does the work and `record_bash` files it.
     Bash(String),
     /// What to send, and — when a skill expanded into it — the line that was
     /// typed. `rewind_nodes()` reads the second: a rewind menu offering four
@@ -1491,56 +1490,66 @@ impl Repl {
         let stored = self.store.load(id).map_err(|e| refused("resume", e))?;
         Ok(self.adopt_session(stored))
     }
+}
 
-    /// Run what `!` named: show the output, and record the command and its
-    /// result in the transcript so the model answers with it in view. Same
-    /// runner, workspace and timeout as the model's own `bash` tool. The
-    /// surface hands in a token so Ctrl-C (line mode) or Esc (terminal) can
-    /// stop the command instead of leaving the caller stuck for the timeout.
-    pub async fn bash(&mut self, command: &str, cancel: CancellationToken) -> Vec<String> {
-        let ctx = self.lane_mut().ctx.clone().with_cancel(cancel);
-        let out = tools::bash::Bash
-            .execute(serde_json::json!({ "command": command }), &ctx)
-            .await;
-        let out = match out {
-            Ok(out) => out,
-            Err(ToolError::Cancelled) => return vec!["cancelled".into()],
-            Err(e) => return vec![format!("failed to run `{command}`: {e}")],
-        };
-        let body = out.flatten();
-        let text = format!(
+/// What a `!` command left behind, kept apart because the two are easy to
+/// confuse: one is written to the transcript, the other drawn on the screen.
+pub struct Bashed {
+    /// What the model reads: the command *and* its output.
+    ///
+    /// Storing only the command left the rebuilt scrollback printing
+    /// `Ran \`git status\`` as a prompt with the output indented under it —
+    /// the live path never did that, because it had the typed line.
+    pub text: String,
+    /// What the terminal shows, the wrapper tags dropped.
+    pub said: Vec<String>,
+}
+
+/// Run what `!` named. Same runner, workspace and timeout as the model's own
+/// `bash` tool; `ctx` carries the token that lets Esc stop it.
+///
+/// Free of `Repl` so the surface can spawn it: holding `&mut Repl` across the
+/// await pinned the whole loop, which is what left the `!` path with an event
+/// loop of its own. Recording the result is the caller's, and needs no await.
+pub async fn run_bash(ctx: &tools::Ctx, command: &str) -> Bashed {
+    let only = |line: String| Bashed {
+        text: String::new(),
+        said: vec![line],
+    };
+    let out = match tools::bash::Bash
+        .execute(serde_json::json!({ "command": command }), ctx)
+        .await
+    {
+        Ok(out) => out,
+        Err(ToolError::Cancelled) => return only("cancelled".into()),
+        Err(e) => return only(format!("failed to run `{command}`: {e}")),
+    };
+    let body = out.flatten();
+    Bashed {
+        text: format!(
             "Ran `{command}`\n{}",
-            if body.is_empty() {
-                "(no output)"
-            } else {
-                &body
-            }
-        );
-        // What the model reads is the command *and its output*; what the
-        // screen shows is the line the user typed. Storing only the first left
-        // the rebuilt scrollback printing `Ran \`git status\`` as a prompt,
-        // with the output indented under it — the live path never did that,
-        // because it had the typed line and the rebuild did not.
-        // `!` is queued while a run has the transcript, so it lands here with
-        // the session at home.
-        if let Some(session) = &mut self.lane_mut().session {
-            session.push_user(agent::session::UserBody::Aside(agent::session::UserText {
-                text,
-                shown: Some(format!("!{command}")),
-            }));
-        }
-        let mut said: Vec<String> = body
+            if body.is_empty() { "(no output)" } else { &body }
+        ),
+        said: body
             .lines()
-            // The tags wrap the model's copy; the terminal shows the output
-            // itself.
             .filter(|l| !matches!(*l, "<stdout>" | "</stdout>" | "<stderr>" | "</stderr>"))
             .map(str::to_string)
-            .collect();
-        if let Err(e) = self.save() {
-            said.push(format!("warning: the transcript was not saved: {e}"));
-        }
-        said
+            .collect(),
     }
+}
+
+/// File a finished `!` command in the transcript.
+///
+/// `text` empty means it never ran — cancelled, or the runner refused — and
+/// there is nothing the model should answer with in view.
+pub fn record_bash(session: &mut Session, command: &str, text: String) {
+    if text.is_empty() {
+        return;
+    }
+    session.push_user(agent::session::UserBody::Aside(agent::session::UserText {
+        text,
+        shown: Some(format!("!{command}")),
+    }));
 }
 
 // A secret value as a change line shows it: set or unset, never the value.
