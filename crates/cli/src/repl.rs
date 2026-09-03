@@ -2,16 +2,16 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use agent::session::Session;
-use agent::{Agent, Totals};
-use tokio_util::sync::CancellationToken;
+use agent::Totals;
 use tools::skills::Skill;
-use tools::{Ctx, Tool, ToolError};
+use tools::{Tool, ToolError};
 
 use serde::Deserialize;
 
 use crate::config::Config;
 use crate::journal;
-use crate::session::{ResumeChoice, Store};
+use crate::lane::Lane;
+use crate::session::{ResumeChoice, Store, Stored};
 
 /// Where a command came from, and so what running it means.
 #[derive(Clone)]
@@ -85,7 +85,6 @@ const BUILTIN: &[Command] = &[
         "[focus]",
         "summarize everything but what you are working on now",
     ),
-    Command::builtin("/todo", "", "show the current plan"),
     Command::builtin("/cost", "", "what this session has spent so far"),
     Command::builtin(
         "/reload",
@@ -335,16 +334,11 @@ const RESUME_WIDTH: usize = 60;
 /// Both surfaces hold one of these and differ only in how they read a line and
 /// where they put what comes back.
 pub struct Repl {
-    pub agent: Agent,
     pub store: Store,
-    pub session: Session,
-    pub id: String,
-    /// When this session began. Held rather than read back: it is set once and
-    /// never changes, and going to disk for it made every save parse the whole
-    /// transcript to recover one integer.
-    pub created: u64,
-    /// What the user calls this session, if anything.
-    pub name: Option<String>,
+    /// What subagents have spent, waiting to be counted. They run inside a
+    /// tool call, so their tokens are not in the run's own figures — and D5
+    /// says an uncounted run is the one thing that cannot be tolerated.
+    pub subagents: std::sync::Arc<std::sync::Mutex<agent::Totals>>,
     /// Held so `/keys` can show what is actually in force, overrides included.
     pub keys: std::sync::Arc<crate::keys::Keys>,
     /// The config in force, as opposed to the one on disk. `/model` picks from
@@ -353,10 +347,6 @@ pub struct Repl {
     /// The command line, kept because it outranks the config and so has to be
     /// re-applied over every reload.
     pub args: std::sync::Arc<crate::Args>,
-    /// The instruction files this run stands on, named as a person would.
-    /// Shown under the banner; rebuilt by `/reload` like everything else the
-    /// config decides.
-    pub context: Vec<String>,
     /// What a slash answers to, built-ins and skills together. Rebuilt by
     /// `/reload`, because a skill can appear between one turn and the next.
     ///
@@ -370,11 +360,42 @@ pub struct Repl {
     /// What `/settings set` has claimed this run, by path. Replayed over
     /// every reload so the claimed values keep winning over the file.
     pub claimed: BTreeMap<String, toml::Value>,
-    /// Carried across turns: the plan and the file locks outlive any one run.
-    pub ctx: Ctx,
-    /// Which worktree the session is in, or None in the repository's own
-    /// checkout. Held so the status line can say where the work is landing.
-    pub worktree: Option<String>,
+    /// Every checkout open in this run, in the order they were opened. The
+    /// main one is first, because that is where a run starts.
+    pub lanes: Vec<Lane>,
+    /// Which of them is in front. The surface shows one at a time.
+    pub current: usize,
+}
+
+impl Repl {
+    /// Put the lane in front's key map and command table in force. A skill
+    /// belongs to one tree and not another, and so does a rebound key; leaving
+    /// the last lane's in place had this one answering to another tree's.
+    fn in_force(&mut self) {
+        self.keys = self.lane().keys.clone();
+        self.commands = self.lane().commands.clone();
+    }
+
+    /// The checkout in front. Indexing is safe by construction: `lanes` is
+    /// never empty and nothing removes from it, so `current` always names one.
+    pub fn lane(&self) -> &Lane {
+        &self.lanes[self.current]
+    }
+
+    /// Where a subagent started in this lane files what it did and what it
+    /// spent. Root and model vary — a `/worktree` moves one, a `/model` the
+    /// other — and the rest never does.
+    fn home(
+        &self,
+        root: std::path::PathBuf,
+        model: String,
+    ) -> std::sync::Arc<dyn agent::task::Home> {
+        crate::subagent::Filed::armed(self.store.clone(), root, model, self.subagents.clone())
+    }
+
+    pub fn lane_mut(&mut self) -> &mut Lane {
+        &mut self.lanes[self.current]
+    }
 }
 
 impl Repl {
@@ -388,7 +409,7 @@ impl Repl {
     /// when nothing is applied.
     ///
     /// What the session owns is untouched by construction: the transcript, the
-    /// plan, the name, the history, the model. Only what the config decides is
+    /// name, the history, the model. Only what the config decides is
     /// replaced.
     pub fn reload(&mut self) -> Vec<String> {
         // Re-read the file tree; the claimed overrides stay.
@@ -416,38 +437,34 @@ impl Repl {
     /// and swap it in. Whole or not at all — nothing is touched until all of
     /// it has been computed. `/reload` reads the file first; `/settings`
     /// hands over a tree it has just edited.
-    fn adopt(
-        &mut self,
-        config: Config,
-        into: Option<tools::Workspace>,
-    ) -> Result<Vec<String>, String> {
-        let root = into
-            .as_ref()
-            .map_or(self.ctx.workspace.root(), |ws| ws.root())
-            .to_path_buf();
+    fn adopt(&mut self, config: Config) -> Result<Vec<String>, String> {
+        let root = self.lane().ctx.workspace.root().to_path_buf();
         let failed = |e| Err(format!("nothing reloaded — {}", refused("reload", e)));
         let project = match crate::config::load_project(&root) {
             Ok(p) => p,
             Err(e) => return failed(e),
         };
-        let resolved = match crate::resolve(&self.args, &root, &config, &project, &self.claimed) {
+        let mut resolved = match crate::resolve(&self.args, &root, &config, &project, &self.claimed) {
             Ok(r) => r,
             Err(e) => return failed(e),
         };
-        // Only here, with everything computed: a workspace whose config or
-        // skills will not resolve leaves the session where it already was.
-        if let Some(ws) = into {
-            self.ctx.relocate(ws);
-        }
-        self.agent.registry = resolved.registry;
-        self.agent.approver = std::sync::Arc::new(agent::Ceiling(resolved.tier));
-        self.agent.system = resolved.system;
-        self.agent.effort = resolved.effort;
-        self.context = resolved.context;
-        self.keys = std::sync::Arc::new(resolved.keys);
+        // Only here, with everything computed: a config or a skill set that
+        // will not resolve leaves what is running exactly as it was.
+        //
+        // One `make_mut`: a run in flight holds the other reference, so this
+        // is where the copy is taken, and taking it four times copies thrice
+        // over.
+        let home = self.home(root.clone(), self.lane().agent.spec.model.clone());
+        let ag = std::sync::Arc::make_mut(&mut self.lane_mut().agent);
+        crate::arm(ag, &mut resolved, home);
+        self.lane_mut().context = resolved.context;
+        self.lane_mut().standing = resolved.standing;
         // A skill can appear between one turn and the next, so the table of
-        // what a slash answers to is recomputed like everything else here.
-        self.commands = std::sync::Arc::new(resolved.commands);
+        // what a slash answers to is recomputed like everything else here —
+        // onto the lane it belongs to, then into force.
+        self.lane_mut().keys = std::sync::Arc::new(resolved.keys);
+        self.lane_mut().commands = std::sync::Arc::new(resolved.commands);
+        self.in_force();
         // The running model is deliberately not re-dialled: a reload re-reads
         // preferences, and which model this session is on was a decision, not a
         // preference. `/model` is how that one changes.
@@ -460,11 +477,11 @@ impl Repl {
         match crate::dial(
             &self.args,
             &self.config,
-            &self.agent.spec.model,
+            &self.lane().agent.spec.model,
             crate::config::Origin::Command,
         ) {
-            Ok(dialled) if dialled.spec != self.agent.spec => {
-                self.agent.retarget(dialled.transport, dialled.spec);
+            Ok(dialled) if dialled.spec != self.lane().agent.spec => {
+                self.retarget(dialled.transport, dialled.spec);
                 notes.extend(
                     dialled
                         .notes
@@ -479,7 +496,7 @@ impl Repl {
             Ok(_) => {}
             Err(e) => notes.push(format!(
                 "`{}` not re-dialled — {}",
-                self.agent.spec.model, e
+                self.lane_mut().agent.spec.model, e
             )),
         }
         tracing::info!(
@@ -487,8 +504,8 @@ impl Repl {
             models = self.config.names().len(),
             rebound_keys = self.config.keys.len(),
             commands = self.commands.len(),
-            effort = ?self.agent.effort,
-            system_bytes = self.agent.system.len(),
+            effort = ?self.lane().agent.effort,
+            system_bytes = self.lane().agent.system.len(),
             "reloaded"
         );
         Ok(notes)
@@ -497,12 +514,11 @@ impl Repl {
     /// Recompute the config from the file tree plus the session's claimed
     /// overrides, and adopt it.
     fn rebuild(&mut self) -> Vec<String> {
-        self.rebuild_into(None).unwrap_or_else(|why| vec![why])
+        self.rebuilt().unwrap_or_else(|why| vec![why])
     }
 
-    /// The same, moving the session to another workspace as part of it. The
-    /// move lands only if everything the new root decides resolves.
-    fn rebuild_into(&mut self, into: Option<tools::Workspace>) -> Result<Vec<String>, String> {
+    /// The same, saying why when nothing could be adopted.
+    fn rebuilt(&mut self) -> Result<Vec<String>, String> {
         let mut tree = self.file.clone();
         for (path, value) in &self.claimed {
             if let Err(e) = crate::settings::put(&mut tree, path, value.clone()) {
@@ -513,7 +529,7 @@ impl Repl {
             Ok(c) => c,
             Err(e) => return Err(refused("settings", anyhow::anyhow!(e))),
         };
-        self.adopt(config, into)
+        self.adopt(config)
     }
 
     /// `/settings set`: try the write on a scratch tree first, so a bad value
@@ -613,7 +629,7 @@ impl Repl {
         ) {
             Ok(d) => d,
             Err(e) => {
-                let held = self.agent.spec.model.clone();
+                let held = self.lane_mut().agent.spec.model.clone();
                 return vec![format!("still on {held} — {}", refused("switch", e))];
             }
         };
@@ -622,8 +638,8 @@ impl Repl {
         // lands on need not be the same string. Comparing the typed one would
         // re-dial the model already running and then announce a reasoning
         // demotion that never happened.
-        if dialled.spec.model == self.agent.spec.model {
-            return vec![format!("already on {}", self.agent.spec.model)];
+        if dialled.spec.model == self.lane_mut().agent.spec.model {
+            return vec![format!("already on {}", self.lane_mut().agent.spec.model)];
         }
         let mut said: Vec<String> = dialled.warning.into_iter().chain(dialled.notes).collect();
         let spec = &dialled.spec;
@@ -632,24 +648,42 @@ impl Repl {
             spec.model,
             summary(spec.format.name(), spec.context_window, &spec.pricing)
         ));
-        if carries_reasoning(&self.session) {
+        // An absent transcript is one a run has, and it is writing this
+        // model's reasoning into it as we speak — so say it either way.
+        if self.lane_mut().session.as_ref().is_none_or(carries_reasoning) {
             said.push(demotion(spec.replay_thinking).into());
         }
         tracing::info!(
             target: "pi::session",
-            from = %self.agent.spec.model,
+            from = %self.lane_mut().agent.spec.model,
             to = %spec.model,
             format = spec.format.name(),
             context_window = spec.context_window,
             "model switched"
         );
-        self.agent.retarget(dialled.transport, dialled.spec);
+        self.retarget(dialled.transport, dialled.spec);
         said
+    }
+
+    /// Point this lane at a new endpoint, and rebuild the subagent behind it.
+    ///
+    /// `Task` holds a snapshot of the agent it was built from, so a retarget
+    /// that stopped at the lane would leave the child on the old provider —
+    /// with the old key — while the status line named the new model.
+    fn retarget(&mut self, transport: std::sync::Arc<dyn brain::Transport>, spec: brain::ModelSpec) {
+        let home = self.home(
+            self.lane().ctx.workspace.root().to_path_buf(),
+            spec.model.clone(),
+        );
+        let standing = self.lane().standing.clone();
+        let ag = std::sync::Arc::make_mut(&mut self.lane_mut().agent);
+        ag.retarget(transport, spec);
+        crate::hang(ag, home, &standing);
     }
 
     /// What `/model` on its own shows.
     fn listing(&self) -> Vec<String> {
-        let here = &self.agent.spec.model;
+        let here = &self.lane().agent.spec.model;
         let choices = self.choices();
         if choices.is_empty() {
             return vec![
@@ -670,15 +704,52 @@ impl Repl {
     /// Save the transcript. Called after every turn: an interrupted one is
     /// exactly the one worth keeping.
     pub fn save(&self) -> anyhow::Result<()> {
+        self.save_lane(self.current)
+    }
+
+    /// The same for a lane that is not in front: a run that ended out of sight
+    /// still has to reach disk, and it is not the screen's turn that decides.
+    pub fn save_lane(&self, at: usize) -> anyhow::Result<()> {
+        // Away with a run, which saves it itself on the way back.
+        let Some(lane) = self.lanes.get(at) else {
+            return Ok(());
+        };
+        let Some(session) = &lane.session else {
+            return Ok(());
+        };
         self.store.save(
-            &self.id,
-            self.ctx.workspace.root(),
-            &self.agent.spec.model,
-            self.name.as_deref(),
-            self.created,
-            &self.session,
+            &lane.id,
+            lane.ctx.workspace.root(),
+            &lane.agent.spec.model,
+            lane.name.as_deref(),
+            lane.created,
+            session,
         )?;
         Ok(())
+    }
+
+    /// Shrink the transcript, or None when there was nothing to shrink — and
+    /// likewise when a run has it, which is why `/compact` is refused then.
+    ///
+    /// Here rather than at each surface: both asked the agent directly, and
+    /// both had to reach past the lane for the session to do it.
+    pub async fn compact_now(
+        &mut self,
+        focus: Option<&str>,
+    ) -> Option<(agent::compact::Report, Totals)> {
+        // One borrow of the lane, two of its fields: they are disjoint, and
+        // asking twice would not be.
+        let lane = self.lane_mut();
+        let session = lane.session.as_mut()?;
+        lane.agent.compact_now(session, focus).await
+    }
+
+    /// What the transcript occupies now, for the line that says why there was
+    /// nothing to compact. Zero while a run has it.
+    pub fn tokens_now(&self) -> usize {
+        self.lane().session.as_ref().map_or(0, |s| {
+            brain::estimate::tokens(&s.context(), &self.lane().agent.spec)
+        })
     }
 
     /// Rewind the conversation to an entry and write the shorter transcript
@@ -688,10 +759,15 @@ impl Repl {
     /// pairing wrong, and a menu row that went stale against the transcript
     /// falls through to removing nothing.
     pub fn rewind_to(&mut self, entry: agent::session::EntryId) -> anyhow::Result<Rewound> {
-        let unsent = self.session.unsent_text(entry);
+        // A rewind is refused while a run has the transcript, so this is the
+        // idle path; without it there is nothing to go back through.
+        let Some(session) = &mut self.lane_mut().session else {
+            return Ok(Rewound::Nothing);
+        };
+        let unsent = session.unsent_text(entry);
         let removed = match unsent {
-            Some(_) => self.session.rollback_before(entry),
-            None => self.session.rollback_to(entry),
+            Some(_) => session.rollback_before(entry),
+            None => session.rollback_to(entry),
         };
         if removed == 0 {
             return Ok(Rewound::Nothing);
@@ -750,37 +826,148 @@ fn carries_reasoning(session: &agent::session::Session) -> bool {
     })
 }
 
-/// What a line at the prompt asks for.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Cmd {
-    Exit,
+/// What an input asked the loop to do, whatever it arrived as.
+///
+/// One vocabulary for the keyboard, the phone and a typed line, so the same
+/// intent gets the same answer however it was expressed.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Intent {
+    /// Nothing for the loop: the press changed only what `Ui` owns.
+    None,
+    /// A line the user submitted, not yet read. The one raw variant, because
+    /// the screen echoes the text and the queue holds it — parsing it at the
+    /// door would throw away what both of them need. `read` says what it is.
+    Submit(String),
+
+    // What `read` makes of a submitted line.
+    /// Prose for the model.
+    Prompt(String),
+    /// What `!` named.
+    Bash(String),
     Help,
-    Todo,
-    Cost,
-    New,
     Keys,
-    Reload,
     Log,
+    Cost,
+    Reload,
+    Name(String),
     /// The session to switch to, or empty to list what there is.
     Resume(String),
-    Name(String),
     /// Everything after the word focuses the summary.
     Compact(String),
     /// The name to move to, or empty to list what there is.
     Model(String),
-    /// The worktree to work in, or empty to list what there is.
+    /// The name to work in, or empty to list what there is.
     Worktree(String),
-    /// Everything after the word: a `set <path> <value>`, `get <path>`,
-    /// `reset [path]`, or empty to open the panel.
+    /// A `set <path> <value>`, `get <path>`, `reset [path]`, or empty to open
+    /// the panel.
     Settings(String),
-    /// The wechat bridge verb: "" = status, "on" = connect, "off" = disconnect.
+    /// The wechat verb: "" = status, "on" = connect, "off" = disconnect.
     Wechat(String),
     /// Not a built-in word. It may name a skill and it may name nothing; the
-    /// command table settles that, and `parse` does not have it.
-    Other {
-        word: String,
-        args: String,
-    },
+    /// command table settles that, and `read` does not have it.
+    Other { word: String, args: String },
+    /// `/new`, and `ctrl+l` twice: a fresh session, the old one kept on disk,
+    /// and the screen rebuilt from the empty one. One variant, because they
+    /// are one intent however it was expressed.
+    New,
+    // Only a key can ask for these: there is no line that says them.
+    /// The rewind selector wants everywhere the session can go back to.
+    OpenRewind,
+    /// A row chosen from the rewind selector: the conversation rewinds there,
+    /// and what the row was decides whether it is kept or unsent.
+    Rewind(agent::session::EntryId),
+    /// The settings panel submitted an edited value.
+    CommitSetting(String, String),
+    /// `ctrl+o`: the checkouts, open or not, to pick one from.
+    OpenPicker,
+    /// Esc caught a prompt on its way out: stop the run, then unsend it.
+    Unsend,
+    /// Leave now — `/exit`, `/quit`, `ctrl+d`, a double `ctrl+c`. One intent,
+    /// so the four of them cannot answer differently.
+    Quit,
+
+    // A key or the phone.
+    Interrupt,
+}
+
+
+/// What a line may do while a turn is in flight.
+///
+/// Read off the parsed command rather than off the `Step` it produces:
+/// `command` has already had its effect by the time it hands one back, so a
+/// `Step` can say what happened but never whether it should have.
+#[derive(Debug)]
+pub enum Fate {
+    /// Touches nothing the run is standing on.
+    Now,
+    /// Goes to the model, or needs the surface free, so it waits.
+    Queued,
+    /// Would move what the run stands on. Says this rather than doing it.
+    Refused(&'static str),
+}
+
+
+impl Intent {
+    /// Exhaustive on purpose, with no catch-all arm: an intent added without an
+    /// answer here should fail to compile rather than default to one.
+    ///
+    /// What it cannot check is an existing arm's body: `Reload` and `Model` are
+    /// `Now` because they write through `Arc::make_mut`, not because anything
+    /// says so. An arm that starts reading `lane.session` breaks this quietly —
+    /// the session is away for the length of a run.
+    pub fn fate(&self) -> Fate {
+        match self {
+            // Answered from the config, the key map or the surface's own
+            // totals — none of which the run is holding.
+            Intent::Help | Intent::Keys | Intent::Log | Intent::Cost | Intent::Name(_) => Fate::Now,
+            // Both write through `Arc::make_mut`, so the run in flight keeps
+            // the agent it started on and the next one picks up the change.
+            Intent::Reload | Intent::Model(_) => Fate::Now,
+            // Bare, these only list what there is.
+            Intent::Resume(name) | Intent::Worktree(name) if name.trim().is_empty() => Fate::Now,
+            Intent::Resume(_) => Fate::Refused(
+                "/resume would replace the transcript this run is writing — esc first",
+            ),
+            // A lane of its own to move to, and the one being left keeps
+            // working in the tree it was already in.
+            Intent::Worktree(_) => Fate::Now,
+            Intent::New => Fate::Refused(
+                "/new would replace the transcript this run is writing — esc first",
+            ),
+            Intent::Compact(_) => Fate::Refused(
+                "/compact rewrites the transcript this run is writing — esc first",
+            ),
+            // `set`/`get`/`reset` are lines; bare opens a panel, which wants
+            // the surface to itself.
+            Intent::Settings(rest) if !rest.trim().is_empty() => Fate::Now,
+            Intent::Settings(_) => Fate::Queued,
+            // A skill is a prompt, and the bridge wants the surface.
+            Intent::Wechat(_) | Intent::Other { .. } => Fate::Queued,
+            // Prose waits for the run that is already talking to the model.
+            Intent::Prompt(_) => Fate::Queued,
+            // A `!` files its result in the transcript, which the run has.
+            Intent::Bash(_) => Fate::Queued,
+            // The raw variant: its fate is the fate of what it turns out to be.
+            // `read` never answers `Submit`, so this ends.
+            Intent::Submit(line) => read(line).fate(),
+            // A menu over the checkouts touches neither the transcript nor the
+            // run: being able to open it mid-run is the point of it.
+            Intent::OpenPicker => Fate::Now,
+            // Both reach for the transcript, and the run is holding it.
+            Intent::OpenRewind | Intent::Rewind(_) => Fate::Refused(
+                "rewinding needs the transcript this run is writing — esc first",
+            ),
+            // Writes the settings file and rebuilds through `Arc::make_mut`,
+            // like `/settings set`, which is the same act from a panel.
+            Intent::CommitSetting(..) => Fate::Now,
+            // Guarded where they land rather than here: `stop_current` acts
+            // only on a lane that is actually running.
+            Intent::Interrupt | Intent::Unsend => Fate::Now,
+            // Leaving is never refused: a hung run must not trap the user.
+            Intent::Quit => Fate::Now,
+            Intent::None => Fate::Now,
+        }
+    }
 }
 
 // Slash commands are recognized before anything reaches the model, so a line
@@ -863,7 +1050,7 @@ fn dispatch(commands: &[Command], word: &str, args: &str) -> Step {
 /// mistake for an unrecoverable one. The model can ask what `/comit` meant; a
 /// user whose sentence was rejected has to reword it.
 pub fn expand(commands: &[Command], line: &str) -> Option<Result<String, String>> {
-    let Cmd::Other { word, args } = parse(line)? else {
+    let Intent::Other { word, args } = read(line) else {
         return None;
     };
     Some(expanded(skill_for(commands, &word)?, &args))
@@ -879,32 +1066,40 @@ fn bash_command(line: &str) -> Option<&str> {
     (!cmd.is_empty()).then_some(cmd)
 }
 
-pub fn parse(line: &str) -> Option<Cmd> {
-    let word = line.split_whitespace().next()?;
-    if !word.starts_with('/') {
-        return None;
+/// What a submitted line is asking for. Total on purpose: every line means
+/// something, and a line naming no command is prose for the model.
+///
+/// `!` is read before the slash words, because a shell command is not one.
+pub fn read(line: &str) -> Intent {
+    if let Some(command) = bash_command(line) {
+        return Intent::Bash(command.to_string());
     }
-    Some(match word {
-        "/exit" | "/quit" => Cmd::Exit,
-        "/help" => Cmd::Help,
-        "/todo" => Cmd::Todo,
-        "/cost" => Cmd::Cost,
-        "/new" => Cmd::New,
-        "/resume" => Cmd::Resume(rest(line)),
-        "/keys" => Cmd::Keys,
-        "/reload" => Cmd::Reload,
-        "/log" => Cmd::Log,
-        "/name" => Cmd::Name(rest(line)),
-        "/compact" => Cmd::Compact(rest(line)),
-        "/model" => Cmd::Model(rest(line)),
-        "/worktree" => Cmd::Worktree(rest(line)),
-        "/wechat" => Cmd::Wechat(rest(line)),
-        "/settings" => Cmd::Settings(rest(line)),
-        other => Cmd::Other {
+    let Some(word) = line.split_whitespace().next() else {
+        return Intent::Prompt(line.to_string());
+    };
+    if !word.starts_with('/') {
+        return Intent::Prompt(line.to_string());
+    }
+    match word {
+        "/exit" | "/quit" => Intent::Quit,
+        "/help" => Intent::Help,
+        "/cost" => Intent::Cost,
+        "/new" => Intent::New,
+        "/resume" => Intent::Resume(rest(line)),
+        "/keys" => Intent::Keys,
+        "/reload" => Intent::Reload,
+        "/log" => Intent::Log,
+        "/name" => Intent::Name(rest(line)),
+        "/compact" => Intent::Compact(rest(line)),
+        "/model" => Intent::Model(rest(line)),
+        "/worktree" => Intent::Worktree(rest(line)),
+        "/wechat" => Intent::Wechat(rest(line)),
+        "/settings" => Intent::Settings(rest(line)),
+        other => Intent::Other {
             word: other.to_string(),
             args: rest(line),
         },
-    })
+    }
 }
 
 // Whatever followed the command word.
@@ -926,8 +1121,8 @@ pub enum Rewound {
 }
 
 pub enum Step {
-    /// A `!` command to run. The surface executes it and records the result,
-    /// because only it can await; `Repl::bash` does the actual work.
+    /// A `!` command to run. The surface runs and records it, because only it
+    /// can await; `run_bash` does the work and `record_bash` files it.
     Bash(String),
     /// What to send, and — when a skill expanded into it — the line that was
     /// typed. `rewind_nodes()` reads the second: a rewind menu offering four
@@ -982,29 +1177,38 @@ fn ago(secs: u64) -> String {
 }
 
 impl Repl {
-    pub fn command(&mut self, line: &str, totals: &Totals) -> Step {
-        if let Some(command) = bash_command(line) {
-            return Step::Bash(command.to_string());
-        }
-        let Some(cmd) = parse(line) else {
-            return Step::Prompt {
-                send: line.to_string(),
-                typed: None,
-            };
-        };
-        match cmd {
-            Cmd::Exit => Step::Quit,
-            Cmd::Help => Step::Handled(help(&self.commands)),
-            Cmd::Keys => Step::Handled(self.keys.listing()),
-            Cmd::Reload => Step::Handled(self.reload()),
-            Cmd::Log => lines(match crate::journal::path() {
+    /// Carry out an intent, or say what the surface must do to carry it out.
+    ///
+    /// Exhaustive with no catch-all, like `Intent::fate`: the arms a surface
+    /// answers for itself are named rather than swept up, so a new intent has
+    /// to say which side of that line it falls on.
+    pub fn run(&mut self, intent: Intent, totals: &Totals) -> Step {
+        match intent {
+            Intent::Bash(command) => Step::Bash(command),
+            Intent::Prompt(send) => Step::Prompt { send, typed: None },
+            // Unreachable by construction: `read` never makes these, and the
+            // surface acts on them before it gets here. The arm earns its keep
+            // anyway — it is what makes the exhaustiveness check bite, so a new
+            // intent has to say which side of this line it falls on.
+            Intent::Submit(_)
+            | Intent::None
+            | Intent::Interrupt
+            | Intent::Unsend
+            | Intent::OpenRewind
+            | Intent::Rewind(_)
+            | Intent::CommitSetting(..)
+            | Intent::OpenPicker => Step::Handled(Vec::new()),
+            Intent::Quit => Step::Quit,
+            Intent::Help => Step::Handled(help(&self.commands)),
+            Intent::Keys => Step::Handled(self.keys.listing()),
+            Intent::Reload => Step::Handled(self.reload()),
+            Intent::Log => lines(match crate::journal::path() {
                 Some(p) => format!("{}", p.display()),
                 None => "not recording — --log is off, or the file would not open".into(),
             }),
-            Cmd::Todo => lines(tools::todo::render(self.session.todos())),
-            Cmd::Cost => lines(crate::render::spent(&totals.usage, totals.cost)),
-            Cmd::New => Step::Swap(self.fresh_session("started")),
-            Cmd::Resume(name) => {
+            Intent::Cost => lines(crate::render::spent(&totals.usage, totals.cost)),
+            Intent::New => Step::Swap(self.fresh_session("started")),
+            Intent::Resume(name) => {
                 if name.is_empty() {
                     Step::Handled(self.resume_listing())
                 } else {
@@ -1014,34 +1218,34 @@ impl Repl {
                     }
                 }
             }
-            Cmd::Name(name) => {
+            Intent::Name(name) => {
                 if name.is_empty() {
-                    self.name = None;
-                    lines(format!("{} is unnamed again", self.id))
+                    self.lane_mut().name = None;
+                    lines(format!("{} is unnamed again", self.lane_mut().id))
                 } else {
-                    let said = format!("{} is now “{name}”", self.id);
-                    self.name = Some(name);
+                    let said = format!("{} is now “{name}”", self.lane_mut().id);
+                    self.lane_mut().name = Some(name);
                     lines(said)
                 }
             }
-            Cmd::Compact(focus) => Step::Compact(Some(focus).filter(|f| !f.is_empty())),
-            Cmd::Model(name) => Step::Handled(if name.is_empty() {
+            Intent::Compact(focus) => Step::Compact(Some(focus).filter(|f| !f.is_empty())),
+            Intent::Model(name) => Step::Handled(if name.is_empty() {
                 self.listing()
             } else {
                 self.switch(&name)
             }),
-            Cmd::Worktree(name) => {
+            Intent::Worktree(name) => {
                 if name.is_empty() {
                     Step::Handled(self.worktree_listing())
                 } else {
                     match self.enter_worktree(&name) {
-                        Ok(said) => Step::Swap(said),
+                        Ok(step) => step,
                         Err(why) => Step::Handled(vec![why]),
                     }
                 }
             }
-            Cmd::Other { word, args } => dispatch(&self.commands, &word, &args),
-            Cmd::Wechat(rest) => match rest.trim() {
+            Intent::Other { word, args } => dispatch(&self.commands, &word, &args),
+            Intent::Wechat(rest) => match rest.trim() {
                 "" => Step::Wechat(WechatCmd::Status),
                 "on" => Step::Wechat(WechatCmd::On),
                 "off" => Step::Wechat(WechatCmd::Off),
@@ -1049,7 +1253,7 @@ impl Repl {
                     "unknown /wechat verb `{other}` — bare, on or off"
                 )),
             },
-            Cmd::Settings(rest) => self.settings(&rest),
+            Intent::Settings(rest) => self.settings(&rest),
         }
     }
 
@@ -1128,8 +1332,6 @@ impl Repl {
         Step::Handled(out)
     }
 
-    /// Drop the in-memory conversation and open a fresh session under a new
-    /// id. The plan goes too; the old transcript stays on disk.
     /// Become the session this id names: the stamp that dates it, the journal
     /// it writes to, and the namespace its spills are filed under.
     ///
@@ -1138,33 +1340,50 @@ impl Repl {
     /// that got missed, and a resumed session was then re-dated on its next
     /// save with the stamp of the session it had just left.
     fn becomes(&mut self, id: String, created: u64) {
-        self.id = id;
-        self.created = created;
-        crate::journal::switched(&self.id);
+        self.lane_mut().id = id;
+        self.lane_mut().created = created;
+        crate::journal::switched(&self.lane_mut().id);
         // Spills are filed under the session id; a session has to own its own
         // namespace or the one before it keeps swallowing them.
-        self.ctx = self.ctx.clone().with_session(&self.id);
+        self.lane_mut().ctx = self.lane_mut().ctx.clone().with_session(&self.lane_mut().id);
     }
 
+    /// Drop the in-memory conversation and open a fresh session under a new
+    /// id. The old transcript stays on disk.
     fn fresh_session(&mut self, said: &str) -> Vec<String> {
-        self.session = Session::default();
+        self.lane_mut().session = Some(Session::default());
+        // A name identifies one session; carried over it would name two, which
+        // is what `/name` exists to prevent.
+        self.lane_mut().name = None;
         self.becomes(crate::session::new_id(), crate::session::now());
-        if let Ok(mut held) = self.ctx.todos.lock() {
-            held.clear();
+        vec![format!("{said} {}", self.lane_mut().id)]
+    }
+
+    /// Take a stored transcript as the running one — entries, name and id.
+    /// Parting with what is being left is the caller's; they differ on when.
+    fn adopt_session(&mut self, stored: Stored) -> Vec<String> {
+        let (id, name, created) = (stored.id.clone(), stored.name.clone(), stored.created);
+        let session = stored.into_session();
+        self.lane_mut().name = name;
+        self.lane_mut().session = Some(session);
+        self.becomes(id, created);
+        let mut said = vec![format!("resumed {}", self.lane_mut().id)];
+        if let Some(name) = self.lane_mut().name.as_deref() {
+            said.push(format!("“{name}”"));
         }
-        vec![format!("{said} {}", self.id)]
+        said
     }
 
     /// `/worktree <name>`: create or reuse a checkout of this repository and
     /// move the session into it.
     ///
-    /// The transcript stays behind. Paths in it are workspace-relative, so
-    /// under another root the same string names a different file; the file
-    /// locks and edit shifts are keyed by absolute path, and a saved session
-    /// belongs to one workspace bucket. Carrying it over would leave the model
-    /// reasoning about two trees at once.
-    fn enter_worktree(&mut self, name: &str) -> Result<Vec<String>, String> {
-        let from = self.ctx.workspace.root().to_path_buf();
+    /// Each tree keeps its own transcript rather than one transcript following
+    /// the move: paths in it are workspace-relative, so under another root the
+    /// same string names a different file, and the file locks and edit shifts
+    /// are keyed by absolute path. Coming back therefore resumes what was being
+    /// said in that tree, not an empty page.
+    fn enter_worktree(&mut self, name: &str) -> Result<Step, String> {
+        let from = self.lane_mut().ctx.workspace.root().to_path_buf();
         let (tree, how) = match crate::worktree::enter(&from, name) {
             Ok(found) => found,
             Err(e) => return Err(refused("worktree", e)),
@@ -1181,32 +1400,111 @@ impl Repl {
         if ws.root() == from {
             return Err(format!("already in {}", tree.name));
         }
-        // Against the root it belongs to, so before the move, not after.
-        // An empty session — nothing said yet — has nothing to keep.
-        if !self.session.is_empty()
+        let on = tree.branch.as_deref().unwrap_or("a detached HEAD");
+        let mut said = vec![
+            match how {
+                crate::worktree::Entered::Created => {
+                    format!("{} — new, on new branch {on}", tree.name)
+                }
+                crate::worktree::Entered::Checkout => {
+                    format!("{} — new, on existing branch {on}", tree.name)
+                }
+                crate::worktree::Entered::Existing => format!("{} — on {on}", tree.name),
+            },
+            tree.path.display().to_string(),
+        ];
+
+        // Against the root it belongs to, so before the move, not after. An
+        // empty session — nothing said yet — has nothing to keep, and one a run
+        // has is saved by the run.
+        if self.lane().session.as_ref().is_some_and(|s| !s.is_empty())
             && let Err(e) = self.save()
         {
             tracing::warn!(target: "pi::session", error = %e, "the leaving session was not saved");
         }
-        let mut said = self.rebuild_into(Some(ws))?;
-        self.worktree = (!tree.main).then(|| tree.name.clone());
-        let on = tree.branch.as_deref().unwrap_or("a detached HEAD");
-        said.push(match how {
-            crate::worktree::Entered::Created => format!("{} — new, on new branch {on}", tree.name),
-            crate::worktree::Entered::Checkout => {
-                format!("{} — new, on existing branch {on}", tree.name)
-            }
-            crate::worktree::Entered::Existing => format!("{} — on {on}", tree.name),
+
+        // Already open: going back to a tree is going back to the lane that
+        // holds it, transcript, screen and all. Nothing is rebuilt.
+        if let Some(i) = self
+            .lanes
+            .iter()
+            .position(|lane| lane.ctx.workspace.root() == ws.root())
+        {
+            self.current = i;
+            self.in_force();
+            said.push(format!("back in {}", self.lane().id));
+            // Handled, not a swap: the lane's screen is parked as it was left,
+            // and rebuilding it from the transcript would throw that away.
+            return Ok(Step::Handled(said));
+        }
+
+        said.extend(self.open_lane(ws, (!tree.main).then(|| tree.name.clone()))?);
+        Ok(Step::Swap(said))
+    }
+
+    /// Open a checkout as a lane of its own, and put it in front.
+    ///
+    /// Whole or not at all, like every other path that reads a config: a tree
+    /// whose config or skills will not resolve leaves the run where it was.
+    fn open_lane(
+        &mut self,
+        ws: tools::Workspace,
+        worktree: Option<String>,
+    ) -> Result<Vec<String>, String> {
+        let root = ws.root().to_path_buf();
+        let failed = |e| format!("nothing opened — {}", refused("worktree", e));
+        let project = crate::config::load_project(&root).map_err(failed)?;
+        let mut resolved =
+            crate::resolve(&self.args, &root, &self.config, &project, &self.claimed).map_err(failed)?;
+
+        let (events, inbox) = Lane::channel();
+        // The model travels; what the root decides does not. A switch changes
+        // trees, and which model is answering was a decision made elsewhere.
+        let home = self.home(root.clone(), self.lane().agent.spec.model.clone());
+        let mut ag = (*self.lane().agent).clone();
+        crate::arm(&mut ag, &mut resolved, home);
+
+        // Built rather than cloned from the lane being left: `Ctx` shares its
+        // file locks and edit shifts through an `Arc`, so a cloned one would
+        // clear that lane's along with its own the first time it relocated.
+        self.lanes.push(Lane {
+            agent: std::sync::Arc::new(ag),
+            session: Some(Session::default()),
+            id: String::new(),
+            created: 0,
+            name: None,
+            context: resolved.context,
+            standing: resolved.standing,
+            ctx: tools::Ctx::new(ws),
+            keys: std::sync::Arc::new(resolved.keys),
+            commands: std::sync::Arc::new(resolved.commands),
+            worktree,
+            events,
+            inbox,
+            pending: Vec::new(),
+            turn: crate::lane::Turn::Idle,
         });
-        said.push(tree.path.display().to_string());
-        said.extend(self.fresh_session("started"));
-        Ok(said)
+        self.current = self.lanes.len() - 1;
+        self.in_force();
+
+        // Asked with the root the next save will file under, so a tree is found
+        // by the same key it was stored by.
+        let found = self.store.latest(&root);
+        Ok(match found {
+            Ok(stored) => self.adopt_session(stored),
+            Err(e) => {
+                // Nothing recorded for this tree is the ordinary case; an
+                // archive that will not load is not, and says so only here.
+                tracing::debug!(target: "pi::session", error = %e, "no session to resume in this worktree");
+                self.fresh_session("started")
+            }
+        })
     }
 
     /// The checkouts `/worktree` can move to, the repository's own first, the
     /// one the session is in marked.
     fn worktree_listing(&self) -> Vec<String> {
-        let here = self.ctx.workspace.root();
+        let here = self.lane().ctx.workspace.root();
         let trees = match crate::worktree::list(here) {
             Ok(t) => t,
             Err(e) => return vec![refused("worktree", e)],
@@ -1237,7 +1535,7 @@ impl Repl {
     /// The sessions `/resume` can switch to, newest first, the one running
     /// now marked.
     fn resume_listing(&self) -> Vec<String> {
-        let list = self.store.choices(self.ctx.workspace.root());
+        let list = self.store.choices(self.lane().ctx.workspace.root());
         if list.is_empty() {
             return vec![
                 "no sessions recorded for this workspace".into(),
@@ -1254,7 +1552,7 @@ impl Repl {
                 } else {
                     crate::render::clip(&s.prompt, RESUME_WIDTH)
                 };
-                (s.id == self.id, text, s.created)
+                (s.id == self.lane().id, text, s.created)
             })
             .collect();
         let width = shown
@@ -1287,69 +1585,75 @@ impl Repl {
     fn resume(&mut self, id: &str) -> Result<Vec<String>, String> {
         // The session being left has to survive too, or /resume throws it
         // away. An empty one — just opened, nothing said — has nothing to keep.
-        if !self.session.is_empty()
+        if self.lane_mut().session.as_ref().is_some_and(|s| !s.is_empty())
             && let Err(e) = self.save()
         {
             tracing::warn!(target: "pi::session", error = %e, "resume could not save the leaving session");
         }
         let stored = self.store.load(id).map_err(|e| refused("resume", e))?;
-        let (resumed_id, name, created) = (stored.id.clone(), stored.name.clone(), stored.created);
-        self.session = stored.into_session();
-        self.name = name;
-        self.becomes(resumed_id, created);
-        let mut said = vec![format!("resumed {}", self.id)];
-        if let Some(name) = self.name.as_deref() {
-            said.push(format!("“{name}”"));
-        }
-        Ok(said)
+        Ok(self.adopt_session(stored))
     }
 
-    /// Run what `!` named: show the output, and record the command and its
-    /// result in the transcript so the model answers with it in view. Same
-    /// runner, workspace and timeout as the model's own `bash` tool. The
-    /// surface hands in a token so Ctrl-C (line mode) or Esc (terminal) can
-    /// stop the command instead of leaving the caller stuck for the timeout.
-    pub async fn bash(&mut self, command: &str, cancel: CancellationToken) -> Vec<String> {
-        let ctx = self.ctx.clone().with_cancel(cancel);
-        let out = tools::bash::Bash
-            .execute(serde_json::json!({ "command": command }), &ctx)
-            .await;
-        let out = match out {
-            Ok(out) => out,
-            Err(ToolError::Cancelled) => return vec!["cancelled".into()],
-            Err(e) => return vec![format!("failed to run `{command}`: {e}")],
-        };
-        let body = out.flatten();
-        let text = format!(
+}
+
+/// What a `!` command left behind, kept apart because the two are easy to
+/// confuse: one is written to the transcript, the other drawn on the screen.
+pub struct Bashed {
+    /// What the model reads: the command *and* its output.
+    ///
+    /// Storing only the command left the rebuilt scrollback printing
+    /// `Ran \`git status\`` as a prompt with the output indented under it —
+    /// the live path never did that, because it had the typed line.
+    pub text: String,
+    /// What the terminal shows, the wrapper tags dropped.
+    pub said: Vec<String>,
+}
+
+/// Run what `!` named. Same runner, workspace and timeout as the model's own
+/// `bash` tool; `ctx` carries the token that lets Esc stop it.
+///
+/// Free of `Repl` so the surface can spawn it: holding `&mut Repl` across the
+/// await pinned the whole loop, which is what left the `!` path with an event
+/// loop of its own. Recording the result is the caller's, and needs no await.
+pub async fn run_bash(ctx: &tools::Ctx, command: &str) -> Bashed {
+    let only = |line: String| Bashed {
+        text: String::new(),
+        said: vec![line],
+    };
+    let out = match tools::bash::Bash
+        .execute(serde_json::json!({ "command": command }), ctx)
+        .await
+    {
+        Ok(out) => out,
+        Err(ToolError::Cancelled) => return only("cancelled".into()),
+        Err(e) => return only(format!("failed to run `{command}`: {e}")),
+    };
+    let body = out.flatten();
+    Bashed {
+        text: format!(
             "Ran `{command}`\n{}",
-            if body.is_empty() {
-                "(no output)"
-            } else {
-                &body
-            }
-        );
-        // What the model reads is the command *and its output*; what the
-        // screen shows is the line the user typed. Storing only the first left
-        // the rebuilt scrollback printing `Ran \`git status\`` as a prompt,
-        // with the output indented under it — the live path never did that,
-        // because it had the typed line and the rebuild did not.
-        self.session
-            .push_user(agent::session::UserBody::Aside(agent::session::UserText {
-                text,
-                shown: Some(format!("!{command}")),
-            }));
-        let mut said: Vec<String> = body
+            if body.is_empty() { "(no output)" } else { &body }
+        ),
+        said: body
             .lines()
-            // The tags wrap the model's copy; the terminal shows the output
-            // itself.
             .filter(|l| !matches!(*l, "<stdout>" | "</stdout>" | "<stderr>" | "</stderr>"))
             .map(str::to_string)
-            .collect();
-        if let Err(e) = self.save() {
-            said.push(format!("warning: the transcript was not saved: {e}"));
-        }
-        said
+            .collect(),
     }
+}
+
+/// File a finished `!` command in the transcript.
+///
+/// `text` empty means it never ran — cancelled, or the runner refused — and
+/// there is nothing the model should answer with in view.
+pub fn record_bash(session: &mut Session, command: &str, text: String) {
+    if text.is_empty() {
+        return;
+    }
+    session.push_user(agent::session::UserBody::Aside(agent::session::UserText {
+        text,
+        shown: Some(format!("!{command}")),
+    }));
 }
 
 // A secret value as a change line shows it: set or unset, never the value.
@@ -1367,8 +1671,8 @@ fn mask_secret(path: &str, value: &toml::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        BUILTIN, Candidate, Choice, Cmd, Command, ResumeChoice, Source, Step, ago, bash_command,
-        commands, complete, dispatch, expand, gist, help, parse,
+        BUILTIN, Candidate, Choice, Command, Fate, Intent, ResumeChoice, Source, Step, ago,
+        bash_command, commands, complete, dispatch, expand, gist, help, read,
     };
     use agent::session::{Entry, Session, UserBody, UserText};
     use tools::skills::Skill;
@@ -1379,7 +1683,7 @@ mod tests {
         // without reaching `parse` would offer to complete into nothing.
         for c in BUILTIN {
             assert!(
-                !matches!(parse(&c.word), Some(Cmd::Other { .. }) | None),
+                !matches!(read(&c.word), Intent::Other { .. } | Intent::Prompt(_)),
                 "{} is listed but does not parse",
                 c.word
             );
@@ -1476,13 +1780,13 @@ mod tests {
     #[test]
     fn the_worktree_word_takes_a_name_and_nothing_else_does() {
         assert!(matches!(
-            parse("/worktree feature-one"),
-            Some(Cmd::Worktree(name)) if name == "feature-one"
+            read("/worktree feature-one"),
+            Intent::Worktree(name) if name == "feature-one"
         ));
         // Bare, it is the listing.
-        assert!(matches!(parse("/worktree"), Some(Cmd::Worktree(name)) if name.is_empty()));
+        assert!(matches!(read("/worktree"), Intent::Worktree(name) if name.is_empty()));
         // Not a built-in word: the command table settles what it is.
-        assert!(matches!(parse("/worktrees"), Some(Cmd::Other { .. })));
+        assert!(matches!(read("/worktrees"), Intent::Other { .. }));
     }
 
     #[test]
@@ -1500,10 +1804,10 @@ mod tests {
         };
         let name = of("/nam");
         assert_eq!((name.line.as_str(), name.more), ("/name", true));
-        // Nothing follows /todo, so the caret should not be pushed past a space
+        // Nothing follows /cost, so the caret should not be pushed past a space
         // the user then has to delete.
-        let todo = of("/tod");
-        assert_eq!((todo.line.as_str(), todo.more), ("/todo", false));
+        let cost = of("/cos");
+        assert_eq!((cost.line.as_str(), cost.more), ("/cost", false));
     }
 
     #[test]
@@ -1617,14 +1921,14 @@ mod tests {
 
     #[test]
     fn a_skill_command_keeps_what_follows_it() {
-        // `parse` has no table, so a skill and a typo are the same shape here
+        // `read` has no table, so a skill and a typo are the same shape here
         // and only the caller can tell them apart.
         assert_eq!(
-            parse("/commit fix the flaky test"),
-            Some(Cmd::Other {
+            read("/commit fix the flaky test"),
+            Intent::Other {
                 word: "/commit".into(),
                 args: "fix the flaky test".into()
-            })
+            }
         );
     }
 
@@ -1632,11 +1936,11 @@ mod tests {
     fn a_typo_is_named_rather_than_sent_to_the_model() {
         // Otherwise `/tood` becomes a prompt and the model has to guess.
         assert_eq!(
-            parse("/tood"),
-            Some(Cmd::Other {
+            read("/tood"),
+            Intent::Other {
                 word: "/tood".into(),
                 args: String::new()
-            })
+            }
         );
     }
 
@@ -1768,22 +2072,98 @@ mod tests {
         assert!(expand(&table, "fix the flaky test").is_none());
     }
 
+    // The gate, table by table. Every input reaches `fate`, so these stand in
+    // for the key presses and phone messages that used to be answered by hand
+    // in the loop — where nothing could test them without a terminal.
+
+    #[test]
+    fn a_key_and_a_line_that_mean_the_same_thing_are_one_intent() {
+        // `ctrl+l` twice returns `Intent::New` directly. This is the other
+        // half: the typed word lands on the same variant, so there is no
+        // second value for `fate` to answer differently about.
+        assert_eq!(read("/new"), Intent::New);
+    }
+
+    #[test]
+    fn a_submitted_line_inherits_the_fate_of_what_it_says() {
+        for line in ["/new", "/log", "/compact keep this", "fix the bug", "!ls", "/nope"] {
+            assert_eq!(
+                format!("{:?}", Intent::Submit(line.into()).fate()),
+                format!("{:?}", read(line).fate()),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn leaving_is_never_refused() {
+        // One intent for `/exit`, `/quit`, ctrl+d and a double ctrl+c — the
+        // words are checked with the rest of the table — and it always
+        // proceeds: a wedged run must not be able to trap the user.
+        assert!(matches!(Intent::Quit.fate(), Fate::Now));
+    }
+
+    #[test]
+    fn reaching_for_the_transcript_is_refused_while_a_run_holds_it() {
+        for intent in [
+            Intent::New,
+            Intent::Resume("1756240000-1".into()),
+            Intent::Compact(String::new()),
+            Intent::OpenRewind,
+        ] {
+            assert!(
+                matches!(intent.fate(), Fate::Refused(_)),
+                "{intent:?} should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn what_the_run_is_not_standing_on_goes_through() {
+        for intent in [
+            Intent::Log,
+            Intent::Cost,
+            Intent::Help,
+            Intent::Keys,
+            Intent::Reload,
+            Intent::Model(String::new()),
+            Intent::Worktree("tree".into()),
+            Intent::Interrupt,
+            Intent::Unsend,
+            Intent::CommitSetting("a.b".into(), "1".into()),
+        ] {
+            assert!(matches!(intent.fate(), Fate::Now), "{intent:?} should proceed");
+        }
+    }
+
+    #[test]
+    fn what_wants_the_model_or_the_surface_waits() {
+        for intent in [
+            Intent::Prompt("hello".into()),
+            Intent::Bash("ls".into()),
+            Intent::Settings(String::new()),
+            Intent::Wechat("on".into()),
+            Intent::Other { word: "/commit".into(), args: String::new() },
+        ] {
+            assert!(matches!(intent.fate(), Fate::Queued), "{intent:?} should wait");
+        }
+    }
+
     #[test]
     fn slash_words_are_commands_and_prose_is_not() {
-        assert_eq!(parse("/exit"), Some(Cmd::Exit));
-        assert_eq!(parse("/quit"), Some(Cmd::Exit));
-        assert_eq!(parse("/todo"), Some(Cmd::Todo));
-        assert_eq!(parse("fix the bug"), None);
-        assert_eq!(parse(""), None);
+        assert_eq!(read("/exit"), Intent::Quit);
+        assert_eq!(read("/quit"), Intent::Quit);
+        assert_eq!(read("fix the bug"), Intent::Prompt("fix the bug".into()));
+        assert_eq!(read(""), Intent::Prompt(String::new()));
     }
 
     #[test]
     fn resume_parse() {
         // Bare, /resume lists; a word names the session to switch to.
-        assert_eq!(parse("/resume"), Some(Cmd::Resume(String::new())));
+        assert_eq!(read("/resume"), Intent::Resume(String::new()));
         assert_eq!(
-            parse("/resume 1756240000-123"),
-            Some(Cmd::Resume("1756240000-123".into()))
+            read("/resume 1756240000-123"),
+            Intent::Resume("1756240000-123".into())
         );
     }
 
@@ -1802,38 +2182,37 @@ mod tests {
 
     #[test]
     fn the_wechat_verb_parses_and_others_are_named() {
-        assert_eq!(parse("/wechat"), Some(Cmd::Wechat(String::new())));
-        assert_eq!(parse("/wechat on"), Some(Cmd::Wechat("on".into())));
-        assert_eq!(parse("/wechat off"), Some(Cmd::Wechat("off".into())));
+        assert_eq!(read("/wechat"), Intent::Wechat(String::new()));
+        assert_eq!(read("/wechat on"), Intent::Wechat("on".into()));
+        assert_eq!(read("/wechat off"), Intent::Wechat("off".into()));
         // A typo reaches the command layer as a literal, so it can be named
         // rather than silently meaning "status".
-        assert_eq!(parse("/wechat oen"), Some(Cmd::Wechat("oen".into())));
+        assert_eq!(read("/wechat oen"), Intent::Wechat("oen".into()));
     }
 
     #[test]
     fn a_prompt_that_merely_mentions_a_slash_stays_a_prompt() {
-        assert_eq!(parse("what does /help do?"), None);
-        assert_eq!(parse("read src/main.rs"), None);
+        assert_eq!(read("what does /help do?"), Intent::Prompt("what does /help do?".into()));
+        assert_eq!(read("read src/main.rs"), Intent::Prompt("read src/main.rs".into()));
     }
 
     #[test]
     fn trailing_words_do_not_break_a_command() {
-        assert_eq!(parse("/todo please"), Some(Cmd::Todo));
     }
 
     #[test]
     fn a_command_that_takes_words_keeps_all_of_them() {
         assert_eq!(
-            parse("/name the flaky test"),
-            Some(Cmd::Name("the flaky test".into()))
+            read("/name the flaky test"),
+            Intent::Name("the flaky test".into())
         );
         assert_eq!(
-            parse("/compact  keep the parser work "),
-            Some(Cmd::Compact("keep the parser work".into()))
+            read("/compact  keep the parser work "),
+            Intent::Compact("keep the parser work".into())
         );
         // Bare, they mean clear and unfocused respectively.
-        assert_eq!(parse("/name"), Some(Cmd::Name(String::new())));
-        assert_eq!(parse("/compact"), Some(Cmd::Compact(String::new())));
+        assert_eq!(read("/name"), Intent::Name(String::new()));
+        assert_eq!(read("/compact"), Intent::Compact(String::new()));
     }
 
     #[test]

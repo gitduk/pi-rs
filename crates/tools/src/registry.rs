@@ -31,7 +31,6 @@ impl Registry {
             .with(crate::edit::Edit)
             .with(crate::grep::Grep)
             .with(crate::glob::Glob)
-            .with(crate::todo::TodoTool)
             .with(crate::bash::Bash)
     }
 
@@ -50,6 +49,17 @@ impl Registry {
 
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
+    }
+
+    /// One tool gone, the rest untouched. `restrict` is the wrong shape for
+    /// this: it consumes `self` while `names()` borrows it, so taking a set
+    /// away means cloning every name to build the set that stays.
+    ///
+    /// A name that is not there is not an error — the caller is saying "not
+    /// this one", and it already is not.
+    pub fn without(mut self, name: &str) -> Self {
+        self.tools.remove(name);
+        self
     }
 
     /// Only the tools named survive. An unknown name is returned to the caller

@@ -4,7 +4,6 @@ use brain::message::{
     AssistantContent, Image, Message, Text, ToolCall, ToolResult, ToolResultContent, UserContent,
 };
 use serde::{Deserialize, Serialize};
-use tools::todo::Todo;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct EntryId(pub u64);
@@ -300,14 +299,6 @@ pub struct Session {
     entries: Vec<Entry>,
     #[serde(default)]
     next: u64,
-    /// The plan as it stands, beside the conversation rather than inside it.
-    ///
-    /// Not how the model reads it — that is the todo tool's own result, in the
-    /// transcript with every other result. This is the copy the tool mutates:
-    /// what `mark` numbers refer to, what `/todo` prints, and what a resume
-    /// restores so the numbers still mean what the transcript says they do.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    todos: Vec<Todo>,
 }
 
 impl Session {
@@ -398,18 +389,6 @@ impl Session {
         let (id, at) = self.mint();
         self.entries.push(Entry::Compaction { id, at, record });
         id
-    }
-
-    /// Record the task list. At most one item may be in progress: two are a
-    /// plan the agent is not actually following.
-    pub fn set_todos(&mut self, mut items: Vec<Todo>) {
-        tools::todo::normalize(&mut items);
-        self.todos = items;
-    }
-
-    /// The task list as it now stands.
-    pub fn todos(&self) -> &[Todo] {
-        &self.todos
     }
 
     /// Continue with a new prompt, repairing a turn that may have died
@@ -544,11 +523,6 @@ impl Session {
         let keep = at + usize::from(keep);
         let removed = self.entries.len() - keep;
         self.entries.truncate(keep);
-        // The plan described work this rewind just undid. Carrying it forward
-        // would leave `mark` numbering items against a list the transcript no
-        // longer contains. Restating a plan costs one tool call; acting on a
-        // false one costs the work.
-        self.todos.clear();
         removed
     }
 

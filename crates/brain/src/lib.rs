@@ -1,3 +1,4 @@
+pub mod count;
 pub mod model;
 pub mod error;
 pub mod estimate;

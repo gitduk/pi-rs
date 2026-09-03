@@ -3,7 +3,7 @@
 A coding agent that stays inside one directory.
 
 Rust, six crates, no framework. It reads and edits files, runs commands,
-searches, keeps a plan, and compacts its own transcript when the window fills.
+searches, and compacts its own transcript when the window fills.
 One binary, `pi`.
 
 It started as an exercise in extracting the core of
@@ -132,7 +132,7 @@ through. `prompt.icon` is the one value that is neither colour nor attribute.
 A key that is not one of those is refused at load, like a misspelled compat
 key.
 
-`/help` `/new` `/resume` `/name` `/model` `/worktree` `/compact` `/reload` `/keys` `/log` `/todo` `/cost` `/wechat` `/exit`,
+`/help` `/new` `/resume` `/name` `/model` `/worktree` `/compact` `/reload` `/keys` `/log` `/cost` `/wechat` `/exit`,
 and one more for every skill on disk. Typing `/` opens a list of what the line
 could still become; `↑` `↓` pick, `Tab` accepts, `Esc` dismisses it until the
 next keystroke. `/model`, `/resume` and `/worktree` complete their arguments
@@ -273,19 +273,11 @@ and refusing it to catch a typo is the worse trade.
 
 ## What it does
 
-**Tools.** `read` `write` `edit` `glob` `grep` `bash` `todo` `skill`.
+**Tools.** `read` `write` `edit` `glob` `grep` `bash` `skill`.
 Each declares a tier — read, write or exec — and `--tier` caps the run. Every
 path is resolved against the workspace root through the deepest existing
 ancestor, so a symlink cannot walk out. `bash` gets its own process group and a
 SIGTERM-then-SIGKILL timeout.
-
-**The plan** is a tool result like any other. `todo` takes `set`, `mark` and
-`clear`, and every call answers with the numbered list as it now stands —
-`mark` addresses items by those numbers, so closing three steps is one small
-call rather than a rewrite of the whole plan. Older answers supersede under
-compaction, so only the newest survives a long run. It rode a note appended to
-the last user turn once: the model could not tell a stale plan from the user
-speaking, and argued with it instead of updating it.
 
 **Edits** are line-anchored patches with content-hash anchors, applied against
 original line numbers so an earlier hunk never shifts a later one. A stale

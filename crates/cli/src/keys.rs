@@ -56,6 +56,7 @@ pub enum Action {
     ScrollHalfDown,
     AppExit,
     AppClearScreen,
+    LanePick,
     ThinkFold,
     ThinkFoldAll,
 }
@@ -200,14 +201,14 @@ pub const BINDINGS: &[Binding] = &[
         id: "menu.next",
         action: A::MenuNext,
         when: W::Menu,
-        keys: &["down", "ctrl+n"],
+        keys: &["down", "ctrl+n", "ctrl+j"],
         note: "",
     },
     Binding {
         id: "menu.previous",
         action: A::MenuPrevious,
         when: W::Menu,
-        keys: &["up", "ctrl+p"],
+        keys: &["up", "ctrl+p", "ctrl+k"],
         note: "",
     },
     Binding {
@@ -265,6 +266,13 @@ pub const BINDINGS: &[Binding] = &[
         when: W::Editor,
         keys: &["ctrl+d"],
         note: "only when the line is empty",
+    },
+    Binding {
+        id: "lane.pick",
+        action: A::LanePick,
+        when: W::Editor,
+        keys: &["ctrl+o"],
+        note: "the checkouts, and the ones not opened yet",
     },
     Binding {
         id: "app.clear-screen",

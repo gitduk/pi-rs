@@ -69,6 +69,16 @@ impl Snapshot<'_> {
             ..Self::default()
         })
     }
+
+    /// Fold in spending that happened inside the run but not as a turn of it —
+    /// a subagent's. Here beside `of_done` because it is the same mapping, and
+    /// a segment added to one is a segment missing from the other.
+    pub fn add(&mut self, more: &agent::Totals) {
+        self.input += more.usage.input;
+        self.output += more.usage.output;
+        self.cache_read += more.usage.cache_read;
+        self.cost = self.cost.map(|c| c + more.cost);
+    }
 }
 
 /// One part of a status line. These are the names the config lists.
@@ -92,9 +102,9 @@ impl Segment {
     pub fn render(self, s: &Snapshot<'_>) -> Option<String> {
         Some(match self {
             Segment::Elapsed => elapsed(s.elapsed?),
-            Segment::InOut => crate::render::in_out(s.input, s.output),
+            Segment::InOut => brain::count::in_out(s.input, s.output),
             Segment::Cache if s.cache_read == 0 => return None,
-            Segment::Cache => format!("{} cached", crate::render::short(s.cache_read)),
+            Segment::Cache => format!("{} cached", brain::count::short(s.cache_read)),
             Segment::Cost => match s.cost? {
                 // An unpriced model reports no cost rather than $0.
                 c if c <= 0.0 => return None,
@@ -107,8 +117,8 @@ impl Segment {
                 (_, 0) => return None,
                 (used, budget) => format!(
                     "ctx {}/{}",
-                    crate::render::short(used as u64),
-                    crate::render::short(budget as u64)
+                    brain::count::short(used as u64),
+                    brain::count::short(budget as u64)
                 ),
             },
             Segment::Compacted if s.compactions == 0 => return None,

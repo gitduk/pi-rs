@@ -13,10 +13,12 @@ mod config;
 mod context;
 mod journal;
 mod keys;
+mod lane;
 mod line;
 mod render;
 mod repl;
 mod session;
+mod subagent;
 mod settings;
 mod status;
 mod tui;
@@ -312,11 +314,52 @@ fn read_prompt(args: &Args) -> Result<Option<String>> {
     Ok(Some(body))
 }
 
+/// Put what `resolve` settled onto an agent, and hang the subagent tool off the
+/// result.
+///
+/// **Call it last.** `Task` clones the agent it is handed, so any field set
+/// after this is one the child does not have — which is how the startup path
+/// once gave the parent `--no-compact` and `--retries` and the child neither.
+///
+/// Takes the fields it installs out of `from`, which the callers do not read
+/// again — the rest of `Resolved` is theirs.
+pub fn arm(
+    ag: &mut agent::Agent,
+    from: &mut Resolved,
+    home: std::sync::Arc<dyn agent::task::Home>,
+) {
+    ag.registry = std::mem::take(&mut from.registry);
+    ag.approver = std::sync::Arc::new(agent::Ceiling(from.tier));
+    ag.system = std::mem::take(&mut from.system);
+    ag.effort = from.effort;
+    hang(ag, home, &from.standing);
+}
+
+/// Hang a subagent off an agent that is otherwise ready, replacing any it
+/// already carries.
+///
+/// Separate from `arm` because `Task` keeps a snapshot of the parent: anything
+/// that changes the parent afterwards — `/model` re-dialling the transport —
+/// has to build a new one, or the child goes on talking to the old endpoint
+/// with the old key.
+pub fn hang(
+    ag: &mut agent::Agent,
+    home: std::sync::Arc<dyn agent::task::Home>,
+    standing: &str,
+) {
+    let task = agent::task::Task::new(ag, home, standing);
+    ag.registry = std::mem::take(&mut ag.registry).with(task);
+}
+
 /// Everything the config and the workspace decide, as opposed to what the
 /// command line fixed for the whole run. `/reload` recomputes exactly this.
 pub struct Resolved {
     pub registry: tools::Registry,
     pub system: String,
+    /// The tail of `system` that belongs to the checkout rather than to the
+    /// assistant: the workspace anchor and the instruction files. Kept apart
+    /// because the subagent has its own prompt but the same tree.
+    pub standing: std::sync::Arc<str>,
     pub tier: tools::Tier,
     pub effort: Effort,
     pub keys: keys::Keys,
@@ -400,7 +443,7 @@ pub fn resolve(
         None => agent::DEFAULT_SYSTEM.to_string(),
     };
     // The system prompt's "relative to it" needs the workspace named.
-    system.push_str(&context::workspace(root));
+    let mut standing = context::workspace(root);
     // Appended rather than sent as a message: these are standing instructions,
     // they do not change within a run, and the system prompt is the part of the
     // request a provider will cache.
@@ -412,12 +455,14 @@ pub fn resolve(
             .iter()
             .map(|p| context::short(p, root))
             .collect();
-        system.push_str(&loaded.text);
+        standing.push_str(&loaded.text);
     }
+    system.push_str(&standing);
 
     Ok(Resolved {
         registry,
         system,
+        standing: standing.into(),
         tier,
         effort,
         keys: config.key_map()?,
@@ -435,9 +480,10 @@ fn paint(
     theme: std::sync::Arc<render::Theme>,
     done: Vec<status::Segment>,
     model: String,
+    subagents: std::sync::Arc<std::sync::Mutex<agent::Totals>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut r = render::Renderer::new(quiet, theme, done, model);
+        let mut r = render::Renderer::new(quiet, theme, done, model, subagents);
         while let Some(event) = rx.recv().await {
             r.on(event);
         }
@@ -487,7 +533,7 @@ async fn main() -> Result<()> {
     };
     let dialled = dial(&args, &config, &named, named_by)?;
 
-    let resolved = resolve(&args, workspace.root(), &config, &project, &BTreeMap::new())?;
+    let mut resolved = resolve(&args, workspace.root(), &config, &project, &BTreeMap::new())?;
     // Ahead of the quiet check on purpose: see `Dialled::warning`.
     if let Some(warning) = &dialled.warning {
         eprintln!("\x1b[{}m{warning}\x1b[0m", config.theme.muted.codes());
@@ -497,17 +543,12 @@ async fn main() -> Result<()> {
             eprintln!("\x1b[{}m{note}\x1b[0m", config.theme.muted.codes());
         }
     }
-    let key_map = std::sync::Arc::new(resolved.keys);
-
     // Captured before the spec and workspace move into the agent and context.
     let root = workspace.root().to_path_buf();
     let model_id = dialled.spec.model.clone();
 
+    let subagents: Arc<std::sync::Mutex<agent::Totals>> = Default::default();
     let mut ag = agent::Agent::new(dialled.transport, dialled.spec);
-    ag.registry = resolved.registry;
-    ag.approver = Arc::new(agent::Ceiling(resolved.tier));
-    ag.system = resolved.system;
-    ag.effort = resolved.effort;
     if args.no_compact {
         ag.compaction = None;
     }
@@ -525,6 +566,20 @@ async fn main() -> Result<()> {
     }
     ag.retry.attempts = args.retries;
     ag.retry.idle = std::time::Duration::from_secs(args.idle_timeout.max(1));
+    // Last, so the child is cloned from an agent that is finished.
+    arm(
+        &mut ag,
+        &mut resolved,
+        subagent::Filed::armed(
+            store.clone(),
+            root.clone(),
+            model_id.clone(),
+            subagents.clone(),
+        ),
+    );
+    // After `arm`, which needs the whole of `resolved`: this takes a field out
+    // of it.
+    let key_map = std::sync::Arc::new(resolved.keys);
 
     let (tx, rx) = mpsc::unbounded_channel();
     let quiet = args.quiet;
@@ -544,30 +599,45 @@ async fn main() -> Result<()> {
     let Some(prompt) = prompt else {
         // Before `id` moves into the Repl: the context borrows it to name the
         // session its spills belong to.
+        // Held on the lane as well as in force: a switch back to this tree has
+        // to put its own key map and command table back, not the last one's.
+        let commands = std::sync::Arc::new(resolved.commands);
         let ctx = tools::Ctx::new(workspace).with_session(&id);
+        let (events, inbox) = lane::Lane::channel();
         let core = repl::Repl {
-            agent: ag,
             store,
-            session: carried,
-            id,
-            created,
-            name,
+            subagents: subagents.clone(),
             keys: key_map.clone(),
             config: config.clone(),
             args: args.clone(),
-            commands: std::sync::Arc::new(resolved.commands),
-            context: resolved.context,
+            commands: commands.clone(),
             file: config::load_tree(args.config.as_deref())
                 .unwrap_or_else(|_| toml::Value::Table(Default::default())),
             claimed: BTreeMap::new(),
-            worktree: worktree::current(&root),
-            ctx,
+            current: 0,
+            lanes: vec![lane::Lane {
+                agent: std::sync::Arc::new(ag),
+                session: Some(carried),
+                id,
+                created,
+                name,
+                context: resolved.context,
+                standing: resolved.standing,
+                worktree: worktree::current(&root),
+                ctx,
+                events,
+                inbox,
+                pending: Vec::new(),
+                turn: lane::Turn::Idle,
+                keys: key_map.clone(),
+                commands,
+            }],
         };
         // The live region needs the terminal at both ends: keys come in one
         // side and the repaint goes out the other. Missing either, there is
         // nothing to hold still, and printing a line at a time is right.
         if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-            return tui::Tui::new(core, key_map, wechat::Bridge::new())?.run(tx, rx).await;
+            return tui::Tui::new(core, key_map, wechat::Bridge::new())?.run().await;
         }
         let painter = paint(
             rx,
@@ -575,6 +645,7 @@ async fn main() -> Result<()> {
             std::sync::Arc::new(config.theme.clone()),
             config.status.done.clone(),
             model_id.clone(),
+            subagents.clone(),
         );
         let out = line::run(core, tx).await;
         let _ = painter.await;
@@ -596,6 +667,7 @@ async fn main() -> Result<()> {
         std::sync::Arc::new(config.theme.clone()),
         config.status.done.clone(),
         model_id.clone(),
+        subagents.clone(),
     );
     let ctx = tools::Ctx::new(workspace)
         .with_session(&id)

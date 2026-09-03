@@ -35,11 +35,6 @@ impl Scripted {
             notes: std::sync::Mutex::new(Vec::new()),
         })
     }
-
-    /// Every note sent, flattened across turns.
-    fn notes(&self) -> Vec<String> {
-        self.notes.lock().unwrap().iter().flatten().cloned().collect()
-    }
 }
 
 #[async_trait]
@@ -1264,81 +1259,3 @@ async fn a_coded_tool_error_reaches_the_model_with_its_code() {
 
 }
 
-// The plan reaches the model as the todo tool's own result and nowhere else.
-// A note once read like the user speaking, so a stale plan got argued with.
-#[tokio::test]
-async fn the_plan_rides_its_tool_result_and_never_a_note() {
-    let dir = tempfile::tempdir().unwrap();
-    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
-    let wire = Scripted::new(vec![
-        call_turn(&[(
-            "t1",
-            "todo",
-            r#"{"op":"set","items":[{"task":"read the code","status":"done"},
-                                    {"task":"fix the parser","status":"in_progress"}]}"#,
-        )]),
-        text_turn("done"),
-    ]);
-    let a = Agent::new(wire.clone(), spec());
-    let (session, out, _) = drive(&a, &ctx, "work").await;
-    out.unwrap();
-
-    let view = session.context();
-    let answered: String = tool_results(&view).iter().map(|r| r.flatten_text()).collect();
-    assert!(answered.contains("2. [~] fix the parser"), "{answered}");
-    assert!(answered.contains("1 open, 1 closed"), "{answered}");
-
-    // Nothing rides the user's turn, which is the point.
-    assert!(wire.notes().is_empty(), "{:?}", wire.notes());
-
-    // It survives on the session, so a resume brings it back and `mark` still
-    // has the list its numbers refer to.
-    assert_eq!(session.todos().len(), 2);
-}
-
-// `mark` addresses items by the numbers the previous answer showed, so the tool
-// has to be reading the plan the session carries, not one built from this call.
-#[tokio::test]
-async fn a_mark_moves_an_item_the_earlier_call_wrote() {
-    let dir = tempfile::tempdir().unwrap();
-    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
-    let wire = Scripted::new(vec![
-        call_turn(&[(
-            "t1",
-            "todo",
-            r#"{"op":"set","items":[{"task":"read the code"},{"task":"fix the parser"}]}"#,
-        )]),
-        call_turn(&[("t2", "todo", r#"{"op":"mark","at":[2],"status":"done"}"#)]),
-        text_turn("done"),
-    ]);
-    let a = Agent::new(wire.clone(), spec());
-    let (session, out, _) = drive(&a, &ctx, "work").await;
-    out.unwrap();
-
-    let view = session.context();
-    let last = tool_results(&view).last().unwrap().flatten_text();
-    assert!(last.contains("2. [x] fix the parser"), "{last}");
-    assert_eq!(
-        session.todos()[1].status,
-        tools::todo::TodoStatus::Done,
-        "the session did not follow the mark"
-    );
-}
-
-// A rewind undoes work the plan says is done. Carrying it forward would leave
-// `mark` numbering items against a list the transcript no longer contains.
-#[test]
-fn rewinding_clears_a_plan_that_described_the_undone_work() {
-    let mut s = agent::session::Session::new();
-    let first = s.prompt("start");
-    s.prompt("more");
-    s.set_todos(vec![tools::todo::Todo {
-        task: "ship it".into(),
-        status: tools::todo::TodoStatus::Done,
-        note: None,
-    }]);
-    assert_eq!(s.todos().len(), 1);
-
-    s.rollback_to(first);
-    assert!(s.todos().is_empty(), "the plan outlived the work it described");
-}

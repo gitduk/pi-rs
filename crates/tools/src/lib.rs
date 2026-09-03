@@ -35,7 +35,6 @@ mod rows;
 pub mod skill;
 pub mod skills;
 pub mod spill;
-pub mod todo;
 pub mod walk;
 pub mod workspace;
 pub mod write;
@@ -198,9 +197,6 @@ impl ToolOutput {
 pub struct Ctx {
     pub workspace: Workspace,
     pub cancel: tokio_util::sync::CancellationToken,
-    /// The agent's plan. Shared so the tool can write it and the loop can record
-    /// it into the session, without the tool knowing a session exists.
-    pub todos: std::sync::Arc<std::sync::Mutex<Vec<todo::Todo>>>,
     /// One lock per file. Tools in the same turn run concurrently, and two
     /// writers to one path otherwise read the same bytes, both succeed, and
     /// one change vanishes without anyone being told.
@@ -228,7 +224,6 @@ impl Ctx {
         Self {
             workspace,
             cancel: tokio_util::sync::CancellationToken::new(),
-            todos: Default::default(),
             file_locks: Default::default(),
             file_shifts: Default::default(),
             session: None,

@@ -175,12 +175,12 @@ fn registry_exposes_a_stable_ordered_tool_block() {
     let r = Registry::builtin();
     assert_eq!(
         r.names(),
-        vec!["bash", "edit", "glob", "grep", "read", "todo", "write"]
+        vec!["bash", "edit", "glob", "grep", "read", "write"]
     );
     let names: Vec<String> = r.defs().iter().map(|d| d.name.clone()).collect();
     assert_eq!(
         names,
-        vec!["bash", "edit", "glob", "grep", "read", "todo", "write"]
+        vec!["bash", "edit", "glob", "grep", "read", "write"]
     );
     assert_eq!(r.get("edit").unwrap().tier(), Tier::Write);
     assert_eq!(r.get("bash").unwrap().tier(), Tier::Exec);
@@ -1159,17 +1159,4 @@ async fn an_edit_without_patch_says_what_the_one_argument_is() {
     assert!(err.contains("missing field `patch`"), "{err}");
     assert!(err.contains("takes a single argument"), "{err}");
     assert!(err.contains("[path#TAG]"), "{err}");
-}
-
-#[tokio::test]
-async fn a_todo_without_op_lists_the_ops_it_takes() {
-    let (_d, c) = ctx();
-    let err = tools::todo::TodoTool
-        .execute(json!({}), &c)
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("missing field `op`"), "{err}");
-    assert!(err.contains("`set`"), "{err}");
-    assert!(err.contains("`show`"), "{err}");
 }

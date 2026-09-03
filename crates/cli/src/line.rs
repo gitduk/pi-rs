@@ -36,10 +36,24 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
             continue;
         }
 
-        match core.command(line, &totals) {
+        match core.run(crate::repl::read(line), &totals) {
             Step::Quit => break,
             Step::Bash(command) => {
-                for line in core.bash(&command, agent::cancel_on_interrupt()).await {
+                // Awaited in place: this surface has nothing else to serve
+                // while it runs, where the TUI spawns it and keeps drawing.
+                let ctx = core
+                    .lane_mut()
+                    .ctx
+                    .clone()
+                    .with_cancel(agent::cancel_on_interrupt());
+                let out = crate::repl::run_bash(&ctx, &command).await;
+                if let Some(session) = core.lane_mut().session.as_mut() {
+                    crate::repl::record_bash(session, &command, out.text);
+                }
+                if let Err(e) = core.save() {
+                    eprintln!("warning: the transcript was not saved: {e}");
+                }
+                for line in out.said {
                     println!("{line}");
                 }
             }
@@ -48,11 +62,7 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
                     println!("{line}");
                 }
             }
-            Step::Compact(focus) => match core
-                .agent
-                .compact_now(&mut core.session, focus.as_deref())
-                .await
-            {
+            Step::Compact(focus) => match core.compact_now(focus.as_deref()).await {
                 Some((report, spent)) => {
                     totals.merge(&spent);
                     println!("compacted {} → {} tokens", report.before, report.after);
@@ -61,8 +71,8 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
                     }
                 }
                 None => {
-                    let held = core.agent.kept_tokens().unwrap_or(0);
-                    let now = brain::estimate::tokens(&core.session.context(), &core.agent.spec);
+                    let held = core.lane_mut().agent.kept_tokens().unwrap_or(0);
+                    let now = core.tokens_now();
                     println!(
                         "nothing to compact — {now} tokens, all inside the {held} kept as working context"
                     );
@@ -86,9 +96,15 @@ async fn turn(
     typed: Option<String>,
     tx: &UnboundedSender<Event>,
 ) -> Totals {
-    core.session.send_prompt(prompt, typed);
-    let ctx = core.ctx.clone().with_cancel(agent::cancel_on_interrupt());
-    let out = core.agent.run(&mut core.session, &ctx, tx).await;
+    // Lent for the length of the turn and put back after, the same shape the
+    // terminal uses — here there is no loop to free, only one owner throughout.
+    let Some(mut session) = core.lane_mut().session.take() else {
+        return Totals::default();
+    };
+    session.send_prompt(prompt, typed);
+    let ctx = core.lane_mut().ctx.clone().with_cancel(agent::cancel_on_interrupt());
+    let out = core.lane_mut().agent.run(&mut session, &ctx, tx).await;
+    core.lane_mut().session = Some(session);
 
     // Saved either way: an interrupted turn is exactly the one worth keeping.
     if let Err(e) = core.save() {

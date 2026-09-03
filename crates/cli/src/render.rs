@@ -3,6 +3,7 @@ use std::io::{IsTerminal, Write};
 use std::sync::{Arc, OnceLock};
 
 use agent::Event;
+use brain::count::{in_out, short};
 use anyhow::{Result, bail};
 use serde::de::{Error as _, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -688,32 +689,6 @@ fn span<'a, 'b>(
     None
 }
 
-/// Thousands, one decimal. Exact counts are noise at this size and the line has
-/// to hold still while they climb.
-pub(crate) fn short(n: u64) -> String {
-    match n {
-        0..=999 => n.to_string(),
-        1_000..=999_999 => format!("{:.1}k", n as f64 / 1_000.0),
-        _ => format!("{:.1}m", n as f64 / 1_000_000.0),
-    }
-}
-/// The in/out counts in the one wording every line that shows them uses: a
-/// figure the provider reported is shown as-is, one it left out reads as a
-/// dash, never as a count of ours standing in for it.
-pub(crate) fn in_out(input: u64, output: u64) -> String {
-    let input = if input > 0 {
-        short(input)
-    } else {
-        "-".to_string()
-    };
-    let output = if output > 0 {
-        short(output)
-    } else {
-        "-".to_string()
-    };
-    format!("{input} in / {output} out")
-}
-
 /// What a run has cost, in the one wording every place that says it uses.
 ///
 /// The cost is shown only when the model is priced — an unpriced model reports
@@ -832,6 +807,10 @@ pub struct Renderer {
     /// a tty, but only the dirty one may be terminated when piped apart.
     out_dirty: bool,
     err_dirty: bool,
+    /// What subagents spent, waiting to be folded into the closing line. They
+    /// work inside a tool call, so not one of their tokens is in the run's own
+    /// figures — and a run nobody can price is worse than one nobody can see.
+    subagents: Arc<std::sync::Mutex<agent::Totals>>,
 }
 
 impl Renderer {
@@ -840,6 +819,7 @@ impl Renderer {
         theme: Arc<Theme>,
         done: Vec<crate::status::Segment>,
         model: String,
+        subagents: Arc<std::sync::Mutex<agent::Totals>>,
     ) -> Self {
         Self {
             paint: Paint::with_theme(std::io::stderr().is_terminal(), theme),
@@ -849,6 +829,7 @@ impl Renderer {
             thinking: false,
             out_dirty: false,
             err_dirty: false,
+            subagents,
         }
     }
 
@@ -878,6 +859,7 @@ impl Renderer {
                 self.settle();
                 if let Some(mut snap) = crate::status::Snapshot::of_done(&event) {
                     snap.model = &self.model;
+                    snap.add(&crate::subagent::drain(&self.subagents));
                     let line = crate::status::line(&self.done, &snap);
                     if !line.is_empty() {
                         eprintln!("{}", self.paint.on(&self.paint.theme.muted, &line));
@@ -1024,7 +1006,7 @@ pub fn summarize(args: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Attr, Color, Markdown, Paint, Style, in_out, spent, summarize};
+    use super::{Attr, Color, Markdown, Paint, Style, spent, summarize};
     use brain::stream::Usage;
     use serde_json::json;
     use std::sync::OnceLock;
@@ -1084,6 +1066,7 @@ mod tests {
             std::sync::Arc::new(super::Theme::default()),
             crate::status::default_done(),
             String::new(),
+            std::sync::Arc::default(),
         );
         r.on(agent::Event::TextDelta("There".into()));
         assert!(r.out_dirty, "an unterminated delta leaves the line open");
@@ -1246,12 +1229,6 @@ mod tests {
     fn a_search_shows_what_it_looked_for_not_where() {
         let args = json!({ "pattern": "fn tier", "path": "crates/tools/src" });
         assert_eq!(summarize(&args), "fn tier");
-    }
-    #[test]
-    fn the_in_out_pair_reads_the_same_everywhere() {
-        assert_eq!(in_out(8_400, 390), "8.4k in / 390 out");
-        assert_eq!(in_out(8_400, 0), "8.4k in / - out");
-        assert_eq!(in_out(0, 0), "- in / - out");
     }
     #[test]
     fn a_measured_run_is_the_bill() {

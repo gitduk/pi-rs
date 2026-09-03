@@ -1,3 +1,4 @@
+use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 /// A directory holding `SKILL.md` and whatever files it references.
@@ -17,47 +18,32 @@ fn usable(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-// Strip one layer of matching quotes, as a YAML scalar would carry.
-fn unquote(value: &str) -> &str {
-    let v = value.trim();
-    for q in ['"', '\''] {
-        if v.len() >= 2 && v.starts_with(q) && v.ends_with(q) {
-            return &v[1..v.len() - 1];
-        }
-    }
-    v
+#[derive(Deserialize)]
+struct Header {
+    name: Option<String>,
+    description: Option<String>,
 }
 
 /// Read `name` and `description` out of a `---` fenced header.
 ///
-/// A deliberate subset of YAML: single-line `key: value`, optionally quoted.
-/// Real skill files use nothing more, and a YAML dependency to parse two
-/// strings is a poor trade.
-pub fn frontmatter(text: &str) -> (Option<String>, Option<String>) {
+/// The header goes through serde_yaml_ng, so quoting, comments and block
+/// scalars come out the way real YAML resolves them. Text with no header at
+/// all is `Ok((None, None))`; a header that will not parse is an `Err`,
+/// reported rather than silently misread.
+pub fn frontmatter(text: &str) -> Result<(Option<String>, Option<String>), String> {
     let Some(rest) = text.strip_prefix("---") else {
-        return (None, None);
+        return Ok((None, None));
     };
     let Some(end) = rest.find("\n---") else {
-        return (None, None);
+        return Ok((None, None));
     };
-
-    let (mut name, mut description) = (None, None);
-    for line in rest[..end].lines() {
-        // Top level only: `metadata:` carries a nested mapping, and a `name:`
-        // indented under it describes the metadata, not the skill.
-        if line.starts_with([' ', '\t']) {
-            continue;
-        }
-        let Some((key, value)) = line.split_once(':') else {
-            continue;
-        };
-        match key.trim() {
-            "name" => name = Some(unquote(value).to_string()),
-            "description" => description = Some(unquote(value).to_string()),
-            _ => {}
-        }
+    let header = rest[..end].trim();
+    if header.is_empty() {
+        return Ok((None, None));
     }
-    (name, description)
+    let Header { name, description } =
+        serde_yaml_ng::from_str(header).map_err(|e| format!("not valid skill frontmatter: {e}"))?;
+    Ok((name, description))
 }
 
 /// Everything below the frontmatter.
@@ -124,7 +110,10 @@ fn read_one(dir: &Path) -> Read {
     let Ok(text) = std::fs::read_to_string(dir.join("SKILL.md")) else {
         return Read::None;
     };
-    let (declared, description) = frontmatter(&text);
+    let (declared, description) = match frontmatter(&text) {
+        Ok(pair) => pair,
+        Err(why) => return Read::Problem(format!("{}: {why}", dir.display())),
+    };
     let shown = dir.display();
 
     // The description is what the model decides on; without it the entry costs
@@ -132,6 +121,10 @@ fn read_one(dir: &Path) -> Read {
     let Some(description) = description.filter(|d| !d.trim().is_empty()) else {
         return Read::Problem(format!("{shown}: SKILL.md has no description"));
     };
+
+    // One skill per line in the tool catalog and the help list.
+    let description = description.split_whitespace().collect::<Vec<_>>().join(" ");
+
     let fallback = dir.file_name().and_then(|n| n.to_str()).unwrap_or_default();
     let name = declared.unwrap_or_else(|| fallback.to_string());
     if !usable(&name) {
@@ -228,7 +221,7 @@ mod tests {
 
     #[test]
     fn a_header_gives_up_its_name_and_description() {
-        let (name, description) = frontmatter(SKILL);
+        let (name, description) = frontmatter(SKILL).unwrap();
         assert_eq!(name.as_deref(), Some("thinking"));
         assert_eq!(description.as_deref(), Some("Five models, one router."));
         assert_eq!(body(SKILL), "# Thinking\n\nBody here.\n");
@@ -238,14 +231,14 @@ mod tests {
     fn a_description_may_carry_the_other_quote_inside_it() {
         let text = "---\ndescription: \"Use when the user says 'go'.\"\n---\nx\n";
         assert_eq!(
-            frontmatter(text).1.as_deref(),
+            frontmatter(text).unwrap().1.as_deref(),
             Some("Use when the user says 'go'.")
         );
     }
 
     #[test]
     fn a_file_with_no_header_is_all_body() {
-        assert_eq!(frontmatter("# Plain\n"), (None, None));
+        assert_eq!(frontmatter("# Plain\n"), Ok((None, None)));
         assert_eq!(body("# Plain\n"), "# Plain\n");
     }
 
@@ -353,10 +346,37 @@ mod tests {
     fn a_nested_metadata_key_does_not_rename_the_skill() {
         // `metadata:` carries its own mapping, and a `name:` indented under it
         // describes the metadata rather than the skill.
-        let text = "---\nname: archify\nmetadata:\n  name: not-this\n                      description: nor this\ndescription: Draw diagrams.\n---\nbody\n";
-        let (name, description) = frontmatter(text);
+        let text = "---\nname: archify\nmetadata:\n  name: not-this\n  description: nor this\ndescription: Draw diagrams.\n---\nbody\n";
+        let (name, description) = frontmatter(text).unwrap();
         assert_eq!(name.as_deref(), Some("archify"));
         assert_eq!(description.as_deref(), Some("Draw diagrams."));
+    }
+
+    #[test]
+    fn a_multiline_description_reaches_the_catalog_on_one_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        skill_at(
+            tmp.path(),
+            "commit",
+            "description: >-\n  First line.\n  Second line.",
+        );
+        let found = discover_from(&[tmp.path().to_path_buf()]);
+        assert_eq!(found.skills.len(), 1);
+        assert_eq!(found.skills[0].description, "First line. Second line.");
+    }
+
+    #[test]
+    fn a_header_that_will_not_parse_is_reported_not_misread() {
+        let tmp = tempfile::tempdir().unwrap();
+        skill_at(tmp.path(), "broken", "name: [1, 2");
+        let found = discover_from(&[tmp.path().to_path_buf()]);
+        assert!(found.skills.is_empty());
+        assert_eq!(found.problems.len(), 1, "{:?}", found.problems);
+        assert!(
+            found.problems[0].contains("not valid skill frontmatter"),
+            "{:?}",
+            found.problems
+        );
     }
 
     #[test]
