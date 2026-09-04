@@ -111,7 +111,7 @@ fn eat_escape<'a, 'b>(chars: &mut Peekable<Chars<'a>>, out: &'b mut String) -> O
         chars.next();
         for c in chars.by_ref() {
             out.push(c);
-            if ('\x40'..='\x7e').contains(&c) {
+            if crate::render::ends_escape(c) {
                 break;
             }
         }
@@ -320,6 +320,22 @@ impl Screen {
             width: size.width,
             height: size.height,
         })
+    }
+
+    /// What the in-memory screen currently holds, one string per row with
+    /// trailing blanks trimmed — the drawn frame, for a test to read back.
+    #[cfg(test)]
+    pub fn painted(&self) -> Vec<String> {
+        let Term::Test(t) = &self.term else {
+            return Vec::new();
+        };
+        let buf = t.backend().buffer();
+        (0..buf.area.height)
+            .map(|y| {
+                let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+                row.trim_end().to_string()
+            })
+            .collect()
     }
 
     /// A screen backed by an in-memory grid, for tests that drive the surface

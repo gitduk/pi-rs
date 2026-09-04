@@ -7,6 +7,8 @@ use tokio_util::sync::CancellationToken;
 
 use tools::Ctx;
 
+use crate::tui::View;
+
 /// Where this lane's turn stands.
 ///
 /// One value rather than a flag beside an outcome: a lane is idle, or running,
@@ -83,6 +85,10 @@ pub struct Lane {
     pub pending: Vec<Event>,
     /// Where this lane's turn stands.
     pub turn: Turn,
+    /// What this lane looks like on screen. Held here rather than parked
+    /// beside the surface: the screen shows the lane `Repl::current` names,
+    /// so there is one view to draw and no second list to keep in step.
+    pub view: View,
     /// What a slash answers to here, and the key map in force. Both are what
     /// this root's config and skills resolved to, so they travel with the lane
     /// rather than with the run — a tree switched back to answers to its own.
