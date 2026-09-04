@@ -827,10 +827,15 @@ pub fn describe(event: &Event, p: &Paint, width: usize) -> Option<String> {
 pub struct Renderer {
     paint: Paint,
     quiet: bool,
-    /// The segments this surface ends a run with, and the model to name if it
-    /// was asked for. A pipe times nothing, so `elapsed` has nothing to say.
+    /// The segments this surface ends a run with. A pipe times nothing and
+    /// queues nothing, so `elapsed` and `queued` have nothing to say here.
     done: Vec<crate::status::Segment>,
+    /// Read off the same events the terminal reads, so a piped run ends on the
+    /// line the terminal would have shown it.
+    tally: crate::status::Tally,
     model: String,
+    /// The worktree this run is working in, for the segment that names it.
+    worktree: Option<String>,
     thinking: bool,
     /// Each stream is tracked separately: they share a terminal when both are
     /// a tty, but only the dirty one may be terminated when piped apart.
@@ -844,12 +849,15 @@ impl Renderer {
         theme: Arc<Theme>,
         done: Vec<crate::status::Segment>,
         model: String,
+        worktree: Option<String>,
     ) -> Self {
         Self {
             paint: Paint::with_theme(std::io::stderr().is_terminal(), theme),
             quiet,
             done,
+            tally: crate::status::Tally::default(),
             model,
+            worktree,
             thinking: false,
             out_dirty: false,
             err_dirty: false,
@@ -859,6 +867,9 @@ impl Renderer {
     /// Answer text goes to stdout so it pipes; everything else is progress and
     /// goes to stderr.
     pub fn on(&mut self, event: Event) {
+        // Before the arms and outside the `quiet` guards: a run still has to
+        // arrive at the right total when nothing about it was printed.
+        self.tally.on(&event);
         match &event {
             Event::ReasoningDelta(d) if !self.quiet => {
                 if !self.thinking {
@@ -880,12 +891,12 @@ impl Renderer {
             Event::Done { .. } if !self.quiet => {
                 self.end_thinking();
                 self.settle();
-                if let Some(mut snap) = crate::status::Snapshot::of_done(&event) {
-                    snap.model = &self.model;
-                    let line = crate::status::line(&self.done, &snap);
-                    if !line.is_empty() {
-                        eprintln!("{}", self.paint.on(&self.paint.theme.muted, &line));
-                    }
+                let snap = self
+                    .tally
+                    .snapshot(&self.model, self.worktree.as_deref(), None, 0);
+                let line = crate::status::line(&self.done, &snap);
+                if !line.is_empty() {
+                    eprintln!("{}", self.paint.on(&self.paint.theme.muted, &line));
                 }
             }
             // Worth seeing even under --quiet: the run did less than it was asked.
@@ -1154,6 +1165,7 @@ mod tests {
             std::sync::Arc::new(super::Theme::default()),
             crate::status::default_done(),
             String::new(),
+            None,
         );
         r.on(agent::Event::TextDelta("There".into()));
         assert!(r.out_dirty, "an unterminated delta leaves the line open");

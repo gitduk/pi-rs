@@ -20,7 +20,6 @@ use agent::session::{Entry as LogEntry, EntryId, Node, Session, UserBody};
 use agent::{AgentError, Event, Totals};
 use anyhow::Result;
 use brain::message::{AssistantContent, ReasoningContent};
-use brain::stream::Usage;
 use crossterm::event::{Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use futures::FutureExt;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -285,6 +284,9 @@ struct ScrollbackRows<'a> {
     /// For the folded summary row, which is synthesized at draw time and so
     /// carries no paint of its own.
     paint: &'a Paint,
+    /// What a finished run's row spells itself out with, for the same reason:
+    /// it is rendered here, not when the run ended.
+    done: &'a [crate::status::Segment],
     /// Next entry to read from the front, and the row offset inside it.
     front: (usize, usize),
     /// Next entry to read from the back, and the row offset inside it.
@@ -292,13 +294,19 @@ struct ScrollbackRows<'a> {
 }
 
 impl<'a> ScrollbackRows<'a> {
-    fn new(rows: &'a [Row], paint: &'a Paint, width: usize) -> Self {
+    fn new(
+        rows: &'a [Row],
+        paint: &'a Paint,
+        done: &'a [crate::status::Segment],
+        width: usize,
+    ) -> Self {
         let back = rows.len().saturating_sub(1);
         let back_row = if rows.is_empty() { 0 } else { rows[back].len() };
         Self {
             rows,
             width,
             paint,
+            done,
             front: (0, 0),
             back: (back, back_row),
         }
@@ -320,12 +328,12 @@ impl<'a> Iterator for ScrollbackRows<'a> {
                 if self.front.1 >= self.back.1 {
                     return None;
                 }
-                let row = entry.line(self.front.1, self.paint, self.width);
+                let row = entry.line(self.front.1, self.paint, self.done, self.width);
                 self.front.1 += 1;
                 return Some(row);
             }
             if self.front.1 < entry.len() {
-                let row = entry.line(self.front.1, self.paint, self.width);
+                let row = entry.line(self.front.1, self.paint, self.done, self.width);
                 self.front.1 += 1;
                 return Some(row);
             }
@@ -347,11 +355,11 @@ impl<'a> DoubleEndedIterator for ScrollbackRows<'a> {
                     return None;
                 }
                 self.back.1 -= 1;
-                return Some(entry.line(self.back.1, self.paint, self.width));
+                return Some(entry.line(self.back.1, self.paint, self.done, self.width));
             }
             if self.back.1 > 0 {
                 self.back.1 -= 1;
-                return Some(entry.line(self.back.1, self.paint, self.width));
+                return Some(entry.line(self.back.1, self.paint, self.done, self.width));
             }
             self.back = (self.back.0 - 1, self.rows[self.back.0 - 1].len());
         }
@@ -563,26 +571,24 @@ pub struct View {
     /// How many rows the opening block occupies. A theme change replaces
     /// exactly those and leaves the conversation under them alone.
     opened: usize,
+    /// When the work in flight began, for the segment that times it. A clock
+    /// and nothing else: whether a run is on is `Lane::turn`'s to say, and one
+    /// field answering both left every ending path to put the clock back or
+    /// leave a spinner running over a finished lane.
     started: Option<Instant>,
     /// Whether this run has produced anything yet — a word, a thought, a call.
     /// Once it has, Esc means stop rather than unsend.
     committed: bool,
-    /// Turns of this run that have already reported their totals.
-    settled: Usage,
-    /// The turn in flight, as far as the provider has said. Superseded rather
-    /// than added to when its `TurnEnd` lands, or the input would count twice.
-    turn: Usage,
+    /// Every number this run has reported, as the events stated them. Both
+    /// status lines read it, so the line the run ends on is the live line's
+    /// last frame rather than a second count of the same turns.
+    tally: crate::status::Tally,
     stopping: bool,
     /// Rows the view is scrolled up by. Zero shows the newest rows.
     scroll: usize,
     /// The last measurement of a scrolled-up view: item counts then, and the
     /// rows they wrapped to. A reflow in place (resize, fold-all) re-bases.
     counted: Option<(usize, usize, usize)>,
-    /// What the last request occupied against what it may. From the loop, not
-    /// measured here: this line repaints ten times a second.
-    ctx: Option<(usize, usize)>,
-    /// Shrinks so far this run.
-    compactions: usize,
     /// The model in force. Copied in before the run borrows the agent, which
     /// is what puts it out of reach for the rest of the turn.
     model: String,
@@ -763,21 +769,13 @@ impl Ui {
     }
 
     /// The values both lines draw on, as this surface currently knows them.
-    fn snapshot<'a>(&self, lane: &'a Lane) -> crate::status::Snapshot<'a> {
-        crate::status::Snapshot {
-            elapsed: lane.view.started.map(|s| s.elapsed()),
-            input: lane.view.settled.input + lane.view.turn.input,
-            output: lane.view.settled.output + lane.view.turn.output,
-            cache_read: lane.view.settled.cache_read + lane.view.turn.cache_read,
-            ctx: lane.view.ctx,
-            compactions: lane.view.compactions,
-            queued: lane.view.queued.len(),
-            model: &lane.view.model,
-            worktree: lane.worktree.as_deref(),
-            // Only a finished run states these, and it brings its own.
-            cost: None,
-            turns: None,
-        }
+    fn snapshot(&self, lane: &Lane) -> crate::status::Snapshot {
+        lane.view.tally.snapshot(
+            &lane.view.model,
+            lane.worktree.as_deref(),
+            lane.view.started.map(|s| s.elapsed()),
+            lane.view.queued.len(),
+        )
     }
 
     /// The separator between lanes on the bar: the one every other line on
@@ -885,37 +883,27 @@ impl Ui {
         ) {
             lane.view.committed = true;
         }
+        // Every number either status line shows is read here, once. The arms
+        // below decide only what reaches the scrollback.
+        lane.view.tally.on(&event);
         match &event {
             Event::TextDelta(d) => self.write(&mut lane.view, d, false),
             Event::ReasoningDelta(d) => self.write(&mut lane.view, d, true),
-            Event::Usage(usage) => {
-                // A retry sends a second one for the same turn: the count it
-                // carries replaces the abandoned attempt's rather than joining
-                // it.
-                lane.view.turn = *usage;
-            }
-            Event::TurnEnd { usage, .. } => {
-                lane.view.settled.input += usage.input;
-                lane.view.settled.output += usage.output;
-                lane.view.settled.cache_read += usage.cache_read;
-                lane.view.settled.cache_write += usage.cache_write;
-                lane.view.turn = Usage::default();
-            }
-            Event::TurnStart { .. } => {}
-            Event::Context { used, budget } => lane.view.ctx = Some((*used, *budget)),
+            // Counted already, and none of them draws a row of its own.
+            Event::Usage(_)
+            | Event::TurnEnd { .. }
+            | Event::TurnStart { .. }
+            | Event::Context { .. } => {}
             Event::Done { .. } => {
                 self.close(&mut lane.view);
-                if let Some(mut snap) = crate::status::Snapshot::of_done(&event) {
-                    snap.model = &lane.view.model;
-                    snap.worktree = lane.worktree.as_deref();
-                    // Still running as far as the screen is concerned: `turn`
-                    // clears this only once the loop returns.
-                    snap.elapsed = lane.view.started.map(|s| s.elapsed());
-                    let line = crate::status::line(&self.done, &snap);
-                    if !line.is_empty() {
-                        let said = self.paint.on(&self.paint.theme.muted, &line);
-                        lane.view.scrollback.push(Row::notice(said));
-                    }
+                // Still running as far as the screen is concerned: `turn`
+                // clears the clock only once the loop returns.
+                let snap = self.snapshot(lane);
+                // Asked now rather than at every draw: a run whose segments
+                // all had nothing to say leaves no row, and a blank one is
+                // worse than none.
+                if !crate::status::parts(&self.done, &snap).is_empty() {
+                    lane.view.scrollback.push(Row::tally(snap));
                 }
             }
             // A call's two events are one line here: the start takes a row in
@@ -944,9 +932,6 @@ impl Ui {
                     .push(Row::result(!is_error, name.clone(), preview.clone()));
             }
             _ => {
-                if matches!(event, Event::Compacted(_)) {
-                    lane.view.compactions += 1;
-                }
                 self.close(&mut lane.view);
                 if let Some(said) = render::describe(&event, &self.paint, self.screen.usable()) {
                     // Row by row: a scrollback line is written with a carriage
@@ -973,8 +958,8 @@ impl Ui {
     /// being typed, or — with the rewind selector open — the user messages a
     /// conversation can be rewound to. Never during a run, when the editor is
     /// a queue, not a command line.
-    fn menu(&self, view: &View) -> Vec<MenuEntry> {
-        if view.started.is_some() {
+    fn menu(&self, lane: &Lane) -> Vec<MenuEntry> {
+        if lane.is_running() {
             return Vec::new();
         }
         if self.settings.is_some() {
@@ -1009,8 +994,8 @@ impl Ui {
     }
 
     /// The highlighted row, clamped: the list shrinks as the word grows.
-    fn highlighted(&self, view: &View) -> Option<MenuEntry> {
-        let mut menu = self.menu(view);
+    fn highlighted(&self, lane: &Lane) -> Option<MenuEntry> {
+        let mut menu = self.menu(lane);
         if menu.is_empty() {
             return None;
         }
@@ -1064,7 +1049,7 @@ impl Ui {
             &self.paint,
         ));
 
-        if lane.view.started.is_some() {
+        if lane.is_running() {
             let mut parts = crate::status::parts(&self.live, &self.snapshot(lane));
             // Not a segment: a run that can be stopped has to say so, and a
             // config that left it out would strand the user mid-turn.
@@ -1160,7 +1145,7 @@ impl Ui {
     }
 
     fn flush(&mut self, lane: &mut Lane) {
-        let menu = self.menu(&lane.view);
+        let menu = self.menu(lane);
         let width = self.screen.usable();
         let bar = self.lane_bar(width);
         let bar_h = usize::from(bar.is_some());
@@ -1189,8 +1174,11 @@ impl Ui {
         } else {
             menu.len().min(room)
         };
+        // Every pinned row, the bar's included: this is what `Fill(1)` will
+        // be left with, and `Rows` fills top-down — a row over that count is
+        // dropped off the bottom, where the newest one is.
         let hist_view = (self.screen.height as usize)
-            .saturating_sub(editor_h + menu_h)
+            .saturating_sub(editor_h + menu_h + bar_h)
             .max(1);
         let live = self.live(lane, hist_view);
 
@@ -1213,7 +1201,7 @@ impl Ui {
         // into several, and counting lines here would put more rows in the
         // area than fit — pushing the newest ones off the bottom, underneath
         // the input, where nothing shows them.
-        let scrollback = ScrollbackRows::new(&lane.view.scrollback, &self.paint, width);
+        let scrollback = ScrollbackRows::new(&lane.view.scrollback, &self.paint, &self.done, width);
         let (rows, scroll) = screen::window(
             scrollback.chain(live.iter().map(|s| Cow::Borrowed(s.as_str()))),
             width,
@@ -1265,7 +1253,7 @@ impl Ui {
 
     /// Rows the scrollback renders to at this width, wraps included.
     fn scrollback_rows(&self, view: &View, width: usize) -> usize {
-        ScrollbackRows::new(&view.scrollback, &self.paint, width)
+        ScrollbackRows::new(&view.scrollback, &self.paint, &self.done, width)
             .map(|line| screen::fit(&line, width).len())
             .sum()
     }
@@ -1341,7 +1329,7 @@ impl Ui {
         let bound = self.keys.action(
             press,
             crate::keys::Layers {
-                menu: self.settings.is_some() || !self.menu(&lane.view).is_empty(),
+                menu: self.settings.is_some() || !self.menu(lane).is_empty(),
                 run: running,
             },
         );
@@ -1413,7 +1401,7 @@ impl Ui {
                 // Enter while a menu is open runs what it highlights. The
                 // typed text is a prefix; the highlighted word is the intent.
                 // The menu reads the editor, so pick before draining it.
-                match self.highlighted(&lane.view) {
+                match self.highlighted(lane) {
                     Some(MenuEntry::Message { id, .. }) => {
                         self.rewind.clear();
                         return Intent::Rewind(id);
@@ -1446,7 +1434,7 @@ impl Ui {
             Some(Action::RunInterrupt) => {
                 // Esc before the model has moved means "I didn't mean to send
                 // that"; an empty editor, or unsending overwrites a line.
-                if self.editor.is_empty() && lane.view.started.is_some() && !lane.view.committed {
+                if self.editor.is_empty() && lane.is_running() && !lane.view.committed {
                     return Intent::Unsend;
                 }
                 return Intent::Interrupt;
@@ -1536,7 +1524,7 @@ impl Ui {
             }
 
             Some(Action::MenuAccept) => {
-                match self.highlighted(&lane.view) {
+                match self.highlighted(lane) {
                     Some(MenuEntry::Message { id, .. }) => {
                         self.rewind.clear();
                         return Intent::Rewind(id);
@@ -1553,12 +1541,12 @@ impl Ui {
                 }
             }
             Some(Action::MenuNext) => {
-                let n = self.menu(&lane.view).len().saturating_sub(1);
+                let n = self.menu(lane).len().saturating_sub(1);
                 let at = self.picked.unwrap_or(n).min(n);
                 self.picked = Some(at.saturating_add(1).min(n));
             }
             Some(Action::MenuPrevious) => {
-                let n = self.menu(&lane.view).len().saturating_sub(1);
+                let n = self.menu(lane).len().saturating_sub(1);
                 let at = self.picked.unwrap_or(n).min(n);
                 self.picked = Some(at.saturating_sub(1));
             }
@@ -2366,12 +2354,10 @@ impl Tui {
     /// per-run figures start from nothing rather than from the last run's.
     /// `committed` says whether the prompt behind it can still be taken back.
     fn arm_view(&mut self, committed: bool) {
-        self.core.lane_mut().view.started = Some(Instant::now());
+        self.core.lane_mut().view.started = Some(std::time::Instant::now());
         self.core.lane_mut().view.committed = committed;
         self.core.lane_mut().view.stopping = false;
-        self.core.lane_mut().view.settled = Usage::default();
-        self.core.lane_mut().view.turn = Usage::default();
-        self.core.lane_mut().view.compactions = 0;
+        self.core.lane_mut().view.tally.clear();
     }
 
     fn start_turn(&mut self, prompt: String, typed: Option<String>, done: &UnboundedSender<Done>) {
@@ -2682,7 +2668,8 @@ impl Tui {
                 ),
             );
         }
-        // The spinner was borrowed for the pass; give the lane its clock back.
+        // The pass is over, so the clock stops. What it was driving — the
+        // live region — already went with the turn.
         self.core.lanes[lane].view.started = None;
     }
 
@@ -2773,7 +2760,7 @@ mod tests {
     fn the_opening_block_names_the_instruction_files() {
         let paint = Paint::new(false);
         let rows = Row::banner(&["~/.pi/Pi.md".into(), "AGENTS.md".into()], &paint);
-        let shown: Vec<String> = ScrollbackRows::new(&rows, &paint, 80)
+        let shown: Vec<String> = ScrollbackRows::new(&rows, &paint, &[], 80)
             .map(|r| r.to_string())
             .collect();
         // The version from the same place the banner reads it: spelled out
@@ -2826,7 +2813,7 @@ mod tests {
     fn a_folded_entry_is_its_summary_until_unfolded() {
         let rows = [block(1, 2, true)];
         let paint = Paint::new(false);
-        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, 80).collect();
+        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 80).collect();
         assert_eq!(rows, vec!["thinking · 2 lines"]);
     }
 
@@ -2834,7 +2821,7 @@ mod tests {
     fn an_unfolded_entry_shows_its_lines() {
         let rows = [block(1, 2, false)];
         let paint = Paint::new(false);
-        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, 80).collect();
+        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 80).collect();
         assert_eq!(rows, vec!["line 1", "line 2"]);
     }
 
@@ -2852,8 +2839,8 @@ mod tests {
         let rebuilt = [Row::stored_result(&stored, Some(sketched))];
 
         let paint = Paint::new(false);
-        let a: Vec<Cow<'_, str>> = ScrollbackRows::new(&live, &paint, 80).collect();
-        let b: Vec<Cow<'_, str>> = ScrollbackRows::new(&rebuilt, &paint, 80).collect();
+        let a: Vec<Cow<'_, str>> = ScrollbackRows::new(&live, &paint, &[], 80).collect();
+        let b: Vec<Cow<'_, str>> = ScrollbackRows::new(&rebuilt, &paint, &[], 80).collect();
         assert_eq!(a, b);
         assert_eq!(a.len(), 3, "head plus the two diff rows");
     }
@@ -2868,10 +2855,10 @@ mod tests {
         let long = "x".repeat(200);
         let rows = [Row::result(true, "edit", format!("head\n  12 + {long}"))];
 
-        let narrow: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, 40).collect();
-        let wide: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, 160).collect();
+        let narrow: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 40).collect();
+        let wide: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 160).collect();
         // And back again: widening must not be the only direction that repaints.
-        let again: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, 40).collect();
+        let again: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 40).collect();
 
         assert_eq!(narrow.len(), 2, "head plus the one diff row");
         assert!(
@@ -2891,7 +2878,7 @@ mod tests {
         let stored = brain::message::ToolResult::text("c1", "read", "fn main() {}\nmore");
         let rows = [Row::stored_result(&stored, None)];
         let paint = Paint::new(false);
-        let out: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, 80).collect();
+        let out: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 80).collect();
         assert_eq!(out.len(), 1);
         assert!(out[0].contains("fn main() {}"), "{}", out[0]);
         assert!(!out[0].contains("more"), "only the first line");
@@ -2904,8 +2891,8 @@ mod tests {
     fn widening_the_window_gives_back_what_was_clipped() {
         let paint = Paint::new(false);
         let rows = [Row::result(true, "read", "a".repeat(200))];
-        let narrow: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, 40).collect();
-        let wide: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, 160).collect();
+        let narrow: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 40).collect();
+        let wide: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 160).collect();
 
         assert!(narrow[0].ends_with('…'), "{}", narrow[0]);
         assert!(
@@ -2924,8 +2911,8 @@ mod tests {
         let paint = Paint::new(false);
         let bad = [Row::result(false, "read", "gone")];
         let good = [Row::result(true, "read", "gone")];
-        let bad: Vec<Cow<'_, str>> = ScrollbackRows::new(&bad, &paint, 80).collect();
-        let good: Vec<Cow<'_, str>> = ScrollbackRows::new(&good, &paint, 80).collect();
+        let bad: Vec<Cow<'_, str>> = ScrollbackRows::new(&bad, &paint, &[], 80).collect();
+        let good: Vec<Cow<'_, str>> = ScrollbackRows::new(&good, &paint, &[], 80).collect();
         assert!(bad[0].starts_with('✗'), "{}", bad[0]);
         assert!(good[0].starts_with('✓'), "{}", good[0]);
     }
@@ -2934,7 +2921,7 @@ mod tests {
     fn a_plain_entry_is_itself() {
         let rows = [Row::notice("hello".to_string())];
         let paint = Paint::new(false);
-        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, 80).collect();
+        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 80).collect();
         assert_eq!(rows, vec!["hello"]);
     }
 
@@ -2944,9 +2931,9 @@ mod tests {
         // empty scrollback panicked. The back walk kept doing it after the
         // front was fixed, and `screen::window` is the one that walks back.
         let paint = Paint::new(false);
-        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&[], &paint, 80).collect();
+        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&[], &paint, &[], 80).collect();
         assert!(rows.is_empty());
-        let back: Vec<Cow<'_, str>> = ScrollbackRows::new(&[], &paint, 80).rev().collect();
+        let back: Vec<Cow<'_, str>> = ScrollbackRows::new(&[], &paint, &[], 80).rev().collect();
         assert!(back.is_empty(), "the back walk too");
     }
 
@@ -2958,7 +2945,7 @@ mod tests {
             Row::notice("d".to_string()),
         ];
         let paint = Paint::new(false);
-        let rows = ScrollbackRows::new(&rows, &paint, 80);
+        let rows = ScrollbackRows::new(&rows, &paint, &[], 80);
         let (front, back): (Vec<_>, Vec<_>) = {
             let mut f = Vec::new();
             let mut b = Vec::new();
@@ -3155,11 +3142,11 @@ mod tests {
         let mut entry = block(1, 2, false);
         let paint = Paint::new(false);
         let rows: Vec<Cow<'_, str>> =
-            ScrollbackRows::new(std::slice::from_ref(&entry), &paint, 80).collect();
+            ScrollbackRows::new(std::slice::from_ref(&entry), &paint, &[], 80).collect();
         assert_eq!(rows, vec!["line 1", "line 2"]);
         entry.set_folded(true);
         let rows: Vec<Cow<'_, str>> =
-            ScrollbackRows::new(std::slice::from_ref(&entry), &paint, 80).collect();
+            ScrollbackRows::new(std::slice::from_ref(&entry), &paint, &[], 80).collect();
         assert_eq!(rows, vec!["thinking · 2 lines"]);
     }
 
@@ -3392,7 +3379,7 @@ mod tests {
         // By content, not by count: the banner this would lay over it is one
         // row too, so a length check cannot tell them apart.
         let paint = Paint::new(false);
-        let rows: Vec<String> = ScrollbackRows::new(&tui.core.lanes[1].view.scrollback, &paint, 80)
+        let rows: Vec<String> = ScrollbackRows::new(&tui.core.lanes[1].view.scrollback, &paint, &[], 80)
             .map(|r| r.to_string())
             .collect();
         assert!(
@@ -3617,6 +3604,122 @@ mod tests {
     }
 
     /// A surface with an in-memory screen, for the drawing tests below.
+    /// The history area is what is left after the menu, the bar and the input.
+    /// Measured without the bar's row, `window` is handed one row more than the
+    /// frame can paint and `Rows` fills top-down — so the row that goes over
+    /// the edge is the newest one, which is the one being read.
+    #[test]
+    fn the_newest_row_survives_a_frame_with_the_lane_bar_on_it() {
+        let mut ui = test_ui(40, 8);
+        ui.tabs = vec![
+            super::Tab { mark: super::Mark::Front, name: "pi-rs".into() },
+            super::Tab { mark: super::Mark::Idle, name: "f1".into() },
+        ];
+        let (_dir, mut lane) = a_running_lane();
+        lane.turn = crate::lane::Turn::Idle;
+        for i in 0..10 {
+            lane.view.scrollback.push(Row::notice(format!("row-{i}")));
+        }
+        ui.flush(&mut lane);
+
+        let painted = ui.screen.painted();
+        assert!(
+            painted.iter().any(|r| r.trim() == "pi-rs · f1"),
+            "the bar is on this frame: {painted:?}"
+        );
+        assert!(
+            painted.iter().any(|r| r.trim() == "row-9"),
+            "the newest row was pushed off the bottom: {painted:?}"
+        );
+    }
+
+    fn a_finished_run(ui: &mut super::Ui, lane: &mut crate::lane::Lane) {
+        ui.on_event(lane, agent::Event::TurnStart { turn: 1 });
+        ui.on_event(
+            lane,
+            agent::Event::Done {
+                turns: 2,
+                usage: brain::stream::Usage {
+                    input: 8_400,
+                    output: 390,
+                    ..Default::default()
+                },
+                cost: 0.0012,
+                ctx: (72_400, 114_000),
+                compactions: 0,
+            },
+        );
+    }
+
+    fn spelled(
+        rows: &[Row],
+        paint: &Paint,
+        done: &[crate::status::Segment],
+    ) -> Vec<String> {
+        ScrollbackRows::new(rows, paint, done, 80)
+            .map(|r| crate::render::strip_ansi(&r))
+            .collect()
+    }
+
+    /// The row a run ends on keeps its numbers, not the string they rendered
+    /// to. The segment list that spells it out and the theme that paints it
+    /// both outlive the run, and a string frozen at the end of it answers to
+    /// neither.
+    #[test]
+    fn the_line_a_run_ends_on_is_respelled_from_its_numbers() {
+        let mut ui = test_ui(80, 24);
+        let (_dir, mut lane) = a_running_lane();
+        a_finished_run(&mut ui, &mut lane);
+
+        let rows = spelled(&lane.view.scrollback, &ui.paint, &crate::status::default_done());
+        assert_eq!(
+            rows.last().map(String::as_str),
+            Some("2 turns · 8.4k in / 390 out · ctx 72.4k/114.0k · $0.0012")
+        );
+
+        // The same row, asked for differently. A stored string could not do
+        // this, which is the whole of what changed.
+        let narrowed = spelled(
+            &lane.view.scrollback,
+            &ui.paint,
+            &[crate::status::Segment::Cost],
+        );
+        assert_eq!(narrowed.last().map(String::as_str), Some("$0.0012"));
+    }
+
+    /// A run that begins no turn — a `!` command — spends no tokens, and a row
+    /// of dashes under it reads as a model call that cost nothing.
+    #[test]
+    fn a_bang_command_shows_no_token_counts() {
+        let ui = test_ui(80, 24);
+        let (_dir, mut lane) = a_running_lane();
+        lane.view.started = Some(std::time::Instant::now());
+
+        let live = ui.live(&lane, 10).join("\n");
+        assert!(live.contains("esc to stop"), "the run is on: {live}");
+        assert!(!live.contains(" in / "), "nothing was spent: {live}");
+    }
+
+    /// The live region follows the lane's turn, not the clock beside it. One
+    /// field answering both meant every ending path had to put the clock back
+    /// or leave a spinner running over a lane that had finished.
+    #[test]
+    fn the_live_region_ends_with_the_turn_and_not_with_the_clock() {
+        let ui = test_ui(80, 24);
+        let (_dir, mut lane) = a_running_lane();
+        lane.view.started = Some(std::time::Instant::now());
+        assert!(
+            ui.live(&lane, 10).iter().any(|r| r.contains("esc to stop")),
+            "a running lane shows the line it can be stopped from"
+        );
+
+        lane.turn = crate::lane::Turn::Idle;
+        assert!(
+            !ui.live(&lane, 10).iter().any(|r| r.contains("esc to stop")),
+            "the clock is still set; the turn is what says the run is over"
+        );
+    }
+
     fn test_ui(width: u16, height: u16) -> super::Ui {
         super::Ui::new(
             crate::tui::screen::Screen::test(width, height),

@@ -18,6 +18,7 @@ use std::cell::RefCell;
 use brain::message::{ToolResult, ToolResultContent};
 
 use crate::render::{self, Markdown, Paint};
+use crate::status::{self, Segment, Snapshot};
 
 /// The gutter a line already said wears. Heavier than the `│` a fenced block
 /// gets: that rule is the machine's, this one is the person's.
@@ -47,6 +48,11 @@ enum Kind {
         preview: String,
         painted: RefCell<Option<(usize, Vec<String>)>>,
     },
+    /// What a finished run left behind, kept as its numbers rather than as the
+    /// string they render to. The segments the config asks for and the theme
+    /// they are painted in both outlive the run, and a string frozen when it
+    /// ended answers to neither.
+    Tally(Snapshot),
     /// A block of reasoning that can be folded or unfolded.
     Reasoning {
         /// Which block this row belongs to; the stream appends completed lines
@@ -90,6 +96,11 @@ impl Row {
         text.lines()
             .map(|line| Self::notice(Self::answer_line(line, md, paint)))
             .collect()
+    }
+
+    /// The line a finished run ends on.
+    pub fn tally(snap: Snapshot) -> Self {
+        Row(Kind::Tally(snap))
     }
 
     /// A reasoning block's first row. Later lines go in through `push_line`.
@@ -168,7 +179,7 @@ impl Row {
     /// How many screen rows this renders to.
     pub fn len(&self) -> usize {
         match &self.0 {
-            Kind::Notice(_) => 1,
+            Kind::Notice(_) | Kind::Tally(_) => 1,
             Kind::Result { preview, .. } => preview.lines().count().max(1),
             Kind::Reasoning { lines, folded, .. } => {
                 if *folded {
@@ -180,10 +191,21 @@ impl Row {
         }
     }
 
-    /// Row `i` of what this renders to, at this width.
-    pub fn line<'a>(&'a self, i: usize, paint: &'a Paint, width: usize) -> Cow<'a, str> {
+    /// Row `i` of what this renders to, at this width. `done` is the segment
+    /// list a finished run's row is spelled out with; every other kind ignores
+    /// it.
+    pub fn line<'a>(
+        &'a self,
+        i: usize,
+        paint: &'a Paint,
+        done: &[Segment],
+        width: usize,
+    ) -> Cow<'a, str> {
         match &self.0 {
             Kind::Notice(s) => Cow::Borrowed(s),
+            Kind::Tally(snap) => {
+                Cow::Owned(paint.on(&paint.theme.muted, &status::line(done, snap)))
+            }
             Kind::Result {
                 ok,
                 name,
@@ -296,7 +318,7 @@ mod said_tests {
         let paint = Paint::new(true);
         Row::prompt(text, "! ", &paint)
             .iter()
-            .map(|r| crate::render::strip_ansi(&r.line(0, &paint, 80)))
+            .map(|r| crate::render::strip_ansi(&r.line(0, &paint, &[], 80)))
             .collect()
     }
 

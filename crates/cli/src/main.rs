@@ -527,9 +527,10 @@ fn paint(
     theme: std::sync::Arc<render::Theme>,
     done: Vec<status::Segment>,
     model: String,
+    worktree: Option<String>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut r = render::Renderer::new(quiet, theme, done, model);
+        let mut r = render::Renderer::new(quiet, theme, done, model, worktree);
         while let Some(event) = rx.recv().await {
             r.on(event);
         }
@@ -592,6 +593,9 @@ async fn main() -> Result<()> {
     }
     // Captured before the spec and workspace move into the agent and context.
     let root = workspace.root().to_path_buf();
+    // Asked once: it shells out to git, and three startups of that was the
+    // pause `Lists` exists to avoid.
+    let worktree = worktree::current(&root);
     let model_id = dialled.spec.model.clone();
 
     let mut ag = agent::Agent::new(dialled.transport, dialled.spec);
@@ -665,7 +669,7 @@ async fn main() -> Result<()> {
 
                 context: resolved.context,
                 standing: resolved.standing,
-                worktree: worktree::current(&root),
+                worktree: worktree.clone(),
                 ctx,
                 events,
                 inbox,
@@ -692,6 +696,7 @@ async fn main() -> Result<()> {
             std::sync::Arc::new(config.theme.clone()),
             config.status.done.clone(),
             model_id.clone(),
+            worktree.clone(),
         );
         let out = line::run(core, tx).await;
         let _ = painter.await;
@@ -714,6 +719,7 @@ async fn main() -> Result<()> {
         std::sync::Arc::new(config.theme.clone()),
         config.status.done.clone(),
         model_id.clone(),
+        worktree.clone(),
     );
     let ctx = tools::Ctx::new(workspace)
         .with_session(&id)
