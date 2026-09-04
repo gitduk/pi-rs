@@ -1520,6 +1520,7 @@ impl Repl {
             inbox,
             pending: Vec::new(),
             turn: crate::lane::Turn::Idle,
+            view: Default::default(),
         });
         self.current = self.lanes.len() - 1;
         self.in_force();
@@ -2327,6 +2328,7 @@ mod tests {
             inbox,
             pending: Vec::new(),
             turn: crate::lane::Turn::Idle,
+            view: Default::default(),
             keys: std::sync::Arc::new(crate::keys::Keys::default()),
             commands: std::sync::Arc::new(Vec::new()),
         }
@@ -2502,6 +2504,7 @@ mod tests {
             inbox,
             pending: Vec::new(),
             turn: crate::lane::Turn::Idle,
+            view: Default::default(),
             keys: keys.clone(),
             commands: commands.clone(),
         };

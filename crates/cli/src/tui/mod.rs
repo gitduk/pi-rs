@@ -30,7 +30,7 @@ use crate::journal;
 use crate::keys::{Action, Keys, Press};
 use crate::render::Style as ThemeStyle;
 use crate::render::{self, Markdown, Paint};
-use crate::lane::Turn;
+use crate::lane::{Lane, Turn};
 use crate::repl::{self, Candidate, Choice, Command, Fate, Intent, Repl, Rewound, Step};
 use crate::session::ResumeChoice;
 use editor::Editor;
@@ -309,8 +309,8 @@ impl<'a> Iterator for ScrollbackRows<'a> {
     type Item = Cow<'a, str>;
 
     fn next(&mut self) -> Option<Cow<'a, str>> {
-        // `next_back` guards the empty case through its row pointers; the
-        // front walk would index `rows[0]` before any check.
+        // Both walks index before they compare their pointers, and on an empty
+        // scrollback `rows[0]` is already out of bounds.
         if self.rows.is_empty() {
             return None;
         }
@@ -337,6 +337,9 @@ impl<'a> Iterator for ScrollbackRows<'a> {
 
 impl<'a> DoubleEndedIterator for ScrollbackRows<'a> {
     fn next_back(&mut self) -> Option<Cow<'a, str>> {
+        if self.rows.is_empty() {
+            return None;
+        }
         while self.front.0 <= self.back.0 {
             let entry = &self.rows[self.back.0];
             if self.front.0 == self.back.0 {
@@ -524,11 +527,12 @@ fn scrollback_from(
 
 // Everything the terminal shows, and nothing the session knows.
 /// What one lane looks like on screen: its conversation, the stream filling
-/// it, where the view is parked and what this run has cost. Swapped whole when
-/// the surface shows another lane; everything on `Ui` around it is the one
+/// it, where it is scrolled and what this run has cost. Owned by the lane it
+/// belongs to, so the surface draws whichever `Repl::current` names and there
+/// is no second list to keep in step; everything on `Ui` around it is the one
 /// terminal, the one keyboard and whatever menu is open over them.
 #[derive(Default)]
-struct View {
+pub struct View {
     /// Model output with no newline after it yet. Kept live because it is still
     /// being written; a completed line goes straight to scrollback.
     partial: String,
@@ -551,13 +555,11 @@ struct View {
     /// lines: their fate was settled at the door, and re-reading them on the
     /// way out would ask a question that has already been answered.
     queued: Vec<Intent>,
-    /// Which worktree the session is working in, or None in the repository's
-    /// own checkout. The status line says it, so the tree being edited is
-    /// visible without asking.
-    worktree: Option<String>,
-    /// The instruction files named in the opening block, kept so `/reload`
-    /// onto a new theme can rebuild it.
-    context: Vec<String>,
+    /// Whether this lane's opening block has been built. A rebuild drops the
+    /// banner along with everything else, so neither an empty scrollback nor a
+    /// zero `opened` can stand in for "never drawn" — and drawing it a second
+    /// time would stack two banners on one lane.
+    drawn: bool,
     /// How many rows the opening block occupies. A theme change replaces
     /// exactly those and leaves the conversation under them alone.
     opened: usize,
@@ -630,52 +632,11 @@ struct Ui {
     /// The segments each line shows, in the order the config named them.
     live: Vec<crate::status::Segment>,
     done: Vec<crate::status::Segment>,
-    /// What the screen is showing: the view belonging to `Repl::current`.
-    ///
-    /// A field rather than an index into `parked`, so it keeps the disjoint
-    /// borrow every method here relies on — `self.view.scrollback` beside
-    /// `self.paint` is two fields, where a lookup would be all of `self`.
-    view: View,
-    /// The views of every other lane, by the same index `Repl::lanes` uses.
-    /// The entry for the lane in front is None: its view is `view`, on loan to
-    /// the screen until the next switch puts it back.
-    parked: Vec<Option<View>>,
     /// What the bottom bar says, in lane order. Empty until there is a second
     /// lane, and the bar is absent with it.
     tabs: Vec<Tab>,
 }
 
-impl Ui {
-    /// Put the view on screen back where it belongs and take another's out.
-    /// Rows, scroll position and this run's numbers all travel with it, so a
-    /// lane comes back exactly as it was left rather than redrawn from its
-    /// transcript.
-    fn show(&mut self, was: usize, now: usize) {
-        if was == now {
-            return;
-        }
-        // The editor is the surface's, not the view's, so a draft does not
-        // travel with the swap below. Dropped here, where every switch passes,
-        // rather than at each caller that has to remember.
-        self.editor.take(false);
-        let leaving = std::mem::take(&mut self.view);
-        if let Some(slot) = self.parked.get_mut(was) {
-            *slot = Some(leaving);
-        }
-        // A lane opened this moment has no view yet, and an empty one is what
-        // a lane nobody has said anything in looks like.
-        self.view = self
-            .parked
-            .get_mut(now)
-            .and_then(Option::take)
-            .unwrap_or_default();
-    }
-
-    /// Make room for a lane that has just been opened.
-    fn opened_lane(&mut self) {
-        self.parked.push(None);
-    }
-}
 
 /// What to call a checkout. The root answers to its directory name, as
 /// `worktree list` already names it — a fixed word would collide with a
@@ -741,18 +702,36 @@ impl MenuEntry {
     }
 }
 
+impl View {
+    /// A lane nobody has said anything in yet: the banner naming what it
+    /// stands on, and everything else empty.
+    pub fn opening(context: &[String], paint: &Paint) -> Self {
+        let scrollback = Row::banner(context, paint);
+        Self {
+            drawn: true,
+            opened: scrollback.len(),
+            scrollback,
+            ..Self::default()
+        }
+    }
+}
+
 impl Ui {
+    /// The draft belongs to the lane it was typed at, and the editor is the
+    /// surface's rather than any view's — so a switch has to drop it, or the
+    /// next Enter files it in whatever lane it landed on.
+    fn leave_lane(&mut self) {
+        self.editor.take(false);
+    }
+
     fn new(
         screen: Screen,
         keys: Arc<Keys>,
         choices: Vec<Choice>,
         commands: Arc<Vec<Command>>,
         lists: Lists,
-        context: &[String],
         paint: Paint,
     ) -> Self {
-        let opening = Row::banner(context, &paint);
-        let opened = opening.len();
         let prompt = Self::paint_prompt(&paint, &paint.theme.prompt.icon);
         let bang_prompt = Self::paint_prompt(&paint, "!");
         let mut editor = Editor::default();
@@ -779,31 +758,22 @@ impl Ui {
             spinner: 0,
             live: crate::status::default_live(),
             done: crate::status::default_done(),
-            parked: vec![None],
             tabs: Vec::new(),
-            // Everything else about a lane starts empty, which is what a lane
-            // nobody has said anything in yet looks like.
-            view: View {
-                context: context.to_vec(),
-                opened,
-                scrollback: opening,
-                ..View::default()
-            },
         }
     }
 
     /// The values both lines draw on, as this surface currently knows them.
-    fn snapshot(&self) -> crate::status::Snapshot<'_> {
+    fn snapshot<'a>(&self, lane: &'a Lane) -> crate::status::Snapshot<'a> {
         crate::status::Snapshot {
-            elapsed: self.view.started.map(|s| s.elapsed()),
-            input: self.view.settled.input + self.view.turn.input,
-            output: self.view.settled.output + self.view.turn.output,
-            cache_read: self.view.settled.cache_read + self.view.turn.cache_read,
-            ctx: self.view.ctx,
-            compactions: self.view.compactions,
-            queued: self.view.queued.len(),
-            model: &self.view.model,
-            worktree: self.view.worktree.as_deref(),
+            elapsed: lane.view.started.map(|s| s.elapsed()),
+            input: lane.view.settled.input + lane.view.turn.input,
+            output: lane.view.settled.output + lane.view.turn.output,
+            cache_read: lane.view.settled.cache_read + lane.view.turn.cache_read,
+            ctx: lane.view.ctx,
+            compactions: lane.view.compactions,
+            queued: lane.view.queued.len(),
+            model: &lane.view.model,
+            worktree: lane.worktree.as_deref(),
             // Only a finished run states these, and it brings its own.
             cost: None,
             turns: None,
@@ -821,33 +791,33 @@ impl Ui {
     fn paint_prompt(paint: &Paint, icon: &str) -> String {
         format!("{} ", paint.on(&paint.theme.prompt.color, icon))
     }
-    fn say(&mut self, line: impl Into<String>) {
-        self.view.scrollback.push(Row::notice(line));
+    fn say(&mut self, view: &mut View, line: impl Into<String>) {
+        view.scrollback.push(Row::notice(line));
     }
 
     /// Where a finished row goes: a reasoning line into the streaming block's
     /// foldable entry, anything else straight into scrollback.
-    fn land(&mut self, painted: String, reasoning: bool) {
-        if reasoning && let Some(id) = self.view.thinking.streaming {
-            if let Some(row) = self.streaming_row(id) {
+    fn land(&mut self, view: &mut View, painted: String, reasoning: bool) {
+        if reasoning && let Some(id) = view.thinking.streaming {
+            if let Some(row) = self.streaming_row(view, id) {
                 row.push_line(painted);
                 return;
             }
             // The block's first line: born the way `ctrl+t` last left the last
             // block — its own fold, not the switch.
-            self.view.scrollback.push(Row::reasoning(
+            view.scrollback.push(Row::reasoning(
                 id,
                 vec![painted],
-                self.view.thinking.birth_fold(),
+                view.thinking.birth_fold(),
             ));
             return;
         }
-        self.view.scrollback.push(Row::notice(painted));
+        view.scrollback.push(Row::notice(painted));
     }
 
     /// The scrollback entry for a streaming block, if it has one yet.
-    fn streaming_row(&mut self, id: u64) -> Option<&mut Row> {
-        self.view.scrollback
+    fn streaming_row<'a>(&mut self, view: &'a mut View, id: u64) -> Option<&'a mut Row> {
+        view.scrollback
             .iter_mut()
             .rev()
             .find(|r| r.block() == Some(id))
@@ -856,95 +826,95 @@ impl Ui {
     /// End the open paragraph and send it up into scrollback.
     /// A finished row, styled for what it is: reasoning, or the answer's
     /// markdown. The one place either decision is made.
-    fn paint_row(&mut self, line: &str, reasoning: bool) -> String {
+    fn paint_row(&mut self, view: &mut View, line: &str, reasoning: bool) -> String {
         if reasoning {
             return Row::reasoning_line(line, &self.paint);
         }
-        Row::answer_line(line, &mut self.view.md, &self.paint)
+        Row::answer_line(line, &mut view.md, &self.paint)
     }
 
-    fn close(&mut self) {
-        if !self.view.partial.is_empty() {
-            let text = std::mem::take(&mut self.view.partial);
-            let painted = self.paint_row(&text, self.view.reasoning);
-            self.land(painted, self.view.reasoning);
+    fn close(&mut self, view: &mut View) {
+        if !view.partial.is_empty() {
+            let text = std::mem::take(&mut view.partial);
+            let painted = self.paint_row(view, &text, view.reasoning);
+            self.land(view, painted, view.reasoning);
         }
-        if self.view.reasoning {
+        if view.reasoning {
             // The block is over: it stops taking lines; its entry is already
             // in the scrollback, folded or not.
-            self.view.thinking.close_block();
+            view.thinking.close_block();
         } else {
             // A fence the answer left open stays open only within the answer.
             // A tool call ends the block, and the block is as far as markdown
             // state can honestly reach.
-            self.view.md.reset();
+            view.md.reset();
         }
-        self.view.reasoning = false;
+        view.reasoning = false;
     }
 
-    fn write(&mut self, delta: &str, reasoning: bool) {
-        if reasoning != self.view.reasoning {
-            self.close();
-            self.view.reasoning = reasoning;
+    fn write(&mut self, view: &mut View, delta: &str, reasoning: bool) {
+        if reasoning != view.reasoning {
+            self.close(view);
+            view.reasoning = reasoning;
             if reasoning {
                 // A new reasoning block: `close` just settled the previous
                 // one; this one gets a fresh id and pushes the old last one
                 // back to the switch.
-                self.view.thinking.start(&mut self.view.scrollback);
+                view.thinking.start(&mut view.scrollback);
             }
         }
 
-        self.view.partial.push_str(delta);
+        view.partial.push_str(delta);
         // A finished line is no longer changing, so it belongs in the
         // scrollback rather than in the region we repaint: reasoning into
         // the streaming block's foldable entry, answer text as a plain row.
-        while let Some(i) = self.view.partial.find('\n') {
-            let line: String = self.view.partial.drain(..=i).collect();
+        while let Some(i) = view.partial.find('\n') {
+            let line: String = view.partial.drain(..=i).collect();
             let line = line.trim_end_matches('\n').to_string();
-            let painted = self.paint_row(&line, reasoning);
-            self.land(painted, reasoning);
+            let painted = self.paint_row(view, &line, reasoning);
+            self.land(view, painted, reasoning);
         }
     }
 
-    fn on_event(&mut self, event: Event) {
+    fn on_event(&mut self, lane: &mut Lane, event: Event) {
         // Anything the model produces spends the chance to unsend: past this
         // the prompt has been answered, not merely sent.
         if matches!(
             event,
             Event::TextDelta(_) | Event::ReasoningDelta(_) | Event::ToolStart { .. }
         ) {
-            self.view.committed = true;
+            lane.view.committed = true;
         }
         match &event {
-            Event::TextDelta(d) => self.write(d, false),
-            Event::ReasoningDelta(d) => self.write(d, true),
+            Event::TextDelta(d) => self.write(&mut lane.view, d, false),
+            Event::ReasoningDelta(d) => self.write(&mut lane.view, d, true),
             Event::Usage(usage) => {
                 // A retry sends a second one for the same turn: the count it
                 // carries replaces the abandoned attempt's rather than joining
                 // it.
-                self.view.turn = *usage;
+                lane.view.turn = *usage;
             }
             Event::TurnEnd { usage, .. } => {
-                self.view.settled.input += usage.input;
-                self.view.settled.output += usage.output;
-                self.view.settled.cache_read += usage.cache_read;
-                self.view.settled.cache_write += usage.cache_write;
-                self.view.turn = Usage::default();
+                lane.view.settled.input += usage.input;
+                lane.view.settled.output += usage.output;
+                lane.view.settled.cache_read += usage.cache_read;
+                lane.view.settled.cache_write += usage.cache_write;
+                lane.view.turn = Usage::default();
             }
             Event::TurnStart { .. } => {}
-            Event::Context { used, budget } => self.view.ctx = Some((*used, *budget)),
+            Event::Context { used, budget } => lane.view.ctx = Some((*used, *budget)),
             Event::Done { .. } => {
-                self.close();
+                self.close(&mut lane.view);
                 if let Some(mut snap) = crate::status::Snapshot::of_done(&event) {
-                    snap.model = &self.view.model;
-                    snap.worktree = self.view.worktree.as_deref();
+                    snap.model = &lane.view.model;
+                    snap.worktree = lane.worktree.as_deref();
                     // Still running as far as the screen is concerned: `turn`
                     // clears this only once the loop returns.
-                    snap.elapsed = self.view.started.map(|s| s.elapsed());
+                    snap.elapsed = lane.view.started.map(|s| s.elapsed());
                     let line = crate::status::line(&self.done, &snap);
                     if !line.is_empty() {
                         let said = self.paint.on(&self.paint.theme.muted, &line);
-                        self.view.scrollback.push(Row::notice(said));
+                        lane.view.scrollback.push(Row::notice(said));
                     }
                 }
             }
@@ -953,8 +923,8 @@ impl Ui {
             // scrolls that row up as its ✓/✗ line. Parallel calls each hold a
             // row, matched back by id because they end out of order.
             Event::ToolStart { id, name, args, .. } => {
-                self.close();
-                self.view.tools.push(RunTool {
+                self.close(&mut lane.view);
+                lane.view.tools.push(RunTool {
                     id: id.clone(),
                     name: name.clone(),
                     summary: render::summarize(args),
@@ -966,23 +936,23 @@ impl Ui {
                 is_error,
                 preview,
             } => {
-                self.close();
-                self.view.tools.retain(|t| t.id != *id);
+                self.close(&mut lane.view);
+                lane.view.tools.retain(|t| t.id != *id);
                 // The same row the rebuild produces, from the same parts. Two
                 // renderings of this is what the second producer used to buy.
-                self.view.scrollback
+                lane.view.scrollback
                     .push(Row::result(!is_error, name.clone(), preview.clone()));
             }
             _ => {
                 if matches!(event, Event::Compacted(_)) {
-                    self.view.compactions += 1;
+                    lane.view.compactions += 1;
                 }
-                self.close();
+                self.close(&mut lane.view);
                 if let Some(said) = render::describe(&event, &self.paint, self.screen.usable()) {
                     // Row by row: a scrollback line is written with a carriage
                     // return of its own, and an embedded newline would stair-
                     // step down the screen without one.
-                    self.view.scrollback.extend(said.lines().map(Row::notice));
+                    lane.view.scrollback.extend(said.lines().map(Row::notice));
                 }
             }
         }
@@ -992,10 +962,10 @@ impl Ui {
     /// dangling. The call's own end event is never sent — a cancelled run
     /// returns before its results are reported — so give the scrollback the
     /// start line the row stood for and clear the row.
-    fn abandon_tools(&mut self) {
-        for t in std::mem::take(&mut self.view.tools) {
+    fn abandon_tools(&mut self, view: &mut View) {
+        for t in std::mem::take(&mut view.tools) {
             let row = Row::tool_start(&t.name, &t.summary, &self.paint);
-            self.view.scrollback.push(row);
+            view.scrollback.push(row);
         }
     }
 
@@ -1003,8 +973,8 @@ impl Ui {
     /// being typed, or — with the rewind selector open — the user messages a
     /// conversation can be rewound to. Never during a run, when the editor is
     /// a queue, not a command line.
-    fn menu(&self) -> Vec<MenuEntry> {
-        if self.view.started.is_some() {
+    fn menu(&self, view: &View) -> Vec<MenuEntry> {
+        if view.started.is_some() {
             return Vec::new();
         }
         if self.settings.is_some() {
@@ -1039,8 +1009,8 @@ impl Ui {
     }
 
     /// The highlighted row, clamped: the list shrinks as the word grows.
-    fn highlighted(&self) -> Option<MenuEntry> {
-        let mut menu = self.menu();
+    fn highlighted(&self, view: &View) -> Option<MenuEntry> {
+        let mut menu = self.menu(view);
         if menu.is_empty() {
             return None;
         }
@@ -1072,11 +1042,11 @@ impl Ui {
 
     /// The rows above the input line: running tools, the open stream, and
     /// the status line. The editor draws separately, pinned to the bottom.
-    fn live(&self, room: usize) -> Vec<String> {
+    fn live(&self, lane: &Lane, room: usize) -> Vec<String> {
         let width = self.screen.usable();
         let mut rows = Vec::new();
 
-        for t in &self.view.tools {
+        for t in &lane.view.tools {
             let line = tool_row(self.spinner, &t.name, &t.summary);
             rows.extend(screen::fit(
                 &self.paint.on(&self.paint.theme.muted, &line),
@@ -1085,28 +1055,28 @@ impl Ui {
         }
 
         rows.extend(body(
-            &self.view.thinking,
-            &self.view.scrollback,
-            &self.view.md,
-            self.view.reasoning,
-            &self.view.partial,
+            &lane.view.thinking,
+            &lane.view.scrollback,
+            &lane.view.md,
+            lane.view.reasoning,
+            &lane.view.partial,
             (width, room),
             &self.paint,
         ));
 
-        if self.view.started.is_some() {
-            let mut parts = crate::status::parts(&self.live, &self.snapshot());
+        if lane.view.started.is_some() {
+            let mut parts = crate::status::parts(&self.live, &self.snapshot(lane));
             // Not a segment: a run that can be stopped has to say so, and a
             // config that left it out would strand the user mid-turn.
             parts.push(
-                if self.view.stopping {
+                if lane.view.stopping {
                     "stopping…"
                 } else {
                     "esc to stop"
                 }
                 .to_string(),
             );
-            let spin = if self.view.stopping {
+            let spin = if lane.view.stopping {
                 "·"
             } else {
                 crate::status::FRAMES[self.spinner % crate::status::FRAMES.len()]
@@ -1160,21 +1130,21 @@ impl Ui {
     /// the picker did when you chose an unopened row.
     ///
     /// None when there is nowhere else to go.
-    fn next_checkout(&self) -> Option<String> {
+    fn next_checkout(&self, lane: &Lane) -> Option<String> {
         let trees = self.lists.worktrees();
         if trees.len() < 2 {
             return None;
         }
         // `worktree::list` puts the main checkout first and names it for its
         // directory, where a lane in it carries no worktree name at all.
-        let at = match self.view.worktree.as_deref() {
+        let at = match lane.worktree.as_deref() {
             Some(name) => trees.iter().position(|c| c.name == name).unwrap_or(0),
             None => 0,
         };
         Some(trees[(at + 1) % trees.len()].name.clone())
     }
 
-    fn set_theme(&mut self, theme: Arc<render::Theme>) {
+    fn set_theme(&mut self, view: &mut View, context: &[String], theme: Arc<render::Theme>) {
         self.paint.theme = theme;
         self.prompt = Self::paint_prompt(&self.paint, &self.paint.theme.prompt.icon);
         self.bang_prompt = Self::paint_prompt(&self.paint, "!");
@@ -1183,14 +1153,14 @@ impl Ui {
             .set_prompts(self.prompt.clone(), self.bang_prompt.clone());
         // The opening block is painted once at construction; rebuild it so a
         // /reload lands on the new theme instead of the old.
-        let opening = Row::banner(&self.view.context, &self.paint);
-        let rest = self.view.scrollback.split_off(self.view.opened);
-        self.view.opened = opening.len();
-        self.view.scrollback = opening.into_iter().chain(rest).collect();
+        let opening = Row::banner(context, &self.paint);
+        let rest = view.scrollback.split_off(view.opened);
+        view.opened = opening.len();
+        view.scrollback = opening.into_iter().chain(rest).collect();
     }
 
-    fn flush(&mut self) {
-        let menu = self.menu();
+    fn flush(&mut self, lane: &mut Lane) {
+        let menu = self.menu(&lane.view);
         let width = self.screen.usable();
         let bar = self.lane_bar(width);
         let bar_h = usize::from(bar.is_some());
@@ -1222,36 +1192,36 @@ impl Ui {
         let hist_view = (self.screen.height as usize)
             .saturating_sub(editor_h + menu_h)
             .max(1);
-        let live = self.live(hist_view);
+        let live = self.live(lane, hist_view);
 
         // While the view is scrolled up, rows the bottom gained since the
         // last measurement fold back into `scroll`, keeping the window put.
-        if self.view.scroll > 0 {
-            let items = (self.view.scrollback.len(), live.len());
+        if lane.view.scroll > 0 {
+            let items = (lane.view.scrollback.len(), live.len());
             // A frame whose item counts match the last measurement has not
             // grown — nothing to fold, and no reason to re-wrap the history.
-            if self.view.counted.is_none_or(|(sb, lv, _)| (sb, lv) != items) {
-                let total = self.scrollback_rows(width) + live.len();
-                self.view.scroll =
-                    absorb_growth(self.view.scroll, self.view.counted.map(|(_, _, t)| t), total);
-                self.view.counted = Some((items.0, items.1, total));
+            if lane.view.counted.is_none_or(|(sb, lv, _)| (sb, lv) != items) {
+                let total = self.scrollback_rows(&lane.view, width) + live.len();
+                lane.view.scroll =
+                    absorb_growth(lane.view.scroll, lane.view.counted.map(|(_, _, t)| t), total);
+                lane.view.counted = Some((items.0, items.1, total));
             }
         } else {
-            self.view.counted = None;
+            lane.view.counted = None;
         }
         // Measured in rows, not lines: a line wider than the terminal wraps
         // into several, and counting lines here would put more rows in the
         // area than fit — pushing the newest ones off the bottom, underneath
         // the input, where nothing shows them.
-        let scrollback = ScrollbackRows::new(&self.view.scrollback, &self.paint, width);
+        let scrollback = ScrollbackRows::new(&lane.view.scrollback, &self.paint, width);
         let (rows, scroll) = screen::window(
             scrollback.chain(live.iter().map(|s| Cow::Borrowed(s.as_str()))),
             width,
             hist_view,
-            self.view.scroll,
+            lane.view.scroll,
         );
 
-        self.view.scroll = scroll;
+        lane.view.scroll = scroll;
         let items = self.menu_items(&menu);
         let picked = self
             .picked
@@ -1294,8 +1264,8 @@ impl Ui {
     }
 
     /// Rows the scrollback renders to at this width, wraps included.
-    fn scrollback_rows(&self, width: usize) -> usize {
-        ScrollbackRows::new(&self.view.scrollback, &self.paint, width)
+    fn scrollback_rows(&self, view: &View, width: usize) -> usize {
+        ScrollbackRows::new(&view.scrollback, &self.paint, width)
             .map(|line| screen::fit(&line, width).len())
             .sum()
     }
@@ -1303,41 +1273,41 @@ impl Ui {
     /// Rebuild the history from the transcript, forgetting everything the old
     /// drawing showed: a rewind changes what the conversation is, and the
     /// screen has to show the new one, not the old one with a note on it.
-    fn rebuild(&mut self, session: &agent::session::Session) {
-        self.view.scrollback.clear();
+    fn rebuild(&mut self, view: &mut View, session: &agent::session::Session) {
+        view.scrollback.clear();
         // The opening block went with it; a rebuilt screen is the conversation.
-        self.view.opened = 0;
-        self.view.partial.clear();
-        self.view.reasoning = false;
-        self.view.tools.clear();
-        self.view.thinking.streaming = None;
-        self.view.thinking.last = self.view.thinking.folded;
-        self.view.md.reset();
-        self.view.scroll = 0;
-        self.view.scrollback = scrollback_from(
+        view.opened = 0;
+        view.partial.clear();
+        view.reasoning = false;
+        view.tools.clear();
+        view.thinking.streaming = None;
+        view.thinking.last = view.thinking.folded;
+        view.md.reset();
+        view.scroll = 0;
+        view.scrollback = scrollback_from(
             session,
             &self.paint,
             &self.bang_prompt,
-            &mut self.view.thinking,
+            &mut view.thinking,
         );
     }
 
     /// Accept a submitted input: echo it so the prompt survives the editor
     /// being cleared, then fold the block that was current back to the switch
     /// — the input pushes it out of current no matter what it turns out to be.
-    fn submit(&mut self, line: &str) {
+    fn submit(&mut self, view: &mut View, line: &str) {
         let rows = Row::prompt(line, &self.bang_prompt, &self.paint);
-        self.view.scrollback.extend(rows);
-        self.view.thinking.fold_previous(&mut self.view.scrollback);
+        view.scrollback.extend(rows);
+        view.thinking.fold_previous(&mut view.scrollback);
     }
 
-    fn key(&mut self, event: TermEvent, running: bool) -> Intent {
+    fn key(&mut self, lane: &mut Lane, event: TermEvent, running: bool) -> Intent {
         let key = match event {
             TermEvent::Resize(w, h) => {
                 self.screen.resized(w, h);
                 // Re-measuring starts at the new width: the re-wrap is a
                 // change of layout, not output, and must not move the view.
-                self.view.counted = None;
+                lane.view.counted = None;
                 return Intent::None;
             }
             TermEvent::Paste(text) => {
@@ -1347,8 +1317,8 @@ impl Ui {
             }
             TermEvent::Mouse(mouse) => {
                 match mouse.kind {
-                    MouseEventKind::ScrollUp => self.scroll_view(true, 1),
-                    MouseEventKind::ScrollDown => self.scroll_view(false, 1),
+                    MouseEventKind::ScrollUp => self.scroll_view(&mut lane.view, true, 1),
+                    MouseEventKind::ScrollDown => self.scroll_view(&mut lane.view, false, 1),
                     _ => {}
                 }
                 return Intent::None;
@@ -1371,7 +1341,7 @@ impl Ui {
         let bound = self.keys.action(
             press,
             crate::keys::Layers {
-                menu: self.settings.is_some() || !self.menu().is_empty(),
+                menu: self.settings.is_some() || !self.menu(&lane.view).is_empty(),
                 run: running,
             },
         );
@@ -1438,12 +1408,12 @@ impl Ui {
         }
 
         match bound {
-            Some(Action::LineClear) => return self.interrupt_or_clear(running),
+            Some(Action::LineClear) => return self.interrupt_or_clear(&mut lane.view, running),
             Some(Action::LineSubmit) => {
                 // Enter while a menu is open runs what it highlights. The
                 // typed text is a prefix; the highlighted word is the intent.
                 // The menu reads the editor, so pick before draining it.
-                match self.highlighted() {
+                match self.highlighted(&lane.view) {
                     Some(MenuEntry::Message { id, .. }) => {
                         self.rewind.clear();
                         return Intent::Rewind(id);
@@ -1476,7 +1446,7 @@ impl Ui {
             Some(Action::RunInterrupt) => {
                 // Esc before the model has moved means "I didn't mean to send
                 // that"; an empty editor, or unsending overwrites a line.
-                if self.editor.is_empty() && self.view.started.is_some() && !self.view.committed {
+                if self.editor.is_empty() && lane.view.started.is_some() && !lane.view.committed {
                     return Intent::Unsend;
                 }
                 return Intent::Interrupt;
@@ -1496,10 +1466,10 @@ impl Ui {
                 return Intent::None;
             }
             Some(Action::LaneNext) => {
-                return match self.next_checkout() {
+                return match self.next_checkout(lane) {
                     Some(name) => Intent::Worktree(name),
                     None => {
-                        self.say(
+                        self.say(&mut lane.view, 
                             self.paint
                                 .on(&self.paint.theme.muted, "the only checkout there is"),
                         );
@@ -1546,27 +1516,27 @@ impl Ui {
             Some(Action::MoveLineEnd) => self.editor.end(),
             Some(Action::HistoryOlder) => self.editor.up(),
             Some(Action::HistoryNewer) => self.editor.down(),
-            Some(Action::ScrollPageUp) => self.scroll_view(true, self.page_scroll_step()),
-            Some(Action::ScrollPageDown) => self.scroll_view(false, self.page_scroll_step()),
-            Some(Action::ScrollHalfUp) => self.scroll_view(true, self.half_scroll_step()),
-            Some(Action::ScrollHalfDown) => self.scroll_view(false, self.half_scroll_step()),
+            Some(Action::ScrollPageUp) => self.scroll_view(&mut lane.view, true, self.page_scroll_step()),
+            Some(Action::ScrollPageDown) => self.scroll_view(&mut lane.view, false, self.page_scroll_step()),
+            Some(Action::ScrollHalfUp) => self.scroll_view(&mut lane.view, true, self.half_scroll_step()),
+            Some(Action::ScrollHalfDown) => self.scroll_view(&mut lane.view, false, self.half_scroll_step()),
             Some(Action::ThinkFold) => {
                 // The last block only: the one streaming, or the newest
                 // finished one when nothing is. The switch is left alone, so
                 // the blocks no one is touching keep what they had.
-                self.view.thinking.toggle_current(&mut self.view.scrollback);
+                lane.view.thinking.toggle_current(&mut lane.view.scrollback);
             }
             Some(Action::ThinkFoldAll) => {
                 // Every block in the scrollback, the last one included, and
                 // the switch with them: one key presses the whole screen to a
                 // single state.
-                self.view.thinking.flip_all(&mut self.view.scrollback);
+                lane.view.thinking.flip_all(&mut lane.view.scrollback);
                 // A fold-all reflows blocks above the view too; re-baseline.
-                self.view.counted = None;
+                lane.view.counted = None;
             }
 
             Some(Action::MenuAccept) => {
-                match self.highlighted() {
+                match self.highlighted(&lane.view) {
                     Some(MenuEntry::Message { id, .. }) => {
                         self.rewind.clear();
                         return Intent::Rewind(id);
@@ -1583,12 +1553,12 @@ impl Ui {
                 }
             }
             Some(Action::MenuNext) => {
-                let n = self.menu().len().saturating_sub(1);
+                let n = self.menu(&lane.view).len().saturating_sub(1);
                 let at = self.picked.unwrap_or(n).min(n);
                 self.picked = Some(at.saturating_add(1).min(n));
             }
             Some(Action::MenuPrevious) => {
-                let n = self.menu().len().saturating_sub(1);
+                let n = self.menu(&lane.view).len().saturating_sub(1);
                 let at = self.picked.unwrap_or(n).min(n);
                 self.picked = Some(at.saturating_sub(1));
             }
@@ -1629,11 +1599,11 @@ impl Ui {
     }
 
     /// Nudge the scrolled history window by `step` rows, up or down.
-    fn scroll_view(&mut self, up: bool, step: usize) {
-        self.view.scroll = if up {
-            self.view.scroll.saturating_add(step)
+    fn scroll_view(&mut self, view: &mut View, up: bool, step: usize) {
+        view.scroll = if up {
+            view.scroll.saturating_add(step)
         } else {
-            self.view.scroll.saturating_sub(step)
+            view.scroll.saturating_sub(step)
         };
     }
 
@@ -1650,7 +1620,7 @@ impl Ui {
     /// One key, three meanings, and the escalation travels with the binding
     /// rather than with Ctrl-C: stop the run, clear the line, or — pressed
     /// twice inside the window — leave.
-    fn interrupt_or_clear(&mut self, running: bool) -> Intent {
+    fn interrupt_or_clear(&mut self, view: &mut View, running: bool) -> Intent {
         if double_tap(&mut self.last_interrupt, Instant::now()) {
             return Intent::Quit;
         }
@@ -1658,7 +1628,7 @@ impl Ui {
             return Intent::Interrupt;
         }
         if self.editor.is_empty() {
-            self.say(
+            self.say(view, 
                 self.paint
                     .on(&self.paint.theme.muted, "press it again to quit"),
             );
@@ -1680,8 +1650,8 @@ fn absorb_growth(scroll: usize, last: Option<usize>, total: usize) -> usize {
 // What a `Step::Handled` leaves behind: its lines, and whatever the command
 // changed under the surface. A free function because a run in flight lands
 // them from inside its own borrow, where `self` is in pieces.
-fn land_handled(ui: &mut Ui, core: &Repl, lines: Vec<String>) {
-    ui.view.scrollback.extend(lines.into_iter().map(Row::notice));
+fn land_handled(ui: &mut Ui, core: &Repl, view: &mut View, lines: Vec<String>) {
+    view.scrollback.extend(lines.into_iter().map(Row::notice));
     // The key map lives in two places; a reload has to reach both or the
     // screen keeps answering to the old bindings.
     if !Arc::ptr_eq(&ui.keys, &core.keys) {
@@ -1691,7 +1661,7 @@ fn land_handled(ui: &mut Ui, core: &Repl, lines: Vec<String>) {
     // skills — the last one did not.
     ui.choices = core.choices();
     if ui.paint.theme.as_ref() != &core.config.theme {
-        ui.set_theme(Arc::new(core.config.theme.clone()));
+        ui.set_theme(view, &core.lane().context, Arc::new(core.config.theme.clone()));
     }
     if !Arc::ptr_eq(&ui.commands, &core.commands) {
         ui.commands = core.commands.clone();
@@ -1822,26 +1792,26 @@ impl Tui {
                 core.store.clone(),
                 core.lane_mut().ctx.workspace.root().to_path_buf(),
             ),
-            &core.lane_mut().context,
             paint,
         );
         ui.setting_paths = crate::settings::leaves(&core.file)
             .into_iter()
             .map(|(p, _)| p)
             .collect();
-        ui.view.worktree = core.lane_mut().worktree.clone();
         ui.live = core.config.status.live.clone();
         ui.done = core.config.status.done.clone();
-        ui.view.model = core.lane_mut().agent.spec.model.clone();
+        let context = core.lane().context.clone();
+        let mut opening = View::opening(&context, &ui.paint);
+        opening.model = core.lane().agent.spec.model.clone();
+        core.lane_mut().view = opening;
         if let Some(prior) = history_path().and_then(|p| std::fs::read_to_string(p).ok()) {
             ui.editor.seed_history(editor::decode(&prior));
         }
         // A resumed session shows its transcript from the start: the whole
         // screen is rebuildable now, so there is no reason to hide it.
-        if let Some(session) = &core.lane_mut().session
-            && !session.is_empty()
-        {
-            ui.rebuild(session);
+        let lane = core.lane_mut();
+        if let Some(session) = lane.session.as_ref().filter(|s| !s.is_empty()) {
+            ui.rebuild(&mut lane.view, session);
         }
         Ok(Self {
             core,
@@ -1867,7 +1837,6 @@ impl Tui {
                 core.store.clone(),
                 core.lane_mut().ctx.workspace.root().to_path_buf(),
             ),
-            &core.lane_mut().context,
             paint,
         );
         let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1904,31 +1873,29 @@ impl Tui {
     /// source of truth again — so the screen is rebuilt from the new one
     /// instead of keeping the old conversation up, and the completion list
     /// follows.
-    /// Bring the screen into step with the lanes after a command: a lane just
-    /// opened needs a slot, and a switch needs its view back on screen and the
-    /// workspace-keyed lists pointed at its root.
+    /// Bring the screen into step with the lanes after a command. The view
+    /// travels with its lane, so a switch leaves nothing to move: what is left
+    /// is the surface's own — the draft, the workspace-keyed lists — and
+    /// whatever the lane posted while nobody was looking.
     fn reconcile(&mut self, was: usize) {
-        while self.ui.parked.len() < self.core.lanes.len() {
-            self.ui.opened_lane();
-        }
         if was == self.core.current {
             return;
         }
-        self.ui.show(was, self.core.current);
-        // The view brought its own worktree name and model back with it; only
-        // the lists are the terminal's, and they are keyed by workspace.
+        self.ui.leave_lane();
         self.ui.lists.at(self.core.lane().ctx.workspace.root());
-        // A view built for a lane opened later starts empty; the instruction
-        // files it stands on are the lane's, and a theme rebuild reads them.
-        if self.ui.view.context.is_empty() {
-            self.ui.view.context = self.core.lane().context.clone();
+        // A lane opened later has no banner yet, and the files it stands on
+        // are its own.
+        if !self.core.lane().view.drawn {
+            let context = self.core.lane().context.clone();
+            let opening = View::opening(&context, &self.ui.paint);
+            self.core.lane_mut().view = opening;
         }
         // What this lane's run posted while nobody was looking, in the order it
         // arrived. Not through the bridge: the phone follows the lane in front,
         // and replaying an hour of another one into it would be a second
         // conversation arriving out of nowhere.
         for event in std::mem::take(&mut self.core.lane_mut().pending) {
-            self.ui.on_event(event);
+            self.ui.on_event(self.core.lane_mut(), event);
         }
         // And the end of it, if it reached one out of sight.
         if let Some((out, unsend)) = self.core.lane_mut().take_ended() {
@@ -1944,14 +1911,14 @@ impl Tui {
     }
 
     fn land_swap(&mut self, said: Vec<String>) {
-        if let Some(session) = &self.core.lane_mut().session {
-            self.ui.rebuild(session);
+        let lane = self.core.lane_mut();
+        if let Some(session) = lane.session.as_ref() {
+            self.ui.rebuild(&mut lane.view, session);
         }
         // `at` forgets both lists, so it stands in for `refresh_sessions`: a
         // swap that did not move repeats the root, and drops them either way.
         self.ui.lists.at(self.core.lane_mut().ctx.workspace.root());
-        self.ui.view.worktree = self.core.lane_mut().worktree.clone();
-        self.ui.view.scrollback.extend(said.into_iter().map(Row::notice));
+        self.core.lane_mut().view.scrollback.extend(said.into_iter().map(Row::notice));
     }
 
     /// Take what every lane's run has posted since the last look: into the view
@@ -1964,7 +1931,7 @@ impl Tui {
             while let Ok(event) = self.core.lanes[at].inbox.try_recv() {
                 if at == self.core.current {
                     self.bridge.observe(&event).await;
-                    self.ui.on_event(event);
+                    self.ui.on_event(self.core.lane_mut(), event);
                 } else {
                     // Deltas arrive thousands at a time and the backlog is
                     // replayed in one go: a run of them folded into one keeps
@@ -2031,7 +1998,7 @@ impl Tui {
                 .unwrap_or("the main checkout");
             format!("{whose}: {what}")
         };
-        self.ui.say(text);
+        self.ui.say(&mut self.core.lane_mut().view, text);
     }
 
     /// The one gate every input passes: a key, the phone, or an intent coming
@@ -2049,11 +2016,11 @@ impl Tui {
         match intent.fate() {
             Fate::Now => Wake::Do(intent),
             Fate::Queued => {
-                self.ui.view.queued.push(intent);
+                self.core.lane_mut().view.queued.push(intent);
                 Wake::Nothing
             }
             Fate::Refused(why) => {
-                self.ui.say(why.to_string());
+                self.ui.say(&mut self.core.lane_mut().view, why.to_string());
                 Wake::Nothing
             }
         }
@@ -2066,7 +2033,8 @@ impl Tui {
             Ok(said) => {
                 let rows = crate::settings::leaves(&self.core.file);
                 self.ui.setting_paths = rows.iter().map(|(p, _)| p.clone()).collect();
-                self.ui
+                self.core
+                    .lane_mut()
                     .view
                     .scrollback
                     .extend(said.into_iter().map(Row::notice));
@@ -2089,12 +2057,12 @@ impl Tui {
         // Said here rather than at the callers: the state is the only thing
         // that knows, and every way of asking to stop arrives through it.
         let Turn::Running { cancel, unsend: take_back } = &mut self.core.lane_mut().turn else {
-            self.ui.say("nothing running to stop");
+            self.ui.say(&mut self.core.lane_mut().view, "nothing running to stop");
             return;
         };
         cancel.cancel();
         *take_back = unsend;
-        self.ui.view.stopping = true;
+        self.core.lane_mut().view.stopping = true;
     }
 
     /// Drive the terminal until the user leaves.
@@ -2114,11 +2082,11 @@ impl Tui {
         loop {
             self.serve_lanes().await;
             self.refresh_tabs();
-            self.ui.flush();
+            self.ui.flush(self.core.lane_mut());
             let running = self.core.lane().is_running();
             let anywhere = self.core.lanes.iter().any(|lane| lane.is_running());
             // A queued intent waits for the lane it was aimed at to come free.
-            let woke = if self.ui.view.queued.is_empty() || running {
+            let woke = if self.core.lane_mut().view.queued.is_empty() || running {
                 // Every branch must be cancel-safe: a loser is dropped mid-poll.
                 // `recv()` and `tick()` are; a blocking read gets its own thread.
                 tokio::select! {
@@ -2131,7 +2099,7 @@ impl Tui {
                     }
                     key = self.events.recv() => match key {
                         Some(key) => {
-                            let intent = self.ui.key(key, running);
+                            let intent = self.ui.key(self.core.lane_mut(), key, running);
                             self.admit(intent)
                         }
                         None => Wake::Leave,
@@ -2145,7 +2113,7 @@ impl Tui {
                         }
                         Some(crate::wechat::Inbound::Stop) => self.admit(Intent::Interrupt),
                         Some(crate::wechat::Inbound::Notice(text)) => {
-                            self.ui.say(text);
+                            self.ui.say(&mut self.core.lane_mut().view, text);
                             Wake::Nothing
                         }
                         None => Wake::Nothing,
@@ -2155,7 +2123,7 @@ impl Tui {
                 // One at a time, each still the intent it was read as. Joined
                 // as lines, a command and a prompt became one line and `read`
                 // saw only the first word.
-                Wake::Do(self.ui.view.queued.remove(0))
+                Wake::Do(self.core.lane_mut().view.queued.remove(0))
             };
             // Out here, where all of `self` is free again.
             let intent = match woke {
@@ -2194,10 +2162,10 @@ impl Tui {
                 // A submitted line is echoed and remembered, and only then
                 // read — the echo wants the text, which reading spends.
                 Intent::Submit(line) => {
-                    self.ui.submit(&line);
+                    self.ui.submit(&mut self.core.lane_mut().view, &line);
                     // A fresh turn starts at the newest row: a view scrolled up
                     // to read would otherwise stream output out of sight.
-                    self.ui.view.scroll = 0;
+                    self.core.lane_mut().view.scroll = 0;
                     // Written per line rather than on the way out: quitting
                     // with two Ctrl-Cs skips every tidy exit path there is.
                     self.save_history();
@@ -2221,7 +2189,14 @@ impl Tui {
                 Step::Quit => break,
                 Step::Bash(command) => self.start_bash(command, &done_tx),
                 Step::Swap(said) => self.land_swap(said),
-                Step::Handled(lines) => land_handled(&mut self.ui, &self.core, lines),
+                Step::Handled(lines) => {
+                    // Lent out rather than borrowed in place: the view lives
+                    // inside `core`, which this also reads.
+                    let at = self.core.current;
+                    let mut view = std::mem::take(&mut self.core.lanes[at].view);
+                    land_handled(&mut self.ui, &self.core, &mut view, lines);
+                    self.core.lanes[at].view = view;
+                }
                 Step::Compact(focus) => self.start_compact(focus, &done_tx),
                 Step::Wechat(cmd) => {
                     let said = match cmd {
@@ -2231,13 +2206,13 @@ impl Tui {
                         repl::WechatCmd::On => match self.bridge.on().await {
                             Ok(said) => said,
                             Err(e) => {
-                                self.ui.say(format!("wechat: {e:#}"));
+                                self.ui.say(&mut self.core.lane_mut().view, format!("wechat: {e:#}"));
                                 Vec::new()
                             }
                         },
                         repl::WechatCmd::Off => self.bridge.off(),
                     };
-                    self.ui.view.scrollback
+                    self.core.lane_mut().view.scrollback
                         .extend(said.into_iter().map(Row::notice));
                 }
                 // What was submitted while the run worked is taken up by the
@@ -2270,8 +2245,8 @@ impl Tui {
         if left == 0 {
             return;
         }
-        self.ui.say("stopping — saving what the runs have written");
-        self.ui.flush();
+        self.ui.say(&mut self.core.lane_mut().view, "stopping — saving what the runs have written");
+        self.ui.flush(self.core.lane_mut());
         let waited = tokio::time::timeout(EXIT_GRACE, async {
             while left > 0 {
                 match done.recv().await {
@@ -2297,7 +2272,7 @@ impl Tui {
     fn rewind_turn(&mut self, id: EntryId) {
         match self.core.rewind_to(id) {
             Ok(Rewound::Nothing) => {
-                self.ui.say(
+                self.ui.say(&mut self.core.lane_mut().view, 
                     self.ui
                         .paint
                         .on(&self.ui.paint.theme.muted, "nothing to rewind to"),
@@ -2308,8 +2283,9 @@ impl Tui {
                 // whole view from it, so the screen returns to the node the
                 // conversation did instead of keeping the forgotten turns.
                 // It clears anything said before it: hence the notice after.
-                if let Some(session) = &self.core.lane_mut().session {
-                    self.ui.rebuild(session);
+                let lane = self.core.lane_mut();
+                if let Some(session) = lane.session.as_ref() {
+                    self.ui.rebuild(&mut lane.view, session);
                 }
                 let said = match outcome {
                     // Unsent is half-typed, not gone: naming where the
@@ -2337,12 +2313,15 @@ impl Tui {
                         format!("rewound{at}")
                     }
                 };
-                self.ui
-                    .say(self.ui.paint.on(&self.ui.paint.theme.muted, &said));
+                let text = self.ui.paint.on(&self.ui.paint.theme.muted, &said);
+                self.ui.say(
+                    &mut self.core.lane_mut().view, text);
             }
             Err(e) => {
-                self.ui
-                    .say(format!("warning: the transcript was not saved: {e}"));
+                self.ui.say(
+                    &mut self.core.lane_mut().view,
+                    format!("warning: the transcript was not saved: {e}"),
+                );
             }
         }
     }
@@ -2368,7 +2347,7 @@ impl Tui {
             })
             .collect();
         if rows.is_empty() {
-            self.ui.say(
+            self.ui.say(&mut self.core.lane_mut().view, 
                 self.ui
                     .paint
                     .on(&self.ui.paint.theme.muted, "nothing to rewind to"),
@@ -2387,12 +2366,12 @@ impl Tui {
     /// per-run figures start from nothing rather than from the last run's.
     /// `committed` says whether the prompt behind it can still be taken back.
     fn arm_view(&mut self, committed: bool) {
-        self.ui.view.started = Some(Instant::now());
-        self.ui.view.committed = committed;
-        self.ui.view.stopping = false;
-        self.ui.view.settled = Usage::default();
-        self.ui.view.turn = Usage::default();
-        self.ui.view.compactions = 0;
+        self.core.lane_mut().view.started = Some(Instant::now());
+        self.core.lane_mut().view.committed = committed;
+        self.core.lane_mut().view.stopping = false;
+        self.core.lane_mut().view.settled = Usage::default();
+        self.core.lane_mut().view.turn = Usage::default();
+        self.core.lane_mut().view.compactions = 0;
     }
 
     fn start_turn(&mut self, prompt: String, typed: Option<String>, done: &UnboundedSender<Done>) {
@@ -2400,7 +2379,7 @@ impl Tui {
         // way refuses another, so the only way it is missing here is the lane
         // whose transcript a panic took and whose archive would not read back.
         let Some(mut carried) = self.core.lane_mut().session.take() else {
-            self.ui.say("this checkout has no transcript — /new or /resume first");
+            self.ui.say(&mut self.core.lane_mut().view, "this checkout has no transcript — /new or /resume first");
             return;
         };
         carried.send_prompt(prompt, typed);
@@ -2410,7 +2389,7 @@ impl Tui {
         self.arm_view(false);
         // Read while the agent is still reachable: `/model` may replace it
         // while this run works, and the run keeps the one it started on.
-        self.ui.view.model = self.core.lane_mut().agent.spec.model.clone();
+        self.core.lane_mut().view.model = self.core.lane_mut().agent.spec.model.clone();
 
         let agent = self.core.lane_mut().agent.clone();
         let sent = self.core.lane_mut().events.clone();
@@ -2437,7 +2416,7 @@ impl Tui {
     /// result is filed in it, and nothing else may replace it meanwhile.
     fn start_bash(&mut self, command: String, done: &UnboundedSender<Done>) {
         let Some(mut carried) = self.core.lane_mut().session.take() else {
-            self.ui.say("this checkout has no transcript — /new or /resume first");
+            self.ui.say(&mut self.core.lane_mut().view, "this checkout has no transcript — /new or /resume first");
             return;
         };
         let cancel = CancellationToken::new();
@@ -2481,7 +2460,7 @@ impl Tui {
     /// serving the others meanwhile.
     fn start_compact(&mut self, focus: Option<String>, done: &UnboundedSender<Done>) {
         let Some(mut carried) = self.core.lane_mut().session.take() else {
-            self.ui.say("this checkout has no transcript — /new or /resume first");
+            self.ui.say(&mut self.core.lane_mut().view, "this checkout has no transcript — /new or /resume first");
             return;
         };
         let cancel = CancellationToken::new();
@@ -2534,7 +2513,7 @@ impl Tui {
             .core
             .lanes
             .get_mut(done.lane)
-            .is_some_and(crate::lane::Lane::finish);
+            .is_some_and(Lane::finish);
         match done.kind {
             Kind::Turn | Kind::Bash(_) => self.settle_run(done, unsend).await,
             Kind::Compact(_) => self.settle_compact(done).await,
@@ -2616,11 +2595,7 @@ impl Tui {
         // this is the only place it can reach the view that asked for it.
         if let Some(said) = said.filter(|lines| !lines.is_empty()) {
             let rows = said.into_iter().map(Row::notice);
-            if lane == self.core.current {
-                self.ui.view.scrollback.extend(rows);
-            } else if let Some(Some(view)) = self.ui.parked.get_mut(lane) {
-                view.scrollback.extend(rows);
-            }
+            self.core.lanes[lane].view.scrollback.extend(rows);
         }
 
         // Out of sight: what the run left to draw waits with it, and the lane
@@ -2707,34 +2682,31 @@ impl Tui {
                 ),
             );
         }
-        // The spinner was borrowed for the pass; give the owning view its
-        // clock back, whichever lane that is now.
-        if lane == self.core.current {
-            self.ui.view.started = None;
-        } else if let Some(Some(view)) = self.ui.parked.get_mut(lane) {
-            view.started = None;
-        }
+        // The spinner was borrowed for the pass; give the lane its clock back.
+        self.core.lanes[lane].view.started = None;
     }
 
     /// Draw the end of a run into the view that is on screen.
     fn close_run(&mut self, out: Result<Totals, AgentError>) {
-        self.ui.close();
+        self.ui.close(&mut self.core.lane_mut().view);
         // A cancelled run's calls got no `ToolEnd`; their animated rows have to
         // reach scrollback some other way before the next flush draws them as a
         // frozen spinner.
-        self.ui.abandon_tools();
-        self.ui.view.started = None;
+        self.ui.abandon_tools(&mut self.core.lane_mut().view);
+        self.core.lane_mut().view.started = None;
         match out {
             Ok(_) => {}
-            Err(AgentError::Cancelled) => self
-                .ui
-                .say(self.ui.paint.on(&self.ui.paint.theme.muted, "stopped")),
+            Err(AgentError::Cancelled) => {
+                let text = self.ui.paint.on(&self.ui.paint.theme.muted, "stopped");
+                self.ui.say(
+                    &mut self.core.lane_mut().view, text);
+            }
             Err(e) => {
                 let text = format!(
                     "{} {e}",
                     self.ui.paint.on(&self.ui.paint.theme.status.err, "error")
                 );
-                self.ui.say(text);
+                self.ui.say(&mut self.core.lane_mut().view, text);
             }
         }
     }
@@ -2968,11 +2940,14 @@ mod tests {
 
     #[test]
     fn an_empty_scrollback_iterates_to_nothing() {
-        // The front walk used to index `rows[0]` before any check, so a
-        // forward iteration over an empty scrollback panicked.
+        // Both walks index `rows[0]` before comparing their pointers, so an
+        // empty scrollback panicked. The back walk kept doing it after the
+        // front was fixed, and `screen::window` is the one that walks back.
         let paint = Paint::new(false);
         let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&[], &paint, 80).collect();
         assert!(rows.is_empty());
+        let back: Vec<Cow<'_, str>> = ScrollbackRows::new(&[], &paint, 80).rev().collect();
+        assert!(back.is_empty(), "the back walk too");
     }
 
     #[test]
@@ -3316,6 +3291,14 @@ mod tests {
 
     /// A lane wired up enough to be settled: a real transcript, a real agent,
     /// and a `Turn::Running` standing in for the job that is about to report.
+    /// A lane and the directory it lives in — the guard comes back so the
+    /// caller keeps it alive for as long as the lane is used.
+    fn a_running_lane() -> (tempfile::TempDir, crate::lane::Lane) {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let lane = running_lane(dir.path());
+        (dir, lane)
+    }
+
     fn running_lane(dir: &std::path::Path) -> crate::lane::Lane {
         struct Mute;
         #[async_trait::async_trait]
@@ -3366,6 +3349,7 @@ mod tests {
                 cancel: tokio_util::sync::CancellationToken::new(),
                 unsend: false,
             },
+            view: Default::default(),
             keys: std::sync::Arc::new(crate::keys::Keys::default()),
             commands: std::sync::Arc::new(Vec::new()),
         }
@@ -3385,6 +3369,36 @@ mod tests {
             current: 0,
         };
         super::Tui::on_test_screen(core, keys)
+    }
+
+    /// A rebuilt lane has already been drawn, whatever its row counts say.
+    /// `rebuild` clears the banner along with the rest — `/resume` and a
+    /// rewind both do it — so a switch back must not read that as a lane
+    /// never drawn and lay a fresh opening block over the transcript.
+    #[tokio::test]
+    async fn switching_back_to_a_rebuilt_lane_keeps_its_transcript() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut tui = surface(dir.path());
+        tui.core.lanes.push(running_lane(dir.path()));
+
+        // Lane 1 as `rebuild` leaves it: the conversation, and no banner.
+        tui.core.lanes[1].view = super::View::opening(&[], &tui.ui.paint);
+        tui.core.lanes[1].view.scrollback = vec![Row::notice("what was said before")];
+        tui.core.lanes[1].view.opened = 0;
+
+        tui.core.current = 1;
+        tui.reconcile(0);
+
+        // By content, not by count: the banner this would lay over it is one
+        // row too, so a length check cannot tell them apart.
+        let paint = Paint::new(false);
+        let rows: Vec<String> = ScrollbackRows::new(&tui.core.lanes[1].view.scrollback, &paint, 80)
+            .map(|r| r.to_string())
+            .collect();
+        assert!(
+            rows.iter().any(|r| r.contains("what was said before")),
+            "the transcript survives the switch: {rows:?}"
+        );
     }
 
     /// The bug this guards: `/compact` used to settle without ever putting the
@@ -3521,7 +3535,8 @@ mod tests {
             super::Tab { mark: super::Mark::Front, name: "pi-rs".into() },
             super::Tab { mark: super::Mark::Idle, name: "f1".into() },
         ];
-        ui.flush();
+        let (_dir, mut lane) = a_running_lane();
+        ui.flush(&mut lane);
 
         let rows = ui.screen.painted();
         let icon = crate::render::Theme::default().prompt.icon;
@@ -3537,14 +3552,15 @@ mod tests {
     #[test]
     fn ctrl_o_walks_to_the_next_checkout_and_wraps() {
         let ring = |at: Option<&str>| {
-            let mut ui = test_ui(80, 24);
+            let ui = test_ui(80, 24);
             let trees = ["pi-rs", "f1", "f2"]
                 .iter()
                 .map(|n| crate::repl::Choice { name: n.to_string(), note: String::new() })
                 .collect();
             ui.lists.worktrees.set(trees).ok();
-            ui.view.worktree = at.map(str::to_string);
-            ui.next_checkout()
+            let (_dir, mut lane) = a_running_lane();
+            lane.worktree = at.map(str::to_string);
+            ui.next_checkout(&lane)
         };
         // The main checkout is the one a lane names as None.
         assert_eq!(ring(None).as_deref(), Some("f1"));
@@ -3561,20 +3577,20 @@ mod tests {
             .worktrees
             .set(vec![crate::repl::Choice { name: "pi-rs".into(), note: String::new() }])
             .ok();
-        assert_eq!(ui.next_checkout(), None);
+        let (_dir, lane) = a_running_lane();
+        assert_eq!(ui.next_checkout(&lane), None);
     }
 
-    /// The editor belongs to the surface, not to the view a lane parks, so a
-    /// draft does not travel with a switch. `show` is where every switch
-    /// passes, and it has to drop the draft there: left standing, the next
-    /// Enter files one lane's half-typed prompt into the session it landed on.
+    /// The view travels with its lane, but the editor is the surface's, so a
+    /// draft would outlive the switch. `leave_lane` is where every switch
+    /// passes and has to drop it: left standing, the next Enter files one
+    /// lane's half-typed prompt into the session it landed on.
     #[test]
     fn switching_checkouts_does_not_carry_a_draft_across() {
         let mut ui = test_ui(80, 24);
-        ui.parked.push(None);
         ui.editor.set_line("half a thought meant for this lane");
 
-        ui.show(0, 1);
+        ui.leave_lane();
 
         assert_eq!(ui.editor.text(), "", "the draft stays with the lane it was typed at");
     }
@@ -3592,7 +3608,8 @@ mod tests {
         ui.lists.worktrees.set(trees).ok();
 
         let ctrl_o = super::TermEvent::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
-        let intent = ui.key(ctrl_o, false);
+        let (_dir, mut lane) = a_running_lane();
+        let intent = ui.key(&mut lane, ctrl_o, false);
         assert!(
             matches!(&intent, crate::repl::Intent::Worktree(name) if name == "f1"),
             "{intent:?}"
@@ -3610,7 +3627,6 @@ mod tests {
                 crate::session::Store::new(std::env::temp_dir()),
                 std::env::temp_dir(),
             ),
-            &[],
             Paint::new(true),
         )
     }
