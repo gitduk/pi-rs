@@ -918,8 +918,6 @@ pub enum Intent {
     Rewind(agent::session::EntryId),
     /// The settings panel submitted an edited value.
     CommitSetting(String, String),
-    /// `ctrl+o`: the checkouts, open or not, to pick one from.
-    OpenPicker,
     /// Esc caught a prompt on its way out: stop the run, then unsend it.
     Unsend,
     /// Leave now — `/exit`, `/quit`, `ctrl+d`, a double `ctrl+c`. One intent,
@@ -988,9 +986,6 @@ impl Intent {
             // The raw variant: its fate is the fate of what it turns out to be.
             // `read` never answers `Submit`, so this ends.
             Intent::Submit(line) => read(line).fate(),
-            // A menu over the checkouts touches neither the transcript nor the
-            // run: being able to open it mid-run is the point of it.
-            Intent::OpenPicker => Fate::Now,
             // Both reach for the transcript, and the run is holding it.
             Intent::OpenRewind | Intent::Rewind(_) => Fate::Refused(
                 "rewinding needs the transcript this run is writing — esc first",
@@ -1235,7 +1230,7 @@ impl Repl {
             | Intent::OpenRewind
             | Intent::Rewind(_)
             | Intent::CommitSetting(..)
-            | Intent::OpenPicker => Step::Handled(Vec::new()),
+            => Step::Handled(Vec::new()),
             Intent::Quit => Step::Quit,
             Intent::Help => Step::Handled(help(&self.commands)),
             Intent::Keys => Step::Handled(self.keys.listing()),

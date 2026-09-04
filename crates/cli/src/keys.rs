@@ -64,7 +64,7 @@ pub enum Action {
     ScrollHalfDown,
     AppExit,
     AppClearScreen,
-    LanePick,
+    LaneNext,
     ThinkFold,
     ThinkFoldAll,
 }
@@ -276,11 +276,11 @@ pub const BINDINGS: &[Binding] = &[
         note: "only when the line is empty",
     },
     Binding {
-        id: "lane.pick",
-        action: A::LanePick,
+        id: "lane.next",
+        action: A::LaneNext,
         when: W::Editor,
         keys: &["ctrl+o"],
-        note: "the checkouts, and the ones not opened yet",
+        note: "the next checkout, opening it if it is not",
     },
     Binding {
         id: "app.clear-screen",

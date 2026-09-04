@@ -19,6 +19,10 @@ use brain::message::{ToolResult, ToolResultContent};
 
 use crate::render::{self, Markdown, Paint};
 
+/// The gutter a line already said wears. Heavier than the `│` a fenced block
+/// gets: that rule is the machine's, this one is the person's.
+const SAID: &str = "▌";
+
 const BANNER: &str = concat!("π ", env!("CARGO_PKG_VERSION"));
 
 pub struct Row(Kind);
@@ -137,17 +141,23 @@ impl Row {
 
     /// A prompt's lines as the stream echoed them: the first with its gutter
     /// and the body in the input style, the rest indented to match.
-    pub fn prompt(text: &str, gutter: &str, bang: &str, paint: &Paint) -> Vec<Self> {
+    pub fn prompt(text: &str, bang: &str, paint: &Paint) -> Vec<Self> {
+        // A `!` is a command, not something said: it keeps its own mark, and
+        // the lines under it keep the plain indent they had.
+        let banged = text.starts_with('!');
+        // Unbroken down every line said: the icon marks what is being typed,
+        // and a landed line wearing it reads as another place to type.
+        let rule = match banged {
+            true => String::new(),
+            false => format!("{} ", paint.on(&paint.theme.prompt.color, SAID)),
+        };
         text.lines()
             .enumerate()
             .map(|(i, line)| {
-                let (gutter, body) = if i == 0 {
-                    match line.strip_prefix('!') {
-                        Some(rest) => (bang, rest.trim_start()),
-                        None => (gutter, line),
-                    }
-                } else {
-                    ("  ", line)
+                let (gutter, body) = match (i, banged) {
+                    (0, true) => (bang, line.strip_prefix('!').unwrap_or(line).trim_start()),
+                    (_, true) => ("  ", line),
+                    _ => (rule.as_str(), line),
                 };
                 let body = paint.on(&paint.theme.input, body);
                 Self::notice(format!("{gutter}{body}"))
@@ -276,4 +286,52 @@ fn tool_start_line(name: &str, summary: &str) -> String {
 fn thinking_summary(n: usize) -> String {
     let s = if n == 1 { "" } else { "s" };
     format!("thinking · {n} line{s}")
+}
+
+#[cfg(test)]
+mod said_tests {
+    use super::*;
+
+    fn said(text: &str) -> Vec<String> {
+        let paint = Paint::new(true);
+        Row::prompt(text, "! ", &paint)
+            .iter()
+            .map(|r| crate::render::strip_ansi(&r.line(0, &paint, 80)))
+            .collect()
+    }
+
+    /// A line that has landed wears a rule, not the prompt icon: the icon
+    /// marks the line being typed, and one above the input read as a second
+    /// place to type. The rule runs down every line, so a multi-line say is
+    /// one bar rather than a mark and some indent.
+    #[test]
+    fn a_said_line_wears_a_rule_and_never_the_prompt_icon() {
+        let icon = crate::render::Theme::default().prompt.icon;
+        assert_eq!(said("hi"), ["\u{258c} hi"]);
+        assert_eq!(
+            said("first\nsecond\nthird"),
+            ["\u{258c} first", "\u{258c} second", "\u{258c} third"],
+            "the rule is unbroken"
+        );
+        for row in said("hi\nthere") {
+            assert!(!row.contains(&icon), "the icon is the input line's: {row}");
+        }
+    }
+
+    /// A `!` is a command, not something said, and keeps its own mark.
+    #[test]
+    fn a_bang_command_keeps_its_own_mark() {
+        assert_eq!(said("!cargo test"), ["! cargo test"]);
+    }
+
+    /// The rule spends the same two columns the prompt did, so nothing that
+    /// lines up against a said line moves.
+    #[test]
+    fn the_rule_costs_what_the_prompt_did() {
+        let icon = crate::render::Theme::default().prompt.icon;
+        assert_eq!(
+            unicode_width::UnicodeWidthStr::width(SAID),
+            unicode_width::UnicodeWidthStr::width(icon.as_str()),
+        );
+    }
 }

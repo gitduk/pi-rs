@@ -423,7 +423,6 @@ fn tool_row(frame: usize, name: &str, summary: &str) -> String {
 fn scrollback_from(
     session: &agent::session::Session,
     paint: &Paint,
-    prompt: &str,
     bang_prompt: &str,
     thinking: &mut Thinking,
 ) -> Vec<Row> {
@@ -460,7 +459,7 @@ fn scrollback_from(
         match entry {
             LogEntry::User { body, .. } => match body {
                 UserBody::Prompt(t) | UserBody::Aside(t) => {
-                    out.extend(Row::prompt(t.shown_text(), prompt, bang_prompt, paint));
+                    out.extend(Row::prompt(t.shown_text(), bang_prompt, paint));
                 }
                 // Machine prose, not the user's line: rebuilt in the muted
                 // voice of a screen notice rather than under the prompt
@@ -596,6 +595,9 @@ struct Ui {
     prompt: String,
     /// The same gutter for a `!` line, where the bang takes the icon's place.
     bang_prompt: String,
+    /// The lane bar's separator, painted once beside the two above it: the bar
+    /// is rebuilt every frame and this depends only on the theme.
+    tab_sep: String,
     /// Which row of the open list is highlighted; kept rather than the list
     /// itself, which is a function of what has been typed. `None` anchors a
     /// fresh list on its bottom row, the best match, beside the input line.
@@ -624,10 +626,6 @@ struct Ui {
     /// The rewind selector's rows, session order, newest last. Empty is closed;
     /// while it is open it replaces the completion list in the same rows.
     rewind: Vec<MenuEntry>,
-    /// The lane picker's rows. Empty is closed; like `rewind` it replaces the
-    /// completion list, but unlike it, it opens while a run is in flight —
-    /// leaving for another checkout is the whole point of being able to.
-    picker: Vec<MenuEntry>,
     spinner: usize,
     /// The segments each line shows, in the order the config named them.
     live: Vec<crate::status::Segment>,
@@ -656,6 +654,10 @@ impl Ui {
         if was == now {
             return;
         }
+        // The editor is the surface's, not the view's, so a draft does not
+        // travel with the swap below. Dropped here, where every switch passes,
+        // rather than at each caller that has to remember.
+        self.editor.take(false);
         let leaving = std::mem::take(&mut self.view);
         if let Some(slot) = self.parked.get_mut(was) {
             *slot = Some(leaving);
@@ -721,27 +723,20 @@ enum MenuEntry {
         show: String,
         help: &'static str,
     },
-    /// A checkout to work in — one that already has a lane, or one that does
-    /// not yet. Picking either is the same intent: `/worktree <name>`.
-    Lane {
-        name: String,
-        show: String,
-        help: &'static str,
-    },
 }
 
 impl MenuEntry {
     fn show(&self) -> &str {
         match self {
             MenuEntry::Completion(c) => &c.show,
-            MenuEntry::Message { show, .. } | MenuEntry::Lane { show, .. } => show,
+            MenuEntry::Message { show, .. } => show,
         }
     }
 
     fn help(&self) -> &str {
         match self {
             MenuEntry::Completion(c) => &c.help,
-            MenuEntry::Message { help, .. } | MenuEntry::Lane { help, .. } => help,
+            MenuEntry::Message { help, .. } => help,
         }
     }
 }
@@ -769,6 +764,7 @@ impl Ui {
             commands,
             lists,
             editor,
+            tab_sep: Self::paint_sep(&paint),
             paint,
             prompt,
             bang_prompt,
@@ -778,7 +774,6 @@ impl Ui {
             last_interrupt: None,
             last_esc: None,
             rewind: Vec::new(),
-            picker: Vec::new(),
             setting_paths: Vec::new(),
             settings: None,
             spinner: 0,
@@ -813,6 +808,13 @@ impl Ui {
             cost: None,
             turns: None,
         }
+    }
+
+    /// The separator between lanes on the bar: the one every other line on
+    /// this surface uses, dimmed so the names it divides are what the eye
+    /// lands on.
+    fn paint_sep(paint: &Paint) -> String {
+        paint.on(&paint.theme.muted, " · ")
     }
 
     /// The prompt gutter as the terminal shows it, colour and all.
@@ -1002,9 +1004,6 @@ impl Ui {
     /// conversation can be rewound to. Never during a run, when the editor is
     /// a queue, not a command line.
     fn menu(&self) -> Vec<MenuEntry> {
-        if !self.picker.is_empty() {
-            return self.picker.clone();
-        }
         if self.view.started.is_some() {
             return Vec::new();
         }
@@ -1134,23 +1133,52 @@ impl Ui {
             .tabs
             .iter()
             .map(|tab| {
+                // The sign says what a lane is doing; being in front is not
+                // that, and `›` is the input prompt's. Plain against dim is
+                // all it takes, on a row nothing should look at twice.
                 let (sign, style) = match tab.mark {
-                    Mark::Front => ("›", &theme.prompt.color),
+                    Mark::Front => ("", &theme.input),
                     Mark::Running => (spin, &theme.muted),
                     Mark::Done => ("✓", &theme.status.ok),
                     Mark::Failed => ("✗", &theme.status.err),
-                    Mark::Idle => (" ", &theme.muted),
+                    Mark::Idle => ("", &theme.muted),
                 };
-                self.paint.on(style, &format!("{sign} {}", tab.name))
+                let label = if sign.is_empty() {
+                    tab.name.clone()
+                } else {
+                    format!("{sign} {}", tab.name)
+                };
+                self.paint.on(style, &label)
             })
             .collect();
-        Some(render::clip(&painted.join("   "), width))
+        Some(render::clip(&painted.join(&self.tab_sep), width))
+    }
+
+    /// The checkout after this one, wrapping at the end — what `ctrl+o` goes
+    /// to. Every checkout on disk is in the ring, not only the ones already
+    /// open: `Intent::Worktree` opens one that is not, which is the same thing
+    /// the picker did when you chose an unopened row.
+    ///
+    /// None when there is nowhere else to go.
+    fn next_checkout(&self) -> Option<String> {
+        let trees = self.lists.worktrees();
+        if trees.len() < 2 {
+            return None;
+        }
+        // `worktree::list` puts the main checkout first and names it for its
+        // directory, where a lane in it carries no worktree name at all.
+        let at = match self.view.worktree.as_deref() {
+            Some(name) => trees.iter().position(|c| c.name == name).unwrap_or(0),
+            None => 0,
+        };
+        Some(trees[(at + 1) % trees.len()].name.clone())
     }
 
     fn set_theme(&mut self, theme: Arc<render::Theme>) {
         self.paint.theme = theme;
         self.prompt = Self::paint_prompt(&self.paint, &self.paint.theme.prompt.icon);
         self.bang_prompt = Self::paint_prompt(&self.paint, "!");
+        self.tab_sep = Self::paint_sep(&self.paint);
         self.editor
             .set_prompts(self.prompt.clone(), self.bang_prompt.clone());
         // The opening block is painted once at construction; rebuild it so a
@@ -1181,15 +1209,15 @@ impl Ui {
         // history wraps.
         let panel = self.settings.as_ref().map(|p| p.view(&self.paint, width));
         let panel_h = panel.as_ref().map(|v| v.len()).unwrap_or(0);
+        // Both branches leave the bar its row: a menu tall enough to take it
+        // would drop the one line saying which checkouts are still working.
+        let room = (self.screen.height as usize).saturating_sub(editor_h + bar_h + 1);
         let menu_h = if panel.is_some() {
-            panel_h.min(
-                (self.screen.height as usize).saturating_sub(editor_h + bar_h + 1),
-            )
+            panel_h.min(room)
         } else if menu.is_empty() {
             0
         } else {
-            menu.len()
-                .min((self.screen.height as usize).saturating_sub(editor_h + 1))
+            menu.len().min(room)
         };
         let hist_view = (self.screen.height as usize)
             .saturating_sub(editor_h + menu_h)
@@ -1232,16 +1260,18 @@ impl Ui {
         let highlight = self.rat_style(&self.paint.theme.menu.selected);
         let _ = self.screen.draw(|frame| {
             let area = frame.area();
-            // The bar is last, so its row number never moves: a menu opening
-            // or a pasted line growing the editor must not make it jump.
+            // The input line is last, so the caret sits on the bottom row and
+            // the bar reads as the edge of the history above it rather than
+            // as something hanging off the line being typed.
             let chunks = Layout::vertical([
                 Constraint::Fill(1),
                 Constraint::Length(menu_h as u16),
-                Constraint::Length(editor_h as u16),
                 Constraint::Length(bar_h as u16),
+                Constraint::Length(editor_h as u16),
             ])
             .split(area);
-            let (main, menu_area, editor_area) = (chunks[0], chunks[1], chunks[2]);
+            let (main, menu_area, bar_area, editor_area) =
+                (chunks[0], chunks[1], chunks[2], chunks[3]);
             frame.render_widget(Rows(&rows), main);
             if let Some(panel) = &panel {
                 frame.render_widget(Rows(panel), menu_area);
@@ -1254,10 +1284,10 @@ impl Ui {
                     &mut state,
                 );
             }
-            frame.render_widget(Rows(&input_view), editor_area);
             if let Some(bar) = &bar {
-                frame.render_widget(Rows(std::slice::from_ref(bar)), chunks[3]);
+                frame.render_widget(Rows(std::slice::from_ref(bar)), bar_area);
             }
+            frame.render_widget(Rows(&input_view), editor_area);
             let caret_row = editor_area.y + caret_in_view as u16;
             frame.set_cursor_position((caret.1, caret_row));
         });
@@ -1287,7 +1317,6 @@ impl Ui {
         self.view.scrollback = scrollback_from(
             session,
             &self.paint,
-            &self.prompt,
             &self.bang_prompt,
             &mut self.view.thinking,
         );
@@ -1297,7 +1326,7 @@ impl Ui {
     /// being cleared, then fold the block that was current back to the switch
     /// — the input pushes it out of current no matter what it turns out to be.
     fn submit(&mut self, line: &str) {
-        let rows = Row::prompt(line, &self.prompt, &self.bang_prompt, &self.paint);
+        let rows = Row::prompt(line, &self.bang_prompt, &self.paint);
         self.view.scrollback.extend(rows);
         self.view.thinking.fold_previous(&mut self.view.scrollback);
     }
@@ -1393,23 +1422,6 @@ impl Ui {
             }
         }
 
-        // A key that is not one of the selector's own closes it first: it
-        // means "drop this and keep typing", the way editing the line
-        // dismisses the completion list.
-        if !self.picker.is_empty()
-            && !matches!(
-                bound,
-                Some(
-                    Action::MenuDismiss
-                        | Action::MenuAccept
-                        | Action::MenuNext
-                        | Action::MenuPrevious
-                        | Action::LineSubmit
-                )
-            )
-        {
-            self.picker.clear();
-        }
         if !self.rewind.is_empty()
             && !matches!(
                 bound,
@@ -1435,11 +1447,6 @@ impl Ui {
                     Some(MenuEntry::Message { id, .. }) => {
                         self.rewind.clear();
                         return Intent::Rewind(id);
-                    }
-                    Some(MenuEntry::Lane { name, .. }) => {
-                        self.picker.clear();
-                        self.editor.take(false);
-                        return Intent::Worktree(name);
                     }
                     Some(MenuEntry::Completion(c)) => {
                         let line = c.line;
@@ -1488,7 +1495,18 @@ impl Ui {
                 }
                 return Intent::None;
             }
-            Some(Action::LanePick) => return Intent::OpenPicker,
+            Some(Action::LaneNext) => {
+                return match self.next_checkout() {
+                    Some(name) => Intent::Worktree(name),
+                    None => {
+                        self.say(
+                            self.paint
+                                .on(&self.paint.theme.muted, "the only checkout there is"),
+                        );
+                        Intent::None
+                    }
+                };
+            }
             Some(Action::AppClearScreen) => {
                 // One press clears the screen; a second, inside the window,
                 // starts a fresh session and rebuilds the screen empty.
@@ -1553,11 +1571,6 @@ impl Ui {
                         self.rewind.clear();
                         return Intent::Rewind(id);
                     }
-                    Some(MenuEntry::Lane { name, .. }) => {
-                        self.picker.clear();
-                        self.editor.take(false);
-                        return Intent::Worktree(name);
-                    }
                     Some(MenuEntry::Completion(c)) => {
                         self.editor.set_line(&c.line);
                         // Something still expected after it wants a space first.
@@ -1581,11 +1594,10 @@ impl Ui {
             }
             // Answered in the first match, which returns; named here because
             // this one has no catch-all and should not grow one.
-            Some(Action::LanePick) => {}
+            Some(Action::LaneNext) => {}
             Some(Action::MenuDismiss) => {
-                let was_rewind = !self.rewind.is_empty() || !self.picker.is_empty();
+                let was_rewind = !self.rewind.is_empty();
                 self.rewind.clear();
-                self.picker.clear();
                 // The completion list is recorded against the text, so any
                 // edit brings it back: this means "not that", not "never
                 // again". The rewind selector dismisses without recording,
@@ -1978,54 +1990,6 @@ impl Tui {
         }
     }
 
-    /// The checkouts to pick from: the lanes already open, then the worktrees
-    /// that have none. Both kinds of row carry the same intent, so entering a
-    /// tree for the first time costs no more than returning to one — which is
-    /// the whole reason this is not just a list of lanes.
-    fn open_picker(&mut self) {
-        let current = self.core.current;
-        let mut rows: Vec<MenuEntry> = self
-            .core
-            .lanes
-            .iter()
-            .enumerate()
-            .map(|(at, lane)| {
-                let name = lane_name(lane);
-                let sign = if at == current {
-                    "›"
-                } else {
-                    match &lane.turn {
-                        Turn::Running { .. } => "⠿",
-                        Turn::Ended { out: Ok(_), .. } => "✓",
-                        Turn::Ended { out: Err(_), .. } => "✗",
-                        Turn::Idle => " ",
-                    }
-                };
-                MenuEntry::Lane {
-                    show: format!("{sign} {name}"),
-                    help: if at == current { "in front" } else { "open" },
-                    name,
-                }
-            })
-            .collect();
-        let open: Vec<String> = self.core.lanes.iter().map(lane_name).collect();
-        let rest: Vec<MenuEntry> = self
-            .ui
-            .lists
-            .worktrees()
-            .iter()
-            .filter(|c| !open.contains(&c.name))
-            .map(|c| MenuEntry::Lane {
-                show: format!("  {}", c.name),
-                help: "not opened yet",
-                name: c.name.clone(),
-            })
-            .collect();
-        rows.extend(rest);
-        self.ui.picker = rows;
-        self.ui.picked = None;
-    }
-
     /// Rebuild the bottom bar from the lanes, before every draw. A run that
     /// ended out of sight has to reach the screen without anyone asking, and
     /// this is the only thing that looks.
@@ -2213,10 +2177,6 @@ impl Tui {
                 }
                 Intent::Unsend => {
                     self.stop_current(true);
-                    continue;
-                }
-                Intent::OpenPicker => {
-                    self.open_picker();
                     continue;
                 }
                 Intent::OpenRewind => {
@@ -2822,7 +2782,7 @@ mod tests {
         }
 
         let mut thinking = Thinking::default();
-        let rows = scrollback_from(&s, &Paint::new(false), "> ", "! ", &mut thinking);
+        let rows = scrollback_from(&s, &Paint::new(false), "! ", &mut thinking);
         let ids: Vec<u64> = rows.iter().filter_map(Row::block).collect();
         assert_eq!(ids.len(), 3, "{} rows, {ids:?}", rows.len());
         let mut sorted = ids.clone();
@@ -3512,4 +3472,148 @@ mod tests {
             "a stopped turn still has to be named: {after_turn}"
         );
     }
+
+    /// The bar reads as a row of names, not a scatter: the sign column holds
+    /// only what a lane is doing — the one in front says so in colour, and
+    /// never with the input prompt's own `\u{203a}`.
+    #[test]
+    fn the_lane_bar_separates_names_the_way_every_other_line_does() {
+        let mut ui = test_ui(80, 24);
+        ui.tabs = vec![
+            super::Tab { mark: super::Mark::Front, name: "pi-rs".into() },
+            super::Tab { mark: super::Mark::Idle, name: "f1".into() },
+            super::Tab { mark: super::Mark::Done, name: "f2".into() },
+        ];
+        let plain = crate::render::strip_ansi(&ui.lane_bar(80).expect("two lanes make a bar"));
+        assert_eq!(plain, "pi-rs \u{b7} f1 \u{b7} \u{2713} f2");
+
+        // Wide enough for the names, far too narrow once escapes are counted
+        // as columns — the whole row still has to survive.
+        let narrow = crate::render::strip_ansi(&ui.lane_bar(30).expect("a bar"));
+        assert!(!narrow.contains('\u{2026}'), "clipped a row that fits: {narrow}");
+    }
+
+    /// The input prompt's icon belongs to the line you type on. The bar sat
+    /// directly under it wearing the same mark, which read as a second place
+    /// to type — whatever the theme sets that icon to.
+    #[test]
+    fn the_lane_bar_never_wears_the_input_prompt() {
+        let icon = crate::render::Theme::default().prompt.icon;
+        let mut ui = test_ui(80, 24);
+        ui.tabs = vec![
+            super::Tab { mark: super::Mark::Front, name: "pi-rs".into() },
+            super::Tab { mark: super::Mark::Idle, name: "f1".into() },
+        ];
+        let plain = crate::render::strip_ansi(&ui.lane_bar(80).expect("two lanes make a bar"));
+        assert!(
+            !plain.contains(&icon),
+            "the bar wears the prompt icon `{icon}`: {plain}"
+        );
+    }
+
+    /// The input line is the bottom row, and the bar sits above it as the
+    /// edge of the history — not hanging off the line being typed, where it
+    /// read as a second prompt.
+    #[test]
+    fn the_bar_sits_above_the_input_line() {
+        let mut ui = test_ui(40, 8);
+        ui.tabs = vec![
+            super::Tab { mark: super::Mark::Front, name: "pi-rs".into() },
+            super::Tab { mark: super::Mark::Idle, name: "f1".into() },
+        ];
+        ui.flush();
+
+        let rows = ui.screen.painted();
+        let icon = crate::render::Theme::default().prompt.icon;
+        let last = rows.last().expect("a drawn frame");
+        assert!(last.starts_with(&icon), "the input line is the bottom row: {last:?}");
+        let above = &rows[rows.len() - 2];
+        assert_eq!(above.trim(), "pi-rs \u{b7} f1", "the bar is the row above it");
+    }
+
+    /// `ctrl+o` walks the checkouts in a ring. Every checkout on disk is in
+    /// it, not only the open ones — the main one first, because that is the
+    /// order `worktree::list` reports and a lane in it carries no name.
+    #[test]
+    fn ctrl_o_walks_to_the_next_checkout_and_wraps() {
+        let ring = |at: Option<&str>| {
+            let mut ui = test_ui(80, 24);
+            let trees = ["pi-rs", "f1", "f2"]
+                .iter()
+                .map(|n| crate::repl::Choice { name: n.to_string(), note: String::new() })
+                .collect();
+            ui.lists.worktrees.set(trees).ok();
+            ui.view.worktree = at.map(str::to_string);
+            ui.next_checkout()
+        };
+        // The main checkout is the one a lane names as None.
+        assert_eq!(ring(None).as_deref(), Some("f1"));
+        assert_eq!(ring(Some("f1")).as_deref(), Some("f2"));
+        // And round the end, back to the main one.
+        assert_eq!(ring(Some("f2")).as_deref(), Some("pi-rs"));
+    }
+
+    /// Nowhere to go is said, not walked to: one checkout has no next.
+    #[test]
+    fn a_lone_checkout_has_no_next() {
+        let ui = test_ui(80, 24);
+        ui.lists
+            .worktrees
+            .set(vec![crate::repl::Choice { name: "pi-rs".into(), note: String::new() }])
+            .ok();
+        assert_eq!(ui.next_checkout(), None);
+    }
+
+    /// The editor belongs to the surface, not to the view a lane parks, so a
+    /// draft does not travel with a switch. `show` is where every switch
+    /// passes, and it has to drop the draft there: left standing, the next
+    /// Enter files one lane's half-typed prompt into the session it landed on.
+    #[test]
+    fn switching_checkouts_does_not_carry_a_draft_across() {
+        let mut ui = test_ui(80, 24);
+        ui.parked.push(None);
+        ui.editor.set_line("half a thought meant for this lane");
+
+        ui.show(0, 1);
+
+        assert_eq!(ui.editor.text(), "", "the draft stays with the lane it was typed at");
+    }
+
+    /// And the key that asks for the switch still names the right destination.
+    #[test]
+    fn ctrl_o_asks_for_the_next_checkout() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut ui = test_ui(80, 24);
+        let trees = ["pi-rs", "f1"]
+            .iter()
+            .map(|n| crate::repl::Choice { name: n.to_string(), note: String::new() })
+            .collect();
+        ui.lists.worktrees.set(trees).ok();
+
+        let ctrl_o = super::TermEvent::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+        let intent = ui.key(ctrl_o, false);
+        assert!(
+            matches!(&intent, crate::repl::Intent::Worktree(name) if name == "f1"),
+            "{intent:?}"
+        );
+    }
+
+    /// A surface with an in-memory screen, for the drawing tests below.
+    fn test_ui(width: u16, height: u16) -> super::Ui {
+        super::Ui::new(
+            crate::tui::screen::Screen::test(width, height),
+            std::sync::Arc::new(crate::keys::Keys::default()),
+            Vec::new(),
+            std::sync::Arc::new(Vec::new()),
+            super::Lists::new(
+                crate::session::Store::new(std::env::temp_dir()),
+                std::env::temp_dir(),
+            ),
+            &[],
+            Paint::new(true),
+        )
+    }
+
+
 }
