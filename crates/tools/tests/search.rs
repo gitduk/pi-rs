@@ -256,3 +256,133 @@ async fn a_file_with_invalid_utf8_still_reports_its_matches() {
     assert!(out.contains("src/odd.rs"), "{out}");
     assert!(out.contains("2:"), "{out}");
 }
+
+// `limit` is what the model asked for; the byte cap is what the window holds.
+// Only the second needs a locator — only the second the model never chose.
+
+#[tokio::test]
+async fn an_over_long_grep_drops_whole_sections_and_spills_the_rest() {
+    let (_d, c) = common::spilling();
+    let r = c.workspace.root();
+    // Each file is a section of its own, and no one section is over budget: the
+    // cut has to land between them.
+    for i in 0..40 {
+        std::fs::write(
+            r.join(format!("f{i:02}.txt")),
+            format!("NEEDLE {}\n", "z".repeat(2_000)),
+        )
+        .unwrap();
+    }
+
+    let out = run(&tools::grep::Grep, json!({ "pattern": "NEEDLE" }), &c).await;
+    assert!(out.len() <= tools::spill::MAX_OUTPUT, "{} bytes", out.len());
+
+    // Every row that survived carries its whole line, and every row sits under
+    // a header — a row without its `[path#TAG]` has no tag for an edit to name.
+    let mut headed = false;
+    for line in out.lines() {
+        if line.starts_with('[') {
+            headed = true;
+        } else if let Some((_, text)) = line.split_once(':')
+            && line.starts_with(char::is_numeric)
+        {
+            assert!(headed, "a row before any header: {line}");
+            assert_eq!(text.len(), "NEEDLE ".len() + 2_000, "half a row: {line}");
+        }
+    }
+
+    // The count has to answer for the byte cut too: a body saying only what the
+    // line limit dropped reads as near-complete when most sections went.
+    assert!(out.contains("of 40 files did not fit the window"), "{out}");
+    let whole = common::spilled_body(&c, &out);
+    assert!(whole.contains("f39.txt"), "the spill must hold what went");
+    assert!(!out.contains("f39.txt"), "nothing was actually dropped\n{out}");
+}
+
+#[tokio::test]
+async fn a_grep_within_budget_carries_no_locator() {
+    let (_d, c) = tree();
+    let out = run(&tools::grep::Grep, json!({ "pattern": "TODO" }), &c).await;
+    assert!(!out.contains("full output:"), "{out}");
+    assert!(out.contains("README.md"), "{out}");
+}
+
+#[tokio::test]
+async fn one_section_over_budget_leaves_only_the_locator() {
+    let (_d, c) = common::spilling();
+    std::fs::write(
+        c.workspace.root().join("min.js"),
+        format!("NEEDLE {}\n", "z".repeat(tools::spill::MAX_OUTPUT)),
+    )
+    .unwrap();
+
+    let out = run(&tools::grep::Grep, json!({ "pattern": "NEEDLE" }), &c).await;
+    // Better an empty view with a locator than half a row under an address.
+    assert!(!out.contains("NEEDLE"), "a section was split\n{out}");
+    assert!(out.contains("… 1 of 1 files did not fit"), "{out}");
+    let whole = common::spilled_body(&c, &out);
+    assert!(whole.contains("NEEDLE"), "the spill must hold what went");
+}
+
+#[tokio::test]
+async fn files_only_answers_to_the_same_limit_as_the_line_view() {
+    let (_d, c) = tree();
+    let r = c.workspace.root();
+    for i in 0..10 {
+        std::fs::write(r.join(format!("m{i}.md")), "TODO: x\n").unwrap();
+    }
+
+    let out = run(
+        &tools::grep::Grep,
+        json!({ "pattern": "TODO", "files_only": true, "limit": 3 }),
+        &c,
+    )
+    .await;
+    assert_eq!(
+        out.lines().filter(|l| l.contains("matches)")).count(),
+        3,
+        "{out}"
+    );
+    assert!(out.contains("more files; narrow the pattern"), "{out}");
+}
+
+#[tokio::test]
+async fn files_only_reports_the_files_it_could_not_search() {
+    let (_d, c) = tree();
+    let big = c.workspace.root().join("huge.txt");
+    std::fs::write(&big, "TODO\n").unwrap();
+    let f = std::fs::OpenOptions::new().write(true).open(&big).unwrap();
+    f.set_len(11 << 20).unwrap();
+
+    let out = run(
+        &tools::grep::Grep,
+        json!({ "pattern": "TODO", "files_only": true }),
+        &c,
+    )
+    .await;
+    assert!(out.contains("over the size limit"), "{out}");
+}
+
+#[tokio::test]
+async fn an_over_long_glob_spills_its_tail() {
+    let (_d, c) = common::spilling();
+    let r = c.workspace.root();
+    let long = "n".repeat(120);
+    for i in 0..400 {
+        std::fs::write(r.join(format!("{long}{i:03}.txt")), "x").unwrap();
+    }
+
+    let out = run(
+        &tools::glob::Glob,
+        json!({ "pattern": "*.txt", "limit": 400 }),
+        &c,
+    )
+    .await;
+    assert!(out.len() <= tools::spill::MAX_OUTPUT, "{} bytes", out.len());
+    let whole = common::spilled_body(&c, &out);
+    assert_eq!(
+        whole.lines().filter(|l| l.ends_with(".txt")).count(),
+        400,
+        "the spill must hold every path"
+    );
+}

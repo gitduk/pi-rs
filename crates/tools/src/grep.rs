@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::walk::{globs, looks_binary, root_of, walker};
-use crate::{Ctx, Tier, Tool, ToolError, ToolOutput};
+use crate::{Ctx, Tier, Tool, ToolError, ToolOutput, spill};
 
 const DEFAULT_LIMIT: usize = 200;
 const PER_FILE_LIMIT: usize = 50;
@@ -63,7 +63,7 @@ impl Tool for Grep {
                 },
                 "insensitive": { "type": "boolean" },
                 "files_only": { "type": "boolean", "description": "List paths instead of matching lines." },
-                "limit": { "type": "integer", "description": "Max matching lines. Default 200." },
+                "limit": { "type": "integer", "description": "Max matching lines, or files under files_only. Default 200." },
             },
             "required": ["pattern"],
             "additionalProperties": false,
@@ -184,22 +184,43 @@ impl Tool for Grep {
         }
 
         let total: usize = hits.iter().map(|h| h.lines.len()).sum();
-        let mut out = String::new();
+        let preview = format!("{} files, {total} matches", hits.len());
+        // The two lines that close either view: what the limit left out, and
+        // what the sweep could not read. Spelt once because both views owe both.
+        let over = |left: usize, unit: &str| {
+            let mut note = String::new();
+            if left > 0 {
+                note.push_str(&format!(
+                    "… {left} more {unit}; narrow the pattern or raise limit\n"
+                ));
+            }
+            if skipped > 0 {
+                note.push_str(&format!(
+                    "… {skipped} files over the size limit were not searched\n"
+                ));
+            }
+            note
+        };
 
         if args.files_only {
-            for h in &hits {
-                out.push_str(&format!("{} ({} matches)\n", h.path, h.lines.len()));
-            }
-            return Ok(ToolOutput::text(out)
-                .with_preview(format!("{} files, {total} matches", hits.len())));
+            let rows: Vec<String> = hits
+                .iter()
+                .take(limit)
+                .map(|h| format!("{} ({} matches)\n", h.path, h.lines.len()))
+                .collect();
+            let notice = over(hits.len() - rows.len(), "files");
+            return Ok(ToolOutput::text(spill::fit(ctx, &rows, "files", &notice)?).with_preview(preview));
         }
 
+        // One per hit file, so a body over budget drops whole sections: a row
+        // parted from the `[path#TAG]` above it has no tag for an edit to name.
+        let mut sections: Vec<String> = Vec::new();
         let mut shown = 0usize;
         for h in &hits {
             if shown >= limit {
                 break;
             }
-            out.push_str(&format!("{}\n", hashline::header(&h.path, &h.tag)));
+            let mut section = format!("{}\n", hashline::header(&h.path, &h.tag));
             // The one view that prints addresses without spans: a match is
             // rarely a construct's opening row, and a parse per hit file would
             // cost more than a view that only points is worth.
@@ -208,27 +229,18 @@ impl Tool for Grep {
                 if shown >= limit {
                     break;
                 }
-                crate::rows::line(&mut out, *n as usize, &spans, text);
+                crate::rows::line(&mut section, *n as usize, &spans, text);
                 shown += 1;
             }
             if h.truncated {
-                out.push_str(&format!(
+                section.push_str(&format!(
                     "… more than {PER_FILE_LIMIT} matches in this file\n"
                 ));
             }
+            sections.push(section);
         }
-        if total > shown {
-            out.push_str(&format!(
-                "… {} more matches; narrow the pattern or raise limit\n",
-                total - shown
-            ));
-        }
-        if skipped > 0 {
-            out.push_str(&format!(
-                "… {skipped} files over the size limit were not searched\n"
-            ));
-        }
+        let notice = over(total - shown, "matches");
 
-        Ok(ToolOutput::text(out).with_preview(format!("{} files, {total} matches", hits.len())))
+        Ok(ToolOutput::text(spill::fit(ctx, &sections, "files", &notice)?).with_preview(preview))
     }
 }

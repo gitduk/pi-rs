@@ -1,3 +1,5 @@
+mod common;
+
 use serde_json::json;
 use tools::{Ctx, Registry, Tier, Tool, ToolError, Workspace};
 
@@ -931,13 +933,7 @@ async fn an_over_long_output_is_kept_somewhere_the_model_can_reach() {
         "{}",
         &out[..90.min(out.len())]
     );
-    let locator = out
-        .lines()
-        .find_map(|l| {
-            l.strip_prefix("full output: ")
-                .and_then(|l| l.split(' ').next())
-        })
-        .expect("the omitted middle must be recoverable");
+    let locator = common::locator_in(&out);
     let whole = std::fs::read_to_string(c.spill_path(locator).unwrap()).unwrap();
     assert!(
         whole.contains("MIDDLE_MARKER"),
@@ -948,9 +944,7 @@ async fn an_over_long_output_is_kept_somewhere_the_model_can_reach() {
 
 #[tokio::test]
 async fn read_spills_an_over_long_view_and_reads_it_back_by_locator() {
-    let dir = tempfile::tempdir().unwrap();
-    let ws = Workspace::new(dir.path()).unwrap();
-    let c = Ctx::new(ws).with_spill_root(dir.path().join("spill"));
+    let (_dir, c) = common::spilling();
     let big: String = (1..=30_000).map(|i| format!("line {i}\n")).collect();
     std::fs::write(c.workspace.root().join("big.txt"), &big).unwrap();
 
@@ -969,13 +963,7 @@ async fn read_spills_an_over_long_view_and_reads_it_back_by_locator() {
         let (n, text) = row.split_once(':').expect("every row is addressed");
         assert_eq!(text, format!("line {n}"), "half a row survived: {row}");
     }
-    let locator = out
-        .lines()
-        .find_map(|l| {
-            l.strip_prefix("full output: ")
-                .and_then(|l| l.split(' ').next())
-        })
-        .expect("the read view must be recoverable");
+    let locator = common::locator_in(&out);
 
     // Reading the spill back re-numbers its lines: spill line 2 is `1:line 1`,
     // so it comes back as row `2:1:line 1`.
@@ -990,9 +978,7 @@ async fn read_spills_an_over_long_view_and_reads_it_back_by_locator() {
 
 #[tokio::test]
 async fn a_spill_that_cannot_be_written_fails_loudly() {
-    let dir = tempfile::tempdir().unwrap();
-    let ws = Workspace::new(dir.path()).unwrap();
-    let c = Ctx::new(ws).with_spill_root(dir.path().join("spill"));
+    let (dir, c) = common::spilling();
     // A file where the session directory would go: create_dir_all cannot.
     std::fs::write(dir.path().join("spill"), "in the way").unwrap();
     let err = tools::bash::Bash

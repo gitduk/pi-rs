@@ -122,6 +122,41 @@ pub fn prune(body: &str) -> String {
     format!("{h}\n… {dropped} bytes omitted …\n{t}")
 }
 
+/// A body assembled from items that must not be split, held to the transcript's
+/// budget with the whole of it spilled for recall.
+///
+/// Whole items rather than bytes, which is what separates this from `prune`: a
+/// grep section cut loose from its `[path#TAG]` header carries no tag, and a
+/// row cut mid-line still parses as an address an edit would then patch. Items
+/// go from the tail, since a view whose items are independent has no end worth
+/// keeping the way a file's has.
+///
+/// The count is said in `unit`s because the caller's own `notice` cannot know
+/// it: that one reports what the search's limit dropped, and a body reading
+/// "3 more matches" beside a locator holding four hundred is worse than silence.
+pub fn fit(ctx: &Ctx, items: &[String], unit: &str, notice: &str) -> Result<String, ToolError> {
+    let mut full = items.concat();
+    full.push_str(notice);
+    let Some(spilled) = write(ctx, &full)? else {
+        return Ok(full);
+    };
+    // The note's length bounds the items, but its count needs them counted first.
+    // Priced at its longest — every item gone — so the real one comes in under.
+    let found = spilled.note();
+    let say = |dropped: usize| {
+        format!(
+            "… {dropped} of {} {unit} did not fit the window\n{found}\n",
+            items.len()
+        )
+    };
+    let room = MAX_OUTPUT.saturating_sub(say(items.len()).len() + notice.len());
+    let kept = crate::rows::fits(items.iter(), |i: &&String| i.len(), room);
+    // What is kept is already the front of `full`, and every item boundary is a
+    // character boundary: slice it rather than build the same bytes twice.
+    let head: usize = items[..kept].iter().map(String::len).sum();
+    Ok(format!("{}{notice}{}", &full[..head], say(items.len() - kept)))
+}
+
 /// The `<label>`-wrapped form bash uses for stdout and stderr. Under the
 /// threshold the body is interpolated directly, so a normal output costs one
 /// allocation, not a copy through `prune` first.

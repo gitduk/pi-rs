@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use std::time::SystemTime;
 
 use crate::walk::{globs, root_of, walker};
-use crate::{Ctx, Tier, Tool, ToolError, ToolOutput};
+use crate::{Ctx, Tier, Tool, ToolError, ToolOutput, spill};
 
 const DEFAULT_LIMIT: usize = 200;
 
@@ -89,17 +89,19 @@ impl Tool for Glob {
         }
 
         let total = found.len();
-        let mut out = String::new();
-        for (_, path) in found.iter().take(limit) {
-            out.push_str(path);
-            out.push('\n');
-        }
-        if total > limit {
-            out.push_str(&format!(
+        let rows: Vec<String> = found
+            .iter()
+            .take(limit)
+            .map(|(_, path)| format!("{path}\n"))
+            .collect();
+        let notice = if total > rows.len() {
+            format!(
                 "… {} more; narrow the pattern or raise limit\n",
-                total - limit
-            ));
-        }
-        Ok(ToolOutput::text(out).with_preview(format!("{total} files")))
+                total - rows.len()
+            )
+        } else {
+            String::new()
+        };
+        Ok(ToolOutput::text(spill::fit(ctx, &rows, "paths", &notice)?).with_preview(format!("{total} files")))
     }
 }
