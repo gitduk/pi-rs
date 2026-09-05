@@ -200,6 +200,7 @@ fn rigged(
     );
     parent.registry = Registry::new()
         .with(Sleeper)
+        .with(tools::write::Write)
         .with(Probe {
             seen: seen.clone(),
             trip: esc.then(|| ctx.cancel.clone()),
@@ -489,4 +490,113 @@ async fn the_child_is_told_what_the_checkout_says() {
         !child.contains("You are a coding agent"),
         "but not on its caller's prompt: {child}"
     );
+}
+
+/// The child's account of its own work is the one part of the result nothing
+/// else checks, and it cannot be asked again. What the tree recorded as the
+/// child wrote it comes back beside that account, whatever the account says.
+#[tokio::test]
+async fn what_the_child_wrote_comes_back_beside_what_it_says() {
+    let (_dir, agent, ctx, _seen, _kept) = harness(vec![
+        // The parent writes first, in the tree the child is about to share.
+        call_turn("p0", "write", r#"{"path":"parent.rs","content":"pub fn p() {}\n"}"#),
+        call_turn("c1", "task", r#"{"description":"add one","prompt":"add one"}"#),
+        call_turn("c2", "write", r#"{"path":"child.rs","content":"pub fn c() {}\n"}"#),
+        text_turn("I rewrote the whole crate"),
+        text_turn("it says it rewrote the crate"),
+    ]);
+    let (session, _out) = drive(&agent, &ctx, "go").await;
+    let transcript = format!("{:?}", session.entries());
+
+    // Read out of the result rather than searched for across the transcript,
+    // which holds the caller's own write as well and would match it.
+    let (_, after) = transcript.split_once("[wrote ").expect("a ledger: {transcript}");
+    let ledger = after.split_once(']').expect("a closed ledger").0;
+    // The two runs share a tree but not a record. A shared one would hand the
+    // caller its own edit back as the child's — worse than no record at all,
+    // because it reads as corroboration.
+    assert_eq!(
+        ledger, "1 file: child.rs",
+        "the child's writes, and only those: {transcript}"
+    );
+}
+
+#[tokio::test]
+async fn a_child_that_wrote_nothing_is_said_to_have_written_nothing() {
+    let (_dir, parent, ctx, _seen, kept) = harness(vec![text_turn("all done, fixed it")]);
+    let task = Task::new(&parent, kept, STANDING);
+    let out = task
+        .execute(json!({ "description": "fix it", "prompt": "fix it" }), &ctx)
+        .await
+        .expect("the child ran")
+        .flatten();
+
+    // The line worth having: it has just described changes it did not make.
+    assert!(out.contains("[wrote nothing]"), "{out}");
+}
+
+#[tokio::test]
+async fn a_check_that_passes_does_not_drag_its_output_along() {
+    let (_dir, parent, ctx, _seen, kept) = harness(vec![text_turn("did it")]);
+    std::fs::write(ctx.workspace.root().join("out.txt"), "SPECIMEN\n").unwrap();
+    let task = Task::new(&parent, kept, STANDING);
+    let out = task
+        .execute(
+            json!({ "description": "go", "prompt": "go", "verify": "cat out.txt" }),
+            &ctx,
+        )
+        .await
+        .expect("the child ran")
+        .flatten();
+
+    assert!(out.contains("[verify `cat out.txt`: exit 0]"), "{out}");
+    assert!(
+        !out.contains("SPECIMEN"),
+        "a check that passed says all it has to with its status: {out}"
+    );
+}
+
+#[tokio::test]
+async fn a_check_that_fails_comes_back_with_what_it_printed() {
+    let (_dir, parent, ctx, _seen, kept) = harness(vec![text_turn("did it")]);
+    std::fs::write(ctx.workspace.root().join("out.txt"), "SPECIMEN\n").unwrap();
+    let task = Task::new(&parent, kept, STANDING);
+    let out = task
+        .execute(
+            json!({ "description": "go", "prompt": "go", "verify": "cat out.txt; exit 3" }),
+            &ctx,
+        )
+        .await
+        .expect("the child ran")
+        .flatten();
+
+    assert!(out.contains("[verify `cat out.txt; exit 3`: exit 3]"), "{out}");
+    assert!(out.contains("SPECIMEN"), "a failing check is what was asked for: {out}");
+    assert!(out.contains("did it"), "and the child still gets its say: {out}");
+}
+
+#[tokio::test]
+async fn a_child_that_ran_out_of_time_is_still_checked() {
+    let (_dir, parent, ctx, _seen, kept) = rigged(
+        vec![call_turn("c1", "sleeper", "{}"), text_turn("never")],
+        20,
+        std::time::Duration::from_millis(50),
+        false,
+    );
+    let task = Task::new(&parent, kept, STANDING)
+        .with_limits(20, std::time::Duration::from_millis(50));
+    let out = task
+        .execute(
+            json!({ "description": "go", "prompt": "go", "verify": "true" }),
+            &ctx,
+        )
+        .await
+        .expect("the caller's turn survives")
+        .flatten();
+
+    assert!(out.contains("unfinished"), "{out}");
+    // The child's own token is tripped by its deadline. Running the check
+    // against that token answers `cancelled` at the one ending whose state
+    // nobody can vouch for — which is the ending a check is most wanted at.
+    assert!(out.contains("[verify `true`: exit 0]"), "{out}");
 }

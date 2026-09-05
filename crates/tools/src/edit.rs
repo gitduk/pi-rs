@@ -728,6 +728,11 @@ impl Tool for Edit {
                 Some(real) => Some(real.clone()),
                 None => ctx.workspace.resolve(path, self.tier()).ok(),
             };
+            // Every path the change reached, whichever side it came in on:
+            // a rename touches both ends, a removal touches the file it took.
+            for real in gone.iter().chain(moved.iter()).filter_map(resolve) {
+                ctx.note_write(&real);
+            }
             for real in gone.iter().filter_map(resolve) {
                 ctx.forget_shift(&real);
             }

@@ -215,6 +215,12 @@ pub struct Ctx {
     /// The lowest line each file's own edits renumbered since it was last read.
     /// The tag says the model knows the bytes; this, whether it knows where.
     pub file_shifts: FileShifts,
+    /// Every path a tool in this run has reported changing. Split from a
+    /// cloned parent's rather
+    /// than shared, unlike the locks and the shifts: those describe the tree,
+    /// which parent and child share, while this answers what *one* run did —
+    /// and a shared set hands a caller its own edits back as the child's.
+    writes: std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<std::path::PathBuf>>>,
     /// The session this context runs in. None in tests and for embedders;
     /// spills then land in the process temp directory.
     session: Option<String>,
@@ -237,6 +243,7 @@ impl Ctx {
             cancel: tokio_util::sync::CancellationToken::new(),
             file_locks: Default::default(),
             file_shifts: Default::default(),
+            writes: Default::default(),
             session: None,
             spill_root: spill::temp(),
         }
@@ -261,23 +268,6 @@ impl Ctx {
         self.session = Some(ns.clone());
         self.spill_root = spill::shared();
         self
-    }
-
-    /// Move to another workspace, dropping what the last one was keyed by.
-    ///
-    /// The locks and the shifts name files by absolute path, so every entry
-    /// belongs to the tree being left and none of them describes the new one.
-    /// Coupled here rather than at the caller: which fields the root decides is
-    /// this struct's to know, and a third one added later would otherwise have
-    /// to be remembered from another crate.
-    pub fn relocate(&mut self, workspace: Workspace) {
-        self.workspace = workspace;
-        if let Ok(mut held) = self.file_locks.lock() {
-            held.clear();
-        }
-        if let Ok(mut held) = self.file_shifts.lock() {
-            held.clear();
-        }
     }
 
     /// Where spills land, overriding the session default. Tests and alternate
@@ -320,6 +310,33 @@ impl Ctx {
             .lock()
             .expect("file shifts poisoned")
             .remove(path);
+    }
+
+    /// Record that this run wrote `path`. Called by the tools that change the
+    /// tree, so what a run says it did can be read against what it did.
+    pub fn note_write(&self, path: &std::path::Path) {
+        self.writes
+            .lock()
+            .expect("writes poisoned")
+            .insert(path.to_path_buf());
+    }
+
+    /// Every path this run has written, in sorted order.
+    pub fn writes(&self) -> Vec<std::path::PathBuf> {
+        self.writes
+            .lock()
+            .expect("writes poisoned")
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Start a record of this run's own writes, leaving the one it was cloned
+    /// from alone. What a caller wants of a subagent is what the *child*
+    /// wrote; a shared record answers with both and names neither.
+    pub fn with_own_writes(mut self) -> Self {
+        self.writes = Default::default();
+        self
     }
 
     /// Hold this while mutating `path`. Keyed on the resolved path, so two

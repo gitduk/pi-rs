@@ -158,6 +158,7 @@ impl Tool for Write {
         } else {
             ctx.note_shift(&path, 1);
         }
+        ctx.note_write(&path);
 
         let mut note = "";
         #[cfg(unix)]

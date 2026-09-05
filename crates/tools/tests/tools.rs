@@ -1146,3 +1146,69 @@ async fn an_edit_without_patch_says_what_the_one_argument_is() {
     assert!(err.contains("takes a single argument"), "{err}");
     assert!(err.contains("[path#TAG]"), "{err}");
 }
+
+// What a run wrote is taken as it writes, never from anything it says
+// afterwards — the account of a subagent's work is the one part of its result
+// nothing else checks.
+#[tokio::test]
+async fn what_a_run_wrote_is_recorded_as_it_writes() {
+    let (_d, c) = ctx();
+    let src = "pub fn f() {\n    1\n}\n";
+    std::fs::write(c.workspace.root().join("a.rs"), src).unwrap();
+    assert!(c.writes().is_empty(), "nothing written yet");
+
+    run(
+        &tools::write::Write,
+        json!({ "path": "b.rs", "content": "pub fn g() {}\n" }),
+        &c,
+    )
+    .await;
+    let patch = format!(
+        "[a.rs#{}]\nPUT 1*:\n+pub fn f() {{ 2 }}\n",
+        hashline::tag(src)
+    );
+    run(&tools::edit::Edit, json!({ "patch": patch }), &c).await;
+    // A read changes nothing, so it leaves no mark.
+    run(&tools::read::Read, json!({ "path": "a.rs" }), &c).await;
+
+    let wrote: Vec<String> = c.writes().iter().map(|p| c.workspace.display(p)).collect();
+    assert_eq!(wrote, ["a.rs", "b.rs"], "both writers, sorted, the read left out");
+}
+
+#[tokio::test]
+async fn a_run_with_its_own_record_writes_nothing_into_its_parents() {
+    let (_d, parent) = ctx();
+    let child = parent.clone().with_own_writes();
+
+    run(&tools::write::Write, json!({ "path": "c.rs", "content": "x\n" }), &child).await;
+    run(&tools::write::Write, json!({ "path": "p.rs", "content": "y\n" }), &parent).await;
+
+    let named = |c: &Ctx| -> Vec<String> { c.writes().iter().map(|p| c.workspace.display(p)).collect() };
+    // The whole point of the split: asking what the child wrote is asking about
+    // the child, and a shared record answers with both and names neither.
+    assert_eq!(named(&child), ["c.rs"]);
+    assert_eq!(named(&parent), ["p.rs"]);
+
+    // A plain clone shares it, which is what makes the opt-in necessary.
+    let sharing = parent.clone();
+    run(&tools::write::Write, json!({ "path": "s.rs", "content": "z\n" }), &sharing).await;
+    assert_eq!(named(&parent), ["p.rs", "s.rs"], "a clone writes into the record it came with");
+}
+
+#[tokio::test]
+async fn a_command_that_printed_nothing_still_reports_how_it_ended() {
+    let (_d, c) = ctx();
+    let quiet = tools::bash::Bash
+        .execute(json!({ "command": "grep nothing /dev/null | head" }), &c)
+        .await
+        .unwrap();
+    assert_eq!(quiet.flatten(), "exit 0, no output");
+    assert!(quiet.useless, "nothing for a later turn to read");
+    // The row that matters most: a command that printed nothing is the one
+    // whose row is read to find out what was asked.
+    assert_eq!(quiet.preview(), "grep nothing /dev/null | head");
+
+    let failed = tools::bash::Bash.execute(json!({ "command": "false" }), &c).await.unwrap();
+    assert_eq!(failed.flatten().trim(), "exit 1", "a silent failure is not a silent success");
+    assert!(!failed.useless, "which is exactly what a later turn needs");
+}

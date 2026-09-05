@@ -1498,9 +1498,8 @@ impl Repl {
         let mut ag = (*self.lane().agent).clone();
         crate::arm(&mut ag, &mut resolved, home);
 
-        // Built rather than cloned from the lane being left: `Ctx` shares its
-        // file locks and edit shifts through an `Arc`, so a cloned one would
-        // clear that lane's along with its own the first time it relocated.
+        // Built, not cloned from the lane being left: a `Ctx`'s tables key on
+        // absolute paths in one tree, and none of that lane's describe this.
         self.lanes.push(Lane {
             agent: std::sync::Arc::new(ag),
             session: Some(Session::default()),

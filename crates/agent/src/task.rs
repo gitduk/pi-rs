@@ -5,7 +5,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::sync::mpsc::unbounded_channel;
-use tools::{Ctx, Tier, Tool, ToolError, ToolOutput};
+use tools::{Ctx, Tier, Tool, ToolError, ToolOutput, bash};
 
 use crate::event::{Event, Totals};
 use crate::session::Session;
@@ -35,6 +35,36 @@ struct Args {
     /// the journal, which otherwise show a delegated job as a bare `task`.
     description: String,
     prompt: String,
+    /// Run after the child stops, in the same checkout. Never seen by the
+    /// child: a check it knows about is a check it can write itself around.
+    #[serde(default)]
+    verify: Option<String>,
+}
+
+/// How many of a child's written paths the result names before it counts the
+/// rest. A note, not a view: `spill::fit` budgets a list the caller asked for,
+/// where this one rides along on every result and has to stay small. The tree
+/// is what a caller reads for the whole manifest.
+const NAMED: usize = 20;
+
+/// What ran after the child, and how it went.
+struct Checked {
+    command: String,
+    outcome: Outcome,
+}
+
+/// A check that ran and one that never got to run are different answers, and
+/// so is the text each carries: what the command printed, or why nothing did.
+enum Outcome {
+    Ran { code: i32, body: String },
+    /// Killed at the cap. It ran, possibly far enough to leave changes behind,
+    /// and only its verdict is missing — never say this one did not run.
+    CutOff { ms: u64 },
+    /// No verdict, for a reason that is not the cap. Deliberately silent on
+    /// whether the command ran: a shell that would not start and an output
+    /// that would not spill both arrive as one error, and guessing between
+    /// them is how a caller is told the tree is clean when it is not.
+    NoVerdict(String),
 }
 
 /// A whole agent loop behind one tool call.
@@ -119,7 +149,16 @@ impl Tool for Task {
          last thing it says is all you get.\n\
          \n\
          It cannot call this tool, so it cannot delegate further. Give it work \
-         it can finish itself."
+         it can finish itself.\n\
+         \n\
+         The result ends with every path it changed through `write` or `edit`, \
+         and the exit status of `verify` if you gave one. A change it made by \
+         running a command is not in that list, which is what `verify` covers. \
+         Send one \
+         whenever the job has something checkable behind it: a test suite, a \
+         build, a linter. What the subagent says about its own work is the only \
+         part of the answer nothing else checks, and it cannot reach you to be \
+         asked again."
     }
 
     fn schema(&self) -> Value {
@@ -133,6 +172,10 @@ impl Tool for Task {
                 "prompt": {
                     "type": "string",
                     "description": "The whole job, self-contained: what to do, where to look, and what to report back. The subagent sees none of this conversation.",
+                },
+                "verify": {
+                    "type": "string",
+                    "description": "Shell command run in the workspace root after the subagent stops — a test suite, a build, a linter. Its exit status comes back with the result. Omit when nothing about the job is checkable.",
                 },
             },
             "required": ["description", "prompt"],
@@ -157,7 +200,11 @@ impl Tool for Task {
         // shared because parent and child edit the same files, while the
         // transcript, its spills and the token are the child's own.
         let stop = ctx.cancel.child_token();
-        let child = ctx.clone().with_cancel(stop.clone()).with_session(&id);
+        let child = ctx
+            .clone()
+            .with_cancel(stop.clone())
+            .with_session(&id)
+            .with_own_writes();
 
         let (tx, mut rx) = unbounded_channel();
         let cap = self.max_turns;
@@ -228,9 +275,43 @@ impl Tool for Task {
             Err(why) => return Err(ToolError::Invalid(format!("task: {why}"))),
         };
 
+        let wrote: Vec<String> = child
+            .writes()
+            .iter()
+            .map(|path| ctx.workspace.display(path))
+            .collect();
+
+        let check = match args.verify.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+            None => None,
+            Some(command) => {
+                // No deadline of our own: `run` clamps to the cap every shell
+                // command in the workspace answers to, and shortening a
+                // subagent's leash is not a request for a shorter test suite.
+                let room = Duration::MAX;
+                // The caller's context, not the child's: a child stopped by
+                // its own cap leaves that token tripped, and this cancelled.
+                let outcome = match bash::run(command, ctx.workspace.root(), room, ctx).await {
+                    Ok(ran) => Outcome::Ran {
+                        code: ran.code,
+                        body: ran.body,
+                    },
+                    // Esc ends the caller's turn as it does anywhere else.
+                    // Anything else is an outcome, not a reason to drop the
+                    // work the child already did.
+                    Err(ToolError::Cancelled) => return Err(ToolError::Cancelled),
+                    Err(ToolError::Timeout { ms }) => Outcome::CutOff { ms },
+                    Err(why) => Outcome::NoVerdict(why.to_string()),
+                };
+                Some(Checked {
+                    // Flattened, since it is about to be quoted into one line.
+                    command: command.replace('\n', " "),
+                    outcome,
+                })
+            }
+        };
         // The child's whole spend rides home on the result, where the parent's
         // run counts it — the surface never had a handle to drain.
-        Ok(ToolOutput::text(answer(&heard, cut.as_deref()))
+        Ok(ToolOutput::text(answer(&heard, cut.as_deref(), &wrote, check.as_ref()))
             .with_preview(sketch(&args.description, &heard))
             .with_spent(heard.spent))
     }
@@ -258,9 +339,16 @@ fn sketch(description: &str, heard: &Heard) -> String {
     }
 }
 
-/// What the caller reads. Never empty: a subagent that said nothing is a fact
-/// the caller has to be told, not an empty string it has to interpret.
-fn answer(heard: &Heard, cut: Option<&str>) -> String {
+/// What the caller reads: the child's own words, then the notes that were not
+/// taken from them.
+///
+/// A subagent's account of itself is the one part of this result nothing else
+/// checks, and the caller cannot tell a job done from a job merely reported
+/// done. `wrote` and `check` are taken from the tree instead — the paths from
+/// the bookkeeping every write goes through, the status from running the
+/// caller's own command afterwards. Never empty: a subagent that said nothing
+/// is a fact the caller has to be told, not an empty string to interpret.
+fn answer(heard: &Heard, cut: Option<&str>, wrote: &[String], check: Option<&Checked>) -> String {
     let said = heard.text.trim();
     let body = if said.is_empty() {
         format!(
@@ -270,8 +358,97 @@ fn answer(heard: &Heard, cut: Option<&str>) -> String {
     } else {
         said.to_string()
     };
-    match cut {
-        Some(why) => format!("{body}\n\n[unfinished — {why}]"),
-        None => body,
+    let mut notes = Vec::new();
+    if let Some(why) = cut {
+        notes.push(format!("[unfinished — {why}]"));
+    }
+    notes.push(wrote_line(wrote));
+    if let Some(check) = check {
+        notes.push(check_line(check));
+    }
+    format!("{body}\n\n{}", notes.join("\n"))
+}
+
+/// The paths the child wrote — or that it wrote none, which is the line worth
+/// having when it has just finished describing the changes it made.
+fn wrote_line(wrote: &[String]) -> String {
+    let n = wrote.len();
+    if n == 0 {
+        return "[wrote nothing]".to_string();
+    }
+    let unit = if n == 1 { "file" } else { "files" };
+    let named = wrote.iter().take(NAMED).map(String::as_str).collect::<Vec<_>>().join(", ");
+    match n.saturating_sub(NAMED) {
+        0 => format!("[wrote {n} {unit}: {named}]"),
+        rest => format!("[wrote {n} {unit}: {named}, and {rest} more]"),
+    }
+}
+
+/// A passing check says all it has to with its exit status; a failing one is
+/// what the caller asked for, so its output comes too.
+fn check_line(check: &Checked) -> String {
+    let command = &check.command;
+    match &check.outcome {
+        Outcome::Ran { code: 0, .. } => format!("[verify `{command}`: exit 0]"),
+        Outcome::Ran { code, body } => {
+            let printed = body.trim_end();
+            let mut line = format!("[verify `{command}`: exit {code}]");
+            if !printed.is_empty() {
+                line.push('\n');
+                line.push_str(printed);
+            }
+            line
+        }
+        Outcome::CutOff { ms } => {
+            format!("[verify `{command}`: no verdict — killed after {ms}ms, having run that long]")
+        }
+        Outcome::NoVerdict(why) => format!("[verify `{command}`: no verdict — {why}]"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Checked, NAMED, Outcome, check_line, wrote_line};
+
+    fn paths(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("src/f{i}.rs")).collect()
+    }
+
+    #[test]
+    fn a_ledger_names_what_it_can_and_counts_the_rest() {
+        assert_eq!(wrote_line(&[]), "[wrote nothing]");
+        assert_eq!(wrote_line(&paths(1)), "[wrote 1 file: src/f0.rs]");
+
+        let many = wrote_line(&paths(NAMED + 3));
+        assert!(many.starts_with(&format!("[wrote {} files: src/f0.rs,", NAMED + 3)), "{many}");
+        assert!(many.ends_with(", and 3 more]"), "{many}");
+        // The count is the whole of it, so a caller reading a truncated list
+        // still knows how much it is not being shown.
+        assert_eq!(many.matches("src/f").count(), NAMED, "{many}");
+    }
+
+    /// The cap is ten minutes, so the endings a caller most needs told apart
+    /// are the two no run in a test can reach.
+    #[test]
+    fn a_check_that_may_have_run_is_never_reported_as_one_that_did_not() {
+        let of = |outcome| check_line(&Checked { command: "cargo test".into(), outcome });
+
+        let killed = of(Outcome::CutOff { ms: 600_000 });
+        assert!(killed.contains("no verdict"), "{killed}");
+        // It ran, and may have left changes behind. Saying it did not is how a
+        // caller concludes the tree is untouched when it is not.
+        assert!(!killed.contains("did not run"), "{killed}");
+        assert!(killed.contains("600000ms"), "{killed}");
+
+        let lost = of(Outcome::NoVerdict("no such shell".into()));
+        assert!(lost.contains("no verdict — no such shell"), "{lost}");
+        // The same reason: it is not known whether this one ran either.
+        assert!(!lost.contains("did not run"), "{lost}");
+
+        let passed = of(Outcome::Ran { code: 0, body: "quiet".into() });
+        assert_eq!(passed, "[verify `cargo test`: exit 0]", "no output when it passed");
+
+        let failed = of(Outcome::Ran { code: 101, body: "assertion failed\n".into() });
+        assert_eq!(failed, "[verify `cargo test`: exit 101]\nassertion failed");
     }
 }
