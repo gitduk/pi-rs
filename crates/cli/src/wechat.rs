@@ -39,8 +39,8 @@ struct State {
     context_token: Option<String>,
 }
 
-/// How long between tool-call summary lines sent to the phone; a turn can
-/// call dozens of tools and each one as its own message would flood it.
+/// How long tool notices are held before going out as one message; a turn
+/// can call dozens of tools and each as its own message would flood the phone.
 const TOOL_INTERVAL: Duration = Duration::from_secs(5);
 
 /// The byte budget for one outbound message. The protocol documents no limit
@@ -80,8 +80,11 @@ pub struct Bridge {
     out: String,
     /// True once `Done` has flushed; a failed turn flushes what is left.
     flushed: bool,
-    /// When the last tool line went out, for the rate limit above.
+    /// When the last tool batch went out, for the interval above.
     last_tool: Option<Instant>,
+    /// Tool notices held since that send. Coalescing them is what keeps a
+    /// parallel call — same instant as its sibling — from being lost.
+    tool_buf: Vec<String>,
     /// Whether the indicator is currently marked on. Optimistic: the send
     /// tasks correct the server side, so a failed send only leaves the mark
     /// stale, never freezes the surface.
@@ -116,6 +119,7 @@ impl Bridge {
             out: String::new(),
             flushed: false,
             last_tool: None,
+            tool_buf: Vec::new(),
             typing_on: false,
             typing: Arc::new(Mutex::new(Typing::default())),
             last_send: None,
@@ -171,25 +175,34 @@ impl Bridge {
         self.last_send = None;
         self.typing_on = false;
         self.out.clear();
+        self.tool_buf.clear();
+        self.last_tool = None;
         self.flushed = false;
         vec!["wechat bridge stopped — /wechat on to reconnect".into()]
     }
 
-    /// Watch one agent event. Text deltas accumulate; tool lines and the
-    /// final answer go out as messages, `Done` flushes the accumulator.
+    /// Watch one agent event. Text deltas and tool lines accumulate; every
+    /// other notice, and `Done`, flush what is held before saying its own.
     pub async fn observe(&mut self, event: &Event) {
         match event {
             Event::TurnStart { turn: 1 } => {
                 self.out.clear();
+                // A turn that ended out of sight never reached `finish_turn`,
+                // and its leftovers would surface inside this turn's first batch.
+                self.tool_buf.clear();
                 self.flushed = false;
+                // Or the previous turn's last send would swallow this one's
+                // first tool line, seconds after the user asked for it.
+                self.last_tool = None;
                 self.typing(true).await;
             }
             Event::TextDelta(text) => self.out.push_str(text),
             Event::ToolStart { name, args, .. } => {
+                self.tool_buf.push(tool_line(name, args));
                 let now = Instant::now();
                 if self.last_tool.is_none_or(|t| now.duration_since(t) >= TOOL_INTERVAL) {
                     self.last_tool = Some(now);
-                    self.send_line(&tool_line(name, args)).await;
+                    self.flush_tools().await;
                 }
             }
             Event::ToolEnd {
@@ -198,24 +211,24 @@ impl Bridge {
                 preview,
                 ..
             } => {
-                self.send_line(&format!("✗ {name} failed — {}", crate::render::clip(preview, 80)))
+                self.say(&format!("✗ {name} failed — {}", crate::render::clip(preview, 80)))
                     .await;
             }
             Event::ToolDenied {
                 name, reason, ..
-            } => self.send_line(&format!("✗ {name} denied — {reason}")).await,
+            } => self.say(&format!("✗ {name} denied — {reason}")).await,
             Event::Retrying {
                 attempt,
                 delay_ms,
                 reason,
                 ..
             } => {
-                self.send_line(&format!("↻ retry {attempt} in {}s — {reason}", delay_ms / 1000))
+                self.say(&format!("↻ retry {attempt} in {}s — {reason}", delay_ms / 1000))
                     .await;
             }
-            Event::Warning(w) => self.send_line(w).await,
+            Event::Warning(w) => self.say(w).await,
             Event::Compacted(r) => {
-                self.send_line(&format!(
+                self.say(&format!(
                     "history compacted {} → {} tokens",
                     r.before, r.after
                 ))
@@ -230,6 +243,7 @@ impl Bridge {
     /// flushed on `Done`; a cancelled or failed one sends what it has.
     pub async fn finish_turn(&mut self, cancelled: bool) {
         if self.flushed {
+            self.flush_tools().await;
             self.typing(false).await;
         } else {
             self.flush(cancelled).await;
@@ -242,10 +256,30 @@ impl Bridge {
             text.push_str("\n\n(stopped)");
         }
         self.flushed = true;
+        // Before the answer: the turn's last batch is still held, and the
+        // answer arriving first would read as the tools running after it.
+        self.flush_tools().await;
         if !text.trim().is_empty() {
             self.send_line(&text).await;
         }
         self.typing(false).await;
+    }
+
+    /// Send what the interval has held as one multi-line message. Empty is
+    /// the ordinary case — most drains find nothing to say.
+    async fn flush_tools(&mut self) {
+        if self.tool_buf.is_empty() {
+            return;
+        }
+        let text = std::mem::take(&mut self.tool_buf).join("\n");
+        self.send_line(&text).await;
+    }
+
+    /// One outbound line that is not a tool notice. Held tool lines go first,
+    /// so the phone reads the turn in the order it happened.
+    async fn say(&mut self, text: &str) {
+        self.flush_tools().await;
+        self.send_line(text).await;
     }
 
     /// One outbound message, sent from its own task so a slow or failing
@@ -763,5 +797,64 @@ mod tests {
             "⚙ edit crates/cli/src/wechat.rs"
         );
         assert_eq!(tool_line("read", &serde_json::json!({})), "⚙ read");
+    }
+
+    fn started(name: &str) -> Event {
+        Event::ToolStart {
+            id: name.into(),
+            name: name.into(),
+            args: serde_json::json!({}),
+        }
+    }
+
+    /// The bridge is not alive here, so every send is a no-op and the
+    /// accumulator is the only thing under test.
+    #[tokio::test]
+    async fn calls_inside_the_interval_are_held_rather_than_dropped() {
+        let mut b = Bridge::new();
+        b.observe(&Event::TurnStart { turn: 1 }).await;
+        // Three in the same instant: the shape a parallel call arrives in,
+        // and the one the old rate limit threw away.
+        for name in ["read", "grep", "bash"] {
+            b.observe(&started(name)).await;
+        }
+        assert_eq!(b.tool_buf, ["⚙ grep", "⚙ bash"]);
+        b.finish_turn(false).await;
+        assert!(b.tool_buf.is_empty(), "{:?}", b.tool_buf);
+    }
+
+    #[tokio::test]
+    async fn a_new_turn_reopens_the_interval() {
+        let mut b = Bridge::new();
+        b.observe(&Event::TurnStart { turn: 1 }).await;
+        b.observe(&started("read")).await;
+        assert!(b.last_tool.is_some());
+        b.observe(&Event::TurnStart { turn: 1 }).await;
+        b.observe(&started("grep")).await;
+        assert!(b.tool_buf.is_empty(), "{:?}", b.tool_buf);
+    }
+
+    /// The lane-switch case: the turn's events stop reaching the bridge, so
+    /// `finish_turn` never runs and the held lines outlive their turn.
+    #[tokio::test]
+    async fn a_turn_that_never_ended_leaves_nothing_for_the_next_one() {
+        let mut b = Bridge::new();
+        b.observe(&Event::TurnStart { turn: 1 }).await;
+        b.observe(&started("read")).await;
+        b.observe(&started("grep")).await;
+        assert_eq!(b.tool_buf, ["⚙ grep"]);
+        b.observe(&Event::TurnStart { turn: 1 }).await;
+        assert!(b.tool_buf.is_empty(), "{:?}", b.tool_buf);
+    }
+
+    #[tokio::test]
+    async fn an_error_line_drains_the_held_calls_first() {
+        let mut b = Bridge::new();
+        b.observe(&Event::TurnStart { turn: 1 }).await;
+        b.observe(&started("read")).await;
+        b.observe(&started("grep")).await;
+        assert_eq!(b.tool_buf, ["⚙ grep"]);
+        b.observe(&Event::Warning("careful".into())).await;
+        assert!(b.tool_buf.is_empty(), "{:?}", b.tool_buf);
     }
 }
