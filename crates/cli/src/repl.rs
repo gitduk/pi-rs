@@ -2525,7 +2525,7 @@ mod tests {
 
         let task = core.lane().agent.registry.get(agent::task::Task::NAME).unwrap();
         let ctx = tools::Ctx::new(core.lane().ctx.workspace.clone());
-        task.execute(serde_json::json!({ "prompt": "go" }), &ctx).await.unwrap();
+        task.execute(serde_json::json!({ "description": "go", "prompt": "go" }), &ctx).await.unwrap();
 
         let saw = new_saw.lock().unwrap();
         assert!(

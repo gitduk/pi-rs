@@ -223,7 +223,7 @@ async fn drive(
 #[tokio::test]
 async fn the_child_answers_into_the_parents_transcript() {
     let (_dir, agent, ctx, seen, kept) = harness(vec![
-        call_turn("c1", "task", r#"{"prompt":"count the files"}"#),
+        call_turn("c1", "task", r#"{"description":"count the files","prompt":"count the files"}"#),
         call_turn("c2", "probe", "{}"),
         text_turn("there are four files"),
         text_turn("the subagent says four"),
@@ -261,7 +261,7 @@ async fn the_child_answers_into_the_parents_transcript() {
 #[tokio::test]
 async fn the_child_shares_the_tree_and_its_bookkeeping() {
     let (_dir, agent, ctx, seen, _kept) = harness(vec![
-        call_turn("c1", "task", r#"{"prompt":"look"}"#),
+        call_turn("c1", "task", r#"{"description":"look","prompt":"look"}"#),
         call_turn("c2", "probe", "{}"),
         text_turn("looked"),
         text_turn("done"),
@@ -289,9 +289,9 @@ async fn the_child_shares_the_tree_and_its_bookkeeping() {
 #[tokio::test]
 async fn the_child_cannot_send_out_a_child_of_its_own() {
     let (_dir, agent, ctx, _seen, kept) = harness(vec![
-        call_turn("c1", "task", r#"{"prompt":"delegate this"}"#),
+        call_turn("c1", "task", r#"{"description":"delegate this","prompt":"delegate this"}"#),
         // The child tries to do the same thing to someone else.
-        call_turn("c2", "task", r#"{"prompt":"no you"}"#),
+        call_turn("c2", "task", r#"{"description":"no you","prompt":"no you"}"#),
         text_turn("could not"),
         text_turn("fine"),
     ]);
@@ -311,7 +311,7 @@ async fn the_child_cannot_send_out_a_child_of_its_own() {
 #[tokio::test]
 async fn a_child_that_says_nothing_still_says_something() {
     let (_dir, agent, ctx, _seen, _kept) = harness(vec![
-        call_turn("c1", "task", r#"{"prompt":"be quiet"}"#),
+        call_turn("c1", "task", r#"{"description":"be quiet","prompt":"be quiet"}"#),
         vec![StreamEvent::Done {
             stop: StopReason::EndTurn,
             usage: Usage::default(),
@@ -332,7 +332,7 @@ async fn a_child_that_says_nothing_still_says_something() {
 async fn running_out_of_time_is_an_answer_not_a_failure() {
     let (_dir, agent, ctx, _seen, _kept) = rigged(
         vec![
-            call_turn("c1", "task", r#"{"prompt":"go round"}"#),
+            call_turn("c1", "task", r#"{"description":"go round","prompt":"go round"}"#),
             call_turn("c2", "sleeper", "{}"),
             text_turn("it reported back"),
         ],
@@ -355,7 +355,7 @@ async fn running_out_of_time_is_an_answer_not_a_failure() {
 async fn esc_reaches_through_the_child_and_ends_the_callers_turn() {
     let (_dir, agent, ctx, _seen, _kept) = rigged(
         vec![
-            call_turn("c1", "task", r#"{"prompt":"long one"}"#),
+            call_turn("c1", "task", r#"{"description":"long one","prompt":"long one"}"#),
             call_turn("c2", "probe", "{}"),
             call_turn("c3", "sleeper", "{}"),
             text_turn("never gets here"),
@@ -389,7 +389,7 @@ async fn the_child_gets_no_tool_the_parent_was_denied() {
     let mut parent = Agent::new(
         Arc::new(Scripted {
             turns: vec![
-                call_turn("c1", "task", r#"{"prompt":"try it"}"#),
+                call_turn("c1", "task", r#"{"description":"try it","prompt":"try it"}"#),
                 call_turn("c2", "sleeper", "{}"),
                 text_turn("could not"),
                 text_turn("nor could I"),
@@ -427,7 +427,7 @@ async fn the_child_is_told_what_the_checkout_says() {
     let mut parent = Agent::new(
         Arc::new(Scripted {
             turns: vec![
-                call_turn("c1", "task", r#"{"prompt":"go"}"#),
+                call_turn("c1", "task", r#"{"description":"go","prompt":"go"}"#),
                 text_turn("done"),
                 text_turn("the subagent is done"),
             ],

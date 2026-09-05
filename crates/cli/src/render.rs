@@ -1138,9 +1138,17 @@ pub fn summarize(args: &serde_json::Value) -> String {
             .collect();
         return clip(&files.join(" "), 80);
     }
-    // `pattern` before `path`: a grep call carries both, and the pattern is the
-    // half that says what the agent was looking for.
-    for key in ["pattern", "command", "path", "query"] {
+    // Order is priority: `pattern` beats `path` because a grep carries both,
+    // and `description`, written for this line, beats the prompt it names.
+    for key in [
+        "description",
+        "pattern",
+        "command",
+        "path",
+        "query",
+        "prompt",
+        "name",
+    ] {
         if let Some(v) = args.get(key).and_then(|v| v.as_str()) {
             return clip(v, 80);
         }
@@ -1290,6 +1298,35 @@ mod tests {
         assert_eq!(summarize(&json!({ "path": "src/a.rs" })), "src/a.rs");
         assert_eq!(summarize(&json!({ "command": "cargo test" })), "cargo test");
         assert_eq!(summarize(&json!({ "nothing": 1 })), "");
+    }
+
+    /// A delegating call is the one a watcher can least afford to see bare:
+    /// the work happens in a window they never see, so the row naming it is
+    /// their only account of what was sent.
+    #[test]
+    fn a_delegated_job_shows_what_it_was_sent() {
+        // The word written for this line wins over the paragraph it names.
+        assert_eq!(
+            summarize(&json!({
+                "description": "find every caller of `spans`",
+                "prompt": "Search the workspace for `spans` and report each call site.",
+            })),
+            "find every caller of `spans`"
+        );
+        // A call from before the field existed still says something.
+        assert_eq!(
+            summarize(&json!({ "prompt": "find every caller of `spans`" })),
+            "find every caller of `spans`"
+        );
+        // A prompt of any length still has to fit one row.
+        let long = "x".repeat(200);
+        assert_eq!(summarize(&json!({ "prompt": long })).chars().count(), 81);
+        // Paragraphs collapse into the one line the row has room for.
+        assert_eq!(
+            summarize(&json!({ "prompt": "read src/a.rs\n\nreport what it does" })),
+            "read src/a.rs  report what it does"
+        );
+        assert_eq!(summarize(&json!({ "name": "commit" })), "commit");
     }
 
     #[test]

@@ -31,6 +31,9 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(serde::Deserialize)]
 struct Args {
+    /// Never read by the child — this is the caller's word to the screen and
+    /// the journal, which otherwise show a delegated job as a bare `task`.
+    description: String,
     prompt: String,
 }
 
@@ -123,12 +126,16 @@ impl Tool for Task {
         json!({
             "type": "object",
             "properties": {
+                "description": {
+                    "type": "string",
+                    "description": "Three to six words naming the job, shown to the user while it runs — \"find every caller of spans\", \"run the test suite\". Not sent to the subagent.",
+                },
                 "prompt": {
                     "type": "string",
                     "description": "The whole job, self-contained: what to do, where to look, and what to report back. The subagent sees none of this conversation.",
                 },
             },
-            "required": ["prompt"],
+            "required": ["description", "prompt"],
             "additionalProperties": false,
         })
     }
@@ -139,7 +146,7 @@ impl Tool for Task {
     }
 
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
-        let args: Args = tools::parse_args_hinted(args, "task takes `prompt`")?;
+        let args: Args = tools::parse_args_hinted(args, "task takes `description` and `prompt`")?;
 
         let id = format!(
             "{}-task-{}",
@@ -180,6 +187,7 @@ impl Tool for Task {
             target: "pi::task",
             "task",
             session = %child.spill_namespace(),
+            description = %args.description,
         );
         // Trips the same token as the turn cap rather than dropping the
         // future, so both endings unwind the run the way Esc does.
