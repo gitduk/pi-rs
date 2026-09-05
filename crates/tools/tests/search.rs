@@ -81,6 +81,31 @@ async fn glob_scopes_to_a_subdirectory_and_reports_no_match() {
     assert!(empty.useless && empty.flatten().contains("no file matches"));
 }
 
+/// The row a finished search leaves has to name what was searched for. A
+/// tally alone is the same row for every search that found that many.
+#[tokio::test]
+async fn a_finished_search_names_what_it_looked_for() {
+    let (_d, c) = tree();
+    let found = tools::glob::Glob
+        .execute(json!({ "pattern": "*.rs" }), &c)
+        .await
+        .unwrap();
+    assert_eq!(found.preview(), "*.rs [2 files]");
+
+    let hits = tools::grep::Grep
+        .execute(json!({ "pattern": "TODO" }), &c)
+        .await
+        .unwrap();
+    assert_eq!(hits.preview(), "TODO [2 files · 2 matches]");
+
+    // The files-only view is the same search and says the same thing.
+    let names = tools::grep::Grep
+        .execute(json!({ "pattern": "TODO", "files_only": true }), &c)
+        .await
+        .unwrap();
+    assert_eq!(names.preview(), "TODO [2 files · 2 matches]");
+}
+
 #[tokio::test]
 async fn glob_reports_what_the_limit_dropped() {
     let (_d, c) = tree();

@@ -14,26 +14,27 @@ pub fn short(n: u64) -> String {
     }
 }
 
-/// The in/out counts in the one wording every line that shows them uses: a
-/// figure the provider reported is shown as-is, one it left out reads as a
-/// dash, never as a count of ours standing in for it.
+/// A figure the provider reported, or the dash standing for one it left out —
+/// never a count of ours standing in for it.
+fn reported(n: u64) -> String {
+    if n > 0 { short(n) } else { "-".to_string() }
+}
+
+/// The in/out counts in the one wording every line that shows them uses.
 pub fn in_out(input: u64, output: u64) -> String {
-    let input = if input > 0 {
-        short(input)
-    } else {
-        "-".to_string()
-    };
-    let output = if output > 0 {
-        short(output)
-    } else {
-        "-".to_string()
-    };
-    format!("{input} in / {output} out")
+    format!("{} in / {} out", reported(input), reported(output))
+}
+
+/// The same two figures where the words will not fit: a scrollback row that
+/// has already said what it is, and needs the columns for what it did. Same
+/// unit and same dash as `in_out` — a narrower spelling, not another count.
+pub fn slash(input: u64, output: u64) -> String {
+    format!("{}/{}", reported(input), reported(output))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{in_out, short};
+    use super::{in_out, short, slash};
 
     #[test]
     fn counts_shorten_once_they_stop_being_worth_reading_exactly() {
@@ -47,5 +48,14 @@ mod tests {
         assert_eq!(in_out(8_400, 390), "8.4k in / 390 out");
         assert_eq!(in_out(8_400, 0), "8.4k in / - out");
         assert_eq!(in_out(0, 0), "- in / - out");
+    }
+
+    /// The narrow spelling drops the words and nothing else: the same
+    /// shortening, and the same dash for what was never reported.
+    #[test]
+    fn the_narrow_spelling_keeps_the_unit_and_the_dash() {
+        assert_eq!(slash(8_400, 390), "8.4k/390");
+        assert_eq!(slash(8_400, 0), "8.4k/-");
+        assert_eq!(slash(0, 0), "-/-");
     }
 }

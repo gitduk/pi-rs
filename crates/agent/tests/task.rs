@@ -258,6 +258,38 @@ async fn the_child_answers_into_the_parents_transcript() {
     assert_ne!(ns, ctx.spill_namespace(), "and not the parent's");
 }
 
+/// The row a finished call leaves has to say which job ended. Several
+/// children run at once, and their bills are indistinguishable.
+#[tokio::test]
+async fn a_finished_call_still_names_the_job() {
+    let (_dir, parent, ctx, _seen, kept) = harness(vec![text_turn("four")]);
+    let task = Task::new(&parent, kept, STANDING);
+    let out = task
+        .execute(
+            json!({ "description": "count the files", "prompt": "count them" }),
+            &ctx,
+        )
+        .await
+        .expect("the child ran");
+
+    let sketch = out.preview();
+    assert_eq!(
+        sketch, "count the files [1 turn · 1.0k/7]",
+        "the job leads and the bill is ranked under it"
+    );
+
+    // A description the model left blank leaves the cost alone rather than a
+    // separator with nothing in front of it.
+    let (_dir, parent, ctx, _seen, kept) = harness(vec![text_turn("four")]);
+    let task = Task::new(&parent, kept, STANDING);
+    let bare = task
+        .execute(json!({ "description": " ", "prompt": "count them" }), &ctx)
+        .await
+        .expect("the child ran")
+        .preview();
+    assert_eq!(bare, "1 turn · 1.0k/7", "no brackets around a bare bill: {bare}");
+}
+
 #[tokio::test]
 async fn the_child_shares_the_tree_and_its_bookkeeping() {
     let (_dir, agent, ctx, seen, _kept) = harness(vec![

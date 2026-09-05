@@ -102,6 +102,9 @@ impl Tool for Glob {
         } else {
             String::new()
         };
-        Ok(ToolOutput::text(spill::fit(ctx, &rows, "paths", &notice)?).with_preview(format!("{total} files")))
+        // The pattern leads, the count is ranked under it: a row saying only
+        // how many files came back names nothing the caller can recognise.
+        Ok(ToolOutput::text(spill::fit(ctx, &rows, "paths", &notice)?)
+            .with_preview(format!("{} [{total} files]", args.pattern)))
     }
 }

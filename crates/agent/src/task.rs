@@ -231,13 +231,30 @@ impl Tool for Task {
         // The child's whole spend rides home on the result, where the parent's
         // run counts it — the surface never had a handle to drain.
         Ok(ToolOutput::text(answer(&heard, cut.as_deref()))
-            .with_preview(format!(
-                "{} turn{} · {}",
-                heard.turns,
-                if heard.turns == 1 { "" } else { "s" },
-                brain::count::in_out(heard.spent.usage.input, heard.spent.usage.output)
-            ))
+            .with_preview(sketch(&args.description, &heard))
             .with_spent(heard.spent))
+    }
+}
+
+/// The line a finished call leaves on the screen: the job it was, and in
+/// brackets what it took. The job leads because several children run at once
+/// and a bill alone names none of them; the brackets are what keep the bill
+/// from reading as a second thing the caller asked for.
+fn sketch(description: &str, heard: &Heard) -> String {
+    let spent = format!(
+        "{} turn{} · {}",
+        heard.turns,
+        if heard.turns == 1 { "" } else { "s" },
+        brain::count::slash(heard.spent.usage.input, heard.spent.usage.output)
+    );
+    // Flattened, not trusted: this row is written one line at a time, and a
+    // newline in it would stair-step everything drawn after.
+    let job = description.replace('\n', " ");
+    match job.trim() {
+        // Nothing to hold apart from, so the brackets would enclose the row
+        // rather than rank it.
+        "" => spent,
+        job => format!("{job} [{spent}]"),
     }
 }
 

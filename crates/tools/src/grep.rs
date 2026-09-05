@@ -184,7 +184,9 @@ impl Tool for Grep {
         }
 
         let total: usize = hits.iter().map(|h| h.lines.len()).sum();
-        let preview = format!("{} files, {total} matches", hits.len());
+        // The pattern leads, the tallies are ranked under it: a row saying
+        // only how much it found names nothing the caller can recognise.
+        let preview = format!("{} [{} files · {total} matches]", args.pattern, hits.len());
         // The two lines that close either view: what the limit left out, and
         // what the sweep could not read. Spelt once because both views owe both.
         let over = |left: usize, unit: &str| {
