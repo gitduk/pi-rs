@@ -51,6 +51,15 @@ const THINKING: &str = "thinking...";
 // second clear reads as the second half of a double-tap and quits.
 const DOUBLE_TAP: std::time::Duration = std::time::Duration::from_millis(500);
 
+// How long a flash stays on the bar row: long enough to read a short line
+// without looking for it, short enough that a second try lands after it.
+const FLASH: std::time::Duration = std::time::Duration::from_secs(3);
+
+// One text each: three and two call sites had their own copy of these, and a
+// reworded one would have drifted.
+const NO_TRANSCRIPT: &str = "this checkout has no transcript — /new or /resume first";
+const NOTHING_TO_REWIND: &str = "nothing to rewind to";
+
 // Whether a press lands inside the double-tap window of the previous one,
 // and records the press either way.
 fn double_tap(last: &mut Option<Instant>, now: Instant) -> bool {
@@ -719,9 +728,13 @@ struct Ui {
     /// The segments each line shows, in the order the config named them.
     live: Vec<crate::status::Segment>,
     done: Vec<crate::status::Segment>,
-    /// What the bottom bar says, in lane order. Empty until there is a second
-    /// lane, and the bar is absent with it.
+    /// What the lane strip says, in lane order. Empty until there is a second
+    /// lane, and the strip is absent with it — though a flash can still take
+    /// that row.
     tabs: Vec<Tab>,
+    /// A note answering the last keypress, painted, and when it landed. It
+    /// takes the bar's row for `FLASH` and then goes — see `flash`.
+    flash: Option<(String, Instant)>,
 }
 
 
@@ -807,8 +820,14 @@ impl Ui {
     /// The draft belongs to the lane it was typed at, and the editor is the
     /// surface's rather than any view's — so a switch has to drop it, or the
     /// next Enter files it in whatever lane it landed on.
+    /// What does not follow the surface to the next checkout: each was built
+    /// against the lane being left, and the selector's rows are entries of
+    /// that lane's transcript. The keys close it before any switch they can
+    /// reach — a `/worktree` off the phone never passes through them.
     fn leave_lane(&mut self) {
         self.editor.take(false);
+        self.flash = None;
+        self.rewind.clear();
     }
 
     fn new(
@@ -847,6 +866,7 @@ impl Ui {
             live: crate::status::default_live(),
             done: crate::status::default_done(),
             tabs: Vec::new(),
+            flash: None,
         }
     }
 
@@ -872,7 +892,36 @@ impl Ui {
         format!("{} ", paint.on(&paint.theme.prompt.color, icon))
     }
     fn say(&mut self, view: &mut View, line: impl Into<String>) {
+        let line = line.into();
+        // A backstop: what repeats most is a refusal, and those go to `flash`.
+        if let Some(last) = view.scrollback.last_mut()
+            && last.repeated(&line)
+        {
+            return;
+        }
         view.scrollback.push(Row::notice(line));
+    }
+
+    /// Answer one keypress on the bar row and leave nothing behind.
+    ///
+    /// The scrollback is a transcript, and what a press did *not* do is not
+    /// part of one — sent there it also stacked a row per press, which is how
+    /// holding `ctrl+o` in a single checkout wrote a screenful of one line.
+    /// Muted here rather than at the callers, which had drifted apart on it.
+    fn flash(&mut self, line: impl Into<String>) {
+        let text = self.paint.on(&self.paint.theme.muted, &line.into());
+        self.flash = Some((text, Instant::now()));
+    }
+
+    /// The bar row while a flash is up, and the only place an expired one is
+    /// dropped — every frame passes through here, so nothing else has to
+    /// remember to clear it.
+    fn flash_line(&mut self, width: usize) -> Option<String> {
+        if self.flash.as_ref().is_some_and(|(_, at)| at.elapsed() >= FLASH) {
+            self.flash = None;
+        }
+        let (text, _) = self.flash.as_ref()?;
+        Some(render::clip(text, width))
     }
 
     /// Where a finished row goes: a reasoning line into the streaming block's
@@ -1227,7 +1276,9 @@ impl Ui {
     fn flush(&mut self, lane: &mut Lane) {
         let menu = self.menu(lane.is_running());
         let width = self.screen.usable();
-        let bar = self.lane_bar(width);
+        // A flash outranks the lane strip: it is gone in a moment, where the
+        // strip is always a keystroke away.
+        let bar = self.flash_line(width).or_else(|| self.lane_bar(width));
         let bar_h = usize::from(bar.is_some());
         let (input, caret) = self.editor.view(&self.paint, width);
         // A paste taller than the terminal must not push the editor area off
@@ -1245,7 +1296,7 @@ impl Ui {
         let panel = self.settings.as_ref().map(|p| p.view(&self.paint, width));
         let panel_h = panel.as_ref().map(|v| v.len()).unwrap_or(0);
         // Both branches leave the bar its row: a menu tall enough to take it
-        // would drop the one line saying which checkouts are still working.
+        // would drop whatever that row is saying.
         let room = (self.screen.height as usize).saturating_sub(editor_h + bar_h + 1);
         let menu_h = if panel.is_some() {
             panel_h.min(room)
@@ -1486,7 +1537,7 @@ impl Ui {
         }
 
         match bound {
-            Some(Action::LineClear) => return self.interrupt_or_clear(&mut lane.view, running),
+            Some(Action::LineClear) => return self.interrupt_or_clear(running),
             Some(Action::LineSubmit) => {
                 // Enter while a menu is open runs what it highlights. The
                 // typed text is a prefix; the highlighted word is the intent.
@@ -1547,10 +1598,7 @@ impl Ui {
                 return match self.next_checkout(lane) {
                     Some(name) => Intent::Worktree(name),
                     None => {
-                        self.say(&mut lane.view, 
-                            self.paint
-                                .on(&self.paint.theme.muted, "the only checkout there is"),
-                        );
+                        self.flash("the only checkout there is");
                         Intent::None
                     }
                 };
@@ -1771,7 +1819,7 @@ impl Ui {
     /// One key, three meanings, and the escalation travels with the binding
     /// rather than with Ctrl-C: stop the run, clear the line, or — pressed
     /// twice inside the window — leave.
-    fn interrupt_or_clear(&mut self, view: &mut View, running: bool) -> Intent {
+    fn interrupt_or_clear(&mut self, running: bool) -> Intent {
         if double_tap(&mut self.last_interrupt, Instant::now()) {
             return Intent::Quit;
         }
@@ -1779,10 +1827,7 @@ impl Ui {
             return Intent::Interrupt;
         }
         if self.editor.is_empty() {
-            self.say(view, 
-                self.paint
-                    .on(&self.paint.theme.muted, "press it again to quit"),
-            );
+            self.flash("press it again to quit");
         } else {
             self.editor.clear();
         }
@@ -2167,6 +2212,11 @@ impl Tui {
         self.say_of(lane, said);
     }
 
+    /// News from a lane, onto the screen actually being watched rather than
+    /// into the lane it came from — where nobody would see it until they
+    /// switched. The `whose:` prefix is what makes that readable, and it is
+    /// why this lands on `current`: a background lane's own view would need no
+    /// name on it.
     fn say_of(&mut self, lane: usize, what: String) {
         let text = if lane == self.core.current {
             what
@@ -2199,7 +2249,7 @@ impl Tui {
                 Wake::Nothing
             }
             Fate::Refused(why) => {
-                self.ui.say(&mut self.core.lane_mut().view, why.to_string());
+                self.ui.flash(why);
                 Wake::Nothing
             }
         }
@@ -2236,7 +2286,7 @@ impl Tui {
         // Said here rather than at the callers: the state is the only thing
         // that knows, and every way of asking to stop arrives through it.
         let Turn::Running { cancel, unsend: take_back } = &mut self.core.lane_mut().turn else {
-            self.ui.say(&mut self.core.lane_mut().view, "nothing running to stop");
+            self.ui.flash("nothing running to stop");
             return;
         };
         cancel.cancel();
@@ -2270,9 +2320,9 @@ impl Tui {
                 // `recv()` and `tick()` are; a blocking read gets its own thread.
                 tokio::select! {
                     Some(done) = done_rx.recv() => Wake::Turn(done),
-                    // Only while something is running: an idle loop waking ten
-                    // times a second is a spinner with nothing to spin.
-                    _ = tick.tick(), if anywhere => {
+                    // Only while something runs, or a flash is up: an idle loop
+                    // waking ten times a second is a spinner with nothing to spin.
+                    _ = tick.tick(), if anywhere || self.ui.flash.is_some() => {
                         self.ui.spinner += 1;
                         Wake::Nothing
                     }
@@ -2383,27 +2433,30 @@ impl Tui {
                         .view
                         .queued
                         .retain(|q| !matches!(q, Intent::LoopRound(_)));
-                    let said = match self.core.lane_mut().looping.take() {
-                        Some(l) => format!("loop stopped after {} round(s) of `{}`", l.round, l.goal),
-                        None => "no loop here — /loop <line> runs one again while \
-                                 it keeps changing files"
-                            .into(),
-                    };
-                    self.ui.say(&mut self.core.lane_mut().view, said);
+                    match self.core.lane_mut().looping.take() {
+                        // A loop really ended: that belongs in the transcript.
+                        Some(l) => {
+                            let said =
+                                format!("loop stopped after {} round(s) of `{}`", l.round, l.goal);
+                            self.ui.say(&mut self.core.lane_mut().view, said);
+                        }
+                        // Nothing ended — a note about the line, not the lane.
+                        None => self.ui.flash(
+                            "no loop here — /loop <line> runs one again while \
+                             it keeps changing files",
+                        ),
+                    }
                     continue;
                 }
                 // Refused rather than replacing: the round already queued would
                 // still run, and it would be counted against the new loop.
                 if let Some(l) = &self.core.lane().looping {
                     let said = format!("`{}` is already looping here — /loop to stop it first", l.goal);
-                    self.ui.say(&mut self.core.lane_mut().view, said);
+                    self.ui.flash(said);
                     continue;
                 }
                 if matches!(crate::repl::read(&goal), Intent::Loop(_)) {
-                    self.ui.say(
-                        &mut self.core.lane_mut().view,
-                        "a loop cannot be its own goal".to_string(),
-                    );
+                    self.ui.flash("a loop cannot be its own goal");
                     continue;
                 }
                 self.core.lane_mut().loop_start(goal.clone());
@@ -2439,6 +2492,7 @@ impl Tui {
             }
             match step {
                 Step::Quit => break,
+                Step::Flash(line) => self.ui.flash(line),
                 Step::Bash(command) => self.start_bash(command, &done_tx),
                 Step::Swap(said) => self.land_swap(said),
                 Step::Handled(lines) => {
@@ -2524,11 +2578,7 @@ impl Tui {
     fn rewind_turn(&mut self, id: EntryId) {
         match self.core.rewind_to(id) {
             Ok(Rewound::Nothing) => {
-                self.ui.say(&mut self.core.lane_mut().view, 
-                    self.ui
-                        .paint
-                        .on(&self.ui.paint.theme.muted, "nothing to rewind to"),
-                );
+                self.ui.flash(NOTHING_TO_REWIND);
             }
             Ok(outcome) => {
                 // The transcript is the source of truth again: rebuild the
@@ -2599,11 +2649,7 @@ impl Tui {
             })
             .collect();
         if rows.is_empty() {
-            self.ui.say(&mut self.core.lane_mut().view, 
-                self.ui
-                    .paint
-                    .on(&self.ui.paint.theme.muted, "nothing to rewind to"),
-            );
+            self.ui.flash(NOTHING_TO_REWIND);
             return;
         }
         self.ui.open_rewind(rows);
@@ -2629,7 +2675,7 @@ impl Tui {
         // way refuses another, so the only way it is missing here is the lane
         // whose transcript a panic took and whose archive would not read back.
         let Some(mut carried) = self.core.lane_mut().session.take() else {
-            self.ui.say(&mut self.core.lane_mut().view, "this checkout has no transcript — /new or /resume first");
+            self.ui.flash(NO_TRANSCRIPT);
             return;
         };
         carried.send_prompt(prompt, typed);
@@ -2666,7 +2712,7 @@ impl Tui {
     /// result is filed in it, and nothing else may replace it meanwhile.
     fn start_bash(&mut self, command: String, done: &UnboundedSender<Done>) {
         let Some(mut carried) = self.core.lane_mut().session.take() else {
-            self.ui.say(&mut self.core.lane_mut().view, "this checkout has no transcript — /new or /resume first");
+            self.ui.flash(NO_TRANSCRIPT);
             return;
         };
         let cancel = CancellationToken::new();
@@ -2710,7 +2756,7 @@ impl Tui {
     /// serving the others meanwhile.
     fn start_compact(&mut self, focus: Option<String>, done: &UnboundedSender<Done>) {
         let Some(mut carried) = self.core.lane_mut().session.take() else {
-            self.ui.say(&mut self.core.lane_mut().view, "this checkout has no transcript — /new or /resume first");
+            self.ui.flash(NO_TRANSCRIPT);
             return;
         };
         let cancel = CancellationToken::new();
@@ -3708,6 +3754,33 @@ mod tests {
         super::Tui::on_test_screen(core, keys)
     }
 
+    /// A flash belongs to the lane it answered. Carried across a switch it
+    /// names the wrong checkout, and it does it on the row the lane strip
+    /// would have used to say which checkout you just landed in.
+    #[tokio::test]
+    async fn a_flash_does_not_follow_the_surface_to_another_lane() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut tui = surface(dir.path());
+        tui.core.lanes.push(running_lane(dir.path()));
+        tui.ui.tabs = vec![
+            super::Tab { mark: super::Mark::Idle, name: "pi-rs".into() },
+            super::Tab { mark: super::Mark::Front, name: "f1".into() },
+        ];
+
+        tui.ui.flash("nothing running to stop");
+        tui.core.current = 1;
+        tui.reconcile(0);
+        assert!(tui.ui.flash.is_none(), "the flash was left behind");
+
+        tui.ui.flush(&mut tui.core.lanes[1]);
+        let painted = tui.ui.screen.painted();
+        assert_eq!(
+            painted[painted.len() - 2].trim(),
+            "pi-rs \u{b7} f1",
+            "the strip has its row back: {painted:?}"
+        );
+    }
+
     /// A rebuilt lane has already been drawn, whatever its row counts say.
     /// `rebuild` clears the banner along with the rest — `/resume` and a
     /// rewind both do it — so a switch back must not read that as a lane
@@ -3881,6 +3954,68 @@ mod tests {
         assert!(last.starts_with(&icon), "the input line is the bottom row: {last:?}");
         let above = &rows[rows.len() - 2];
         assert_eq!(above.trim(), "pi-rs \u{b7} f1", "the bar is the row above it");
+    }
+
+    /// A flash answers the keypress on the bar row and leaves no trace in the
+    /// transcript: it outranks the lane strip while it is up, and the strip
+    /// comes back on its own once the window passes — with no help from
+    /// whoever set the flash, who is long gone by then.
+    #[test]
+    fn a_flash_takes_the_bar_row_and_gives_it_back() {
+        let mut ui = test_ui(40, 8);
+        ui.tabs = vec![
+            super::Tab { mark: super::Mark::Front, name: "pi-rs".into() },
+            super::Tab { mark: super::Mark::Idle, name: "f1".into() },
+        ];
+        let (_dir, mut lane) = a_running_lane();
+        let before = lane.view.scrollback.len();
+
+        ui.flash("the only checkout there is");
+        ui.flush(&mut lane);
+        let painted = ui.screen.painted();
+        let bar = &painted[painted.len() - 2];
+        assert_eq!(bar.trim(), "the only checkout there is", "{painted:?}");
+        assert_eq!(
+            lane.view.scrollback.len(),
+            before,
+            "a flash is not part of the transcript"
+        );
+
+        // Backdated past the window: the next frame is the one that drops it,
+        // which is what an idle screen relies on.
+        let (text, _) = ui.flash.take().expect("a flash is up");
+        ui.flash = Some((text, super::Instant::now().checked_sub(super::FLASH).expect("a clock")));
+        ui.flush(&mut lane);
+        let painted = ui.screen.painted();
+        assert_eq!(painted[painted.len() - 2].trim(), "pi-rs \u{b7} f1", "{painted:?}");
+        assert!(ui.flash.is_none(), "the expired flash was dropped");
+    }
+
+    /// The same notice landing again with nothing between it and the last one
+    /// is one row and a count — a screenful of identical lines is the failure
+    /// this stops, and only an unbroken run folds.
+    #[test]
+    fn the_same_notice_twice_running_is_one_row_and_a_count() {
+        let mut ui = test_ui(40, 8);
+        let (_dir, mut lane) = a_running_lane();
+        lane.view.scrollback.clear();
+        let shown = |ui: &super::Ui, lane: &crate::lane::Lane, i: usize| {
+            let (text, _) = lane.view.scrollback[i].line(0, &ui.paint, &[], 80);
+            crate::render::strip_ansi(&text)
+        };
+
+        ui.say(&mut lane.view, "nothing to rewind to");
+        ui.say(&mut lane.view, "nothing to rewind to");
+        ui.say(&mut lane.view, "nothing to rewind to");
+        assert_eq!(lane.view.scrollback.len(), 1);
+        assert_eq!(shown(&ui, &lane, 0), "nothing to rewind to \u{d7}3");
+
+        // Broken by another line, the next repeat starts its own row rather
+        // than reaching back over it.
+        ui.say(&mut lane.view, "stopped");
+        ui.say(&mut lane.view, "nothing to rewind to");
+        assert_eq!(lane.view.scrollback.len(), 3);
+        assert_eq!(shown(&ui, &lane, 2), "nothing to rewind to");
     }
 
     /// `ctrl+o` walks the checkouts in a ring. Every checkout on disk is in

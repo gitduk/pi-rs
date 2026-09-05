@@ -1072,7 +1072,7 @@ fn skill_for<'a>(commands: &'a [Command], word: &str) -> Option<&'a Skill> {
 // A word `parse` did not know: a skill to run, or a typo to name.
 fn dispatch(commands: &[Command], word: &str, args: &str) -> Step {
     let Some(skill) = skill_for(commands, word) else {
-        return lines(format!("unknown command {word} — /help lists them"));
+        return Step::Flash(format!("unknown command {word} — /help lists them"));
     };
     match expanded(skill, args) {
         Ok(send) => Step::Prompt {
@@ -1169,6 +1169,15 @@ pub enum Rewound {
 }
 
 pub enum Step {
+    /// One line whose whole content is "nothing happened": a verb that is not
+    /// one, a command refused, a checkout you are already in. No state moved
+    /// and there is no detail to come back to, so a minute later the line says
+    /// nothing the screen does not already show.
+    ///
+    /// The surface shows it on the bar for a moment and keeps it out of the
+    /// scrollback — see `Ui::flash`. An error carrying detail is the other
+    /// side of that line and stays in the transcript.
+    Flash(String),
     /// A `!` command to run. The surface runs and records it, because only it
     /// can await; `run_bash` does the work and `record_bash` files it.
     Bash(String),
@@ -1301,7 +1310,7 @@ impl Repl {
                 "" => Step::Wechat(WechatCmd::Status),
                 "on" => Step::Wechat(WechatCmd::On),
                 "off" => Step::Wechat(WechatCmd::Off),
-                other => lines(format!(
+                other => Step::Flash(format!(
                     "unknown /wechat verb `{other}` — bare, on or off"
                 )),
             },
@@ -1320,14 +1329,14 @@ impl Repl {
                 let path = parts.next().unwrap_or("");
                 let value = parts.next().unwrap_or("");
                 if path.is_empty() || value.is_empty() {
-                    return lines("usage: /settings set <path> <value>");
+                    return Step::Flash("usage: /settings set <path> <value>".into());
                 }
                 Step::Handled(self.edit(path, value))
             }
             "get" => {
                 let path = parts.next().unwrap_or("");
                 if path.is_empty() {
-                    return lines("usage: /settings get <path>");
+                    return Step::Flash("usage: /settings get <path>".into());
                 }
                 let tree = self.file.clone();
                 match crate::settings::get(&tree, path) {
@@ -1354,7 +1363,7 @@ impl Repl {
                     Step::Handled(self.unclaim(Some(path)))
                 }
             }
-            other => lines(format!(
+            other => Step::Flash(format!(
                 "unknown /settings verb `{other}` — set, get or reset"
             )),
         }
@@ -1452,7 +1461,7 @@ impl Repl {
             }
         };
         if ws.root() == from {
-            return Err(format!("already in {}", tree.name));
+            return Ok(Step::Flash(format!("already in {}", tree.name)));
         }
         let on = tree.branch.as_deref().unwrap_or("a detached HEAD");
         let mut said = vec![
@@ -1477,10 +1486,8 @@ impl Repl {
             tracing::warn!(target: "pi::session", error = %e, "the leaving session was not saved");
         }
 
-        // Already open: going back to a tree is going back to the lane that
-        // holds it, transcript, screen and all. Nothing is rebuilt, and its
-        // banner is already on its screen — a switch back says where, not
-        // what the tree is again.
+        // Already open: the lane that holds it comes back whole. Nothing is
+        // said — the screen changing, bar included, says where you are.
         if let Some(i) = self
             .lanes
             .iter()
@@ -1488,7 +1495,7 @@ impl Repl {
         {
             self.current = i;
             self.in_force();
-            return Ok(lines(format!("back in {}", tree.name)));
+            return Ok(Step::Handled(Vec::new()));
         }
 
         said.extend(self.open_lane(ws, (!tree.main).then(|| tree.name.clone()))?);

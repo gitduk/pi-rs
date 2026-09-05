@@ -45,7 +45,11 @@ enum Kind {
     /// A painted line the screen alone knows about: the banner, a command's
     /// output, a warning. Colour does not depend on width, so painting it
     /// early costs nothing.
-    Notice(String),
+    ///
+    /// `times` counts the same notice landing again with nothing between it
+    /// and the last one: a key held down, or a refusal repeated. It renders as
+    /// one row with a count rather than as a column of identical lines.
+    Notice { text: String, times: usize },
     /// A tool's result, kept as its parts. Clipping waits for the frame that
     /// needs it: a row clipped at the width it landed at can never grow back
     /// when the window does.
@@ -80,7 +84,26 @@ impl Row {
     /// Something only the screen ever knew. Free-form on purpose — no session
     /// entry answers for it, so nothing can drift.
     pub fn notice(line: impl Into<String>) -> Self {
-        Row(Kind::Notice(line.into()))
+        Row(Kind::Notice {
+            text: line.into(),
+            times: 1,
+        })
+    }
+
+    /// Fold a repeat into this row, if it is the same notice: the scrollback
+    /// then shows `line ×2` where a second row would have gone.
+    ///
+    /// Compares the painted text, which is what makes it safe: two notices
+    /// that read alike but are painted differently are different rows, and a
+    /// row of any other kind never folds.
+    pub fn repeated(&mut self, line: &str) -> bool {
+        match &mut self.0 {
+            Kind::Notice { text, times } if text == line => {
+                *times += 1;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// One finished line of the answer, painted as markdown.
@@ -201,7 +224,7 @@ impl Row {
     /// How many screen rows this renders to.
     pub fn len(&self) -> usize {
         match &self.0 {
-            Kind::Notice(_) | Kind::Said { .. } | Kind::Tally(_) => 1,
+            Kind::Notice { .. } | Kind::Said { .. } | Kind::Tally(_) => 1,
             Kind::Result { preview, .. } => preview.lines().count().max(1),
             Kind::Reasoning { lines, folded, .. } => {
                 if *folded {
@@ -227,7 +250,13 @@ impl Row {
     ) -> (Cow<'a, str>, Option<&'a str>) {
         match &self.0 {
             Kind::Said { border, body } => (Cow::Borrowed(body), Some(border)),
-            Kind::Notice(s) => (Cow::Borrowed(s), None),
+            Kind::Notice { text, times } if *times == 1 => (Cow::Borrowed(text), None),
+            Kind::Notice { text, times } => {
+                // The count wears the muted style whatever the line it trails,
+                // so a repeated warning still reads as one warning and a tally.
+                let count = paint.on(&paint.theme.muted, &format!(" ×{times}"));
+                (Cow::Owned(format!("{text}{count}")), None)
+            }
             Kind::Tally(snap) => (
                 Cow::Owned(paint.on(&paint.theme.muted, &status::line(done, snap))),
                 None,

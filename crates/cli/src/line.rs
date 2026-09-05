@@ -57,6 +57,9 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
                     println!("{line}");
                 }
             }
+            // There is no bar row to hold it here, and nothing repaints: a
+            // flash is simply printed, like every other answer on this surface.
+            Step::Flash(line) => println!("{line}"),
             Step::Swap(lines) | Step::Handled(lines) => {
                 for line in lines {
                     println!("{line}");
