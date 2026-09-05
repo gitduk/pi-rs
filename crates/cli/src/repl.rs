@@ -929,6 +929,9 @@ pub enum Intent {
     Rewind(agent::session::EntryId),
     /// The settings panel submitted an edited value.
     CommitSetting(String, String),
+    /// The line being typed wants `$EDITOR`. The surface's own: the editor
+    /// takes the terminal, which only the surface knows how to give away.
+    EditExternally,
     /// Esc caught a prompt on its way out: stop the run, then unsend it.
     Unsend,
     /// Leave now — `/exit`, `/quit`, `ctrl+d`, a double `ctrl+c`. One intent,
@@ -1007,6 +1010,9 @@ impl Intent {
             // Writes the settings file and rebuilds through `Arc::make_mut`,
             // like `/settings set`, which is the same act from a panel.
             Intent::CommitSetting(..) => Fate::Now,
+            // The input line is the surface's, not the transcript's: a run in
+            // flight is writing the second and never reads the first.
+            Intent::EditExternally => Fate::Now,
             // Guarded where they land rather than here: `stop_current` acts
             // only on a lane that is actually running.
             Intent::Interrupt | Intent::Unsend => Fate::Now,
@@ -1254,6 +1260,7 @@ impl Repl {
             | Intent::OpenRewind
             | Intent::Rewind(_)
             | Intent::CommitSetting(..)
+            | Intent::EditExternally
             => Step::Handled(Vec::new()),
             // The surface's, like `Submit`: arming a lane and re-submitting a
             // line through `read` are both things only it can do, so it takes

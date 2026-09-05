@@ -96,6 +96,12 @@ pub enum Action {
     ModeInsertAfter,
     ModeInsertLineStart,
     ModeInsertLineEnd,
+    // Delete and leave in one press. Vim spells these `cl` and `c$`; there is
+    // no operator here, so the two ranges worth having are bound directly.
+    ChangeChar,
+    ChangeToLineEnd,
+    /// The line, in `$EDITOR`. The one action that leaves the process.
+    EditExternally,
 }
 
 pub struct Binding {
@@ -425,6 +431,27 @@ pub const BINDINGS: &[Binding] = &[
         when: W::Mode(Mode::Normal),
         keys: &["D"],
         note: "",
+    },
+    Binding {
+        id: "normal.change.char",
+        action: A::ChangeChar,
+        when: W::Mode(Mode::Normal),
+        keys: &["s"],
+        note: "the character under the caret, then Insert",
+    },
+    Binding {
+        id: "normal.change.to-line-end",
+        action: A::ChangeToLineEnd,
+        when: W::Mode(Mode::Normal),
+        keys: &["C"],
+        note: "to the end of the line, then Insert",
+    },
+    Binding {
+        id: "normal.edit.external",
+        action: A::EditExternally,
+        when: W::Mode(Mode::Normal),
+        keys: &["E"],
+        note: "the line in $VISUAL/$EDITOR, and back",
     },
     Binding {
         id: "mode.insert",

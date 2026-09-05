@@ -18,6 +18,7 @@ wechat.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tokio-util.workspace = true
+libc = "0.2"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 unicode-width = "0.2.2"

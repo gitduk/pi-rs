@@ -312,16 +312,22 @@ pub struct Screen {
     pub height: u16,
 }
 
+/// Raw mode and the three modes the surface draws under. One function so `new`
+/// and `resume` claim exactly what `leave` gives back, rather than nearly.
+fn enter(stdout: &mut Stdout) -> std::io::Result<()> {
+    crossterm::terminal::enable_raw_mode()?;
+    crossterm::execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture
+    )
+}
+
 impl Screen {
     pub fn new() -> std::io::Result<Self> {
-        crossterm::terminal::enable_raw_mode()?;
         let mut stdout = std::io::stdout();
-        crossterm::execute!(
-            stdout,
-            EnterAlternateScreen,
-            EnableBracketedPaste,
-            EnableMouseCapture
-        )?;
+        enter(&mut stdout)?;
 
         // A panic in raw mode otherwise leaves a terminal the user has to
         // `reset`, with the panic message itself unreadable.
@@ -454,6 +460,29 @@ impl Screen {
             DisableMouseCapture
         );
         let _ = crossterm::terminal::disable_raw_mode();
+    }
+
+    /// Take the terminal back after `leave` gave it to a child. Errors are
+    /// returned, not swallowed: an absent surface must not be a surprise.
+    pub fn resume(&mut self) -> std::io::Result<()> {
+        // Asked for rather than remembered: a resize while the child held the
+        // terminal raised no event this process could have seen.
+        let size = match &self.term {
+            Term::Live(t) => {
+                enter(&mut std::io::stdout())?;
+                t.size()?
+            }
+            // Nothing was taken from a test screen, so there is nothing to
+            // claim back — and raw mode here is the test runner's own.
+            #[cfg(test)]
+            Term::Test(_) => return Ok(()),
+        };
+        self.width = size.width;
+        self.height = size.height;
+        // Re-entering gives back a screen ratatui's diff no longer describes,
+        // so the next frame has to be a whole one.
+        self.clear();
+        Ok(())
     }
 }
 

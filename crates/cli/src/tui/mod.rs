@@ -39,6 +39,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState};
 use row::Row;
 use screen::{Rows, Screen};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 // What a folded run shows instead of what it is thinking.
@@ -1572,6 +1573,7 @@ impl Ui {
                     }
                 }
             }
+            Some(Action::EditExternally) => return Intent::EditExternally,
             Some(Action::RunInterrupt) => {
                 // Esc before the model has moved means "I didn't mean to send
                 // that"; an empty editor, or unsending overwrites a line.
@@ -1652,6 +1654,14 @@ impl Ui {
                 self.editor.end();
                 self.leave_normal();
             }
+            Some(Action::ChangeChar) => {
+                self.editor.delete();
+                self.leave_normal();
+            }
+            Some(Action::ChangeToLineEnd) => {
+                self.editor.kill_to_end();
+                self.leave_normal();
+            }
             Some(Action::MoveLineStart) => self.editor.home(),
             Some(Action::MoveLineEnd) => self.editor.end(),
             Some(Action::HistoryOlder) => self.editor.up(),
@@ -1704,7 +1714,7 @@ impl Ui {
             }
             // Answered in the first match, which returns; named here because
             // this one has no catch-all and should not grow one.
-            Some(Action::LaneNext) => {}
+            Some(Action::LaneNext) | Some(Action::EditExternally) => {}
             Some(Action::MenuDismiss) => {
                 let was_rewind = !self.rewind.is_empty();
                 self.rewind.clear();
@@ -1946,22 +1956,129 @@ pub struct Tui {
     core: Repl,
     ui: Ui,
     events: UnboundedReceiver<TermEvent>,
+    /// Stops the reader while a child holds the terminal.
+    hold: Hold,
     totals: Totals,
     bridge: crate::wechat::Bridge,
 }
 
 // crossterm reads blockingly, so the keyboard gets a thread of its own and
 // reaches the loop as just another channel.
-fn reader() -> UnboundedReceiver<TermEvent> {
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    std::thread::spawn(move || {
-        while let Ok(event) = crossterm::event::read() {
-            if tx.send(event).is_err() {
-                return;
+/// What the reader waits on when nothing has been typed. `poll` returns the
+/// moment a key arrives, so it costs idle wakeups and no latency.
+const INPUT_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// How long `park` waits to be told the reader stopped. Twice the poll: one
+/// just entered has that long before it looks at the flag again.
+const PARK_WAIT: std::time::Duration =
+    std::time::Duration::from_millis(INPUT_POLL.as_millis() as u64 * 2);
+
+/// How often `park` looks while it waits.
+const PARK_STEP: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// The reader's pause switch. Two readers on one stdin would split the user's
+/// keystrokes between them, and a thread inside `read` cannot be told to stop.
+#[derive(Clone, Default)]
+struct Hold {
+    paused: Arc<AtomicBool>,
+    parked: Arc<AtomicBool>,
+}
+
+impl Hold {
+    /// Stop reading, and wait to be told it stopped. Bounded: a reader starved
+    /// past `PARK_WAIT` is handed the race rather than hanging the editor.
+    async fn park(&self) -> Parked {
+        self.paused.store(true, Ordering::Release);
+        let mut waited = std::time::Duration::ZERO;
+        while waited < PARK_WAIT && !self.parked.load(Ordering::Acquire) {
+            tokio::time::sleep(PARK_STEP).await;
+            waited += PARK_STEP;
+        }
+        Parked(self.clone())
+    }
+}
+
+/// SIGINT and SIGQUIT ignored while a child holds the terminal. Cooked mode
+/// sends both to the whole foreground group, which this process is in.
+#[cfg(unix)]
+struct Deafened([libc::sighandler_t; 2]);
+
+#[cfg(unix)]
+impl Deafened {
+    fn new() -> Self {
+        // SAFETY: `signal` is the process-wide disposition; `Drop` puts back
+        // exactly what is read here.
+        unsafe {
+            Self([
+                libc::signal(libc::SIGINT, libc::SIG_IGN),
+                libc::signal(libc::SIGQUIT, libc::SIG_IGN),
+            ])
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Deafened {
+    fn drop(&mut self) {
+        for (signal, prior) in [(libc::SIGINT, self.0[0]), (libc::SIGQUIT, self.0[1])] {
+            // A disposition that could not be read is not one to restore.
+            if prior != libc::SIG_ERR {
+                // SAFETY: putting back what `new` took, in the same process.
+                unsafe { libc::signal(signal, prior) };
             }
         }
+    }
+}
+
+#[cfg(not(unix))]
+struct Deafened;
+
+#[cfg(not(unix))]
+impl Deafened {
+    fn new() -> Self {
+        Self
+    }
+}
+
+/// Restarts the reader on the way out, however it goes. A reader left parked
+/// is a dead keyboard with nothing on screen to say why.
+struct Parked(Hold);
+
+impl Drop for Parked {
+    fn drop(&mut self) {
+        self.0.paused.store(false, Ordering::Release);
+    }
+}
+
+fn reader() -> (UnboundedReceiver<TermEvent>, Hold) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let hold = Hold::default();
+    let mine = hold.clone();
+    std::thread::spawn(move || loop {
+        if mine.paused.load(Ordering::Acquire) {
+            mine.parked.store(true, Ordering::Release);
+            std::thread::sleep(INPUT_POLL);
+            continue;
+        }
+        mine.parked.store(false, Ordering::Release);
+        match crossterm::event::poll(INPUT_POLL) {
+            // Re-checked: the terminal may have gone to a child while this
+            // poll was waiting, and that keystroke belongs to the child now.
+            Ok(true) if !mine.paused.load(Ordering::Acquire) => {
+                match crossterm::event::read() {
+                    Ok(event) => {
+                        if tx.send(event).is_err() {
+                            return;
+                        }
+                    }
+                    Err(_) => return,
+                }
+            }
+            Ok(_) => {}
+            Err(_) => return,
+        }
     });
-    rx
+    (rx, hold)
 }
 
 /// How long leaving waits for the runs it just cancelled. Long enough for a
@@ -1970,6 +2087,43 @@ fn reader() -> UnboundedReceiver<TermEvent> {
 const EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
 // Where recalled prompts are kept between sessions.
+/// `$VISUAL` before `$EDITOR` before `vi`, the order every terminal program
+/// that asks uses.
+fn external_editor() -> (String, Vec<String>) {
+    let raw = ["VISUAL", "EDITOR"]
+        .into_iter()
+        .find_map(|key| std::env::var(key).ok().filter(|v| !v.trim().is_empty()));
+    split_editor(raw.as_deref().unwrap_or("vi"))
+}
+
+/// Split rather than run whole (`code -w`), and never through a shell, which
+/// would make every character in it live. The price is that quoting cannot.
+fn split_editor(raw: &str) -> (String, Vec<String>) {
+    let mut parts = raw.split_whitespace();
+    let program = parts.next().unwrap_or("vi").to_string();
+    (program, parts.map(str::to_string).collect())
+}
+
+/// A file for the editor to work in, `0600` because `/tmp` is shared and the
+/// line holds whatever the user was about to say. `.md` buys highlighting.
+fn scratch_file(text: &str) -> std::io::Result<std::path::PathBuf> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path = std::env::temp_dir().join(format!("pi-edit-{}-{stamp}.md", std::process::id()));
+    let mut open = std::fs::OpenOptions::new();
+    open.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open.mode(0o600);
+    }
+    let mut file = open.open(&path)?;
+    std::io::Write::write_all(&mut file, text.as_bytes())?;
+    Ok(path)
+}
+
 fn history_path() -> Option<std::path::PathBuf> {
     tools::state::dir().map(|d| d.join("history"))
 }
@@ -2011,10 +2165,12 @@ impl Tui {
         if let Some(session) = lane.session.as_ref().filter(|s| !s.is_empty()) {
             ui.rebuild(&mut lane.view, session);
         }
+        let (events, hold) = reader();
         Ok(Self {
             core,
             ui,
-            events: reader(),
+            events,
+            hold,
             totals: Totals::default(),
             bridge,
         })
@@ -2042,6 +2198,7 @@ impl Tui {
             core,
             ui,
             events: rx,
+            hold: Hold::default(),
             totals: Totals::default(),
             bridge: crate::wechat::Bridge::new(),
         }
@@ -2390,6 +2547,10 @@ impl Tui {
                     self.commit_setting(&path, &value);
                     continue;
                 }
+                Intent::EditExternally => {
+                    self.edit_externally().await;
+                    continue;
+                }
                 // A submitted line is echoed and remembered, and only then
                 // read — the echo wants the text, which reading spends.
                 // A loop's own round: echoed and read like a typed line, and
@@ -2710,6 +2871,86 @@ impl Tui {
     ///
     /// It borrows the transcript like a turn, and for the same reason: the
     /// result is filed in it, and nothing else may replace it meanwhile.
+    /// Hand the terminal to `$EDITOR` on a copy of the line, and take back what
+    /// was saved. On its own thread: a run in flight still has a stream to serve.
+    async fn edit_externally(&mut self) {
+        let path = match scratch_file(self.ui.editor.text()) {
+            Ok(path) => path,
+            Err(e) => {
+                self.ui.flash(format!("no scratch file: {e}"));
+                return;
+            }
+        };
+        let (program, args) = external_editor();
+
+        // The terminal is gone from here to `resume`, so nothing between them
+        // may return early: the surface would be left invisible.
+        let _parked = self.hold.park().await;
+        let _deaf = Deafened::new();
+        self.ui.screen.leave();
+        let ran = tokio::task::spawn_blocking({
+            let path = path.clone();
+            move || {
+                let mut cmd = std::process::Command::new(program);
+                cmd.args(args).arg(&path);
+                // SIG_IGN is inherited across exec, and an editor installing
+                // no handler would be the one that could not be interrupted.
+                #[cfg(unix)]
+                unsafe {
+                    use std::os::unix::process::CommandExt;
+                    cmd.pre_exec(|| {
+                        libc::signal(libc::SIGINT, libc::SIG_DFL);
+                        libc::signal(libc::SIGQUIT, libc::SIG_DFL);
+                        Ok(())
+                    });
+                }
+                cmd.status()
+            }
+        })
+        .await;
+        let resumed = self.ui.screen.resume();
+        self.ui.show_mode();
+        // A resize while the child held the terminal raised no event, so the
+        // view's measurements are against a width that may no longer exist.
+        self.core.lane_mut().view.counted = None;
+
+        // Judged on its own: a save that succeeded is still a save when the
+        // screen comes back badly, and reading the two together threw it away.
+        let (mut keep, mut said) = match ran {
+            Err(e) => (false, Some(format!("the editor did not run: {e}"))),
+            Ok(Err(e)) => (false, Some(format!("could not run the editor: {e}"))),
+            // `:cq` is how vim says "forget it". Git reads a non-zero exit the
+            // same way, and the line the user had is worth more than the file.
+            Ok(Ok(s)) if !s.success() => {
+                (false, Some(format!("editor exited {s} — the line is unchanged")))
+            }
+            Ok(Ok(_)) => match std::fs::read_to_string(&path) {
+                Ok(text) => {
+                    self.ui.editor.set_line(text.trim_end());
+                    (false, None)
+                }
+                // Kept: what was written is the only copy of it, and naming
+                // the file beats deleting it.
+                Err(e) => (
+                    true,
+                    Some(format!("saved at {} — could not read it back: {e}", path.display())),
+                ),
+            },
+        };
+        // A surface that did not come back cannot show anything, so the file
+        // stays as the way out and its name is what the message carries.
+        if let Err(e) = resumed {
+            keep = true;
+            said = Some(format!("the screen did not come back: {e} — line at {}", path.display()));
+        }
+        if !keep {
+            let _ = std::fs::remove_file(&path);
+        }
+        if let Some(line) = said {
+            self.ui.flash(line);
+        }
+    }
+
     fn start_bash(&mut self, command: String, done: &UnboundedSender<Done>) {
         let Some(mut carried) = self.core.lane_mut().session.take() else {
             self.ui.flash(NO_TRANSCRIPT);
@@ -4233,6 +4474,33 @@ mod tests {
     }
 
     /// A surface with the modal keys on, at their defaults.
+    #[test]
+    fn the_editor_setting_splits_into_a_program_and_its_arguments() {
+        assert_eq!(super::split_editor("nvim"), ("nvim".into(), vec![]));
+        assert_eq!(
+            super::split_editor("code -w"),
+            ("code".into(), vec!["-w".to_string()])
+        );
+        // Blank is what an unset variable already filtered out; `vi` is the
+        // same answer either way rather than a program named "".
+        assert_eq!(super::split_editor("   "), ("vi".into(), vec![]));
+    }
+
+    /// The line can hold anything the user was about to say, and `/tmp` is
+    /// shared, so the mode is part of the contract rather than a detail.
+    #[test]
+    fn the_scratch_file_carries_the_line_and_is_private() {
+        let path = super::scratch_file("hello\nworld").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello\nworld");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+        }
+        std::fs::remove_file(&path).unwrap();
+    }
+
     fn vim_ui() -> super::Ui {
         let mut ui = test_ui(80, 24);
         ui.set_vim(&crate::config::Vim { enabled: true, ..Default::default() });
@@ -4338,6 +4606,32 @@ mod tests {
         assert_eq!(ui.editor.text(), "ZYab", "a types past it");
     }
 
+    /// `x` and `D` delete and stay in Normal; these delete the same ranges and
+    /// leave. The landing is the whole difference, so it is asserted twice.
+    #[test]
+    fn s_and_c_delete_their_range_and_land_in_insert() {
+        let mut ui = vim_ui();
+        let (_dir, mut lane) = a_running_lane();
+        ui.editor.set_line("abcd");
+        ui.vim.as_mut().unwrap().mode = crate::keys::Mode::Normal;
+
+        ui.key(&mut lane, typed('0'), false);
+        ui.key(&mut lane, typed('s'), false);
+        assert_eq!(ui.editor.text(), "bcd");
+        assert_eq!(mode(&ui), Some(crate::keys::Mode::Insert));
+        ui.key(&mut lane, typed('Z'), false);
+        assert_eq!(ui.editor.text(), "Zbcd", "s types where the character was");
+
+        ui.vim.as_mut().unwrap().mode = crate::keys::Mode::Normal;
+        ui.key(&mut lane, typed('0'), false);
+        ui.key(&mut lane, typed('l'), false);
+        ui.key(&mut lane, typed('C'), false);
+        assert_eq!(ui.editor.text(), "Z");
+        assert_eq!(mode(&ui), Some(crate::keys::Mode::Insert));
+        ui.key(&mut lane, typed('Y'), false);
+        assert_eq!(ui.editor.text(), "ZY", "C leaves the caret where it cut");
+    }
+
     /// The mode outlives a submitted line, which is the whole reason it has to
     /// be visible: the gutter says which one is up.
     #[test]
@@ -4359,7 +4653,7 @@ mod tests {
         let mut ui = vim_ui();
         ui.vim.as_mut().unwrap().mode = crate::keys::Mode::Normal;
 
-        ui.set_vim(&crate::config::Vim::default());
+        ui.set_vim(&crate::config::Vim { enabled: false, ..Default::default() });
         assert!(ui.vim.is_none());
 
         ui.set_vim(&crate::config::Vim { enabled: true, ..Default::default() });
