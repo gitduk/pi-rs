@@ -275,8 +275,13 @@ impl Tool for Task {
             Err(why) => return Err(ToolError::Invalid(format!("task: {why}"))),
         };
 
-        let wrote: Vec<String> = child
-            .writes()
+        let changed = child.writes();
+        // Into the caller's record as well as the child's: these are changes
+        // this run caused, and what reads that record asks exactly that.
+        for path in &changed {
+            ctx.note_write(path);
+        }
+        let wrote: Vec<String> = changed
             .iter()
             .map(|path| ctx.workspace.display(path))
             .collect();

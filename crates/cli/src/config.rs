@@ -89,6 +89,12 @@ pub struct Config {
     /// Vim keys: off unless a file asks for them.
     #[serde(default)]
     pub vim: Vim,
+    /// How many rounds a `/loop` may run before it stops on its own. Unset is
+    /// no ceiling: a loop ends when a round changes nothing, and the one shape
+    /// that never reaches is a round that undoes the last one. Set this and
+    /// that shape has a floor; leave it unset and esc is the only brake.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loop_max_turns: Option<usize>,
 }
 
 /// The modal keys, and the sequence that leaves Insert for Normal.
@@ -737,6 +743,16 @@ fn to_edit_value(value: &toml::Value) -> toml_edit::Value {
 
 #[cfg(test)]
 mod tests {
+    /// The reference config is documentation, and `deny_unknown_fields` means
+    /// a key misspelled there is a key nobody can use.
+    #[test]
+    fn the_reference_config_is_one_this_build_would_load() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/pi.toml");
+        let body = std::fs::read_to_string(path).expect("examples/pi.toml");
+        let config: super::Config = toml::from_str(&body).expect("the reference config parses");
+        assert_eq!(config.loop_max_turns, Some(10));
+    }
+
     use super::*;
 
     const SAMPLE: &str = r#"

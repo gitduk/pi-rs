@@ -132,7 +132,7 @@ through. `prompt.icon` is the one value that is neither colour nor attribute.
 A key that is not one of those is refused at load, like a misspelled compat
 key.
 
-`/help` `/new` `/resume` `/name` `/model` `/worktree` `/compact` `/reload` `/keys` `/log` `/cost` `/wechat` `/exit`,
+`/help` `/new` `/resume` `/name` `/model` `/worktree` `/compact` `/loop` `/reload` `/keys` `/log` `/cost` `/wechat` `/exit`,
 and one more for every skill on disk. Typing `/` opens a list of what the line
 could still become; `↑` `↓` pick, `Tab` accepts, `Esc` dismisses it until the
 next keystroke. `/model`, `/resume` and `/worktree` complete their arguments
@@ -171,6 +171,28 @@ workspace, under the same timeout, with the same clamps as the model's own
 `bash` tool. `!` alone is just a prompt.
 `/compact [what to keep in view]` summarizes everything outside the tail
 you are working from — for when a phase has ended and no budget can tell.
+
+`/loop <line>` runs that line again, and again, while it keeps changing the
+tree. It is one thing, and the thing is not repetition: a model that has just
+reviewed its own work and found nothing left will say so whether or not that
+is true, and the second pass — the one you type yourself — is where the rest
+of it turns up. `/loop` is that second pass, decided by the tree instead. A
+round that wrote a file had work left; a round that wrote nothing did not, and
+the loop ends there. What counts is what `write` and `edit` touched — a change
+a shell command made is not in it, and a round of those alone ends the loop. The model is never asked, and never told it is in one:
+the line is re-submitted exactly as typed, so a skill under `/loop` runs the
+way it runs alone.
+
+What it does not do is judge whether a goal was reached. `/loop find me an
+answer` is a loop with nothing to measure — those belong in the ordinary
+back-and-forth, where you are the one who decides to go again. Esc ends a loop
+along with the round it caught, and `loop_max_turns` puts a ceiling on the one
+shape convergence cannot catch: a round that undoes the one before it changes
+files forever. `/loop` on its own stops the one in force, and a second `/loop` is refused
+rather than replacing it — the round already queued would otherwise run and be
+counted against the loop that did not ask for it. A loop runs in the checkout
+it was started in and only while that one is in front: `/worktree` away from it and its next round waits with
+the lane, like any queued line, until you come back.
 `/name` and `--name` label a session, because the ids are timestamps.
 
 `/model` on its own lists what `~/.pi/settings.toml` defines — wire, window,

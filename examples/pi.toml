@@ -44,6 +44,12 @@ summarize_model = "claude-haiku-4-5"
 effort = "medium"                # off | low | medium | high
 tier   = "exec"                  # read | write | exec
 
+# How many rounds a `/loop` may run before it stops on its own. Unset there is
+# no ceiling — a loop ends when a round changes nothing, and the one shape that
+# never reaches is a round that undoes the last one. Worth setting for that
+# alone: without it, esc is the only brake.
+loop_max_turns = 10
+
 # Replaces the built-in system prompt. Rarely what you want: the built-in one
 # is what the tools were written against.
 # system = "~/.pi/system.md"

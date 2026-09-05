@@ -220,7 +220,7 @@ pub struct Ctx {
     /// than shared, unlike the locks and the shifts: those describe the tree,
     /// which parent and child share, while this answers what *one* run did —
     /// and a shared set hands a caller its own edits back as the child's.
-    writes: std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<std::path::PathBuf>>>,
+    writes: std::sync::Arc<std::sync::Mutex<Written>>,
     /// The session this context runs in. None in tests and for embedders;
     /// spills then land in the process temp directory.
     session: Option<String>,
@@ -232,6 +232,17 @@ pub type FileLocks =
     std::sync::Arc<std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, FileLock>>>;
 
 pub type FileLock = std::sync::Arc<tokio::sync::Mutex<()>>;
+
+/// What a run has changed: which files, and how many times over.
+///
+/// Two questions, and a set answers only the first. "Did anything happen just
+/// now" is asked of a run that has been writing all along, and the second
+/// change to a file already in the set has to be visible to it.
+#[derive(Default)]
+struct Written {
+    paths: std::collections::BTreeSet<std::path::PathBuf>,
+    made: u64,
+}
 
 pub type FileShifts =
     std::sync::Arc<std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, usize>>>;
@@ -315,10 +326,17 @@ impl Ctx {
     /// Record that this run wrote `path`. Called by the tools that change the
     /// tree, so what a run says it did can be read against what it did.
     pub fn note_write(&self, path: &std::path::Path) {
-        self.writes
-            .lock()
-            .expect("writes poisoned")
-            .insert(path.to_path_buf());
+        let mut written = self.writes.lock().expect("writes poisoned");
+        written.paths.insert(path.to_path_buf());
+        written.made += 1;
+    }
+
+    /// How many writes this run has made, a file written twice counting twice.
+    ///
+    /// Not `writes().len()`, which counts distinct paths: a run that keeps
+    /// working the same file would look to that like a run that had stopped.
+    pub fn writes_made(&self) -> u64 {
+        self.writes.lock().expect("writes poisoned").made
     }
 
     /// Every path this run has written, in sorted order.
@@ -326,6 +344,7 @@ impl Ctx {
         self.writes
             .lock()
             .expect("writes poisoned")
+            .paths
             .iter()
             .cloned()
             .collect()

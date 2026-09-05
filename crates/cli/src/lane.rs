@@ -39,6 +39,39 @@ pub enum Turn {
     },
 }
 
+/// A `/loop` in force on one lane.
+///
+/// The loop is invisible to the model: nothing about it reaches the prompt, so
+/// a skill under `/loop` runs exactly as it does on its own, every round. What
+/// decides another round is the tree, not anything the model says about it.
+pub struct Looping {
+    /// Re-submitted verbatim each round, read as whatever it was the first
+    /// time — a skill stays a skill, prose stays prose.
+    pub goal: String,
+    pub round: usize,
+    /// `ctx.writes_made()` as this round began. The count only grows, so the
+    /// difference is how much the round changed.
+    marked: u64,
+    /// Set when this loop puts a round in the queue, taken when that round
+    /// ends. A turn that did not come from here — a line typed between rounds
+    /// — also ends, and counting it would move the loop on something it never
+    /// ran.
+    running: bool,
+}
+
+/// What a loop does now that one of its rounds has ended.
+pub enum Round {
+    /// Run this line again, as round `next`.
+    Again { goal: String, next: usize },
+    /// The round changed nothing. Where a loop that is fixing things finishes:
+    /// a pass that found nothing to do has nothing to do next time either.
+    Quiet,
+    /// `loop_max_turns` reached, with rounds still changing the tree.
+    Capped(usize),
+    /// Esc, an error, or a prompt taken back. The loop goes with the run.
+    Cut,
+}
+
 pub struct Lane {
     /// Shared so a run can take it with it: `Agent::run` needs only `&self`,
     /// and a turn outlives the borrow the surface could lend it. `/model` and
@@ -94,6 +127,8 @@ pub struct Lane {
     /// rather than with the run — a tree switched back to answers to its own.
     pub keys: std::sync::Arc<crate::keys::Keys>,
     pub commands: std::sync::Arc<Vec<crate::repl::Command>>,
+    /// The `/loop` this lane is under, if any.
+    pub looping: Option<Looping>,
 }
 
 impl Lane {
@@ -130,5 +165,53 @@ impl Lane {
     /// Whether a run has this lane's transcript right now.
     pub fn is_running(&self) -> bool {
         matches!(self.turn, Turn::Running { .. })
+    }
+
+    /// The round this lane's loop queued has begun. Nothing else it runs is
+    /// one, so nothing else moves it on.
+    pub fn loop_running(&mut self) {
+        if let Some(looping) = &mut self.looping {
+            looping.running = true;
+        }
+    }
+
+    /// Put this lane under a loop, marked from where the tree stands now.
+    pub fn loop_start(&mut self, goal: String) {
+        self.looping = Some(Looping {
+            goal,
+            round: 0,
+            marked: self.ctx.writes_made(),
+            running: false,
+        });
+    }
+
+    /// What the loop in force does now that a round has ended — `None` when
+    /// there was no loop. `finished` is whether the run reached its own end
+    /// rather than being cut short.
+    ///
+    /// The loop is taken out and only put back to go round again, so every
+    /// ending drops it without a second place to remember that.
+    pub fn loop_step(&mut self, finished: bool, cap: Option<usize>) -> Option<Round> {
+        if !self.looping.as_ref()?.running {
+            return None;
+        }
+        let mut looping = self.looping.take()?;
+        looping.running = false;
+        let wrote = self.ctx.writes_made();
+        looping.round += 1;
+        let changed = wrote > looping.marked;
+        looping.marked = wrote;
+        Some(if !finished {
+            Round::Cut
+        } else if !changed {
+            Round::Quiet
+        } else if cap.is_some_and(|cap| looping.round >= cap) {
+            Round::Capped(looping.round)
+        } else {
+            let goal = looping.goal.clone();
+            let next = looping.round + 1;
+            self.looping = Some(looping);
+            Round::Again { goal, next }
+        })
     }
 }

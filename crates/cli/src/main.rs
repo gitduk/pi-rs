@@ -674,6 +674,7 @@ async fn main() -> Result<()> {
                 events,
                 inbox,
                 pending: Vec::new(),
+                looping: None,
                 turn: lane::Turn::Idle,
                 view: Default::default(),
                 keys: key_map.clone(),

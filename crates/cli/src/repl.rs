@@ -85,6 +85,11 @@ const BUILTIN: &[Command] = &[
         "[focus]",
         "summarize everything but what you are working on now",
     ),
+    Command::builtin(
+        "/loop",
+        "[text]",
+        "repeat a line while it keeps changing the tree; bare, stop one",
+    ),
     Command::builtin("/cost", "", "what this session has spent so far"),
     Command::builtin(
         "/reload",
@@ -903,6 +908,12 @@ pub enum Intent {
     Settings(String),
     /// The wechat verb: "" = status, "on" = connect, "off" = disconnect.
     Wechat(String),
+    /// What to run over and over, or empty to stop the loop in force.
+    Loop(String),
+    /// One round of a loop, put back through the door by the surface. Apart
+    /// from `Submit` only so the turn it starts can be told from a line typed
+    /// between rounds — `read` never answers it.
+    LoopRound(String),
     /// Not a built-in word. It may name a skill and it may name nothing; the
     /// command table settles that, and `read` does not have it.
     Other { word: String, args: String },
@@ -979,6 +990,9 @@ impl Intent {
             Intent::Settings(_) => Fate::Queued,
             // A skill is a prompt, and the bridge wants the surface.
             Intent::Wechat(_) | Intent::Other { .. } => Fate::Queued,
+            // Arms the lane and submits its first round like a typed line;
+            // both want the lane free.
+            Intent::Loop(_) | Intent::LoopRound(_) => Fate::Queued,
             // Prose waits for the run that is already talking to the model.
             Intent::Prompt(_) => Fate::Queued,
             // A `!` files its result in the transcript, which the run has.
@@ -1127,6 +1141,7 @@ pub fn read(line: &str) -> Intent {
         "/model" => Intent::Model(rest(line)),
         "/worktree" => Intent::Worktree(rest(line)),
         "/wechat" => Intent::Wechat(rest(line)),
+        "/loop" => Intent::Loop(rest(line)),
         "/settings" => Intent::Settings(rest(line)),
         other => Intent::Other {
             word: other.to_string(),
@@ -1231,6 +1246,10 @@ impl Repl {
             | Intent::Rewind(_)
             | Intent::CommitSetting(..)
             => Step::Handled(Vec::new()),
+            // The surface's, like `Submit`: arming a lane and re-submitting a
+            // line through `read` are both things only it can do, so it takes
+            // this before `run` is reached.
+            Intent::Loop(_) | Intent::LoopRound(_) => Step::Handled(Vec::new()),
             Intent::Quit => Step::Quit,
             Intent::Help => Step::Handled(help(&self.commands)),
             Intent::Keys => Step::Handled(self.keys.listing()),
@@ -1517,6 +1536,7 @@ impl Repl {
             events,
             inbox,
             pending: Vec::new(),
+            looping: None,
             turn: crate::lane::Turn::Idle,
             view: Default::default(),
         });
@@ -2325,6 +2345,7 @@ mod tests {
             events,
             inbox,
             pending: Vec::new(),
+            looping: None,
             turn: crate::lane::Turn::Idle,
             view: Default::default(),
             keys: std::sync::Arc::new(crate::keys::Keys::default()),
@@ -2501,6 +2522,7 @@ mod tests {
             events,
             inbox,
             pending: Vec::new(),
+            looping: None,
             turn: crate::lane::Turn::Idle,
             view: Default::default(),
             keys: keys.clone(),
