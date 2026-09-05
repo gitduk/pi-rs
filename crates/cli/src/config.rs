@@ -86,7 +86,7 @@ pub struct Config {
     /// Which parts the running and the finished status lines show.
     #[serde(default)]
     pub status: crate::status::Lines,
-    /// Vim keys: off unless a file asks for them.
+    /// Vim keys: on unless a file turns them off.
     #[serde(default)]
     pub vim: Vim,
     /// How many rounds a `/loop` may run before it stops on its own. Unset is
@@ -99,12 +99,13 @@ pub struct Config {
 
 /// The modal keys, and the sequence that leaves Insert for Normal.
 ///
-/// Off by default, and additive when on: the Normal layer binds bare
-/// characters only, and nothing that was bound before it existed is one.
+/// On by default, which is payable because the layer is additive: the Normal
+/// layer binds bare characters only, and nothing bound before it existed is
+/// one. `enabled = false` turns it off.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Vim {
-    #[serde(default)]
+    #[serde(default = "default_enabled")]
     pub enabled: bool,
     /// Two characters typed inside the window below. Empty turns the sequence
     /// off, and with it the only way into Normal — `esc` keeps all three of
@@ -113,6 +114,10 @@ pub struct Vim {
     pub escape: String,
     #[serde(default = "default_escape_ms")]
     pub escape_timeout_ms: u64,
+}
+
+fn default_enabled() -> bool {
+    true
 }
 
 fn default_escape() -> String {
@@ -126,7 +131,7 @@ fn default_escape_ms() -> u64 {
 impl Default for Vim {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: default_enabled(),
             escape: default_escape(),
             escape_timeout_ms: default_escape_ms(),
         }
@@ -1201,21 +1206,28 @@ output_per_mtok = 0
     }
 
     #[test]
-    fn vim_is_off_unless_a_file_asks_and_keeps_its_defaults_when_it_does() {
-        // Off is the shipped answer, and a file that names only `enabled` must
-        // still get a working sequence — an empty `escape` is the documented
-        // way to have no way into Normal, not something a partial table falls
-        // into by accident.
-        let off = parse("").unwrap();
-        assert!(!off.vim.enabled);
+    fn vim_is_on_unless_a_file_turns_it_off_and_keeps_its_defaults_either_way() {
+        // Two ways to say nothing about `enabled` — no table at all, and a
+        // table that omits it — reach the answer down different serde paths.
+        // They are asserted together because only that catches one drifting.
+        let bare = parse("").unwrap();
+        assert!(bare.vim.enabled);
 
+        let partial = parse("[vim]\nescape = \"jj\"\n").unwrap();
+        assert!(partial.vim.enabled);
+        assert_eq!(partial.vim.escape, "jj");
+
+        // A file that names only `enabled` must still get a working sequence —
+        // an empty `escape` is the documented way to have no way into Normal,
+        // not something a partial table falls into by accident.
         let on = parse("[vim]\nenabled = true\n").unwrap();
         assert!(on.vim.enabled);
         assert_eq!(on.vim.escape, "jk");
         assert_eq!(on.vim.escape_timeout_ms, 250);
 
-        let jj = parse("[vim]\nenabled = true\nescape = \"jj\"\n").unwrap();
-        assert_eq!(jj.vim.escape, "jj");
+        let off = parse("[vim]\nenabled = false\n").unwrap();
+        assert!(!off.vim.enabled);
+        assert_eq!(off.vim.escape, "jk");
     }
 
     #[test]
