@@ -26,7 +26,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
 use crate::journal;
-use crate::keys::{Action, Keys, Press};
+use crate::keys::{Action, Keys, Mode, Press};
 use crate::render::Style as ThemeStyle;
 use crate::render::{self, Markdown, Paint};
 use crate::lane::{Lane, Turn};
@@ -314,9 +314,9 @@ impl<'a> ScrollbackRows<'a> {
 }
 
 impl<'a> Iterator for ScrollbackRows<'a> {
-    type Item = Cow<'a, str>;
+    type Item = (Cow<'a, str>, Option<&'a str>);
 
-    fn next(&mut self) -> Option<Cow<'a, str>> {
+    fn next(&mut self) -> Option<Self::Item> {
         // Both walks index before they compare their pointers, and on an empty
         // scrollback `rows[0]` is already out of bounds.
         if self.rows.is_empty() {
@@ -328,14 +328,14 @@ impl<'a> Iterator for ScrollbackRows<'a> {
                 if self.front.1 >= self.back.1 {
                     return None;
                 }
-                let row = entry.line(self.front.1, self.paint, self.done, self.width);
+                let item = entry.line(self.front.1, self.paint, self.done, self.width);
                 self.front.1 += 1;
-                return Some(row);
+                return Some(item);
             }
             if self.front.1 < entry.len() {
-                let row = entry.line(self.front.1, self.paint, self.done, self.width);
+                let item = entry.line(self.front.1, self.paint, self.done, self.width);
                 self.front.1 += 1;
-                return Some(row);
+                return Some(item);
             }
             self.front = (self.front.0 + 1, 0);
         }
@@ -344,7 +344,7 @@ impl<'a> Iterator for ScrollbackRows<'a> {
 }
 
 impl<'a> DoubleEndedIterator for ScrollbackRows<'a> {
-    fn next_back(&mut self) -> Option<Cow<'a, str>> {
+    fn next_back(&mut self) -> Option<Self::Item> {
         if self.rows.is_empty() {
             return None;
         }
@@ -594,6 +594,85 @@ pub struct View {
     model: String,
 }
 
+/// What a typed character means to the modal keys.
+enum Typed {
+    /// It lands in the line, as it would with vim keys off.
+    Insert,
+    /// It closed the escape sequence: the half already on screen has to come
+    /// back off, and the mode has changed.
+    Escape,
+    /// Normal mode. An unbound character commands nothing and types nothing —
+    /// without this the mode would be a costume, every key still typing.
+    Ignore,
+}
+
+/// The modal keys' whole state: the mode that is up, the sequence that leaves
+/// Insert, and the character that may be its first half.
+///
+/// One struct rather than four fields on `Ui`: none of them means anything
+/// without the others, and `Ui` already carries more loose state than it
+/// should. `Ui` holds it as an `Option`, so vim being off is the absence of
+/// the state rather than a flag beside it — "off, but in Normal" cannot be
+/// written down.
+struct Vim {
+    mode: Mode,
+    /// The two characters that leave Insert, resolved once. `None` — an empty
+    /// setting, or any other length — is no sequence, and with it no way into
+    /// Normal at all.
+    escape: Option<(char, char)>,
+    window: std::time::Duration,
+    /// The last character typed, and when. Lazy, like the double-taps: the
+    /// character is on screen already and nothing is held pending, so the line
+    /// is never a guess about a key that has not arrived.
+    last: Option<(char, Instant)>,
+}
+
+impl Vim {
+    fn new(cfg: &crate::config::Vim) -> Self {
+        let mut vim = Self {
+            mode: Mode::Insert,
+            escape: None,
+            window: std::time::Duration::ZERO,
+            last: None,
+        };
+        vim.configure(cfg);
+        vim
+    }
+
+    /// Take what the config says about the sequence, resolving the two
+    /// characters here rather than at every keystroke. Anything that is not
+    /// exactly two of them is no sequence — the documented way to leave
+    /// Normal unreachable while keeping the layer's bindings listed.
+    fn configure(&mut self, cfg: &crate::config::Vim) {
+        let mut chars = cfg.escape.chars();
+        self.escape = match (chars.next(), chars.next(), chars.next()) {
+            (Some(a), Some(b), None) => Some((a, b)),
+            _ => None,
+        };
+        self.window = std::time::Duration::from_millis(cfg.escape_timeout_ms);
+    }
+
+    /// What `c` does, and the mode change if it makes one.
+    fn typed(&mut self, c: char, now: Instant) -> Typed {
+        if self.mode == Mode::Normal {
+            return Typed::Ignore;
+        }
+        let Some((first, second)) = self.escape else {
+            return Typed::Insert;
+        };
+        let armed = self
+            .last
+            .take()
+            .is_some_and(|(p, at)| p == first && now.duration_since(at) < self.window);
+        if armed && c == second {
+            self.mode = Mode::Normal;
+            return Typed::Escape;
+        }
+        self.last = Some((c, now));
+        Typed::Insert
+    }
+}
+
 struct Ui {
     screen: Screen,
     keys: Arc<Keys>,
@@ -635,6 +714,8 @@ struct Ui {
     /// while it is open it replaces the completion list in the same rows.
     rewind: Vec<MenuEntry>,
     spinner: usize,
+    /// The modal keys, or None while they are off.
+    vim: Option<Vim>,
     /// The segments each line shows, in the order the config named them.
     live: Vec<crate::status::Segment>,
     done: Vec<crate::status::Segment>,
@@ -759,6 +840,7 @@ impl Ui {
             last_interrupt: None,
             last_esc: None,
             rewind: Vec::new(),
+            vim: None,
             setting_paths: Vec::new(),
             settings: None,
             spinner: 0,
@@ -958,8 +1040,8 @@ impl Ui {
     /// being typed, or — with the rewind selector open — the user messages a
     /// conversation can be rewound to. Never during a run, when the editor is
     /// a queue, not a command line.
-    fn menu(&self, lane: &Lane) -> Vec<MenuEntry> {
-        if lane.is_running() {
+    fn menu(&self, running: bool) -> Vec<MenuEntry> {
+        if running {
             return Vec::new();
         }
         if self.settings.is_some() {
@@ -994,8 +1076,8 @@ impl Ui {
     }
 
     /// The highlighted row, clamped: the list shrinks as the word grows.
-    fn highlighted(&self, lane: &Lane) -> Option<MenuEntry> {
-        let mut menu = self.menu(lane);
+    fn highlighted(&self, running: bool) -> Option<MenuEntry> {
+        let mut menu = self.menu(running);
         if menu.is_empty() {
             return None;
         }
@@ -1131,11 +1213,9 @@ impl Ui {
 
     fn set_theme(&mut self, view: &mut View, context: &[String], theme: Arc<render::Theme>) {
         self.paint.theme = theme;
-        self.prompt = Self::paint_prompt(&self.paint, &self.paint.theme.prompt.icon);
         self.bang_prompt = Self::paint_prompt(&self.paint, "!");
         self.tab_sep = Self::paint_sep(&self.paint);
-        self.editor
-            .set_prompts(self.prompt.clone(), self.bang_prompt.clone());
+        self.show_mode();
         // The opening block is painted once at construction; rebuild it so a
         // /reload lands on the new theme instead of the old.
         let opening = Row::banner(context, &self.paint);
@@ -1145,7 +1225,7 @@ impl Ui {
     }
 
     fn flush(&mut self, lane: &mut Lane) {
-        let menu = self.menu(lane);
+        let menu = self.menu(lane.is_running());
         let width = self.screen.usable();
         let bar = self.lane_bar(width);
         let bar_h = usize::from(bar.is_some());
@@ -1203,7 +1283,7 @@ impl Ui {
         // the input, where nothing shows them.
         let scrollback = ScrollbackRows::new(&lane.view.scrollback, &self.paint, &self.done, width);
         let (rows, scroll) = screen::window(
-            scrollback.chain(live.iter().map(|s| Cow::Borrowed(s.as_str()))),
+            scrollback.chain(live.iter().map(|s| (Cow::Borrowed(s.as_str()), None))),
             width,
             hist_view,
             lane.view.scroll,
@@ -1254,7 +1334,7 @@ impl Ui {
     /// Rows the scrollback renders to at this width, wraps included.
     fn scrollback_rows(&self, view: &View, width: usize) -> usize {
         ScrollbackRows::new(&view.scrollback, &self.paint, &self.done, width)
-            .map(|line| screen::fit(&line, width).len())
+            .map(|(text, border)| screen::wrap(border, &text, width).len())
             .sum()
     }
 
@@ -1300,6 +1380,9 @@ impl Ui {
             }
             TermEvent::Paste(text) => {
                 self.last_esc = None;
+                if let Some(v) = &mut self.vim {
+                    v.last = None;
+                }
                 self.editor.insert_str(&text.replace('\r', "\n"));
                 return Intent::None;
             }
@@ -1329,10 +1412,17 @@ impl Ui {
         let bound = self.keys.action(
             press,
             crate::keys::Layers {
-                menu: self.settings.is_some() || !self.menu(lane).is_empty(),
+                menu: self.settings.is_some() || !self.menu(running).is_empty(),
                 run: running,
+                mode: self.vim.as_ref().map(|v| v.mode),
             },
         );
+
+        // A key that means something breaks the escape sequence: `j`, a
+        // command, then `k` is two commands and a `j`, not a mode change.
+        if bound.is_some() && let Some(v) = &mut self.vim {
+            v.last = None;
+        }
 
         // The settings panel owns the menu keys while it is open.
         if let Some(panel) = &mut self.settings {
@@ -1401,7 +1491,7 @@ impl Ui {
                 // Enter while a menu is open runs what it highlights. The
                 // typed text is a prefix; the highlighted word is the intent.
                 // The menu reads the editor, so pick before draining it.
-                match self.highlighted(lane) {
+                match self.highlighted(running) {
                     Some(MenuEntry::Message { id, .. }) => {
                         self.rewind.clear();
                         return Intent::Rewind(id);
@@ -1500,6 +1590,20 @@ impl Ui {
             Some(Action::MoveCharRight) => self.editor.right(),
             Some(Action::MoveWordLeft) => self.editor.word_left(),
             Some(Action::MoveWordRight) => self.editor.word_right(),
+            Some(Action::MoveWordNext) => self.editor.word_next(),
+            Some(Action::ModeInsert) => self.leave_normal(),
+            Some(Action::ModeInsertAfter) => {
+                self.editor.right();
+                self.leave_normal();
+            }
+            Some(Action::ModeInsertLineStart) => {
+                self.editor.home();
+                self.leave_normal();
+            }
+            Some(Action::ModeInsertLineEnd) => {
+                self.editor.end();
+                self.leave_normal();
+            }
             Some(Action::MoveLineStart) => self.editor.home(),
             Some(Action::MoveLineEnd) => self.editor.end(),
             Some(Action::HistoryOlder) => self.editor.up(),
@@ -1524,7 +1628,7 @@ impl Ui {
             }
 
             Some(Action::MenuAccept) => {
-                match self.highlighted(lane) {
+                match self.highlighted(running) {
                     Some(MenuEntry::Message { id, .. }) => {
                         self.rewind.clear();
                         return Intent::Rewind(id);
@@ -1541,12 +1645,12 @@ impl Ui {
                 }
             }
             Some(Action::MenuNext) => {
-                let n = self.menu(lane).len().saturating_sub(1);
+                let n = self.menu(running).len().saturating_sub(1);
                 let at = self.picked.unwrap_or(n).min(n);
                 self.picked = Some(at.saturating_add(1).min(n));
             }
             Some(Action::MenuPrevious) => {
-                let n = self.menu(lane).len().saturating_sub(1);
+                let n = self.menu(running).len().saturating_sub(1);
                 let at = self.picked.unwrap_or(n).min(n);
                 self.picked = Some(at.saturating_sub(1));
             }
@@ -1564,14 +1668,25 @@ impl Ui {
                     self.dismissed_at = Some(self.editor.text().to_string());
                 }
             }
-            // Unbound and printable is the one thing no table has to say.
+            // Unbound and printable is the one thing no table has to say —
+            // except in Normal, where it is the table saying no.
             None => {
                 if let KeyCode::Char(c) = key.code
                     && !key
                         .modifiers
                         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
                 {
-                    self.editor.insert(c);
+                    match self.vim.as_mut().map(|v| v.typed(c, Instant::now())) {
+                        Some(Typed::Ignore) => {}
+                        // The sequence's first half is already on screen: take
+                        // it back, so the line says what it means at every
+                        // point rather than only once the mode has changed.
+                        Some(Typed::Escape) => {
+                            self.editor.backspace();
+                            self.show_mode();
+                        }
+                        Some(Typed::Insert) | None => self.editor.insert(c),
+                    }
                 }
             }
             Some(
@@ -1603,6 +1718,54 @@ impl Ui {
 
     fn half_scroll_step(&self) -> usize {
         ((self.screen.height as usize) / 2).max(1)
+    }
+
+    /// Back to Insert. The half-typed escape character goes with the mode: it
+    /// belonged to a line nobody is commanding any more.
+    fn leave_normal(&mut self) {
+        if let Some(v) = &mut self.vim {
+            v.mode = Mode::Insert;
+            v.last = None;
+        }
+        self.show_mode();
+    }
+
+    /// Put the mode where it can be seen: the gutter's icon and the shape of
+    /// the caret. Both, because either alone is missable — the gutter is two
+    /// columns away from where the eye is, and the caret is a shape the
+    /// terminal may refuse to change.
+    ///
+    /// This is what pays for the mode never resetting itself. A mode that
+    /// persists across submitted lines and cannot be seen would be a trap;
+    /// one that can be seen is just where you left it.
+    fn show_mode(&mut self) {
+        // Three states, not two: vim off is not "Insert", and a caret shaped
+        // for a mode nobody turned on is a change to somebody else's terminal.
+        let normal = self.vim.as_ref().map(|v| v.mode == Mode::Normal);
+        let icon = match normal {
+            Some(true) => self.paint.theme.prompt.normal.clone(),
+            _ => self.paint.theme.prompt.icon.clone(),
+        };
+        self.prompt = Self::paint_prompt(&self.paint, &icon);
+        self.editor
+            .set_prompts(self.prompt.clone(), self.bang_prompt.clone());
+        self.screen.cursor_shape(normal);
+    }
+
+    /// Follow what the config says about the modal keys.
+    ///
+    /// Turning them off drops the state rather than parking it: coming back
+    /// later in Normal, with no keystroke between having asked to go there,
+    /// is the one surprise this has to rule out. Turning them off is also the
+    /// only thing that changes the mode without a key — everything else keeps
+    /// whichever mode was last asked for, submitted lines included.
+    fn set_vim(&mut self, cfg: &crate::config::Vim) {
+        match (&mut self.vim, cfg.enabled) {
+            (slot @ None, true) => *slot = Some(Vim::new(cfg)),
+            (slot, false) => *slot = None,
+            (Some(v), true) => v.configure(cfg),
+        }
+        self.show_mode();
     }
 
     /// One key, three meanings, and the escalation travels with the binding
@@ -1654,6 +1817,7 @@ fn land_handled(ui: &mut Ui, core: &Repl, view: &mut View, lines: Vec<String>) {
     if !Arc::ptr_eq(&ui.commands, &core.commands) {
         ui.commands = core.commands.clone();
     }
+    ui.set_vim(&core.config.vim);
     // The config tree changed under a reload; the `/settings` completion list
     // follows it.
     ui.setting_paths = crate::settings::leaves(&core.file)
@@ -1788,6 +1952,7 @@ impl Tui {
             .collect();
         ui.live = core.config.status.live.clone();
         ui.done = core.config.status.done.clone();
+        ui.set_vim(&core.config.vim);
         let context = core.lane().context.clone();
         let mut opening = View::opening(&context, &ui.paint);
         opening.model = core.lane().agent.spec.model.clone();
@@ -2761,7 +2926,7 @@ mod tests {
         let paint = Paint::new(false);
         let rows = Row::banner(&["~/.pi/Pi.md".into(), "AGENTS.md".into()], &paint);
         let shown: Vec<String> = ScrollbackRows::new(&rows, &paint, &[], 80)
-            .map(|r| r.to_string())
+            .map(|(r, _)| r.to_string())
             .collect();
         // The version from the same place the banner reads it: spelled out
         // here, every release breaks a test about the context files.
@@ -2813,7 +2978,9 @@ mod tests {
     fn a_folded_entry_is_its_summary_until_unfolded() {
         let rows = [block(1, 2, true)];
         let paint = Paint::new(false);
-        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 80).collect();
+        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 80)
+            .map(|(s, _)| s)
+            .collect();
         assert_eq!(rows, vec!["thinking · 2 lines"]);
     }
 
@@ -2821,7 +2988,9 @@ mod tests {
     fn an_unfolded_entry_shows_its_lines() {
         let rows = [block(1, 2, false)];
         let paint = Paint::new(false);
-        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 80).collect();
+        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 80)
+            .map(|(s, _)| s)
+            .collect();
         assert_eq!(rows, vec!["line 1", "line 2"]);
     }
 
@@ -2839,8 +3008,12 @@ mod tests {
         let rebuilt = [Row::stored_result(&stored, Some(sketched))];
 
         let paint = Paint::new(false);
-        let a: Vec<Cow<'_, str>> = ScrollbackRows::new(&live, &paint, &[], 80).collect();
-        let b: Vec<Cow<'_, str>> = ScrollbackRows::new(&rebuilt, &paint, &[], 80).collect();
+        let a: Vec<Cow<'_, str>> = ScrollbackRows::new(&live, &paint, &[], 80)
+            .map(|(s, _)| s)
+            .collect();
+        let b: Vec<Cow<'_, str>> = ScrollbackRows::new(&rebuilt, &paint, &[], 80)
+            .map(|(s, _)| s)
+            .collect();
         assert_eq!(a, b);
         assert_eq!(a.len(), 3, "head plus the two diff rows");
     }
@@ -2855,10 +3028,16 @@ mod tests {
         let long = "x".repeat(200);
         let rows = [Row::result(true, "edit", format!("head\n  12 + {long}"))];
 
-        let narrow: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 40).collect();
-        let wide: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 160).collect();
+        let narrow: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 40)
+            .map(|(s, _)| s)
+            .collect();
+        let wide: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 160)
+            .map(|(s, _)| s)
+            .collect();
         // And back again: widening must not be the only direction that repaints.
-        let again: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 40).collect();
+        let again: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 40)
+            .map(|(s, _)| s)
+            .collect();
 
         assert_eq!(narrow.len(), 2, "head plus the one diff row");
         assert!(
@@ -2878,7 +3057,9 @@ mod tests {
         let stored = brain::message::ToolResult::text("c1", "read", "fn main() {}\nmore");
         let rows = [Row::stored_result(&stored, None)];
         let paint = Paint::new(false);
-        let out: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 80).collect();
+        let out: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 80)
+            .map(|(s, _)| s)
+            .collect();
         assert_eq!(out.len(), 1);
         assert!(out[0].contains("fn main() {}"), "{}", out[0]);
         assert!(!out[0].contains("more"), "only the first line");
@@ -2891,8 +3072,12 @@ mod tests {
     fn widening_the_window_gives_back_what_was_clipped() {
         let paint = Paint::new(false);
         let rows = [Row::result(true, "read", "a".repeat(200))];
-        let narrow: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 40).collect();
-        let wide: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 160).collect();
+        let narrow: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 40)
+            .map(|(s, _)| s)
+            .collect();
+        let wide: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 160)
+            .map(|(s, _)| s)
+            .collect();
 
         assert!(narrow[0].ends_with('…'), "{}", narrow[0]);
         assert!(
@@ -2911,8 +3096,12 @@ mod tests {
         let paint = Paint::new(false);
         let bad = [Row::result(false, "read", "gone")];
         let good = [Row::result(true, "read", "gone")];
-        let bad: Vec<Cow<'_, str>> = ScrollbackRows::new(&bad, &paint, &[], 80).collect();
-        let good: Vec<Cow<'_, str>> = ScrollbackRows::new(&good, &paint, &[], 80).collect();
+        let bad: Vec<Cow<'_, str>> = ScrollbackRows::new(&bad, &paint, &[], 80)
+            .map(|(s, _)| s)
+            .collect();
+        let good: Vec<Cow<'_, str>> = ScrollbackRows::new(&good, &paint, &[], 80)
+            .map(|(s, _)| s)
+            .collect();
         assert!(bad[0].starts_with('✗'), "{}", bad[0]);
         assert!(good[0].starts_with('✓'), "{}", good[0]);
     }
@@ -2921,7 +3110,9 @@ mod tests {
     fn a_plain_entry_is_itself() {
         let rows = [Row::notice("hello".to_string())];
         let paint = Paint::new(false);
-        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 80).collect();
+        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 80)
+            .map(|(s, _)| s)
+            .collect();
         assert_eq!(rows, vec!["hello"]);
     }
 
@@ -2931,9 +3122,14 @@ mod tests {
         // empty scrollback panicked. The back walk kept doing it after the
         // front was fixed, and `screen::window` is the one that walks back.
         let paint = Paint::new(false);
-        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&[], &paint, &[], 80).collect();
+        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&[], &paint, &[], 80)
+            .map(|(s, _)| s)
+            .collect();
         assert!(rows.is_empty());
-        let back: Vec<Cow<'_, str>> = ScrollbackRows::new(&[], &paint, &[], 80).rev().collect();
+        let back: Vec<Cow<'_, str>> = ScrollbackRows::new(&[], &paint, &[], 80)
+            .rev()
+            .map(|(s, _)| s)
+            .collect();
         assert!(back.is_empty(), "the back walk too");
     }
 
@@ -2963,8 +3159,54 @@ mod tests {
             }
             (f, b)
         };
+        let front: Vec<&str> = front.iter().map(|(s, _)| s.as_ref()).collect();
+        let back: Vec<&str> = back.iter().map(|(s, _)| s.as_ref()).collect();
         assert_eq!(front, vec!["a", "line 1"]);
         assert_eq!(back, vec!["d", "line 2"]);
+    }
+
+    /// A said line wider than the terminal keeps its rule down every row it
+    /// wraps to. Before the border lived apart from the text, the wrap cut it
+    /// at the first row and the rest of the line ran flush against the left
+    /// edge — the bar ended mid-air.
+    #[test]
+    fn a_wrapped_said_line_keeps_its_rule_down_every_row() {
+        let paint = Paint::new(false);
+        let rows = Row::prompt(&"curl ".repeat(30), "! ", &paint);
+        let scrollback = ScrollbackRows::new(&rows, &paint, &[], 20);
+        let (out, _) = screen::window(scrollback, 20, 10, 0);
+        assert!(out.len() > 1, "a line wider than the window wraps");
+        for (i, row) in out.iter().enumerate() {
+            assert!(
+                row.starts_with("\u{258c} "),
+                "row {i} lost the rule: {row:?}"
+            );
+        }
+        // Nothing is lost either: the wrapped rows still spell the whole line.
+        let joined: String = out
+            .iter()
+            .map(|row| {
+                crate::render::strip_ansi(row)
+                    .trim_start_matches("\u{258c} ")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(joined, "curl ".repeat(30));
+    }
+
+    /// A `!` command keeps its own mark and nothing is repeated: its wrapped
+    /// rows are the command's continuation, not a new command each row.
+    #[test]
+    fn a_wrapped_bang_command_repeats_nothing() {
+        let paint = Paint::new(false);
+        let rows = Row::prompt(&format!("!{}", "go ".repeat(30)), "! ", &paint);
+        let scrollback = ScrollbackRows::new(&rows, &paint, &[], 20);
+        let (out, _) = screen::window(scrollback, 20, 10, 0);
+        assert!(out.len() > 1);
+        assert!(out[0].starts_with("! "));
+        for row in &out[1..] {
+            assert!(!row.starts_with("! "), "a continuation row wore the mark: {row:?}");
+        }
     }
 
     #[test]
@@ -3141,12 +3383,15 @@ mod tests {
         // shown are still the same entry: folding them takes them back.
         let mut entry = block(1, 2, false);
         let paint = Paint::new(false);
-        let rows: Vec<Cow<'_, str>> =
-            ScrollbackRows::new(std::slice::from_ref(&entry), &paint, &[], 80).collect();
+        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(std::slice::from_ref(&entry), &paint, &[], 80)
+            .map(|(s, _)| s)
+            .collect();
         assert_eq!(rows, vec!["line 1", "line 2"]);
         entry.set_folded(true);
         let rows: Vec<Cow<'_, str>> =
-            ScrollbackRows::new(std::slice::from_ref(&entry), &paint, &[], 80).collect();
+            ScrollbackRows::new(std::slice::from_ref(&entry), &paint, &[], 80)
+                .map(|(s, _)| s)
+                .collect();
         assert_eq!(rows, vec!["thinking · 2 lines"]);
     }
 
@@ -3218,7 +3463,7 @@ mod tests {
         let total = content.len();
         *scroll = absorb_growth(*scroll, *last_total, total);
         let (rows, s) = screen::window(
-            content.iter().map(|s| Cow::Borrowed(s.as_str())),
+            content.iter().map(|s| (Cow::Borrowed(s.as_str()), None)),
             80,
             room,
             *scroll,
@@ -3380,7 +3625,7 @@ mod tests {
         // row too, so a length check cannot tell them apart.
         let paint = Paint::new(false);
         let rows: Vec<String> = ScrollbackRows::new(&tui.core.lanes[1].view.scrollback, &paint, &[], 80)
-            .map(|r| r.to_string())
+            .map(|(r, _)| r.to_string())
             .collect();
         assert!(
             rows.iter().any(|r| r.contains("what was said before")),
@@ -3603,6 +3848,33 @@ mod tests {
         );
     }
 
+    /// The completion list is off during a run, and the reason is not cosmetic:
+    /// `When::Menu` outranks `When::Run`, so a live menu takes Esc away from
+    /// `run.interrupt` and leaves the turn with no way to be stopped.
+    #[test]
+    fn esc_still_interrupts_a_run_with_a_command_word_in_the_editor() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut ui = test_ui(80, 24);
+        ui.commands = std::sync::Arc::new(vec![crate::repl::Command {
+            word: "/new".into(),
+            args: "",
+            help: "a fresh session".into(),
+            source: crate::repl::Source::Builtin,
+        }]);
+        ui.editor.set_line("/new");
+        let (_dir, mut lane) = a_running_lane();
+
+        // The same line does offer a completion when nothing is running, so
+        // this test fails if the guard goes rather than passing vacuously.
+        assert!(!ui.menu(false).is_empty());
+        assert!(ui.menu(true).is_empty(), "the editor is a queue during a run");
+
+        let esc = super::TermEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let intent = ui.key(&mut lane, esc, true);
+        assert!(matches!(intent, crate::repl::Intent::Interrupt), "{intent:?}");
+    }
+
     /// A surface with an in-memory screen, for the drawing tests below.
     /// The history area is what is left after the menu, the bar and the input.
     /// Measured without the bar's row, `window` is handed one row more than the
@@ -3657,7 +3929,7 @@ mod tests {
         done: &[crate::status::Segment],
     ) -> Vec<String> {
         ScrollbackRows::new(rows, paint, done, 80)
-            .map(|r| crate::render::strip_ansi(&r))
+            .map(|(r, _)| crate::render::strip_ansi(&r))
             .collect()
     }
 
@@ -3718,6 +3990,140 @@ mod tests {
             !ui.live(&lane, 10).iter().any(|r| r.contains("esc to stop")),
             "the clock is still set; the turn is what says the run is over"
         );
+    }
+
+    /// A surface with the modal keys on, at their defaults.
+    fn vim_ui() -> super::Ui {
+        let mut ui = test_ui(80, 24);
+        ui.set_vim(&crate::config::Vim { enabled: true, ..Default::default() });
+        ui
+    }
+
+    fn typed(c: char) -> super::TermEvent {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        super::TermEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+    }
+
+    fn mode(ui: &super::Ui) -> Option<crate::keys::Mode> {
+        ui.vim.as_ref().map(|v| v.mode)
+    }
+
+    /// The sequence is read where unbound characters are typed, and its first
+    /// half is a real `j` on a real line until the `k` arrives — nothing is
+    /// held pending, so the screen is never a guess.
+    #[test]
+    fn jk_leaves_insert_and_takes_its_first_half_back_off_the_line() {
+        let mut ui = vim_ui();
+        let (_dir, mut lane) = a_running_lane();
+
+        ui.key(&mut lane, typed('j'), false);
+        assert_eq!(ui.editor.text(), "j", "a lone j is a j");
+        assert_eq!(mode(&ui), Some(crate::keys::Mode::Insert));
+
+        ui.key(&mut lane, typed('k'), false);
+        assert_eq!(ui.editor.text(), "", "the j goes with the mode change");
+        assert_eq!(mode(&ui), Some(crate::keys::Mode::Normal));
+    }
+
+    /// Outside the window the two characters are just two characters. Without
+    /// this, a `j` typed minutes ago would still be armed.
+    #[test]
+    fn a_j_left_behind_does_not_arm_a_later_k() {
+        let mut ui = vim_ui();
+        let (_dir, mut lane) = a_running_lane();
+
+        ui.key(&mut lane, typed('j'), false);
+        let stale = super::Instant::now() - std::time::Duration::from_secs(1);
+        ui.vim.as_mut().unwrap().last = Some(('j', stale));
+        ui.key(&mut lane, typed('k'), false);
+
+        assert_eq!(ui.editor.text(), "jk");
+        assert_eq!(mode(&ui), Some(crate::keys::Mode::Insert));
+    }
+
+    /// A command between the halves breaks the sequence: `j`, a keystroke that
+    /// means something, then `k` is two commands and a `j`, not a mode change.
+    #[test]
+    fn a_bound_key_between_the_halves_breaks_the_sequence() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut ui = vim_ui();
+        let (_dir, mut lane) = a_running_lane();
+
+        ui.key(&mut lane, typed('j'), false);
+        let left = super::TermEvent::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        ui.key(&mut lane, left, false);
+        ui.key(&mut lane, typed('k'), false);
+
+        assert_eq!(ui.editor.text(), "kj", "the caret had moved before the k");
+        assert_eq!(mode(&ui), Some(crate::keys::Mode::Insert));
+    }
+
+    /// Normal has to refuse the keys it does not bind. Without this the mode
+    /// is a costume: `z` would still type a `z` and only the bound keys would
+    /// behave, which is worse than no mode at all.
+    #[test]
+    fn an_unbound_character_types_nothing_in_normal() {
+        let mut ui = vim_ui();
+        let (_dir, mut lane) = a_running_lane();
+        ui.editor.set_line("hello");
+        ui.vim.as_mut().unwrap().mode = crate::keys::Mode::Normal;
+
+        ui.key(&mut lane, typed('z'), false);
+        assert_eq!(ui.editor.text(), "hello");
+
+        // And the keys it does bind still command.
+        ui.key(&mut lane, typed('0'), false);
+        ui.key(&mut lane, typed('x'), false);
+        assert_eq!(ui.editor.text(), "ello");
+    }
+
+    /// The way back, and what `a` does that `i` does not.
+    #[test]
+    fn i_and_a_return_to_insert_on_either_side_of_the_caret() {
+        let mut ui = vim_ui();
+        let (_dir, mut lane) = a_running_lane();
+        ui.editor.set_line("ab");
+        ui.vim.as_mut().unwrap().mode = crate::keys::Mode::Normal;
+
+        ui.key(&mut lane, typed('0'), false);
+        ui.key(&mut lane, typed('i'), false);
+        assert_eq!(mode(&ui), Some(crate::keys::Mode::Insert));
+        ui.key(&mut lane, typed('Z'), false);
+        assert_eq!(ui.editor.text(), "Zab", "i types where the caret is");
+
+        ui.vim.as_mut().unwrap().mode = crate::keys::Mode::Normal;
+        ui.key(&mut lane, typed('0'), false);
+        ui.key(&mut lane, typed('a'), false);
+        ui.key(&mut lane, typed('Y'), false);
+        assert_eq!(ui.editor.text(), "ZYab", "a types past it");
+    }
+
+    /// The mode outlives a submitted line, which is the whole reason it has to
+    /// be visible: the gutter says which one is up.
+    #[test]
+    fn the_gutter_says_which_mode_is_up() {
+        let mut ui = vim_ui();
+        let insert = ui.prompt.clone();
+        ui.vim.as_mut().unwrap().mode = crate::keys::Mode::Normal;
+        ui.show_mode();
+        assert_ne!(ui.prompt, insert);
+        ui.leave_normal();
+        assert_eq!(ui.prompt, insert);
+    }
+
+    /// Turning the keys off is the one thing that moves the mode without a
+    /// keystroke — otherwise switching back on would land in Normal with
+    /// nothing having asked to go there.
+    #[test]
+    fn turning_the_keys_off_drops_the_mode_rather_than_parking_it() {
+        let mut ui = vim_ui();
+        ui.vim.as_mut().unwrap().mode = crate::keys::Mode::Normal;
+
+        ui.set_vim(&crate::config::Vim::default());
+        assert!(ui.vim.is_none());
+
+        ui.set_vim(&crate::config::Vim { enabled: true, ..Default::default() });
+        assert_eq!(mode(&ui), Some(crate::keys::Mode::Insert));
     }
 
     fn test_ui(width: u16, height: u16) -> super::Ui {

@@ -20,8 +20,10 @@ use brain::message::{ToolResult, ToolResultContent};
 use crate::render::{self, Markdown, Paint};
 use crate::status::{self, Segment, Snapshot};
 
-/// The gutter a line already said wears. Heavier than the `│` a fenced block
-/// gets: that rule is the machine's, this one is the person's.
+// The gutter a line already said wears. Heavier than the `│` a fenced block
+// gets: that rule is the machine's, this one is the person's. Kept out of the
+// row's text so a line wider than the terminal can repeat it on every row it
+// wraps to — see `Kind::Said`.
 const SAID: &str = "▌";
 
 const BANNER: &str = concat!("π ", env!("CARGO_PKG_VERSION"));
@@ -29,6 +31,17 @@ const BANNER: &str = concat!("π ", env!("CARGO_PKG_VERSION"));
 pub struct Row(Kind);
 
 enum Kind {
+    /// One logical line of a prompt the user said: the border and the body
+    /// kept apart, so wrapping can repeat the border on every screen row the
+    /// body spans. A single border in the text would be cut at the first
+    /// wrap — the bar would end mid-air and the rest of the line would run
+    /// flush against the left edge.
+    Said {
+        /// The painted rule and its column: `▌ ` in the prompt colour.
+        border: String,
+        /// The line's text, painted in the input style, without the border.
+        body: String,
+    },
     /// A painted line the screen alone knows about: the banner, a command's
     /// output, a warning. Colour does not depend on width, so painting it
     /// early costs nothing.
@@ -150,36 +163,45 @@ impl Row {
         Self::notice(paint.on(&paint.theme.muted, &tool_start_line(name, summary)))
     }
 
-    /// A prompt's lines as the stream echoed them: the first with its gutter
-    /// and the body in the input style, the rest indented to match.
+    /// One logical line of a prompt the user said: the rule it wears, and the
+    /// text under it. The border lives apart from the body so the screen can
+    /// repeat it on every row the body wraps to — see `Kind::Said`.
+    fn said(border: String, body: String) -> Self {
+        Row(Kind::Said { border, body })
+    }
+
+    /// A prompt's lines as the stream echoed them: a `!` keeps its own mark
+    /// and its continuation the plain indent, everything else wears the rule,
+    /// unbroken down every line of it.
     pub fn prompt(text: &str, bang: &str, paint: &Paint) -> Vec<Self> {
-        // A `!` is a command, not something said: it keeps its own mark, and
-        // the lines under it keep the plain indent they had.
-        let banged = text.starts_with('!');
-        // Unbroken down every line said: the icon marks what is being typed,
-        // and a landed line wearing it reads as another place to type.
-        let rule = match banged {
-            true => String::new(),
-            false => format!("{} ", paint.on(&paint.theme.prompt.color, SAID)),
-        };
-        text.lines()
-            .enumerate()
-            .map(|(i, line)| {
-                let (gutter, body) = match (i, banged) {
-                    (0, true) => (bang, line.strip_prefix('!').unwrap_or(line).trim_start()),
-                    (_, true) => ("  ", line),
-                    _ => (rule.as_str(), line),
+        if text.starts_with('!') {
+            // A `!` is a command, not something said: the bang takes the
+            // prompt's place, and the lines under it keep the plain indent.
+            let mut rows = Vec::new();
+            for (i, line) in text.lines().enumerate() {
+                let (gutter, body) = if i == 0 {
+                    (bang, line.strip_prefix('!').unwrap_or(line).trim_start())
+                } else {
+                    ("  ", line)
                 };
                 let body = paint.on(&paint.theme.input, body);
-                Self::notice(format!("{gutter}{body}"))
-            })
+                rows.push(Self::notice(format!("{gutter}{body}")));
+            }
+            return rows;
+        }
+        // Unbroken down every line said: the icon marks what is being typed,
+        // and a landed line wearing it reads as another place to type. The
+        // border is kept apart from the body so wrapping can repeat it.
+        let border = format!("{} ", paint.on(&paint.theme.prompt.color, SAID));
+        text.lines()
+            .map(|line| Self::said(border.clone(), paint.on(&paint.theme.input, line)))
             .collect()
     }
 
     /// How many screen rows this renders to.
     pub fn len(&self) -> usize {
         match &self.0 {
-            Kind::Notice(_) | Kind::Tally(_) => 1,
+            Kind::Notice(_) | Kind::Said { .. } | Kind::Tally(_) => 1,
             Kind::Result { preview, .. } => preview.lines().count().max(1),
             Kind::Reasoning { lines, folded, .. } => {
                 if *folded {
@@ -191,21 +213,25 @@ impl Row {
         }
     }
 
-    /// Row `i` of what this renders to, at this width. `done` is the segment
-    /// list a finished run's row is spelled out with; every other kind ignores
-    /// it.
+    /// What the screen renders for row `i` of this row, at this width: the
+    /// text, and the border its continuation rows must repeat. A said row
+    /// keeps the rule apart from the body so a line wider than the terminal
+    /// can carry it to every row it wraps to; anything else is a single text
+    /// with no border to keep.
     pub fn line<'a>(
         &'a self,
         i: usize,
         paint: &'a Paint,
         done: &[Segment],
         width: usize,
-    ) -> Cow<'a, str> {
+    ) -> (Cow<'a, str>, Option<&'a str>) {
         match &self.0 {
-            Kind::Notice(s) => Cow::Borrowed(s),
-            Kind::Tally(snap) => {
-                Cow::Owned(paint.on(&paint.theme.muted, &status::line(done, snap)))
-            }
+            Kind::Said { border, body } => (Cow::Borrowed(body), Some(border)),
+            Kind::Notice(s) => (Cow::Borrowed(s), None),
+            Kind::Tally(snap) => (
+                Cow::Owned(paint.on(&paint.theme.muted, &status::line(done, snap))),
+                None,
+            ),
             Kind::Result {
                 ok,
                 name,
@@ -223,16 +249,17 @@ impl Row {
                 // A `RefCell` cannot lend its contents out past the guard, and
                 // one row is a line of text: cloning it is the cheap half of
                 // what repainting the whole result would cost.
-                Cow::Owned(rows[i].clone())
+                (Cow::Owned(rows[i].clone()), None)
             }
             Kind::Reasoning { lines, folded, .. } => {
-                if *folded {
+                let text = if *folded {
                     // The count row is synthesized at draw time, so it takes
                     // its muted styling here rather than from a painted row.
                     Cow::Owned(paint.on(&paint.theme.muted, &thinking_summary(lines.len())))
                 } else {
-                    Cow::Borrowed(&lines[i])
-                }
+                    Cow::Borrowed(lines[i].as_str())
+                };
+                (text, None)
             }
         }
     }
@@ -318,7 +345,10 @@ mod said_tests {
         let paint = Paint::new(true);
         Row::prompt(text, "! ", &paint)
             .iter()
-            .map(|r| crate::render::strip_ansi(&r.line(0, &paint, &[], 80)))
+            .map(|r| {
+                let (body, border) = r.line(0, &paint, &[], 80);
+                crate::render::strip_ansi(&format!("{}{}", border.unwrap_or_default(), body))
+            })
             .collect()
     }
 

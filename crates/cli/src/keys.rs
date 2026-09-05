@@ -14,6 +14,19 @@ use std::collections::{BTreeMap, HashMap};
 use anyhow::{Result, bail};
 use crossterm::event::{KeyCode, KeyModifiers};
 
+/// Which of the two modal states the editor is in. Exclusive: exactly one
+/// holds at a time, which is why it is a value of its own rather than two
+/// more layers — nothing here can express being in both at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Mode {
+    /// Keys type. The layer is empty: everything Insert does, it does by
+    /// falling through to `Editor`.
+    #[default]
+    Insert,
+    /// Keys command. Bare characters move and delete instead of typing.
+    Normal,
+}
+
 /// When a binding is consulted. `action` tries these nearest-first, so a key
 /// the menu claims never reaches the editor underneath it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -22,16 +35,23 @@ pub enum When {
     Menu,
     /// A turn is in flight.
     Run,
-    /// Always.
+    /// Only in that mode, and only while vim keys are on at all.
+    Mode(Mode),
+    /// Always — in both modes, so the thirty bindings that were here before
+    /// vim existed keep working under it.
     Editor,
 }
 
-/// Which layers are up when a key is pressed. One value rather than two bare
-/// booleans — both are usually live at once, and a swapped pair compiles.
+/// Which layers are up when a key is pressed. One value rather than three
+/// bare fields — they are usually live at once, and a swapped pair compiles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Layers {
     pub menu: bool,
     pub run: bool,
+    /// The mode, or `None` when vim keys are off. Three legal states in three
+    /// representations: a separate `vim: bool` beside a `Mode` would make
+    /// "off, but in Normal" expressible and meaningless.
+    pub mode: Option<Mode>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -46,6 +66,9 @@ pub enum Action {
     MoveCharRight,
     MoveWordLeft,
     MoveWordRight,
+    /// To the start of the next word, which `MoveWordRight` does not do: it
+    /// lands on the end of this one. Vim's `w` beside vim's `e`.
+    MoveWordNext,
     MoveLineStart,
     MoveLineEnd,
     HistoryOlder,
@@ -67,6 +90,12 @@ pub enum Action {
     LaneNext,
     ThinkFold,
     ThinkFoldAll,
+    // Leaving Normal. There is no action for entering it: `jk` is a sequence,
+    // not a press, and it is read where unbound characters are typed.
+    ModeInsert,
+    ModeInsertAfter,
+    ModeInsertLineStart,
+    ModeInsertLineEnd,
 }
 
 pub struct Binding {
@@ -303,20 +332,145 @@ pub const BINDINGS: &[Binding] = &[
         keys: &["ctrl+shift+t", "alt+t"],
         note: "every reasoning block, the current one included",
     },
+
+    // Normal mode from here down. Every key is a bare character, and that is a
+    // rule rather than a coincidence: the layer sits above `Editor`, so
+    // anything it claims it also takes away — and no binding that existed
+    // before vim is a bare character. Bound to one, this layer is pure
+    // addition.
+    //
+    // The ids carry a `normal.` prefix only where one is needed:
+    // `move.char.left` is already taken, `mode.insert` cannot be, since the
+    // Insert layer is empty and nothing else can ask to leave a mode.
+    Binding {
+        id: "normal.move.char.left",
+        action: A::MoveCharLeft,
+        when: W::Mode(Mode::Normal),
+        keys: &["h"],
+        note: "",
+    },
+    Binding {
+        id: "normal.move.char.right",
+        action: A::MoveCharRight,
+        when: W::Mode(Mode::Normal),
+        keys: &["l"],
+        note: "",
+    },
+    Binding {
+        id: "normal.move.word.next",
+        action: A::MoveWordNext,
+        when: W::Mode(Mode::Normal),
+        keys: &["w"],
+        note: "the start of the next word",
+    },
+    Binding {
+        id: "normal.move.word.end",
+        action: A::MoveWordRight,
+        when: W::Mode(Mode::Normal),
+        keys: &["e"],
+        note: "the end of this one",
+    },
+    Binding {
+        id: "normal.move.word.back",
+        action: A::MoveWordLeft,
+        when: W::Mode(Mode::Normal),
+        keys: &["b"],
+        note: "",
+    },
+    Binding {
+        id: "normal.move.line.start",
+        action: A::MoveLineStart,
+        when: W::Mode(Mode::Normal),
+        keys: &["0"],
+        note: "",
+    },
+    Binding {
+        id: "normal.move.line.end",
+        action: A::MoveLineEnd,
+        when: W::Mode(Mode::Normal),
+        keys: &["$"],
+        note: "",
+    },
+    Binding {
+        id: "normal.history.older",
+        action: A::HistoryOlder,
+        when: W::Mode(Mode::Normal),
+        keys: &["k"],
+        note: "the line above, or the previous prompt when there is none",
+    },
+    Binding {
+        id: "normal.history.newer",
+        action: A::HistoryNewer,
+        when: W::Mode(Mode::Normal),
+        keys: &["j"],
+        note: "",
+    },
+    Binding {
+        id: "normal.delete.char-forward",
+        action: A::DeleteCharForward,
+        when: W::Mode(Mode::Normal),
+        keys: &["x"],
+        note: "",
+    },
+    Binding {
+        id: "normal.delete.char-back",
+        action: A::DeleteCharBack,
+        when: W::Mode(Mode::Normal),
+        keys: &["X"],
+        note: "",
+    },
+    Binding {
+        id: "normal.delete.to-line-end",
+        action: A::DeleteToLineEnd,
+        when: W::Mode(Mode::Normal),
+        keys: &["D"],
+        note: "",
+    },
+    Binding {
+        id: "mode.insert",
+        action: A::ModeInsert,
+        when: W::Mode(Mode::Normal),
+        keys: &["i"],
+        note: "",
+    },
+    Binding {
+        id: "mode.insert.after",
+        action: A::ModeInsertAfter,
+        when: W::Mode(Mode::Normal),
+        keys: &["a"],
+        note: "past the caret",
+    },
+    Binding {
+        id: "mode.insert.line-start",
+        action: A::ModeInsertLineStart,
+        when: W::Mode(Mode::Normal),
+        keys: &["I"],
+        note: "",
+    },
+    Binding {
+        id: "mode.insert.line-end",
+        action: A::ModeInsertLineEnd,
+        when: W::Mode(Mode::Normal),
+        keys: &["A"],
+        note: "",
+    },
 ];
 
 impl Keys {
     /// What is bound right now, as lines. A rebindable system with no way to
     /// see the ids is one nobody can rebind.
+    ///
+    /// No column says which mode a binding belongs to, because the ids do:
+    /// `normal.` is on every one of them that needed telling apart.
     pub fn listing(&self) -> Vec<String> {
         let width = BINDINGS.iter().map(|b| b.id.len()).max().unwrap_or(0);
         BINDINGS
             .iter()
             .map(|b| {
                 let mut keys: Vec<String> = self
-                    .map
+                    .who
                     .iter()
-                    .filter(|(_, a)| **a == b.action)
+                    .filter(|(_, id)| **id == b.id)
                     .map(|((_, p), _)| show(*p))
                     .collect();
                 keys.sort();
@@ -354,14 +508,17 @@ fn show(p: Press) -> String {
 
 /// A key press, normalized.
 ///
-/// Shift is dropped from a bare character because the character already
-/// carries it — `shift+a` and `A` are the same press reported two ways
-/// depending on the terminal, and a table that distinguished them would work
-/// on some and not others. It is kept when Ctrl or Alt rides with it, so
-/// `ctrl+shift+t` stays distinct from `ctrl+t` on the terminals that report
-/// it; the ones that do not degrade it to `ctrl+t`, which is why a reachable
-/// alternate is worth binding beside it. Named keys keep it, so
-/// `shift+enter` stays expressible.
+/// Shift folds into a bare character rather than being dropped: `A`,
+/// `shift+a`, and `a` with the shift bit all arrive as `A`, which is the
+/// same press reported three ways depending on the terminal, and stays
+/// distinct from `a`. Dropping it instead would collapse the two, and a
+/// modal keymap needs `D` to mean something other than `d`. Ctrl and Alt
+/// name the unshifted letter, because there the terminals disagree about
+/// the character rather than about the modifier — `ctrl+shift+t` stays
+/// distinct from `ctrl+t` on the ones that report shift, and degrades to it
+/// on the ones that do not, which is why a reachable alternate is worth
+/// binding beside it. Named keys keep shift, so `shift+enter` stays
+/// expressible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Press {
     pub code: KeyCode,
@@ -372,13 +529,19 @@ impl Press {
     pub fn of(code: KeyCode, mods: KeyModifiers) -> Self {
         let mods = mods & (KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT);
         match code {
+            KeyCode::Char(c) if mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                Press {
+                    code: KeyCode::Char(c.to_ascii_lowercase()),
+                    mods,
+                }
+            }
             KeyCode::Char(c) => Press {
-                code: KeyCode::Char(c.to_ascii_lowercase()),
-                mods: if mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
-                    mods
+                code: KeyCode::Char(if mods.contains(KeyModifiers::SHIFT) {
+                    c.to_ascii_uppercase()
                 } else {
-                    mods - KeyModifiers::SHIFT
-                },
+                    c
+                }),
+                mods: mods - KeyModifiers::SHIFT,
             },
             _ => Press { code, mods },
         }
@@ -413,15 +576,17 @@ fn named(word: &str) -> Option<KeyCode> {
     })
 }
 
-/// `ctrl+shift+y`, `alt+left`, `f5`, `?`.
+/// `ctrl+shift+y`, `alt+left`, `f5`, `?`, `D`.
+///
+/// Modifier names and key names are read case-insensitively; a bare
+/// character is not, because `D` and `d` are two presses.
 pub fn parse(spec: &str) -> Result<Press> {
-    let lower = spec.trim().to_ascii_lowercase();
     let mut mods = KeyModifiers::NONE;
-    let mut rest = lower.as_str();
+    let mut rest = spec.trim();
     // Split on the first `+` only while something follows it, so `+` and
     // `ctrl++` name the key itself.
     while let Some((head, tail)) = rest.split_once('+').filter(|(_, t)| !t.is_empty()) {
-        match head {
+        match head.to_ascii_lowercase().as_str() {
             "ctrl" | "control" => mods |= KeyModifiers::CONTROL,
             "alt" | "opt" | "option" | "meta" => mods |= KeyModifiers::ALT,
             "shift" => mods |= KeyModifiers::SHIFT,
@@ -432,7 +597,7 @@ pub fn parse(spec: &str) -> Result<Press> {
     if rest.is_empty() {
         bail!("`{spec}` names no key");
     }
-    let code = match named(rest) {
+    let code = match named(&rest.to_ascii_lowercase()) {
         Some(c) => c,
         None => {
             let mut chars = rest.chars();
@@ -451,6 +616,11 @@ pub fn parse(spec: &str) -> Result<Press> {
 #[derive(Debug)]
 pub struct Keys {
     map: HashMap<(When, Press), Action>,
+    /// Which binding owns each key. `resolve` builds this to catch conflicts
+    /// and it used to be thrown away; keeping it is what lets `listing` ask
+    /// "what is bound to this id" instead of reconstructing the answer from
+    /// the action, which two ids in one layer are allowed to share.
+    who: HashMap<(When, Press), &'static str>,
 }
 
 impl Default for Keys {
@@ -509,17 +679,20 @@ impl Keys {
                 map.insert((b.when, press), b.action);
             }
         }
-        Ok(Self { map })
+        Ok(Self { map, who })
     }
 
     /// What this press means, given what is on screen.
     pub fn action(&self, press: Press, layers: Layers) -> Option<Action> {
-        let mut live = Vec::with_capacity(3);
+        let mut live = Vec::with_capacity(4);
         if layers.menu {
             live.push(When::Menu);
         }
         if layers.run {
             live.push(When::Run);
+        }
+        if let Some(mode) = layers.mode {
+            live.push(When::Mode(mode));
         }
         live.push(When::Editor);
         if let hit @ Some(_) = live
@@ -556,7 +729,7 @@ mod tests {
         let keys = Keys::resolve(&BTreeMap::new()).unwrap();
         for (menu, running) in [(false, false), (false, true), (true, true)] {
             assert_eq!(
-                keys.action(press("ctrl+t"), Layers { menu, run: running }),
+                keys.action(press("ctrl+t"), Layers { menu, run: running, ..Layers::default() }),
                 Some(Action::ThinkFold),
                 "menu={menu} running={running}"
             );
@@ -585,7 +758,7 @@ mod tests {
         // flat table has no way to say so.
         let k = Keys::default();
         assert_eq!(
-            k.action(press("up"), Layers { menu: true, run: false }),
+            k.action(press("up"), Layers { menu: true, ..Layers::default() }),
             Some(Action::MenuPrevious)
         );
         assert_eq!(
@@ -593,7 +766,7 @@ mod tests {
             Some(Action::HistoryOlder)
         );
         assert_eq!(
-            k.action(press("esc"), Layers { menu: true, run: true }),
+            k.action(press("esc"), Layers { menu: true, run: true, mode: None }),
             Some(Action::MenuDismiss)
         );
         assert_eq!(k.action(press("esc"), Layers::default()), Some(Action::Rewind));
@@ -614,6 +787,76 @@ mod tests {
             k.action(press("home"), Layers::default()),
             Some(Action::MoveLineStart)
         );
+    }
+
+    #[test]
+    fn the_normal_layer_takes_nothing_away() {
+        // The premise the whole table rests on: Normal binds bare characters,
+        // and nothing bound before vim existed is one, so every older binding
+        // still answers under it. A Normal key on a modifier combination would
+        // quietly shadow one — the layer sits above `Editor` — and this is the
+        // only thing that would notice.
+        let k = Keys::default();
+        for b in BINDINGS {
+            if b.when == W::Mode(Mode::Normal) {
+                continue;
+            }
+            for spec in b.keys {
+                let press = parse(spec).unwrap();
+                let insert = Layers {
+                    menu: b.when == W::Menu,
+                    run: b.when == W::Run,
+                    mode: None,
+                };
+                assert_eq!(
+                    k.action(press, insert),
+                    k.action(press, Layers { mode: Some(Mode::Normal), ..insert }),
+                    "{} (`{spec}`) does not mean the same thing in Normal",
+                    b.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_normal_layer_is_dead_while_vim_is_off() {
+        // `mode: None` is what off means, and it is the only representation of
+        // it: there is no flag beside a mode that could disagree with it.
+        let k = Keys::default();
+        assert_eq!(k.action(press("h"), Layers::default()), None);
+        assert_eq!(
+            k.action(press("h"), Layers { mode: Some(Mode::Normal), ..Layers::default() }),
+            Some(Action::MoveCharLeft)
+        );
+    }
+
+    #[test]
+    fn normal_tells_a_capital_from_its_lowercase() {
+        // What the shift-folding change bought, spent: `x` and `X` delete in
+        // two directions, and before it they were one press.
+        let k = Keys::default();
+        let normal = Layers { mode: Some(Mode::Normal), ..Layers::default() };
+        assert_eq!(k.action(press("x"), normal), Some(Action::DeleteCharForward));
+        assert_eq!(k.action(press("X"), normal), Some(Action::DeleteCharBack));
+        assert_eq!(k.action(press("i"), normal), Some(Action::ModeInsert));
+        assert_eq!(k.action(press("I"), normal), Some(Action::ModeInsertLineStart));
+    }
+
+    #[test]
+    fn the_listing_keeps_two_ids_that_share_an_action_apart() {
+        // `move.char.left` and `normal.move.char.left` are one action under
+        // two ids. A listing that found a binding's keys by its action would
+        // print `h, left` against both, and neither could be rebound alone.
+        let lines = Keys::default().listing();
+        let keys_of = |id: &str| {
+            let line = lines
+                .iter()
+                .find(|l| l.starts_with(&format!("{id} ")))
+                .unwrap_or_else(|| panic!("{id} is not listed"));
+            line[id.len()..].trim().to_string()
+        };
+        assert_eq!(keys_of("move.char.left"), "left");
+        assert_eq!(keys_of("normal.move.char.left"), "h");
     }
 
     #[test]
@@ -670,12 +913,16 @@ mod tests {
 
     #[test]
     fn shift_rides_the_character_rather_than_the_modifier() {
-        // Terminals disagree about whether shift+a arrives as Char('A') or as
-        // Char('a') with SHIFT; a table that distinguished them would work on
-        // some and not others.
-        let a = Press::of(KeyCode::Char('A'), KeyModifiers::SHIFT);
-        let b = Press::of(KeyCode::Char('a'), KeyModifiers::NONE);
-        assert_eq!(a, b);
+        // Terminals disagree about whether shift+a arrives as Char('A'),
+        // Char('A') with SHIFT, or Char('a') with SHIFT. All three are one
+        // press and must converge; a table that distinguished them would work
+        // on some terminals and not others.
+        let reports = [
+            Press::of(KeyCode::Char('A'), KeyModifiers::NONE),
+            Press::of(KeyCode::Char('A'), KeyModifiers::SHIFT),
+            Press::of(KeyCode::Char('a'), KeyModifiers::SHIFT),
+        ];
+        assert!(reports.iter().all(|p| *p == reports[0]), "{reports:?}");
         // Ctrl+Shift rides beside Ctrl on the terminals that report it, so
         // ctrl+shift+t can own an action of its own there.
         assert_ne!(press("ctrl+shift+t"), press("ctrl+t"));
@@ -688,6 +935,50 @@ mod tests {
         );
         // Named keys keep it, so shift+enter stays expressible.
         assert_ne!(press("shift+enter"), press("enter"));
+    }
+
+    #[test]
+    fn a_capital_is_a_different_press_from_its_lowercase() {
+        // Shift folds into the character rather than being dropped, which is
+        // what lets a modal keymap give `D` a meaning `d` does not have.
+        assert_ne!(press("D"), press("d"));
+        assert_eq!(
+            press("D"),
+            Press::of(KeyCode::Char('D'), KeyModifiers::NONE)
+        );
+        // Ctrl and Alt still name the unshifted letter: there the terminals
+        // disagree about the character, not about the modifier.
+        assert_eq!(press("ctrl+D"), press("ctrl+d"));
+        // Modifier and key names stay case-insensitive; only bare characters
+        // carry case.
+        assert_eq!(press("Ctrl+Left"), press("ctrl+left"));
+    }
+
+    #[test]
+    fn a_capital_and_its_lowercase_can_hold_two_bindings_at_once() {
+        // The payoff: before shift folded into the character these collided
+        // as one press, and a table wanting both had to give one of them up.
+        let mut o = BTreeMap::new();
+        o.insert("move.line.start".to_string(), vec!["D".to_string()]);
+        o.insert("move.line.end".to_string(), vec!["d".to_string()]);
+        let k = Keys::resolve(&o).unwrap();
+        assert_eq!(
+            k.action(press("D"), Layers::default()),
+            Some(Action::MoveLineStart)
+        );
+        assert_eq!(
+            k.action(press("d"), Layers::default()),
+            Some(Action::MoveLineEnd)
+        );
+    }
+
+    #[test]
+    fn a_capital_survives_the_round_trip_through_the_listing() {
+        // `/keys` prints presses with `show`, and what it prints has to be
+        // what a config can type back in.
+        for spec in ["D", "d", "ctrl+shift+t", "shift+enter", "$", "f5"] {
+            assert_eq!(press(&show(press(spec))), press(spec), "{spec}");
+        }
     }
     #[test]
     fn a_shift_riding_press_falls_back_to_the_bare_key() {

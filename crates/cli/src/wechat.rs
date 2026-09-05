@@ -292,7 +292,7 @@ impl Bridge {
                     let part =
                         if total > 1 { format!(" (piece {}/{total})", i + 1) } else { String::new() };
                     let _ = tx.send(Inbound::Notice(format!(
-                        "wechat send failed{part}: {e:#} — the phone may not have messaged this bot yet"
+                        "wechat send failed{part}: {e:#} — try sending a message from the phone first"
                     )));
                     break;
                 }
@@ -555,7 +555,11 @@ async fn handle_update(
             continue;
         }
         s.peer = Some(msg.from_user_id.clone());
-        s.context_token = msg.context_token.clone();
+        // Keep the last valid token: a tokenless message must not erase it
+        // (the reference stores only when one is present).
+        if let Some(token) = &msg.context_token {
+            s.context_token = Some(token.clone());
+        }
         dirty = true;
         let _ = tx.send(Inbound::Text { text });
     }

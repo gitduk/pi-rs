@@ -141,6 +141,17 @@ impl Editor {
         self.cursor = self.word_end();
     }
 
+    /// Past this word and the space after it, so the caret lands where the
+    /// next word starts. `word_right` stops at the end of this one — the two
+    /// are vim's `w` and `e`, and only the second one existed.
+    pub fn word_next(&mut self) {
+        let tail = &self.text[self.cursor..];
+        let word = tail.len() - tail.trim_start_matches(|c: char| !c.is_whitespace()).len();
+        let rest = &tail[word..];
+        let space = rest.len() - rest.trim_start_matches(char::is_whitespace).len();
+        self.cursor += word + space;
+    }
+
     pub fn kill_word_back(&mut self) {
         let start = self.word_start();
         self.text.replace_range(start..self.cursor, "");

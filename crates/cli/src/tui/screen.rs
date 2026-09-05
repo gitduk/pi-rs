@@ -9,7 +9,6 @@
 
 use std::borrow::Cow;
 use std::io::Stdout;
-use std::iter::Peekable;
 use std::str::Chars;
 
 use crossterm::event::{
@@ -41,7 +40,7 @@ pub fn fit(line: &str, width: usize) -> Vec<String> {
     // A break re-opens the SGR in force, or the rest of a coloured line
     // would come out plain: the style lives at the head of the line.
     let mut sgr = String::new();
-    let mut chars = line.chars().peekable();
+    let mut chars = line.chars();
     while let Some(c) = chars.next() {
         if c == '\x1b' {
             if let Some(params) = eat_escape(&mut chars, &mut piece) {
@@ -103,17 +102,14 @@ pub fn fit(line: &str, width: usize) -> Vec<String> {
 // `[` and `O` are themselves inside the final-byte range, so a scan that
 // started on one would stop on it and leave the parameters to be counted
 // as text.
-fn eat_escape<'a, 'b>(chars: &mut Peekable<Chars<'a>>, out: &'b mut String) -> Option<&'b str> {
+fn eat_escape<'a, 'b>(chars: &mut Chars<'a>, out: &'b mut String) -> Option<&'b str> {
     let at = out.len();
     out.push('\x1b');
-    if let Some(intro @ ('[' | 'O')) = chars.peek().copied() {
-        out.push(intro);
-        chars.next();
-        for c in chars.by_ref() {
-            out.push(c);
-            if crate::render::ends_escape(c) {
-                break;
-            }
+    let mut esc = crate::render::Escape::new();
+    for c in chars.by_ref() {
+        out.push(c);
+        if esc.closed(c) {
+            break;
         }
     }
     out[at..]
@@ -148,8 +144,12 @@ pub fn usable(width: u16) -> usize {
 /// bottom, out of sight below the input. The walk starts from the newest line
 /// and stops as soon as the window is full, so a long history is not wrapped
 /// in full on every frame.
+///
+/// Each line carries the border its wraps repeat, if it has one: a said
+/// line's rule must run down every row it wraps to, or the bar is cut at the
+/// first one. See `wrap`.
 pub fn window<'a>(
-    lines: impl DoubleEndedIterator<Item = Cow<'a, str>>,
+    lines: impl DoubleEndedIterator<Item = (Cow<'a, str>, Option<&'a str>)>,
     width: usize,
     room: usize,
     scroll: usize,
@@ -157,11 +157,11 @@ pub fn window<'a>(
     let want = room + scroll;
     // Newest row first, so the walk can stop without knowing the total.
     let mut back: Vec<String> = Vec::new();
-    for line in lines.rev() {
+    for (line, border) in lines.rev() {
         if back.len() >= want {
             break;
         }
-        back.extend(fit(&line, width).into_iter().rev());
+        back.extend(wrap(border, &line, width).into_iter().rev());
     }
     // Clamp so the window never starts before the first row; when the walk
     // reached the top (back has fewer rows than want), this is the only place
@@ -170,6 +170,29 @@ pub fn window<'a>(
     let mut rows: Vec<String> = back.into_iter().skip(scroll).take(room).collect();
     rows.reverse();
     (rows, scroll)
+}
+
+/// Break a line into pieces that each occupy exactly one terminal row — a
+/// bordered line repeats its border on every piece, so a said line keeps its
+/// rule unbroken down the rows it wraps to instead of cutting it at the first.
+pub fn wrap(border: Option<&str>, line: &str, width: usize) -> Vec<String> {
+    let Some(border) = border else {
+        return fit(line, width);
+    };
+    // The rule needs its columns and the body needs at least one. A frame too
+    // narrow to spare both drops the rule rather than overflowing: a row wider
+    // than `width` wraps again under whatever paints it, and `window` counted
+    // the rows on the promise that none of them would.
+    let spare = width
+        .checked_sub(crate::render::visible_width(border))
+        .filter(|avail| *avail > 0);
+    let Some(avail) = spare else {
+        return fit(line, width);
+    };
+    fit(line, avail)
+        .into_iter()
+        .map(|piece| format!("{border}{piece}"))
+        .collect()
 }
 
 /// The SGR parameters between `\x1b[` and `m`, applied to a style. Invalid
@@ -219,7 +242,7 @@ pub fn parse_sgr(params: &str, mut style: Style) -> Style {
 fn write_piece(piece: &str, x: u16, y: u16, buf: &mut Buffer) {
     let mut style = Style::default();
     let mut col = x;
-    let mut chars = piece.chars().peekable();
+    let mut chars = piece.chars();
     let mut seq = String::new();
     while let Some(c) = chars.next() {
         if c == '\x1b' {
@@ -389,6 +412,27 @@ impl Screen {
         }
     }
 
+    /// Shape the caret to say which mode is up: a block commands, a bar types,
+    /// and `None` — vim off — hands the shape back, so nobody who never asked
+    /// for modal keys ends up with a caret they did not choose. The one part
+    /// of the mode no repaint carries: the caret is the terminal's to draw,
+    /// not ratatui's.
+    ///
+    /// Live terminals only — a test screen has none to shape, and writing to
+    /// stdout there would mark the runner's own caret.
+    pub fn cursor_shape(&mut self, normal: Option<bool>) {
+        if !matches!(self.term, Term::Live(_)) {
+            return;
+        }
+        use crossterm::cursor::SetCursorStyle as Shape;
+        let style = match normal {
+            Some(true) => Shape::SteadyBlock,
+            Some(false) => Shape::SteadyBar,
+            None => Shape::DefaultUserShape,
+        };
+        let _ = crossterm::execute!(std::io::stdout(), style);
+    }
+
     /// Give the terminal back: leave the alternate screen and restore raw.
     /// Nothing to give back when nothing was taken, so a test screen is a
     /// no-op here — it must not disable raw mode on the runner's own terminal.
@@ -402,6 +446,9 @@ impl Screen {
         let _ = crossterm::execute!(
             std::io::stdout(),
             crossterm::cursor::Show,
+            // The caret is the terminal's, not the alternate screen's: a
+            // block left behind would follow the user into their shell.
+            crossterm::cursor::SetCursorStyle::DefaultUserShape,
             LeaveAlternateScreen,
             DisableBracketedPaste,
             DisableMouseCapture
@@ -419,7 +466,7 @@ impl Drop for Screen {
 #[cfg(test)]
 mod tests {
     use super::{Rows, parse_sgr};
-    use super::{fit, window};
+    use super::{fit, window, wrap};
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     use ratatui::style::{Color, Modifier, Style};
@@ -588,7 +635,7 @@ mod tests {
     fn shown(lines: &[&str], width: usize, room: usize, scroll: usize) -> Vec<String> {
         let owned: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
         let (rows, _) = window(
-            owned.iter().map(|s| Cow::Borrowed(s.as_str())),
+            owned.iter().map(|s| (Cow::Borrowed(s.as_str()), None)),
             width,
             room,
             scroll,
@@ -622,9 +669,77 @@ mod tests {
     #[test]
     fn scrolling_stops_at_the_oldest_row() {
         let owned: Vec<String> = ["a", "b", "c"].iter().map(|l| l.to_string()).collect();
-        let (rows, scroll) = window(owned.iter().map(|s| Cow::Borrowed(s.as_str())), 10, 2, 99);
+        let (rows, scroll) = window(
+            owned.iter().map(|s| (Cow::Borrowed(s.as_str()), None)),
+            10,
+            2,
+            99,
+        );
         assert_eq!(rows, vec!["a", "b"]);
         assert_eq!(scroll, 1, "clamped, so one press down comes back");
+    }
+
+    /// A bordered line repeats its border on every row it wraps to, so a said
+    /// line keeps its rule unbroken instead of cutting it at the first wrap.
+    #[test]
+    fn a_bordered_line_repeats_its_border_on_every_wrapped_row() {
+        // `fit` closes each cut piece with a reset; the border rides on top.
+        assert_eq!(
+            wrap(Some("▌ "), "abcdef", 4),
+            ["▌ ab\x1b[0m", "▌ cd\x1b[0m", "▌ ef"]
+        );
+        // A painted border spends its escape bytes, not its columns.
+        assert_eq!(
+            wrap(Some("\x1b[38;2;0;255;255m▌\x1b[0m "), "abcdef", 4),
+            [
+                "\x1b[38;2;0;255;255m▌\x1b[0m ab\x1b[0m",
+                "\x1b[38;2;0;255;255m▌\x1b[0m cd\x1b[0m",
+                "\x1b[38;2;0;255;255m▌\x1b[0m ef"
+            ]
+        );
+    }
+
+    /// The three escape scanners — `fit` here, `clip` and `visible_width` in
+    /// `render` — each need something different out of a sequence, so they
+    /// stay three functions. Nothing structural makes them agree on where one
+    /// ends, which is what this is for.
+    #[test]
+    fn the_escape_scanners_agree_on_where_a_sequence_ends() {
+        for s in [
+            "\u{1b}7ab",              // two-byte: ESC and a final byte
+            "\u{1b}(Bab",             // an intermediate byte before the final one
+            "\u{1b}[1mab\u{1b}[0m",    // the ordinary SGR shape
+            "\u{1b}[38;5;9mab",
+            "\u{1b}]0;title\u{7}ab",   // a control string closed by BEL
+            "\u{1b}]0;title\u{1b}\\ab", // and one closed by ST
+        ] {
+            let width = crate::render::visible_width(s);
+            assert_eq!(width, 2, "visible_width disagrees on {s:?}");
+            assert_eq!(crate::render::clip(s, width), s, "clip disagrees on {s:?}");
+            assert_eq!(fit(s, width).len(), 1, "fit disagrees on {s:?}");
+        }
+    }
+
+    /// A bordered line that fits gets one row, its border and all.
+    #[test]
+    fn a_bordered_line_that_fits_stays_one_row() {
+        assert_eq!(wrap(Some("▌ "), "abc", 6), ["▌ abc"]);
+    }
+
+    /// Every row `wrap` returns fits the width it was given — the promise
+    /// `window` counts rows on. A frame with no room for the rule and a column
+    /// of text both gives up the rule, not the promise.
+    #[test]
+    fn a_frame_too_narrow_for_the_rule_drops_it_rather_than_overflowing() {
+        for width in 1..=4 {
+            for row in wrap(Some("▌ "), "abcdef", width) {
+                assert!(
+                    crate::render::visible_width(&row) <= width,
+                    "{row:?} is wider than {width}"
+                );
+            }
+        }
+        assert_eq!(wrap(Some("▌ "), "ab", 2), ["ab"], "the text keeps the frame");
     }
 
     #[test]

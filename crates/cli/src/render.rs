@@ -9,33 +9,116 @@ use serde::de::{Error as _, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 const RESET: &str = "\x1b[0m";
 
-/// Whether `c` is the final byte of an escape sequence, per ECMA-48. The
-/// introducer (`[`, `O`) is in this range too, so callers consume it first.
-pub fn ends_escape(c: char) -> bool {
-    ('\x40'..='\x7e').contains(&c)
+/// Where an escape sequence ends.
+///
+/// The three scanners over painted text — `visible` and `clip` here, `fit` in
+/// `screen` — differ in what they do with the characters (count their columns,
+/// copy them, drop them) but not in where the sequence stops. This decides
+/// that for all three. Each used to decide it alone, and they disagreed.
+pub struct Escape {
+    /// What shape it is, once the first character has said. `None` until then.
+    kind: Option<Kind>,
+    /// Inside a control string: the last character was `\x1b`, so a `\` now
+    /// closes it.
+    st: bool,
 }
 
-/// The visible text of a painted string, for tests that assert on layout
-/// rather than colour. Mirrors what `clip` skips.
-#[cfg(test)]
-pub fn strip_ansi(s: &str) -> String {
-    let mut out = String::new();
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c != '\x1b' {
-            out.push(c);
-            continue;
-        }
-        if let Some('[' | 'O') = chars.clone().next() {
-            chars.next();
-        }
-        for c in chars.by_ref() {
-            if ends_escape(c) {
-                break;
+enum Kind {
+    /// `ESC [`, `ESC O` — parameters and intermediates, then a byte in
+    /// 0x40-0x7e.
+    Control,
+    /// `ESC P`, `ESC X`, `ESC ]`, `ESC ^`, `ESC _` — DCS, SOS, OSC, PM, APC.
+    /// Arbitrary text closed by BEL or by ST (`ESC \`), not by any byte
+    /// range: an OSC setting the window title carries a `;` and the title,
+    /// and a scanner reading it as a control sequence stops on the first
+    /// letter and draws the rest of the title.
+    Str,
+    /// A bare `ESC` with an intermediate byte, ending on a byte in 0x30-0x7e
+    /// — wider than a control sequence's, which is where `ESC 7` lives.
+    Bare,
+    /// Over already: the first character was itself the final byte. `ESC 7`
+    /// saves the cursor and `ESC 8` restores it — what `less`, `vim` and
+    /// every progress bar emit most — and 0x37 is outside a control
+    /// sequence's range, so reading one as a control sequence leaves it
+    /// looking unfinished and eats the character after it.
+    Done,
+}
+
+impl Escape {
+    /// The state directly after an `\x1b`. Feed it every character that
+    /// follows; it answers true on the one that closes the sequence.
+    pub fn new() -> Self {
+        Self { kind: None, st: false }
+    }
+
+    pub fn closed(&mut self, c: char) -> bool {
+        let Some(kind) = &self.kind else {
+            // The first character decides the shape, and for a two-byte
+            // sequence it is also the last. `[` and `O` are final bytes by
+            // the range test too, so they are matched before it.
+            let kind = match c {
+                '[' | 'O' => Kind::Control,
+                'P' | 'X' | ']' | '^' | '_' => Kind::Str,
+                c if ('\x30'..='\x7e').contains(&c) => Kind::Done,
+                _ => Kind::Bare,
+            };
+            let done = matches!(kind, Kind::Done);
+            self.kind = Some(kind);
+            return done;
+        };
+        match kind {
+            Kind::Done => true,
+            Kind::Control => ('\x40'..='\x7e').contains(&c),
+            Kind::Bare => ('\x30'..='\x7e').contains(&c),
+            Kind::Str => {
+                let closed = c == '\x07' || (self.st && c == '\\');
+                self.st = c == '\x1b';
+                closed
             }
         }
     }
-    out
+}
+
+impl Default for Escape {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The characters a terminal actually shows, escapes stepped over: they cost
+/// a dozen bytes and zero columns, so anything measuring or reproducing what
+/// is on screen has to skip them the same way.
+fn visible(s: &str) -> impl Iterator<Item = char> + '_ {
+    let mut chars = s.chars();
+    std::iter::from_fn(move || {
+        loop {
+            let c = chars.next()?;
+            if c != '\x1b' {
+                return Some(c);
+            }
+            let mut esc = Escape::new();
+            for c in chars.by_ref() {
+                if esc.closed(c) {
+                    break;
+                }
+            }
+        }
+    })
+}
+
+/// The columns a painted string occupies, which is what a layout has to
+/// budget for — not its byte or character count.
+pub fn visible_width(s: &str) -> usize {
+    visible(s)
+        .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0))
+        .sum()
+}
+
+/// The visible text of a painted string, for tests that assert on layout
+/// rather than colour.
+#[cfg(test)]
+pub fn strip_ansi(s: &str) -> String {
+    visible(s).collect()
 }
 
 /// One text attribute: bold, dim, italic — whatever SGR can set besides colour.
@@ -404,6 +487,15 @@ pub struct Prompt {
     pub color: Style,
     #[serde(default = "default_icon")]
     pub icon: String,
+    /// What the gutter shows while vim keys are in Normal. Different enough
+    /// from `icon` to be read at a glance: the mode is the one thing on
+    /// screen that changes what every other key does.
+    #[serde(default = "default_normal_icon")]
+    pub normal: String,
+}
+
+fn default_normal_icon() -> String {
+    "\u{00b7}".to_string()
 }
 
 impl Default for Prompt {
@@ -411,6 +503,7 @@ impl Default for Prompt {
         Self {
             color: default_prompt_color(),
             icon: default_icon(),
+            normal: default_normal_icon(),
         }
     }
 }
@@ -997,36 +1090,18 @@ pub fn clip(s: &str, max: usize) -> String {
     let mut used = 0;
     // An escape is stepped over, not counted: it is a dozen printable
     // characters and zero columns. A cut inside one's reach closes the style.
-    // `Intro` is the byte after `\x1b`, which `ends_escape` would otherwise
-    // stop on — the same order `screen::eat_escape` scans in.
-    enum Esc {
-        No,
-        Intro,
-        Body,
-    }
-    let mut esc = Esc::No;
+    let mut esc: Option<Escape> = None;
     let mut styled = false;
     for (i, c) in one.char_indices() {
-        match esc {
-            Esc::Intro => {
-                esc = match c {
-                    '[' | 'O' => Esc::Body,
-                    c if ends_escape(c) => Esc::No,
-                    _ => Esc::Body,
-                };
-                continue;
+        if let Some(open) = &mut esc {
+            if open.closed(c) {
+                esc = None;
             }
-            Esc::Body => {
-                if ends_escape(c) {
-                    esc = Esc::No;
-                }
-                continue;
-            }
-            Esc::No if c == '\x1b' => {
-                (esc, styled) = (Esc::Intro, true);
-                continue;
-            }
-            Esc::No => {}
+            continue;
+        }
+        if c == '\x1b' {
+            (esc, styled) = (Some(Escape::new()), true);
+            continue;
         }
         used += unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
         if used > max {
@@ -1075,6 +1150,40 @@ pub fn summarize(args: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Every shape of escape prints nothing and costs no columns. Each line
+    /// is one the old per-scanner range tests got wrong: a bare `ESC 7` ends
+    /// outside a control sequence's byte range, and a control string ends on
+    /// a terminator rather than on any range at all.
+    #[test]
+    fn every_shape_of_escape_costs_no_columns() {
+        for (s, text) in [
+            ("\u{1b}cab", "ab"),                 // two-byte, final by either range
+            ("\u{1b}7ab", "ab"),                 // save cursor: 0x37, the wider range
+            ("\u{1b}8ab", "ab"),                 // restore cursor
+            ("\u{1b}(Bab", "ab"),                // intermediate 0x28, then final 0x42
+            ("\u{1b}[1mab\u{1b}[0m", "ab"),      // the ordinary SGR shape
+            ("\u{1b}]0;title\u{7}ab", "ab"),     // OSC closed by BEL
+            ("\u{1b}]0;title\u{1b}\\ab", "ab"),  // OSC closed by ST
+            ("\u{1b}Pq~~\u{1b}\\ab", "ab"),      // DCS, same terminator
+        ] {
+            assert_eq!(super::visible_width(s), 2, "{s:?}");
+            assert_eq!(super::strip_ansi(s), text, "{s:?}");
+        }
+    }
+
+    /// Columns, not characters and not bytes — the same measure `clip` and
+    /// `fit` take, so a border's column can be spared from a body's width.
+    #[test]
+    fn visible_width_counts_columns() {
+        assert_eq!(super::visible_width("\u{1b}[38;2;0;255;255m\u{258c}\u{1b}[0m "), 2);
+        assert_eq!(super::visible_width("\u{4e2d}\u{6587}"), 4);
+        assert_eq!(super::visible_width(""), 0);
+        // An escape cut off by the end of the string ends the walk rather
+        // than looping on it.
+        assert_eq!(super::visible_width("ab\u{1b}"), 2);
+        assert_eq!(super::visible_width("ab\u{1b}["), 2);
+    }
+
     /// `clip` measures columns. An escape prints nothing, so counting its
     /// bytes cut a painted row to a fraction of the width asked for — the
     /// lane bar lost most of its lanes to a cyan prompt colour.

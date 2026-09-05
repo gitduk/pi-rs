@@ -1459,7 +1459,9 @@ impl Repl {
         }
 
         // Already open: going back to a tree is going back to the lane that
-        // holds it, transcript, screen and all. Nothing is rebuilt.
+        // holds it, transcript, screen and all. Nothing is rebuilt, and its
+        // banner is already on its screen — a switch back says where, not
+        // what the tree is again.
         if let Some(i) = self
             .lanes
             .iter()
@@ -1467,10 +1469,7 @@ impl Repl {
         {
             self.current = i;
             self.in_force();
-            said.push(format!("back in {}", self.lane().id));
-            // Handled, not a swap: the lane's screen is parked as it was left,
-            // and rebuilding it from the transcript would throw that away.
-            return Ok(Step::Handled(said));
+            return Ok(lines(format!("back in {}", tree.name)));
         }
 
         said.extend(self.open_lane(ws, (!tree.main).then(|| tree.name.clone()))?);
