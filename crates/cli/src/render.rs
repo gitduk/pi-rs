@@ -495,7 +495,7 @@ pub struct Prompt {
 }
 
 fn default_normal_icon() -> String {
-    "\u{00b7}".to_string()
+    "\u{2502}".to_string()
 }
 
 impl Default for Prompt {
