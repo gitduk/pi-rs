@@ -22,11 +22,12 @@ globset.workspace = true
 grep-matcher.workspace = true
 grep-regex.workspace = true
 grep-searcher.workspace = true
+reqwest.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util"] }
 tempfile = "3"
 filetime = "0.2"

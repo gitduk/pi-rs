@@ -116,7 +116,7 @@ impl Workspace {
 
         let resolved =
             real_until_missing(&target).ok_or_else(|| ToolError::Escape(input.into()))?;
-        if tier != Tier::Read && !self.allows(&resolved) {
+        if tier.fenced() && !self.allows(&resolved) {
             return Err(ToolError::Escape(input.into()));
         }
         Ok(resolved)

@@ -33,6 +33,7 @@ impl Registry {
             .with(crate::grep::Grep)
             .with(crate::glob::Glob)
             .with(crate::bash::Bash)
+            .with(crate::fetch::Fetch::default())
     }
 
     pub fn with(mut self, tool: impl Tool + 'static) -> Self {

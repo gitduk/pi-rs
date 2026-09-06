@@ -169,6 +169,7 @@ mod tests {
 
         assert!(got.contains("tier=\"read\""), "spelled as the flag is: {got}");
         assert!(env(tools::Tier::Exec).contains("tier=\"exec\""));
+        assert!(env(tools::Tier::Net).contains("tier=\"net\""));
     }
 
     #[test]

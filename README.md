@@ -92,6 +92,7 @@ pi "fix the flaky test"        # one-shot
 echo "..." | pi                # prompt on stdin
 pi -c                          # continue the last session here
 pi -C ~/some-repo --tier read  # elsewhere, read-only
+pi --tier net                  # read the tree and the web, write and run nothing
 ```
 
 Interactive is the default at a terminal. Everything is printed to stderr
@@ -299,11 +300,17 @@ and refusing it to catch a typo is the worse trade.
 
 ## What it does
 
-**Tools.** `read` `write` `edit` `glob` `grep` `bash` `skill` `task`.
-Each declares a tier — read, write or exec — and `--tier` caps the run. Every
-path is resolved against the workspace root through the deepest existing
-ancestor, so a symlink cannot walk out. `bash` gets its own process group and a
-SIGTERM-then-SIGKILL timeout.
+**Tools.** `read` `write` `edit` `glob` `grep` `bash` `fetch` `skill` `task`.
+Each declares a tier and `--tier` caps the run. `read`, `write` and `exec` are a
+ladder, each reaching further into this machine than the last; `net` sits beside
+them rather than above, because the outside world is a different direction —
+`--tier net` reads the tree and the web, writing nothing and running nothing,
+while `--tier exec` covers `net` anyway, since `sh` can `curl`. A request is
+still a request: nothing filters the address, so `fetch` reaches a host on your
+own network as readily as one on the internet. Every path is resolved
+against the workspace root through the deepest existing ancestor, so a symlink
+cannot walk out. `bash` gets its own process group and a SIGTERM-then-SIGKILL
+timeout; `fetch` speaks http and https only, and answers with text.
 
 **Edits** are line-anchored patches with content-hash anchors, applied against
 original line numbers so an earlier hunk never shifts a later one. A stale

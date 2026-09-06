@@ -446,7 +446,7 @@ impl Config {
             flags.tier.or(self.tier)
         }
         .unwrap_or(TierArg::Exec)
-        .min(project.max_tier.unwrap_or(TierArg::Exec));
+        .capped_by(project.max_tier.unwrap_or(TierArg::Exec));
         Settled { effort, tier }
     }
 
@@ -1060,6 +1060,25 @@ output_per_mtok = 0
         assert_eq!(
             c.settle(&up, Flags::default(), &BTreeMap::new()).tier,
             TierArg::Write
+        );
+    }
+
+    /// `max_tier` is a ceiling, and two ceilings with no order between them
+    /// leave only what they share. A checkout that declared itself read-only
+    /// plus the web does not thereby hand a `--tier write` run the web.
+    #[test]
+    fn a_ceiling_beside_the_tier_rather_than_above_it_leaves_read() {
+        let c: Config = parse("tier = \"write\"\n").unwrap();
+        let net = parse_project("max_tier = \"net\"\n").unwrap();
+        assert_eq!(
+            c.settle(&net, Flags::default(), &BTreeMap::new()).tier,
+            TierArg::Read
+        );
+
+        let c: Config = parse("tier = \"net\"\n").unwrap();
+        assert_eq!(
+            c.settle(&net, Flags::default(), &BTreeMap::new()).tier,
+            TierArg::Net
         );
     }
 

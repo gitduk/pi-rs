@@ -26,6 +26,7 @@ where
 pub mod bash;
 pub mod blocks;
 pub mod edit;
+pub mod fetch;
 pub mod glob;
 pub mod grep;
 mod parses;
@@ -45,11 +46,136 @@ pub mod state;
 
 /// What a call is permitted to touch. The approval gate reads this; it is a
 /// static classification, not a guess about any particular argument.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+///
+/// Not a ladder, which is why there is no `Ord`. `Read`, `Write` and `Exec`
+/// are one — each reaches further into this machine than the last — but `Net`
+/// sits beside them: the outside world is a different direction, and a run
+/// that may read the tree and search the web while changing nothing here is a
+/// shape no single line can name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier {
     Read,
     Write,
     Exec,
+    Net,
+}
+
+impl Tier {
+    /// Whether a run capped at `ceiling` may make a call of this tier.
+    ///
+    /// `Exec` covers `Net` because `sh` can `curl`. Refusing the fetch tool to
+    /// a run that may spawn a shell would deny nothing and teach the model to
+    /// route around the tool that reports its failures.
+    pub fn under(self, ceiling: Tier) -> bool {
+        match (ceiling, self) {
+            (Tier::Exec, _) => true,
+            (Tier::Write, t) => matches!(t, Tier::Read | Tier::Write),
+            (Tier::Net, t) => matches!(t, Tier::Read | Tier::Net),
+            (Tier::Read, t) => matches!(t, Tier::Read),
+        }
+    }
+
+    /// Whether a path this tier resolves is held inside the workspace. Reading
+    /// may name anything on the machine; changing it and running in it may not.
+    ///
+    /// A `match` rather than `!= Read`, which is what it came from: the two
+    /// agree today, and the match is what makes a tier added later fail to
+    /// compile until someone has decided which side it belongs on.
+    pub fn fenced(self) -> bool {
+        match self {
+            Tier::Read => false,
+            Tier::Write | Tier::Exec => true,
+            // Never asked — nothing at this tier opens a path. If that ever
+            // changes, inside the workspace is the answer to start from.
+            Tier::Net => true,
+        }
+    }
+
+    /// The most both ceilings allow — what `min` gave while this was a total
+    /// order. `Write` and `Net` have no order between them, so what survives
+    /// both of those is `Read`. `the_cap_is_the_most_both_ceilings_allow`
+    /// states the property this has to keep.
+    pub fn capped_by(self, other: Tier) -> Tier {
+        if self.under(other) {
+            self
+        } else if other.under(self) {
+            other
+        } else {
+            Tier::Read
+        }
+    }
+}
+
+#[cfg(test)]
+mod tier_tests {
+    use super::Tier::{self, Exec, Net, Read, Write};
+
+    /// Every tier, for the tests that have to try them all.
+    const ALL: [Tier; 4] = [Read, Write, Exec, Net];
+
+    /// `ALL` cannot be checked against the enum by the compiler, but this can:
+    /// a fifth variant makes this match non-exhaustive, and whoever adds it
+    /// has to come here — where `ALL` is one line up — to say so.
+    fn _every_tier_is_in_all(t: Tier) {
+        match t {
+            Read | Write | Exec | Net => assert!(ALL.contains(&t)),
+        }
+    }
+
+    /// The shape of the thing, stated once: what each ceiling reaches.
+    #[test]
+    fn a_ceiling_reaches_what_it_says_and_nothing_further() {
+        let reach = |c: Tier| ALL.into_iter().filter(|t| t.under(c)).collect::<Vec<_>>();
+        assert_eq!(reach(Read), vec![Read]);
+        assert_eq!(reach(Write), vec![Read, Write]);
+        assert_eq!(reach(Net), vec![Read, Net]);
+        assert_eq!(reach(Exec), vec![Read, Write, Exec, Net]);
+    }
+
+    /// The whole reason `Net` is a tier and not a rung: a run may reach the
+    /// web without gaining the right to change anything here, and a run that
+    /// may only read the tree does not silently gain the web.
+    #[test]
+    fn net_and_write_are_beside_each_other_not_in_order() {
+        assert!(!Net.under(Write));
+        assert!(!Write.under(Net));
+        assert!(!Net.under(Read));
+        // Exec is the exception, and deliberately: `sh` can `curl`, so
+        // refusing the fetch tool there would deny nothing.
+        assert!(Net.under(Exec));
+    }
+
+    /// The property `capped_by` has to keep, whatever tiers exist: the cap is
+    /// under both ceilings, and nothing under both reaches past it. A fifth
+    /// tier whose pairwise meet is not itself a tier fails here rather than
+    /// silently taking the `Read` branch.
+    #[test]
+    fn the_cap_is_the_most_both_ceilings_allow() {
+        for a in ALL {
+            for b in ALL {
+                let cap = a.capped_by(b);
+                assert!(cap.under(a) && cap.under(b), "{a:?} + {b:?} gave {cap:?}");
+                for t in ALL.iter().filter(|t| t.under(a) && t.under(b)) {
+                    assert!(t.under(cap), "{t:?} is under {a:?} and {b:?}, not {cap:?}");
+                }
+            }
+        }
+    }
+
+    /// What `min` did while this was a total order. Two ceilings with no
+    /// order between them leave only what they share.
+    #[test]
+    fn a_project_ceiling_applies_downward() {
+        assert_eq!(Exec.capped_by(Read), Read);
+        assert_eq!(Exec.capped_by(Net), Net);
+        assert_eq!(Read.capped_by(Exec), Read);
+        assert_eq!(Net.capped_by(Write), Read);
+        assert_eq!(Write.capped_by(Net), Read);
+        for t in ALL {
+            assert_eq!(t.capped_by(t), t);
+            assert_eq!(t.capped_by(Exec), t, "exec caps nothing");
+        }
+    }
 }
 
 /// How a call schedules against the other calls in the same turn.

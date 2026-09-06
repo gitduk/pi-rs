@@ -57,23 +57,45 @@ impl FormatArg {
 
 /// Ordered, so a project file can lower the ceiling without being able to
 /// raise it.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    ValueEnum,
-    serde::Deserialize,
-    serde::Serialize,
-)]
+/// `tools::Tier` as the command line and the config files spell it. Not
+/// ordered, because the tiers are not: see `tools::Tier`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TierArg {
     Read,
     Write,
     Exec,
+    Net,
+}
+
+impl From<TierArg> for tools::Tier {
+    fn from(arg: TierArg) -> Self {
+        match arg {
+            TierArg::Read => tools::Tier::Read,
+            TierArg::Write => tools::Tier::Write,
+            TierArg::Exec => tools::Tier::Exec,
+            TierArg::Net => tools::Tier::Net,
+        }
+    }
+}
+
+impl From<tools::Tier> for TierArg {
+    fn from(tier: tools::Tier) -> Self {
+        match tier {
+            tools::Tier::Read => TierArg::Read,
+            tools::Tier::Write => TierArg::Write,
+            tools::Tier::Exec => TierArg::Exec,
+            tools::Tier::Net => TierArg::Net,
+        }
+    }
+}
+
+impl TierArg {
+    /// A project ceiling applied downward. `tools::Tier` owns the rule, which
+    /// is not `min`: `write` and `net` have no order between them.
+    pub fn capped_by(self, other: Self) -> Self {
+        tools::Tier::from(self).capped_by(other.into()).into()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, ValueEnum, serde::Deserialize, serde::Serialize)]
@@ -130,7 +152,9 @@ pub struct Args {
     #[arg(short = 'C', long, default_value = ".")]
     cwd: String,
 
-    /// Highest tool tier this run may use. Defaults to exec.
+    /// What this run may reach. read, write and exec each reach further
+    /// into this machine; net reaches the web and nothing else. Defaults to
+    /// exec, which covers net.
     #[arg(long, value_enum)]
     tier: Option<TierArg>,
 
@@ -389,11 +413,7 @@ pub fn resolve(
         },
         claimed,
     );
-    let tier = match settled.tier {
-        TierArg::Read => tools::Tier::Read,
-        TierArg::Write => tools::Tier::Write,
-        TierArg::Exec => tools::Tier::Exec,
-    };
+    let tier = tools::Tier::from(settled.tier);
     let effort = match settled.effort {
         EffortArg::Off => Effort::Off,
         EffortArg::Low => Effort::Low,
