@@ -138,7 +138,20 @@ pub async fn run(
     #[cfg(unix)]
     cmd.process_group(0);
 
-    let child = cmd.spawn()?;
+    // A working directory that has gone — a removed worktree, a deleted
+    // checkout — fails here as a bare ENOENT, which reads exactly like a
+    // missing command. Nothing else says the ground went, so the model retries.
+    let child = cmd.spawn().map_err(|e| {
+        if cwd.is_dir() {
+            ToolError::from(e)
+        } else {
+            ToolError::Invalid(format!(
+                "the working directory is gone: {}. Nothing will run here \
+                 until it is back or the run moves elsewhere.",
+                cwd.display()
+            ))
+        }
+    })?;
     // wait_with_output consumes the child, so the group id is taken first.
     let group = child.id();
 

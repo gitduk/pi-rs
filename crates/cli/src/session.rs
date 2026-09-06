@@ -117,6 +117,17 @@ impl Stored {
     }
 }
 
+/// A session whose workspace is gone is unreachable, but a path can be absent
+/// for a morning as well as for good. Nothing younger than this is swept, so
+/// an unmounted disk costs a delay and never a transcript.
+const UNREACHED_KEEP: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 60 * 60);
+
+/// Just enough of an archive to say which tree it belongs to.
+#[derive(Deserialize)]
+struct Belongs {
+    workspace: String,
+}
+
 /// Where transcripts live. Held as a value rather than read from the
 /// environment at each call, so tests need no global state to isolate.
 #[derive(Debug, Clone)]
@@ -292,6 +303,64 @@ impl Store {
         found
     }
 
+    /// Sweep buckets nobody can reach. `/resume` lists one workspace's
+    /// sessions, so a workspace that is gone has taken the only way back to
+    /// them with it — a removed worktree, a deleted checkout.
+    ///
+    /// Reachability alone would not be safe: a path is also absent when a disk
+    /// is not mounted this morning, and that must not cost a transcript. Age is
+    /// what separates the two, so nothing recent goes whatever the path says.
+    pub fn prune(&self) {
+        self.prune_older_than(UNREACHED_KEEP);
+    }
+
+    /// The same, against a stated age rather than the constant — a test that
+    /// waits a month is not a test.
+    fn prune_older_than(&self, keep: std::time::Duration) {
+        let Ok(dirs) = std::fs::read_dir(&self.root) else {
+            return;
+        };
+        let now = std::time::SystemTime::now();
+        for dir in dirs.flatten() {
+            let bucket = dir.path();
+            if !bucket.is_dir() {
+                continue;
+            }
+            let files: Vec<_> = match std::fs::read_dir(&bucket) {
+                Ok(entries) => entries
+                    .flatten()
+                    .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+                    .collect(),
+                Err(_) => continue,
+            };
+            // A bucket with nothing in it belongs to nobody, whatever it held.
+            if files.is_empty() {
+                let _ = std::fs::remove_dir(&bucket);
+                continue;
+            }
+            let recent = files.iter().any(|f| {
+                f.metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| now.duration_since(t).ok())
+                    .is_none_or(|age| age < keep)
+            });
+            if recent {
+                continue;
+            }
+            // One file answers for the bucket: they are grouped by the very
+            // path being asked about.
+            let gone = files.iter().find_map(|f| {
+                let text = std::fs::read_to_string(f.path()).ok()?;
+                let belongs: Belongs = serde_json::from_str(&text).ok()?;
+                Some(!Path::new(&belongs.workspace).is_dir())
+            });
+            if gone == Some(true) {
+                let _ = std::fs::remove_dir_all(&bucket);
+            }
+        }
+    }
+
     /// Every session `/resume` can name for this workspace, newest first,
     /// reduced to what the list and its completion show: the id it is named
     /// by and its first prompt.
@@ -369,6 +438,36 @@ mod tests {
 
     fn results() -> Message {
         Message::tool_results(vec![brain::message::ToolResult::text("c1", "read", "body")])
+    }
+
+    /// Unreachability is not enough on its own: a checkout that is merely
+    /// unmounted looks exactly like one that was removed, and only the second
+    /// is a reason to drop a transcript. Age is what tells them apart.
+    #[test]
+    fn a_bucket_goes_when_its_tree_is_gone_and_not_before() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::new(tmp.path());
+        let log = log_with(vec![Message::user("hi")]);
+        // Outside the store's own root: a workspace under it would read as one
+        // more bucket, and an empty one at that.
+        let live = tempfile::tempdir().unwrap();
+
+        let save = |id: &str, at: &std::path::Path| {
+            store.save(id, at, "test-model", None, 7, &log).unwrap();
+        };
+        save("live", live.path());
+        save("gone", std::path::Path::new("/no/such/checkout"));
+
+        // Young enough that the path is not yet evidence of anything.
+        store.prune_older_than(std::time::Duration::from_secs(3600));
+        assert!(store.load("gone").is_ok(), "an hour is not a removed tree");
+
+        store.prune_older_than(std::time::Duration::ZERO);
+        assert!(store.load("live").is_ok(), "the tree is still there");
+        assert!(
+            store.load("gone").is_err(),
+            "nothing can reach a bucket whose tree went"
+        );
     }
 
     #[test]

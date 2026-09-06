@@ -468,6 +468,13 @@ async fn main() -> Result<()> {
     let project = config::load_project(workspace.root())?;
 
     let store = session::Store::default();
+    // Off the startup path, like the journal's own sweep: it stats every
+    // bucket and almost never has anything to take. A run that exits first
+    // loses nothing — the next one sweeps.
+    tokio::task::spawn_blocking({
+        let store = store.clone();
+        move || store.prune()
+    });
     let prior = match (&args.resume, args.continue_last) {
         (Some(id), _) => Some(store.load(id)?),
         (None, true) => Some(store.latest(workspace.root())?),

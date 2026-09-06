@@ -2124,8 +2124,31 @@ fn scratch_file(text: &str) -> std::io::Result<std::path::PathBuf> {
     Ok(path)
 }
 
-fn history_path() -> Option<std::path::PathBuf> {
-    tools::state::dir().map(|d| d.join("history"))
+/// Recall is keyed by workspace, like the transcripts and the completion
+/// lists. One file for the whole machine put another project's lines under
+/// `k` in this one, which is a leak as well as a nuisance.
+fn history_path(workspace: &std::path::Path) -> Option<std::path::PathBuf> {
+    tools::state::dir().map(|d| d.join("history").join(tools::state::key_of(workspace)))
+}
+
+/// What this run recalls in `workspace`, or nothing.
+fn history_of(workspace: &std::path::Path) -> Vec<String> {
+    history_path(workspace)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|prior| editor::decode(&prior))
+        .unwrap_or_default()
+}
+
+/// The single file every workspace used to share. Its contents are the bug
+/// itself — every project's lines in one list — so there is nothing in it to
+/// carry into the buckets that replace it, and it stands where their directory
+/// has to go.
+fn drop_shared_history() {
+    if let Some(old) = tools::state::dir().map(|d| d.join("history"))
+        && old.is_file()
+    {
+        let _ = std::fs::remove_file(old);
+    }
 }
 
 // Enough to recall from without the file growing without bound.
@@ -2156,8 +2179,10 @@ impl Tui {
         let mut opening = View::opening(&context, &ui.paint);
         opening.model = core.lane().agent.spec.model.clone();
         core.lane_mut().view = opening;
-        if let Some(prior) = history_path().and_then(|p| std::fs::read_to_string(p).ok()) {
-            ui.editor.seed_history(editor::decode(&prior));
+        drop_shared_history();
+        {
+            let lines = history_of(core.lane().ctx.workspace.root());
+            ui.editor.seed_history(lines);
         }
         // A resumed session shows its transcript from the start: the whole
         // screen is rebuildable now, so there is no reason to hide it.
@@ -2206,7 +2231,9 @@ impl Tui {
 
     /// Best effort: losing a recall list is not worth a message on the way out.
     fn save_history(&self) {
-        let Some(path) = history_path() else { return };
+        let Some(path) = history_path(self.core.lane().ctx.workspace.root()) else {
+            return;
+        };
         let all = self.ui.editor.history();
         let keep = &all[all.len().saturating_sub(HISTORY_KEEP)..];
         if let Some(dir) = path.parent() {
@@ -2238,6 +2265,11 @@ impl Tui {
         }
         self.ui.leave_lane();
         self.ui.lists.at(self.core.lane().ctx.workspace.root());
+        // Recall follows the checkout for the same reason the lists do. The
+        // line just typed is already filed: `save_history` runs per line, and
+        // ran while this lane was still the one in front.
+        let lines = history_of(self.core.lane().ctx.workspace.root());
+        self.ui.editor.seed_history(lines);
         // A lane opened later has no banner yet, and the files it stands on
         // are its own.
         if !self.core.lane().view.drawn {
@@ -3993,6 +4025,52 @@ mod tests {
             current: 0,
         };
         super::Tui::on_test_screen(core, keys)
+    }
+
+    /// Recall belongs to the checkout, like the transcripts and the completion
+    /// lists. One file for the whole machine put the lines typed in one project
+    /// under `k` in another — a leak as much as a nuisance.
+    #[tokio::test]
+    async fn recall_follows_the_checkout() {
+        let home = tempfile::tempdir().expect("a pi home");
+        let prior = std::env::var_os("PI_HOME");
+        // SAFETY: the value is read on this thread, and put back below before
+        // anything can fail.
+        unsafe { std::env::set_var("PI_HOME", home.path()) };
+
+        let first = tempfile::tempdir().expect("a checkout");
+        let second = tempfile::tempdir().expect("another checkout");
+        let file = |ws: &std::path::Path, line: &str| {
+            let path = super::history_path(ws).expect("a bucket");
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("the bucket");
+            std::fs::write(path, super::editor::encode(&[line.to_string()])).expect("written");
+        };
+        file(first.path(), "what the first was asked");
+        file(second.path(), "what the second was asked");
+
+        let mut tui = surface(first.path());
+        // `on_test_screen` skips the startup seed `Tui::new` does, so stand in
+        // for it. What is under test is that a switch replaces this, and that
+        // it does not read the bucket of the checkout being left.
+        tui.ui.editor.seed_history(vec!["what the first was asked".to_string()]);
+        tui.core.lanes.push(running_lane(second.path()));
+        tui.core.current = 1;
+        tui.reconcile(0);
+        let landed = tui.ui.editor.history().to_vec();
+
+        // Before the assertions: a failure must not leave the variable set for
+        // whatever else is running beside this test.
+        match prior {
+            Some(v) => unsafe { std::env::set_var("PI_HOME", v) },
+            None => unsafe { std::env::remove_var("PI_HOME") },
+        }
+
+        assert_eq!(
+            landed.first().map(String::as_str),
+            Some("what the second was asked"),
+            "the lane in front is what k recalls"
+        );
+        assert_eq!(landed.len(), 1, "and only that one: {landed:?}");
     }
 
     /// A flash belongs to the lane it answered. Carried across a switch it
