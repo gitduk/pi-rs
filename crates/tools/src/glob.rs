@@ -28,7 +28,8 @@ impl Tool for Glob {
     fn description(&self) -> &str {
         "Find files by path pattern, newest first. Respects .gitignore. A pattern \
          with no `/` matches at any depth, so `*.rs` finds every Rust file. Use \
-         grep when you need to match file contents."
+         grep when you need to match file contents, and either of them before \
+         running find in bash: they already know what to ignore."
     }
 
     fn schema(&self) -> Value {

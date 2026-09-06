@@ -134,10 +134,6 @@ pub struct Args {
     #[arg(long, value_enum)]
     tier: Option<TierArg>,
 
-    /// Restrict the tool set, e.g. --tools read,bash
-    #[arg(long, value_delimiter = ',')]
-    tools: Vec<String>,
-
     #[arg(long, value_enum)]
     effort: Option<EffortArg>,
 
@@ -145,22 +141,6 @@ pub struct Args {
     /// smaller than the config says.
     #[arg(long, value_name = "TOKENS")]
     context: Option<u32>,
-
-    /// Send the transcript untouched and let the provider refuse it.
-    #[arg(long)]
-    no_compact: bool,
-
-    /// Drop old history outright instead of summarizing it first.
-    #[arg(long)]
-    no_summary: bool,
-
-    /// How many times to retry a request the provider could not serve.
-    #[arg(long, default_value_t = 4)]
-    retries: usize,
-
-    /// Give up on a stream that has sent nothing for this long.
-    #[arg(long, value_name = "SECONDS", default_value_t = 300)]
-    idle_timeout: u64,
 
     /// Replace the built-in system prompt.
     #[arg(long)]
@@ -175,7 +155,7 @@ pub struct Args {
     #[arg(long)]
     no_skills: bool,
 
-    /// Ignore ~/.pi/Pi.md and the project's AGENTS.md.
+    /// Ignore ~/.pi/AGENTS.md and the project's.
     #[arg(long)]
     no_context_files: bool,
 
@@ -183,16 +163,6 @@ pub struct Args {
     #[arg(short, long)]
     quiet: bool,
 
-    /// How much this run writes to its journal. `debug` adds the payloads —
-    /// request bodies, patches, tool arguments in full. `off` writes nothing.
-    #[arg(
-        long,
-        value_name = "LEVEL",
-        value_enum,
-        env = "PI_LOG",
-        default_value = "info"
-    )]
-    log: journal::LogLevel,
 }
 
 // `configured` is the config's `api_key`; the environment variable is the
@@ -319,7 +289,7 @@ fn read_prompt(args: &Args) -> Result<Option<String>> {
 ///
 /// **Call it last.** `Task` clones the agent it is handed, so any field set
 /// after this is one the child does not have — which is how the startup path
-/// once gave the parent `--no-compact` and `--retries` and the child neither.
+/// once gave the parent its retry policy and the child none.
 ///
 /// Takes the fields it installs out of `from`, which the callers do not read
 /// again — the rest of `Resolved` is theirs.
@@ -332,7 +302,7 @@ pub fn arm(
     ag.approver = std::sync::Arc::new(agent::Ceiling(from.tier));
     ag.system = std::mem::take(&mut from.system);
     ag.effort = from.effort;
-    hang(ag, home, &from.standing, from.task);
+    hang(ag, home, &from.standing);
 }
 
 /// Hang a subagent off an agent that is otherwise ready, replacing any it
@@ -343,68 +313,24 @@ pub fn arm(
 /// has to build a new one, or the child goes on talking to the old endpoint
 /// with the old key.
 ///
-/// `task` is false when `--tools` did not name it: the subagent is a tool the
-/// model may call, and an explicit tool list is exactly that list.
 pub fn hang(
     ag: &mut agent::Agent,
     home: std::sync::Arc<dyn agent::task::Home>,
     standing: &str,
-    task: bool,
 ) {
-    if task {
-        let task = agent::task::Task::new(ag, home, standing);
-        ag.registry = std::mem::take(&mut ag.registry).with(task);
-    }
-}
-
-/// Every name `--tools` accepts, for the line that says one was not one. The
-/// two hung tools are as nameable as the builtins and have to be listed with
-/// them, or the message tells the user to drop the very name it just refused.
-fn known_tools() -> Vec<String> {
-    let mut all: Vec<String> = tools::Registry::builtin()
-        .names()
-        .into_iter()
-        .map(str::to_string)
-        .collect();
-    all.push(agent::task::Task::NAME.to_string());
-    all.push(tools::skill::NAME.to_string());
-    all.sort();
-    all
-}
-
-/// The `--tools` names `restrict` sees: the builtins, minus the two tools
-/// attached after it, which `restrict` would otherwise reject as unknown.
-fn restrict_request(names: &[String]) -> Vec<String> {
-    let hung = [agent::task::Task::NAME, tools::skill::NAME];
-    names
-        .iter()
-        .filter(|n| !hung.contains(&n.as_str()))
-        .cloned()
-        .collect()
-}
-
-/// Whether the model may call `tool`: no `--tools` means everything; an
-/// explicit list is exactly the tools it names.
-pub(crate) fn wants_tool(names: &[String], tool: &str) -> bool {
-    names.is_empty() || names.iter().any(|n| n == tool)
-}
-
-/// Whether the subagent tool is in force, for the callers without a `Resolved`.
-pub(crate) fn wants_task(names: &[String]) -> bool {
-    wants_tool(names, agent::task::Task::NAME)
+    let task = agent::task::Task::new(ag, home, standing);
+    ag.registry = std::mem::take(&mut ag.registry).with(task);
 }
 
 /// Everything the config and the workspace decide, as opposed to what the
 /// command line fixed for the whole run. `/reload` recomputes exactly this.
 pub struct Resolved {
     pub registry: tools::Registry,
-    /// Whether the subagent tool is in force — false when `--tools` named it
-    /// not. `registry` cannot carry this: `hang` runs after `restrict`.
-    pub task: bool,
     pub system: String,
-    /// The tail of `system` that belongs to the checkout rather than to the
-    /// assistant: the workspace anchor and the instruction files. Kept apart
-    /// because the subagent has its own prompt but the same tree.
+    /// The tail of `system` that belongs to the run rather than to the
+    /// assistant: the workspace anchor, what the run is, and the instruction
+    /// files. Kept apart because the subagent has its own prompt but the same
+    /// tree, the same machine and the same tier.
     pub standing: std::sync::Arc<str>,
     pub tier: tools::Tier,
     pub effort: Effort,
@@ -433,14 +359,6 @@ pub fn resolve(
     let mut notes = Vec::new();
 
     let mut registry = tools::Registry::builtin();
-    // The two tools attached after `restrict` are not in the builtin list it
-    // knows, so they are taken out here and decided by the same list below.
-    let restrict_to = restrict_request(&args.tools);
-    if !args.tools.is_empty() {
-        registry = registry.restrict(&restrict_to).map_err(|bad| {
-            anyhow::anyhow!("no tool named `{bad}`; known: {}", known_tools().join(", "))
-        })?;
-    }
     let skills = if args.no_skills {
         Vec::new()
     } else {
@@ -459,7 +377,7 @@ pub fn resolve(
     // type and a body the model can load, and both read the same list.
     let commands = repl::commands(&skills, &mut notes);
     let tool = tools::skill::SkillTool::new(skills);
-    if !tool.is_empty() && wants_tool(&args.tools, tools::skill::NAME) {
+    if !tool.is_empty() {
         registry = registry.with(tool);
     }
 
@@ -490,6 +408,7 @@ pub fn resolve(
     };
     // The system prompt's "relative to it" needs the workspace named.
     let mut standing = context::workspace(root);
+    standing.push_str(&context::env(tier));
     // Appended rather than sent as a message: these are standing instructions,
     // they do not change within a run, and the system prompt is the part of the
     // request a provider will cache.
@@ -507,7 +426,6 @@ pub fn resolve(
 
     Ok(Resolved {
         registry,
-        task: wants_task(&args.tools),
         system,
         standing: standing.into(),
         tier,
@@ -562,7 +480,7 @@ async fn main() -> Result<()> {
         .as_ref()
         .map(|p| p.id.clone())
         .unwrap_or_else(session::new_id);
-    journal::install(&id, args.log);
+    journal::install(&id, journal::level_from_env());
     journal::opening(
         &id,
         &args,
@@ -599,23 +517,22 @@ async fn main() -> Result<()> {
     let model_id = dialled.spec.model.clone();
 
     let mut ag = agent::Agent::new(dialled.transport, dialled.spec);
-    if args.no_compact {
-        ag.compaction = None;
-    }
-    ag.summarize = !args.no_summary;
     // Resolved here rather than lazily: a name that does not exist should be a
     // startup error, not a surprise the first time history gets long enough to
     // compact.
     if let Some(name) = &config.summarize_model
-        && !args.no_summary
         && name != &model_id
     {
         let summarizer = dial(&args, &config, name, config::Origin::Global)
             .with_context(|| format!("defaults.summarize_with = \"{name}\""))?;
         ag.summarizer = Some((summarizer.transport, summarizer.spec));
     }
-    ag.retry.attempts = args.retries;
-    ag.retry.idle = std::time::Duration::from_secs(args.idle_timeout.max(1));
+    if let Some(n) = config.retries {
+        ag.retry.attempts = n;
+    }
+    if let Some(secs) = config.idle_timeout {
+        ag.retry.idle = std::time::Duration::from_secs(secs.max(1));
+    }
     // Last, so the child is cloned from an agent that is finished.
     arm(
         &mut ag,
@@ -777,68 +694,4 @@ async fn main() -> Result<()> {
     }
     outcome?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{restrict_request, wants_task, wants_tool};
-
-    fn named(list: &[&str]) -> Vec<String> {
-        list.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn no_tools_means_everything() {
-        let none: Vec<String> = Vec::new();
-        assert!(wants_task(&none) && wants_tool(&none, tools::skill::NAME));
-        assert!(restrict_request(&none).is_empty());
-    }
-
-    #[test]
-    fn an_explicit_list_is_exactly_the_tools_it_names() {
-        let only = named(&["read"]);
-        assert!(!wants_task(&only), "task is not on the list");
-        assert!(!wants_tool(&only, tools::skill::NAME), "skill is not on the list");
-        assert_eq!(restrict_request(&only), only);
-    }
-
-    #[test]
-    fn task_and_skill_can_be_named_instead_of_implicit() {
-        let with_task = named(&["read", "task"]);
-        assert!(wants_task(&with_task));
-        assert!(!wants_tool(&with_task, tools::skill::NAME));
-        assert_eq!(restrict_request(&with_task), named(&["read"]));
-
-        let with_skill = named(&["read", "skill"]);
-        assert!(!wants_task(&with_skill));
-        assert!(wants_tool(&with_skill, tools::skill::NAME));
-        assert_eq!(restrict_request(&with_skill), named(&["read"]));
-    }
-
-    /// The refusal has to offer the names it accepts, `task` and `skill`
-    /// included — they are nameable in `--tools` but not in the builtin list.
-    #[test]
-    fn the_known_list_names_every_tool_tools_accepts() {
-        let known = super::known_tools();
-        for wanted in ["read", "bash", agent::task::Task::NAME, tools::skill::NAME] {
-            assert!(known.iter().any(|n| n == wanted), "{wanted} in {known:?}");
-        }
-        let mut sorted = known.clone();
-        sorted.sort();
-        assert_eq!(known, sorted, "listed in an order a reader can scan");
-    }
-
-    #[test]
-    fn hung_tools_never_reach_restrict_but_typos_still_do() {
-        let only_task = named(&["task"]);
-        assert!(wants_task(&only_task));
-        assert!(restrict_request(&only_task).is_empty());
-
-        let typo = named(&["readd"]);
-        assert_eq!(
-            restrict_request(&typo),
-            typo,
-            "a name that is not a hung tool stays where restrict can reject it"
-        );
-    }
 }

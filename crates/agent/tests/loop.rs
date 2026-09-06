@@ -23,6 +23,8 @@ use tools::{Concurrency, Ctx, Registry, Tier, Tool, ToolError, ToolOutput, Works
 struct Scripted {
     turns: Vec<Vec<StreamEvent>>,
     next: AtomicUsize,
+    /// What each turn put on the wire beside the transcript.
+    notes: std::sync::Mutex<Vec<Vec<String>>>,
 }
 
 impl Scripted {
@@ -30,6 +32,7 @@ impl Scripted {
         Arc::new(Self {
             turns,
             next: AtomicUsize::new(0),
+            notes: Default::default(),
         })
     }
 }
@@ -40,8 +43,9 @@ impl Transport for Scripted {
     async fn stream(
         &self,
         _spec: &ModelSpec,
-        _req: &Request,
+        req: &Request,
     ) -> brain::Result<BoxStream<'static, brain::Result<StreamEvent>>> {
+        self.notes.lock().unwrap().push(req.notes.clone());
         let i = self.next.fetch_add(1, Ordering::SeqCst);
         let events = self.turns.get(i).cloned().unwrap_or_default();
         Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
@@ -93,10 +97,36 @@ fn call_turn(calls: &[(&str, &str, &str)]) -> Vec<StreamEvent> {
 
 
 fn harness(turns: Vec<Vec<StreamEvent>>) -> (tempfile::TempDir, Agent, Ctx) {
+    let (dir, agent, ctx, _) = wired(turns);
+    (dir, agent, ctx)
+}
+
+// The same, keeping the wire so a test can read what was sent to it.
+fn wired(turns: Vec<Vec<StreamEvent>>) -> (tempfile::TempDir, Agent, Ctx, Arc<Scripted>) {
     let dir = tempfile::tempdir().unwrap();
     let ws = Workspace::new(dir.path()).unwrap();
-    let agent = Agent::new(Scripted::new(turns), spec());
-    (dir, agent, Ctx::new(ws))
+    let wire = Scripted::new(turns);
+    let agent = Agent::new(wire.clone(), spec());
+    (dir, agent, Ctx::new(ws), wire)
+}
+
+/// The window rides a note, not the transcript: it is true of the request it
+/// went out on and of no other, so the next turn replaces it instead of
+/// leaving a stale reading behind to be read back as fact.
+#[tokio::test]
+async fn the_turn_ships_its_window_as_a_note() {
+    let (_dir, agent, ctx, wire) = wired(vec![text_turn("done")]);
+    let (_session, out, _events) = drive(&agent, &ctx, "go").await;
+    out.unwrap();
+
+    let sent = wire.notes.lock().unwrap();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].len(), 1, "one reading, not an accumulating list");
+    let note = &sent[0][0];
+    assert!(note.starts_with("<context used=\""), "{note}");
+    assert!(note.contains("budget=\""), "{note}");
+    // Nothing was compacted, so the turn says nothing about compaction.
+    assert!(!note.contains("compacted"), "{note}");
 }
 
 async fn drive(

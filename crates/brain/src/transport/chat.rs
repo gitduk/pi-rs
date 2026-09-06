@@ -169,8 +169,7 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
             json!({ "role": "system", "content": system }),
         );
     }
-    // The notes are not a statement of fact, so they ride the last user turn
-    // rather than their own role.
+    // Per-turn state, not a statement of fact — see `Request::notes`.
     if !req.notes.is_empty() {
         let notes = req
             .notes

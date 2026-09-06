@@ -63,16 +63,6 @@ impl Registry {
         self
     }
 
-    /// Only the tools named survive. An unknown name is returned to the caller
-    /// rather than silently dropped: a typo would otherwise disarm the agent.
-    pub fn restrict(mut self, names: &[String]) -> Result<Self, String> {
-        if let Some(bad) = names.iter().find(|n| !self.tools.contains_key(*n)) {
-            return Err(bad.clone());
-        }
-        self.tools.retain(|k, _| names.contains(k));
-        Ok(self)
-    }
-
     pub fn defs(&self) -> Vec<ToolDef> {
         self.tools
             .values()

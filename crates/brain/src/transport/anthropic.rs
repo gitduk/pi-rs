@@ -162,14 +162,25 @@ fn encode_messages(msgs: &[Message], spec: &ModelSpec) -> Vec<Value> {
     out
 }
 
-// Notes ride the tail of the last user message. A breakpoint caches up to and
-// including the block it sits on, so anything after it is outside the cache —
-// which is exactly where something that changes every turn belongs. Put them
-// in `system` instead and every breakpoint in the message array sits behind
-// content that just changed, so none of them ever hit.
-fn append_notes(messages: &mut [Value], notes: &[String]) {
+/// The cache marker this endpoint is known to take, if any.
+fn marker(cache: CacheControl) -> Option<Value> {
+    match cache {
+        // An endpoint nobody has measured is not told to cache, per block no
+        // less than per request: an unknown field is a 400 on some of them.
+        CacheControl::Off => None,
+        CacheControl::Standard => Some(json!({ "type": "ephemeral" })),
+        CacheControl::LongTtl => Some(json!({ "type": "ephemeral", "ttl": "1h" })),
+    }
+}
+
+// Notes ride the tail of the last user message, and the breakpoint goes on the
+// block before them: a breakpoint caches up to and including the block it sits
+// on, so the notes stay outside the cache, which is where something rewritten
+// every turn has to sit. Takes the marker rather than a flag so that it can be
+// placed only once — what comes back is what went unplaced.
+fn append_notes(messages: &mut [Value], notes: &[String], mark: Option<Value>) -> Option<Value> {
     if notes.is_empty() {
-        return;
+        return mark;
     }
     // Merged into the last user block rather than appended as their own, which
     // is what the other wire does: this one requires user and assistant to
@@ -186,9 +197,17 @@ fn append_notes(messages: &mut [Value], notes: &[String]) {
             target: "pi::wire", format = "anthropic", notes = notes.len(),
             "no user message to carry the notes; they were dropped"
         );
-        return;
+        return mark;
+    };
+    let leftover = match (last.last_mut(), mark) {
+        (Some(block), Some(m)) => {
+            block["cache_control"] = m;
+            None
+        }
+        (_, mark) => mark,
     };
     last.extend(notes.iter().map(|n| json!({ "type": "text", "text": n })));
+    leftover
 }
 
 pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
@@ -197,8 +216,9 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
         .unwrap_or(spec.max_output_tokens)
         .min(spec.max_output_tokens);
 
+    let mark = marker(cache_control(spec).unwrap_or(CacheControl::Off));
     let mut messages = encode_messages(&req.messages, spec);
-    append_notes(&mut messages, &req.notes);
+    let leftover = append_notes(&mut messages, &req.notes, mark);
 
     let mut body = json!({
         "model": spec.model,
@@ -208,15 +228,11 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
     });
 
     // One field, and the API places the breakpoint itself — on the last
-    // cacheable block, moving it forward as the conversation grows. Until now
-    // the only breakpoint sat on the system block, so the transcript, which is
-    // the largest part of the request, was re-read at full price every turn.
-    match cache_control(spec) {
-        Ok(CacheControl::Standard) => body["cache_control"] = json!({ "type": "ephemeral" }),
-        Ok(CacheControl::LongTtl) => {
-            body["cache_control"] = json!({ "type": "ephemeral", "ttl": "1h" })
-        }
-        _ => {}
+    // cacheable block, moving it forward as the conversation grows. Only ever
+    // reached by a marker no block took: this one lands on the *last* block,
+    // which is a note, writing a prefix next turn's notes have already changed.
+    if let Some(m) = leftover {
+        body["cache_control"] = m;
     }
 
     let system = req.system_text();
@@ -720,6 +736,58 @@ mod tests {
         assert_eq!(body["messages"].as_array().unwrap().len(), 0);
     }
 
+    /// A breakpoint caches up to and including the block it lands on, so
+    /// anything after it is outside — which is where something recomputed every
+    /// turn has to sit, or the prefix breaks on it. The top-level field cannot
+    /// do that job: it lands on the *last* block, which is the note itself.
+    #[test]
+    fn a_note_pushes_the_breakpoint_onto_the_block_before_it() {
+        let req = Request {
+            messages: vec![Message::user("go")],
+            notes: vec!["[true only this turn]".into()],
+            ..Default::default()
+        };
+        let body = build_body(&spec(), &req);
+
+        assert!(body.get("cache_control").is_none());
+        let blocks = body["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(blocks[0]["text"], "go");
+        assert_eq!(
+            blocks[0]["cache_control"],
+            json!({ "type": "ephemeral", "ttl": "1h" })
+        );
+        assert_eq!(blocks[1]["text"], "[true only this turn]");
+        assert!(blocks[1].get("cache_control").is_none());
+
+        // An endpoint nobody measured is told nothing, per block no less than
+        // per request.
+        let mut cold = spec();
+        cold.format = Format::Anthropic { cache_control: CacheControl::Off };
+        let body = build_body(&cold, &req);
+        assert!(body.get("cache_control").is_none());
+        assert!(body["messages"][0]["content"][0].get("cache_control").is_none());
+    }
+
+    /// Notes with nowhere to land take no marker, so it comes back unplaced and
+    /// the top-level field still gets it. Keying that on `notes.is_empty()`
+    /// instead would cache nothing at all — worse than before.
+    #[test]
+    fn notes_that_are_dropped_do_not_take_the_breakpoint_with_them() {
+        let req = Request {
+            messages: vec![Message::System {
+                content: "be terse".into(),
+            }],
+            notes: vec!["[true only this turn]".into()],
+            ..Default::default()
+        };
+        let body = build_body(&spec(), &req);
+        assert_eq!(body["messages"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            body["cache_control"],
+            json!({ "type": "ephemeral", "ttl": "1h" })
+        );
+    }
+
     /// One field, placed once. The breakpoint used to sit on the system block
     /// and nowhere else, so the transcript — much the largest part of the
     /// request — was re-read at full price every turn.
@@ -748,9 +816,6 @@ mod tests {
         assert!(build_body(&cold, &req).get("cache_control").is_none());
     }
 
-    /// A breakpoint caches up to and including the block it lands on, so
-    /// anything after it is outside — which is where something recomputed every
-    /// turn has to sit, or the prefix breaks on it.
     /// The estimate and the encoder must answer the same question. They are
     /// separate walks of the same transcript — one decides when to compact, the
     /// other decides what ships — and a gap between them is invisible: the

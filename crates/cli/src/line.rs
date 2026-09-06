@@ -76,7 +76,7 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
                     }
                 }
                 None => {
-                    let held = core.lane_mut().agent.kept_tokens().unwrap_or(0);
+                    let held = core.lane_mut().agent.kept_tokens();
                     let now = core.tokens_now();
                     println!(
                         "nothing to compact — {now} tokens, all inside the {held} kept as working context"

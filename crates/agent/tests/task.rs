@@ -411,10 +411,9 @@ async fn esc_reaches_through_the_child_and_ends_the_callers_turn() {
 
 #[tokio::test]
 async fn the_child_gets_no_tool_the_parent_was_denied() {
-    // The parent is built with `probe` only, as `--tools` would leave it. The
-    // child is cloned from that, so a restriction the user asked for cannot be
-    // stepped around by delegating — which would otherwise make `task` a way
-    // to get back everything `--tools` took away.
+    // The parent is built with `probe` only. The child is cloned from that,
+    // so whatever the parent does not hold cannot be reached by delegating —
+    // which would otherwise make `task` a way around the parent's own limits.
     let dir = tempfile::tempdir().unwrap();
     let ws = Workspace::new(dir.path()).unwrap();
     let seen = Arc::new(Seen::default());

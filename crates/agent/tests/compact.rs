@@ -523,6 +523,23 @@ use brain::message::Text as _Text;
 
     struct Never;
 
+    /// A summary that does not come back. The manual pass always summarizes
+    /// what it drops, so the one test that drops anything does reach a
+    /// network — and an empty answer is not fatal, which is what lets the
+    /// rest of `Never`'s neighbours keep asserting they never reach one.
+    struct Empty;
+
+    #[async_trait]
+    impl Transport for Empty {
+        async fn stream(
+            &self,
+            _: &ModelSpec,
+            _: &Request,
+        ) -> brain::Result<BoxStream<'static, brain::Result<StreamEvent>>> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+    }
+
     #[async_trait]
     impl Transport for Never {
         async fn stream(
@@ -563,7 +580,7 @@ use brain::message::Text as _Text;
         // The whole point of asking for it: the user knows a phase ended, and
         // no budget can tell. This transcript is far under the window.
         let mut a = agent_with(1_000_000, 32_000);
-        a.summarize = false; // Never has no network to summarize with.
+        a.summarizer = Some((Arc::new(Empty), spec()));
         let mut s = Session::with_prompt("go");
         // Distinct paths, so the supersede tier has nothing to take and the
         // tail protection is what has to stop the descent.
@@ -588,7 +605,7 @@ use brain::message::Text as _Text;
         assert!(after < before, "{before} -> {after}");
         // It stops at the tail the agent is working from rather than at zero.
         assert!(
-            after >= a.kept_tokens().unwrap() / 2,
+            after >= a.kept_tokens() / 2,
             "took the tail too: {after}"
         );
     }
@@ -617,7 +634,7 @@ use brain::message::Text as _Text;
         );
 
         let policy = agent::Policy {
-            protect_tail: a.kept_tokens().expect("compaction is on"),
+            protect_tail: a.kept_tokens(),
             ..agent::Policy::default()
         };
         let (_record, report) = agent::compact::plan(&s, &a.spec, budget, &policy);

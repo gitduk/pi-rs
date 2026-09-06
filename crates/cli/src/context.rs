@@ -1,10 +1,11 @@
 //! Standing instructions: what to do here, as opposed to what to do now.
 //!
-//! Personal ones live in `Pi.md` at the pi root, beside `settings.toml`. A
-//! project's live in its `AGENTS.md`, the vendor-neutral name every harness
-//! reads. Another harness's own file is deliberately not read in its place:
-//! the shared name exists so that one file serves every tool, and reading the
-//! alternatives too would reward keeping them apart.
+//! Both are `AGENTS.md`, the vendor-neutral name every harness reads: yours at
+//! the pi root beside `settings.toml`, a project's in the project. Another
+//! harness's own file is deliberately not read in its place: the shared name
+//! exists so that one file serves every tool, and reading the alternatives too
+//! would reward keeping them apart. One name rather than two for the same job,
+//! for the same reason.
 
 use std::path::{Path, PathBuf};
 
@@ -19,9 +20,12 @@ fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
+/// What both the personal file and a project's are called.
+const NAME: &str = "AGENTS.md";
+
 // The one file a directory contributes, or none.
 fn in_dir(dir: &Path) -> Option<PathBuf> {
-    let path = dir.join("AGENTS.md");
+    let path = dir.join(NAME);
     path.is_file().then_some(path)
 }
 
@@ -46,16 +50,37 @@ pub fn workspace(root: &Path) -> String {
     format!("\n\n<workspace path=\"{}\"/>", root.display())
 }
 
+/// What this run is, as against what it is working on.
+///
+/// Everything here holds still for the whole run, because it rides the system
+/// prompt — the part a provider caches. A field that moved mid-run would cost
+/// that cache every turn, which is why the model and the window are not here:
+/// the window is the denominator of a number the turn already carries.
+///
+/// The date is a day, not an instant, so that two runs an hour apart still
+/// share one cached prefix.
+pub fn env(tier: tools::Tier) -> String {
+    // `sh`, not `$SHELL`: the bash tool runs `Command::new("sh")` whatever the
+    // login shell is, and the tool's own name is what misleads about it.
+    let day = &crate::journal::rfc3339(std::time::SystemTime::now())[..10];
+    let tier = format!("{tier:?}").to_lowercase();
+    format!(
+        "\n\n<env date=\"{day}\" platform=\"{}\" shell=\"sh\" pi=\"{}\" tier=\"{tier}\"/>",
+        std::env::consts::OS,
+        env!("CARGO_PKG_VERSION"),
+    )
+}
+
 /// Every instructions file that applies, most general first.
 ///
 /// Order is the whole point: the nearest directory speaks last, so where two
 /// files disagree the more specific one is the one the model read most
 /// recently. The walk ends at the repository root and never reaches `$HOME`,
-/// whose `Pi.md` is the personal one and is already first in the list.
+/// whose file is the personal one and is already first in the list.
 pub fn paths(workspace: &Path, home: Option<&Path>, root: Option<&Path>) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Some(r) = root
-        && let personal = r.join("Pi.md")
+        && let personal = r.join(NAME)
         && personal.is_file()
     {
         out.push(personal);
@@ -71,7 +96,13 @@ pub fn paths(workspace: &Path, home: Option<&Path>, root: Option<&Path>) -> Vec<
         }
     }
     project.reverse();
-    out.extend(project);
+    // Both files share a name, so a workspace inside the pi root reaches the
+    // personal one on the way up and would send it twice.
+    for path in project {
+        if !out.contains(&path) {
+            out.push(path);
+        }
+    }
     out
 }
 
@@ -82,7 +113,7 @@ pub fn load(workspace: &Path) -> Loaded {
 // The same, against a stated home and pi root rather than this process's.
 //
 // A test that reads the real `$HOME` passes or fails on whether whoever runs
-// it happens to keep a `Pi.md` — which is a property of the machine, not of
+// it happens to keep one — which is a property of the machine, not of
 // the code under test.
 fn from(workspace: &Path, home: Option<&Path>, root: Option<&Path>) -> Loaded {
     let mut loaded = Loaded::default();
@@ -107,12 +138,37 @@ fn from(workspace: &Path, home: Option<&Path>, root: Option<&Path>) -> Loaded {
 
 #[cfg(test)]
 mod tests {
-    use super::{from, paths, workspace};
+    use super::{env, from, paths, workspace};
     use std::path::Path;
 
     fn write(path: &Path, body: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, body).unwrap();
+    }
+
+    /// Every field has to hold still for a whole run — the block rides the
+    /// cached prefix. The date is the only one that moves at all, and it moves
+    /// once a day, so two runs an hour apart still share that prefix.
+    #[test]
+    fn the_env_block_names_the_run_and_says_which_shell() {
+        let got = env(tools::Tier::Read);
+        println!("{got}");
+
+        assert!(got.starts_with("\n\n<env date=\""), "{got}");
+        assert!(got.ends_with("/>"), "{got}");
+        let date = got.split("date=\"").nth(1).unwrap().split('"').next().unwrap();
+        assert_eq!(date.len(), 10, "a day, not an instant: {date}");
+        assert_eq!(date.matches('-').count(), 2, "{date}");
+
+        assert!(
+            got.contains(&format!("pi=\"{}\"", env!("CARGO_PKG_VERSION"))),
+            "{got}"
+        );
+        // The tool is named `bash` and runs `sh`; this is where that is said.
+        assert!(got.contains("shell=\"sh\""), "{got}");
+
+        assert!(got.contains("tier=\"read\""), "spelled as the flag is: {got}");
+        assert!(env(tools::Tier::Exec).contains("tier=\"exec\""));
     }
 
     #[test]
@@ -130,7 +186,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
         let root = home.join(".pi");
-        write(&root.join("Pi.md"), "personal");
+        write(&root.join("AGENTS.md"), "personal");
         let repo = home.join("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         write(&repo.join("AGENTS.md"), "repo");
@@ -141,11 +197,28 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                root.join("Pi.md"),
+                root.join("AGENTS.md"),
                 repo.join("AGENTS.md"),
                 deep.join("AGENTS.md"),
             ],
             "general to specific, so the closest one is read last"
+        );
+    }
+
+    /// Editing your own config is an ordinary thing to do — `pi -C ~/.pi` —
+    /// and both files now answer to one name, so the walk up reaches the very
+    /// file the personal slot already took.
+    #[test]
+    fn the_personal_file_is_not_sent_twice_when_it_is_also_the_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let root = home.join(".pi");
+        write(&root.join("AGENTS.md"), "personal");
+
+        assert_eq!(
+            paths(&root, Some(&home), Some(&root)),
+            vec![root.join("AGENTS.md")],
+            "one file, read once"
         );
     }
 

@@ -106,12 +106,8 @@ pub struct Agent {
     pub approver: Arc<dyn Approver>,
     pub system: String,
     pub effort: Effort,
-    /// None leaves the transcript alone and lets the provider refuse it.
-    pub compaction: Option<Policy>,
-    /// Ask the model to summarize the history compaction is about to drop.
-    /// False drops it outright, which is faster and loses more.
-    pub summarize: bool,
-    /// Who writes that summary, when it is not the model doing the work. The
+    pub compaction: Policy,
+    /// Who writes the summary, when it is not the model doing the work. The
     /// job is large input, small output and little judgement, so it need not be
     /// the expensive one. Its own transport all the same: the spec that priced
     /// a turn has to be the one that ran it, or a cheap summary is billed at
@@ -125,6 +121,17 @@ pub struct Agent {
 // "would not parse" is one loop whatever the prose says, while a genuinely
 // different error starts a new count.
 type Failures = HashMap<(String, String), usize>;
+
+/// The window, as the turn that ships it sees it. Shaped as a tag rather than
+/// a sentence because a note is read in the user's voice: a reading is a fact
+/// about the run, where a sentence would be someone talking.
+fn context_note(used: usize, budget: usize, trimmed: bool) -> String {
+    // Says only that the transcript shrank, never how: a summary that replaced
+    // part of it is in the transcript to be read, where the taking is not. The
+    // cheaper reclaims run before any drop and leave no summary behind.
+    let trimmed = if trimmed { " trimmed=\"true\"" } else { "" };
+    format!("<context used=\"{used}\" budget=\"{budget}\"{trimmed}/>")
+}
 
 // What a streamed call resolves to before anything runs. Deciding first keeps
 // the result list aligned with the call list even when nothing executes.
@@ -142,8 +149,7 @@ impl Agent {
             approver: Arc::new(Ceiling(tools::Tier::Exec)),
             system: DEFAULT_SYSTEM.to_string(),
             effort: Effort::Off,
-            compaction: Some(Policy::default()),
-            summarize: true,
+            compaction: Policy::default(),
             summarizer: None,
             retry: Retry::default(),
         }
@@ -189,6 +195,9 @@ impl Agent {
                 session = %ctx.spill_namespace(),
             );
             let mut squeezes = 0usize;
+            // Turn-scoped, not per-attempt: a squeeze retries the send, and the
+            // attempt that lands still carries the shrunken transcript.
+            let mut trimmed = false;
             // Kept past the retry loop: the fallback below prices what was
             // actually sent, which a squeeze or a compaction may have changed.
             let mut sent;
@@ -206,6 +215,7 @@ impl Agent {
                 sent = messages;
                 if shrunk {
                     compactions += 1;
+                    trimmed = true;
                 }
                 used = brain::estimate::tokens(&sent, &self.spec);
                 say(tx, Event::Context { used, budget });
@@ -224,7 +234,7 @@ impl Agent {
                 let req = Request {
                     system: Some(self.system.clone()),
                     messages: sent.clone(),
-                    notes: Vec::new(),
+                    notes: vec![context_note(used, budget, trimmed)],
                     tools: self.registry.defs(),
                     max_output_tokens: None,
                     temperature: None,
@@ -373,9 +383,7 @@ impl Agent {
         tx: &UnboundedSender<Event>,
     ) -> (Vec<Message>, bool) {
         let measured = session.context();
-        let Some(policy) = &self.compaction else {
-            return (measured, false);
-        };
+        let policy = &self.compaction;
         if brain::estimate::tokens(&measured, &self.spec) <= budget {
             return (measured, false);
         }
@@ -386,7 +394,7 @@ impl Agent {
             ..*policy
         };
         let (mut record, mut report) = compact::plan(session, &self.spec, budget, &policy);
-        if !record.dropped.is_empty() && self.summarize {
+        if !record.dropped.is_empty() {
             let (used, priced) = self
                 .write_summary(session, &mut record, None)
                 .instrument(tracing::info_span!(target: "pi::compact", "summarize"))
@@ -405,9 +413,9 @@ impl Agent {
         (session.context(), true)
     }
 
-    /// What a manual compaction leaves alone, when there is one.
-    pub fn kept_tokens(&self) -> Option<usize> {
-        self.compaction.is_some().then(|| self.tail_within(self.budget()))
+    /// What a manual compaction leaves alone.
+    pub fn kept_tokens(&self) -> usize {
+        self.tail_within(self.budget())
     }
 
     /// The working tail to hold back, against a transcript budget of `budget`.
@@ -415,7 +423,7 @@ impl Agent {
     /// A flat 16k is a seventh of a 114k budget and more than a 9k one holds,
     /// and a tail the size of the budget leaves the drop tier nothing to take.
     fn tail_within(&self, budget: usize) -> usize {
-        self.compaction.map_or(0, |p| p.protect_tail.min(budget / 4))
+        self.compaction.protect_tail.min(budget / 4)
     }
 
     /// Compact now, at the user's word rather than the window's.
@@ -430,12 +438,12 @@ impl Agent {
         session: &mut Session,
         focus: Option<&str>,
     ) -> Option<(compact::Report, Totals)> {
-        let base = self.compaction?;
+        let base = self.compaction;
         let tail = self.tail_within(self.budget());
         let policy = compact::Policy { protect_tail: tail, ..base };
         let (mut record, mut report) = compact::plan(session, &self.spec, tail, &policy);
         let mut spent = Totals::default();
-        if !record.dropped.is_empty() && self.summarize {
+        if !record.dropped.is_empty() {
             let (used, priced) = self
                 .write_summary(session, &mut record, focus)
                 .instrument(tracing::info_span!(target: "pi::compact", "summarize"))
@@ -633,6 +641,10 @@ impl Agent {
         failures: &mut Failures,
         spent: &mut Totals,
     ) -> Result<Vec<(ToolResult, Option<String>)>, AgentError> {
+        // Read once for the batch rather than per failure: it is a fixed fact
+        // about the machine, and `failed` is not the place to learn it.
+        let logs = tools::state::logs();
+        let logs = logs.as_deref();
         let actions: Vec<Action> = calls
             .iter()
             .map(|c| {
@@ -733,7 +745,7 @@ impl Agent {
             // content holds. The rebuild has no other way back to it.
             let mut sketched = None;
             let result = match (action, output) {
-                (Action::Reject(why), _) => failed(call, why.clone(), None, failures),
+                (Action::Reject(why), _) => failed(call, why.clone(), None, failures, logs),
                 (_, Some(Err(ToolError::Cancelled))) => return Err(AgentError::Cancelled),
                 (_, Some(Err(e))) => {
                     let mut body = e.to_string();
@@ -751,7 +763,7 @@ impl Agent {
                             preview: body.clone(),
                         },
                     );
-                    failed(call, body, e.category(), failures)
+                    failed(call, body, e.category(), failures, logs)
                 }
                 (_, Some(Ok(out))) => {
                     // A nested run's spend belongs to the run that called it:
@@ -839,8 +851,9 @@ fn failed(
     mut body: String,
     code: Option<&'static str>,
     failures: &mut Failures,
+    logs: Option<&std::path::Path>,
 ) -> ToolResult {
-    if let Some(notice) = too_many_failures(call, code, failures) {
+    if let Some(notice) = too_many_failures(call, code, failures, logs) {
         body.push_str(&notice);
     }
     ToolResult::error(call.id.clone(), &call.name, body)
@@ -858,6 +871,7 @@ fn too_many_failures(
     call: &ToolCall,
     code: Option<&'static str>,
     failures: &mut Failures,
+    logs: Option<&std::path::Path>,
 ) -> Option<String> {
     let key = (
         call.name.clone(),
@@ -877,12 +891,24 @@ fn too_many_failures(
         seen,
         "a tool keeps failing in a row"
     );
-    Some(format!(
+    let mut notice = format!(
         "\n[the same `{}` call has now failed the same way {seen} times. \
          Sending it again will not change the answer — change the call, \
-         or reach the goal another way.]",
+         or reach the goal another way.",
         call.name
-    ))
+    );
+    // The journal holds what the transcript cannot: the call as it went on the
+    // wire. Pointed at the directory rather than the file because the file is
+    // named for a session and `/new` moves it; the newest one is this run's.
+    if let Some(logs) = logs {
+        notice.push_str(&format!(
+            " The wire records are under {}, newest file first — it is JSONL, \
+             so grep it rather than reading it whole.",
+            logs.display()
+        ));
+    }
+    notice.push(']');
+    Some(notice)
 }
 
 fn wedged(idle: std::time::Duration) -> AgentError {
@@ -921,6 +947,25 @@ mod tests {
     use super::*;
     use brain::message::ToolCall;
 
+    /// A reclaim is an event, not a running total: what the model has to act on
+    /// is that its transcript just shrank, and that is true of one turn only. A
+    /// count would be read as a standing fact on every later one.
+    ///
+    /// It claims a taking and never a summary. `plan` spends its cheaper
+    /// measures before it drops anything, and a summary is written only for a
+    /// drop — so on the common path there is nothing to promise.
+    #[test]
+    fn a_reclaim_is_stated_on_the_turn_it_happened_and_claims_no_summary() {
+        assert_eq!(
+            context_note(118_000, 200_000, false),
+            r#"<context used="118000" budget="200000"/>"#
+        );
+        assert_eq!(
+            context_note(118_000, 200_000, true),
+            r#"<context used="118000" budget="200000" trimmed="true"/>"#
+        );
+    }
+
     fn call(name: &str) -> ToolCall {
         ToolCall {
             id: format!("call_{name}"),
@@ -932,19 +977,44 @@ mod tests {
     #[test]
     fn two_same_code_failures_are_named() {
         let mut f = Failures::new();
-        assert!(too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f).is_none());
-        let n = too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f);
+        assert!(too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f, None).is_none());
+        let n = too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f, None);
         assert!(n.is_some(), "second same-code failure is named");
         assert!(n.unwrap().contains("edit"));
+    }
+
+    /// The transcript says a call failed; only the journal says what the call
+    /// actually carried. A loop is exactly when that difference starts to
+    /// matter, so the notice that names the loop is where the journal is named.
+    #[test]
+    fn the_notice_points_at_the_journal_it_cannot_otherwise_reach() {
+        let logs = std::path::Path::new("/pi-home-fixture/logs");
+        let mut f = Failures::new();
+        too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f, Some(logs));
+        let notice = too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f, Some(logs))
+            .expect("the second same-code failure is named");
+
+        assert!(notice.contains("/pi-home-fixture/logs"), "{notice}");
+        // JSONL has no skeleton to fall back on, so a whole-file read is the
+        // one way to spend the window that the pointer would have saved.
+        assert!(notice.contains("grep"), "{notice}");
+
+        // A machine with nowhere to keep a journal still gets the loop named.
+        let mut f = Failures::new();
+        too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f, None);
+        let bare = too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f, None)
+            .expect("naming the loop does not depend on having a journal");
+        assert!(bare.contains("failed the same way"), "{bare}");
+        assert!(!bare.contains("grep"), "{bare}");
     }
 
     #[test]
     fn a_different_code_starts_a_fresh_count() {
         let mut f = Failures::new();
-        too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f);
+        too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f, None);
         // A genuinely different error is a new situation, not a loop.
         assert!(
-            too_many_failures(&call("edit"), Some("EDIT_RENUMBERED"), &mut f).is_none(),
+            too_many_failures(&call("edit"), Some("EDIT_RENUMBERED"), &mut f, None).is_none(),
             "different code must not count against the old one"
         );
     }
@@ -952,7 +1022,7 @@ mod tests {
     #[test]
     fn an_edit_success_does_not_clear_its_failure_streak() {
         let mut f = Failures::new();
-        too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f);
+        too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f, None);
         note_success(&call("edit"), &mut f);
         // Landing one edit does not mean the next will land, so its streak
         // stays until the model changes approach.
@@ -962,7 +1032,7 @@ mod tests {
     #[test]
     fn a_success_clears_the_streak_for_any_other_tool() {
         let mut f = Failures::new();
-        too_many_failures(&call("bash"), Some("BASH_TIMEOUT"), &mut f);
+        too_many_failures(&call("bash"), Some("BASH_TIMEOUT"), &mut f, None);
         note_success(&call("bash"), &mut f);
         assert!(f.is_empty(), "a bash success breaks the bash streak");
     }
@@ -970,15 +1040,15 @@ mod tests {
     #[test]
     fn a_failure_after_naming_starts_a_fresh_count() {
         let mut f = Failures::new();
-        too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f);
+        too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f, None);
         assert!(
-            too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f).is_some(),
+            too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f, None).is_some(),
             "two in a row are named"
         );
         // The naming reset the count: one isolated mistake after the loop was
         // broken is a new situation, not the Nth repeat of the old one.
         assert!(
-            too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f).is_none(),
+            too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f, None).is_none(),
             "a single failure after naming must not be called a repeat"
         );
     }

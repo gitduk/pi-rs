@@ -11,6 +11,13 @@ pub fn dir() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".pi")))
 }
 
+/// Where journals are written. Named here rather than in `cli`, which is what
+/// writes them: the agent points the model at them when a tool keeps failing,
+/// and neither side may guess at the other's layout.
+pub fn logs() -> Option<PathBuf> {
+    dir().map(|d| d.join("logs"))
+}
+
 /// An id as a file or directory name, with everything that could leave the
 /// parent gone. Ids are minted as `{ts}-{pid}`, so this changes nothing for a
 /// real one; it is the guard every consumer applies before an id opens a path.

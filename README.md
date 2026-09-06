@@ -132,7 +132,7 @@ through. `prompt.icon` is the one value that is neither colour nor attribute.
 A key that is not one of those is refused at load, like a misspelled compat
 key.
 
-`/help` `/new` `/resume` `/name` `/model` `/worktree` `/compact` `/loop` `/reload` `/keys` `/log` `/cost` `/wechat` `/exit`,
+`/help` `/new` `/resume` `/name` `/model` `/worktree` `/compact` `/loop` `/reload` `/keys` `/status` `/cost` `/wechat` `/exit`,
 and one more for every skill on disk. Typing `/` opens a list of what the line
 could still become; `↑` `↓` pick, `Tab` accepts, `Esc` dismisses it until the
 next keystroke. `/model`, `/resume` and `/worktree` complete their arguments
@@ -223,7 +223,10 @@ cursor live in `~/.pi/wechat.json`.
 ### The journal
 
 Every session keeps one, at `~/.pi/logs/<session>.jsonl`, and
-`/log` says where. A run opens the journal of the session it starts on —
+`/status` says where — along with the transcript's own file, and the tail of
+the system prompt the model is answering under. A tool that fails the same way
+twice is told the directory too: the journal holds the call as it went on the
+wire, which the transcript does not. A run opens the journal of the session it starts on —
 `--resume` included — and `/resume` or `/new` switches it to the session now
 in charge, so the whole of a session reads as one file across the runs that
 touched it.
@@ -236,7 +239,7 @@ two together rather than reproduced.
 One JSON object per line, so `jq` is the reader:
 
 ```bash
-J=~/.pi/logs/<session>.jsonl                            # /log prints the path
+J=~/.pi/logs/<session>.jsonl                            # /status prints the path
 jq -c 'select(.lvl=="WARN" or .lvl=="ERROR")' $J      # only what went wrong
 jq -c 'select(.ev=="pi::span")|{msg,name,dur_ms}' $J  # what took the time
 jq -r 'select(.ev=="pi::edit")|.patch' $J             # what the model actually wrote
@@ -245,12 +248,12 @@ jq -r 'select(.ev=="pi::edit")|.patch' $J             # what the model actually 
 `ms` is milliseconds since the run began, `in` is the span a record sits under
 (`turn>tool`), and `ev` says which part spoke: `pi::session` `pi::loop`
 `pi::wire` `pi::tool` `pi::edit` `pi::bash` `pi::compact` `pi::keys`, plus
-`pi::span` for the record that closes a span and carries its `dur_ms`. `--log debug` widens the fields, so
-patches and tool arguments arrive whole rather than clipped to a kilobyte.
-`--log trace` adds the request bodies themselves — hundreds of kilobytes a
-turn, which is why they sit a level below everything else — and the
-dependencies' own accounts, which is a lot of hyper. `--log off`
-writes nothing; `PI_LOG` sets it for good.
+`pi::span` for the record that closes a span and carries its `dur_ms`.
+`PI_LOG=debug` widens the fields, so patches and tool arguments arrive whole
+rather than clipped to a kilobyte. `PI_LOG=trace` adds the request bodies
+themselves — hundreds of kilobytes a turn, which is why they sit a level below
+everything else — and the dependencies' own accounts, which is a lot of hyper.
+`PI_LOG=off` writes nothing.
 
 Journals are as sensitive as transcripts — prompts, paths, file contents — and
 kept the same way: `0600`, outside the workspace, dropped after two weeks. No
@@ -259,9 +262,9 @@ field named for one is replaced by a fingerprint of it.
 
 ### Standing instructions
 
-`~/.pi/Pi.md` for yours, `AGENTS.md` for a project's — walked up to the
-repository root, general first, so where two disagree the nearer directory is
-the one read last. Appended to the system prompt, which is the part a provider
+`AGENTS.md` for both — `~/.pi/AGENTS.md` for yours, a project's in the
+project — walked up to the repository root, general first, so where two
+disagree the nearer directory is the one read last. Appended to the system prompt, which is the part a provider
 caches. `--no-context-files` turns it off.
 
 ### Skills
@@ -299,9 +302,7 @@ and refusing it to catch a typo is the worse trade.
 Each declares a tier — read, write or exec — and `--tier` caps the run. Every
 path is resolved against the workspace root through the deepest existing
 ancestor, so a symlink cannot walk out. `bash` gets its own process group and a
-SIGTERM-then-SIGKILL timeout. `--tools read,bash` restricts the model to that
-list; `task` (a subagent) and `skill` are tools like the rest, so an explicit
-list must name them to keep them.
+SIGTERM-then-SIGKILL timeout.
 
 **Edits** are line-anchored patches with content-hash anchors, applied against
 original line numbers so an earlier hunk never shifts a later one. A stale

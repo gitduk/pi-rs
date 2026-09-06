@@ -96,7 +96,7 @@ const BUILTIN: &[Command] = &[
         "",
         "re-read ~/.pi/settings.toml, the instructions and the skills",
     ),
-    Command::builtin("/log", "", "where this session is writing its journal"),
+    Command::builtin("/status", "", "what this run is standing on, and where it is writing"),
     Command::builtin(
         "/keys",
         "",
@@ -677,10 +677,9 @@ impl Repl {
             spec.model.clone(),
         );
         let standing = self.lane().standing.clone();
-        let task = crate::wants_task(&self.args.tools);
         let ag = std::sync::Arc::make_mut(&mut self.lane_mut().agent);
         ag.retarget(transport, spec);
-        crate::hang(ag, home, &standing, task);
+        crate::hang(ag, home, &standing);
     }
 
     /// What `/model` on its own shows.
@@ -891,7 +890,7 @@ pub enum Intent {
     Bash(String),
     Help,
     Keys,
-    Log,
+    Status,
     Cost,
     Reload,
     Name(String),
@@ -969,7 +968,7 @@ impl Intent {
         match self {
             // Answered from the config, the key map or the surface's own
             // totals — none of which the run is holding.
-            Intent::Help | Intent::Keys | Intent::Log | Intent::Cost | Intent::Name(_) => Fate::Now,
+            Intent::Help | Intent::Keys | Intent::Status | Intent::Cost | Intent::Name(_) => Fate::Now,
             // Both write through `Arc::make_mut`, so the run in flight keeps
             // the agent it started on and the next one picks up the change.
             Intent::Reload | Intent::Model(_) => Fate::Now,
@@ -1141,7 +1140,7 @@ pub fn read(line: &str) -> Intent {
         "/resume" => Intent::Resume(rest(line)),
         "/keys" => Intent::Keys,
         "/reload" => Intent::Reload,
-        "/log" => Intent::Log,
+        "/status" => Intent::Status,
         "/name" => Intent::Name(rest(line)),
         "/compact" => Intent::Compact(rest(line)),
         "/model" => Intent::Model(rest(line)),
@@ -1217,6 +1216,47 @@ pub enum WechatCmd {
     Off,
 }
 
+impl Repl {
+    /// What this run stands on, in one place: the tail of the system prompt as
+    /// the model receives it, then the two files a person opens when a run goes
+    /// wrong. The instruction files are named rather than quoted — `standing`
+    /// carries them whole, and their content is in the files themselves.
+    fn status_lines(&self) -> Vec<String> {
+        let lane = self.lane();
+        let mut out = standing_head(&lane.standing);
+        if !lane.context.is_empty() {
+            out.push("context:".into());
+            out.extend(lane.context.iter().map(|c| format!("- {c}")));
+        }
+        out.push(match crate::journal::path() {
+            Some(p) => format!("journal: {}", p.display()),
+            None => "journal: not recording — PI_LOG is off, or it would not open".into(),
+        });
+        out.push(format!(
+            "session: {}",
+            self.store
+                .path_of(lane.ctx.workspace.root(), &lane.id)
+                .display()
+        ));
+        out
+    }
+}
+
+/// What the system prompt's tail says about the run, which is all of it up to
+/// the first instruction file. Split on the tag rather than counting parts, so
+/// that a field added to the head shows up here without being told to; the
+/// files are named separately because `standing` carries them whole.
+fn standing_head(standing: &str) -> Vec<String> {
+    standing
+        .split("<instructions")
+        .next()
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 fn lines(text: impl Into<String>) -> Step {
     Step::Handled(text.into().lines().map(str::to_string).collect())
 }
@@ -1270,10 +1310,7 @@ impl Repl {
             Intent::Help => Step::Handled(help(&self.commands)),
             Intent::Keys => Step::Handled(self.keys.listing()),
             Intent::Reload => Step::Handled(self.reload()),
-            Intent::Log => lines(match crate::journal::path() {
-                Some(p) => format!("{}", p.display()),
-                None => "not recording — --log is off, or the file would not open".into(),
-            }),
+            Intent::Status => Step::Handled(self.status_lines()),
             Intent::Cost => Step::Handled(self.cost_lines(totals)),
             Intent::New => Step::Swap(self.fresh_session("started")),
             Intent::Resume(name) => {
@@ -1743,6 +1780,7 @@ mod tests {
     use super::{
         BUILTIN, Candidate, Choice, Command, Fate, Intent, ResumeChoice, Source, Step, ago,
         bash_command, commands, complete, dispatch, expand, gist, help, read,
+        standing_head,
     };
     use agent::session::{Entry, Session, UserBody, UserText};
     use tools::skills::Skill;
@@ -2156,7 +2194,7 @@ mod tests {
 
     #[test]
     fn a_submitted_line_inherits_the_fate_of_what_it_says() {
-        for line in ["/new", "/log", "/compact keep this", "fix the bug", "!ls", "/nope"] {
+        for line in ["/new", "/status", "/compact keep this", "fix the bug", "!ls", "/nope"] {
             assert_eq!(
                 format!("{:?}", Intent::Submit(line.into()).fate()),
                 format!("{:?}", read(line).fate()),
@@ -2188,10 +2226,31 @@ mod tests {
         }
     }
 
+    /// `/status` shows the run, not the instruction files' contents — those
+    /// are in the files, and one of them is thousands of words long.
+    #[test]
+    fn the_status_head_stops_at_the_first_instruction_file() {
+        let standing = concat!(
+            "\n\n<workspace path=\"/w\"/>",
+            "\n\n<env date=\"2026-09-06\" tier=\"exec\"/>",
+            "\n\n<instructions path=\"/w/AGENTS.md\">\nbe terse\n</instructions>",
+        );
+        assert_eq!(
+            standing_head(standing),
+            vec![
+                "<workspace path=\"/w\"/>".to_string(),
+                "<env date=\"2026-09-06\" tier=\"exec\"/>".to_string(),
+            ],
+            "the head, and none of what the files say"
+        );
+        // A run standing on nothing still has a head to show.
+        assert!(standing_head("").is_empty());
+    }
+
     #[test]
     fn what_the_run_is_not_standing_on_goes_through() {
         for intent in [
-            Intent::Log,
+            Intent::Status,
             Intent::Cost,
             Intent::Help,
             Intent::Keys,

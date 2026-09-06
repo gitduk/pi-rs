@@ -189,18 +189,6 @@ fn registry_exposes_a_stable_ordered_tool_block() {
     assert_eq!(r.get("read").unwrap().tier(), Tier::Read);
 }
 
-#[test]
-fn restrict_rejects_a_typo_rather_than_disarming_the_agent() {
-    assert_eq!(
-        Registry::builtin().restrict(&["reed".into()]).unwrap_err(),
-        "reed"
-    );
-    let r = Registry::builtin()
-        .restrict(&["read".into(), "bash".into()])
-        .unwrap();
-    assert_eq!(r.names(), vec!["bash", "read"]);
-}
-
 #[tokio::test]
 async fn a_huge_file_is_refused_before_it_is_read_into_memory() {
     let (_d, c) = ctx();

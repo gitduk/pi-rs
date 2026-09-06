@@ -95,6 +95,18 @@ pub struct Config {
     /// that shape has a floor; leave it unset and esc is the only brake.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub loop_max_turns: Option<usize>,
+
+    /// How many times to retry a request the provider could not serve. Unset
+    /// is 4, which is `Retry::default()` — the number lives there, not here, so
+    /// that an unset field and a missing config agree by construction.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retries: Option<usize>,
+
+    /// Seconds of silence before a stream counts as wedged. Unset is 300,
+    /// generous because a reasoning model can think for minutes before its
+    /// first token. Clamped up to 1: a zero would call every stream wedged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idle_timeout: Option<u64>,
 }
 
 /// The modal keys, and the sequence that leaves Insert for Normal.

@@ -3215,7 +3215,7 @@ impl Tui {
             // to save — only the same word a stopped turn ends on.
             self.say_of(lane, self.ui.paint.on(&self.ui.paint.theme.muted, "stopped"));
         } else if back {
-            let held = self.core.lanes[lane].agent.kept_tokens().unwrap_or(0);
+            let held = self.core.lanes[lane].agent.kept_tokens();
             let now = self.core.tokens_now_at(lane);
             self.say_of(
                 lane,
@@ -3315,7 +3315,7 @@ mod tests {
     #[test]
     fn the_opening_block_names_the_instruction_files() {
         let paint = Paint::new(false);
-        let rows = Row::banner(&["~/.pi/Pi.md".into(), "AGENTS.md".into()], &paint);
+        let rows = Row::banner(&["~/.pi/AGENTS.md".into(), "AGENTS.md".into()], &paint);
         let shown: Vec<String> = ScrollbackRows::new(&rows, &paint, &[], 80)
             .map(|(r, _)| r.to_string())
             .collect();
@@ -3326,7 +3326,7 @@ mod tests {
             [
                 concat!("π ", env!("CARGO_PKG_VERSION")),
                 "context:",
-                "- ~/.pi/Pi.md",
+                "- ~/.pi/AGENTS.md",
                 "- AGENTS.md"
             ]
         );

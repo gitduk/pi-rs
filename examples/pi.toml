@@ -50,6 +50,13 @@ tier   = "exec"                  # read | write | exec
 # alone: without it, esc is the only brake.
 loop_max_turns = 10
 
+# How many times to retry a request the provider could not serve, and how many
+# seconds of silence before a stream counts as wedged. The second is generous
+# on purpose: a reasoning model can legitimately think for minutes before its
+# first token.
+retries = 4
+idle_timeout = 300
+
 # Replaces the built-in system prompt. Rarely what you want: the built-in one
 # is what the tools were written against.
 # system = "~/.pi/system.md"

@@ -49,8 +49,10 @@ impl Tool for Bash {
 
     fn description(&self) -> &str {
         "Run a shell command in the workspace. Each call is a fresh shell: cd and \
-         environment changes do not carry over. Prefer read and write over cat \
-         and heredocs."
+         environment changes do not carry over — pass cwd rather than prefixing \
+         cd. Prefer read, edit and write over cat, heredocs and sed -i: they \
+         report failures you can act on, and only they hand back a TAG to edit \
+         against."
     }
 
     fn schema(&self) -> Value {

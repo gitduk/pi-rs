@@ -138,7 +138,7 @@ fn clip(s: &str, cap: usize) -> Value {
 
 // RFC 3339, UTC, milliseconds. Hand-rolled: a calendar is thirty lines and a
 // date crate is a dependency the rest of the binary has no use for.
-fn rfc3339(t: SystemTime) -> String {
+pub(crate) fn rfc3339(t: SystemTime) -> String {
     let d = t.duration_since(UNIX_EPOCH).unwrap_or_default();
     let secs = d.as_secs() as i64;
     let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
@@ -531,7 +531,7 @@ where
 // it from far away without the path being threaded through the terminal loop.
 static JOURNAL: std::sync::OnceLock<std::sync::Arc<Journal>> = std::sync::OnceLock::new();
 
-/// Where the journal is writing right now, for `/log` and the failure line.
+/// Where the journal is writing right now, for `/status` and the failure line.
 /// Read back from the journal itself — the sink holds its own path — so there
 /// is no second copy to keep in step.
 pub fn path() -> Option<PathBuf> {
@@ -540,7 +540,7 @@ pub fn path() -> Option<PathBuf> {
 
 // Where journals live, beside the transcripts they belong to.
 fn dir() -> Option<PathBuf> {
-    tools::state::dir().map(|d| d.join("logs"))
+    tools::state::logs()
 }
 
 // Where a session's journal lives.
@@ -576,6 +576,16 @@ fn prune(dir: &Path) {
 /// Not recording is not worth failing a run over — the level is off, there is
 /// no state directory, or the file would not open — so the error is reported
 /// and dropped rather than returned.
+/// The level `PI_LOG` names, `Info` when it is unset or unreadable. A typo
+/// falls back rather than failing: not recording is not worth failing a run
+/// over, and neither is misspelling how much to record.
+pub fn level_from_env() -> LogLevel {
+    let Ok(name) = std::env::var("PI_LOG") else {
+        return LogLevel::Info;
+    };
+    <LogLevel as clap::ValueEnum>::from_str(&name, true).unwrap_or(LogLevel::Info)
+}
+
 pub fn install(id: &str, level: LogLevel) {
     if level == LogLevel::Off {
         return;
@@ -585,7 +595,7 @@ pub fn install(id: &str, level: LogLevel) {
     let journal = match Journal::open(&path, level.field_cap()) {
         Ok(j) => std::sync::Arc::new(j),
         Err(e) => {
-            eprintln!("warning: no journal ({e}); --log off silences this");
+            eprintln!("warning: no journal ({e}); PI_LOG=off silences this");
             return;
         }
     };
@@ -649,7 +659,7 @@ pub fn opening(
 /// The run has moved to a different session — a `/resume` or a `/new` — so
 /// point the journal at that session's file, and mark the seam in it. Each
 /// session keeps one journal across every run that touched it, which is how
-/// `/log` and the file both follow the session.
+/// `/status` and the file both follow the session.
 pub fn switched(id: &str) {
     if let (Some(dir), Some(journal)) = (dir(), JOURNAL.get())
         && let Err(e) = journal.retarget(&path_for(&dir, id))

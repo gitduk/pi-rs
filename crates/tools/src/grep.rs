@@ -47,7 +47,8 @@ impl Tool for Grep {
         "Search file contents by regular expression. Respects .gitignore and skips \
          binaries. Results come back as `[path#TAG]` sections with numbered lines, \
          the same shape read returns — so a match can be edited without reading \
-         the file first."
+         the file first. Reach for this before running rg or find in bash: it \
+         already knows what to ignore."
     }
 
     fn schema(&self) -> Value {

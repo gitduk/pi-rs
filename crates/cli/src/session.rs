@@ -154,6 +154,14 @@ impl Store {
         self.root.join(tools::state::key_of(workspace))
     }
 
+    /// Where one session's transcript is, written or not yet. `/status` names
+    /// it: a transcript nobody can find is one nobody reads back when a run
+    /// goes wrong.
+    pub fn path_of(&self, workspace: &Path, id: &str) -> PathBuf {
+        self.dir_of(workspace)
+            .join(format!("{}.json", tools::state::file_stem(id)))
+    }
+
     /// `created` is the caller's because it is set once and never changes.
     /// Reading it back off disk here meant parsing the whole transcript to
     /// recover one integer — on every turn, growing with the session it saved.
@@ -166,9 +174,8 @@ impl Store {
         created: u64,
         session: &Session,
     ) -> Result<PathBuf> {
-        let dir = self.dir_of(workspace);
-        std::fs::create_dir_all(&dir)?;
-        let path = dir.join(format!("{}.json", tools::state::file_stem(id)));
+        std::fs::create_dir_all(self.dir_of(workspace))?;
+        let path = self.path_of(workspace, id);
 
         // Rename, so a crash mid-write cannot leave a truncated transcript.
         let tmp = path.with_extension("json.tmp");
