@@ -165,13 +165,40 @@ impl Store {
         self.root.join(tools::state::key_of(workspace))
     }
 
+    /// What `k` recalls in this workspace. Beside the transcripts rather than
+    /// in a tree of its own: it answers to the same key, and it stops meaning
+    /// anything at the same moment they do.
+    ///
+    /// Per workspace and not per session on purpose — the line you are
+    /// reaching back for is usually one you typed before `/new`.
+    pub fn history_path(&self, workspace: &Path) -> PathBuf {
+        self.dir_of(workspace).join("history")
+    }
+
+    /// Where a session's journal is written. Beside its transcript, so that
+    /// dropping the session drops the record of how it went with it — the two
+    /// used to live in different trees under different rules, and a swept
+    /// bucket left its logs behind for a fortnight.
+    pub fn journal_path(&self, workspace: &Path, id: &str) -> PathBuf {
+        self.dir_of(workspace)
+            .join(tools::state::file_stem(id))
+            .join("journal.jsonl")
+    }
+
+    /// The tree every bucket sits in, for the sweeps that walk all of them.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// Where one session's transcript is, written or not yet. `/status` names
     /// it: a transcript nobody can find is one nobody reads back when a run
     /// goes wrong.
     pub fn path_of(&self, workspace: &Path, id: &str) -> PathBuf {
         self.dir_of(workspace)
-            .join(format!("{}.json", tools::state::file_stem(id)))
+            .join(tools::state::file_stem(id))
+            .join("session.json")
     }
+
 
     /// `created` is the caller's because it is set once and never changes.
     /// Reading it back off disk here meant parsing the whole transcript to
@@ -185,8 +212,8 @@ impl Store {
         created: u64,
         session: &Session,
     ) -> Result<PathBuf> {
-        std::fs::create_dir_all(self.dir_of(workspace))?;
         let path = self.path_of(workspace, id);
+        std::fs::create_dir_all(path.parent().expect("a session directory"))?;
 
         // Rename, so a crash mid-write cannot leave a truncated transcript.
         let tmp = path.with_extension("json.tmp");
@@ -227,30 +254,22 @@ impl Store {
     /// knowing which workspace saved it. Sessions saved before the bucketed
     /// layout sit flat under the root; the search falls back to that path.
     pub fn load(&self, id: &str) -> Result<Stored> {
-        let name = format!("{}.json", tools::state::file_stem(id));
+        let stem = tools::state::file_stem(id);
         let mut match_: Option<PathBuf> = None;
         if let Ok(entries) = std::fs::read_dir(&self.root) {
             for entry in entries.flatten() {
-                let candidate = entry.path().join(&name);
+                let candidate = entry.path().join(&stem).join("session.json");
                 if candidate.is_file() {
                     match_ = Some(candidate);
                     break;
                 }
             }
         }
-        let path = match match_ {
-            Some(p) => p,
-            None => {
-                let flat = self.root.join(&name);
-                if flat.is_file() {
-                    flat
-                } else {
-                    return Err(anyhow::anyhow!(
-                        "no session `{id}` in {}",
-                        self.root.display()
-                    ));
-                }
-            }
+        let Some(path) = match_ else {
+            return Err(anyhow::anyhow!(
+                "no session `{id}` in {}",
+                self.root.display()
+            ));
         };
         let body = std::fs::read_to_string(&path)
             .with_context(|| format!("no session `{id}` at {}", path.display()))?;
@@ -267,20 +286,20 @@ impl Store {
             .into_iter()
             .flatten()
             .flatten()
-            // A session re-saved after the layout change lives in both
-            // places; the bucket copy is the newer one, so it wins the dedup.
-            .chain(std::fs::read_dir(&self.root).into_iter().flatten().flatten())
             .filter_map(|entry| {
-                if entry.path().extension().is_none_or(|e| e != "json") {
+                // The bucket also holds `history`, which is a file and so is
+                // skipped by asking for a transcript inside it.
+                let path = entry.path().join("session.json");
+                if !path.is_file() {
                     return None;
                 }
-                let body = std::fs::read_to_string(entry.path()).ok()?;
+                let body = std::fs::read_to_string(&path).ok()?;
                 match serde_json::from_str::<Peek>(&body) {
                     Ok(peek) => (peek.workspace == want).then_some(peek),
                     Err(e) => {
                         tracing::warn!(
                             target: "pi::session",
-                            path = %entry.path().display(),
+                            path = %path.display(),
                             error = %e,
                             "unreadable transcript skipped"
                         );
@@ -326,20 +345,24 @@ impl Store {
             if !bucket.is_dir() {
                 continue;
             }
-            let files: Vec<_> = match std::fs::read_dir(&bucket) {
+            let transcripts: Vec<PathBuf> = match std::fs::read_dir(&bucket) {
                 Ok(entries) => entries
                     .flatten()
-                    .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+                    .map(|e| e.path().join("session.json"))
+                    .filter(|p| p.is_file())
                     .collect(),
                 Err(_) => continue,
             };
-            // A bucket with nothing in it belongs to nobody, whatever it held.
-            if files.is_empty() {
+            // Nothing here says which tree this bucket belongs to, so nothing
+            // here can say it is gone. `remove_dir` takes the bucket only if it
+            // is genuinely empty: one holding recall and no transcripts is
+            // still somebody's, and is left alone.
+            if transcripts.is_empty() {
                 let _ = std::fs::remove_dir(&bucket);
                 continue;
             }
-            let recent = files.iter().any(|f| {
-                f.metadata()
+            let recent = transcripts.iter().any(|p| {
+                p.metadata()
                     .and_then(|m| m.modified())
                     .ok()
                     .and_then(|t| now.duration_since(t).ok())
@@ -348,10 +371,10 @@ impl Store {
             if recent {
                 continue;
             }
-            // One file answers for the bucket: they are grouped by the very
-            // path being asked about.
-            let gone = files.iter().find_map(|f| {
-                let text = std::fs::read_to_string(f.path()).ok()?;
+            // One transcript answers for the bucket: they are grouped by the
+            // very path being asked about.
+            let gone = transcripts.iter().find_map(|p| {
+                let text = std::fs::read_to_string(p).ok()?;
                 let belongs: Belongs = serde_json::from_str(&text).ok()?;
                 Some(!Path::new(&belongs.workspace).is_dir())
             });
@@ -419,7 +442,7 @@ mod tests {
     /// settled by the id rather than by recency. Forced through the JSON
     /// because an entry's stamp is the session's to set, not a caller's.
     fn touched_at(store: &Store, workspace: &Path, id: &str, at: u64) {
-        let path = store.dir_of(workspace).join(format!("{}.json", id));
+        let path = store.path_of(workspace, id);
         let mut raw: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         raw["entries"].as_array_mut().unwrap().last_mut().unwrap()["at"] = json!(at);
@@ -673,8 +696,9 @@ mod tests {
             .save("t", std::path::Path::new("/w"), "m", None, 1, &log)
             .unwrap();
 
-        // The archive lives in the bucket, not flat under the store root.
-        let bucket = tmp.path().join("-w").join("t.json");
+        // A session is a directory in the bucket, holding the transcript and
+        // the journal that recorded it.
+        let bucket = tmp.path().join("-w").join("t").join("session.json");
         assert!(
             bucket.is_file(),
             "session must be filed under its workspace bucket"
@@ -688,26 +712,4 @@ mod tests {
         assert_eq!(store.load("t").unwrap().id, "t");
     }
 
-    #[test]
-    fn a_flat_archive_from_before_the_bucket_layout_still_loads_and_lists() {
-        let tmp = tempfile::tempdir().unwrap();
-        let store = Store::new(tmp.path());
-        let log = log_with(vec![Message::user("old session")]);
-        // The old layout wrote the archive straight under the root.
-        let flat = tmp.path().join("old.json");
-        let stored = Stored {
-            id: "old".into(),
-            workspace: "/w".into(),
-            model: "m".into(),
-            created: 1,
-            name: None,
-            session: log,
-        };
-        std::fs::write(&flat, serde_json::to_vec(&stored).unwrap()).unwrap();
-
-        assert_eq!(store.load("old").unwrap().id, "old");
-        let choices = store.choices(std::path::Path::new("/w"));
-        assert_eq!(choices.len(), 1, "{choices:?}");
-        assert_eq!(choices[0].id, "old");
-    }
 }

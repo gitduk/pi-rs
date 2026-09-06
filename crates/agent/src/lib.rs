@@ -641,10 +641,14 @@ impl Agent {
         failures: &mut Failures,
         spent: &mut Totals,
     ) -> Result<Vec<(ToolResult, Option<String>)>, AgentError> {
-        // Read once for the batch rather than per failure: it is a fixed fact
-        // about the machine, and `failed` is not the place to learn it.
-        let logs = tools::state::logs();
-        let logs = logs.as_deref();
+        // Read once for the batch rather than per failure, and from `ctx`
+        // rather than the machine: a session moves — `/new`, `/resume` — and
+        // the context is what moves with it.
+        let journal = ctx
+            .session()
+            .and_then(|id| tools::state::session_dir(ctx.workspace.root(), id))
+            .map(|d| d.join("journal.jsonl"));
+        let journal = journal.as_deref();
         let actions: Vec<Action> = calls
             .iter()
             .map(|c| {
@@ -745,7 +749,7 @@ impl Agent {
             // content holds. The rebuild has no other way back to it.
             let mut sketched = None;
             let result = match (action, output) {
-                (Action::Reject(why), _) => failed(call, why.clone(), None, failures, logs),
+                (Action::Reject(why), _) => failed(call, why.clone(), None, failures, journal),
                 (_, Some(Err(ToolError::Cancelled))) => return Err(AgentError::Cancelled),
                 (_, Some(Err(e))) => {
                     let mut body = e.to_string();
@@ -763,7 +767,7 @@ impl Agent {
                             preview: body.clone(),
                         },
                     );
-                    failed(call, body, e.category(), failures, logs)
+                    failed(call, body, e.category(), failures, journal)
                 }
                 (_, Some(Ok(out))) => {
                     // A nested run's spend belongs to the run that called it:
@@ -851,9 +855,9 @@ fn failed(
     mut body: String,
     code: Option<&'static str>,
     failures: &mut Failures,
-    logs: Option<&std::path::Path>,
+    journal: Option<&std::path::Path>,
 ) -> ToolResult {
-    if let Some(notice) = too_many_failures(call, code, failures, logs) {
+    if let Some(notice) = too_many_failures(call, code, failures, journal) {
         body.push_str(&notice);
     }
     ToolResult::error(call.id.clone(), &call.name, body)
@@ -871,7 +875,7 @@ fn too_many_failures(
     call: &ToolCall,
     code: Option<&'static str>,
     failures: &mut Failures,
-    logs: Option<&std::path::Path>,
+    journal: Option<&std::path::Path>,
 ) -> Option<String> {
     let key = (
         call.name.clone(),
@@ -897,14 +901,14 @@ fn too_many_failures(
          or reach the goal another way.",
         call.name
     );
-    // The journal holds what the transcript cannot: the call as it went on the
-    // wire. Pointed at the directory rather than the file because the file is
-    // named for a session and `/new` moves it; the newest one is this run's.
-    if let Some(logs) = logs {
+    // The journal holds what the transcript cannot: the call as it went out on
+    // the wire. Named exactly, because it is this session's and `ctx` followed
+    // the session here.
+    if let Some(journal) = journal {
         notice.push_str(&format!(
-            " The wire records are under {}, newest file first — it is JSONL, \
-             so grep it rather than reading it whole.",
-            logs.display()
+            " The wire records for this session are in {} — it is JSONL, so \
+             grep it rather than reading it whole.",
+            journal.display()
         ));
     }
     notice.push(']');
@@ -988,13 +992,14 @@ mod tests {
     /// matter, so the notice that names the loop is where the journal is named.
     #[test]
     fn the_notice_points_at_the_journal_it_cannot_otherwise_reach() {
-        let logs = std::path::Path::new("/pi-home-fixture/logs");
+        let journal = std::path::Path::new("/fixture/sessions/-w/s1/journal.jsonl");
         let mut f = Failures::new();
-        too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f, Some(logs));
-        let notice = too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f, Some(logs))
-            .expect("the second same-code failure is named");
+        too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f, Some(journal));
+        let notice =
+            too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f, Some(journal))
+                .expect("the second same-code failure is named");
 
-        assert!(notice.contains("/pi-home-fixture/logs"), "{notice}");
+        assert!(notice.contains("/fixture/sessions/-w/s1/journal.jsonl"), "{notice}");
         // JSONL has no skeleton to fall back on, so a whole-file read is the
         // one way to spend the window that the pointer would have saved.
         assert!(notice.contains("grep"), "{notice}");

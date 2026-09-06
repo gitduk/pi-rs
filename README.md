@@ -222,11 +222,12 @@ cursor live in `~/.pi/wechat.json`.
 
 ### The journal
 
-Every session keeps one, at `~/.pi/logs/<session>.jsonl`, and
+Every session keeps one at `~/.pi/sessions/<project>/<session>/journal.jsonl`,
+beside the transcript it recorded, so that dropping a session drops both.
 `/status` says where — along with the transcript's own file, and the tail of
 the system prompt the model is answering under. A tool that fails the same way
-twice is told the directory too: the journal holds the call as it went on the
-wire, which the transcript does not. A run opens the journal of the session it starts on —
+twice is told the path too: the journal holds the call as it went on the wire,
+which the transcript does not. A run opens the journal of the session it starts on —
 `--resume` included — and `/resume` or `/new` switches it to the session now
 in charge, so the whole of a session reads as one file across the runs that
 touched it.
@@ -239,7 +240,7 @@ two together rather than reproduced.
 One JSON object per line, so `jq` is the reader:
 
 ```bash
-J=~/.pi/logs/<session>.jsonl                            # /status prints the path
+J=~/.pi/sessions/<project>/<session>/journal.jsonl    # /status prints it
 jq -c 'select(.lvl=="WARN" or .lvl=="ERROR")' $J      # only what went wrong
 jq -c 'select(.ev=="pi::span")|{msg,name,dur_ms}' $J  # what took the time
 jq -r 'select(.ev=="pi::edit")|.patch' $J             # what the model actually wrote

@@ -1447,7 +1447,11 @@ impl Repl {
     fn becomes(&mut self, id: String, created: u64) {
         self.lane_mut().id = id;
         self.lane_mut().created = created;
-        crate::journal::switched(&self.lane_mut().id);
+        let id = self.lane().id.clone();
+        let path = self
+            .store
+            .journal_path(self.lane().ctx.workspace.root(), &id);
+        crate::journal::switched(&path, &id);
         // Spills are filed under the session id; a session has to own its own
         // namespace or the one before it keeps swallowing them.
         self.lane_mut().ctx = self.lane_mut().ctx.clone().with_session(&self.lane_mut().id);

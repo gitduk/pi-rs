@@ -288,6 +288,11 @@ impl Ctx {
         self
     }
 
+    /// The session this context runs in, when it has one.
+    pub fn session(&self) -> Option<&str> {
+        self.session.as_deref()
+    }
+
     /// The namespace new spills are filed under.
     pub fn spill_namespace(&self) -> &str {
         self.session.as_deref().unwrap_or("default")

@@ -11,10 +11,21 @@ pub fn dir() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".pi")))
 }
 
-/// Where journals are written. Named here rather than in `cli`, which is what
-/// writes them: the agent points the model at them when a tool keeps failing,
-/// and neither side may guess at the other's layout.
-pub fn logs() -> Option<PathBuf> {
+/// Where transcripts and their journals are kept, one directory per session.
+pub fn sessions() -> Option<PathBuf> {
+    dir().map(|d| d.join("sessions"))
+}
+
+/// One session's own directory. Named here rather than in `cli`, which is what
+/// writes it: the agent points the model at the journal inside when a tool
+/// keeps failing, and neither side may guess at the other's layout.
+pub fn session_dir(workspace: &Path, id: &str) -> Option<PathBuf> {
+    sessions().map(|s| s.join(key_of(workspace)).join(file_stem(id)))
+}
+
+/// The tree journals used to have to themselves. Kept only so that the run
+/// that finds one can take it: nothing writes here any more.
+pub fn stale_logs() -> Option<PathBuf> {
     dir().map(|d| d.join("logs"))
 }
 

@@ -473,7 +473,18 @@ async fn main() -> Result<()> {
     // loses nothing — the next one sweeps.
     tokio::task::spawn_blocking({
         let store = store.clone();
-        move || store.prune()
+        move || {
+            // The journals live in the buckets now, so the two sweeps walk one
+            // tree. Transcripts go by reach, journals by age — a run worth
+            // reading back is a fortnight old at most, and the work is not.
+            journal::prune(store.root());
+            store.prune();
+            // One layout ago journals had a tree of their own. Nothing looks
+            // there now, so nothing would ever take them.
+            if let Some(logs) = tools::state::stale_logs() {
+                let _ = std::fs::remove_dir_all(logs);
+            }
+        }
     });
     let prior = match (&args.resume, args.continue_last) {
         (Some(id), _) => Some(store.load(id)?),
@@ -487,7 +498,10 @@ async fn main() -> Result<()> {
         .as_ref()
         .map(|p| p.id.clone())
         .unwrap_or_else(session::new_id);
-    journal::install(&id, journal::level_from_env());
+    journal::install(
+        &store.journal_path(workspace.root(), &id),
+        journal::level_from_env(),
+    );
     journal::opening(
         &id,
         &args,

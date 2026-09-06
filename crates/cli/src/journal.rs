@@ -538,35 +538,35 @@ pub fn path() -> Option<PathBuf> {
     JOURNAL.get()?.sink.lock().ok().map(|s| s.path.clone())
 }
 
-// Where journals live, beside the transcripts they belong to.
-fn dir() -> Option<PathBuf> {
-    tools::state::logs()
-}
-
-// Where a session's journal lives.
-fn path_for(dir: &Path, id: &str) -> PathBuf {
-    dir.join(format!("{}.jsonl", tools::state::file_stem(id)))
-}
-
-// Drop journals nothing will be read back from. Failures are ignored: a full
-// or read-only log directory is a reason to log less, never to stop the run.
-fn prune(dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
+/// Drop journals nothing will be read back from. Walks the session tree,
+/// because that is where they live now — a bucket, a session, its journal.
+///
+/// A fortnight, where a transcript keeps until its checkout goes: a journal is
+/// for reading back a run that went wrong last week, and a transcript is the
+/// work itself. Sharing a directory does not make them the same age.
+///
+/// Failures are ignored: a full or read-only directory is a reason to log
+/// less, never to stop the run.
+pub fn prune(sessions: &Path) {
+    let Ok(buckets) = std::fs::read_dir(sessions) else {
         return;
     };
     let now = SystemTime::now();
-    for entry in entries.flatten() {
-        if entry.path().extension().is_none_or(|e| e != "jsonl") {
+    for bucket in buckets.flatten() {
+        let Ok(entries) = std::fs::read_dir(bucket.path()) else {
             continue;
-        }
-        let old = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| now.duration_since(t).ok())
-            .is_some_and(|age| age > KEEP);
-        if old {
-            let _ = std::fs::remove_file(entry.path());
+        };
+        for entry in entries.flatten() {
+            let path = entry.path().join("journal.jsonl");
+            let old = path
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| now.duration_since(t).ok())
+                .is_some_and(|age| age > KEEP);
+            if old {
+                let _ = std::fs::remove_file(&path);
+            }
         }
     }
 }
@@ -586,13 +586,14 @@ pub fn level_from_env() -> LogLevel {
     <LogLevel as clap::ValueEnum>::from_str(&name, true).unwrap_or(LogLevel::Info)
 }
 
-pub fn install(id: &str, level: LogLevel) {
+pub fn install(path: &Path, level: LogLevel) {
     if level == LogLevel::Off {
         return;
     }
-    let Some(dir) = dir() else { return };
-    let path = path_for(&dir, id);
-    let journal = match Journal::open(&path, level.field_cap()) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let journal = match Journal::open(path, level.field_cap()) {
         Ok(j) => std::sync::Arc::new(j),
         Err(e) => {
             eprintln!("warning: no journal ({e}); PI_LOG=off silences this");
@@ -606,11 +607,6 @@ pub fn install(id: &str, level: LogLevel) {
     if tracing::subscriber::set_global_default(tracing_subscriber::registry().with(layer)).is_ok() {
         let _ = JOURNAL.set(journal);
     }
-    // Off the startup path: a fortnight of journals is hundreds of files to
-    // stat, almost never with anything to delete, and the run has a request to
-    // send. Losing the sweep to an early exit costs nothing — the next run
-    // does it.
-    tokio::task::spawn_blocking(move || prune(&dir));
 }
 
 /// The state the run started from, recorded once.
@@ -660,9 +656,12 @@ pub fn opening(
 /// point the journal at that session's file, and mark the seam in it. Each
 /// session keeps one journal across every run that touched it, which is how
 /// `/status` and the file both follow the session.
-pub fn switched(id: &str) {
-    if let (Some(dir), Some(journal)) = (dir(), JOURNAL.get())
-        && let Err(e) = journal.retarget(&path_for(&dir, id))
+pub fn switched(path: &Path, id: &str) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Some(journal) = JOURNAL.get()
+        && let Err(e) = journal.retarget(path)
     {
         tracing::warn!(target: "pi::session", session = id, error = %e, "could not move the journal to this session");
     }
