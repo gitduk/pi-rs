@@ -1241,15 +1241,18 @@ impl Ui {
         Some(render::clip(&painted.join(&self.tab_sep), width))
     }
 
-    /// The checkout after this one, wrapping at the end — what `ctrl+o` goes
-    /// to. Every checkout on disk is in the ring, not only the ones already
-    /// open: `Intent::Worktree` opens one that is not, which is the same thing
-    /// the picker did when you chose an unopened row.
+    /// The checkout a step from this one, wrapping at either end — what
+    /// `ctrl+o` and the Normal `l`/`h` go to. `forward` picks the ring's next
+    /// checkout, `!forward` its previous. Every checkout on disk is in the
+    /// ring, not only the ones already open: `Intent::Worktree` opens one that
+    /// is not, which is the same thing the picker did when you chose an
+    /// unopened row.
     ///
     /// None when there is nowhere else to go.
-    fn next_checkout(&self, lane: &Lane) -> Option<String> {
+    fn step_checkout(&self, lane: &Lane, forward: bool) -> Option<String> {
         let trees = self.lists.worktrees();
-        if trees.len() < 2 {
+        let n = trees.len();
+        if n < 2 {
             return None;
         }
         // `worktree::list` puts the main checkout first and names it for its
@@ -1258,7 +1261,12 @@ impl Ui {
             Some(name) => trees.iter().position(|c| c.name == name).unwrap_or(0),
             None => 0,
         };
-        Some(trees[(at + 1) % trees.len()].name.clone())
+        let i = if forward {
+            (at + 1) % n
+        } else {
+            (at + n - 1) % n
+        };
+        Some(trees[i].name.clone())
     }
 
     fn set_theme(&mut self, view: &mut View, context: &[String], theme: Arc<render::Theme>) {
@@ -1596,8 +1604,9 @@ impl Ui {
                 }
                 return Intent::None;
             }
-            Some(Action::LaneNext) => {
-                return match self.next_checkout(lane) {
+            Some(action @ (Action::LaneNext | Action::LanePrev)) => {
+                let forward = action == Action::LaneNext;
+                return match self.step_checkout(lane, forward) {
                     Some(name) => Intent::Worktree(name),
                     None => {
                         self.flash("the only checkout there is");
@@ -1714,7 +1723,7 @@ impl Ui {
             }
             // Answered in the first match, which returns; named here because
             // this one has no catch-all and should not grow one.
-            Some(Action::LaneNext) | Some(Action::EditExternally) => {}
+            Some(Action::LaneNext) | Some(Action::LanePrev) | Some(Action::EditExternally) => {}
             Some(Action::MenuDismiss) => {
                 let was_rewind = !self.rewind.is_empty();
                 self.rewind.clear();
@@ -4317,12 +4326,13 @@ mod tests {
         assert_eq!(shown(&ui, &lane, 2), "nothing to rewind to");
     }
 
-    /// `ctrl+o` walks the checkouts in a ring. Every checkout on disk is in
-    /// it, not only the open ones — the main one first, because that is the
-    /// order `worktree::list` reports and a lane in it carries no name.
+    /// `ctrl+o` and the Normal `l` walk the checkouts in a ring forward; `h`
+    /// walks it back. Every checkout on disk is in it, not only the open ones
+    /// — the main one first, because that is the order `worktree::list`
+    /// reports and a lane in it carries no name.
     #[test]
-    fn ctrl_o_walks_to_the_next_checkout_and_wraps() {
-        let ring = |at: Option<&str>| {
+    fn stepping_the_checkouts_walks_the_ring_and_wraps_both_ways() {
+        let ring = |at: Option<&str>, forward: bool| {
             let ui = test_ui(80, 24);
             let trees = ["pi-rs", "f1", "f2"]
                 .iter()
@@ -4331,13 +4341,17 @@ mod tests {
             ui.lists.worktrees.set(trees).ok();
             let (_dir, mut lane) = a_running_lane();
             lane.worktree = at.map(str::to_string);
-            ui.next_checkout(&lane)
+            ui.step_checkout(&lane, forward)
         };
         // The main checkout is the one a lane names as None.
-        assert_eq!(ring(None).as_deref(), Some("f1"));
-        assert_eq!(ring(Some("f1")).as_deref(), Some("f2"));
+        assert_eq!(ring(None, true).as_deref(), Some("f1"));
+        assert_eq!(ring(Some("f1"), true).as_deref(), Some("f2"));
         // And round the end, back to the main one.
-        assert_eq!(ring(Some("f2")).as_deref(), Some("pi-rs"));
+        assert_eq!(ring(Some("f2"), true).as_deref(), Some("pi-rs"));
+        // The other way round, from the main one.
+        assert_eq!(ring(None, false).as_deref(), Some("f2"));
+        assert_eq!(ring(Some("f1"), false).as_deref(), Some("pi-rs"));
+        assert_eq!(ring(Some("f2"), false).as_deref(), Some("f1"));
     }
 
     /// Nowhere to go is said, not walked to: one checkout has no next.
@@ -4349,7 +4363,8 @@ mod tests {
             .set(vec![crate::repl::Choice { name: "pi-rs".into(), note: String::new() }])
             .ok();
         let (_dir, lane) = a_running_lane();
-        assert_eq!(ui.next_checkout(&lane), None);
+        assert_eq!(ui.step_checkout(&lane, true), None);
+        assert_eq!(ui.step_checkout(&lane, false), None);
     }
 
     /// The view travels with its lane, but the editor is the surface's, so a
@@ -4384,6 +4399,33 @@ mod tests {
         assert!(
             matches!(&intent, crate::repl::Intent::Worktree(name) if name == "f1"),
             "{intent:?}"
+        );
+    }
+
+    /// Normal mode: `l` is the next checkout and `h` the previous one. The
+    /// key map resolves on the mode, so a bare `l`/`h` in Normal switches
+    /// lanes instead of moving the caret.
+    #[test]
+    fn normal_h_and_l_step_the_checkouts() {
+        let mut ui = vim_ui();
+        let trees = ["pi-rs", "f1", "f2"]
+            .iter()
+            .map(|n| crate::repl::Choice { name: n.to_string(), note: String::new() })
+            .collect();
+        ui.lists.worktrees.set(trees).ok();
+        ui.vim.as_mut().unwrap().mode = crate::keys::Mode::Normal;
+        let (_dir, mut lane) = a_running_lane();
+
+        let next = ui.key(&mut lane, typed('l'), false);
+        assert!(
+            matches!(&next, crate::repl::Intent::Worktree(name) if name == "f1"),
+            "{next:?}"
+        );
+        lane.worktree = Some("f1".into());
+        let prev = ui.key(&mut lane, typed('h'), false);
+        assert!(
+            matches!(&prev, crate::repl::Intent::Worktree(name) if name == "pi-rs"),
+            "{prev:?}"
         );
     }
 
@@ -4682,7 +4724,11 @@ mod tests {
 
         ui.vim.as_mut().unwrap().mode = crate::keys::Mode::Normal;
         ui.key(&mut lane, typed('0'), false);
-        ui.key(&mut lane, typed('l'), false);
+        let right = super::TermEvent::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Right,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        ui.key(&mut lane, right, false);
         ui.key(&mut lane, typed('C'), false);
         assert_eq!(ui.editor.text(), "Z");
         assert_eq!(mode(&ui), Some(crate::keys::Mode::Insert));

@@ -8,9 +8,11 @@
 //! One file per workspace, beside its transcripts: a note is about the work,
 //! and the work is a checkout.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+
+use crate::session::now;
 
 /// How many notes the shelf holds. Yours are never crowded out, so what this
 /// really caps is how many the model may keep.
@@ -52,13 +54,6 @@ impl Note {
         let days = now.saturating_sub(self.at) as f64 / DAY as f64;
         self.weight.map(|w| w as f64 - days * PER_DAY)
     }
-}
-
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or_default()
 }
 
 /// One workspace's shelf.
@@ -127,14 +122,12 @@ impl Memory {
             let (sx, sy) = (x.score(now).unwrap_or(0.0), y.score(now).unwrap_or(0.0));
             sx.total_cmp(&sy).then(x.at.cmp(&y.at))
         });
-        let doomed: std::collections::BTreeSet<usize> =
-            ranked.into_iter().take(theirs - room).collect();
-        let mut i = 0;
-        self.notes.retain(|_| {
-            let keep = !doomed.contains(&i);
-            i += 1;
-            keep
-        });
+        let mut doomed = vec![false; self.notes.len()];
+        for i in ranked.into_iter().take(theirs - room) {
+            doomed[i] = true;
+        }
+        let mut doomed = doomed.into_iter();
+        self.notes.retain(|_| !doomed.next().unwrap_or(false));
     }
 
     /// The shelf as the model reads it, or nothing when it is empty.
@@ -160,13 +153,6 @@ impl Memory {
 fn day(at: u64) -> String {
     crate::journal::rfc3339(std::time::UNIX_EPOCH + std::time::Duration::from_secs(at))[..10]
         .to_string()
-}
-
-/// Where one workspace's shelf lives, beside its transcripts.
-pub fn path_of(sessions: &Path, workspace: &Path) -> PathBuf {
-    sessions
-        .join(tools::state::key_of(workspace))
-        .join("memory.json")
 }
 
 #[cfg(test)]

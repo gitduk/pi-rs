@@ -13,9 +13,9 @@ mod config;
 mod context;
 mod journal;
 mod keys;
-mod memory;
 mod lane;
 mod line;
+mod memory;
 mod render;
 mod repl;
 mod session;
@@ -575,6 +575,11 @@ async fn main() -> Result<()> {
     if let Some(secs) = config.idle_timeout {
         ag.retry.idle = std::time::Duration::from_secs(secs.max(1));
     }
+    // Before `arm`, which is where the child is cloned: a shelf hung after it
+    // would reach this run and none of the subagents it spawns. Here rather
+    // than beside the Repl, so a one-shot `pi "..."` reads the same shelf an
+    // interactive session writes — outliving one transcript is the whole point.
+    ag.memory = memory::Memory::load(&store.memory_path(&root)).render();
     // Last, so the child is cloned from an agent that is finished.
     arm(
         &mut ag,
@@ -608,7 +613,7 @@ async fn main() -> Result<()> {
         let commands = std::sync::Arc::new(resolved.commands);
         let ctx = tools::Ctx::new(workspace).with_session(&id);
         let (events, inbox) = lane::Lane::channel();
-        let mut core = repl::Repl {
+        let core = repl::Repl {
             store,
             keys: key_map.clone(),
             config: config.clone(),
@@ -640,7 +645,6 @@ async fn main() -> Result<()> {
                 commands,
             }],
         };
-        core.refresh_memory();
         // The live region needs the terminal at both ends: keys come in one
         // side and the repaint goes out the other. Missing either, there is
         // nothing to hold still, and printing a line at a time is right.
