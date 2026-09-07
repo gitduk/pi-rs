@@ -97,6 +97,7 @@ pub enum Action {
     ScrollHalfDown,
     AppExit,
     AppClearScreen,
+    LanePrev,
     LaneNext,
     ThinkFold,
     ThinkFoldAll,
@@ -384,21 +385,21 @@ pub const BINDINGS: &[Binding] = &[
     // addition.
     //
     // The ids carry a `normal.` prefix only where one is needed:
-    // `move.char.left` is already taken, `mode.insert` cannot be, since the
+    // `lane.next` is already taken, `mode.insert` cannot be, since the
     // Insert layer is empty and nothing else can ask to leave a mode.
     Binding {
-        id: "normal.move.char.left",
-        action: A::MoveCharLeft,
+        id: "normal.lane.prev",
+        action: A::LanePrev,
         when: W::Mode(Mode::Normal),
         keys: &["h"],
-        note: "",
+        note: "the previous checkout, opening it if it is not",
     },
     Binding {
-        id: "normal.move.char.right",
-        action: A::MoveCharRight,
+        id: "normal.lane.next",
+        action: A::LaneNext,
         when: W::Mode(Mode::Normal),
         keys: &["l"],
-        note: "",
+        note: "the next checkout, opening it if it is not",
     },
     Binding {
         id: "normal.move.word.next",
@@ -923,8 +924,24 @@ mod tests {
         assert_eq!(k.action(press("h"), Layers::default()), None);
         assert_eq!(
             k.action(press("h"), Layers { mode: Some(Mode::Normal), ..Layers::default() }),
-            Some(Action::MoveCharLeft)
+            Some(Action::LanePrev)
         );
+    }
+    #[test]
+    fn the_listing_keeps_two_ids_that_share_an_action_apart() {
+        // `lane.next` and `normal.lane.next` are one action under two ids. A
+        // listing that found a binding's keys by its action would print
+        // `l, ctrl+o` against both, and neither could be rebound alone.
+        let lines = Keys::default().listing();
+        let keys_of = |id: &str| {
+            let line = lines
+                .iter()
+                .find(|l| l.starts_with(&format!("{id} ")))
+                .unwrap_or_else(|| panic!("{id} is not listed"));
+            line[id.len()..].split("  ·  ").next().unwrap().trim().to_string()
+        };
+        assert_eq!(keys_of("lane.next"), "ctrl+o");
+        assert_eq!(keys_of("normal.lane.next"), "l");
     }
 
     #[test]
@@ -939,22 +956,6 @@ mod tests {
         assert_eq!(k.action(press("I"), normal), Some(Action::ModeInsertLineStart));
     }
 
-    #[test]
-    fn the_listing_keeps_two_ids_that_share_an_action_apart() {
-        // `move.char.left` and `normal.move.char.left` are one action under
-        // two ids. A listing that found a binding's keys by its action would
-        // print `h, left` against both, and neither could be rebound alone.
-        let lines = Keys::default().listing();
-        let keys_of = |id: &str| {
-            let line = lines
-                .iter()
-                .find(|l| l.starts_with(&format!("{id} ")))
-                .unwrap_or_else(|| panic!("{id} is not listed"));
-            line[id.len()..].trim().to_string()
-        };
-        assert_eq!(keys_of("move.char.left"), "left");
-        assert_eq!(keys_of("normal.move.char.left"), "h");
-    }
 
     #[test]
     fn two_explicit_bindings_may_not_share_a_key() {

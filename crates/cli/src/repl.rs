@@ -375,11 +375,20 @@ pub struct Repl {
 
 impl Repl {
     /// Put the lane in front's key map and command table in force. A skill
-    /// belongs to one tree and not another, and so does a rebound key; leaving
-    /// the last lane's in place had this one answering to another tree's.
+    /// belongs to one tree and not another, and so does a rebound key;
+    /// leaving the last lane's in place had this one answering to another
+    /// tree's.
+    ///
+    /// The shelf is not here: `arm` hands the agent a handle to this
+    /// checkout's file, and the handle reads it every turn.
     fn in_force(&mut self) {
         self.keys = self.lane().keys.clone();
         self.commands = self.lane().commands.clone();
+    }
+
+    /// Where the lane in front keeps what outlives its transcripts.
+    fn memory_path(&self) -> std::path::PathBuf {
+        self.store.memory_path(self.lane().ctx.workspace.root())
     }
 
     /// The checkout in front. Indexing is safe by construction: `lanes` is
@@ -461,7 +470,7 @@ impl Repl {
         // is where the copy is taken, and taking it four times copies thrice
         // over.
         let home = self.home(root.clone(), self.lane().agent.spec.model.clone());
-        let shelf = crate::memory::shelf(self.store.root(), &root);
+        let shelf = crate::memory::shelf(self.store.memory_path(&root));
         let ag = std::sync::Arc::make_mut(&mut self.lane_mut().agent);
         crate::arm(ag, &mut resolved, home, shelf);
         self.lane_mut().context = resolved.context;
@@ -690,8 +699,7 @@ impl Repl {
 
     /// This workspace's shelf, and the file it lives in.
     fn shelf(&self) -> (crate::memory::Memory, std::path::PathBuf) {
-        let root = self.lane().ctx.workspace.root().to_path_buf();
-        let path = crate::memory::path_of(self.store.root(), &root);
+        let path = self.memory_path();
         (crate::memory::Memory::load(&path), path)
     }
 
@@ -1645,7 +1653,7 @@ impl Repl {
         // trees, and which model is answering was a decision made elsewhere.
         let home = self.home(root.clone(), self.lane().agent.spec.model.clone());
         let mut ag = (*self.lane().agent).clone();
-        crate::arm(&mut ag, &mut resolved, home, crate::memory::shelf(self.store.root(), &root));
+        crate::arm(&mut ag, &mut resolved, home, crate::memory::shelf(self.store.memory_path(&root)));
 
         // Built, not cloned from the lane being left: a `Ctx`'s tables key on
         // absolute paths in one tree, and none of that lane's describe this.
@@ -1671,9 +1679,9 @@ impl Repl {
             view: Default::default(),
         });
         self.current = self.lanes.len() - 1;
-        self.in_force();
         // The agent was cloned from the lane being left, and its shelf with
-        // it. Another checkout is another workspace, which is another shelf.
+        // it; `arm` put this checkout's own in its place.
+        self.in_force();
 
         // Asked with the root the next save will file under, so a tree is found
         // by the same key it was stored by.
@@ -2487,9 +2495,7 @@ mod tests {
         );
         crate::lane::Lane {
             agent: std::sync::Arc::new(agent::Agent::new(
-                std::sync::Arc::new(Recording {
-                    saw: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-                }),
+                std::sync::Arc::new(Recording::default()),
                 test_spec("m"),
             )),
             session: None,
@@ -2606,10 +2612,12 @@ mod tests {
         assert_eq!(lines.len(), 1, "one billed lane keeps the one-line answer");
     }
 
-    /// A transport that records the model each request asks for, and answers
-    /// one empty turn.
+    /// A transport that records the model each request asks for and the notes
+    /// riding it, and answers one empty turn.
+    #[derive(Default)]
     struct Recording {
         saw: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        notes: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     }
 
     #[async_trait::async_trait]
@@ -2617,10 +2625,11 @@ mod tests {
         async fn stream(
             &self,
             spec: &brain::model::ModelSpec,
-            _req: &brain::request::Request,
+            req: &brain::request::Request,
         ) -> brain::Result<futures::stream::BoxStream<'static, brain::Result<brain::stream::StreamEvent>>>
         {
             self.saw.lock().unwrap().push(spec.model.clone());
+            self.notes.lock().unwrap().push(req.notes.join("\n"));
             let done = Ok(brain::stream::StreamEvent::Done {
                 stop: brain::stream::StopReason::EndTurn,
                 usage: brain::stream::Usage::default(),
@@ -2651,18 +2660,27 @@ mod tests {
         }
     }
 
-    /// `/model` retargets the lane's agent and rebuilds the subagent behind
-    /// it; the rebuild has to carry the new endpoint and model, or a child
-    /// called after the switch keeps talking to the old one with the old key.
-    #[tokio::test]
-    async fn retarget_rebuilds_the_subagent_on_the_new_model() {
-        let dir = tempfile::tempdir().unwrap();
-        let ws = tools::Workspace::new(dir.path()).unwrap();
-        let store = crate::session::Store::new(dir.path().join("state"));
-
-        let old_saw = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let old_transport = std::sync::Arc::new(Recording { saw: old_saw.clone() });
-        let agent = agent::Agent::new(old_transport, test_spec("model-a"));
+    /// One lane on the given transport, with a subagent hung off it.
+    fn a_repl(
+        root: &std::path::Path,
+        transport: std::sync::Arc<Recording>,
+        model: &str,
+    ) -> crate::repl::Repl {
+        let ws = tools::Workspace::new(root).unwrap();
+        let mut agent = agent::Agent::new(transport, test_spec(model));
+        let store = crate::session::Store::new(root.join("state"));
+        // What `arm` does before `hang`, which this stands in for: the child
+        // is cloned here, and a shelf set afterwards is one it never sees.
+        agent.shelf = Some(crate::memory::shelf(store.memory_path(root)));
+        crate::hang(
+            &mut agent,
+            crate::subagent::Filed::armed(
+                crate::session::Store::new(root.join("state")),
+                root.to_path_buf(),
+                model.into(),
+            ),
+            "standing",
+        );
 
         let keys = std::sync::Arc::new(crate::keys::Keys::default());
         let commands = std::sync::Arc::new(Vec::<crate::repl::Command>::new());
@@ -2687,9 +2705,9 @@ mod tests {
             keys: keys.clone(),
             commands: commands.clone(),
         };
-        let mut core = crate::repl::Repl {
+        crate::repl::Repl {
             store,
-            keys: keys.clone(),
+            keys,
             config: std::sync::Arc::new(crate::config::Config::default()),
             args: std::sync::Arc::new(<crate::Args as clap::Parser>::parse_from(["pi"])),
             commands,
@@ -2697,15 +2715,54 @@ mod tests {
             claimed: Default::default(),
             lanes: vec![lane],
             current: 0,
-        };
+        }
+    }
 
-        let new_saw = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let new_transport = std::sync::Arc::new(Recording { saw: new_saw.clone() });
-        core.retarget(new_transport, test_spec("model-b"));
-
+    /// What the child asked for, once.
+    async fn run_the_child(core: &crate::repl::Repl) {
         let task = core.lane().agent.registry.get(agent::task::Task::NAME).unwrap();
         let ctx = tools::Ctx::new(core.lane().ctx.workspace.clone());
-        task.execute(serde_json::json!({ "description": "go", "prompt": "go" }), &ctx).await.unwrap();
+        task.execute(serde_json::json!({ "description": "go", "prompt": "go" }), &ctx)
+            .await
+            .unwrap();
+    }
+
+    /// `/mem` has to reach the subagent too. `Task` snapshots the agent it was
+    /// built from, so what the child holds is a handle rather than the text:
+    /// it reads the file each turn, and a note written since is already there.
+    #[tokio::test]
+    async fn a_written_note_reaches_the_child_the_next_time_it_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let transport = std::sync::Arc::new(Recording::default());
+        let notes = transport.notes.clone();
+        let mut core = a_repl(dir.path(), transport, "model-a");
+
+        run_the_child(&core).await;
+        let before = notes.lock().unwrap().join("|");
+        assert!(!before.contains("<memory>"), "nothing on the shelf yet: {before}");
+
+        core.remember("prefers xh over curl");
+        run_the_child(&core).await;
+        let after = notes.lock().unwrap().last().unwrap().clone();
+        assert!(after.contains("prefers xh over curl"), "{after}");
+    }
+
+    /// `/model` retargets the lane's agent and rebuilds the subagent behind
+    /// it; the rebuild has to carry the new endpoint and model, or a child
+    /// called after the switch keeps talking to the old one with the old key.
+    #[tokio::test]
+    async fn retarget_rebuilds_the_subagent_on_the_new_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_saw = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let old_transport =
+            std::sync::Arc::new(Recording { saw: old_saw.clone(), ..Default::default() });
+        let mut core = a_repl(dir.path(), old_transport, "model-a");
+
+        let new_saw = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let new_transport =
+            std::sync::Arc::new(Recording { saw: new_saw.clone(), ..Default::default() });
+        core.retarget(new_transport, test_spec("model-b"));
+        run_the_child(&core).await;
 
         let saw = new_saw.lock().unwrap();
         assert!(

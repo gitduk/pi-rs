@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::session::now;
+
 /// How many notes the shelf holds. Yours are never crowded out, so what this
 /// really caps is how many the model may keep.
 pub const CAP: usize = 30;
@@ -62,13 +64,6 @@ impl Note {
         let days = now.saturating_sub(self.at) as f64 / DAY as f64;
         self.weight.map(|w| w as f64 - days * PER_DAY)
     }
-}
-
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or_default()
 }
 
 /// One note as a panel shows it: what to call it, when it was written, and
@@ -151,14 +146,12 @@ impl Memory {
             let (sx, sy) = (x.score(now).unwrap_or(0.0), y.score(now).unwrap_or(0.0));
             sx.total_cmp(&sy).then(x.at.cmp(&y.at))
         });
-        let doomed: std::collections::HashSet<usize> =
-            ranked.into_iter().take(theirs - room).collect();
-        let mut i = 0;
-        self.notes.retain(|_| {
-            let keep = !doomed.contains(&i);
-            i += 1;
-            keep
-        });
+        let mut doomed = vec![false; self.notes.len()];
+        for i in ranked.into_iter().take(theirs - room) {
+            doomed[i] = true;
+        }
+        let mut doomed = doomed.into_iter();
+        self.notes.retain(|_| !doomed.next().unwrap_or(false));
     }
 
     /// One row per note, for a panel to show: the day it was written and the
@@ -212,15 +205,8 @@ fn day(at: u64) -> String {
 }
 
 /// This workspace's shelf, as the agent reaches it.
-pub fn shelf(sessions: &Path, workspace: &Path) -> std::sync::Arc<dyn agent::Shelf> {
-    std::sync::Arc::new(File::at(path_of(sessions, workspace)))
-}
-
-/// Where one workspace's shelf lives, beside its transcripts.
-pub fn path_of(sessions: &Path, workspace: &Path) -> PathBuf {
-    sessions
-        .join(tools::state::key_of(workspace))
-        .join("memory.json")
+pub fn shelf(path: PathBuf) -> std::sync::Arc<dyn agent::Shelf> {
+    std::sync::Arc::new(File::at(path))
 }
 
 /// The shelf as the agent reaches it: a path, read and written on demand.
