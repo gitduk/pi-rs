@@ -1027,6 +1027,13 @@ pub enum Fate {
     Now,
     /// Goes to the model, or needs the surface free, so it waits.
     Queued,
+    /// Prose, while a run is working: it goes to the run rather than waiting
+    /// for it, and is read at the run's next turn boundary.
+    ///
+    /// Carries the text because answering took a read of the line — `Submit`
+    /// cannot say what it is without one — and reading it a second time at the
+    /// door is how two readings drift apart.
+    Steered(String),
     /// Would move what the run stands on. Says this rather than doing it.
     Refused(&'static str),
 }
@@ -1073,8 +1080,10 @@ impl Intent {
             // Arms the lane and submits its first round like a typed line;
             // both want the lane free.
             Intent::Loop(_) | Intent::LoopRound(_) => Fate::Queued,
-            // Prose waits for the run that is already talking to the model.
-            Intent::Prompt(_) => Fate::Queued,
+            // Prose reaches the run that is already talking to the model:
+            // waiting for it is what makes a correction arrive too late to be
+            // one.
+            Intent::Prompt(text) => Fate::Steered(text.clone()),
             // A `!` files its result in the transcript, which the run has.
             Intent::Bash(_) => Fate::Queued,
             // The raw variant: its fate is the fate of what it turns out to be.
@@ -2366,7 +2375,6 @@ mod tests {
     #[test]
     fn what_wants_the_model_or_the_surface_waits() {
         for intent in [
-            Intent::Prompt("hello".into()),
             Intent::Bash("ls".into()),
             Intent::Settings(String::new()),
             Intent::Wechat("on".into()),
@@ -2374,6 +2382,26 @@ mod tests {
         ] {
             assert!(matches!(intent.fate(), Fate::Queued), "{intent:?} should wait");
         }
+    }
+
+    /// Prose is the one thing a working run can still hear, so it does not
+    /// wait for one — waiting is what makes a correction arrive too late.
+    #[test]
+    fn prose_reaches_the_run_rather_than_waiting_for_it() {
+        let said = "the bug is in parse.rs";
+        assert!(
+            matches!(Intent::Prompt(said.into()).fate(), Fate::Steered(text) if text == said)
+        );
+        // A raw line answers as whatever it reads as, so both doors agree.
+        assert!(matches!(
+            Intent::Submit(said.into()).fate(),
+            Fate::Steered(text) if text == said
+        ));
+        // A slash word is not prose and still waits.
+        assert!(matches!(
+            Intent::Submit("/settings".into()).fate(),
+            Fate::Queued
+        ));
     }
 
     #[test]

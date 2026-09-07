@@ -884,7 +884,10 @@ impl Ui {
             &lane.view.model,
             lane.worktree.as_deref(),
             lane.view.started.map(|s| s.elapsed()),
-            lane.view.queued.len(),
+            // Both are lines the user has given the surface that have not
+            // reached the model. Which side of the seam one waits on is the
+            // loop's business, not the reader's.
+            lane.view.queued.len() + lane.steer().map_or(0, agent::Steer::len),
         )
     }
 
@@ -2224,6 +2227,19 @@ impl Tui {
         }
     }
 
+    /// A line the surface has taken from the user: onto the screen, at the
+    /// newest row, and into the history file.
+    ///
+    /// One place rather than one per door. A fresh turn starts at the newest
+    /// row — a view scrolled up to read would otherwise stream output out of
+    /// sight — and the history is written per line rather than on the way out,
+    /// because quitting with two Ctrl-Cs skips every tidy exit path there is.
+    fn echo_sent(&mut self, line: &str) {
+        self.ui.submit(&mut self.core.lane_mut().view, line);
+        self.core.lane_mut().view.scroll = 0;
+        self.save_history();
+    }
+
     /// Best effort: losing a recall list is not worth a message on the way out.
     fn save_history(&self) {
         let path = self
@@ -2433,6 +2449,26 @@ impl Tui {
                 self.core.lane_mut().view.queued.push(intent);
                 Wake::Nothing
             }
+            Fate::Steered(text) => {
+                // A `!` or a `/compact` holds the lane: nothing is listening,
+                // so the line waits for it the way every line used to.
+                let Some(steer) = self.core.lane().steer().cloned() else {
+                    self.core.lane_mut().view.queued.push(intent);
+                    return Wake::Nothing;
+                };
+                // Echoed like any submitted line, and unlike a queued one:
+                // this is already on its way to the model, and a line the user
+                // cannot see they sent is one they send twice.
+                self.echo_sent(&text);
+                // Spends the chance to unsend, exactly as the model's first
+                // word does: esc now means stop. Without this, esc after a
+                // line was said takes the prompt back and the line — never
+                // heard, handed back at `finish` — starts a turn of its own,
+                // which is the opposite of what the user just asked for.
+                self.core.lane_mut().view.committed = true;
+                steer.say(text);
+                Wake::Nothing
+            }
             Fate::Refused(why) => {
                 self.ui.flash(why);
                 Wake::Nothing
@@ -2500,7 +2536,7 @@ impl Tui {
     fn stop_current(&mut self, unsend: bool) {
         // Said here rather than at the callers: the state is the only thing
         // that knows, and every way of asking to stop arrives through it.
-        let Turn::Running { cancel, unsend: take_back } = &mut self.core.lane_mut().turn else {
+        let Turn::Running { cancel, unsend: take_back, .. } = &mut self.core.lane_mut().turn else {
             self.ui.flash("nothing running to stop");
             return;
         };
@@ -2636,13 +2672,7 @@ impl Tui {
                     crate::repl::read(&line)
                 }
                 Intent::Submit(line) => {
-                    self.ui.submit(&mut self.core.lane_mut().view, &line);
-                    // A fresh turn starts at the newest row: a view scrolled up
-                    // to read would otherwise stream output out of sight.
-                    self.core.lane_mut().view.scroll = 0;
-                    // Written per line rather than on the way out: quitting
-                    // with two Ctrl-Cs skips every tidy exit path there is.
-                    self.save_history();
+                    self.echo_sent(&line);
                     crate::repl::read(&line)
                 }
                 // A key that means a command — `ctrl+l` twice is `/new` —
@@ -2914,6 +2944,7 @@ impl Tui {
         };
         carried.send_prompt(prompt, typed);
         let cancel = CancellationToken::new();
+        let steer = agent::Steer::default();
         let ctx = self.core.lane_mut().ctx.clone().with_cancel(cancel.clone());
 
         self.arm_view(false);
@@ -2925,8 +2956,10 @@ impl Tui {
         let sent = self.core.lane_mut().events.clone();
         let lane = self.core.current;
         let done = done.clone();
+        // The run's own handle on the mailbox; the lane keeps the other.
+        let heard = steer.clone();
         tokio::spawn(async move {
-            let out = guard(agent.run(&mut carried, &ctx, &sent)).await;
+            let out = guard(agent.steered(&mut carried, &ctx, &sent, &heard)).await;
             let _ = done.send(Done {
                 lane,
                 kind: Kind::Turn,
@@ -2935,6 +2968,7 @@ impl Tui {
         });
         self.core.lane_mut().turn = Turn::Running {
             cancel,
+            steer: Some(steer),
             unsend: false,
         };
     }
@@ -3061,6 +3095,9 @@ impl Tui {
         });
         self.core.lane_mut().turn = Turn::Running {
             cancel,
+            // Not a turn: nothing here calls a model, so there is no boundary
+            // at which a line could be heard.
+            steer: None,
             unsend: false,
         };
     }
@@ -3105,6 +3142,9 @@ impl Tui {
         });
         self.core.lane_mut().turn = Turn::Running {
             cancel,
+            // Not a turn: nothing here calls a model, so there is no boundary
+            // at which a line could be heard.
+            steer: None,
             unsend: false,
         };
     }
@@ -3119,11 +3159,20 @@ impl Tui {
         self.serve_lanes().await;
         // Here rather than in the arms below, so a kind added later cannot
         // forget it and leave the lane queueing prompts it will never run.
-        let unsend = self
-            .core
-            .lanes
-            .get_mut(done.lane)
-            .is_some_and(Lane::finish);
+        let unsend = match self.core.lanes.get_mut(done.lane) {
+            Some(lane) => {
+                let back = lane.finish();
+                // Said after the run's last look at the mailbox, so it was
+                // never heard. Back through the door as an ordinary line: the
+                // lane is idle now, so it runs at once rather than waiting on
+                // nothing.
+                lane.view
+                    .queued
+                    .extend(back.unheard.into_iter().map(Intent::Prompt));
+                back.unsend
+            }
+            None => false,
+        };
         match done.kind {
             Kind::Turn | Kind::Bash(_) => self.settle_run(done, unsend).await,
             Kind::Compact(_) => self.settle_compact(done).await,
@@ -4052,6 +4101,7 @@ mod tests {
             // What every `start_*` leaves behind while its job runs.
             turn: crate::lane::Turn::Running {
                 cancel: tokio_util::sync::CancellationToken::new(),
+                steer: None,
                 unsend: false,
             },
             view: Default::default(),

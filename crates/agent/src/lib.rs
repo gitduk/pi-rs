@@ -20,12 +20,14 @@ pub mod event;
 mod oneshot;
 pub mod remember;
 pub mod session;
+pub mod steer;
 pub mod summarize;
 pub mod task;
 
 pub use approval::{Approver, Ceiling, Decision};
 pub use compact::Policy;
 pub use remember::{Kept, Shelf};
+pub use steer::Steer;
 use event::say;
 pub use event::{Event, Totals};
 
@@ -186,11 +188,25 @@ impl Agent {
         self.spec = spec;
     }
 
+    /// A run nobody is talking to. What a subagent, a `--print` and a test all
+    /// want: named for what it is rather than passed an empty mailbox at every
+    /// call site.
     pub async fn run(
         &self,
         session: &mut Session,
         ctx: &Ctx,
         tx: &UnboundedSender<Event>,
+    ) -> Result<Totals, AgentError> {
+        self.steered(session, ctx, tx, &Steer::default()).await
+    }
+
+    /// The same run, with somewhere for the user to speak into while it works.
+    pub async fn steered(
+        &self,
+        session: &mut Session,
+        ctx: &Ctx,
+        tx: &UnboundedSender<Event>,
+        steer: &Steer,
     ) -> Result<Totals, AgentError> {
         let mut totals = Totals::default();
         // How many times a tool has failed in a row, so a loop can be named —
@@ -208,6 +224,12 @@ impl Agent {
         let mut compactions = 0usize;
 
         for turn in 1.. {
+            // What was said while the run worked. Here and nowhere else: a
+            // `tool_use` must be answered by its results before anything else
+            // may speak, and this is the first point where all of them are.
+            for said in steer.take() {
+                session.prompt(said);
+            }
             say(tx, Event::TurnStart { turn });
             // Entered around each await rather than held across them: a guard
             // spanning an await point labels whatever else the runtime polls.
@@ -364,6 +386,12 @@ impl Agent {
             session.push_assistant(content);
 
             if calls.is_empty() {
+                // The model stopped, but the user spoke while it was speaking.
+                // Ending here would post `Done` and leave the line to start a
+                // second run saying what this one can still hear.
+                if !steer.is_empty() {
+                    continue;
+                }
                 say(
                     tx,
                     Event::Done {

@@ -1,7 +1,7 @@
 //! One checkout being worked in, and everything the workspace root decides.
 
 use agent::session::Session;
-use agent::{Agent, Event, Totals};
+use agent::{Agent, Event, Steer, Totals};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio_util::sync::CancellationToken;
 
@@ -21,6 +21,14 @@ pub enum Turn {
     Running {
         /// What `esc` cancels, and only for the lane in front.
         cancel: CancellationToken,
+        /// Where a line typed mid-run goes, when the job in flight is a turn
+        /// and can hear one: the run takes it at its next turn boundary.
+        ///
+        /// `None` for a `!` or a `/compact`. Neither calls a model, so neither
+        /// has a boundary to take a line at, and a line typed at one waits for
+        /// the lane the way every line used to. Optional rather than an empty
+        /// mailbox on every job, because the two are not the same thing to say.
+        steer: Option<Steer>,
         /// Esc caught the prompt on its way out: stop the run, then unsend it.
         /// Set while the run works, acted on when it ends.
         unsend: bool,
@@ -70,6 +78,20 @@ pub enum Round {
     Capped(usize),
     /// Esc, an error, or a prompt taken back. The loop goes with the run.
     Cut,
+}
+
+/// What a job leaves behind when it hands the transcript back.
+///
+/// One value rather than a bool and a leftover list read from two places: a
+/// caller that took the `unsend` and forgot the rest would drop what the user
+/// said into the gap between the run's last look and its return.
+#[derive(Default)]
+pub struct Handback {
+    /// Esc asked for the prompt back.
+    pub unsend: bool,
+    /// Said to the run after its last look at the mailbox, so never heard.
+    /// It goes back to the surface to be run as an ordinary line.
+    pub unheard: Vec<String>,
 }
 
 pub struct Lane {
@@ -152,13 +174,23 @@ impl Lane {
         }
     }
 
-    /// A job has given this lane's transcript back, saying whether it wants
-    /// the prompt back too. The one place `Running` ends: a lane left in it
-    /// queues every later prompt and never drains.
-    pub fn finish(&mut self) -> bool {
+    /// A job has given this lane's transcript back. The one place `Running`
+    /// ends: a lane left in it queues every later prompt and never drains.
+    pub fn finish(&mut self) -> Handback {
         match std::mem::replace(&mut self.turn, Turn::Idle) {
-            Turn::Running { unsend, .. } => unsend,
-            _ => false,
+            Turn::Running { unsend, steer, .. } => Handback {
+                unsend,
+                unheard: steer.map(|s| s.take()).unwrap_or_default(),
+            },
+            _ => Handback::default(),
+        }
+    }
+
+    /// Where a line typed mid-run goes, while a run is there to hear one.
+    pub fn steer(&self) -> Option<&Steer> {
+        match &self.turn {
+            Turn::Running { steer, .. } => steer.as_ref(),
+            _ => None,
         }
     }
 

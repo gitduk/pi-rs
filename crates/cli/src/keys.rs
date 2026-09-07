@@ -259,7 +259,7 @@ pub const BINDINGS: &[Binding] = &[
         action: A::LineSubmit,
         when: W::Editor,
         keys: &["enter"],
-        note: "queues, while a run is working",
+        note: "reaches the run in flight; a command waits for it",
     },
     Binding {
         id: "line.clear",
