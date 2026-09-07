@@ -11,6 +11,7 @@ mod editor;
 mod row;
 mod screen;
 mod settings;
+mod shelf;
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -715,6 +716,9 @@ struct Ui {
     /// The open settings panel, or None. While it is open it owns the menu
     /// rows and intercepts the menu keys before the editor does.
     settings: Option<settings::Panel>,
+    /// The open shelf panel, or None. Like the settings panel it owns the menu
+    /// keys while it is up, and two of its own besides.
+    shelf: Option<shelf::Panel>,
     /// When the last `ctrl+l` was pressed, for the new-session double-tap.
     last_l: Option<Instant>,
     last_interrupt: Option<Instant>,
@@ -829,6 +833,10 @@ impl Ui {
         self.editor.take(false);
         self.flash = None;
         self.rewind.clear();
+        // The shelf belongs to a checkout. Left open across a switch it would
+        // go on showing the notes of the tree behind you, and the next `x`
+        // would take one off the shelf of the tree in front.
+        self.shelf = None;
     }
 
     fn new(
@@ -863,6 +871,7 @@ impl Ui {
             vim: None,
             setting_paths: Vec::new(),
             settings: None,
+            shelf: None,
             spinner: 0,
             live: crate::status::default_live(),
             done: crate::status::default_done(),
@@ -1094,7 +1103,7 @@ impl Ui {
         if running {
             return Vec::new();
         }
-        if self.settings.is_some() {
+        if self.settings.is_some() || self.shelf.is_some() {
             // The panel owns this space; the completion list waits.
             return Vec::new();
         }
@@ -1294,7 +1303,13 @@ impl Ui {
         // it, and the scrolled history fills what is left. The caret's row
         // therefore depends only on the pinned rows, never on how the
         // history wraps.
-        let panel = self.settings.as_ref().map(|p| p.view(&self.paint, width));
+        // One space, one panel at a time: `/mem` and `/settings` both open
+        // over the menu, and neither can be typed while the other is up.
+        let panel = self
+            .settings
+            .as_ref()
+            .map(|p| p.view(&self.paint, width))
+            .or_else(|| self.shelf.as_ref().map(|p| p.view(&self.paint, width)));
         let panel_h = panel.as_ref().map(|v| v.len()).unwrap_or(0);
         // Both branches leave the bar its row: a menu tall enough to take it
         // would drop whatever that row is saying.
@@ -1464,7 +1479,12 @@ impl Ui {
         let bound = self.keys.action(
             press,
             crate::keys::Layers {
-                menu: self.settings.is_some() || !self.menu(running).is_empty(),
+                menu: self.settings.is_some()
+                    || self.shelf.is_some()
+                    || !self.menu(running).is_empty(),
+                // Off while a note is being typed, so `x` and `e` are letters
+                // again and the borrowed `esc` still leaves the edit.
+                shelf: self.shelf.as_ref().is_some_and(|p| !p.editing()),
                 run: running,
                 mode: self.vim.as_ref().map(|v| v.mode),
             },
@@ -1489,7 +1509,10 @@ impl Ui {
                 }
                 Some(Action::MenuAccept) => {
                     if panel.editing() {
-                        let (path, _) = panel.rows[panel.at].clone();
+                        let Some(path) = panel.path().map(str::to_string) else {
+                            panel.finish_edit();
+                            return Intent::None;
+                        };
                         let value = panel.editing_value().to_string();
                         return Intent::CommitSetting(path, value);
                     } else {
@@ -1522,6 +1545,57 @@ impl Ui {
             }
         }
 
+        // The shelf panel, on the same footing as the settings one.
+        if let Some(panel) = &mut self.shelf {
+            match bound {
+                Some(Action::MenuNext) => {
+                    panel.next();
+                    return Intent::None;
+                }
+                Some(Action::MenuPrevious) => {
+                    panel.previous();
+                    return Intent::None;
+                }
+                Some(Action::MenuAccept) => {
+                    if panel.editing() {
+                        let Some(id) = panel.focused() else {
+                            panel.finish_edit();
+                            return Intent::None;
+                        };
+                        return Intent::ShelfWrite(id, panel.editing_value().to_string());
+                    }
+                    panel.begin_edit();
+                    return Intent::None;
+                }
+                Some(Action::MenuDelete) => {
+                    return match panel.focused() {
+                        Some(id) => Intent::ShelfDrop(id),
+                        None => Intent::None,
+                    };
+                }
+                Some(Action::MenuDismiss) => {
+                    if panel.dismiss() {
+                        self.shelf = None;
+                    }
+                    return Intent::None;
+                }
+                _ => {
+                    if panel.editing() {
+                        if let KeyCode::Char(c) = key.code
+                            && !key
+                                .modifiers
+                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                        {
+                            panel.insert(c);
+                        } else if matches!(bound, Some(Action::DeleteCharBack)) {
+                            panel.backspace();
+                        }
+                        return Intent::None;
+                    }
+                }
+            }
+        }
+
         if !self.rewind.is_empty()
             && !matches!(
                 bound,
@@ -1538,6 +1612,9 @@ impl Ui {
         }
 
         match bound {
+            // Only a list with removable rows answers it, and only the shelf
+            // has those; elsewhere the key was never bound in the first place.
+            Some(Action::MenuDelete) => return Intent::None,
             Some(Action::LineClear) => return self.interrupt_or_clear(running),
             Some(Action::LineSubmit) => {
                 // Enter while a menu is open runs what it highlights. The
@@ -1630,6 +1707,9 @@ impl Ui {
         }
 
         match bound {
+            // Only a list with removable rows answers it, and only the shelf
+            // has those; nothing else raises the layer that binds it.
+            Some(Action::MenuDelete) => {}
             Some(Action::InsertNewline) => self.editor.insert('\n'),
             Some(Action::DeleteCharBack) => self.editor.backspace(),
             Some(Action::DeleteCharForward) => self.editor.delete(),
@@ -2460,6 +2540,24 @@ impl Tui {
         }
     }
 
+    /// Show the panel what became of a write, and say so in the scrollback
+    /// when it did not take: the panel is a list of notes, with nowhere in it
+    /// for a sentence about the disk.
+    fn after_shelf(&mut self, failed: Option<String>) {
+        if let Some(why) = failed {
+            self.core
+                .lane_mut()
+                .view
+                .scrollback
+                .push(Row::notice(format!("the shelf would not take it: {why}")));
+        }
+        let rows = self.core.shelf_rows();
+        if let Some(panel) = &mut self.ui.shelf {
+            panel.refresh(rows);
+            panel.finish_edit();
+        }
+    }
+
     /// Stop the run in front, if there is one. `unsend` also takes the prompt
     /// back once it has stopped.
     fn stop_current(&mut self, unsend: bool) {
@@ -2570,6 +2668,16 @@ impl Tui {
                     self.commit_setting(&path, &value);
                     continue;
                 }
+                Intent::ShelfWrite(id, text) => {
+                    let failed = self.core.shelf_write(id, &text);
+                    self.after_shelf(failed);
+                    continue;
+                }
+                Intent::ShelfDrop(id) => {
+                    let failed = self.core.shelf_drop(id);
+                    self.after_shelf(failed);
+                    continue;
+                }
                 Intent::EditExternally => {
                     self.edit_externally().await;
                     continue;
@@ -2649,8 +2757,17 @@ impl Tui {
             }
             // Bare `/settings` opens the panel instead of going through the
             // line command's read-only list.
+            // One panel at a time: both draw over the menu, and a hidden one
+            // goes on raising its own key layer over the visible one.
+            if matches!(intent, Intent::Mem(ref rest) if rest.trim().is_empty()) {
+                let rows = self.core.shelf_rows();
+                self.ui.settings = None;
+                self.ui.shelf = Some(shelf::Panel::new(rows));
+                continue;
+            }
             if matches!(intent, Intent::Settings(ref rest) if rest.trim().is_empty()) {
                 let rows = crate::settings::leaves(&self.core.file);
+                self.ui.shelf = None;
                 self.ui.settings = Some(settings::Panel::new(rows));
                 continue;
             }
@@ -4016,6 +4133,92 @@ mod tests {
             current: 0,
         };
         super::Tui::on_test_screen(core, keys)
+    }
+
+    /// The panel is the whole reason a shelf is worth having: what is on it
+    /// steers the model, and a shelf you cannot see is a shelf you cannot
+    /// correct. Browse it, rewrite a note, take one away.
+    #[tokio::test]
+    async fn the_panel_rewrites_and_removes_what_is_on_the_shelf() {
+        let dir = tempfile::tempdir().expect("a checkout");
+        let mut tui = surface(dir.path());
+        let root = tui.core.lane().ctx.workspace.root().to_path_buf();
+        let path = crate::memory::path_of(tui.core.store.root(), &root);
+
+        let mut shelf = crate::memory::Memory::default();
+        shelf.add([
+            crate::memory::Note::yours("prefers xh over curl"),
+            crate::memory::Note::yours("the parser lives in syntax/"),
+        ]);
+        shelf.save(&path).expect("written");
+
+        let rows = tui.core.shelf_rows();
+        assert_eq!(rows.len(), 2);
+        let first = rows[0].id;
+        tui.ui.shelf = Some(super::shelf::Panel::new(rows));
+
+        // Down one, rewrite it. `e` opens the line, and the layer that binds
+        // `e` goes off the moment it does, so the letters land as letters.
+        let panel = tui.ui.shelf.as_mut().expect("open");
+        panel.next();
+        let second = panel.focused().expect("a second row");
+        panel.begin_edit();
+        assert_eq!(panel.editing_value(), "the parser lives in syntax/");
+        for c in " and hashline/".chars() {
+            panel.insert(c);
+        }
+        let text = panel.editing_value().to_string();
+        assert!(tui.core.shelf_write(second, &text).is_none(), "the write took");
+        tui.after_shelf(None);
+
+        let after = crate::memory::Memory::load(&path);
+        assert_eq!(after.notes[1].text, "the parser lives in syntax/ and hashline/");
+        assert_eq!(after.notes[1].at, shelf.notes[1].at, "the same note, said better");
+        assert!(!tui.ui.shelf.as_ref().expect("open").editing(), "the line closed");
+
+        // And take it away.
+        assert!(tui.core.shelf_drop(second).is_none());
+        tui.after_shelf(None);
+        let after = crate::memory::Memory::load(&path);
+        assert_eq!(after.notes.len(), 1);
+        assert_eq!(after.notes[0].text, "prefers xh over curl");
+        let panel = tui.ui.shelf.as_ref().expect("open");
+        assert_eq!(panel.focused(), Some(first), "the cursor followed the row that went");
+    }
+
+    /// The shelf belongs to a checkout. Open across a switch it would show one
+    /// tree's notes while `x` took a note off another's.
+    #[tokio::test]
+    async fn switching_checkouts_closes_the_shelf() {
+        let first = tempfile::tempdir().expect("a checkout");
+        let second = tempfile::tempdir().expect("another checkout");
+        let mut tui = surface(first.path());
+        tui.ui.shelf = Some(super::shelf::Panel::new(Vec::new()));
+
+        tui.core.lanes.push(running_lane(second.path()));
+        let was = tui.core.current;
+        tui.core.current = 1;
+        tui.reconcile(was);
+
+        assert!(tui.ui.shelf.is_none(), "still showing the tree behind you");
+    }
+
+    /// Emptying the line is the same intent as deleting the row: a blank note
+    /// on the shelf is a row nothing else can reach.
+    #[tokio::test]
+    async fn a_note_rewritten_to_nothing_leaves() {
+        let dir = tempfile::tempdir().expect("a checkout");
+        let mut tui = surface(dir.path());
+        let root = tui.core.lane().ctx.workspace.root().to_path_buf();
+        let path = crate::memory::path_of(tui.core.store.root(), &root);
+
+        let mut shelf = crate::memory::Memory::default();
+        shelf.add([crate::memory::Note::yours("prefers xh")]);
+        shelf.save(&path).expect("written");
+
+        let only = tui.core.shelf_rows()[0].id;
+        assert!(tui.core.shelf_write(only, "   ").is_none());
+        assert!(crate::memory::Memory::load(&path).notes.is_empty());
     }
 
     /// Recall belongs to the checkout, like the transcripts and the completion

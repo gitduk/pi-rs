@@ -10,8 +10,8 @@ use crate::journal;
 
 /// One row: the path and the value, the way a file would write it.
 pub struct Panel {
-    pub(crate) rows: Vec<(String, String)>,
-    pub(crate) at: usize,
+    rows: Vec<(String, String)>,
+    at: usize,
     /// Some while a value is being typed; browsing otherwise.
     editing: Option<Editor>,
     /// What the last commit refused, shown under the rows.
@@ -45,11 +45,16 @@ impl Panel {
         self.error = None;
     }
 
+    /// The path under the cursor, for the caller that commits it.
+    pub fn path(&self) -> Option<&str> {
+        self.rows.get(self.at).map(|(p, _)| p.as_str())
+    }
+
     /// The value being typed, or the current row's if none is.
     pub fn editing_value(&self) -> &str {
         match &self.editing {
             Some(e) => e.text(),
-            None => &self.rows[self.at].1,
+            None => self.rows.get(self.at).map(|(_, v)| v.as_str()).unwrap_or(""),
         }
     }
 
@@ -156,6 +161,16 @@ mod tests {
         let mut p = Panel::new(Vec::new());
         p.begin_edit();
         assert!(!p.editing());
+    }
+
+    /// Reachable only through `begin_edit`, which declines an empty panel —
+    /// but that is the call order guarding it, not the type. The shelf panel
+    /// beside this one is empty as a matter of course.
+    #[test]
+    fn an_empty_panel_answers_rather_than_indexing_past_its_end() {
+        let p = Panel::new(Vec::new());
+        assert_eq!(p.path(), None);
+        assert_eq!(p.editing_value(), "");
     }
 
     #[test]

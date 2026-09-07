@@ -88,7 +88,7 @@ const BUILTIN: &[Command] = &[
     Command::builtin(
         "/mem",
         "[text]",
-        "keep something past this transcript, or show what is kept",
+        "keep something past this transcript, or open what is kept",
     ),
     Command::builtin(
         "/loop",
@@ -688,14 +688,43 @@ impl Repl {
         crate::hang(ag, home, &standing);
     }
 
+    /// This workspace's shelf, and the file it lives in.
+    fn shelf(&self) -> (crate::memory::Memory, std::path::PathBuf) {
+        let root = self.lane().ctx.workspace.root().to_path_buf();
+        let path = crate::memory::path_of(self.store.root(), &root);
+        (crate::memory::Memory::load(&path), path)
+    }
+
+    /// What the panel shows: each note, the day it was written, and what to
+    /// call it when the panel acts on it.
+    pub fn shelf_rows(&self) -> Vec<crate::memory::Row> {
+        self.shelf().0.rows()
+    }
+
+    /// Rewrite one note, or take it away when `text` is empty — an emptied
+    /// line is the same intent as deleting it, and refusing it would leave a
+    /// blank row nothing else can reach.
+    pub fn shelf_write(&mut self, id: u64, text: &str) -> Option<String> {
+        let (mut shelf, path) = self.shelf();
+        match text.trim().is_empty() {
+            true => return self.shelf_drop(id),
+            false => shelf.rewrite(id, text.trim()),
+        }
+        shelf.save(&path).err().map(|e| e.to_string())
+    }
+
+    pub fn shelf_drop(&mut self, id: u64) -> Option<String> {
+        let (mut shelf, path) = self.shelf();
+        shelf.forget(id);
+        shelf.save(&path).err().map(|e| e.to_string())
+    }
+
     /// Write a note to this workspace's shelf, or say what is on it.
     ///
     /// A note you typed carries no weight and never ages out: the cap falls on
     /// what the model wrote, not on what you did.
     fn remember(&mut self, text: &str) -> Vec<String> {
-        let root = self.lane().ctx.workspace.root().to_path_buf();
-        let path = crate::memory::path_of(self.store.root(), &root);
-        let mut shelf = crate::memory::Memory::load(&path);
+        let (mut shelf, path) = self.shelf();
         let text = text.trim();
         if text.is_empty() {
             return match shelf.render() {
@@ -961,6 +990,11 @@ pub enum Intent {
     Rewind(agent::session::EntryId),
     /// The settings panel submitted an edited value.
     CommitSetting(String, String),
+    /// The shelf panel rewrote a note, or took it away. Named rather than
+    /// numbered: compaction writes to the same file mid-run, so the row a
+    /// note sat on when the panel drew it is not where it sits now.
+    ShelfWrite(u64, String),
+    ShelfDrop(u64),
     /// The line being typed wants `$EDITOR`. The surface's own: the editor
     /// takes the terminal, which only the surface knows how to give away.
     EditExternally,
@@ -1045,6 +1079,7 @@ impl Intent {
             // Writes the settings file and rebuilds through `Arc::make_mut`,
             // like `/settings set`, which is the same act from a panel.
             Intent::CommitSetting(..) => Fate::Now,
+            Intent::ShelfWrite(..) | Intent::ShelfDrop(_) => Fate::Now,
             // The input line is the surface's, not the transcript's: a run in
             // flight is writing the second and never reads the first.
             Intent::EditExternally => Fate::Now,
@@ -1337,6 +1372,8 @@ impl Repl {
             | Intent::OpenRewind
             | Intent::Rewind(_)
             | Intent::CommitSetting(..)
+            | Intent::ShelfWrite(..)
+            | Intent::ShelfDrop(_)
             | Intent::EditExternally
             => Step::Handled(Vec::new()),
             // The surface's, like `Submit`: arming a lane and re-submitting a

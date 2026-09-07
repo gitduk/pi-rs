@@ -25,6 +25,11 @@ const DAY: u64 = 60 * 60 * 24;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Note {
+    /// What names this note, so a panel can act on the note it is showing
+    /// rather than the row it sat on. Compaction rewrites this file mid-run,
+    /// and a row number means a different note afterwards.
+    #[serde(default)]
+    pub id: u64,
     pub text: String,
     /// Unix seconds. Rendered with the note, because a shelf of bare
     /// statements is read in the present tense however old it is.
@@ -39,12 +44,12 @@ pub struct Note {
 impl Note {
     /// A note you typed.
     pub fn yours(text: impl Into<String>) -> Self {
-        Self { text: text.into(), at: now(), weight: None }
+        Self { id: 0, text: text.into(), at: now(), weight: None }
     }
 
     /// A note the model wrote, at the weight it gave.
     pub fn theirs(text: impl Into<String>, weight: u8) -> Self {
-        Self { text: text.into(), at: now(), weight: Some(weight.clamp(1, 3)) }
+        Self { id: 0, text: text.into(), at: now(), weight: Some(weight.clamp(1, 3)) }
     }
 
     pub fn is_yours(&self) -> bool {
@@ -66,6 +71,15 @@ fn now() -> u64 {
         .unwrap_or_default()
 }
 
+/// One note as a panel shows it: what to call it, when it was written, and
+/// what it says.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Row {
+    pub id: u64,
+    pub day: String,
+    pub text: String,
+}
+
 /// One workspace's shelf.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Memory {
@@ -78,10 +92,22 @@ impl Memory {
     /// as empty rather than as a failure: memory is an aid, and a run that
     /// refused to start over a corrupted aid would be the worse trade.
     pub fn load(path: &Path) -> Self {
-        std::fs::read_to_string(path)
+        let mut shelf: Self = std::fs::read_to_string(path)
             .ok()
             .and_then(|body| serde_json::from_str(&body).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        shelf.number();
+        shelf
+    }
+
+    /// Give an id to whatever lacks one. Zero is not an id — it is what a
+    /// note written before ids reads as, and what `Note::yours` mints before
+    /// it knows what else is on the shelf.
+    fn number(&mut self) {
+        let taken = self.notes.iter().map(|n| n.id).max().unwrap_or(0);
+        for (nth, note) in self.notes.iter_mut().filter(|n| n.id == 0).enumerate() {
+            note.id = taken + nth as u64 + 1;
+        }
     }
 
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
@@ -96,6 +122,7 @@ impl Memory {
     /// Add notes and make room for them.
     pub fn add(&mut self, notes: impl IntoIterator<Item = Note>) {
         self.notes.extend(notes);
+        self.number();
         self.evict(now());
     }
 
@@ -132,6 +159,31 @@ impl Memory {
             i += 1;
             keep
         });
+    }
+
+    /// One row per note, for a panel to show: the day it was written and the
+    /// note itself. The day is separate here and inline in `render` — a person
+    /// reads it in a column, the model reads it in the sentence.
+    pub fn rows(&self) -> Vec<Row> {
+        self.notes
+            .iter()
+            .map(|n| Row { id: n.id, day: day(n.at), text: n.text.clone() })
+            .collect()
+    }
+
+    /// Rewrite one note, leaving its weight and its day alone: it is the same
+    /// note said better, not a new one, and re-dating it would let a shelf be
+    /// kept alive forever by tidying it.
+    pub fn rewrite(&mut self, id: u64, text: &str) {
+        if let Some(note) = self.notes.iter_mut().find(|n| n.id == id) {
+            note.text = text.to_string();
+        }
+    }
+
+    /// Take one away. A note that is not there is not an error: it went while
+    /// the panel was looking at it, which is what was wanted anyway.
+    pub fn forget(&mut self, id: u64) {
+        self.notes.retain(|n| n.id != id);
     }
 
     /// The shelf as the model reads it, or nothing when it is empty.
@@ -207,11 +259,11 @@ mod tests {
     use super::{CAP, DAY, Memory, Note};
 
     fn model(text: &str, weight: u8, days_ago: u64) -> Note {
-        Note { text: text.into(), at: 1_000 * DAY - days_ago * DAY, weight: Some(weight) }
+        Note { id: 0, text: text.into(), at: 1_000 * DAY - days_ago * DAY, weight: Some(weight) }
     }
 
     fn yours(text: &str) -> Note {
-        Note { text: text.into(), at: 1_000 * DAY, weight: None }
+        Note { id: 0, text: text.into(), at: 1_000 * DAY, weight: None }
     }
 
     fn shelf(notes: Vec<Note>) -> Memory {
@@ -261,6 +313,47 @@ mod tests {
         m.add((0..40).map(|i| model(&format!("theirs {i}"), 2, i)));
         assert_eq!(m.notes.len(), CAP);
         assert_eq!(m.notes.iter().filter(|n| n.is_yours()).count(), 10);
+    }
+
+    /// The panel draws rows, then a compaction rewrites the file underneath
+    /// it. A row number would name a different note by the time the user
+    /// pressed `x`; a name names the note.
+    #[test]
+    fn a_note_is_named_not_numbered() {
+        let mut m = shelf(vec![yours("first"), yours("second"), yours("third")]);
+        m.number();
+        let second = m.notes[1].id;
+        assert!(m.notes.iter().all(|n| n.id != 0), "every note answers to something");
+
+        // What a compaction does behind the panel's back.
+        m.notes.remove(0);
+        m.add([model("what the model kept", 3, 0)]);
+
+        m.rewrite(second, "second, said better");
+        assert_eq!(m.notes.iter().find(|n| n.id == second).unwrap().text, "second, said better");
+
+        m.forget(second);
+        assert!(m.notes.iter().all(|n| n.id != second));
+        assert_eq!(
+            texts(&m),
+            vec!["third", "what the model kept"],
+            "nothing else moved"
+        );
+    }
+
+    /// Ids are minted against what is already there, so a shelf that grew and
+    /// shrank never hands two notes the same name.
+    #[test]
+    fn a_name_is_never_handed_out_twice() {
+        let mut m = shelf(vec![yours("a"), yours("b")]);
+        m.number();
+        let a = m.notes[0].id;
+        m.forget(a);
+        m.add([yours("c"), yours("d")]);
+        let ids: Vec<u64> = m.notes.iter().map(|n| n.id).collect();
+        let unique: std::collections::HashSet<u64> = ids.iter().copied().collect();
+        assert_eq!(ids.len(), unique.len(), "{ids:?}");
+        assert!(!ids.contains(&a), "a name that went stays gone: {ids:?}");
     }
 
     /// A bare statement is read in the present tense however old it is, so

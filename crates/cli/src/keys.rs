@@ -33,6 +33,12 @@ pub enum Mode {
 pub enum When {
     /// The completion list is open.
     Menu,
+    /// The shelf panel is open and browsing, not editing a note.
+    ///
+    /// Its own layer rather than `Menu`, which the completion list shares: a
+    /// bare letter bound there is a letter the completion list can no longer
+    /// be filtered by, and `x` and `e` are letters.
+    Shelf,
     /// A turn is in flight.
     Run,
     /// Only in that mode, and only while vim keys are on at all.
@@ -47,6 +53,8 @@ pub enum When {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Layers {
     pub menu: bool,
+    /// The shelf panel is up and not editing a note.
+    pub shelf: bool,
     pub run: bool,
     /// The mode, or `None` when vim keys are off. Three legal states in three
     /// representations: a separate `vim: bool` beside a `Mode` would make
@@ -79,6 +87,8 @@ pub enum Action {
     MenuNext,
     MenuPrevious,
     MenuDismiss,
+    /// Take the focused row away, where a list has rows that can go.
+    MenuDelete,
     RunInterrupt,
     Rewind,
     ScrollPageUp,
@@ -252,6 +262,34 @@ pub const BINDINGS: &[Binding] = &[
         action: A::MenuPrevious,
         when: W::Menu,
         keys: &["up", "ctrl+p", "ctrl+k"],
+        note: "",
+    },
+    Binding {
+        id: "shelf.edit",
+        action: A::MenuAccept,
+        when: W::Shelf,
+        keys: &["e"],
+        note: "rewrite the note under the cursor",
+    },
+    Binding {
+        id: "shelf.delete",
+        action: A::MenuDelete,
+        when: W::Shelf,
+        keys: &["x"],
+        note: "take the note under the cursor off the shelf",
+    },
+    Binding {
+        id: "shelf.next",
+        action: A::MenuNext,
+        when: W::Shelf,
+        keys: &["j"],
+        note: "",
+    },
+    Binding {
+        id: "shelf.previous",
+        action: A::MenuPrevious,
+        when: W::Shelf,
+        keys: &["k"],
         note: "",
     },
     Binding {
@@ -711,7 +749,13 @@ impl Keys {
 
     /// What this press means, given what is on screen.
     pub fn action(&self, press: Press, layers: Layers) -> Option<Action> {
-        let mut live = Vec::with_capacity(4);
+        let mut live = Vec::with_capacity(5);
+        // Before `Menu`, which the shelf panel also raises so it inherits the
+        // movement and dismissal keys: what the shelf binds for itself wins
+        // over what it borrows.
+        if layers.shelf {
+            live.push(When::Shelf);
+        }
         if layers.menu {
             live.push(When::Menu);
         }
@@ -793,7 +837,7 @@ mod tests {
             Some(Action::HistoryOlder)
         );
         assert_eq!(
-            k.action(press("esc"), Layers { menu: true, run: true, mode: None }),
+            k.action(press("esc"), Layers { menu: true, run: true, mode: None, shelf: false }),
             Some(Action::MenuDismiss)
         );
         assert_eq!(k.action(press("esc"), Layers::default()), Some(Action::Rewind));
@@ -816,6 +860,31 @@ mod tests {
         );
     }
 
+    /// The reason the shelf has a layer of its own. `x` and `e` are letters,
+    /// and the completion list is filtered by letters — bound under `Menu`
+    /// they would be letters the list could no longer be narrowed by.
+    #[test]
+    fn the_shelf_letters_reach_no_further_than_the_shelf() {
+        let k = Keys::default();
+        let listing = Layers { menu: true, ..Layers::default() };
+        for letter in ["x", "e", "j", "k"] {
+            assert_eq!(
+                k.action(press(letter), listing),
+                None,
+                "`{letter}` was taken from the completion list"
+            );
+        }
+
+        let browsing = Layers { menu: true, shelf: true, ..Layers::default() };
+        assert_eq!(k.action(press("x"), browsing), Some(Action::MenuDelete));
+        assert_eq!(k.action(press("e"), browsing), Some(Action::MenuAccept));
+        assert_eq!(k.action(press("j"), browsing), Some(Action::MenuNext));
+        assert_eq!(k.action(press("k"), browsing), Some(Action::MenuPrevious));
+        // Borrowed from the menu it sits over, rather than bound twice.
+        assert_eq!(k.action(press("esc"), browsing), Some(Action::MenuDismiss));
+        assert_eq!(k.action(press("down"), browsing), Some(Action::MenuNext));
+    }
+
     #[test]
     fn the_normal_layer_takes_nothing_away() {
         // The premise the whole table rests on: Normal binds bare characters,
@@ -832,6 +901,7 @@ mod tests {
                 let press = parse(spec).unwrap();
                 let insert = Layers {
                     menu: b.when == W::Menu,
+                    shelf: b.when == W::Shelf,
                     run: b.when == W::Run,
                     mode: None,
                 };
