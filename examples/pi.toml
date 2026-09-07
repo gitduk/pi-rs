@@ -68,7 +68,7 @@ idle_timeout = 300
 # Empty by default: those tools stay inside the workspace. Read tools already
 # reach anywhere. Only this file can set it — a cloned pi.toml may not lower
 # the boundary.
-# write_roots = ["/tmp", "/home/wukaige/scratch"]
+# write_roots = ["/tmp", "/home/me/scratch"]
 
 # ---------------------------------------------------------------------------
 # Facts about a model the defaults get wrong.

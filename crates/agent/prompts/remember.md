@@ -48,7 +48,7 @@ ones first when it fills:
 One note per line, the weight, a space, then the note. Nothing else — no
 preamble, no headings, no blank lines, no bullets.
 
-    3 Kaige refuses private-address filtering in fetch: it would break reading a local dev server
+    3 the user refuses private-address filtering in fetch: it would break reading a local dev server
     2 --tools, --log and --no-compact were deleted; do not propose them
     1 the worktree lane bug came from an aside being the transcript's first entry
 

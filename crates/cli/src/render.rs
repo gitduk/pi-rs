@@ -640,7 +640,7 @@ impl Markdown {
         if self.fenced {
             // A gutter rather than a colour: code has to stay the most legible
             // thing on the screen, and thirty yellow rows is the opposite.
-            return format!("{}{text}", p.on(&p.theme.muted, "│ "));
+            return format!("{}{text}", p.on(&p.theme.muted, "▌ "));
         }
         let body = text.trim_start();
         let pad = &text[..text.len() - body.len()];
@@ -1453,7 +1453,7 @@ mod tests {
         // Inside, nothing is markup: a gutter, and the text as written.
         assert_eq!(
             m.line("let a = *b;", &p).replace('\x1b', "^"),
-            "^[2m│ ^[0mlet a = *b;"
+            "^[2m▌ ^[0mlet a = *b;"
         );
         m.advance("let a = *b;");
         m.advance("```");
