@@ -638,9 +638,9 @@ impl Markdown {
             return p.on(&p.theme.muted, text);
         }
         if self.fenced {
-            // A gutter rather than a colour: code has to stay the most legible
-            // thing on the screen, and thirty yellow rows is the opposite.
-            return format!("{}{text}", p.on(&p.theme.muted, "▌ "));
+            // A code line keeps its own marks: `**` and backticks are code,
+            // not markup, so it prints as written.
+            return text.to_string();
         }
         let body = text.trim_start();
         let pad = &text[..text.len() - body.len()];
@@ -1450,10 +1450,10 @@ mod tests {
         let p = Paint::new(true);
         assert!(!m.line("fn f() {}", &p).contains('\x1b'), "prose is prose");
         m.advance("```rust");
-        // Inside, nothing is markup: a gutter, and the text as written.
+        // Inside, nothing is markup: the text as written.
         assert_eq!(
             m.line("let a = *b;", &p).replace('\x1b', "^"),
-            "^[2m▌ ^[0mlet a = *b;"
+            "let a = *b;"
         );
         m.advance("let a = *b;");
         m.advance("```");
