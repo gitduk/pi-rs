@@ -490,6 +490,23 @@ impl Config {
     }
 }
 
+/// `:7897` and `:7897/v1` typed at an input. The file and the running spec
+/// store the expanded URL; this is typing, not a dialect.
+pub fn expand_base_url(raw: &str) -> String {
+    let rest = match raw.strip_prefix(':') {
+        Some(rest) => rest,
+        None => return raw.to_string(),
+    };
+    let (port, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, ""),
+    };
+    if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+        return raw.to_string();
+    }
+    format!("http://127.0.0.1:{port}{path}")
+}
+
 fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
@@ -1309,6 +1326,16 @@ output_per_mtok = 0
             .unwrap_err()
             .to_string();
         assert!(e.contains("move.line.start"), "{e}");
+    }
+
+    #[test]
+    fn a_port_typed_at_an_input_is_loopback_http() {
+        assert_eq!(expand_base_url(":7897"), "http://127.0.0.1:7897");
+        assert_eq!(expand_base_url(":7897/v1"), "http://127.0.0.1:7897/v1");
+        assert_eq!(expand_base_url("http://127.0.0.1:7897"), "http://127.0.0.1:7897");
+        assert_eq!(expand_base_url(":7897s"), ":7897s");
+        assert_eq!(expand_base_url("::7897"), "::7897");
+        assert_eq!(expand_base_url(":"), ":");
     }
 }
 

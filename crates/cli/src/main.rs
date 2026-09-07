@@ -253,7 +253,7 @@ pub fn dial(
         .find(model)
         .with_context(|| unknown(model, named_by))?;
     if let Some(url) = &args.base_url {
-        spec.base_url = url.clone();
+        spec.base_url = config::expand_base_url(url);
     }
     if let Some(window) = args.context {
         spec.context_window = window;

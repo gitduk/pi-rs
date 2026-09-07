@@ -551,6 +551,8 @@ impl Repl {
     /// `/settings set`: try the write on a scratch tree first, so a bad value
     /// touches nothing, then record it as a claim and rebuild.
     pub fn edit(&mut self, path: &str, raw: &str) -> Vec<String> {
+        let expanded = (path == "base_url").then(|| crate::config::expand_base_url(raw));
+        let raw = expanded.as_deref().unwrap_or(raw);
         let mut scratch = self.file.clone();
         let old = crate::settings::get(&scratch, path).ok().cloned();
         if let Err(e) = crate::settings::set(&mut scratch, path, raw) {
@@ -591,6 +593,8 @@ impl Repl {
     /// happens on a scratch tree first; nothing is written or applied when it
     /// fails.
     pub fn commit_file(&mut self, path: &str, raw: &str) -> Result<Vec<String>, String> {
+        let expanded = (path == "base_url").then(|| crate::config::expand_base_url(raw));
+        let raw = expanded.as_deref().unwrap_or(raw);
         let mut scratch = self.file.clone();
         crate::settings::set(&mut scratch, path, raw).map_err(|e| format!("{e:#}"))?;
         let new = crate::settings::get(&scratch, path).unwrap().clone();
