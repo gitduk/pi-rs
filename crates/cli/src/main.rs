@@ -13,6 +13,7 @@ mod config;
 mod context;
 mod journal;
 mod keys;
+mod memory;
 mod lane;
 mod line;
 mod render;
@@ -607,7 +608,7 @@ async fn main() -> Result<()> {
         let commands = std::sync::Arc::new(resolved.commands);
         let ctx = tools::Ctx::new(workspace).with_session(&id);
         let (events, inbox) = lane::Lane::channel();
-        let core = repl::Repl {
+        let mut core = repl::Repl {
             store,
             keys: key_map.clone(),
             config: config.clone(),
@@ -639,6 +640,7 @@ async fn main() -> Result<()> {
                 commands,
             }],
         };
+        core.refresh_memory();
         // The live region needs the terminal at both ends: keys come in one
         // side and the repaint goes out the other. Missing either, there is
         // nothing to hold still, and printing a line at a time is right.

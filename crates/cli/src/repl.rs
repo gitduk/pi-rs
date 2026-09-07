@@ -86,6 +86,11 @@ const BUILTIN: &[Command] = &[
         "summarize everything but what you are working on now",
     ),
     Command::builtin(
+        "/mem",
+        "[text]",
+        "keep something past this transcript, or show what is kept",
+    ),
+    Command::builtin(
         "/loop",
         "[text]",
         "repeat a line while it keeps changing the tree; bare, stop one",
@@ -683,6 +688,47 @@ impl Repl {
     }
 
     /// What `/model` on its own shows.
+    /// Put the workspace's shelf in front of the model.
+    ///
+    /// Called wherever the shelf or the workspace changes, because which shelf
+    /// is in force follows the lane rather than the run.
+    pub fn refresh_memory(&mut self) {
+        let root = self.lane().ctx.workspace.root().to_path_buf();
+        let path = crate::memory::path_of(self.store.root(), &root);
+        let text = crate::memory::Memory::load(&path).render();
+        std::sync::Arc::make_mut(&mut self.lane_mut().agent).memory = text;
+    }
+
+    /// Write a note to this workspace's shelf, or say what is on it.
+    ///
+    /// A note you typed carries no weight and never ages out: the cap falls on
+    /// what the model wrote, not on what you did.
+    fn remember(&mut self, text: &str) -> Vec<String> {
+        let root = self.lane().ctx.workspace.root().to_path_buf();
+        let path = crate::memory::path_of(self.store.root(), &root);
+        let mut shelf = crate::memory::Memory::load(&path);
+        let text = text.trim();
+        if text.is_empty() {
+            return match shelf.render() {
+                None => vec![
+                    "nothing on the shelf here yet — `/mem <what to keep>` puts something on it"
+                        .into(),
+                ],
+                Some(text) => text.lines().map(str::to_string).collect(),
+            };
+        }
+        shelf.add([crate::memory::Note::yours(text)]);
+        match shelf.save(&path) {
+            Ok(()) => {
+                // Straight in front of the model: a note that waited for the
+                // next run would look, this turn, like it had not been taken.
+                self.refresh_memory();
+                vec![format!("remembered — {} on the shelf", shelf.notes.len())]
+            }
+            Err(e) => vec![format!("the shelf would not take it: {e}")],
+        }
+    }
+
     fn listing(&self) -> Vec<String> {
         let here = &self.lane().agent.spec.model;
         let choices = self.choices();
@@ -898,6 +944,8 @@ pub enum Intent {
     Resume(String),
     /// Everything after the word focuses the summary.
     Compact(String),
+    /// What to put on this workspace's shelf, or empty to show what is on it.
+    Mem(String),
     /// The name to move to, or empty to list what there is.
     Model(String),
     /// The name to work in, or empty to list what there is.
@@ -969,6 +1017,9 @@ impl Intent {
             // Answered from the config, the key map or the surface's own
             // totals — none of which the run is holding.
             Intent::Help | Intent::Keys | Intent::Status | Intent::Cost | Intent::Name(_) => Fate::Now,
+            // The shelf is a file, not the transcript: writing to it needs no
+            // turn and waits for none.
+            Intent::Mem(_) => Fate::Now,
             // Both write through `Arc::make_mut`, so the run in flight keeps
             // the agent it started on and the next one picks up the change.
             Intent::Reload | Intent::Model(_) => Fate::Now,
@@ -1148,6 +1199,7 @@ pub fn read(line: &str) -> Intent {
         "/wechat" => Intent::Wechat(rest(line)),
         "/loop" => Intent::Loop(rest(line)),
         "/settings" => Intent::Settings(rest(line)),
+        "/mem" => Intent::Mem(rest(line)),
         other => Intent::Other {
             word: other.to_string(),
             args: rest(line),
@@ -1333,6 +1385,7 @@ impl Repl {
                     lines(said)
                 }
             }
+            Intent::Mem(text) => Step::Handled(self.remember(&text)),
             Intent::Compact(focus) => Step::Compact(Some(focus).filter(|f| !f.is_empty())),
             Intent::Model(name) => Step::Handled(if name.is_empty() {
                 self.listing()
@@ -1597,6 +1650,9 @@ impl Repl {
         });
         self.current = self.lanes.len() - 1;
         self.in_force();
+        // The agent was cloned from the lane being left, and its shelf with
+        // it. Another checkout is another workspace, which is another shelf.
+        self.refresh_memory();
 
         // Asked with the root the next save will file under, so a tree is found
         // by the same key it was stored by.
@@ -2346,6 +2402,11 @@ mod tests {
         // Bare, they mean clear and unfocused respectively.
         assert_eq!(read("/name"), Intent::Name(String::new()));
         assert_eq!(read("/compact"), Intent::Compact(String::new()));
+        assert_eq!(read("/mem"), Intent::Mem(String::new()));
+        assert_eq!(
+            read("/mem  prefers xh over curl "),
+            Intent::Mem("prefers xh over curl".into())
+        );
     }
 
     #[test]

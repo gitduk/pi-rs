@@ -114,6 +114,13 @@ pub struct Agent {
     /// the working model's rate.
     pub summarizer: Option<(Arc<dyn Transport>, ModelSpec)>,
     pub retry: Retry,
+    /// What survived earlier transcripts, already rendered, or nothing.
+    ///
+    /// A note rather than part of the system prompt, because it moves: the
+    /// prompt is the cached prefix, and changing its tail re-bills every
+    /// message behind it. Whose file it is and how it is kept belongs to
+    /// whoever built the agent.
+    pub memory: Option<String>,
 }
 
 // Per-tool failure streaks across one run, so a loop can be named. Keyed by
@@ -131,6 +138,14 @@ fn context_note(used: usize, budget: usize, trimmed: bool) -> String {
     // cheaper reclaims run before any drop and leave no summary behind.
     let trimmed = if trimmed { " trimmed=\"true\"" } else { "" };
     format!("<context used=\"{used}\" budget=\"{budget}\"{trimmed}/>")
+}
+
+/// Everything the turn says about itself, in the order it is read: what the
+/// window is doing now, then what outlived the transcripts before it.
+fn turn_notes(used: usize, budget: usize, trimmed: bool, memory: Option<&str>) -> Vec<String> {
+    let mut out = vec![context_note(used, budget, trimmed)];
+    out.extend(memory.map(str::to_string).filter(|m| !m.trim().is_empty()));
+    out
 }
 
 // What a streamed call resolves to before anything runs. Deciding first keeps
@@ -151,6 +166,7 @@ impl Agent {
             effort: Effort::Off,
             compaction: Policy::default(),
             summarizer: None,
+            memory: None,
             retry: Retry::default(),
         }
     }
@@ -234,7 +250,7 @@ impl Agent {
                 let req = Request {
                     system: Some(self.system.clone()),
                     messages: sent.clone(),
-                    notes: vec![context_note(used, budget, trimmed)],
+                    notes: turn_notes(used, budget, trimmed, self.memory.as_deref()),
                     tools: self.registry.defs(),
                     max_output_tokens: None,
                     temperature: None,
@@ -958,6 +974,20 @@ mod tests {
     /// It claims a taking and never a summary. `plan` spends its cheaper
     /// measures before it drops anything, and a summary is written only for a
     /// drop — so on the common path there is nothing to promise.
+    /// The window first, the shelf after: what the turn is doing now, then
+    /// what outlived the transcripts before it. An empty shelf says nothing at
+    /// all rather than an empty tag for the model to interpret.
+    #[test]
+    fn the_shelf_rides_the_turn_behind_the_window_reading() {
+        let window = context_note(10, 100, false);
+        assert_eq!(turn_notes(10, 100, false, None), vec![window.clone()]);
+        assert_eq!(turn_notes(10, 100, false, Some("   ")), vec![window.clone()]);
+        assert_eq!(
+            turn_notes(10, 100, false, Some("<memory>\n2026-09-07 prefers xh\n</memory>")),
+            vec![window, "<memory>\n2026-09-07 prefers xh\n</memory>".to_string()]
+        );
+    }
+
     #[test]
     fn a_reclaim_is_stated_on_the_turn_it_happened_and_claims_no_summary() {
         assert_eq!(
