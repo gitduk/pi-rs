@@ -517,9 +517,40 @@ use brain::message::Text as _Text;
     use brain::request::Request;
     use brain::stream::StreamEvent;
     use brain::transport::Transport;
+    use brain::stream::{BlockKind, StopReason, Usage};
+    use futures::StreamExt;
     use futures::stream::BoxStream;
     use serde_json::json;
     use std::sync::Arc;
+
+    fn text_turn(body: &str) -> Vec<StreamEvent> {
+        vec![
+            StreamEvent::BlockStart { index: 0, kind: BlockKind::Text },
+            StreamEvent::TextDelta { index: 0, delta: body.into() },
+            StreamEvent::Done {
+                stop: StopReason::EndTurn,
+                usage: Usage { input: 3_000, output: 5, ..Default::default() },
+            },
+        ]
+    }
+
+    /// Fourteen distinct reads: enough weight that a compaction has something
+    /// to drop, and distinct paths so the supersede tier cannot take it first.
+    fn bulky_session() -> Session {
+        let mut s = Session::with_prompt("go");
+        for i in 0..14 {
+            s.push_assistant(vec![AssistantContent::ToolCall(ToolCall {
+                id: format!("c{i}"),
+                name: "read".into(),
+                args: json!({ "path": format!("f{i}.rs") }),
+            })]);
+            s.push_user(UserBody::Result {
+                result: ToolResult::text(format!("c{i}"), "read", big(4_000)),
+                preview: None,
+            });
+        }
+        s
+    }
 
     struct Never;
 
@@ -573,6 +604,92 @@ use brain::message::Text as _Text;
         let a = agent_with(200_000, 32_000);
         let b = a.budget();
         assert!(b > 120_000 && b < 200_000, "{b}");
+    }
+
+    /// One transport, two prompts: the compaction asks for a summary and for
+    /// what should outlive the session, and tells them apart by what it is
+    /// holding when each answer comes back.
+    struct Both {
+        answer: &'static str,
+        asked: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl Transport for Both {
+        async fn stream(
+            &self,
+            _: &ModelSpec,
+            req: &Request,
+        ) -> brain::Result<BoxStream<'static, brain::Result<StreamEvent>>> {
+            let system = req.system.clone().unwrap_or_default();
+            let remembering = system.contains("Name a future moment");
+            self.asked.lock().unwrap().push(req.messages[0].text());
+            let body = if remembering { self.answer } else { "what happened" };
+            Ok(futures::stream::iter(text_turn(body).into_iter().map(Ok)).boxed())
+        }
+    }
+
+    #[derive(Default)]
+    struct Recorder(Arc<std::sync::Mutex<Vec<agent::Kept>>>);
+
+    impl agent::Shelf for Recorder {
+        fn read(&self) -> Option<String> {
+            Some("<memory>\n2026-09-01 already known\n</memory>".into())
+        }
+        fn keep(&self, notes: Vec<agent::Kept>) {
+            self.0.lock().unwrap().extend(notes);
+        }
+    }
+
+    /// The shelf is filled from the same span the summary covers, in the same
+    /// round trip, and what is already on it rides along so the model does not
+    /// write the same fact down twice in new words.
+    #[tokio::test]
+    async fn a_compaction_asks_what_should_outlive_the_session() {
+        let kept = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut a = agent_with(1_000_000, 32_000);
+        a.summarizer = Some((
+            Arc::new(Both {
+                answer: "3 prefers xh over curl\nnot a note\n1 the parser is in syntax/",
+                asked: asked.clone(),
+            }),
+            spec(),
+        ));
+        a.shelf = Some(Arc::new(Recorder(kept.clone())));
+
+        let mut s = bulky_session();
+        let (report, spent) = a.compact_now(&mut s, Some("the parser")).await.expect("work");
+        assert!(report.touched());
+
+        let kept = kept.lock().unwrap().clone();
+        assert_eq!(
+            kept,
+            vec![
+                agent::Kept { text: "prefers xh over curl".into(), weight: 3 },
+                agent::Kept { text: "the parser is in syntax/".into(), weight: 1 },
+            ],
+            "the prose between them is not a note"
+        );
+
+        let asked = asked.lock().unwrap().clone();
+        assert_eq!(asked.len(), 2, "one summary and one shelf");
+        let shelved = asked.iter().find(|a| a.contains("Already on the shelf")).expect("sent");
+        assert!(shelved.contains("already known"), "{shelved}");
+        assert!(shelved.contains("the parser"), "the focus rides along too: {shelved}");
+        // Both calls are billed, not just the summary.
+        assert!(spent.usage.input >= 6_000, "{:?}", spent.usage);
+    }
+
+    /// A run with no shelf still summarizes, and asks nobody anything else.
+    #[tokio::test]
+    async fn no_shelf_means_no_second_call() {
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut a = agent_with(1_000_000, 32_000);
+        a.summarizer = Some((Arc::new(Both { answer: "3 x", asked: asked.clone() }), spec()));
+        let mut s = bulky_session();
+        assert!(a.compact_now(&mut s, None).await.expect("work").0.touched());
+        assert_eq!(asked.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

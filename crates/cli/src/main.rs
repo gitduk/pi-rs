@@ -322,11 +322,13 @@ pub fn arm(
     ag: &mut agent::Agent,
     from: &mut Resolved,
     home: std::sync::Arc<dyn agent::task::Home>,
+    shelf: std::sync::Arc<dyn agent::Shelf>,
 ) {
     ag.registry = std::mem::take(&mut from.registry);
     ag.approver = std::sync::Arc::new(agent::Ceiling(from.tier));
     ag.system = std::mem::take(&mut from.system);
     ag.effort = from.effort;
+    ag.shelf = Some(shelf);
     hang(ag, home, &from.standing);
 }
 
@@ -580,6 +582,7 @@ async fn main() -> Result<()> {
         &mut ag,
         &mut resolved,
         subagent::Filed::armed(store.clone(), root.clone(), model_id.clone()),
+        memory::shelf(store.root(), &root),
     );
     // After `arm`, which needs the whole of `resolved`: this takes a field out
     // of it.
@@ -608,7 +611,7 @@ async fn main() -> Result<()> {
         let commands = std::sync::Arc::new(resolved.commands);
         let ctx = tools::Ctx::new(workspace).with_session(&id);
         let (events, inbox) = lane::Lane::channel();
-        let mut core = repl::Repl {
+        let core = repl::Repl {
             store,
             keys: key_map.clone(),
             config: config.clone(),
@@ -640,7 +643,6 @@ async fn main() -> Result<()> {
                 commands,
             }],
         };
-        core.refresh_memory();
         // The live region needs the terminal at both ends: keys come in one
         // side and the repaint goes out the other. Missing either, there is
         // nothing to hold still, and printing a line at a time is right.

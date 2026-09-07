@@ -92,17 +92,7 @@ pub fn write(ctx: &Ctx, body: &str) -> Result<Option<SpillRef>, ToolError> {
     let path = dir.join(format!("{name}.log"));
     std::fs::create_dir_all(&dir)
         .map_err(|e| ToolError::Spill(format!("{}: {e}", dir.display())))?;
-    // Write under a temp name and rename, so the final path never carries the
-    // wrong permissions: a crash between write and chmod would leave the
-    // file's contents world-readable beside a 0600 transcript.
-    let tmp = path.with_extension("log.tmp");
-    std::fs::write(&tmp, body).map_err(|e| ToolError::Spill(format!("{}: {e}", tmp.display())))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-    }
-    std::fs::rename(&tmp, &path)
+    state::write_private(&path, body.as_bytes())
         .map_err(|e| ToolError::Spill(format!("{}: {e}", path.display())))?;
     Ok(Some(SpillRef {
         bytes: body.len(),

@@ -29,6 +29,25 @@ pub fn stale_logs() -> Option<PathBuf> {
     dir().map(|d| d.join("logs"))
 }
 
+/// Write bytes where only this user can read them, whole or not at all.
+///
+/// Under a temp name and renamed, so the final path never carries the wrong
+/// permissions: a crash between the write and the chmod would leave the
+/// contents world-readable at the name everything else reads.
+pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension(match path.extension().and_then(|e| e.to_str()) {
+        Some(had) => format!("{had}.tmp"),
+        None => "tmp".into(),
+    });
+    std::fs::write(&tmp, bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    std::fs::rename(&tmp, path)
+}
+
 /// An id as a file or directory name, with everything that could leave the
 /// parent gone. Ids are minted as `{ts}-{pid}`, so this changes nothing for a
 /// real one; it is the guard every consumer applies before an id opens a path.

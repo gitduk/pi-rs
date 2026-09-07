@@ -461,8 +461,9 @@ impl Repl {
         // is where the copy is taken, and taking it four times copies thrice
         // over.
         let home = self.home(root.clone(), self.lane().agent.spec.model.clone());
+        let shelf = crate::memory::shelf(self.store.root(), &root);
         let ag = std::sync::Arc::make_mut(&mut self.lane_mut().agent);
-        crate::arm(ag, &mut resolved, home);
+        crate::arm(ag, &mut resolved, home, shelf);
         self.lane_mut().context = resolved.context;
         self.lane_mut().standing = resolved.standing;
         // A skill can appear between one turn and the next, so the table of
@@ -687,18 +688,6 @@ impl Repl {
         crate::hang(ag, home, &standing);
     }
 
-    /// What `/model` on its own shows.
-    /// Put the workspace's shelf in front of the model.
-    ///
-    /// Called wherever the shelf or the workspace changes, because which shelf
-    /// is in force follows the lane rather than the run.
-    pub fn refresh_memory(&mut self) {
-        let root = self.lane().ctx.workspace.root().to_path_buf();
-        let path = crate::memory::path_of(self.store.root(), &root);
-        let text = crate::memory::Memory::load(&path).render();
-        std::sync::Arc::make_mut(&mut self.lane_mut().agent).memory = text;
-    }
-
     /// Write a note to this workspace's shelf, or say what is on it.
     ///
     /// A note you typed carries no weight and never ages out: the cap falls on
@@ -719,16 +708,12 @@ impl Repl {
         }
         shelf.add([crate::memory::Note::yours(text)]);
         match shelf.save(&path) {
-            Ok(()) => {
-                // Straight in front of the model: a note that waited for the
-                // next run would look, this turn, like it had not been taken.
-                self.refresh_memory();
-                vec![format!("remembered — {} on the shelf", shelf.notes.len())]
-            }
+            Ok(()) => vec![format!("remembered — {} on the shelf", shelf.notes.len())],
             Err(e) => vec![format!("the shelf would not take it: {e}")],
         }
     }
 
+    /// What `/model` on its own shows.
     fn listing(&self) -> Vec<String> {
         let here = &self.lane().agent.spec.model;
         let choices = self.choices();
@@ -1623,7 +1608,7 @@ impl Repl {
         // trees, and which model is answering was a decision made elsewhere.
         let home = self.home(root.clone(), self.lane().agent.spec.model.clone());
         let mut ag = (*self.lane().agent).clone();
-        crate::arm(&mut ag, &mut resolved, home);
+        crate::arm(&mut ag, &mut resolved, home, crate::memory::shelf(self.store.root(), &root));
 
         // Built, not cloned from the lane being left: a `Ctx`'s tables key on
         // absolute paths in one tree, and none of that lane's describe this.
@@ -1652,7 +1637,6 @@ impl Repl {
         self.in_force();
         // The agent was cloned from the lane being left, and its shelf with
         // it. Another checkout is another workspace, which is another shelf.
-        self.refresh_memory();
 
         // Asked with the root the next save will file under, so a tree is found
         // by the same key it was stored by.

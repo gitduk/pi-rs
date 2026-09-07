@@ -96,6 +96,8 @@ impl Task {
         let mut agent = parent.clone();
         agent.registry = std::mem::take(&mut agent.registry).without(Self::NAME);
         agent.system = format!("{PROMPT}{standing}");
+        // The same facts, and no way to add one: see `remember::ReadOnly`.
+        agent.shelf = agent.shelf.take().map(|s| Arc::new(crate::remember::ReadOnly(s)) as Arc<_>);
         Self {
             agent: Arc::new(agent),
             home,

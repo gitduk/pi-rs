@@ -42,6 +42,11 @@ impl Note {
         Self { text: text.into(), at: now(), weight: None }
     }
 
+    /// A note the model wrote, at the weight it gave.
+    pub fn theirs(text: impl Into<String>, weight: u8) -> Self {
+        Self { text: text.into(), at: now(), weight: Some(weight.clamp(1, 3)) }
+    }
+
     pub fn is_yours(&self) -> bool {
         self.weight.is_none()
     }
@@ -83,16 +88,8 @@ impl Memory {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        // Rename, so a crash mid-write cannot leave half a shelf.
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            // Notes quote the user and the tree; a transcript's permissions.
-            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-        }
-        std::fs::rename(&tmp, path)?;
+        // Notes quote the user and the tree; a transcript's permissions.
+        tools::state::write_private(path, &serde_json::to_vec_pretty(self)?)?;
         Ok(())
     }
 
@@ -127,7 +124,7 @@ impl Memory {
             let (sx, sy) = (x.score(now).unwrap_or(0.0), y.score(now).unwrap_or(0.0));
             sx.total_cmp(&sy).then(x.at.cmp(&y.at))
         });
-        let doomed: std::collections::BTreeSet<usize> =
+        let doomed: std::collections::HashSet<usize> =
             ranked.into_iter().take(theirs - room).collect();
         let mut i = 0;
         self.notes.retain(|_| {
@@ -162,11 +159,47 @@ fn day(at: u64) -> String {
         .to_string()
 }
 
+/// This workspace's shelf, as the agent reaches it.
+pub fn shelf(sessions: &Path, workspace: &Path) -> std::sync::Arc<dyn agent::Shelf> {
+    std::sync::Arc::new(File::at(path_of(sessions, workspace)))
+}
+
 /// Where one workspace's shelf lives, beside its transcripts.
 pub fn path_of(sessions: &Path, workspace: &Path) -> PathBuf {
     sessions
         .join(tools::state::key_of(workspace))
         .join("memory.json")
+}
+
+/// The shelf as the agent reaches it: a path, read and written on demand.
+///
+/// Read fresh each time rather than held: `/mem` writes to the same file
+/// between turns, and a copy taken at startup would quietly overwrite it.
+pub struct File {
+    path: PathBuf,
+}
+
+impl File {
+    pub fn at(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl agent::Shelf for File {
+    fn read(&self) -> Option<String> {
+        Memory::load(&self.path).render()
+    }
+
+    // Inline rather than on a blocking thread, unlike `subagent::Filed`: that
+    // one files megabyte transcripts from several lanes at once, this one
+    // thirty short lines at a compaction.
+    fn keep(&self, notes: Vec<agent::Kept>) {
+        let mut shelf = Memory::load(&self.path);
+        shelf.add(notes.into_iter().map(|n| Note::theirs(n.text, n.weight)));
+        if let Err(e) = shelf.save(&self.path) {
+            tracing::warn!(target: "pi::memory", error = %e, "could not write the shelf");
+        }
+    }
 }
 
 #[cfg(test)]

@@ -15,10 +15,7 @@ pub struct Totals {
 
 impl Totals {
     pub fn add(&mut self, usage: &Usage, cost: f64) {
-        self.usage.input += usage.input;
-        self.usage.output += usage.output;
-        self.usage.cache_read += usage.cache_read;
-        self.usage.cache_write += usage.cache_write;
+        self.usage.add(usage);
         self.cost += cost;
     }
 

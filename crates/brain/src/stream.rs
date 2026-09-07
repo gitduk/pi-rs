@@ -13,6 +13,19 @@ pub struct Usage {
     pub cache_write: u64,
 }
 
+impl Usage {
+    /// Fold another call's counters in. Every field, so a counter added to the
+    /// struct without being added here is a compile error rather than a number
+    /// that quietly stops accumulating.
+    pub fn add(&mut self, other: &Usage) {
+        let Usage { input, output, cache_read, cache_write } = other;
+        self.input += input;
+        self.output += output;
+        self.cache_read += cache_read;
+        self.cache_write += cache_write;
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StopReason {
     #[default]

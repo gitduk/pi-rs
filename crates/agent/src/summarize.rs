@@ -1,11 +1,9 @@
 use brain::model::ModelSpec;
-use brain::message::{AssistantContent, Message};
+use brain::message::AssistantContent;
 
 use crate::session::{Entry, UserBody};
-use brain::request::{Effort, Request, ToolChoice};
-use brain::stream::{Accumulator, Usage};
+use brain::stream::Usage;
 use brain::transport::Transport;
-use futures::StreamExt;
 
 pub const PROMPT: &str = include_str!("../prompts/summarize.md");
 
@@ -110,31 +108,15 @@ pub async fn run(
         Some(f) => format!("Focus the summary on: {f}\n\n{history}"),
         None => history,
     };
-    let req = Request {
-        system: Some(PROMPT.to_string()),
-        messages: vec![Message::user(body)],
-        notes: Vec::new(),
-        tools: Vec::new(),
-        max_output_tokens: Some(MAX_SUMMARY_TOKENS.min(spec.max_output_tokens)),
-        temperature: None,
-        // Reasoning about a summary costs more than the summary is worth.
-        effort: Effort::Off,
-        tool_choice: ToolChoice::None,
-    };
-
-    let mut acc = Accumulator::new(spec.model.clone());
-    let mut stream = transport.stream(spec, &req).await?;
-    while let Some(ev) = stream.next().await {
-        acc.push(ev?);
-    }
-    let done = acc.finish();
-    let text = done.message.text();
+    let (text, usage) = crate::oneshot::ask(transport, spec, PROMPT, body, MAX_SUMMARY_TOKENS).await?;
+    // Unlike the shelf beside it, nothing to say is a failure here: the span
+    // goes either way, and it goes unsummarized.
     if text.trim().is_empty() {
         return Err(brain::BrainError::Stream(
             "the summarizer returned nothing".into(),
         ));
     }
-    Ok((text, done.usage))
+    Ok((text, usage))
 }
 
 #[cfg(test)]

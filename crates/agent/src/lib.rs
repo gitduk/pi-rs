@@ -17,12 +17,15 @@ use crate::session::Session;
 pub mod approval;
 pub mod compact;
 pub mod event;
+mod oneshot;
+pub mod remember;
 pub mod session;
 pub mod summarize;
 pub mod task;
 
 pub use approval::{Approver, Ceiling, Decision};
 pub use compact::Policy;
+pub use remember::{Kept, Shelf};
 use event::say;
 pub use event::{Event, Totals};
 
@@ -114,13 +117,15 @@ pub struct Agent {
     /// the working model's rate.
     pub summarizer: Option<(Arc<dyn Transport>, ModelSpec)>,
     pub retry: Retry,
-    /// What survived earlier transcripts, already rendered, or nothing.
+    /// Where facts that should outlive this session are kept. None for a
+    /// subagent, a test or an embedder: a run nobody will return to has
+    /// nothing to leave behind.
+    /// Read into every turn's notes and written when compaction drops a span.
     ///
     /// A note rather than part of the system prompt, because it moves: the
     /// prompt is the cached prefix, and changing its tail re-bills every
-    /// message behind it. Whose file it is and how it is kept belongs to
-    /// whoever built the agent.
-    pub memory: Option<String>,
+    /// message behind it.
+    pub shelf: Option<Arc<dyn remember::Shelf>>,
 }
 
 // Per-tool failure streaks across one run, so a loop can be named. Keyed by
@@ -142,9 +147,13 @@ fn context_note(used: usize, budget: usize, trimmed: bool) -> String {
 
 /// Everything the turn says about itself, in the order it is read: what the
 /// window is doing now, then what outlived the transcripts before it.
-fn turn_notes(used: usize, budget: usize, trimmed: bool, memory: Option<&str>) -> Vec<String> {
+///
+/// Read from the shelf each turn rather than held: compaction writes to it
+/// mid-run, and a copy taken at startup would show the model a shelf without
+/// the note it had just put there.
+fn turn_notes(used: usize, budget: usize, trimmed: bool, shelf: Option<String>) -> Vec<String> {
     let mut out = vec![context_note(used, budget, trimmed)];
-    out.extend(memory.map(str::to_string).filter(|m| !m.trim().is_empty()));
+    out.extend(shelf.filter(|m| !m.trim().is_empty()));
     out
 }
 
@@ -166,7 +175,7 @@ impl Agent {
             effort: Effort::Off,
             compaction: Policy::default(),
             summarizer: None,
-            memory: None,
+            shelf: None,
             retry: Retry::default(),
         }
     }
@@ -250,7 +259,12 @@ impl Agent {
                 let req = Request {
                     system: Some(self.system.clone()),
                     messages: sent.clone(),
-                    notes: turn_notes(used, budget, trimmed, self.memory.as_deref()),
+                    notes: turn_notes(
+                        used,
+                        budget,
+                        trimmed,
+                        self.shelf.as_ref().and_then(|s| s.read()),
+                    ),
                     tools: self.registry.defs(),
                     max_output_tokens: None,
                     temperature: None,
@@ -412,7 +426,7 @@ impl Agent {
         let (mut record, mut report) = compact::plan(session, &self.spec, budget, &policy);
         if !record.dropped.is_empty() {
             let (used, priced) = self
-                .write_summary(session, &mut record, None)
+                .retire_span(session, &mut record, None)
                 .instrument(tracing::info_span!(target: "pi::compact", "summarize"))
                 .await;
             report.summarized = record.summary.is_some();
@@ -461,7 +475,7 @@ impl Agent {
         let mut spent = Totals::default();
         if !record.dropped.is_empty() {
             let (used, priced) = self
-                .write_summary(session, &mut record, focus)
+                .retire_span(session, &mut record, focus)
                 .instrument(tracing::info_span!(target: "pi::compact", "summarize"))
                 .await;
             report.summarized = record.summary.is_some();
@@ -474,18 +488,23 @@ impl Agent {
         Some((report, spent))
     }
 
-    /// Summarize what is about to be dropped, folding in any summary already in
-    /// force and retiring it.
+    /// Ask what the span being dropped is worth, and to whom.
     ///
-    /// A failure here is not fatal: the entries still go, unsummarized. Losing
-    /// the summary costs context; failing the turn costs the whole run.
+    /// Two judgements about one span, so one function and one round trip: a
+    /// summary that carries this session's work forward, folding in any
+    /// summary already in force and retiring it, and a few facts for the shelf
+    /// that should outlive the session entirely.
+    ///
+    /// A failure in either is not fatal: the entries still go. Losing the
+    /// summary costs context and losing a note costs a fact; failing the turn
+    /// costs the whole run.
     ///
     /// Returns the usage *and what it cost*, because only here is it known
     /// which spec priced it. Handing back a bare usage let both callers pick a
     /// spec themselves, and both picked the main model's — so a cheaper
     /// summarizer would have been billed at the expensive model's rates, twice
     /// over and without a word.
-    async fn write_summary(
+    async fn retire_span(
         &self,
         session: &Session,
         record: &mut session::Compaction,
@@ -497,17 +516,59 @@ impl Agent {
         };
         let history =
             summarize::render(&session.summaries(), &session.entries_for(&record.dropped));
-        match summarize::run(transport, spec, history, focus).await {
-            Ok((text, usage)) => {
+
+        // Two judgements, one span, and neither is the other: the summary
+        // carries this session's work forward, the shelf carries a few facts
+        // past it. Together rather than in turn — one round trip, not two.
+        let (summarized, kept) = futures::future::join(
+            summarize::run(transport, spec, history.clone(), focus),
+            self.fill_shelf(transport, spec, history, focus),
+        )
+        .await;
+
+        let mut usage = kept;
+        match summarized {
+            Ok((text, used)) => {
                 record.summary = Some(text);
                 // The new summary covers what the old one did, so the entry
                 // carrying the old one leaves the view.
                 record.dropped.extend(session.summary_entries());
-                (usage, spec.cost(&usage))
+                usage.add(&used);
             }
             Err(e) => {
                 tracing::warn!(target: "pi::compact", error = %e, "summarizing dropped history failed");
-                (brain::stream::Usage::default(), 0.0)
+            }
+        }
+        let cost = spec.cost(&usage);
+        (usage, cost)
+    }
+
+    /// Ask what should outlive the session and put it on the shelf, when there
+    /// is one. Answers with what the asking cost, zero when nothing was asked.
+    ///
+    /// A failure is swallowed for the same reason the summary's is: losing a
+    /// note costs a fact, failing the compaction costs the run.
+    async fn fill_shelf(
+        &self,
+        transport: &dyn Transport,
+        spec: &ModelSpec,
+        history: String,
+        focus: Option<&str>,
+    ) -> brain::stream::Usage {
+        let Some(shelf) = &self.shelf else {
+            return brain::stream::Usage::default();
+        };
+        match remember::run(transport, spec, history, focus, shelf.read()).await {
+            Ok((notes, usage)) => {
+                if !notes.is_empty() {
+                    tracing::info!(target: "pi::compact", kept = notes.len(), "shelved");
+                    shelf.keep(notes);
+                }
+                usage
+            }
+            Err(e) => {
+                tracing::warn!(target: "pi::compact", error = %e, "asking what to keep failed");
+                brain::stream::Usage::default()
             }
         }
     }
@@ -981,9 +1042,9 @@ mod tests {
     fn the_shelf_rides_the_turn_behind_the_window_reading() {
         let window = context_note(10, 100, false);
         assert_eq!(turn_notes(10, 100, false, None), vec![window.clone()]);
-        assert_eq!(turn_notes(10, 100, false, Some("   ")), vec![window.clone()]);
+        assert_eq!(turn_notes(10, 100, false, Some("   ".into())), vec![window.clone()]);
         assert_eq!(
-            turn_notes(10, 100, false, Some("<memory>\n2026-09-07 prefers xh\n</memory>")),
+            turn_notes(10, 100, false, Some("<memory>\n2026-09-07 prefers xh\n</memory>".into())),
             vec![window, "<memory>\n2026-09-07 prefers xh\n</memory>".to_string()]
         );
     }

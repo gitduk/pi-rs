@@ -259,6 +259,46 @@ async fn the_child_answers_into_the_parents_transcript() {
     assert_ne!(ns, ctx.spill_namespace(), "and not the parent's");
 }
 
+/// The child works from the same facts and leaves none behind.
+///
+/// Both halves have been wrong in the same afternoon: a child given no shelf
+/// reads nothing, and a child given the parent's own writes to it out of
+/// sight. `arm` sets the parent's before `hang` freezes the copy the child
+/// keeps for the life of the run.
+#[tokio::test]
+async fn a_child_reads_the_shelf_and_cannot_write_to_it() {
+    #[derive(Default)]
+    struct Watched {
+        reads: AtomicUsize,
+        wrote: std::sync::Mutex<Vec<agent::Kept>>,
+    }
+
+    impl agent::Shelf for Watched {
+        fn read(&self) -> Option<String> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            Some("<memory>\n2026-09-07 prefers xh\n</memory>".into())
+        }
+        fn keep(&self, notes: Vec<agent::Kept>) {
+            self.wrote.lock().unwrap().extend(notes);
+        }
+    }
+
+    let watched = Arc::new(Watched::default());
+    let (_dir, mut parent, ctx, _seen, home) = harness(vec![text_turn("done")]);
+    parent.shelf = Some(watched.clone());
+
+    let task = Task::new(&parent, home, STANDING);
+    task.execute(json!({ "description": "look", "prompt": "look" }), &ctx)
+        .await
+        .expect("the child ran");
+
+    assert!(watched.reads.load(Ordering::SeqCst) > 0, "the child saw nothing");
+    assert!(
+        watched.wrote.lock().unwrap().is_empty(),
+        "a note nobody watched arrive"
+    );
+}
+
 /// The row a finished call leaves has to say which job ended. Several
 /// children run at once, and their bills are indistinguishable.
 #[tokio::test]
