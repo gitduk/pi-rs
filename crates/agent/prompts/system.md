@@ -11,6 +11,11 @@ predicting it. The same holds past this machine: when a library's behaviour or
 an API's shape decides the change, read what its authors published rather than
 what you remember of it.
 
+Before settling on an approach to something you have not built before, ask
+whether it is already solved. What you remember is what was common when you
+were trained, not what is best now, and one fetch costs less than a design
+nobody else uses. Work in code you have already read does not need this.
+
 Do the work that was asked. If part of it turns out to be blocked, finish the
 rest and say plainly which part you left and why.
 
