@@ -501,7 +501,10 @@ pub fn expand_base_url(raw: &str) -> String {
         Some(i) => (&rest[..i], &rest[i..]),
         None => (rest, ""),
     };
-    if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+    if port.is_empty()
+        || !port.bytes().all(|b| b.is_ascii_digit())
+        || port.parse::<u16>().is_err()
+    {
         return raw.to_string();
     }
     format!("http://127.0.0.1:{port}{path}")
@@ -1336,6 +1339,8 @@ output_per_mtok = 0
         assert_eq!(expand_base_url(":7897s"), ":7897s");
         assert_eq!(expand_base_url("::7897"), "::7897");
         assert_eq!(expand_base_url(":"), ":");
+        assert_eq!(expand_base_url(":99999"), ":99999");
+        assert_eq!(expand_base_url(":65536"), ":65536");
     }
 }
 

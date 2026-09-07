@@ -20,9 +20,8 @@ use brain::message::{ToolResult, ToolResultContent};
 use crate::render::{self, Markdown, Paint};
 use crate::status::{self, Segment, Snapshot};
 
-// The gutter a line already said wears: the same bar a fenced block gets,
-// but in the prompt's colour. Kept out of the row's text so a line wider
-// than the terminal can repeat it on every row it wraps to — see `Kind::Said`.
+// The gutter a line already said wears, in the prompt's colour. Kept out
+// of the row's text so wrapping can repeat it — see `Kind::Said`.
 const SAID: &str = "▌";
 
 const BANNER: &str = concat!("π ", env!("CARGO_PKG_VERSION"));

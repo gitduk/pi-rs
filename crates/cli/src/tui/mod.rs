@@ -2384,11 +2384,10 @@ impl Tui {
             .collect();
     }
 
-    /// Say something about a lane on the screen the user is actually looking
-    /// at. A lane that is not in front names itself first, or the notice reads
-    /// as news about whichever tree happens to be up.
     /// Carry the lane's loop past a round that has just ended: queue the next
-    /// one, or say why there is not one.
+    /// one, or say why there is no next round when one ended it. A round the
+    /// user cut and a round still queued both speak for themselves — the
+    /// notice is for the loop that ended on its own.
     ///
     /// What decides is the tree, never the model: a round that changed a file
     /// is a round whose work was not finished, and one that changed nothing
@@ -2400,19 +2399,18 @@ impl Tui {
             return;
         };
         let said = match round {
-            crate::lane::Round::Again { goal, next } => {
+            crate::lane::Round::Again { goal, .. } => {
                 self.core.lanes[lane].view.queued.push(Intent::LoopRound(goal));
-                format!("loop round {next}")
+                return;
             }
+            crate::lane::Round::Cut => return,
             crate::lane::Round::Quiet => "loop done — that round changed nothing".to_string(),
             crate::lane::Round::Capped(n) => {
                 format!("loop stopped at loop_max_turns ({n}) — rounds were still changing files")
             }
-            crate::lane::Round::Cut => "loop stopped".to_string(),
         };
         self.say_of(lane, said);
     }
-
     /// News from a lane, onto the screen actually being watched rather than
     /// into the lane it came from — where nobody would see it until they
     /// switched. The `whose:` prefix is what makes that readable, and it is
@@ -2854,16 +2852,14 @@ impl Tui {
                     self.ui.rebuild(&mut lane.view, session);
                 }
                 let said = match outcome {
-                    // Unsent is half-typed, not gone: naming where the
-                    // transcript ends would name the wrong thing.
-                    // Cancelling takes long enough to type into, and a line
-                    // started meanwhile is the newer intent.
                     Rewound::Unsent(_) if !self.ui.editor.is_empty() => {
                         "unsent — the line you were typing stands; Up recalls it".to_string()
                     }
+                    // Unsent is half-typed, not gone: the text goes back to
+                    // the editor, and the cursor on it says what happened.
                     Rewound::Unsent(text) => {
                         self.ui.editor.set_line(&text);
-                        "unsent — the message is back in the editor".to_string()
+                        return;
                     }
                     Rewound::Kept | Rewound::Nothing => {
                         let at = self
@@ -5034,17 +5030,14 @@ mod tests {
         lane.loop_running();
         wrote(&mut lane, "a.rs");
         let again = lane.loop_step(true, None).expect("a loop is in force");
-        assert!(
-            matches!(&again, Round::Again { goal, next: 2 } if goal == "/code-review high"),
-            "the goal goes back verbatim, as the round it now is",
-        );
+        assert!(matches!(&again, Round::Again { goal } if goal == "/code-review high"));
 
         // The same file again. What a loop like this does most of the time is
         // keep working the files it has already touched, so a record that
         // counted distinct paths would call this round idle and stop here.
         lane.loop_running();
         wrote(&mut lane, "a.rs");
-        assert!(matches!(lane.loop_step(true, None), Some(Round::Again { next: 3, .. })));
+        assert!(matches!(lane.loop_step(true, None), Some(Round::Again { .. })));
 
         // Nothing changed: a pass with nothing to do has nothing to do next
         // time either.
@@ -5068,7 +5061,7 @@ mod tests {
 
         lane.loop_running();
         wrote(&mut lane, "a.rs");
-        assert!(matches!(lane.loop_step(true, None), Some(Round::Again { next: 2, .. })));
+        assert!(matches!(lane.loop_step(true, None), Some(Round::Again { .. })));
     }
 
     /// Esc is the only brake when `loop_max_turns` is unset, so it has to stop

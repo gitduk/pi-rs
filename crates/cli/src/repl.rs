@@ -551,11 +551,10 @@ impl Repl {
     /// `/settings set`: try the write on a scratch tree first, so a bad value
     /// touches nothing, then record it as a claim and rebuild.
     pub fn edit(&mut self, path: &str, raw: &str) -> Vec<String> {
-        let expanded = (path == "base_url").then(|| crate::config::expand_base_url(raw));
-        let raw = expanded.as_deref().unwrap_or(raw);
+        let raw = typed(path, raw);
         let mut scratch = self.file.clone();
         let old = crate::settings::get(&scratch, path).ok().cloned();
-        if let Err(e) = crate::settings::set(&mut scratch, path, raw) {
+        if let Err(e) = crate::settings::set(&mut scratch, path, &raw) {
             return vec![refused("settings", e)];
         }
         let new = crate::settings::get(&scratch, path).unwrap().clone();
@@ -593,10 +592,9 @@ impl Repl {
     /// happens on a scratch tree first; nothing is written or applied when it
     /// fails.
     pub fn commit_file(&mut self, path: &str, raw: &str) -> Result<Vec<String>, String> {
-        let expanded = (path == "base_url").then(|| crate::config::expand_base_url(raw));
-        let raw = expanded.as_deref().unwrap_or(raw);
+        let raw = typed(path, raw);
         let mut scratch = self.file.clone();
-        crate::settings::set(&mut scratch, path, raw).map_err(|e| format!("{e:#}"))?;
+        crate::settings::set(&mut scratch, path, &raw).map_err(|e| format!("{e:#}"))?;
         let new = crate::settings::get(&scratch, path).unwrap().clone();
         crate::config::Config::deserialize(scratch).map_err(|e| format!("{e:#}"))?;
         let file = self
@@ -1123,6 +1121,13 @@ fn refused(what: &str, e: anyhow::Error) -> String {
     let detail = format!("{e:#}");
     tracing::warn!(target: "pi::session", command = what, error = %detail, "refused");
     detail
+}
+
+fn typed<'a>(path: &str, raw: &'a str) -> Cow<'a, str> {
+    match path {
+        "base_url" => Cow::Owned(crate::config::expand_base_url(raw)),
+        _ => Cow::Borrowed(raw),
+    }
 }
 
 // A skill command as a message the user could have typed, or why it could not
