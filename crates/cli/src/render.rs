@@ -487,9 +487,9 @@ pub struct Prompt {
     pub color: Style,
     #[serde(default = "default_icon")]
     pub icon: String,
-    /// What the gutter shows while vim keys are in Normal. Different enough
-    /// from `icon` to be read at a glance: the mode is the one thing on
-    /// screen that changes what every other key does.
+    /// What the gutter shows while vim keys are in Normal. The same bar as
+    /// `icon` by default — the caret's shape is what says which mode is up —
+    /// but its own setting, for a terminal that will not reshape the caret.
     #[serde(default = "default_normal_icon")]
     pub normal: String,
 }
@@ -545,7 +545,7 @@ fn default_input() -> Style {
 }
 
 fn default_icon() -> String {
-    "›".into()
+    "\u{2502}".into()
 }
 
 impl Default for Theme {

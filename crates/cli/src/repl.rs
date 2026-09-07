@@ -1394,7 +1394,10 @@ impl Repl {
             Intent::Reload => Step::Handled(self.reload()),
             Intent::Status => Step::Handled(self.status_lines()),
             Intent::Cost => Step::Handled(self.cost_lines(totals)),
-            Intent::New => Step::Swap(self.fresh_session("started")),
+            Intent::New => {
+                self.fresh_session();
+                Step::Swap(Vec::new())
+            }
             Intent::Resume(name) => {
                 if name.is_empty() {
                     Step::Handled(self.resume_listing())
@@ -1542,13 +1545,16 @@ impl Repl {
 
     /// Drop the in-memory conversation and open a fresh session under a new
     /// id. The old transcript stays on disk.
-    fn fresh_session(&mut self, said: &str) -> Vec<String> {
+    ///
+    /// Says nothing: the screen it is rebuilt into is empty, which is the
+    /// whole of the news, and the id it opened under is the surface's own
+    /// business — as with a resumed one.
+    fn fresh_session(&mut self) {
         self.lane_mut().session = Some(Session::default());
         // A name identifies one session; carried over it would name two, which
         // is what `/name` exists to prevent.
         self.lane_mut().name = None;
         self.becomes(crate::session::new_id(), crate::session::now());
-        vec![format!("{said} {}", self.lane_mut().id)]
     }
 
     /// Take a stored transcript as the running one — entries, name and id.
@@ -1559,11 +1565,13 @@ impl Repl {
         self.lane_mut().name = name;
         self.lane_mut().session = Some(session);
         self.becomes(id, created);
-        let mut said = vec![format!("resumed {}", self.lane_mut().id)];
-        if let Some(name) = self.lane_mut().name.as_deref() {
-            said.push(format!("“{name}”"));
+        // The id is a timestamp with a pid in it — nothing to read, and the
+        // transcript coming back on screen already says what was resumed. A
+        // name is worth a line, being what the user called it.
+        match self.lane_mut().name.as_deref() {
+            Some(name) => vec![format!("resumed “{name}”")],
+            None => Vec::new(),
         }
-        said
     }
 
     /// `/worktree <name>`: create or reuse a checkout of this repository and
@@ -1692,7 +1700,8 @@ impl Repl {
                 // Nothing recorded for this tree is the ordinary case; an
                 // archive that will not load is not, and says so only here.
                 tracing::debug!(target: "pi::session", error = %e, "no session to resume in this worktree");
-                self.fresh_session("started")
+                self.fresh_session();
+                Vec::new()
             }
         })
     }

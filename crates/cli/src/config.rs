@@ -1232,7 +1232,7 @@ output_per_mtok = 0
         assert_eq!(c.theme.muted.codes(), "2");
         assert_eq!(c.theme.code.codes(), "38;2;88;166;255");
         assert_eq!(c.theme.menu.selected.codes(), "7");
-        assert_eq!(c.theme.prompt.icon, "›");
+        assert_eq!(c.theme.prompt.icon, "\u{2502}");
         assert_eq!(c.theme.input.codes(), "");
     }
 

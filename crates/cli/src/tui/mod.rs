@@ -8,10 +8,9 @@
 //! timer for the spinner — so nothing has to be bolted on beside it.
 
 mod editor;
+mod panel;
 mod row;
 mod screen;
-mod settings;
-mod shelf;
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -34,6 +33,7 @@ use crate::lane::{Lane, Turn};
 use crate::repl::{self, Candidate, Choice, Command, Fate, Intent, Repl, Rewound, Step};
 use crate::session::ResumeChoice;
 use editor::Editor;
+use panel::{Body, Panel, Took};
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::Style as RStyle;
 use ratatui::text::{Line, Span};
@@ -713,12 +713,10 @@ struct Ui {
     /// The config paths `/settings` can reach, from `settings::leaves`.
     /// Rebuilt whenever the config tree is replaced.
     setting_paths: Vec<String>,
-    /// The open settings panel, or None. While it is open it owns the menu
-    /// rows and intercepts the menu keys before the editor does.
-    settings: Option<settings::Panel>,
-    /// The open shelf panel, or None. Like the settings panel it owns the menu
-    /// keys while it is up, and two of its own besides.
-    shelf: Option<shelf::Panel>,
+    /// The open panel, or None — one at a time, which is what one field
+    /// rather than one per panel is for. While it is up it owns the menu rows
+    /// and intercepts the menu keys before the editor does.
+    panel: Option<Panel>,
     /// When the last `ctrl+l` was pressed, for the new-session double-tap.
     last_l: Option<Instant>,
     last_interrupt: Option<Instant>,
@@ -833,10 +831,11 @@ impl Ui {
         self.editor.take(false);
         self.flash = None;
         self.rewind.clear();
-        // The shelf belongs to a checkout. Left open across a switch it would
-        // go on showing the notes of the tree behind you, and the next `x`
-        // would take one off the shelf of the tree in front.
-        self.shelf = None;
+        // A panel belonging to the checkout goes with it; the config stays.
+        // Each panel answers that itself, so a new one cannot be forgotten.
+        if self.panel.as_ref().is_some_and(|p| p.body().lane_scoped()) {
+            self.panel = None;
+        }
     }
 
     fn new(
@@ -870,8 +869,7 @@ impl Ui {
             rewind: Vec::new(),
             vim: None,
             setting_paths: Vec::new(),
-            settings: None,
-            shelf: None,
+            panel: None,
             spinner: 0,
             live: crate::status::default_live(),
             done: crate::status::default_done(),
@@ -916,7 +914,7 @@ impl Ui {
     ///
     /// The scrollback is a transcript, and what a press did *not* do is not
     /// part of one — sent there it also stacked a row per press, which is how
-    /// holding `ctrl+o` in a single checkout wrote a screenful of one line.
+    /// holding the step key in a single checkout wrote a screenful of one line.
     /// Muted here rather than at the callers, which had drifted apart on it.
     fn flash(&mut self, line: impl Into<String>) {
         let text = self.paint.on(&self.paint.theme.muted, &line.into());
@@ -1097,13 +1095,14 @@ impl Ui {
 
     /// What the line could still become: a completion while a command word is
     /// being typed, or — with the rewind selector open — the user messages a
-    /// conversation can be rewound to. Never during a run, when the editor is
-    /// a queue, not a command line.
-    fn menu(&self, running: bool) -> Vec<MenuEntry> {
-        if running {
-            return Vec::new();
-        }
-        if self.settings.is_some() || self.shelf.is_some() {
+    /// conversation can be rewound to.
+    ///
+    /// A run does not close it. The editor is a queue then, but `/help`,
+    /// `/cost` and `/model` answer on the spot and the rest queue as what they
+    /// are, so the word being typed is still worth completing. `esc` reaches
+    /// `run.interrupt` past the list — see `keys::Menu`.
+    fn menu(&self) -> Vec<MenuEntry> {
+        if self.panel.is_some() {
             // The panel owns this space; the completion list waits.
             return Vec::new();
         }
@@ -1135,8 +1134,8 @@ impl Ui {
     }
 
     /// The highlighted row, clamped: the list shrinks as the word grows.
-    fn highlighted(&self, running: bool) -> Option<MenuEntry> {
-        let mut menu = self.menu(running);
+    fn highlighted(&self) -> Option<MenuEntry> {
+        let mut menu = self.menu();
         if menu.is_empty() {
             return None;
         }
@@ -1250,8 +1249,8 @@ impl Ui {
         Some(render::clip(&painted.join(&self.tab_sep), width))
     }
 
-    /// The checkout a step from this one, wrapping at either end — what
-    /// `ctrl+o` and the Normal `l`/`h` go to. `forward` picks the ring's next
+    /// The checkout a step from this one, wrapping at either end — where the
+    /// Normal `L`/`H` go. `forward` picks the ring's next
     /// checkout, `!forward` its previous. Every checkout on disk is in the
     /// ring, not only the ones already open: `Intent::Worktree` opens one that
     /// is not, which is the same thing the picker did when you chose an
@@ -1292,7 +1291,7 @@ impl Ui {
     }
 
     fn flush(&mut self, lane: &mut Lane) {
-        let menu = self.menu(lane.is_running());
+        let menu = self.menu();
         let width = self.screen.usable();
         // A flash outranks the lane strip: it is gone in a moment, where the
         // strip is always a keystroke away.
@@ -1311,13 +1310,9 @@ impl Ui {
         // it, and the scrolled history fills what is left. The caret's row
         // therefore depends only on the pinned rows, never on how the
         // history wraps.
-        // One space, one panel at a time: `/mem` and `/settings` both open
-        // over the menu, and neither can be typed while the other is up.
-        let panel = self
-            .settings
-            .as_ref()
-            .map(|p| p.view(&self.paint, width))
-            .or_else(|| self.shelf.as_ref().map(|p| p.view(&self.paint, width)));
+        // One space, one panel: they all draw over the menu, and the surface
+        // can hold only one of them at a time.
+        let panel = self.panel.as_ref().map(|p| p.view(&self.paint, width));
         let panel_h = panel.as_ref().map(|v| v.len()).unwrap_or(0);
         // Both branches leave the bar its row: a menu tall enough to take it
         // would drop whatever that row is saying.
@@ -1487,12 +1482,17 @@ impl Ui {
         let bound = self.keys.action(
             press,
             crate::keys::Layers {
-                menu: self.settings.is_some()
-                    || self.shelf.is_some()
-                    || !self.menu(running).is_empty(),
-                // Off while a note is being typed, so `x` and `e` are letters
-                // again and the borrowed `esc` still leaves the edit.
-                shelf: self.shelf.as_ref().is_some_and(|p| !p.editing()),
+                // A panel counts as a menu whether or not it has verbs of its
+                // own: `menu()` is empty while one is open, so the layer it
+                // borrows has to be named here rather than inferred.
+                menu: match self.panel.as_ref().map(Panel::layer) {
+                    // Its own verbs, off while a row is being typed so that
+                    // `x` and `e` are letters again — `esc` still leaves it.
+                    Some(Some(which)) => crate::keys::Menu::Verbs(which),
+                    Some(None) => crate::keys::Menu::On,
+                    None if self.menu().is_empty() => crate::keys::Menu::Off,
+                    None => crate::keys::Menu::On,
+                },
                 run: running,
                 mode: self.vim.as_ref().map(|v| v.mode),
             },
@@ -1504,103 +1504,18 @@ impl Ui {
             v.last = None;
         }
 
-        // The settings panel owns the menu keys while it is open.
-        if let Some(panel) = &mut self.settings {
-            match bound {
-                Some(Action::MenuNext) => {
-                    panel.next();
+        // The panel owns the menu keys while it is open, and answers with
+        // whatever its own verbs mean; `panel.rs` is where a new one plugs in.
+        if let Some(panel) = &mut self.panel {
+            match panel.press(bound, key) {
+                Took::Intent(intent) => return intent,
+                Took::Close => {
+                    self.panel = None;
                     return Intent::None;
                 }
-                Some(Action::MenuPrevious) => {
-                    panel.previous();
-                    return Intent::None;
-                }
-                Some(Action::MenuAccept) => {
-                    if panel.editing() {
-                        let Some(path) = panel.path().map(str::to_string) else {
-                            panel.finish_edit();
-                            return Intent::None;
-                        };
-                        let value = panel.editing_value().to_string();
-                        return Intent::CommitSetting(path, value);
-                    } else {
-                        panel.begin_edit();
-                        return Intent::None;
-                    }
-                }
-                Some(Action::MenuDismiss) => {
-                    if panel.dismiss() {
-                        self.settings = None;
-                    }
-                    return Intent::None;
-                }
-                _ => {
-                    // Printable keys edit the panel's value; everything else
-                    // falls through to the normal editor and is ignored.
-                    if panel.editing() {
-                        if let KeyCode::Char(c) = key.code
-                            && !key
-                                .modifiers
-                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                        {
-                            panel.insert(c);
-                        } else if matches!(bound, Some(Action::DeleteCharBack)) {
-                            panel.backspace();
-                        }
-                        return Intent::None;
-                    }
-                }
-            }
-        }
-
-        // The shelf panel, on the same footing as the settings one.
-        if let Some(panel) = &mut self.shelf {
-            match bound {
-                Some(Action::MenuNext) => {
-                    panel.next();
-                    return Intent::None;
-                }
-                Some(Action::MenuPrevious) => {
-                    panel.previous();
-                    return Intent::None;
-                }
-                Some(Action::MenuAccept) => {
-                    if panel.editing() {
-                        let Some(id) = panel.focused() else {
-                            panel.finish_edit();
-                            return Intent::None;
-                        };
-                        return Intent::ShelfWrite(id, panel.editing_value().to_string());
-                    }
-                    panel.begin_edit();
-                    return Intent::None;
-                }
-                Some(Action::MenuDelete) => {
-                    return match panel.focused() {
-                        Some(id) => Intent::ShelfDrop(id),
-                        None => Intent::None,
-                    };
-                }
-                Some(Action::MenuDismiss) => {
-                    if panel.dismiss() {
-                        self.shelf = None;
-                    }
-                    return Intent::None;
-                }
-                _ => {
-                    if panel.editing() {
-                        if let KeyCode::Char(c) = key.code
-                            && !key
-                                .modifiers
-                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                        {
-                            panel.insert(c);
-                        } else if matches!(bound, Some(Action::DeleteCharBack)) {
-                            panel.backspace();
-                        }
-                        return Intent::None;
-                    }
-                }
+                // Browsing, and not a key it knows: the editor underneath
+                // goes on taking it.
+                Took::Nothing => {}
             }
         }
 
@@ -1628,7 +1543,7 @@ impl Ui {
                 // Enter while a menu is open runs what it highlights. The
                 // typed text is a prefix; the highlighted word is the intent.
                 // The menu reads the editor, so pick before draining it.
-                match self.highlighted(running) {
+                match self.highlighted() {
                     Some(MenuEntry::Message { id, .. }) => {
                         self.rewind.clear();
                         return Intent::Rewind(id);
@@ -1775,7 +1690,7 @@ impl Ui {
             }
 
             Some(Action::MenuAccept) => {
-                match self.highlighted(running) {
+                match self.highlighted() {
                     Some(MenuEntry::Message { id, .. }) => {
                         self.rewind.clear();
                         return Intent::Rewind(id);
@@ -1792,12 +1707,12 @@ impl Ui {
                 }
             }
             Some(Action::MenuNext) => {
-                let n = self.menu(running).len().saturating_sub(1);
+                let n = self.menu().len().saturating_sub(1);
                 let at = self.picked.unwrap_or(n).min(n);
                 self.picked = Some(at.saturating_add(1).min(n));
             }
             Some(Action::MenuPrevious) => {
-                let n = self.menu(running).len().saturating_sub(1);
+                let n = self.menu().len().saturating_sub(1);
                 let at = self.picked.unwrap_or(n).min(n);
                 self.picked = Some(at.saturating_sub(1));
             }
@@ -1877,10 +1792,11 @@ impl Ui {
         self.show_mode();
     }
 
-    /// Put the mode where it can be seen: the gutter's icon and the shape of
-    /// the caret. Both, because either alone is missable — the gutter is two
-    /// columns away from where the eye is, and the caret is a shape the
-    /// terminal may refuse to change.
+    /// Put the mode where it can be seen: the shape of the caret, and the
+    /// gutter's icon where the theme gives the two modes different ones. It
+    /// does not by default — one bar either way — because the caret is where
+    /// the eye already is; a terminal that will not reshape it is what
+    /// `prompt.normal` is for.
     ///
     /// This is what pays for the mode never resetting itself. A mode that
     /// persists across submitted lines and cannot be seen would be a trap;
@@ -2525,24 +2441,26 @@ impl Tui {
     }
 
     /// Write one edited value from the settings panel, and show the panel what
-    /// became of it.
+    /// became of it. A refusal stays in the panel, beside the edit that earned
+    /// it; there is nowhere else for it to be read.
     fn commit_setting(&mut self, path: &str, value: &str) {
         match self.core.commit_file(path, value) {
             Ok(said) => {
-                let rows = crate::settings::leaves(&self.core.file);
-                self.ui.setting_paths = rows.iter().map(|(p, _)| p.clone()).collect();
                 self.core
                     .lane_mut()
                     .view
                     .scrollback
                     .extend(said.into_iter().map(Row::notice));
-                if let Some(panel) = &mut self.ui.settings {
-                    panel.refresh(rows);
-                    panel.finish_edit();
-                }
+                // The completion list views the same tree, and outlives the
+                // panel — so it is rebuilt here rather than with the rows.
+                self.ui.setting_paths = crate::settings::leaves(&self.core.file)
+                    .into_iter()
+                    .map(|(p, _)| p)
+                    .collect();
+                self.reload_panel();
             }
             Err(why) => {
-                if let Some(panel) = &mut self.ui.settings {
+                if let Some(panel) = &mut self.ui.panel {
                     panel.refuse(why);
                 }
             }
@@ -2560,10 +2478,20 @@ impl Tui {
                 .scrollback
                 .push(Row::notice(format!("the shelf would not take it: {why}")));
         }
-        let rows = self.core.shelf_rows();
-        if let Some(panel) = &mut self.ui.shelf {
-            panel.refresh(rows);
-            panel.finish_edit();
+        self.reload_panel();
+    }
+
+    /// Re-read the open panel's rows from whatever they are a view of, after a
+    /// commit changed it underneath them. One match, and it is the only place
+    /// that has to know where a panel's rows come from.
+    fn reload_panel(&mut self) {
+        let body = match self.ui.panel.as_ref().map(Panel::body) {
+            Some(Body::Settings(_)) => Body::Settings(crate::settings::leaves(&self.core.file)),
+            Some(Body::Shelf(_)) => Body::Shelf(self.core.shelf_rows()),
+            None => return,
+        };
+        if let Some(panel) = &mut self.ui.panel {
+            panel.refresh(body);
         }
     }
 
@@ -2764,20 +2692,16 @@ impl Tui {
                 self.core.lane_mut().view.queued.push(Intent::LoopRound(goal));
                 continue;
             }
-            // Bare `/settings` opens the panel instead of going through the
-            // line command's read-only list.
-            // One panel at a time: both draw over the menu, and a hidden one
-            // goes on raising its own key layer over the visible one.
+            // Bare `/mem` and `/settings` open a panel rather than printing
+            // the read-only list. One field: opening one closes the other.
             if matches!(intent, Intent::Mem(ref rest) if rest.trim().is_empty()) {
                 let rows = self.core.shelf_rows();
-                self.ui.settings = None;
-                self.ui.shelf = Some(shelf::Panel::new(rows));
+                self.ui.panel = Some(Panel::new(Body::Shelf(rows)));
                 continue;
             }
             if matches!(intent, Intent::Settings(ref rest) if rest.trim().is_empty()) {
                 let rows = crate::settings::leaves(&self.core.file);
-                self.ui.shelf = None;
-                self.ui.settings = Some(settings::Panel::new(rows));
+                self.ui.panel = Some(Panel::new(Body::Settings(rows)));
                 continue;
             }
             let was = self.core.current;
@@ -3407,9 +3331,11 @@ impl Tui {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cow, Row, ScrollbackRows, Thinking, absorb_growth, body, scrollback_from,
-        secret_settings_set, tool_row,
+        Body, Cow, Intent, Panel, Row, ScrollbackRows, Thinking, Took, absorb_growth, body,
+        scrollback_from, secret_settings_set, tool_row,
     };
+    use crate::keys::Action;
+    use crossterm::event::KeyCode;
     use crate::render::Markdown;
     use crate::render::Paint;
     use crate::tui::screen;
@@ -4071,6 +3997,12 @@ mod tests {
         (dir, lane)
     }
 
+    /// A bare press, for the panel tests: they drive `press` by the action it
+    /// resolved to, and the event itself only carries the printable character.
+    fn stroke(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
+    }
+
     fn running_lane(dir: &std::path::Path) -> crate::lane::Lane {
         struct Mute;
         #[async_trait::async_trait]
@@ -4164,35 +4096,57 @@ mod tests {
         let rows = tui.core.shelf_rows();
         assert_eq!(rows.len(), 2);
         let first = rows[0].id;
-        tui.ui.shelf = Some(super::shelf::Panel::new(rows));
+        let second = rows[1].id;
+        tui.ui.panel = Some(Panel::new(Body::Shelf(rows)));
 
+        // Driven through the presses rather than the panel's own methods: the
+        // dispatch under them is what every panel now shares, and a test that
+        // called past it would leave the shared part untested.
+        //
         // Down one, rewrite it. `e` opens the line, and the layer that binds
         // `e` goes off the moment it does, so the letters land as letters.
-        let panel = tui.ui.shelf.as_mut().expect("open");
-        panel.next();
-        let second = panel.focused().expect("a second row");
-        panel.begin_edit();
+        let panel = tui.ui.panel.as_mut().expect("open");
+        panel.press(Some(Action::MenuNext), stroke(KeyCode::Null));
+        panel.press(Some(Action::MenuAccept), stroke(KeyCode::Null));
         assert_eq!(panel.editing_value(), "the parser lives in syntax/");
         for c in " and hashline/".chars() {
-            panel.insert(c);
+            panel.press(None, stroke(KeyCode::Char(c)));
         }
-        let text = panel.editing_value().to_string();
-        assert!(tui.core.shelf_write(second, &text).is_none(), "the write took");
+        let Took::Intent(Intent::ShelfWrite(id, text)) =
+            panel.press(Some(Action::MenuAccept), stroke(KeyCode::Null))
+        else {
+            panic!("the panel asked for something other than a write");
+        };
+        assert_eq!(id, second, "the note under the cursor");
+        assert!(tui.core.shelf_write(id, &text).is_none(), "the write took");
         tui.after_shelf(None);
 
         let after = crate::memory::Memory::load(&path);
         assert_eq!(after.notes[1].text, "the parser lives in syntax/ and hashline/");
         assert_eq!(after.notes[1].at, shelf.notes[1].at, "the same note, said better");
-        assert!(!tui.ui.shelf.as_ref().expect("open").editing(), "the line closed");
+        assert!(!tui.ui.panel.as_ref().expect("open").editing(), "the line closed");
 
         // And take it away.
-        assert!(tui.core.shelf_drop(second).is_none());
+        let panel = tui.ui.panel.as_mut().expect("open");
+        let Took::Intent(Intent::ShelfDrop(id)) =
+            panel.press(Some(Action::MenuDelete), stroke(KeyCode::Null))
+        else {
+            panic!("the panel asked for something other than a drop");
+        };
+        assert_eq!(id, second, "the cursor stayed on the row it had rewritten");
+        assert!(tui.core.shelf_drop(id).is_none());
         tui.after_shelf(None);
         let after = crate::memory::Memory::load(&path);
         assert_eq!(after.notes.len(), 1);
         assert_eq!(after.notes[0].text, "prefers xh over curl");
-        let panel = tui.ui.shelf.as_ref().expect("open");
-        assert_eq!(panel.focused(), Some(first), "the cursor followed the row that went");
+
+        let panel = tui.ui.panel.as_mut().expect("open");
+        let Took::Intent(Intent::ShelfDrop(id)) =
+            panel.press(Some(Action::MenuDelete), stroke(KeyCode::Null))
+        else {
+            panic!("the panel asked for something other than a drop");
+        };
+        assert_eq!(id, first, "the cursor followed the row that went");
     }
 
     /// The shelf belongs to a checkout. Open across a switch it would show one
@@ -4202,14 +4156,14 @@ mod tests {
         let first = tempfile::tempdir().expect("a checkout");
         let second = tempfile::tempdir().expect("another checkout");
         let mut tui = surface(first.path());
-        tui.ui.shelf = Some(super::shelf::Panel::new(Vec::new()));
+        tui.ui.panel = Some(Panel::new(Body::Shelf(Vec::new())));
 
         tui.core.lanes.push(running_lane(second.path()));
         let was = tui.core.current;
         tui.core.current = 1;
         tui.reconcile(was);
 
-        assert!(tui.ui.shelf.is_none(), "still showing the tree behind you");
+        assert!(tui.ui.panel.is_none(), "still showing the tree behind you");
     }
 
     /// Emptying the line is the same intent as deleting the row: a blank note
@@ -4529,8 +4483,8 @@ mod tests {
         assert_eq!(shown(&ui, &lane, 2), "nothing to rewind to");
     }
 
-    /// `ctrl+o` and the Normal `l` walk the checkouts in a ring forward; `h`
-    /// walks it back. Every checkout on disk is in it, not only the open ones
+    /// The Normal `L` walks the checkouts in a ring forward; `H` walks it
+    /// back. Every checkout on disk is in it, not only the open ones
     /// — the main one first, because that is the order `worktree::list`
     /// reports and a lane in it carries no name.
     #[test]
@@ -4584,32 +4538,11 @@ mod tests {
         assert_eq!(ui.editor.text(), "", "the draft stays with the lane it was typed at");
     }
 
-    /// And the key that asks for the switch still names the right destination.
+    /// Normal mode: `L` is the next checkout and `H` the previous one, and the
+    /// lowercase pair is left to the caret. `J`/`K` take the window in the
+    /// same hand, half a screen at a time.
     #[test]
-    fn ctrl_o_asks_for_the_next_checkout() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
-        let mut ui = test_ui(80, 24);
-        let trees = ["pi-rs", "f1"]
-            .iter()
-            .map(|n| crate::repl::Choice { name: n.to_string(), note: String::new() })
-            .collect();
-        ui.lists.worktrees.set(trees).ok();
-
-        let ctrl_o = super::TermEvent::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
-        let (_dir, mut lane) = a_running_lane();
-        let intent = ui.key(&mut lane, ctrl_o, false);
-        assert!(
-            matches!(&intent, crate::repl::Intent::Worktree(name) if name == "f1"),
-            "{intent:?}"
-        );
-    }
-
-    /// Normal mode: `l` is the next checkout and `h` the previous one. The
-    /// key map resolves on the mode, so a bare `l`/`h` in Normal switches
-    /// lanes instead of moving the caret.
-    #[test]
-    fn normal_h_and_l_step_the_checkouts() {
+    fn normal_capitals_step_the_checkouts_and_the_window() {
         let mut ui = vim_ui();
         let trees = ["pi-rs", "f1", "f2"]
             .iter()
@@ -4619,24 +4552,39 @@ mod tests {
         ui.vim.as_mut().unwrap().mode = crate::keys::Mode::Normal;
         let (_dir, mut lane) = a_running_lane();
 
-        let next = ui.key(&mut lane, typed('l'), false);
+        let next = ui.key(&mut lane, typed('L'), false);
         assert!(
             matches!(&next, crate::repl::Intent::Worktree(name) if name == "f1"),
             "{next:?}"
         );
         lane.worktree = Some("f1".into());
-        let prev = ui.key(&mut lane, typed('h'), false);
+        let prev = ui.key(&mut lane, typed('H'), false);
         assert!(
             matches!(&prev, crate::repl::Intent::Worktree(name) if name == "pi-rs"),
             "{prev:?}"
         );
+
+        // The lowercase pair no longer leaves the lane it is typed in.
+        for lower in ['h', 'l'] {
+            let intent = ui.key(&mut lane, typed(lower), false);
+            assert!(matches!(intent, crate::repl::Intent::None), "`{lower}`: {intent:?}");
+        }
+
+        // And the window moves without the caret: scrolled up by J, back by K.
+        lane.view.scroll = 0;
+        ui.key(&mut lane, typed('K'), false);
+        let up = lane.view.scroll;
+        assert!(up > 0, "K went back through the window: {up}");
+        ui.key(&mut lane, typed('J'), false);
+        assert!(lane.view.scroll < up, "J came forward again: {}", lane.view.scroll);
     }
 
-    /// The completion list is off during a run, and the reason is not cosmetic:
-    /// `When::Menu` outranks `When::Run`, so a live menu takes Esc away from
-    /// `run.interrupt` and leaves the turn with no way to be stopped.
+    /// The completion list stays up during a run — `/help` and `/model` answer
+    /// on the spot then, and the rest queue as what they are. `esc` is the one
+    /// key it costs, and it costs it for a press: innermost first, so the list
+    /// goes and the next `esc` reaches the run.
     #[test]
-    fn esc_still_interrupts_a_run_with_a_command_word_in_the_editor() {
+    fn esc_takes_the_list_first_and_the_run_next() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let mut ui = test_ui(80, 24);
@@ -4646,17 +4594,42 @@ mod tests {
             help: "a fresh session".into(),
             source: crate::repl::Source::Builtin,
         }]);
-        ui.editor.set_line("/new");
         let (_dir, mut lane) = a_running_lane();
+        let esc = || super::TermEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
-        // The same line does offer a completion when nothing is running, so
-        // this test fails if the guard goes rather than passing vacuously.
-        assert!(!ui.menu(false).is_empty());
-        assert!(ui.menu(true).is_empty(), "the editor is a queue during a run");
-
-        let esc = super::TermEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        let intent = ui.key(&mut lane, esc, true);
+        // Nothing typed raises no list, so the common way to stop a run is one
+        // press, as the running row says it is. Committed, or an empty line
+        // would mean `Unsend` — a different answer to the same key, and not
+        // the one this is about.
+        lane.view.committed = true;
+        assert!(ui.menu().is_empty(), "an empty line completes to nothing");
+        let intent = ui.key(&mut lane, esc(), true);
         assert!(matches!(intent, crate::repl::Intent::Interrupt), "{intent:?}");
+
+        ui.editor.set_line("/ne");
+        assert!(!ui.menu().is_empty(), "the word is worth completing mid-run");
+
+        // First press: the list, and nothing asked of the loop.
+        let intent = ui.key(&mut lane, esc(), true);
+        assert!(matches!(intent, crate::repl::Intent::None), "{intent:?}");
+        assert!(ui.menu().is_empty(), "the list went");
+        // Second: through where the list was, to the run.
+        let intent = ui.key(&mut lane, esc(), true);
+        assert!(matches!(intent, crate::repl::Intent::Interrupt), "{intent:?}");
+
+        // Typing past the dismissal brings the list back, and Tab still
+        // completes mid-run — the half of the menu the run never claimed.
+        ui.editor.set_line("/n");
+        let tab = super::TermEvent::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        ui.key(&mut lane, tab, true);
+        assert_eq!(ui.editor.text(), "/new", "the half-typed word was completed");
+
+        // A panel is modal — `/mem` opens one while a run is in flight — and
+        // `esc` there is about the panel, the way it is about the list.
+        ui.panel = Some(Panel::new(Body::Shelf(Vec::new())));
+        let intent = ui.key(&mut lane, esc(), true);
+        assert!(matches!(intent, crate::repl::Intent::None), "{intent:?}");
+        assert!(ui.panel.is_none(), "esc closed the panel rather than the run");
     }
 
     /// A surface with an in-memory screen, for the drawing tests below.
@@ -4940,16 +4913,25 @@ mod tests {
     }
 
     /// The mode outlives a submitted line, which is the whole reason it has to
-    /// be visible: the gutter says which one is up.
+    /// be visible — and by default that is the caret's shape, not the gutter:
+    /// both modes wear the same bar. `prompt.normal` is what a terminal that
+    /// will not reshape its caret sets to get the difference back, so the
+    /// gutter still follows it.
     #[test]
-    fn the_gutter_says_which_mode_is_up() {
+    fn the_gutter_follows_the_theme_rather_than_the_mode() {
         let mut ui = vim_ui();
         let insert = ui.prompt.clone();
         ui.vim.as_mut().unwrap().mode = crate::keys::Mode::Normal;
         ui.show_mode();
-        assert_ne!(ui.prompt, insert);
+        assert_eq!(ui.prompt, insert, "one bar either way; the caret is what changes");
+
+        let mut theme = crate::render::Theme::default();
+        theme.prompt.normal = "›".into();
+        ui.paint.theme = std::sync::Arc::new(theme);
+        ui.show_mode();
+        assert_ne!(ui.prompt, insert, "a theme that does tell them apart is obeyed");
         ui.leave_normal();
-        assert_eq!(ui.prompt, insert);
+        assert_eq!(ui.prompt, insert, "and back to the bar on the way out");
     }
 
     /// Turning the keys off is the one thing that moves the mode without a

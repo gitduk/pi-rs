@@ -33,12 +33,14 @@ pub enum Mode {
 pub enum When {
     /// The completion list is open.
     Menu,
-    /// The shelf panel is open and browsing, not editing a note.
+    /// A panel is open and browsing, not editing a row: its own verbs.
     ///
-    /// Its own layer rather than `Menu`, which the completion list shares: a
+    /// Their own layer rather than `Menu`, which the completion list shares: a
     /// bare letter bound there is a letter the completion list can no longer
-    /// be filtered by, and `x` and `e` are letters.
-    Shelf,
+    /// be filtered by, and `x` and `e` are letters. One layer per panel rather
+    /// than one shared by all of them, for the same reason one step down: a
+    /// letter one panel binds is one the next panel cannot.
+    Panel(Which),
     /// A turn is in flight.
     Run,
     /// Only in that mode, and only while vim keys are on at all.
@@ -48,13 +50,35 @@ pub enum When {
     Editor,
 }
 
+/// Whose verbs `When::Panel` names. A panel with no verbs of its own — the
+/// settings panel is one — raises no layer and appears here not at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Which {
+    Shelf,
+}
+
+/// What is up over the editor: nothing, something with the menu's own keys,
+/// or a panel that brings verbs of its own besides.
+///
+/// One field rather than a flag beside an `Option<Which>`, which would make
+/// "no menu, but the shelf's verbs are live" expressible and meaningless.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Menu {
+    #[default]
+    Off,
+    /// A completion list, the rewind selector, or a panel with no verbs of
+    /// its own: the menu's movement and dismissal keys, and nothing more.
+    On,
+    /// A panel browsing rather than editing, so its own verbs are letters no
+    /// longer. Everything `On` has, and these over the top of it.
+    Verbs(Which),
+}
+
 /// Which layers are up when a key is pressed. One value rather than three
 /// bare fields — they are usually live at once, and a swapped pair compiles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Layers {
-    pub menu: bool,
-    /// The shelf panel is up and not editing a note.
-    pub shelf: bool,
+    pub menu: Menu,
     pub run: bool,
     /// The mode, or `None` when vim keys are off. Three legal states in three
     /// representations: a separate `vim: bool` beside a `Mode` would make
@@ -268,28 +292,28 @@ pub const BINDINGS: &[Binding] = &[
     Binding {
         id: "shelf.edit",
         action: A::MenuAccept,
-        when: W::Shelf,
+        when: W::Panel(Which::Shelf),
         keys: &["e"],
         note: "rewrite the note under the cursor",
     },
     Binding {
         id: "shelf.delete",
         action: A::MenuDelete,
-        when: W::Shelf,
+        when: W::Panel(Which::Shelf),
         keys: &["x"],
         note: "take the note under the cursor off the shelf",
     },
     Binding {
         id: "shelf.next",
         action: A::MenuNext,
-        when: W::Shelf,
+        when: W::Panel(Which::Shelf),
         keys: &["j"],
         note: "",
     },
     Binding {
         id: "shelf.previous",
         action: A::MenuPrevious,
-        when: W::Shelf,
+        when: W::Panel(Which::Shelf),
         keys: &["k"],
         note: "",
     },
@@ -350,13 +374,6 @@ pub const BINDINGS: &[Binding] = &[
         note: "only when the line is empty",
     },
     Binding {
-        id: "lane.next",
-        action: A::LaneNext,
-        when: W::Editor,
-        keys: &["ctrl+o"],
-        note: "the next checkout, opening it if it is not",
-    },
-    Binding {
         id: "app.clear-screen",
         action: A::AppClearScreen,
         when: W::Editor,
@@ -391,15 +408,30 @@ pub const BINDINGS: &[Binding] = &[
         id: "normal.lane.prev",
         action: A::LanePrev,
         when: W::Mode(Mode::Normal),
-        keys: &["h"],
+        keys: &["H"],
         note: "the previous checkout, opening it if it is not",
     },
     Binding {
         id: "normal.lane.next",
         action: A::LaneNext,
         when: W::Mode(Mode::Normal),
-        keys: &["l"],
+        keys: &["L"],
         note: "the next checkout, opening it if it is not",
+    },
+    // The window, where the lowercase pair moves through recall instead.
+    Binding {
+        id: "normal.view.scroll-half-up",
+        action: A::ScrollHalfUp,
+        when: W::Mode(Mode::Normal),
+        keys: &["K"],
+        note: "half a window back, as ctrl+b does",
+    },
+    Binding {
+        id: "normal.view.scroll-half-down",
+        action: A::ScrollHalfDown,
+        when: W::Mode(Mode::Normal),
+        keys: &["J"],
+        note: "half a window on, as ctrl+f does",
     },
     Binding {
         id: "normal.move.word.next",
@@ -751,13 +783,17 @@ impl Keys {
     /// What this press means, given what is on screen.
     pub fn action(&self, press: Press, layers: Layers) -> Option<Action> {
         let mut live = Vec::with_capacity(5);
-        // Before `Menu`, which the shelf panel also raises so it inherits the
-        // movement and dismissal keys: what the shelf binds for itself wins
-        // over what it borrows.
-        if layers.shelf {
-            live.push(When::Shelf);
+        // A panel's own verbs before the movement and dismissal keys it
+        // borrows from `Menu` rather than binding twice.
+        if let Menu::Verbs(which) = layers.menu {
+            live.push(When::Panel(which));
         }
-        if layers.menu {
+        // Over the run, which costs `esc` — the one key `menu.dismiss` and
+        // `run.interrupt` both claim. It costs it only for a press: dismissing
+        // records the line it happened at, so the list is gone by the next
+        // press and that one reaches the run. Innermost first, the way `esc`
+        // inside a panel leaves the edit before it leaves the panel.
+        if layers.menu != Menu::Off {
             live.push(When::Menu);
         }
         if layers.run {
@@ -799,11 +835,16 @@ mod tests {
         // a binding that resolved between turns and not during them would be
         // the one context it is useless in.
         let keys = Keys::resolve(&BTreeMap::new()).unwrap();
-        for (menu, running) in [(false, false), (false, true), (true, true)] {
+        for (menu, running) in [
+            (Menu::Off, false),
+            (Menu::Off, true),
+            (Menu::On, true),
+            (Menu::Verbs(Which::Shelf), true),
+        ] {
             assert_eq!(
                 keys.action(press("ctrl+t"), Layers { menu, run: running, ..Layers::default() }),
                 Some(Action::ThinkFold),
-                "menu={menu} running={running}"
+                "menu={menu:?} running={running}"
             );
         }
     }
@@ -830,7 +871,7 @@ mod tests {
         // flat table has no way to say so.
         let k = Keys::default();
         assert_eq!(
-            k.action(press("up"), Layers { menu: true, ..Layers::default() }),
+            k.action(press("up"), Layers { menu: Menu::On, ..Layers::default() }),
             Some(Action::MenuPrevious)
         );
         assert_eq!(
@@ -838,10 +879,34 @@ mod tests {
             Some(Action::HistoryOlder)
         );
         assert_eq!(
-            k.action(press("esc"), Layers { menu: true, run: true, mode: None, shelf: false }),
+            k.action(press("esc"), Layers { menu: Menu::On, run: true, mode: None }),
             Some(Action::MenuDismiss)
         );
         assert_eq!(k.action(press("esc"), Layers::default()), Some(Action::Rewind));
+    }
+
+    /// `menu.dismiss` and `run.interrupt` are the only two bindings that claim
+    /// one key. With nothing over the editor the run gets it in every mode —
+    /// which is the whole of the common case, since an empty line completes to
+    /// nothing and raises no list. Read from the table rather than written as
+    /// `esc`, so rebinding either one does not make this pass by never firing.
+    #[test]
+    fn nothing_over_the_editor_leaves_the_stop_key_to_the_run() {
+        let k = Keys::default();
+        let stop = BINDINGS
+            .iter()
+            .find(|b| b.id == "run.interrupt")
+            .expect("a binding that stops a run");
+        for spec in stop.keys {
+            let key = parse(spec).unwrap();
+            for mode in [None, Some(Mode::Insert), Some(Mode::Normal)] {
+                assert_eq!(
+                    k.action(key, Layers { menu: Menu::Off, run: true, mode }),
+                    Some(Action::RunInterrupt),
+                    "`{spec}` with mode={mode:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -867,7 +932,7 @@ mod tests {
     #[test]
     fn the_shelf_letters_reach_no_further_than_the_shelf() {
         let k = Keys::default();
-        let listing = Layers { menu: true, ..Layers::default() };
+        let listing = Layers { menu: Menu::On, ..Layers::default() };
         for letter in ["x", "e", "j", "k"] {
             assert_eq!(
                 k.action(press(letter), listing),
@@ -876,7 +941,8 @@ mod tests {
             );
         }
 
-        let browsing = Layers { menu: true, shelf: true, ..Layers::default() };
+        let browsing =
+            Layers { menu: Menu::Verbs(Which::Shelf), ..Layers::default() };
         assert_eq!(k.action(press("x"), browsing), Some(Action::MenuDelete));
         assert_eq!(k.action(press("e"), browsing), Some(Action::MenuAccept));
         assert_eq!(k.action(press("j"), browsing), Some(Action::MenuNext));
@@ -901,8 +967,11 @@ mod tests {
             for spec in b.keys {
                 let press = parse(spec).unwrap();
                 let insert = Layers {
-                    menu: b.when == W::Menu,
-                    shelf: b.when == W::Shelf,
+                    menu: match b.when {
+                        W::Menu => Menu::On,
+                        W::Panel(which) => Menu::Verbs(which),
+                        _ => Menu::Off,
+                    },
                     run: b.when == W::Run,
                     mode: None,
                 };
@@ -921,17 +990,17 @@ mod tests {
         // `mode: None` is what off means, and it is the only representation of
         // it: there is no flag beside a mode that could disagree with it.
         let k = Keys::default();
-        assert_eq!(k.action(press("h"), Layers::default()), None);
+        assert_eq!(k.action(press("H"), Layers::default()), None);
         assert_eq!(
-            k.action(press("h"), Layers { mode: Some(Mode::Normal), ..Layers::default() }),
+            k.action(press("H"), Layers { mode: Some(Mode::Normal), ..Layers::default() }),
             Some(Action::LanePrev)
         );
     }
     #[test]
     fn the_listing_keeps_two_ids_that_share_an_action_apart() {
-        // `lane.next` and `normal.lane.next` are one action under two ids. A
-        // listing that found a binding's keys by its action would print
-        // `l, ctrl+o` against both, and neither could be rebound alone.
+        // `menu.next` and `shelf.next` are one action under two ids. A listing
+        // that found a binding's keys by its action would print all four keys
+        // against both, and neither could be rebound alone.
         let lines = Keys::default().listing();
         let keys_of = |id: &str| {
             let line = lines
@@ -940,8 +1009,8 @@ mod tests {
                 .unwrap_or_else(|| panic!("{id} is not listed"));
             line[id.len()..].split("  ·  ").next().unwrap().trim().to_string()
         };
-        assert_eq!(keys_of("lane.next"), "ctrl+o");
-        assert_eq!(keys_of("normal.lane.next"), "l");
+        assert_eq!(keys_of("menu.next"), "ctrl+j, ctrl+n, down");
+        assert_eq!(keys_of("shelf.next"), "j");
     }
 
     #[test]

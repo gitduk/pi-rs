@@ -63,7 +63,12 @@ fn checked(dir: &Path, args: &[&str]) -> Result<String> {
 /// owns `.worktrees`.
 pub fn list(dir: &Path) -> Result<Vec<Tree>> {
     let listed = checked(dir, &["worktree", "list", "--porcelain"])?;
-    let mut out: Vec<Tree> = Vec::new();
+    // The flag beside each tree is git's `prunable`: the checkout's directory
+    // is gone, but the metadata naming it lives until `worktree prune` runs.
+    // Kept while parsing and dropped at the end rather than as it arrives —
+    // the attribute's place in a record is git's to change, and popping the
+    // entry would strand the lines after it on the tree before.
+    let mut out: Vec<(Tree, bool)> = Vec::new();
     let mut root = PathBuf::new();
     // Records are blank-line separated, `worktree <path>` always first.
     for line in listed.lines() {
@@ -74,19 +79,26 @@ pub fn list(dir: &Path) -> Result<Vec<Tree>> {
                 root = path.clone();
             }
             let name = name_of(&path, &root, main);
-            out.push(Tree {
-                path,
-                name,
-                branch: None,
-                main,
-            });
+            out.push((
+                Tree {
+                    path,
+                    name,
+                    branch: None,
+                    main,
+                },
+                false,
+            ));
         } else if let Some(reference) = line.strip_prefix("branch ")
-            && let Some(last) = out.last_mut()
+            && let Some((last, _)) = out.last_mut()
         {
             last.branch = Some(reference.trim_start_matches("refs/heads/").to_string());
+        } else if line.starts_with("prunable")
+            && let Some((_, gone)) = out.last_mut()
+        {
+            *gone = true;
         }
     }
-    Ok(out)
+    Ok(out.into_iter().filter(|(_, gone)| !gone).map(|(t, _)| t).collect())
 }
 
 // Under `.worktrees` the name is the path below it, so `feat/one` keeps both
@@ -298,6 +310,26 @@ mod tests {
         assert_eq!(trees.len(), 2);
         assert_eq!(trees[0].path, dir.path().canonicalize().unwrap());
         assert!(trees[0].main);
+    }
+
+    /// A checkout deleted from the shell rather than through git stays
+    /// registered until `worktree prune` runs, and git goes on listing it —
+    /// marked `prunable`. Listing it here would offer a switch into a
+    /// directory that is not there.
+    #[test]
+    fn a_checkout_deleted_behind_gits_back_stops_being_listed() {
+        let dir = repo();
+        enter(dir.path(), "fix-1").unwrap();
+        let (gone, _) = enter(dir.path(), "fix-2").unwrap();
+        assert_eq!(list(dir.path()).unwrap().len(), 3);
+
+        std::fs::remove_dir_all(&gone.path).expect("the directory goes");
+        let trees = list(dir.path()).unwrap();
+        assert_eq!(trees.len(), 2, "{:?}", trees.iter().map(|t| &t.name).collect::<Vec<_>>());
+        assert!(!trees.iter().any(|t| t.name == "fix-2"));
+        // The one beside it is untouched, and the main checkout still leads.
+        assert!(trees[0].main);
+        assert!(trees.iter().any(|t| t.name == "fix-1"));
     }
 
     #[test]
