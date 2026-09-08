@@ -605,6 +605,9 @@ pub struct View {
     /// The model in force. Copied in before the run borrows the agent, which
     /// is what puts it out of reach for the rest of the turn.
     model: String,
+    /// The half-typed line parked when the surface last left this lane,
+    /// waiting in the view to come back to the editor with it.
+    draft: String,
 }
 
 /// What a typed character means to the modal keys.
@@ -821,15 +824,13 @@ impl View {
 }
 
 impl Ui {
-    /// The draft belongs to the lane it was typed at, and the editor is the
-    /// surface's rather than any view's — so a switch has to drop it, or the
-    /// next Enter files it in whatever lane it landed on.
-    /// What does not follow the surface to the next checkout: each was built
-    /// against the lane being left, and the selector's rows are entries of
-    /// that lane's transcript. The keys close it before any switch they can
-    /// reach — a `/worktree` off the phone never passes through them.
-    fn leave_lane(&mut self) {
-        self.editor.take(false);
+    /// What leaves with the checkout being left: the half-typed line, parked
+    /// in its lane's view — the editor is the surface's, and a line left
+    /// standing in it would be filed in whichever checkout came next — and
+    /// the state built against that lane: a flash, the rewind selector over
+    /// its transcript, a lane-scoped panel.
+    fn leave_lane(&mut self, lane: &mut Lane) {
+        lane.view.draft = self.editor.take_composing();
         self.flash = None;
         self.rewind.clear();
         // A panel belonging to the checkout goes with it; the config stays.
@@ -2288,19 +2289,17 @@ impl Tui {
         self.ui.lists.forget();
     }
 
-    /// A `/new` or a `/resume` replaced the session — the transcript is the
-    /// source of truth again — so the screen is rebuilt from the new one
-    /// instead of keeping the old conversation up, and the completion list
-    /// follows.
-    /// Bring the screen into step with the lanes after a command. The view
-    /// travels with its lane, so a switch leaves nothing to move: what is left
-    /// is the surface's own — the draft, the workspace-keyed lists — and
-    /// whatever the lane posted while nobody was looking.
+    /// Bring the screen into step with the lanes after a command. A switch
+    /// parks the line being typed in the view of the lane it was typed at
+    /// and takes the lane in front's own parked line back up; the lists
+    /// follow, and what that lane posted while away is replayed here.
     fn reconcile(&mut self, was: usize) {
         if was == self.core.current {
             return;
         }
-        self.ui.leave_lane();
+        self.ui.leave_lane(&mut self.core.lanes[was]);
+        let parked = std::mem::take(&mut self.core.lane_mut().view.draft);
+        self.ui.editor.set_line(&parked);
         self.ui.lists.at(self.core.lane().ctx.workspace.root());
         // Recall follows the checkout for the same reason the lists do. The
         // line just typed is already filed: `save_history` runs per line, and
@@ -4183,6 +4182,15 @@ mod tests {
         super::Tui::on_test_screen(core, keys)
     }
 
+    /// Put another lane in front, the way a checkout switch would, and
+    /// reconcile the surface against the lane it displaced.
+    fn switch_to(tui: &mut super::Tui, lane: crate::lane::Lane) {
+        let was = tui.core.current;
+        tui.core.lanes.push(lane);
+        tui.core.current = tui.core.lanes.len() - 1;
+        tui.reconcile(was);
+    }
+
     /// The panel is the whole reason a shelf is worth having: what is on it
     /// steers the model, and a shelf you cannot see is a shelf you cannot
     /// correct. Browse it, rewrite a note, take one away.
@@ -4274,10 +4282,7 @@ mod tests {
         let mut tui = surface(first.path());
         tui.ui.panel = Some(Panel::new(Body::Shelf(Vec::new())));
 
-        tui.core.lanes.push(running_lane(second.path()));
-        let was = tui.core.current;
-        tui.core.current = 1;
-        tui.reconcile(was);
+        switch_to(&mut tui, running_lane(second.path()));
 
         assert!(tui.ui.panel.is_none(), "still showing the tree behind you");
     }
@@ -4324,9 +4329,7 @@ mod tests {
         tui.ui
             .editor
             .seed_history(vec!["what the first was asked".to_string()]);
-        tui.core.lanes.push(running_lane(second.path()));
-        tui.core.current = 1;
-        tui.reconcile(0);
+        switch_to(&mut tui, running_lane(second.path()));
 
         let landed = tui.ui.editor.history();
         assert_eq!(
@@ -4344,7 +4347,6 @@ mod tests {
     async fn a_flash_does_not_follow_the_surface_to_another_lane() {
         let dir = tempfile::tempdir().expect("a temp dir");
         let mut tui = surface(dir.path());
-        tui.core.lanes.push(running_lane(dir.path()));
         tui.ui.tabs = vec![
             super::Tab {
                 mark: super::Mark::Idle,
@@ -4357,8 +4359,7 @@ mod tests {
         ];
 
         tui.ui.flash("nothing running to stop");
-        tui.core.current = 1;
-        tui.reconcile(0);
+        switch_to(&mut tui, running_lane(dir.path()));
         assert!(tui.ui.flash.is_none(), "the flash was left behind");
 
         tui.ui.flush(&mut tui.core.lanes[1]);
@@ -4378,15 +4379,12 @@ mod tests {
     async fn switching_back_to_a_rebuilt_lane_keeps_its_transcript() {
         let dir = tempfile::tempdir().expect("a temp dir");
         let mut tui = surface(dir.path());
-        tui.core.lanes.push(running_lane(dir.path()));
-
-        // Lane 1 as `rebuild` leaves it: the conversation, and no banner.
-        tui.core.lanes[1].view = super::View::opening(&[], &tui.ui.paint);
-        tui.core.lanes[1].view.scrollback = vec![Row::notice("what was said before")];
-        tui.core.lanes[1].view.opened = 0;
-
-        tui.core.current = 1;
-        tui.reconcile(0);
+        let mut lane = running_lane(dir.path());
+        // As `rebuild` leaves it: the conversation, and no banner.
+        lane.view = super::View::opening(&[], &tui.ui.paint);
+        lane.view.scrollback = vec![Row::notice("what was said before")];
+        lane.view.opened = 0;
+        switch_to(&mut tui, lane);
 
         // By content, not by count: the banner this would lay over it is one
         // row too, so a length check cannot tell them apart.
@@ -4709,21 +4707,62 @@ mod tests {
         assert_eq!(ui.step_checkout(&lane, false), None);
     }
 
-    /// The view travels with its lane, but the editor is the surface's, so a
-    /// draft would outlive the switch. `leave_lane` is where every switch
-    /// passes and has to drop it: left standing, the next Enter files one
-    /// lane's half-typed prompt into the session it landed on.
-    #[test]
-    fn switching_checkouts_does_not_carry_a_draft_across() {
-        let mut ui = test_ui(80, 24);
-        ui.editor.set_line("half a thought meant for this lane");
+    /// The half-typed line belongs to the lane it was typed at. A switch
+    /// parks it on that lane — the editor is the surface's, and Enter on the
+    /// checkout just landed on must not file another lane's draft into its
+    /// session — and it comes back to the editor when the lane does.
+    #[tokio::test]
+    async fn a_draft_is_parked_on_the_lane_it_was_typed_at_and_comes_back() {
+        let first = tempfile::tempdir().expect("a checkout");
+        let second = tempfile::tempdir().expect("another checkout");
+        let mut tui = surface(first.path());
+        tui.ui.editor.set_line("half a thought meant for this lane");
 
-        ui.leave_lane();
+        let was = tui.core.current;
+        switch_to(&mut tui, running_lane(second.path()));
 
         assert_eq!(
-            ui.editor.text(),
+            tui.core.lanes[was].view.draft, "half a thought meant for this lane",
+            "the draft is parked on the lane that was left"
+        );
+        assert_eq!(
+            tui.ui.editor.text(),
             "",
-            "the draft stays with the lane it was typed at"
+            "the checkout in front starts its own clean line"
+        );
+
+        tui.core.current = was;
+        tui.reconcile(was + 1);
+        assert_eq!(
+            tui.ui.editor.text(),
+            "half a thought meant for this lane",
+            "the draft is back in the editor with its lane"
+        );
+        assert_eq!(
+            tui.core.lanes[was].view.draft, "",
+            "the parked draft was taken up, not left behind"
+        );
+    }
+    /// Up browsing recall puts the composed line aside and shows a recalled
+    /// one; switching then must park the composed line, not the recall.
+    #[tokio::test]
+    async fn a_switch_mid_recall_keeps_the_line_being_typed() {
+        let first = tempfile::tempdir().expect("a checkout");
+        let second = tempfile::tempdir().expect("another checkout");
+        let mut tui = surface(first.path());
+        tui.ui
+            .editor
+            .seed_history(vec!["an older prompt".to_string()]);
+        tui.ui.editor.set_line("half a thought meant for this lane");
+        tui.ui.editor.up();
+        assert_eq!(tui.ui.editor.text(), "an older prompt");
+
+        let was = tui.core.current;
+        switch_to(&mut tui, running_lane(second.path()));
+
+        assert_eq!(
+            tui.core.lanes[was].view.draft, "half a thought meant for this lane",
+            "the composing line is parked, not the recalled one"
         );
     }
 
