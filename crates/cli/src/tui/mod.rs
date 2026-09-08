@@ -2385,9 +2385,9 @@ impl Tui {
     }
 
     /// Carry the lane's loop past a round that has just ended: queue the next
-    /// one, or say why there is no next round when one ended it. A round the
-    /// user cut and a round still queued both speak for themselves — the
-    /// notice is for the loop that ended on its own.
+    /// one under a `loop round {n}` marker, or say why there is no next round
+    /// when one ended it. A round the user cut speaks for itself — the notice
+    /// is for the loop that went on, and for the one that ended on its own.
     ///
     /// What decides is the tree, never the model: a round that changed a file
     /// is a round whose work was not finished, and one that changed nothing
@@ -2399,9 +2399,9 @@ impl Tui {
             return;
         };
         let said = match round {
-            crate::lane::Round::Again { goal, .. } => {
+            crate::lane::Round::Again { goal, next } => {
                 self.core.lanes[lane].view.queued.push(Intent::LoopRound(goal));
-                return;
+                format!("loop round {next}")
             }
             crate::lane::Round::Cut => return,
             crate::lane::Round::Quiet => "loop done — that round changed nothing".to_string(),
@@ -5030,14 +5030,17 @@ mod tests {
         lane.loop_running();
         wrote(&mut lane, "a.rs");
         let again = lane.loop_step(true, None).expect("a loop is in force");
-        assert!(matches!(&again, Round::Again { goal } if goal == "/code-review high"));
+        assert!(
+            matches!(&again, Round::Again { goal, next: 2 } if goal == "/code-review high"),
+            "the goal goes back verbatim, as the round it now is",
+        );
 
         // The same file again. What a loop like this does most of the time is
         // keep working the files it has already touched, so a record that
         // counted distinct paths would call this round idle and stop here.
         lane.loop_running();
         wrote(&mut lane, "a.rs");
-        assert!(matches!(lane.loop_step(true, None), Some(Round::Again { .. })));
+        assert!(matches!(lane.loop_step(true, None), Some(Round::Again { next: 3, .. })));
 
         // Nothing changed: a pass with nothing to do has nothing to do next
         // time either.

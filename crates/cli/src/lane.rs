@@ -69,8 +69,8 @@ pub struct Looping {
 
 /// What a loop does now that one of its rounds has ended.
 pub enum Round {
-    /// Run this line again.
-    Again { goal: String },
+    /// Run this line again, as round `next`.
+    Again { goal: String, next: usize },
     /// The round changed nothing. Where a loop that is fixing things finishes:
     /// a pass that found nothing to do has nothing to do next time either.
     Quiet,
@@ -241,8 +241,9 @@ impl Lane {
             Round::Capped(looping.round)
         } else {
             let goal = looping.goal.clone();
+            let next = looping.round + 1;
             self.looping = Some(looping);
-            Round::Again { goal }
+            Round::Again { goal, next }
         })
     }
 }
