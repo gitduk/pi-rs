@@ -1254,10 +1254,12 @@ impl Ui {
 
     /// The checkout a step from this one, wrapping at either end — where the
     /// Normal `L`/`H` go. `forward` picks the ring's next
-    /// checkout, `!forward` its previous. Every checkout on disk is in the
-    /// ring, not only the ones already open: `Intent::Worktree` opens one that
-    /// is not, which is the same thing the picker did when you chose an
-    /// unopened row.
+    /// checkout, `!forward` its previous. The ring walks the checkouts in
+    /// the order the bar shows them — the ones already open, in the order
+    /// they were opened — and puts the ones not open yet after them, in the
+    /// order `worktree::list` reports. `Intent::Worktree` opens one that is
+    /// not, which is the same thing the picker did when you chose an unopened
+    /// row.
     ///
     /// None when there is nowhere else to go.
     fn step_checkout(&self, lane: &Lane, forward: bool) -> Option<String> {
@@ -1266,18 +1268,31 @@ impl Ui {
         if n < 2 {
             return None;
         }
-        // `worktree::list` puts the main checkout first and names it for its
-        // directory, where a lane in it carries no worktree name at all.
-        let at = match lane.worktree.as_deref() {
-            Some(name) => trees.iter().position(|c| c.name == name).unwrap_or(0),
-            None => 0,
-        };
+        // Open checkouts keep the bar's order, the rest of the disk follows
+        // in git's, and a tab that names no checkout is dropped.
+        let mut order: Vec<&str> = Vec::with_capacity(n);
+        for tab in &self.tabs {
+            let name = tab.name.as_str();
+            if trees.iter().any(|c| c.name == name) && !order.contains(&name) {
+                order.push(name);
+            }
+        }
+        for tree in trees {
+            if !order.contains(&tree.name.as_str()) {
+                order.push(&tree.name);
+            }
+        }
+        // The lane's worktree name — or its directory, in the main checkout.
+        let at = order
+            .iter()
+            .position(|name| *name == lane_name(lane))
+            .unwrap_or(0);
         let i = if forward {
-            (at + 1) % n
+            (at + 1) % order.len()
         } else {
-            (at + n - 1) % n
+            (at + order.len() - 1) % order.len()
         };
-        Some(trees[i].name.clone())
+        Some(order[i].to_string())
     }
 
     fn set_theme(&mut self, view: &mut View, context: &[String], theme: Arc<render::Theme>) {
@@ -2394,6 +2409,51 @@ impl Tui {
             .collect();
     }
 
+    /// Drop lanes whose checkout was deleted outside pi — idle ones only, a
+    /// running or looping lane still answering to the index it was given.
+    fn drop_vanished_lanes(&mut self) {
+        let mut gone: Vec<(usize, String)> = Vec::new();
+        // Back to front, stopping at a working lane: removing one before it
+        // would shift the index a run in flight reports back by. That lane's
+        // turn over, the next pass drops what this one left.
+        for (at, lane) in self.core.lanes.iter().enumerate().rev() {
+            if lane.is_running() || lane.looping.is_some() {
+                break;
+            }
+            if at == self.core.current {
+                continue;
+            }
+            let Some(name) = lane.worktree.as_deref() else {
+                continue;
+            };
+            if lane.ctx.workspace.root().exists() {
+                continue;
+            }
+            gone.push((at, name.to_string()));
+        }
+        if gone.is_empty() {
+            return;
+        }
+        let names = gone
+            .iter()
+            .map(|(_, n)| format!("`{n}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let is_are = if gone.len() == 1 { "is" } else { "are" };
+        let lane_word = if gone.len() == 1 { "lane" } else { "lanes" };
+        self.ui.flash(format!("{names} {is_are} gone from disk — closing the {lane_word}"));
+        // Already highest first, so earlier indices stay put while they go.
+        for (at, _) in gone {
+            self.core.lanes.remove(at);
+            if at < self.core.current {
+                self.core.current -= 1;
+            }
+        }
+        // The ring's list is cached; a vanished checkout must not stay in it
+        // for a later step to offer — and re-create — by its stale name.
+        self.ui.lists.forget();
+    }
+
     /// Carry the lane's loop past a round that has just ended: queue the next
     /// one, or say why there is no next round when one ended it. A round the
     /// user cut and a round still queued both speak for themselves — the
@@ -2569,6 +2629,8 @@ impl Tui {
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             self.serve_lanes().await;
+            // Before the bar rebuilds, so a vanished tab goes with its lane.
+            self.drop_vanished_lanes();
             self.refresh_tabs();
             self.ui.flush(self.core.lane_mut());
             let running = self.core.lane().is_running();
@@ -4050,6 +4112,16 @@ mod tests {
         (dir, lane)
     }
 
+    /// An idle worktree lane whose checkout has been deleted from disk —
+    /// exactly what `drop_vanished_lanes` exists to find.
+    fn vanished_lane(name: &str) -> crate::lane::Lane {
+        let (_dir, mut lane) = a_running_lane();
+        lane.turn = crate::lane::Turn::Idle;
+        lane.worktree = Some(name.into());
+        std::fs::remove_dir_all(lane.ctx.workspace.root()).expect("the checkout goes");
+        lane
+    }
+
     /// A bare press, for the panel tests: they drive `press` by the action it
     /// resolved to, and the event itself only carries the printable character.
     fn stroke(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
@@ -4563,6 +4635,93 @@ mod tests {
         assert_eq!(ring(None, false).as_deref(), Some("f2"));
         assert_eq!(ring(Some("f1"), false).as_deref(), Some("pi-rs"));
         assert_eq!(ring(Some("f2"), false).as_deref(), Some("f1"));
+    }
+
+    /// The ring agrees with the tabs the bar shows: a step lands on the next
+    /// checkout in the order they were opened, not the order git reports
+    /// them, with the ones not open yet after the open ones.
+    #[test]
+    fn the_ring_walks_the_tabs_order_not_gits() {
+        let mut ui = test_ui(80, 24);
+        let trees = ["pi-rs", "fw-rm", "fix-input", "fix-mem"]
+            .iter()
+            .map(|n| crate::repl::Choice { name: n.to_string(), note: String::new() })
+            .collect();
+        ui.lists.worktrees.set(trees).ok();
+        // fix-input was created before fix-mem, but the user opened fix-mem
+        // first — the bar's order, which a step from fw-rm must follow.
+        ui.tabs = vec![
+            super::Tab { mark: super::Mark::Idle, name: "pi-rs".into() },
+            super::Tab { mark: super::Mark::Idle, name: "fw-rm".into() },
+            super::Tab { mark: super::Mark::Front, name: "fix-mem".into() },
+            super::Tab { mark: super::Mark::Idle, name: "fix-input".into() },
+        ];
+        let (_dir, mut lane) = a_running_lane();
+        lane.worktree = Some("fw-rm".into());
+
+        assert_eq!(ui.step_checkout(&lane, true).as_deref(), Some("fix-mem"));
+        lane.worktree = Some("fix-mem".into());
+        assert_eq!(ui.step_checkout(&lane, true).as_deref(), Some("fix-input"));
+        lane.worktree = Some("fix-input".into());
+        assert_eq!(ui.step_checkout(&lane, true).as_deref(), Some("pi-rs"));
+        // And the other way, still on the bar's order.
+        lane.worktree = Some("fix-mem".into());
+        assert_eq!(ui.step_checkout(&lane, false).as_deref(), Some("fw-rm"));
+    }
+
+    /// A checkout deleted from the shell leaves its lane a dead end; the loop
+    /// drops idle ones so the bar's tab and the step ring stop pretending it
+    /// is there, and the lane in front keeps its place.
+    #[test]
+    fn a_lane_whose_checkout_vanished_is_dropped_and_current_follows() {
+        let dir = tempfile::tempdir().expect("a checkout");
+        let mut tui = surface(dir.path());
+        // A stale ring entry would let a later step offer — and re-create —
+        // the checkout that just went; dropping the lane drops the cache.
+        tui.ui
+            .lists
+            .worktrees
+            .set(vec![crate::repl::Choice { name: "fix-mem".into(), note: String::new() }])
+            .ok();
+        let gone = vanished_lane("fix-mem");
+        tui.core.lanes.push(gone);
+        assert_eq!(tui.core.lanes.len(), 2);
+
+        tui.drop_vanished_lanes();
+        assert_eq!(tui.core.lanes.len(), 1);
+        assert_eq!(tui.core.current, 0);
+        assert!(tui.ui.lists.worktrees().is_empty(), "the stale ring entry went too");
+
+        // A vanished lane before the one in front shifts its index down.
+        let mut tui = surface(dir.path());
+        let earlier = vanished_lane("fix-old");
+        tui.core.lanes.insert(0, earlier);
+        tui.core.current = 1;
+        tui.core.lanes[1].turn = crate::lane::Turn::Idle;
+        tui.drop_vanished_lanes();
+        assert_eq!(tui.core.lanes.len(), 1);
+        assert_eq!(tui.core.current, 0, "the front lane follows its index");
+    }
+
+    /// A vanished lane that sits before a running one waits: removing it
+    /// would shift the index the running lane's end reports back by.
+    #[test]
+    fn a_vanished_lane_before_a_running_one_waits_for_it() {
+        let dir = tempfile::tempdir().expect("a checkout");
+        let mut tui = surface(dir.path());
+        let gone = vanished_lane("fix-mem");
+        tui.core.lanes.push(gone);
+        let (_run_dir, running) = a_running_lane();
+        tui.core.lanes.push(running);
+        assert_eq!(tui.core.lanes.len(), 3);
+
+        tui.drop_vanished_lanes();
+        assert_eq!(tui.core.lanes.len(), 3, "the run's lane must not move");
+
+        // The run over, the same pass now reaches the vanished lane.
+        tui.core.lanes[2].turn = crate::lane::Turn::Idle;
+        tui.drop_vanished_lanes();
+        assert_eq!(tui.core.lanes.len(), 2);
     }
 
     /// Nowhere to go is said, not walked to: one checkout has no next.
