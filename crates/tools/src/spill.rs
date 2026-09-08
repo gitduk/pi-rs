@@ -144,7 +144,11 @@ pub fn fit(ctx: &Ctx, items: &[String], unit: &str, notice: &str) -> Result<Stri
     // What is kept is already the front of `full`, and every item boundary is a
     // character boundary: slice it rather than build the same bytes twice.
     let head: usize = items[..kept].iter().map(String::len).sum();
-    Ok(format!("{}{notice}{}", &full[..head], say(items.len() - kept)))
+    Ok(format!(
+        "{}{notice}{}",
+        &full[..head],
+        say(items.len() - kept)
+    ))
 }
 
 /// The `<label>`-wrapped form bash uses for stdout and stderr. Under the

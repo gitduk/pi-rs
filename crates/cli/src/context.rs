@@ -156,7 +156,13 @@ mod tests {
 
         assert!(got.starts_with("\n\n<env date=\""), "{got}");
         assert!(got.ends_with("/>"), "{got}");
-        let date = got.split("date=\"").nth(1).unwrap().split('"').next().unwrap();
+        let date = got
+            .split("date=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
         assert_eq!(date.len(), 10, "a day, not an instant: {date}");
         assert_eq!(date.matches('-').count(), 2, "{date}");
 
@@ -167,7 +173,10 @@ mod tests {
         // The tool is named `bash` and runs `sh`; this is where that is said.
         assert!(got.contains("shell=\"sh\""), "{got}");
 
-        assert!(got.contains("tier=\"read\""), "spelled as the flag is: {got}");
+        assert!(
+            got.contains("tier=\"read\""),
+            "spelled as the flag is: {got}"
+        );
         assert!(env(tools::Tier::Exec).contains("tier=\"exec\""));
         assert!(env(tools::Tier::Net).contains("tier=\"net\""));
     }

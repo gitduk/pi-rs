@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
-use brain::model::ModelSpec;
 use brain::message::{AssistantContent, Message, UserContent};
+use brain::model::ModelSpec;
 use brain::request::Request;
 use brain::stream::{BlockKind, StopReason, StreamEvent, Usage};
 use brain::transport::Transport;
@@ -44,7 +44,6 @@ impl Scripted {
 
 #[async_trait]
 impl Transport for Scripted {
-
     async fn stream(
         &self,
         _spec: &ModelSpec,
@@ -104,7 +103,6 @@ fn call_turn(calls: &[(&str, &str, &str)]) -> Vec<StreamEvent> {
     });
     ev
 }
-
 
 fn harness(turns: Vec<Vec<StreamEvent>>) -> (tempfile::TempDir, Agent, Ctx) {
     let (dir, agent, ctx, _) = wired(turns);
@@ -521,7 +519,6 @@ struct WithSummarizer {
 
 #[async_trait]
 impl Transport for WithSummarizer {
-
     async fn stream(
         &self,
         _spec: &ModelSpec,
@@ -623,7 +620,10 @@ async fn a_summary_is_priced_by_the_model_that_wrote_it() {
     let b = Agent::new(itself.clone(), main);
     let dearly = drive(&b, &ctx, "read it repeatedly").await.1.unwrap();
 
-    assert!(itself.summaries.load(Ordering::SeqCst) > 0, "nothing summarized");
+    assert!(
+        itself.summaries.load(Ordering::SeqCst) > 0,
+        "nothing summarized"
+    );
     assert!(
         cheaply.cost < dearly.cost,
         "a free summarizer was billed at the main model's rates: {} vs {}",
@@ -926,11 +926,7 @@ async fn an_overflow_refusal_shrinks_the_transcript_and_retries() {
     for i in 0..3 {
         history.push(call_message(&format!("h{i}")));
         history.push(Message::tool_results(vec![
-            brain::message::ToolResult::text(
-                format!("h{i}"),
-                "read",
-                "z".repeat(12_000),
-            ),
+            brain::message::ToolResult::text(format!("h{i}"), "read", "z".repeat(12_000)),
         ]));
     }
     let mut session = Session::from_messages(history);
@@ -1071,11 +1067,7 @@ async fn an_overflow_with_no_number_falls_back_to_squeezing() {
     for i in 0..3 {
         history.push(call_message(&format!("h{i}")));
         history.push(Message::tool_results(vec![
-            brain::message::ToolResult::text(
-                format!("h{i}"),
-                "read",
-                "z".repeat(12_000),
-            ),
+            brain::message::ToolResult::text(format!("h{i}"), "read", "z".repeat(12_000)),
         ]));
     }
 
@@ -1102,7 +1094,6 @@ async fn an_overflow_with_no_number_falls_back_to_squeezing() {
         "{events:?}"
     );
 }
-
 
 #[tokio::test]
 async fn a_call_that_keeps_returning_the_same_thing_is_named() {
@@ -1201,7 +1192,13 @@ async fn a_failure_repeated_with_different_args_is_still_named() {
     // the args-keyed echo never matches; the refusal's first line is stable,
     // which is the shape a real session takes.
     let turns: Vec<Vec<StreamEvent>> = (0..3)
-        .map(|i| call_turn(&[("t", "edit", &format!(r#"{{"patch":"PUT 1:\n+variant {i}"}}"#))]))
+        .map(|i| {
+            call_turn(&[(
+                "t",
+                "edit",
+                &format!(r#"{{"patch":"PUT 1:\n+variant {i}"}}"#),
+            )])
+        })
         .chain([text_turn("gave up")])
         .collect();
     let a = Agent::new(Scripted::new(turns), spec());
@@ -1309,16 +1306,15 @@ async fn a_coded_tool_error_reaches_the_model_with_its_code() {
     let body = results[0].flatten_text();
     assert!(body.starts_with("Error: timed out after 42ms"), "{body}");
     assert!(body.ends_with("[code: TOOL_TIMEOUT]"), "{body}");
-
 }
-
 
 /// A line said while the run worked lands at the next seam — after the results
 /// it interrupted, never among them. Among them it would leave a `tool_use`
 /// unanswered, which both wires refuse.
 #[tokio::test]
 async fn a_line_said_mid_run_lands_after_the_results_it_interrupted() {
-    let (_d, mut a, ctx, wire) = wired(vec![call_turn(&[("t1", "slow", "{}")]), text_turn("noted")]);
+    let (_d, mut a, ctx, wire) =
+        wired(vec![call_turn(&[("t1", "slow", "{}")]), text_turn("noted")]);
     a.registry = Registry::new().with(Sleeper {
         name: "slow",
         delay_ms: 0,
@@ -1345,7 +1341,10 @@ async fn a_line_said_mid_run_lands_after_the_results_it_interrupted() {
             _ => false,
         })
         .expect("the call was answered");
-    assert!(answered < said, "the line follows the result it interrupted");
+    assert!(
+        answered < said,
+        "the line follows the result it interrupted"
+    );
 }
 
 /// The model stopped, but the user had already spoken. Posting `Done` here

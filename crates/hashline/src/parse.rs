@@ -402,7 +402,7 @@ fn put_site(spec: &str, dir: &str, no: usize) -> Result<PutSite, Error> {
                 what: format!(
                     "`PUT {spec}:{other}`: after the colon, expected `UP`, `DOWN` or nothing"
                 ),
-            })
+            });
         }
     })
 }

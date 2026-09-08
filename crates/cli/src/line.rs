@@ -87,11 +87,10 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
                 let spent = turn(&mut core, send, typed, &tx).await;
                 totals.merge(&spent);
                 core.lane_mut().totals.merge(&spent);
-
             }
-            Step::Wechat(_) => println!(
-                "wechat needs a terminal to show the login QR — run pi in a terminal"
-            ),
+            Step::Wechat(_) => {
+                println!("wechat needs a terminal to show the login QR — run pi in a terminal")
+            }
         }
     }
     Ok(())
@@ -109,7 +108,11 @@ async fn turn(
         return Totals::default();
     };
     session.send_prompt(prompt, typed);
-    let ctx = core.lane_mut().ctx.clone().with_cancel(agent::cancel_on_interrupt());
+    let ctx = core
+        .lane_mut()
+        .ctx
+        .clone()
+        .with_cancel(agent::cancel_on_interrupt());
     let out = core.lane_mut().agent.run(&mut session, &ctx, tx).await;
 
     session.note_outcome(&out);

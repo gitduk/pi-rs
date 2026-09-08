@@ -157,11 +157,7 @@ impl<'a> Item<'a> {
 // message, so this counts the framing more than once. That is the safe
 // direction — the estimate decides *when* to compact, and compacting a little
 // early costs tokens where compacting a little late costs the request.
-fn tokens_of(
-    seen: &Seen<'_>,
-    spec: &ModelSpec,
-    gone: &HashMap<(EntryId, usize), &str>,
-) -> usize {
+fn tokens_of(seen: &Seen<'_>, spec: &ModelSpec, gone: &HashMap<(EntryId, usize), &str>) -> usize {
     let body = match seen.entry() {
         Entry::User { body, .. } => estimate::user_block(&user_block(body)),
         Entry::Assistant { id, blocks, .. } => Session::shown_blocks(blocks, *id, gone)

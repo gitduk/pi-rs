@@ -799,9 +799,8 @@ mod tests {
             drop(_parent);
         });
 
-        let by_session = |id: &str| -> Vec<&Value> {
-            out.iter().filter(|r| r["session"] == id).collect()
-        };
+        let by_session =
+            |id: &str| -> Vec<&Value> { out.iter().filter(|r| r["session"] == id).collect() };
 
         // Each child leaves three records, and every one carries its id in
         // the body and in the path that files it.

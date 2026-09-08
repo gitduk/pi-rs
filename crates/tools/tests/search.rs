@@ -321,7 +321,10 @@ async fn an_over_long_grep_drops_whole_sections_and_spills_the_rest() {
     assert!(out.contains("of 40 files did not fit the window"), "{out}");
     let whole = common::spilled_body(&c, &out);
     assert!(whole.contains("f39.txt"), "the spill must hold what went");
-    assert!(!out.contains("f39.txt"), "nothing was actually dropped\n{out}");
+    assert!(
+        !out.contains("f39.txt"),
+        "nothing was actually dropped\n{out}"
+    );
 }
 
 #[tokio::test]

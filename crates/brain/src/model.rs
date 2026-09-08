@@ -29,18 +29,18 @@ pub enum Format {
 }
 
 impl Format {
-/// The name this format goes by everywhere it is written down: the config
-/// key's value, the journal's `format` field, an API error's first word.
-/// It is not the credential contract: the two OpenAI-family wires share
-/// `OPENAI_API_KEY`, and only Anthropic keys on this name.
-/// Renaming one renames the journal word but never a key.
-pub fn name(&self) -> &'static str {
-    match self {
-        Format::Anthropic { .. } => "anthropic",
-        Format::OpenAi => "openai",
-        Format::Chat => "chat",
+    /// The name this format goes by everywhere it is written down: the config
+    /// key's value, the journal's `format` field, an API error's first word.
+    /// It is not the credential contract: the two OpenAI-family wires share
+    /// `OPENAI_API_KEY`, and only Anthropic keys on this name.
+    /// Renaming one renames the journal word but never a key.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Format::Anthropic { .. } => "anthropic",
+            Format::OpenAi => "openai",
+            Format::Chat => "chat",
+        }
     }
-}
 }
 
 /// Whether to ask an Anthropic endpoint to cache, and for how long.

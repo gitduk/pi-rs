@@ -5,9 +5,7 @@
 //! one has to build the whole struct. Here once, rather than drifting apart in
 //! each of them.
 
-use brain::model::{
-    CacheControl, Format, ModelSpec, Pricing, ReplayThinking, ThinkingControl,
-};
+use brain::model::{CacheControl, Format, ModelSpec, Pricing, ReplayThinking, ThinkingControl};
 
 /// `replay_thinking` is `Tagged` deliberately: on a spec that drops prior
 /// reasoning the estimate counts it as nothing, and a fixture built out of

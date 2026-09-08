@@ -1,9 +1,7 @@
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::message::{
-    AssistantContent, Message, Reasoning, ReasoningContent, Text, ToolCall,
-};
+use crate::message::{AssistantContent, Message, Reasoning, ReasoningContent, Text, ToolCall};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Usage {
@@ -18,7 +16,12 @@ impl Usage {
     /// struct without being added here is a compile error rather than a number
     /// that quietly stops accumulating.
     pub fn add(&mut self, other: &Usage) {
-        let Usage { input, output, cache_read, cache_write } = other;
+        let Usage {
+            input,
+            output,
+            cache_read,
+            cache_write,
+        } = other;
         self.input += input;
         self.output += output;
         self.cache_read += cache_read;
@@ -39,10 +42,7 @@ pub enum StopReason {
 pub enum BlockKind {
     Text,
     Reasoning,
-    ToolCall {
-        id: Option<String>,
-        name: String,
-    },
+    ToolCall { id: Option<String>, name: String },
 }
 
 /// Normalized stream deltas. `index` addresses a content block within the

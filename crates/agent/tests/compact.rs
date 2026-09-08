@@ -3,8 +3,8 @@ use agent::session::{Session, UserBody, UserText};
 use brain::estimate;
 
 mod common;
-use common::spec;
 use brain::message::{AssistantContent, Message, ToolCall, ToolResult, UserContent};
+use common::spec;
 use serde_json::json;
 
 // Drive the real path — plan, record, derive — and hand back the new view.
@@ -189,11 +189,7 @@ fn the_working_tail_survives_while_older_results_age_out() {
         m.push(result(&format!("c{i}"), "bash", &big(30_000)));
     }
     let before = estimate::tokens(&m, &spec());
-    let r = compact(
-        &mut m,
-        before / 2,
-        &Policy::default(),
-    );
+    let r = compact(&mut m, before / 2, &Policy::default());
 
     assert!(r.aged_out > 0, "{r:?}");
     // The last exchange is what the agent is working from.
@@ -221,7 +217,10 @@ fn an_aged_out_result_keeps_its_head_and_tail() {
     let r = compact(
         &mut m,
         2_000,
-        &Policy { protect_tail: 0, ..Policy::default() },
+        &Policy {
+            protect_tail: 0,
+            ..Policy::default()
+        },
     );
 
     assert_eq!(r.aged_out, 1, "{r:?}");
@@ -243,7 +242,10 @@ fn a_result_under_the_prune_threshold_keeps_only_the_notice() {
     let r = compact(
         &mut m,
         100,
-        &Policy { protect_tail: 0, ..Policy::default() },
+        &Policy {
+            protect_tail: 0,
+            ..Policy::default()
+        },
     );
 
     assert_eq!(r.aged_out, 1, "{r:?}");
@@ -264,7 +266,10 @@ fn a_head_and_tail_too_big_for_the_window_lowers_to_the_notice() {
     let r = compact(
         &mut m,
         500,
-        &Policy { protect_tail: 0, ..Policy::default() },
+        &Policy {
+            protect_tail: 0,
+            ..Policy::default()
+        },
     );
 
     assert_eq!(r.aged_out, 1, "{r:?}");
@@ -289,7 +294,10 @@ fn the_drop_tier_spares_a_skill_exchange() {
     let r = compact(
         &mut m,
         200,
-        &Policy { protect_tail: 0, ..Policy::default() },
+        &Policy {
+            protect_tail: 0,
+            ..Policy::default()
+        },
     );
 
     // The skill body is instructions being followed: omission refuses it, and
@@ -312,7 +320,14 @@ fn dropping_history_keeps_the_task_and_stays_balanced() {
         m.push(Message::assistant_text(big(40_000)));
         m.push(Message::user(format!("next {i}")));
     }
-    let r = compact(&mut m, 20_000, &Policy { protect_tail: 0, ..Policy::default() });
+    let r = compact(
+        &mut m,
+        20_000,
+        &Policy {
+            protect_tail: 0,
+            ..Policy::default()
+        },
+    );
 
     assert!(r.dropped > 0, "{r:?}");
     assert_eq!(
@@ -361,7 +376,10 @@ fn a_dropped_exchange_never_orphans_the_result_that_answered_it() {
         },
     );
 
-    assert!(r.dropped > 0, "the drop tier has to run for this to mean anything: {r:?}");
+    assert!(
+        r.dropped > 0,
+        "the drop tier has to run for this to mean anything: {r:?}"
+    );
     assert_balanced(&m);
     assert_eq!(
         m[0].text().split("and now").next().unwrap().trim(),
@@ -382,19 +400,29 @@ fn an_oversized_argument_goes_while_the_path_beside_it_stays() {
             name: "write".into(),
             args: json!({ "path": format!("f{i}.rs"), "content": big(30_000) }),
         })]);
-        s.push_results(vec![ToolResult::text(format!("c{i}"), "write", "wrote 400 lines")]);
+        s.push_results(vec![ToolResult::text(
+            format!("c{i}"),
+            "write",
+            "wrote 400 lines",
+        )]);
     }
 
     // `protect_tail` off: what is under test is the arguments tier, and with
     // the default tail the remainder stays over budget and the drop tier —
     // correctly — takes the exchanges instead.
-    let policy = Policy { protect_tail: 0, ..Policy::default() };
+    let policy = Policy {
+        protect_tail: 0,
+        ..Policy::default()
+    };
     let budget = estimate::tokens(&s.context(), &spec()) / 4;
     let (record, report) = plan(&s, &spec(), budget, &policy);
     s.record(record);
 
     assert!(report.args_taken > 0, "{report:?}");
-    assert_eq!(report.dropped, 0, "the arguments alone were enough: {report:?}");
+    assert_eq!(
+        report.dropped, 0,
+        "the arguments alone were enough: {report:?}"
+    );
     let view = s.context();
     assert_balanced(&view);
 
@@ -402,7 +430,11 @@ fn an_oversized_argument_goes_while_the_path_beside_it_stays() {
     assert_eq!(calls.len(), 6, "every call keeps its block");
     let taken: Vec<&&ToolCall> = calls
         .iter()
-        .filter(|c| c.args["content"].as_str().is_some_and(|t| t.starts_with("[omitted")))
+        .filter(|c| {
+            c.args["content"]
+                .as_str()
+                .is_some_and(|t| t.starts_with("[omitted"))
+        })
         .collect();
     assert!(!taken.is_empty(), "nothing was taken: {calls:?}");
     for c in &taken {
@@ -441,7 +473,10 @@ fn arguments_already_taken_are_not_taken_twice() {
     assert!(r1.args_taken > 0, "{r1:?}");
 
     let (_second, r2) = plan(&s, &spec(), budget, &Policy::default());
-    assert_eq!(r2.args_taken, 0, "the same arguments were taken twice: {r2:?}");
+    assert_eq!(
+        r2.args_taken, 0,
+        "the same arguments were taken twice: {r2:?}"
+    );
 }
 
 #[test]
@@ -455,9 +490,23 @@ fn compaction_converges_instead_of_shrinking_forever() {
         ));
         m.push(result(&format!("c{i}"), "read", &big(20_000)));
     }
-    let first = compact(&mut m, 2_000, &Policy { protect_tail: 0, ..Policy::default() });
+    let first = compact(
+        &mut m,
+        2_000,
+        &Policy {
+            protect_tail: 0,
+            ..Policy::default()
+        },
+    );
     let snapshot = m.clone();
-    let second = compact(&mut m, 2_000, &Policy { protect_tail: 0, ..Policy::default() });
+    let second = compact(
+        &mut m,
+        2_000,
+        &Policy {
+            protect_tail: 0,
+            ..Policy::default()
+        },
+    );
 
     // A second pass over an already-compacted transcript must find nothing.
     assert_eq!(m, snapshot, "{second:?}");
@@ -507,17 +556,17 @@ fn an_entry_elided_by_an_earlier_pass_is_not_elided_again() {
 mod budget {
     use super::big;
     use super::spec;
-    use agent::session::{Session, UserBody};
-#[allow(unused_imports)]
-use brain::message::Text as _Text;
-    use brain::message::{AssistantContent, ToolCall, ToolResult};
     use agent::Agent;
+    use agent::session::{Session, UserBody};
     use async_trait::async_trait;
+    #[allow(unused_imports)]
+    use brain::message::Text as _Text;
+    use brain::message::{AssistantContent, ToolCall, ToolResult};
     use brain::model::ModelSpec;
     use brain::request::Request;
     use brain::stream::StreamEvent;
-    use brain::transport::Transport;
     use brain::stream::{BlockKind, StopReason, Usage};
+    use brain::transport::Transport;
     use futures::StreamExt;
     use futures::stream::BoxStream;
     use serde_json::json;
@@ -525,11 +574,21 @@ use brain::message::Text as _Text;
 
     fn text_turn(body: &str) -> Vec<StreamEvent> {
         vec![
-            StreamEvent::BlockStart { index: 0, kind: BlockKind::Text },
-            StreamEvent::TextDelta { index: 0, delta: body.into() },
+            StreamEvent::BlockStart {
+                index: 0,
+                kind: BlockKind::Text,
+            },
+            StreamEvent::TextDelta {
+                index: 0,
+                delta: body.into(),
+            },
             StreamEvent::Done {
                 stop: StopReason::EndTurn,
-                usage: Usage { input: 3_000, output: 5, ..Default::default() },
+                usage: Usage {
+                    input: 3_000,
+                    output: 5,
+                    ..Default::default()
+                },
             },
         ]
     }
@@ -624,7 +683,11 @@ use brain::message::Text as _Text;
             let system = req.system.clone().unwrap_or_default();
             let remembering = system.contains("Name a future moment");
             self.asked.lock().unwrap().push(req.messages[0].text());
-            let body = if remembering { self.answer } else { "what happened" };
+            let body = if remembering {
+                self.answer
+            } else {
+                "what happened"
+            };
             Ok(futures::stream::iter(text_turn(body).into_iter().map(Ok)).boxed())
         }
     }
@@ -659,24 +722,39 @@ use brain::message::Text as _Text;
         a.shelf = Some(Arc::new(Recorder(kept.clone())));
 
         let mut s = bulky_session();
-        let (report, spent) = a.compact_now(&mut s, Some("the parser")).await.expect("work");
+        let (report, spent) = a
+            .compact_now(&mut s, Some("the parser"))
+            .await
+            .expect("work");
         assert!(report.touched());
 
         let kept = kept.lock().unwrap().clone();
         assert_eq!(
             kept,
             vec![
-                agent::Kept { text: "prefers xh over curl".into(), weight: 3 },
-                agent::Kept { text: "the parser is in syntax/".into(), weight: 1 },
+                agent::Kept {
+                    text: "prefers xh over curl".into(),
+                    weight: 3
+                },
+                agent::Kept {
+                    text: "the parser is in syntax/".into(),
+                    weight: 1
+                },
             ],
             "the prose between them is not a note"
         );
 
         let asked = asked.lock().unwrap().clone();
         assert_eq!(asked.len(), 2, "one summary and one shelf");
-        let shelved = asked.iter().find(|a| a.contains("Already on the shelf")).expect("sent");
+        let shelved = asked
+            .iter()
+            .find(|a| a.contains("Already on the shelf"))
+            .expect("sent");
         assert!(shelved.contains("already known"), "{shelved}");
-        assert!(shelved.contains("the parser"), "the focus rides along too: {shelved}");
+        assert!(
+            shelved.contains("the parser"),
+            "the focus rides along too: {shelved}"
+        );
         // Both calls are billed, not just the summary.
         assert!(spent.usage.input >= 6_000, "{:?}", spent.usage);
     }
@@ -686,7 +764,13 @@ use brain::message::Text as _Text;
     async fn no_shelf_means_no_second_call() {
         let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut a = agent_with(1_000_000, 32_000);
-        a.summarizer = Some((Arc::new(Both { answer: "3 x", asked: asked.clone() }), spec()));
+        a.summarizer = Some((
+            Arc::new(Both {
+                answer: "3 x",
+                asked: asked.clone(),
+            }),
+            spec(),
+        ));
         let mut s = bulky_session();
         assert!(a.compact_now(&mut s, None).await.expect("work").0.touched());
         assert_eq!(asked.lock().unwrap().len(), 1);
@@ -721,10 +805,7 @@ use brain::message::Text as _Text;
         let after = brain::estimate::tokens(&s.context(), &spec());
         assert!(after < before, "{before} -> {after}");
         // It stops at the tail the agent is working from rather than at zero.
-        assert!(
-            after >= a.kept_tokens() / 2,
-            "took the tail too: {after}"
-        );
+        assert!(after >= a.kept_tokens() / 2, "took the tail too: {after}");
     }
 
     // A flat 16k tail against a 9k budget protects more than the budget holds,
@@ -796,7 +877,14 @@ fn a_skill_body_survives_a_compaction_that_takes_everything_else() {
         call("c3", "read", json!({ "path": "a.rs" })),
         result("c3", "read", &big(9_000)),
     ];
-    let r = compact(&mut m, 4_000, &Policy { protect_tail: 0, ..Policy::default() });
+    let r = compact(
+        &mut m,
+        4_000,
+        &Policy {
+            protect_tail: 0,
+            ..Policy::default()
+        },
+    );
 
     // Instructions the agent is in the middle of following are not spare
     // context, whatever the budget says.
@@ -867,7 +955,15 @@ fn a_bang_command_goes_with_the_question_that_refers_to_it() {
     })]);
 
     // The floor: everything droppable goes.
-    let (record, r) = plan(&s, &spec(), 0, &Policy { protect_tail: 0, ..Policy::default() });
+    let (record, r) = plan(
+        &s,
+        &spec(),
+        0,
+        &Policy {
+            protect_tail: 0,
+            ..Policy::default()
+        },
+    );
     s.record(record);
     assert!(r.dropped > 0 || r.aged_out > 0, "{r:?}");
 
@@ -903,12 +999,23 @@ fn a_bang_command_can_be_shrunk_where_a_question_cannot() {
     })]);
 
     let budget = estimate::tokens(&s.context(), &spec()) / 2;
-    let (record, r) = plan(&s, &spec(), budget, &Policy { protect_tail: 0, ..Policy::default() });
+    let (record, r) = plan(
+        &s,
+        &spec(),
+        budget,
+        &Policy {
+            protect_tail: 0,
+            ..Policy::default()
+        },
+    );
     s.record(record);
     assert!(r.aged_out > 0, "the aside was never shrunk: {r:?}");
 
     let joined: String = s.context().iter().map(Message::text).collect();
-    assert!(joined.contains("the task"), "the question stays: {joined:.200}");
+    assert!(
+        joined.contains("the task"),
+        "the question stays: {joined:.200}"
+    );
     assert!(joined.contains("fix that"), "and so does this one");
 }
 
@@ -942,11 +1049,17 @@ fn dropping_leaves_no_question_without_its_answer() {
         text: "last".into(),
     })]);
 
-    let policy = Policy { protect_tail: 0, ..Policy::default() };
+    let policy = Policy {
+        protect_tail: 0,
+        ..Policy::default()
+    };
     let budget = estimate::tokens(&s.context(), &spec()) / 6;
     let (record, report) = plan(&s, &spec(), budget, &policy);
     s.record(record);
-    assert!(report.dropped > 0, "nothing was dropped, so nothing is proven: {report:?}");
+    assert!(
+        report.dropped > 0,
+        "nothing was dropped, so nothing is proven: {report:?}"
+    );
 
     let view = s.context();
     assert_balanced(&view);
@@ -999,8 +1112,10 @@ fn dropping_a_chat_only_turn_does_not_take_the_next_question_with_it() {
     for i in 0..8 {
         let q = format!("question {i}");
         let a = left.contains(&q);
-        assert!(a || !left.contains(&format!("question {}", i + 1)),
+        assert!(
+            a || !left.contains(&format!("question {}", i + 1)),
             "`{q}` was dropped while a later question survived — a question is \
-             not the answer's spare context");
+             not the answer's spare context"
+        );
     }
 }

@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
+use crate::{AgentError, Totals};
 use brain::message::{
     AssistantContent, Image, Message, Text, ToolCall, ToolResult, ToolResultContent, UserContent,
 };
 use serde::{Deserialize, Serialize};
-use crate::{AgentError, Totals};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct EntryId(pub u64);
@@ -182,17 +182,17 @@ pub enum Entry {
 impl Entry {
     pub fn id(&self) -> EntryId {
         match self {
-            Entry::User { id, .. }
-            | Entry::Assistant { id, .. }
-            | Entry::Compaction { id, .. } => *id,
+            Entry::User { id, .. } | Entry::Assistant { id, .. } | Entry::Compaction { id, .. } => {
+                *id
+            }
         }
     }
 
     pub fn at(&self) -> u64 {
         match self {
-            Entry::User { at, .. }
-            | Entry::Assistant { at, .. }
-            | Entry::Compaction { at, .. } => *at,
+            Entry::User { at, .. } | Entry::Assistant { at, .. } | Entry::Compaction { at, .. } => {
+                *at
+            }
         }
     }
 
@@ -276,7 +276,10 @@ fn node_of(entry: &Entry) -> Option<Node> {
 pub enum Seen<'a> {
     As(&'a Entry),
     /// Content replaced, shell kept — a `tool_use` must keep its `tool_result`.
-    Omitted { entry: &'a Entry, notice: &'a str },
+    Omitted {
+        entry: &'a Entry,
+        notice: &'a str,
+    },
 }
 
 impl<'a> Seen<'a> {
@@ -291,7 +294,6 @@ impl<'a> Seen<'a> {
             Seen::As(e) | Seen::Omitted { entry: e, .. } => e,
         }
     }
-
 }
 
 /// The whole conversation: every prompt, tool result, response, and compaction
@@ -360,7 +362,10 @@ impl Session {
                                 text: t.text,
                                 shown: None,
                             }),
-                            UserContent::ToolResult(r) => UserBody::Result { result: r, preview: None },
+                            UserContent::ToolResult(r) => UserBody::Result {
+                                result: r,
+                                preview: None,
+                            },
                             UserContent::Image(i) => UserBody::Image(i),
                         });
                     }
@@ -851,19 +856,27 @@ mod tests {
     fn the_view_hands_over_one_message_per_entry() {
         let mut s = Session::new();
         s.prompt("go");
-        s.push_assistant(vec![AssistantContent::Text(MsgText { text: "on it".into() })]);
+        s.push_assistant(vec![AssistantContent::Text(MsgText {
+            text: "on it".into(),
+        })]);
         s.push_results(vec![
             ToolResult::text("c1", "read", "a"),
             ToolResult::text("c2", "grep", "b"),
         ]);
-        s.push_user(UserBody::Image(Image::Url { url: "http://x/i.png".into() }));
+        s.push_user(UserBody::Image(Image::Url {
+            url: "http://x/i.png".into(),
+        }));
         s.prompt("and now this");
 
         let msgs = s.context();
         assert_eq!(msgs.len(), s.view().len());
         for m in &msgs {
             if let Message::User { content } = m {
-                assert_eq!(content.len(), 1, "a user message carried more than its entry");
+                assert_eq!(
+                    content.len(),
+                    1,
+                    "a user message carried more than its entry"
+                );
             }
         }
     }
@@ -876,7 +889,9 @@ mod tests {
     fn compacting_the_opening_turn_leaves_it_in_the_transcript() {
         let mut s = Session::new();
         let first = s.prompt("why is the flaky test flaky?");
-        s.push_assistant(vec![AssistantContent::Text(MsgText { text: "looking".into() })]);
+        s.push_assistant(vec![AssistantContent::Text(MsgText {
+            text: "looking".into(),
+        })]);
         s.prompt("and the other one?");
 
         s.record(Compaction {
@@ -897,17 +912,25 @@ mod tests {
     fn rewinding_past_a_compaction_undoes_it() {
         let mut s = Session::new();
         let first = s.prompt("the task");
-        s.push_assistant(vec![AssistantContent::Text(MsgText { text: "on it".into() })]);
+        s.push_assistant(vec![AssistantContent::Text(MsgText {
+            text: "on it".into(),
+        })]);
         let second = s.prompt("more");
         s.record(Compaction {
             dropped: vec![first],
             ..Default::default()
         });
 
-        assert!(s.rewind_nodes().iter().any(|n| n.id() == first), "the menu must reach it");
+        assert!(
+            s.rewind_nodes().iter().any(|n| n.id() == first),
+            "the menu must reach it"
+        );
         s.rollback_to(second);
 
-        assert!(!s.out_of_view().contains(&first), "the compaction went with the rewind");
+        assert!(
+            !s.out_of_view().contains(&first),
+            "the compaction went with the rewind"
+        );
         assert!(s.view().iter().any(|seen| seen.id() == first));
     }
 
@@ -917,13 +940,21 @@ mod tests {
     fn unsending_a_message_takes_it_out_of_the_transcript() {
         let mut s = Session::new();
         s.prompt("the first thing");
-        s.push_assistant(vec![AssistantContent::Text(MsgText { text: "done".into() })]);
+        s.push_assistant(vec![AssistantContent::Text(MsgText {
+            text: "done".into(),
+        })]);
         let second = s.prompt("teh typo one");
-        s.push_assistant(vec![AssistantContent::Text(MsgText { text: "answering".into() })]);
+        s.push_assistant(vec![AssistantContent::Text(MsgText {
+            text: "answering".into(),
+        })]);
 
         assert_eq!(s.unsent_text(second).as_deref(), Some("teh typo one"));
         assert_eq!(s.last_ask(), Some(second));
-        assert_eq!(s.rollback_before(second), 2, "the message and the answer to it");
+        assert_eq!(
+            s.rollback_before(second),
+            2,
+            "the message and the answer to it"
+        );
         assert!(!s.history().any(|e| e.id() == second));
         assert_eq!(s.rewind_nodes().len(), 2, "the first turn, both halves");
     }
@@ -940,7 +971,9 @@ mod tests {
             args: serde_json::json!({ "path": "f.rs" }),
         })]);
         s.push_results(vec![ToolResult::text("c1", "read", "a")]);
-        s.push_assistant(vec![AssistantContent::Text(MsgText { text: "it says a".into() })]);
+        s.push_assistant(vec![AssistantContent::Text(MsgText {
+            text: "it says a".into(),
+        })]);
 
         let nodes = s.rewind_nodes();
         assert_eq!(nodes.len(), 2, "the question and the answer, not the call");
@@ -963,12 +996,21 @@ mod tests {
         assert_eq!(entries.len(), 3, "prompt, the note, the new prompt");
         assert_eq!(
             match &entries[1] {
-                Entry::User { body: UserBody::Note(t), .. } => t.text.as_str(),
+                Entry::User {
+                    body: UserBody::Note(t),
+                    ..
+                } => t.text.as_str(),
                 other => panic!("expected the stop note, got {other:?}"),
             },
             STOPPED_BY_USER
         );
-        assert!(matches!(&entries[2], Entry::User { body: UserBody::Prompt(_), .. }));
+        assert!(matches!(
+            &entries[2],
+            Entry::User {
+                body: UserBody::Prompt(_),
+                ..
+            }
+        ));
 
         // One note per dead run: the send that followed consumed the marker.
         s.send_prompt("and now this", None);
@@ -987,7 +1029,11 @@ mod tests {
 
         let entries = s.entries();
         let note = entries[1].id();
-        assert_eq!(s.unsent_text(note), None, "not the user's words to take back");
+        assert_eq!(
+            s.unsent_text(note),
+            None,
+            "not the user's words to take back"
+        );
         assert_eq!(
             s.rewind_nodes().len(),
             2,
@@ -1025,15 +1071,28 @@ mod tests {
         s.send_prompt("delete the branch", None);
 
         let entries = s.entries();
-        assert_eq!(entries.len(), 5, "prompt, tool work, the note, the new prompt");
+        assert_eq!(
+            entries.len(),
+            5,
+            "prompt, tool work, the note, the new prompt"
+        );
         assert_eq!(
             match &entries[3] {
-                Entry::User { body: UserBody::Note(t), .. } => t.text.as_str(),
+                Entry::User {
+                    body: UserBody::Note(t),
+                    ..
+                } => t.text.as_str(),
                 other => panic!("expected the stop note, got {other:?}"),
             },
             STOPPED_UNKNOWN
         );
-        assert!(matches!(&entries[4], Entry::User { body: UserBody::Prompt(_), .. }));
+        assert!(matches!(
+            &entries[4],
+            Entry::User {
+                body: UserBody::Prompt(_),
+                ..
+            }
+        ));
     }
 
     /// An answered run leaves no marker, and a clean send stays clean.
@@ -1047,16 +1106,26 @@ mod tests {
             args: serde_json::json!({}),
         })]);
         s.push_results(vec![ToolResult::text("c1", "read", "a")]);
-        s.push_assistant(vec![AssistantContent::Text(MsgText { text: "it says a".into() })]);
+        s.push_assistant(vec![AssistantContent::Text(MsgText {
+            text: "it says a".into(),
+        })]);
 
         s.send_prompt("and now this", None);
 
         let entries = s.entries();
-        assert_eq!(entries.len(), 5, "no note: prompt, call, result, reply, prompt");
+        assert_eq!(
+            entries.len(),
+            5,
+            "no note: prompt, call, result, reply, prompt"
+        );
         assert!(
-            !entries
-                .iter()
-                .any(|e| matches!(e, Entry::User { body: UserBody::Note(_), .. })),
+            !entries.iter().any(|e| matches!(
+                e,
+                Entry::User {
+                    body: UserBody::Note(_),
+                    ..
+                }
+            )),
             "an answered round adds no note"
         );
     }
@@ -1078,7 +1147,13 @@ mod tests {
 
         let entries = s.entries();
         assert_eq!(entries.len(), 1, "only the new prompt follows the rewind");
-        assert!(matches!(&entries[0], Entry::User { body: UserBody::Prompt(_), .. }));
+        assert!(matches!(
+            &entries[0],
+            Entry::User {
+                body: UserBody::Prompt(_),
+                ..
+            }
+        ));
     }
 
     /// The mapping the callers rely on: an answer records nothing, a stop the
@@ -1099,7 +1174,10 @@ mod tests {
         assert_eq!(entries.len(), 3, "prompt, the note, the new prompt");
         assert_eq!(
             match &entries[1] {
-                Entry::User { body: UserBody::Note(t), .. } => t.text.as_str(),
+                Entry::User {
+                    body: UserBody::Note(t),
+                    ..
+                } => t.text.as_str(),
                 other => panic!("expected the note aside, got {other:?}"),
             },
             STOPPED_BY_USER
@@ -1112,13 +1190,19 @@ mod tests {
     fn rewinding_to_an_answer_keeps_it() {
         let mut s = Session::new();
         s.prompt("go");
-        s.push_assistant(vec![AssistantContent::Text(MsgText { text: "here".into() })]);
+        s.push_assistant(vec![AssistantContent::Text(MsgText {
+            text: "here".into(),
+        })]);
         let reply = s.rewind_nodes().pop().map(|n| n.id()).expect("an answer");
         s.prompt("and then");
 
         assert_eq!(s.rollback_to(reply), 1);
         assert!(s.history().any(|e| e.id() == reply), "the answer stays");
-        assert_eq!(s.unsent_text(reply), None, "nothing goes back to the editor");
+        assert_eq!(
+            s.unsent_text(reply),
+            None,
+            "nothing goes back to the editor"
+        );
     }
 
     /// The one user message that legitimately carries more than one block.
@@ -1126,7 +1210,9 @@ mod tests {
     fn summaries_ride_the_first_user_message_rather_than_one_of_their_own() {
         let mut s = Session::new();
         s.prompt("go");
-        s.push_assistant(vec![AssistantContent::Text(MsgText { text: "done".into() })]);
+        s.push_assistant(vec![AssistantContent::Text(MsgText {
+            text: "done".into(),
+        })]);
         s.record(Compaction {
             summary: Some("earlier: read two files".into()),
             ..Default::default()

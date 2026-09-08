@@ -394,7 +394,6 @@ pub const BINDINGS: &[Binding] = &[
         keys: &["ctrl+shift+t", "alt+t"],
         note: "every reasoning block, the current one included",
     },
-
     // Normal mode from here down. Every key is a bare character, and that is a
     // rule rather than a coincidence: the layer sits above `Editor`, so
     // anything it claims it also takes away — and no binding that existed
@@ -818,9 +817,7 @@ impl Keys {
                 mods: press.mods - KeyModifiers::SHIFT,
                 ..press
             };
-            return live
-                .iter()
-                .find_map(|w| self.map.get(&(*w, bare)).copied());
+            return live.iter().find_map(|w| self.map.get(&(*w, bare)).copied());
         }
         None
     }
@@ -842,7 +839,14 @@ mod tests {
             (Menu::Verbs(Which::Shelf), true),
         ] {
             assert_eq!(
-                keys.action(press("ctrl+t"), Layers { menu, run: running, ..Layers::default() }),
+                keys.action(
+                    press("ctrl+t"),
+                    Layers {
+                        menu,
+                        run: running,
+                        ..Layers::default()
+                    }
+                ),
                 Some(Action::ThinkFold),
                 "menu={menu:?} running={running}"
             );
@@ -871,7 +875,13 @@ mod tests {
         // flat table has no way to say so.
         let k = Keys::default();
         assert_eq!(
-            k.action(press("up"), Layers { menu: Menu::On, ..Layers::default() }),
+            k.action(
+                press("up"),
+                Layers {
+                    menu: Menu::On,
+                    ..Layers::default()
+                }
+            ),
             Some(Action::MenuPrevious)
         );
         assert_eq!(
@@ -879,10 +889,20 @@ mod tests {
             Some(Action::HistoryOlder)
         );
         assert_eq!(
-            k.action(press("esc"), Layers { menu: Menu::On, run: true, mode: None }),
+            k.action(
+                press("esc"),
+                Layers {
+                    menu: Menu::On,
+                    run: true,
+                    mode: None
+                }
+            ),
             Some(Action::MenuDismiss)
         );
-        assert_eq!(k.action(press("esc"), Layers::default()), Some(Action::Rewind));
+        assert_eq!(
+            k.action(press("esc"), Layers::default()),
+            Some(Action::Rewind)
+        );
     }
 
     /// `menu.dismiss` and `run.interrupt` are the only two bindings that claim
@@ -901,7 +921,14 @@ mod tests {
             let key = parse(spec).unwrap();
             for mode in [None, Some(Mode::Insert), Some(Mode::Normal)] {
                 assert_eq!(
-                    k.action(key, Layers { menu: Menu::Off, run: true, mode }),
+                    k.action(
+                        key,
+                        Layers {
+                            menu: Menu::Off,
+                            run: true,
+                            mode
+                        }
+                    ),
                     Some(Action::RunInterrupt),
                     "`{spec}` with mode={mode:?}"
                 );
@@ -932,7 +959,10 @@ mod tests {
     #[test]
     fn the_shelf_letters_reach_no_further_than_the_shelf() {
         let k = Keys::default();
-        let listing = Layers { menu: Menu::On, ..Layers::default() };
+        let listing = Layers {
+            menu: Menu::On,
+            ..Layers::default()
+        };
         for letter in ["x", "e", "j", "k"] {
             assert_eq!(
                 k.action(press(letter), listing),
@@ -941,8 +971,10 @@ mod tests {
             );
         }
 
-        let browsing =
-            Layers { menu: Menu::Verbs(Which::Shelf), ..Layers::default() };
+        let browsing = Layers {
+            menu: Menu::Verbs(Which::Shelf),
+            ..Layers::default()
+        };
         assert_eq!(k.action(press("x"), browsing), Some(Action::MenuDelete));
         assert_eq!(k.action(press("e"), browsing), Some(Action::MenuAccept));
         assert_eq!(k.action(press("j"), browsing), Some(Action::MenuNext));
@@ -977,7 +1009,13 @@ mod tests {
                 };
                 assert_eq!(
                     k.action(press, insert),
-                    k.action(press, Layers { mode: Some(Mode::Normal), ..insert }),
+                    k.action(
+                        press,
+                        Layers {
+                            mode: Some(Mode::Normal),
+                            ..insert
+                        }
+                    ),
                     "{} (`{spec}`) does not mean the same thing in Normal",
                     b.id
                 );
@@ -992,7 +1030,13 @@ mod tests {
         let k = Keys::default();
         assert_eq!(k.action(press("H"), Layers::default()), None);
         assert_eq!(
-            k.action(press("H"), Layers { mode: Some(Mode::Normal), ..Layers::default() }),
+            k.action(
+                press("H"),
+                Layers {
+                    mode: Some(Mode::Normal),
+                    ..Layers::default()
+                }
+            ),
             Some(Action::LanePrev)
         );
     }
@@ -1007,7 +1051,12 @@ mod tests {
                 .iter()
                 .find(|l| l.starts_with(&format!("{id} ")))
                 .unwrap_or_else(|| panic!("{id} is not listed"));
-            line[id.len()..].split("  ·  ").next().unwrap().trim().to_string()
+            line[id.len()..]
+                .split("  ·  ")
+                .next()
+                .unwrap()
+                .trim()
+                .to_string()
         };
         assert_eq!(keys_of("menu.next"), "ctrl+j, ctrl+n, down");
         assert_eq!(keys_of("shelf.next"), "j");
@@ -1018,13 +1067,21 @@ mod tests {
         // What the shift-folding change bought, spent: `x` and `X` delete in
         // two directions, and before it they were one press.
         let k = Keys::default();
-        let normal = Layers { mode: Some(Mode::Normal), ..Layers::default() };
-        assert_eq!(k.action(press("x"), normal), Some(Action::DeleteCharForward));
+        let normal = Layers {
+            mode: Some(Mode::Normal),
+            ..Layers::default()
+        };
+        assert_eq!(
+            k.action(press("x"), normal),
+            Some(Action::DeleteCharForward)
+        );
         assert_eq!(k.action(press("X"), normal), Some(Action::DeleteCharBack));
         assert_eq!(k.action(press("i"), normal), Some(Action::ModeInsert));
-        assert_eq!(k.action(press("I"), normal), Some(Action::ModeInsertLineStart));
+        assert_eq!(
+            k.action(press("I"), normal),
+            Some(Action::ModeInsertLineStart)
+        );
     }
-
 
     #[test]
     fn two_explicit_bindings_may_not_share_a_key() {

@@ -16,8 +16,7 @@ use crate::session::Store;
 /// The exit path drains these — a transcript promised on disk has to be there
 /// when the process goes, or the handoff was just a faster way to lose it.
 fn pending() -> &'static std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>> {
-    static PENDING: OnceLock<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> =
-        OnceLock::new();
+    static PENDING: OnceLock<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> = OnceLock::new();
     PENDING.get_or_init(|| std::sync::Mutex::new(Vec::new()))
 }
 
@@ -57,7 +56,12 @@ impl Home for Filed {
     /// each serialize megabytes on the tool path; the handle is registered so
     /// [`flush`] can wait for it before the process goes.
     fn keep(&self, id: &str, session: Session) {
-        let (store, root, model, id) = (self.store.clone(), self.root.clone(), self.model.clone(), id.to_string());
+        let (store, root, model, id) = (
+            self.store.clone(),
+            self.root.clone(),
+            self.model.clone(),
+            id.to_string(),
+        );
         let handle = tokio::task::spawn_blocking(move || {
             let saved = store.save(
                 &id,

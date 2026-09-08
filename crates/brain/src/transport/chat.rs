@@ -14,9 +14,7 @@ use serde_json::{Value, json};
 
 use super::{Shared, Transport};
 use crate::error::{BrainError, Result};
-use crate::message::{
-    AssistantContent, Image, Message, Replay, ToolResult, UserContent, tagged,
-};
+use crate::message::{AssistantContent, Image, Message, Replay, ToolResult, UserContent, tagged};
 use crate::model::{Format, ModelSpec, ThinkingControl};
 use crate::request::{Request, ToolChoice};
 use crate::stream::{BlockKind, StopReason, StreamEvent, Usage};
@@ -164,10 +162,10 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
 
     let system = req.system_text();
     if let Some(system) = system {
-        body["messages"].as_array_mut().unwrap().insert(
-            0,
-            json!({ "role": "system", "content": system }),
-        );
+        body["messages"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, json!({ "role": "system", "content": system }));
     }
     // Per-turn state, not a statement of fact — see `Request::notes`.
     if !req.notes.is_empty() {

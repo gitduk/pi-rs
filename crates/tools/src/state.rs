@@ -96,10 +96,7 @@ mod tests {
 
     #[test]
     fn a_workspace_key_is_its_slash_path_with_separators_dashed() {
-        assert_eq!(
-            key_of(Path::new("/home/dev/pi-rs")),
-            "-home-dev-pi-rs"
-        );
+        assert_eq!(key_of(Path::new("/home/dev/pi-rs")), "-home-dev-pi-rs");
         assert_eq!(key_of(Path::new("/")), "-");
         assert_eq!(key_of(Path::new(".")), "-");
     }

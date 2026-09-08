@@ -13,7 +13,7 @@ pub mod login;
 pub mod types;
 
 pub use client::{Client, Error as ClientError};
-pub use login::{login as login_flow, LoginError, LoginView, render_qr};
+pub use login::{LoginError, LoginView, login as login_flow, render_qr};
 pub use types::{
-    text_of, Credentials, QrCode, QrStatus, Update, WireMessage, CHANNEL_VERSION, DEFAULT_BASE_URL,
+    CHANNEL_VERSION, Credentials, DEFAULT_BASE_URL, QrCode, QrStatus, Update, WireMessage, text_of,
 };

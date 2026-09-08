@@ -9,13 +9,13 @@ use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use reqwest::RequestBuilder;
-use serde_json::{json, Value};
+use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
+use serde_json::{Value, json};
 
 use crate::types::{
-    BOT_TYPE, CHANNEL_VERSION, Config, Credentials, ILINK_APP_CLIENT_VERSION, ILINK_APP_ID,
-    QrCode, QrStatus, Update,
+    BOT_TYPE, CHANNEL_VERSION, Config, Credentials, ILINK_APP_CLIENT_VERSION, ILINK_APP_ID, QrCode,
+    QrStatus, Update,
 };
 
 /// How long a long-poll request is allowed to hold before the client treats
@@ -174,13 +174,8 @@ impl Client {
     }
 
     async fn get(&self, endpoint: &str, timeout: Duration) -> Result<String> {
-        self.call(
-            self.http.get(self.url(endpoint)),
-            None,
-            endpoint,
-            timeout,
-        )
-        .await
+        self.call(self.http.get(self.url(endpoint)), None, endpoint, timeout)
+            .await
     }
 
     async fn post(
@@ -272,7 +267,10 @@ fn headers(token: Option<&str>) -> HeaderMap {
         "AuthorizationType",
         HeaderValue::from_static("ilink_bot_token"),
     );
-    h.insert("X-WECHAT-UIN", HeaderValue::from_str(&wechat_uin()).unwrap());
+    h.insert(
+        "X-WECHAT-UIN",
+        HeaderValue::from_str(&wechat_uin()).unwrap(),
+    );
     h.insert("iLink-App-Id", HeaderValue::from_static(ILINK_APP_ID));
     h.insert(
         "iLink-App-ClientVersion",
@@ -299,10 +297,7 @@ fn parse_status(v: Value) -> Result<QrStatus> {
         "expired" => QrStatus::Expired,
         "binded_redirect" => QrStatus::BindedRedirect,
         "scaned_but_redirect" => QrStatus::Redirect {
-            host: v["redirect_host"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string(),
+            host: v["redirect_host"].as_str().unwrap_or_default().to_string(),
         },
         "confirmed" => QrStatus::Confirmed(Credentials {
             token: q("bot_token").unwrap_or_default(),

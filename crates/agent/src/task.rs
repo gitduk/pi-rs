@@ -56,10 +56,15 @@ struct Checked {
 /// A check that ran and one that never got to run are different answers, and
 /// so is the text each carries: what the command printed, or why nothing did.
 enum Outcome {
-    Ran { code: i32, body: String },
+    Ran {
+        code: i32,
+        body: String,
+    },
     /// Killed at the cap. It ran, possibly far enough to leave changes behind,
     /// and only its verdict is missing — never say this one did not run.
-    CutOff { ms: u64 },
+    CutOff {
+        ms: u64,
+    },
     /// No verdict, for a reason that is not the cap. Deliberately silent on
     /// whether the command ran: a shell that would not start and an output
     /// that would not spill both arrive as one error, and guessing between
@@ -97,7 +102,10 @@ impl Task {
         agent.registry = std::mem::take(&mut agent.registry).without(Self::NAME);
         agent.system = format!("{PROMPT}{standing}");
         // The same facts, and no way to add one: see `remember::ReadOnly`.
-        agent.shelf = agent.shelf.take().map(|s| Arc::new(crate::remember::ReadOnly(s)) as Arc<_>);
+        agent.shelf = agent
+            .shelf
+            .take()
+            .map(|s| Arc::new(crate::remember::ReadOnly(s)) as Arc<_>);
         Self {
             agent: Arc::new(agent),
             home,
@@ -288,7 +296,12 @@ impl Tool for Task {
             .map(|path| ctx.workspace.display(path))
             .collect();
 
-        let check = match args.verify.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        let check = match args
+            .verify
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
             None => None,
             Some(command) => {
                 // No deadline of our own: `run` clamps to the cap every shell
@@ -318,9 +331,11 @@ impl Tool for Task {
         };
         // The child's whole spend rides home on the result, where the parent's
         // run counts it — the surface never had a handle to drain.
-        Ok(ToolOutput::text(answer(&heard, cut.as_deref(), &wrote, check.as_ref()))
-            .with_preview(sketch(&args.description, &heard))
-            .with_spent(heard.spent))
+        Ok(
+            ToolOutput::text(answer(&heard, cut.as_deref(), &wrote, check.as_ref()))
+                .with_preview(sketch(&args.description, &heard))
+                .with_spent(heard.spent),
+        )
     }
 }
 
@@ -384,7 +399,12 @@ fn wrote_line(wrote: &[String]) -> String {
         return "[wrote nothing]".to_string();
     }
     let unit = if n == 1 { "file" } else { "files" };
-    let named = wrote.iter().take(NAMED).map(String::as_str).collect::<Vec<_>>().join(", ");
+    let named = wrote
+        .iter()
+        .take(NAMED)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
     match n.saturating_sub(NAMED) {
         0 => format!("[wrote {n} {unit}: {named}]"),
         rest => format!("[wrote {n} {unit}: {named}, and {rest} more]"),
@@ -427,7 +447,10 @@ mod tests {
         assert_eq!(wrote_line(&paths(1)), "[wrote 1 file: src/f0.rs]");
 
         let many = wrote_line(&paths(NAMED + 3));
-        assert!(many.starts_with(&format!("[wrote {} files: src/f0.rs,", NAMED + 3)), "{many}");
+        assert!(
+            many.starts_with(&format!("[wrote {} files: src/f0.rs,", NAMED + 3)),
+            "{many}"
+        );
         assert!(many.ends_with(", and 3 more]"), "{many}");
         // The count is the whole of it, so a caller reading a truncated list
         // still knows how much it is not being shown.
@@ -438,7 +461,12 @@ mod tests {
     /// are the two no run in a test can reach.
     #[test]
     fn a_check_that_may_have_run_is_never_reported_as_one_that_did_not() {
-        let of = |outcome| check_line(&Checked { command: "cargo test".into(), outcome });
+        let of = |outcome| {
+            check_line(&Checked {
+                command: "cargo test".into(),
+                outcome,
+            })
+        };
 
         let killed = of(Outcome::CutOff { ms: 600_000 });
         assert!(killed.contains("no verdict"), "{killed}");
@@ -452,10 +480,19 @@ mod tests {
         // The same reason: it is not known whether this one ran either.
         assert!(!lost.contains("did not run"), "{lost}");
 
-        let passed = of(Outcome::Ran { code: 0, body: "quiet".into() });
-        assert_eq!(passed, "[verify `cargo test`: exit 0]", "no output when it passed");
+        let passed = of(Outcome::Ran {
+            code: 0,
+            body: "quiet".into(),
+        });
+        assert_eq!(
+            passed, "[verify `cargo test`: exit 0]",
+            "no output when it passed"
+        );
 
-        let failed = of(Outcome::Ran { code: 101, body: "assertion failed\n".into() });
+        let failed = of(Outcome::Ran {
+            code: 101,
+            body: "assertion failed\n".into(),
+        });
         assert_eq!(failed, "[verify `cargo test`: exit 101]\nassertion failed");
     }
 }

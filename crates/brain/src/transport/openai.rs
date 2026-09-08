@@ -5,14 +5,14 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 use super::Transport;
-use crate::model::{Format, ModelSpec, ThinkingControl};
+use super::{Gaps, Shared};
 use crate::error::{BrainError, Result};
 use crate::message::{
     AssistantContent, Image, Message, Reasoning, ReasoningContent, Replay, Text, ToolCall,
     ToolResult, ToolResultContent, UserContent, tagged,
 };
+use crate::model::{Format, ModelSpec, ThinkingControl};
 use crate::request::{Request, ToolChoice};
-use super::{Gaps, Shared};
 use crate::stream::{BlockKind, InvalidToolArgs, StopReason, StreamEvent, Usage};
 
 pub struct OpenAi {
@@ -263,7 +263,6 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
     body
 }
 
-
 // `input_tokens` counts the cached prefix and the newly written one as well as
 // the fresh tokens, so both come out of it. Subtracting only the read half —
 // which is what the Chat Completions decoder did — bills the write twice.
@@ -463,15 +462,13 @@ impl Decoder {
                     None => Vec::new(),
                 }
             }
-            "response.function_call_arguments.delta" => {
-                match gaps.owed(data, event, "delta") {
-                    Some(delta) => vec![StreamEvent::ToolArgsDelta {
-                        index,
-                        delta: delta.to_string(),
-                    }],
-                    None => Vec::new(),
-                }
-            }
+            "response.function_call_arguments.delta" => match gaps.owed(data, event, "delta") {
+                Some(delta) => vec![StreamEvent::ToolArgsDelta {
+                    index,
+                    delta: delta.to_string(),
+                }],
+                None => Vec::new(),
+            },
             "response.output_item.done" => vec![StreamEvent::BlockEnd { index }],
             "response.completed" | "response.incomplete" => {
                 let response = &data["response"];
@@ -613,7 +610,9 @@ mod tests {
     /// eyeballing against a live endpoint, and is a no-op without it.
     #[test]
     fn tmp_dump_live_body() {
-        let Ok(dir) = std::env::var("PI_SNAP") else { return };
+        let Ok(dir) = std::env::var("PI_SNAP") else {
+            return;
+        };
         let model = std::env::var("PI_MODEL").unwrap();
         let mut s = spec();
         s.model = model;
@@ -838,7 +837,10 @@ mod tests {
             )],
         }];
         assert_eq!(
-            body(Request { messages: msgs.clone(), ..Default::default() })["input"][0],
+            body(Request {
+                messages: msgs.clone(),
+                ..Default::default()
+            })["input"][0],
             json!({
                 "type": "message",
                 "role": "assistant",
@@ -850,7 +852,10 @@ mod tests {
         dropping.replay_thinking = ReplayThinking::Off;
         let dropped = build_body(
             &dropping,
-            &Request { messages: msgs, ..Default::default() },
+            &Request {
+                messages: msgs,
+                ..Default::default()
+            },
         );
         assert_eq!(dropped["input"].as_array().unwrap().len(), 0);
     }
@@ -862,10 +867,16 @@ mod tests {
         let req = Request {
             messages: vec![Message::Assistant {
                 content: vec![
-                    AssistantContent::Text(Text { text: "first ".into() }),
-                    AssistantContent::Text(Text { text: "second".into() }),
+                    AssistantContent::Text(Text {
+                        text: "first ".into(),
+                    }),
+                    AssistantContent::Text(Text {
+                        text: "second".into(),
+                    }),
                     call("c1", "read", json!({})),
-                    AssistantContent::Text(Text { text: "after".into() }),
+                    AssistantContent::Text(Text {
+                        text: "after".into(),
+                    }),
                     call("c2", "grep", json!({})),
                 ],
             }],
@@ -1081,7 +1092,9 @@ mod tests {
         let item = &body(req)["input"][0];
         assert_eq!(item["type"], "reasoning", "it demoted instead of replaying");
         assert!(
-            item["encrypted_content"].as_str().is_some_and(|s| !s.is_empty()),
+            item["encrypted_content"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()),
             "the ciphertext is the whole of what replays: {item}"
         );
     }
@@ -1127,7 +1140,11 @@ mod tests {
     fn a_whole_turn_replays_into_the_message_the_terminal_frame_states() {
         let done = drive(&a_turn());
         assert!(done.invalid.is_empty());
-        assert_eq!(done.stop, StopReason::ToolUse, "a pending call is not an end");
+        assert_eq!(
+            done.stop,
+            StopReason::ToolUse,
+            "a pending call is not an end"
+        );
 
         let Message::Assistant { content, .. } = done.message else {
             panic!("assistant")
@@ -1259,7 +1276,10 @@ mod tests {
         };
         assert_eq!(
             r.content[0],
-            ReasoningContent::Text { text: "the working".into(), signature: None }
+            ReasoningContent::Text {
+                text: "the working".into(),
+                signature: None
+            }
         );
     }
 
@@ -1323,7 +1343,10 @@ mod tests {
         let kept = with(ReplayThinking::Tagged);
 
         let sent = |s: &ModelSpec| build_body(s, &req(s)).to_string();
-        assert!(!sent(&dropped).contains(&thinking), "it was dropped from the body");
+        assert!(
+            !sent(&dropped).contains(&thinking),
+            "it was dropped from the body"
+        );
         assert!(sent(&kept).contains(&thinking), "it rode the body");
 
         let counted = |s: &ModelSpec| crate::estimate::tokens(&req(s).messages, s);

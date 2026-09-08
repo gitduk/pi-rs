@@ -46,12 +46,22 @@ pub struct Note {
 impl Note {
     /// A note you typed.
     pub fn yours(text: impl Into<String>) -> Self {
-        Self { id: 0, text: text.into(), at: now(), weight: None }
+        Self {
+            id: 0,
+            text: text.into(),
+            at: now(),
+            weight: None,
+        }
     }
 
     /// A note the model wrote, at the weight it gave.
     pub fn theirs(text: impl Into<String>, weight: u8) -> Self {
-        Self { id: 0, text: text.into(), at: now(), weight: Some(weight.clamp(1, 3)) }
+        Self {
+            id: 0,
+            text: text.into(),
+            at: now(),
+            weight: Some(weight.clamp(1, 3)),
+        }
     }
 
     pub fn is_yours(&self) -> bool {
@@ -160,7 +170,11 @@ impl Memory {
     pub fn rows(&self) -> Vec<Row> {
         self.notes
             .iter()
-            .map(|n| Row { id: n.id, day: day(n.at), text: n.text.clone() })
+            .map(|n| Row {
+                id: n.id,
+                day: day(n.at),
+                text: n.text.clone(),
+            })
             .collect()
     }
 
@@ -245,11 +259,21 @@ mod tests {
     use super::{CAP, DAY, Memory, Note};
 
     fn model(text: &str, weight: u8, days_ago: u64) -> Note {
-        Note { id: 0, text: text.into(), at: 1_000 * DAY - days_ago * DAY, weight: Some(weight) }
+        Note {
+            id: 0,
+            text: text.into(),
+            at: 1_000 * DAY - days_ago * DAY,
+            weight: Some(weight),
+        }
     }
 
     fn yours(text: &str) -> Note {
-        Note { id: 0, text: text.into(), at: 1_000 * DAY, weight: None }
+        Note {
+            id: 0,
+            text: text.into(),
+            at: 1_000 * DAY,
+            weight: None,
+        }
     }
 
     fn shelf(notes: Vec<Note>) -> Memory {
@@ -274,11 +298,18 @@ mod tests {
         // Nothing went: four notes is not thirty.
         assert_eq!(m.notes.len(), 4);
 
-        let mut m = shelf((0..CAP).map(|i| model(&format!("filler {i}"), 2, 0)).collect());
+        let mut m = shelf(
+            (0..CAP)
+                .map(|i| model(&format!("filler {i}"), 2, 0))
+                .collect(),
+        );
         m.notes.push(model("old and slight", 1, 25));
         m.evict(1_000 * DAY);
         assert_eq!(m.notes.len(), CAP);
-        assert!(!texts(&m).contains(&"old and slight"), "the weakest survived");
+        assert!(
+            !texts(&m).contains(&"old and slight"),
+            "the weakest survived"
+        );
     }
 
     /// You put it there; only you take it away. A shelf you filled yourself is
@@ -309,14 +340,20 @@ mod tests {
         let mut m = shelf(vec![yours("first"), yours("second"), yours("third")]);
         m.number();
         let second = m.notes[1].id;
-        assert!(m.notes.iter().all(|n| n.id != 0), "every note answers to something");
+        assert!(
+            m.notes.iter().all(|n| n.id != 0),
+            "every note answers to something"
+        );
 
         // What a compaction does behind the panel's back.
         m.notes.remove(0);
         m.add([model("what the model kept", 3, 0)]);
 
         m.rewrite(second, "second, said better");
-        assert_eq!(m.notes.iter().find(|n| n.id == second).unwrap().text, "second, said better");
+        assert_eq!(
+            m.notes.iter().find(|n| n.id == second).unwrap().text,
+            "second, said better"
+        );
 
         m.forget(second);
         assert!(m.notes.iter().all(|n| n.id != second));

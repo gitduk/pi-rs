@@ -501,9 +501,7 @@ pub fn expand_base_url(raw: &str) -> String {
         Some(i) => (&rest[..i], &rest[i..]),
         None => (rest, ""),
     };
-    if port.is_empty()
-        || !port.bytes().all(|b| b.is_ascii_digit())
-        || port.parse::<u16>().is_err()
+    if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) || port.parse::<u16>().is_err()
     {
         return raw.to_string();
     }
@@ -762,12 +760,7 @@ fn to_edit_value(value: &toml::Value) -> toml_edit::Value {
         toml::Value::Float(f) => Value::from(*f),
         toml::Value::Boolean(b) => Value::from(*b),
         toml::Value::Datetime(d) => Value::from(d.to_string()),
-        toml::Value::Array(items) => Value::Array(
-            items
-                .iter()
-                .map(to_edit_value)
-                .collect(),
-        ),
+        toml::Value::Array(items) => Value::Array(items.iter().map(to_edit_value).collect()),
         toml::Value::Table(map) => {
             let mut t = toml_edit::InlineTable::new();
             for (k, v) in map {
@@ -1243,7 +1236,10 @@ output_per_mtok = 0
             Some(crate::keys::Action::MoveLineStart)
         );
         // Replaced, so the default it displaced is gone.
-        assert_eq!(k.action(press("ctrl+l").unwrap(), crate::keys::Layers::default()), None);
+        assert_eq!(
+            k.action(press("ctrl+l").unwrap(), crate::keys::Layers::default()),
+            None
+        );
     }
 
     #[test]
@@ -1335,7 +1331,10 @@ output_per_mtok = 0
     fn a_port_typed_at_an_input_is_loopback_http() {
         assert_eq!(expand_base_url(":7897"), "http://127.0.0.1:7897");
         assert_eq!(expand_base_url(":7897/v1"), "http://127.0.0.1:7897/v1");
-        assert_eq!(expand_base_url("http://127.0.0.1:7897"), "http://127.0.0.1:7897");
+        assert_eq!(
+            expand_base_url("http://127.0.0.1:7897"),
+            "http://127.0.0.1:7897"
+        );
         assert_eq!(expand_base_url(":7897s"), ":7897s");
         assert_eq!(expand_base_url("::7897"), "::7897");
         assert_eq!(expand_base_url(":"), ":");

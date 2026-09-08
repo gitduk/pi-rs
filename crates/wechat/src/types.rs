@@ -233,7 +233,10 @@ mod tests {
 
     #[test]
     fn an_empty_poll_is_not_an_error() {
-        let u: Update = serde_json::from_str("{\"ret\":0,\"msgs\":[],\"get_updates_buf\":\"b\",\"longpolling_timeout_ms\":35000}").unwrap();
+        let u: Update = serde_json::from_str(
+            "{\"ret\":0,\"msgs\":[],\"get_updates_buf\":\"b\",\"longpolling_timeout_ms\":35000}",
+        )
+        .unwrap();
         assert!(!u.is_error());
         assert_eq!(u.get_updates_buf, "b");
     }

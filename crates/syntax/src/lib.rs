@@ -260,7 +260,6 @@ pub fn error_rows(lang: Lang, content: &str) -> Vec<usize> {
     rows
 }
 
-
 /// The file's declarations, in source order, nested by container.
 pub fn outline(lang: Lang, content: &str) -> Vec<Item> {
     let Some(tree) = parse(lang, content) else {
@@ -442,7 +441,10 @@ export default { port: 8080 };
     fn spans_answer_what_block_answers_for_every_row() {
         spans_match_block(Lang::Rust, RUST);
         spans_match_block(Lang::TypeScript, TS);
-        spans_match_block(Lang::Python, "class Dog:\n    def bark(self):\n        return 1\n");
+        spans_match_block(
+            Lang::Python,
+            "class Dog:\n    def bark(self):\n        return 1\n",
+        );
     }
 
     #[test]
@@ -479,7 +481,10 @@ pub fn complete(word: &str) -> Vec<u8> {
     #[test]
     fn nothing_the_parser_could_not_read_is_a_construct() {
         let src = "one\ntwo\nthree\n";
-        assert!(spans(Lang::Rust, src).is_empty(), "one error node, not a span");
+        assert!(
+            spans(Lang::Rust, src).is_empty(),
+            "one error node, not a span"
+        );
         spans_match_block(Lang::Rust, src);
     }
 

@@ -1,7 +1,7 @@
 // Kept here so the agent's public name (`agent::Totals`) survives the move:
 // the type now lives in `brain`, where `tools` can carry it on a `ToolOutput`.
-pub use brain::totals::Totals;
 use brain::stream::Usage;
+pub use brain::totals::Totals;
 
 /// What the loop reports as it runs. A renderer consumes these; the loop never
 /// writes to a terminal itself.

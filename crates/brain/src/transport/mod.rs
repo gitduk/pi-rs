@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use serde_json::Value;
 
-use crate::model::ModelSpec;
 use crate::error::Result;
+use crate::model::ModelSpec;
 use crate::request::Request;
 use crate::stream::StreamEvent;
 
@@ -101,7 +101,6 @@ pub trait Transport: Send + Sync {
         req: &Request,
     ) -> Result<BoxStream<'static, Result<StreamEvent>>>;
 }
-
 
 /// A `Gaps` shared between the transport that owns it and the stream it hands
 /// out. Cloneable, so the stream takes one rather than borrowing the transport.
@@ -217,7 +216,12 @@ impl Gaps {
 
     /// Read a string field the frame owes. `None` says the host left it out,
     /// and says so where a bare `?` used to drop the frame in silence.
-    pub(crate) fn owed<'a>(&mut self, frame: &'a Value, event: &str, field: &str) -> Option<&'a str> {
+    pub(crate) fn owed<'a>(
+        &mut self,
+        frame: &'a Value,
+        event: &str,
+        field: &str,
+    ) -> Option<&'a str> {
         match frame[field].as_str() {
             Some(found) => Some(found),
             None => {
@@ -240,7 +244,10 @@ mod tests {
         assert_eq!(gaps.owed(&delta, "content_block_delta", "text"), None);
         assert_eq!(gaps.reported(), 1);
         // The field that is there reads back without reporting anything.
-        assert_eq!(gaps.owed(&delta, "content_block_delta", "type"), Some("text_delta"));
+        assert_eq!(
+            gaps.owed(&delta, "content_block_delta", "type"),
+            Some("text_delta")
+        );
         assert_eq!(gaps.reported(), 1);
     }
 

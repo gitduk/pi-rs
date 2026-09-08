@@ -66,7 +66,10 @@ async fn json_comes_back_as_it_was_served() {
         .await
         .unwrap()
         .flatten();
-    assert!(body.contains("{\"tag\":\"v1.11.0\",\"draft\":false}"), "{body}");
+    assert!(
+        body.contains("{\"tag\":\"v1.11.0\",\"draft\":false}"),
+        "{body}"
+    );
 }
 
 /// A 404's own page is often the most informative thing about the mistake, so
@@ -99,7 +102,10 @@ async fn a_binary_response_is_refused_with_its_type_named() {
         .execute(json!({ "url": url }), &c)
         .await
         .unwrap_err();
-    assert!(matches!(err, ToolError::Invalid(ref m) if m.contains("image/png")), "{err}");
+    assert!(
+        matches!(err, ToolError::Invalid(ref m) if m.contains("image/png")),
+        "{err}"
+    );
 }
 
 /// The scheme gate is the whole boundary between this tool and a second,
@@ -190,10 +196,9 @@ async fn a_server_cannot_write_its_own_tags_into_the_transcript() {
 /// the gate is worth nothing if a `Location:` header can step around it.
 #[tokio::test]
 async fn a_redirect_cannot_leave_http() {
-    let url = serving(
-        "HTTP/1.1 302 Found\r\nLocation: file:///etc/passwd\r\nConnection: close\r\n\r\n",
-    )
-    .await;
+    let url =
+        serving("HTTP/1.1 302 Found\r\nLocation: file:///etc/passwd\r\nConnection: close\r\n\r\n")
+            .await;
     let (_d, c) = ctx();
     let body = Fetch::default()
         .execute(json!({ "url": url }), &c)
@@ -223,9 +228,16 @@ async fn an_escaped_close_tag_cannot_come_back_as_a_real_one() {
         .await
         .unwrap()
         .flatten();
-    assert_eq!(body.matches("<fetched ").count(), 1, "a second result: {body}");
+    assert_eq!(
+        body.matches("<fetched ").count(),
+        1,
+        "a second result: {body}"
+    );
     assert_eq!(body.matches("</fetched>").count(), 1, "{body}");
-    assert!(body.contains("trusted.example"), "the prose survives: {body}");
+    assert!(
+        body.contains("trusted.example"),
+        "the prose survives: {body}"
+    );
 }
 
 /// The same by the other door: a JSON body is passed through verbatim, so
@@ -246,4 +258,3 @@ async fn a_json_body_cannot_close_the_tag_either() {
     assert_eq!(body.matches("<fetched ").count(), 1, "{body}");
     assert_eq!(body.matches("</fetched>").count(), 1, "{body}");
 }
-

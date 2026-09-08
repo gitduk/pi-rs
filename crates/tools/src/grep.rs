@@ -212,7 +212,9 @@ impl Tool for Grep {
                 .map(|h| format!("{} ({} matches)\n", h.path, h.lines.len()))
                 .collect();
             let notice = over(hits.len() - rows.len(), "files");
-            return Ok(ToolOutput::text(spill::fit(ctx, &rows, "files", &notice)?).with_preview(preview));
+            return Ok(
+                ToolOutput::text(spill::fit(ctx, &rows, "files", &notice)?).with_preview(preview)
+            );
         }
 
         // One per hit file, so a body over budget drops whole sections: a row

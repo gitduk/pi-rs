@@ -318,20 +318,23 @@ fn build(
 
     let mut out: Vec<String> = Vec::with_capacity(len);
     let mut landed: Vec<Landed> = Vec::new();
-    let record =
-        |out: &mut Vec<String>, body: Vec<String>, took: Vec<String>, took_at: usize, landed: &mut Vec<Landed>| {
-            if body.is_empty() && took.is_empty() {
-                return;
-            }
-            let start = out.len() + 1;
-            out.extend(body);
-            landed.push(Landed {
-                start,
-                end: out.len(),
-                took,
-                took_at,
-            });
-        };
+    let record = |out: &mut Vec<String>,
+                  body: Vec<String>,
+                  took: Vec<String>,
+                  took_at: usize,
+                  landed: &mut Vec<Landed>| {
+        if body.is_empty() && took.is_empty() {
+            return;
+        }
+        let start = out.len() + 1;
+        out.extend(body);
+        landed.push(Landed {
+            start,
+            end: out.len(),
+            took,
+            took_at,
+        });
+    };
 
     if len == 0 {
         record(
@@ -483,14 +486,10 @@ pub fn first_changed_line(changes: &[Change]) -> Option<usize> {
         let (content, landed) = match change {
             Change::Remove { .. } => continue,
             Change::Write {
-                content,
-                landed,
-                ..
+                content, landed, ..
             }
             | Change::Rename {
-                content,
-                landed,
-                ..
+                content, landed, ..
             } => (content, landed),
         };
         let lines: Vec<&str> = content.lines().collect();
@@ -504,7 +503,14 @@ pub fn first_changed_line(changes: &[Change]) -> Option<usize> {
     }
     None
 }
-fn hunks(out: &mut String, old_path: &str, new_path: &str, old_content: &str, content: &str, landed: &[Landed]) {
+fn hunks(
+    out: &mut String,
+    old_path: &str,
+    new_path: &str,
+    old_content: &str,
+    content: &str,
+    landed: &[Landed],
+) {
     const CONTEXT: usize = 3;
     let old: Vec<&str> = old_content.lines().collect();
     let new: Vec<&str> = content.lines().collect();
@@ -551,7 +557,10 @@ fn hunks(out: &mut String, old_path: &str, new_path: &str, old_content: &str, co
             out.push_str(t);
             out.push('\n');
         }
-        for g in new.get(l.start.saturating_sub(1)..l.end).unwrap_or_default() {
+        for g in new
+            .get(l.start.saturating_sub(1)..l.end)
+            .unwrap_or_default()
+        {
             out.push('+');
             out.push_str(g);
             out.push('\n');
@@ -571,9 +580,5 @@ fn changed(l: &Landed, lines: &[&str]) -> bool {
     let gave = lines
         .get(l.start.saturating_sub(1)..l.end)
         .unwrap_or_default();
-    l.took.len() != gave.len()
-        || l.took
-            .iter()
-            .zip(gave)
-            .any(|(t, g)| t != g)
+    l.took.len() != gave.len() || l.took.iter().zip(gave).any(|(t, g)| t != g)
 }

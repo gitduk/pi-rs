@@ -35,7 +35,12 @@ fn edit(before: &str, ops: &str) -> Result<String, Error> {
 // Apply `ops` to a single file and return the whole plan, hunks and all.
 fn plan_for(before: &str, ops: &str) -> Plan {
     let src = format!("[a.rs#{}]\n{ops}", tag(before));
-    apply(&parse(&src).unwrap(), &files(&[("a.rs", before)]), &NoBlocks).unwrap()
+    apply(
+        &parse(&src).unwrap(),
+        &files(&[("a.rs", before)]),
+        &NoBlocks,
+    )
+    .unwrap()
 }
 
 // The unified patch `ops` produces against `before`, as a string.
@@ -102,10 +107,7 @@ fn a_stale_tag_is_rejected_before_anything_is_built() {
 
 #[test]
 fn one_stale_section_rejects_the_whole_patch() {
-    let src = format!(
-        "[a.rs#{}]\nPUT 1:\n+A\n[b.rs#0000]\nPUT 1:\n+B\n",
-        tag(SRC)
-    );
+    let src = format!("[a.rs#{}]\nPUT 1:\n+A\n[b.rs#0000]\nPUT 1:\n+B\n", tag(SRC));
     let patch = parse(&src).unwrap();
     // a.rs is valid, but a partly-applied patch is worse than a rejected one.
     assert!(apply(&patch, &files(&[("a.rs", SRC), ("b.rs", SRC)]), &NoBlocks).is_err());
@@ -362,14 +364,16 @@ fn an_insert_after_a_range_is_anchored_where_it_was_written() {
     // as one: the shift boundary and the address a refusal prints back. A
     // `:DOWN` sharing its anchor with the range's end is the case that named
     // the range's start instead, reporting a shift above where anything moved.
-    let src = "[a.rs#(tag)]\nPUT 2-4:\n+A\n+B\n+C\nPUT 4:DOWN\n+tail\n"
-        .replace("(tag)", &tag(SRC));
+    let src = "[a.rs#(tag)]\nPUT 2-4:\n+A\n+B\n+C\nPUT 4:DOWN\n+tail\n".replace("(tag)", &tag(SRC));
     let plan = apply(&parse(&src).unwrap(), &files(&[("a.rs", SRC)]), &NoBlocks).unwrap();
     let Change::Write { landed, .. } = &plan.changes[0] else {
         panic!("expected a write")
     };
     let inserted = landed.last().expect("the insertion");
-    assert_eq!(inserted.took_at, 4, "anchored at the range's end, not its start");
+    assert_eq!(
+        inserted.took_at, 4,
+        "anchored at the range's end, not its start"
+    );
     // The replace is one-for-one, so only the insertion moves anything.
     assert_eq!(first_shifted_line(&plan.changes), Some(4));
 }
@@ -444,14 +448,10 @@ fn a_spelling_this_grammar_dropped_is_simply_not_an_address() {
         "PUT 2>:\n+x",
         "PUT 2*>:\n+x",
         "CUT 2>",
-        "CUT 2:UP",    // direction lives on PUT; CUT takes lines or a block
-        "CUT abc",     // never valid under either
+        "CUT 2:UP", // direction lives on PUT; CUT takes lines or a block
+        "CUT abc",  // never valid under either
     ] {
-        assert!(
-            says(ops).contains("an address is"),
-            "{ops}: {}",
-            says(ops)
-        );
+        assert!(says(ops).contains("an address is"), "{ops}: {}", says(ops));
     }
 
     // Complaints that are about the number rather than the shape stay their
@@ -481,7 +481,11 @@ fn what_the_grammar_prints_is_what_the_grammar_reads() {
     for want in cases {
         let shown = want.to_string();
         // The door a view uses to ask "is this one of mine".
-        assert_eq!(Target::read(&shown), Some(want), "`{shown}` did not read back");
+        assert_eq!(
+            Target::read(&shown),
+            Some(want),
+            "`{shown}` did not read back"
+        );
         let patch = parse(&format!("[f.rs#AAAA]\nCUT {shown}\n"))
             .unwrap_or_else(|e| panic!("`{shown}` does not parse: {e}"));
         let got = match &patch.sections[0].ops[0] {
@@ -594,8 +598,7 @@ fn a_later_hunk_numbers_its_displaced_lines_in_the_original_file() {
     // `took_at` keeps the original numbering; `start` is where they are now.
     let src = format!("[a.rs#{}]\nPUT 1:\n+a\n+b\nCUT 3:\n", tag(SRC));
     let plan = apply(&parse(&src).unwrap(), &files(&[("a.rs", SRC)]), &NoBlocks).unwrap();
-    let Change::Write { landed, .. } = &plan.changes[0]
-    else {
+    let Change::Write { landed, .. } = &plan.changes[0] else {
         panic!()
     };
     assert_eq!(landed[1].took, vec!["three"]);
@@ -653,10 +656,7 @@ fn crlf_files_keep_their_ending_and_new_rows_join_with_it() {
 
 #[test]
 fn a_crlf_file_without_a_trailing_newline_keeps_it_that_way() {
-    assert_eq!(
-        edit("one\r\ntwo", "PUT 1:\n+ONE\n").unwrap(),
-        "ONE\r\ntwo"
-    );
+    assert_eq!(edit("one\r\ntwo", "PUT 1:\n+ONE\n").unwrap(), "ONE\r\ntwo");
 }
 
 #[test]
@@ -677,16 +677,27 @@ fn unified_patch_keeps_neighbouring_hunks_from_sharing_context() {
         patch_of(SRC, "PUT 1:UP:\n+zero\nCUT 4:\n"),
         "--- a/a.rs\n+++ b/a.rs\n@@ -1,3 +1,4 @@\n+zero\n one\n two\n three\n@@ -4,1 +4,0 @@\n-four\n"
     );
-    assert_eq!(first_changed_line(&plan_for(SRC, "PUT 1:UP:\n+zero\nCUT 4:\n").changes), Some(1));
+    assert_eq!(
+        first_changed_line(&plan_for(SRC, "PUT 1:UP:\n+zero\nCUT 4:\n").changes),
+        Some(1)
+    );
 }
 
 #[test]
 fn unified_patch_skips_hunks_that_changed_nothing_and_deleted_files() {
     assert_eq!(patch_of(SRC, "PUT 2:\n+two\n"), "");
-    assert_eq!(first_changed_line(&plan_for(SRC, "PUT 2:\n+two\n").changes), None);
+    assert_eq!(
+        first_changed_line(&plan_for(SRC, "PUT 2:\n+two\n").changes),
+        None
+    );
 
     let removed = format!("[a.rs#{}]\nRM\n", tag(SRC));
-    let plan = apply(&parse(&removed).unwrap(), &files(&[("a.rs", SRC)]), &NoBlocks).unwrap();
+    let plan = apply(
+        &parse(&removed).unwrap(),
+        &files(&[("a.rs", SRC)]),
+        &NoBlocks,
+    )
+    .unwrap();
     assert_eq!(unified_patch(&plan.changes, &files(&[("a.rs", SRC)])), "");
     assert_eq!(first_changed_line(&plan.changes), None);
 }
@@ -703,8 +714,14 @@ fn unified_patch_names_both_sides_of_a_rename() {
 
 #[test]
 fn first_changed_line_anchors_a_pure_deletion_before_it() {
-    assert_eq!(first_changed_line(&plan_for(SRC, "CUT 4:\n").changes), Some(3));
-    assert_eq!(first_changed_line(&plan_for(SRC, "CUT 1:\n").changes), Some(1));
+    assert_eq!(
+        first_changed_line(&plan_for(SRC, "CUT 4:\n").changes),
+        Some(3)
+    );
+    assert_eq!(
+        first_changed_line(&plan_for(SRC, "CUT 1:\n").changes),
+        Some(1)
+    );
 }
 
 #[test]

@@ -123,8 +123,7 @@ impl Workspace {
     }
 
     fn allows(&self, path: &Path) -> bool {
-        path.starts_with(&self.root)
-            || self.write_roots.iter().any(|root| path.starts_with(root))
+        path.starts_with(&self.root) || self.write_roots.iter().any(|root| path.starts_with(root))
     }
 
     /// Workspace-relative form for display. Absolute paths would let the model
@@ -259,7 +258,10 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         let ws = ws.with_write_roots(&[outside.path()]).unwrap();
         let named = format!("{}/sub", outside.path().display());
-        assert!(ws.resolve(&named, Tier::Exec).is_ok(), "bash may work there");
+        assert!(
+            ws.resolve(&named, Tier::Exec).is_ok(),
+            "bash may work there"
+        );
         assert!(ws.resolve(&named, Tier::Write).is_ok());
     }
 
@@ -281,7 +283,10 @@ mod tests {
         let through_link = ws
             .resolve(&format!("{}/x.txt", link.display()), Tier::Write)
             .expect("the root it actually names");
-        assert_eq!(through_link, elsewhere.path().canonicalize().unwrap().join("x.txt"));
+        assert_eq!(
+            through_link,
+            elsewhere.path().canonicalize().unwrap().join("x.txt")
+        );
 
         // And it widened to that target only, not to the link's own parent.
         assert!(matches!(
@@ -303,7 +308,10 @@ mod tests {
         let ws = ws.with_write_roots(&[allowed.path()]).unwrap();
         assert!(
             matches!(
-                ws.resolve(&format!("{}/out/secret", allowed.path().display()), Tier::Write),
+                ws.resolve(
+                    &format!("{}/out/secret", allowed.path().display()),
+                    Tier::Write
+                ),
                 Err(ToolError::Escape(_))
             ),
             "a link out of the write root is still out of it"

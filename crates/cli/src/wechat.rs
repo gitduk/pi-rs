@@ -12,8 +12,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use agent::Event;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use wechat::Update;
@@ -200,7 +200,10 @@ impl Bridge {
             Event::ToolStart { name, args, .. } => {
                 self.tool_buf.push(tool_line(name, args));
                 let now = Instant::now();
-                if self.last_tool.is_none_or(|t| now.duration_since(t) >= TOOL_INTERVAL) {
+                if self
+                    .last_tool
+                    .is_none_or(|t| now.duration_since(t) >= TOOL_INTERVAL)
+                {
                     self.last_tool = Some(now);
                     self.flush_tools().await;
                 }
@@ -211,20 +214,26 @@ impl Bridge {
                 preview,
                 ..
             } => {
-                self.say(&format!("✗ {name} failed — {}", crate::render::clip(preview, 80)))
-                    .await;
+                self.say(&format!(
+                    "✗ {name} failed — {}",
+                    crate::render::clip(preview, 80)
+                ))
+                .await;
             }
-            Event::ToolDenied {
-                name, reason, ..
-            } => self.say(&format!("✗ {name} denied — {reason}")).await,
+            Event::ToolDenied { name, reason, .. } => {
+                self.say(&format!("✗ {name} denied — {reason}")).await
+            }
             Event::Retrying {
                 attempt,
                 delay_ms,
                 reason,
                 ..
             } => {
-                self.say(&format!("↻ retry {attempt} in {}s — {reason}", delay_ms / 1000))
-                    .await;
+                self.say(&format!(
+                    "↻ retry {attempt} in {}s — {reason}",
+                    delay_ms / 1000
+                ))
+                .await;
             }
             Event::Warning(w) => self.say(w).await,
             Event::Compacted(r) => {
@@ -322,9 +331,15 @@ impl Bridge {
                 }
                 // A later piece without the ones before it reads as garbage,
                 // so a failed send ends the message rather than skipping a hole.
-                if let Err(e) = client.send_text(&token, &peer, &context_token, &piece).await {
-                    let part =
-                        if total > 1 { format!(" (piece {}/{total})", i + 1) } else { String::new() };
+                if let Err(e) = client
+                    .send_text(&token, &peer, &context_token, &piece)
+                    .await
+                {
+                    let part = if total > 1 {
+                        format!(" (piece {}/{total})", i + 1)
+                    } else {
+                        String::new()
+                    };
                     let _ = tx.send(Inbound::Notice(format!(
                         "wechat send failed{part}: {e:#} — try sending a message from the phone first"
                     )));
@@ -490,9 +505,7 @@ async fn poll(
             _ = abort.cancelled() => return,
         };
         match update {
-            Ok(update) => {
-                handle_update(&state, &tx, update, &mut failures, &mut timeout).await
-            }
+            Ok(update) => handle_update(&state, &tx, update, &mut failures, &mut timeout).await,
             Err(e) => {
                 failures += 1;
                 if failures == 3 {
@@ -678,7 +691,10 @@ fn boundary(rest: &str, budget: usize) -> (usize, usize) {
         let skip = if sep == " " {
             1
         } else {
-            rest[i..].bytes().take_while(|b| matches!(b, b'\n' | b'\r')).count()
+            rest[i..]
+                .bytes()
+                .take_while(|b| matches!(b, b'\n' | b'\r'))
+                .count()
         };
         return (i, skip);
     }
@@ -792,10 +808,7 @@ mod tests {
     #[test]
     fn a_tool_line_carries_the_summarized_argument() {
         let args = serde_json::json!({ "path": "crates/cli/src/wechat.rs" });
-        assert_eq!(
-            tool_line("edit", &args),
-            "⚙ edit crates/cli/src/wechat.rs"
-        );
+        assert_eq!(tool_line("edit", &args), "⚙ edit crates/cli/src/wechat.rs");
         assert_eq!(tool_line("read", &serde_json::json!({})), "⚙ read");
     }
 

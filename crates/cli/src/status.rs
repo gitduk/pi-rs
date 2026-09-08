@@ -461,12 +461,7 @@ mod tests {
     /// patch one in afterwards.
     #[test]
     fn a_snapshot_asks_for_what_no_event_states() {
-        let s = Tally::default().snapshot(
-            "sonnet",
-            Some("f1"),
-            Some(Duration::from_secs(3)),
-            2,
-        );
+        let s = Tally::default().snapshot("sonnet", Some("f1"), Some(Duration::from_secs(3)), 2);
         assert_eq!(s.model, "sonnet");
         assert_eq!(s.worktree.as_deref(), Some("f1"));
         assert_eq!(s.elapsed, Some(Duration::from_secs(3)));

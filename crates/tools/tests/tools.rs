@@ -1175,7 +1175,11 @@ async fn what_a_run_wrote_is_recorded_as_it_writes() {
     run(&tools::read::Read, json!({ "path": "a.rs" }), &c).await;
 
     let wrote: Vec<String> = c.writes().iter().map(|p| c.workspace.display(p)).collect();
-    assert_eq!(wrote, ["a.rs", "b.rs"], "both writers, sorted, the read left out");
+    assert_eq!(
+        wrote,
+        ["a.rs", "b.rs"],
+        "both writers, sorted, the read left out"
+    );
 }
 
 #[tokio::test]
@@ -1183,10 +1187,21 @@ async fn a_run_with_its_own_record_writes_nothing_into_its_parents() {
     let (_d, parent) = ctx();
     let child = parent.clone().with_own_writes();
 
-    run(&tools::write::Write, json!({ "path": "c.rs", "content": "x\n" }), &child).await;
-    run(&tools::write::Write, json!({ "path": "p.rs", "content": "y\n" }), &parent).await;
+    run(
+        &tools::write::Write,
+        json!({ "path": "c.rs", "content": "x\n" }),
+        &child,
+    )
+    .await;
+    run(
+        &tools::write::Write,
+        json!({ "path": "p.rs", "content": "y\n" }),
+        &parent,
+    )
+    .await;
 
-    let named = |c: &Ctx| -> Vec<String> { c.writes().iter().map(|p| c.workspace.display(p)).collect() };
+    let named =
+        |c: &Ctx| -> Vec<String> { c.writes().iter().map(|p| c.workspace.display(p)).collect() };
     // The whole point of the split: asking what the child wrote is asking about
     // the child, and a shared record answers with both and names neither.
     assert_eq!(named(&child), ["c.rs"]);
@@ -1194,8 +1209,17 @@ async fn a_run_with_its_own_record_writes_nothing_into_its_parents() {
 
     // A plain clone shares it, which is what makes the opt-in necessary.
     let sharing = parent.clone();
-    run(&tools::write::Write, json!({ "path": "s.rs", "content": "z\n" }), &sharing).await;
-    assert_eq!(named(&parent), ["p.rs", "s.rs"], "a clone writes into the record it came with");
+    run(
+        &tools::write::Write,
+        json!({ "path": "s.rs", "content": "z\n" }),
+        &sharing,
+    )
+    .await;
+    assert_eq!(
+        named(&parent),
+        ["p.rs", "s.rs"],
+        "a clone writes into the record it came with"
+    );
 }
 
 #[tokio::test]
@@ -1211,7 +1235,14 @@ async fn a_command_that_printed_nothing_still_reports_how_it_ended() {
     // whose row is read to find out what was asked.
     assert_eq!(quiet.preview(), "grep nothing /dev/null | head");
 
-    let failed = tools::bash::Bash.execute(json!({ "command": "false" }), &c).await.unwrap();
-    assert_eq!(failed.flatten().trim(), "exit 1", "a silent failure is not a silent success");
+    let failed = tools::bash::Bash
+        .execute(json!({ "command": "false" }), &c)
+        .await
+        .unwrap();
+    assert_eq!(
+        failed.flatten().trim(),
+        "exit 1",
+        "a silent failure is not a silent success"
+    );
     assert!(!failed.useless, "which is exactly what a later turn needs");
 }

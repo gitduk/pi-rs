@@ -80,7 +80,9 @@ impl Tool for Bash {
         };
         // A zero would otherwise kill the command before it started.
         let timeout = std::time::Duration::from_millis(
-            args.timeout_ms.filter(|ms| *ms > 0).unwrap_or(DEFAULT_TIMEOUT_MS),
+            args.timeout_ms
+                .filter(|ms| *ms > 0)
+                .unwrap_or(DEFAULT_TIMEOUT_MS),
         );
 
         let ran = run(&args.command, &cwd, timeout, ctx).await?;
@@ -234,7 +236,8 @@ mod tests {
     #[test]
     fn a_git_lock_failure_is_recognised() {
         let index = "fatal: Unable to create '/w/.git/index.lock': File exists.";
-        let head = "fatal: cannot lock ref 'HEAD': Unable to create '/w/.git/HEAD.lock': File exists.";
+        let head =
+            "fatal: cannot lock ref 'HEAD': Unable to create '/w/.git/HEAD.lock': File exists.";
         let other = "Another git process seems to be running in this repository";
         let not = "fatal: not a git repository (or any of the parent directories): .git";
         for busy in [index, head, other] {

@@ -205,7 +205,6 @@ impl Store {
             .join("session.json")
     }
 
-
     /// `created` is the caller's because it is set once and never changes.
     /// Reading it back off disk here meant parsing the whole transcript to
     /// recover one integer — on every turn, growing with the session it saved.
@@ -717,5 +716,4 @@ mod tests {
         // And it loads from the bucket by id alone.
         assert_eq!(store.load("t").unwrap().id, "t");
     }
-
 }

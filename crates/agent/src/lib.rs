@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use brain::model::ModelSpec;
 use brain::message::{Message, ToolCall, ToolResult};
+use brain::model::ModelSpec;
 use brain::request::{Effort, Request};
 use brain::stream::{Accumulator, InvalidToolArgs, StreamEvent};
 use brain::transport::Transport;
@@ -26,10 +26,10 @@ pub mod task;
 
 pub use approval::{Approver, Ceiling, Decision};
 pub use compact::Policy;
-pub use remember::{Kept, Shelf};
-pub use steer::Steer;
 use event::say;
 pub use event::{Event, Totals};
+pub use remember::{Kept, Shelf};
+pub use steer::Steer;
 
 pub const DEFAULT_SYSTEM: &str = include_str!("../prompts/system.md");
 
@@ -101,7 +101,6 @@ pub enum AgentError {
     #[error("cancelled")]
     Cancelled,
 }
-
 
 #[derive(Clone)]
 pub struct Agent {
@@ -212,7 +211,6 @@ impl Agent {
         // How many times a tool has failed in a row, so a loop can be named —
         // naming it is the only thing that stops one.
         let mut failures: Failures = Failures::new();
-
 
         // Our token estimate is a bound, not a measurement. When the provider
         // says otherwise, this is what carries the correction forward.
@@ -498,7 +496,10 @@ impl Agent {
     ) -> Option<(compact::Report, Totals)> {
         let base = self.compaction;
         let tail = self.tail_within(self.budget());
-        let policy = compact::Policy { protect_tail: tail, ..base };
+        let policy = compact::Policy {
+            protect_tail: tail,
+            ..base
+        };
         let (mut record, mut report) = compact::plan(session, &self.spec, tail, &policy);
         let mut spent = Totals::default();
         if !record.dropped.is_empty() {
@@ -607,7 +608,6 @@ impl Agent {
     pub fn budget(&self) -> usize {
         self.budget_within(self.spec.context_window as usize)
     }
-
 
     /// The same accounting against a window the provider named instead of the
     /// one the spec claims.
@@ -1070,10 +1070,21 @@ mod tests {
     fn the_shelf_rides_the_turn_behind_the_window_reading() {
         let window = context_note(10, 100, false);
         assert_eq!(turn_notes(10, 100, false, None), vec![window.clone()]);
-        assert_eq!(turn_notes(10, 100, false, Some("   ".into())), vec![window.clone()]);
         assert_eq!(
-            turn_notes(10, 100, false, Some("<memory>\n2026-09-07 prefers xh\n</memory>".into())),
-            vec![window, "<memory>\n2026-09-07 prefers xh\n</memory>".to_string()]
+            turn_notes(10, 100, false, Some("   ".into())),
+            vec![window.clone()]
+        );
+        assert_eq!(
+            turn_notes(
+                10,
+                100,
+                false,
+                Some("<memory>\n2026-09-07 prefers xh\n</memory>".into())
+            ),
+            vec![
+                window,
+                "<memory>\n2026-09-07 prefers xh\n</memory>".to_string()
+            ]
         );
     }
 
@@ -1113,12 +1124,24 @@ mod tests {
     fn the_notice_points_at_the_journal_it_cannot_otherwise_reach() {
         let journal = std::path::Path::new("/fixture/sessions/-w/s1/journal.jsonl");
         let mut f = Failures::new();
-        too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f, Some(journal));
-        let notice =
-            too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f, Some(journal))
-                .expect("the second same-code failure is named");
+        too_many_failures(
+            &call("edit"),
+            Some("EDIT_UNBALANCED"),
+            &mut f,
+            Some(journal),
+        );
+        let notice = too_many_failures(
+            &call("edit"),
+            Some("EDIT_UNBALANCED"),
+            &mut f,
+            Some(journal),
+        )
+        .expect("the second same-code failure is named");
 
-        assert!(notice.contains("/fixture/sessions/-w/s1/journal.jsonl"), "{notice}");
+        assert!(
+            notice.contains("/fixture/sessions/-w/s1/journal.jsonl"),
+            "{notice}"
+        );
         // JSONL has no skeleton to fall back on, so a whole-file read is the
         // one way to spend the window that the pointer would have saved.
         assert!(notice.contains("grep"), "{notice}");
@@ -1191,7 +1214,10 @@ mod tests {
         let raw = format!(r#"{{"path":"{}"}}"#, "a".repeat(600));
         // Column at the very end: the window must reach the tail, hiding the
         // head where the parse already succeeded.
-        let tail = invalid_args_snippet(&raw, "control character found in string at line 1 column 611");
+        let tail = invalid_args_snippet(
+            &raw,
+            "control character found in string at line 1 column 611",
+        );
         assert!(tail.starts_with('…'), "{tail}");
         assert!(tail.ends_with('}'), "{tail}");
         assert!(tail.chars().count() <= MAX_INVALID_ARGS_SHOWN + 1, "{tail}");

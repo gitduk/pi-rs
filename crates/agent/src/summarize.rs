@@ -1,5 +1,5 @@
-use brain::model::ModelSpec;
 use brain::message::AssistantContent;
+use brain::model::ModelSpec;
 
 use crate::session::{Entry, UserBody};
 use brain::stream::Usage;
@@ -37,9 +37,7 @@ pub fn render(earlier: &[&str], entries: &[&Entry]) -> String {
     for e in entries {
         match e {
             Entry::User { body, .. } => match body {
-                UserBody::Prompt(t) => {
-                    lines.push(format!("[user] {}", clip(&t.text, BLOCK_CHARS)))
-                }
+                UserBody::Prompt(t) => lines.push(format!("[user] {}", clip(&t.text, BLOCK_CHARS))),
                 UserBody::Aside(t) => {
                     lines.push(format!("[user ran] {}", clip(&t.text, BLOCK_CHARS)))
                 }
@@ -108,7 +106,8 @@ pub async fn run(
         Some(f) => format!("Focus the summary on: {f}\n\n{history}"),
         None => history,
     };
-    let (text, usage) = crate::oneshot::ask(transport, spec, PROMPT, body, MAX_SUMMARY_TOKENS).await?;
+    let (text, usage) =
+        crate::oneshot::ask(transport, spec, PROMPT, body, MAX_SUMMARY_TOKENS).await?;
     // Unlike the shelf beside it, nothing to say is a failure here: the span
     // goes either way, and it goes unsummarized.
     if text.trim().is_empty() {
@@ -218,14 +217,16 @@ mod tests {
 
     #[test]
     fn reasoning_is_left_out_of_the_record() {
-        let a = assistant(vec![AssistantContent::Reasoning(brain::message::Reasoning {
-            id: None,
-            content: vec![brain::message::ReasoningContent::Text {
-                text: "scratch work".into(),
-                signature: None,
-            }],
-            by: None,
-        })]);
+        let a = assistant(vec![AssistantContent::Reasoning(
+            brain::message::Reasoning {
+                id: None,
+                content: vec![brain::message::ReasoningContent::Text {
+                    text: "scratch work".into(),
+                    signature: None,
+                }],
+                by: None,
+            },
+        )]);
         assert!(!render(&[], &[&a]).contains("scratch work"));
     }
 }

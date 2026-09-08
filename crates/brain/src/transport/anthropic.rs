@@ -4,14 +4,14 @@ use futures::stream::{BoxStream, StreamExt};
 use serde_json::{Value, json};
 
 use super::Transport;
-use crate::model::{CacheControl, Format, ModelSpec, ThinkingControl};
+use super::{Gaps, Shared};
 use crate::error::{BrainError, Result};
 use crate::message::{
-    AssistantContent, Image, Message, Reasoning, Replay, ToolResult,
-    ToolResultContent, UserContent, tagged,
+    AssistantContent, Image, Message, Reasoning, Replay, ToolResult, ToolResultContent,
+    UserContent, tagged,
 };
+use crate::model::{CacheControl, Format, ModelSpec, ThinkingControl};
 use crate::request::{Request, ToolChoice};
-use super::{Gaps, Shared};
 use crate::stream::{BlockKind, StopReason, StreamEvent, Usage};
 
 const API_VERSION: &str = "2023-06-01";
@@ -128,14 +128,12 @@ fn encode_message(msg: &Message, spec: &ModelSpec) -> Option<Value> {
                 .filter_map(|b| match b {
                     AssistantContent::Text(t) => Some(json!({ "type": "text", "text": t.text })),
                     AssistantContent::Reasoning(r) => encode_reasoning(r, spec),
-                    AssistantContent::ToolCall(call) => {
-                        Some(json!({
-                            "type": "tool_use",
-                            "id": call.id,
-                            "name": call.name,
-                            "input": call.args,
-                        }))
-                    }
+                    AssistantContent::ToolCall(call) => Some(json!({
+                        "type": "tool_use",
+                        "id": call.id,
+                        "name": call.name,
+                        "input": call.args,
+                    })),
                 })
                 .collect();
             (!blocks.is_empty()).then(|| json!({ "role": "assistant", "content": blocks }))
@@ -325,9 +323,7 @@ fn decode_frame(
                 cache_read: u["cache_read_input_tokens"].as_u64().unwrap_or(0),
                 cache_write: u["cache_creation_input_tokens"].as_u64().unwrap_or(0),
             };
-            Some(StreamEvent::MessageStart {
-                usage: *usage,
-            })
+            Some(StreamEvent::MessageStart { usage: *usage })
         }
         "content_block_start" => {
             let block = &data["content_block"];
@@ -361,11 +357,15 @@ fn decode_frame(
                 }),
                 "signature_delta" => Some(StreamEvent::ReasoningSignature {
                     index,
-                    signature: gaps.owed(delta, "signature_delta", "signature")?.to_string(),
+                    signature: gaps
+                        .owed(delta, "signature_delta", "signature")?
+                        .to_string(),
                 }),
                 "input_json_delta" => Some(StreamEvent::ToolArgsDelta {
                     index,
-                    delta: gaps.owed(delta, "input_json_delta", "partial_json")?.to_string(),
+                    delta: gaps
+                        .owed(delta, "input_json_delta", "partial_json")?
+                        .to_string(),
                 }),
                 other => {
                     gaps.lost(event, other);
@@ -412,9 +412,7 @@ impl Transport for Anthropic {
         if let Some(key) = &self.api_key {
             call = call.header("x-api-key", key);
         }
-        let call = call
-            .header("anthropic-version", API_VERSION)
-            .json(&body);
+        let call = call.header("anthropic-version", API_VERSION).json(&body);
         let resp = super::exchange("anthropic", url, spec, req, &body, call).await?;
 
         let mut stop = StopReason::default();
@@ -449,10 +447,10 @@ impl Transport for Anthropic {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::CacheControl;
-    use crate::request::Effort;
     use crate::message::{Image, ReasoningContent, Text, ToolCall, ToolResultContent};
+    use crate::model::CacheControl;
     use crate::model::ReplayThinking;
+    use crate::request::Effort;
 
     fn spec() -> ModelSpec {
         ModelSpec {
@@ -475,13 +473,25 @@ mod tests {
             Message::user("go"),
             Message::Assistant {
                 content: vec![
-                    AssistantContent::ToolCall(ToolCall { id: "c1".into(), name: "read".into(), args: json!({}) }),
-                    AssistantContent::ToolCall(ToolCall { id: "c2".into(), name: "grep".into(), args: json!({}) }),
+                    AssistantContent::ToolCall(ToolCall {
+                        id: "c1".into(),
+                        name: "read".into(),
+                        args: json!({}),
+                    }),
+                    AssistantContent::ToolCall(ToolCall {
+                        id: "c2".into(),
+                        name: "grep".into(),
+                        args: json!({}),
+                    }),
                 ],
             },
             Message::tool_results(vec![result("c1", "read")]),
             Message::tool_results(vec![result("c2", "grep")]),
-            Message::User { content: vec![UserContent::Image(Image::Url { url: "http://x/i.png".into() })] },
+            Message::User {
+                content: vec![UserContent::Image(Image::Url {
+                    url: "http://x/i.png".into(),
+                })],
+            },
             Message::user("next"),
         ]
     }
@@ -507,7 +517,13 @@ mod tests {
         // encoder saw them. It no longer does — Responses wants them apart —
         // so the encoder joins instead, and the two orders must agree.
         let body = |m: Vec<Message>| {
-            build_body(&spec(), &Request { messages: m, ..Default::default() })
+            build_body(
+                &spec(),
+                &Request {
+                    messages: m,
+                    ..Default::default()
+                },
+            )
         };
         assert_eq!(body(apart()), body(together()));
         assert_eq!(body(apart())["messages"].as_array().unwrap().len(), 3);
@@ -526,7 +542,10 @@ mod tests {
             Message::Assistant {
                 content: vec![AssistantContent::Reasoning(Reasoning {
                     id: None,
-                    content: vec![ReasoningContent::Text { text: "t".into(), signature: None }],
+                    content: vec![ReasoningContent::Text {
+                        text: "t".into(),
+                        signature: None,
+                    }],
                     by: None,
                 })],
             },
@@ -703,7 +722,6 @@ mod tests {
         let block = &body["messages"][0]["content"][0];
         assert_eq!(block["tool_use_id"], "toolu_abc");
         assert!(block.get("id").is_none());
-
     }
 
     #[test]
@@ -762,10 +780,16 @@ mod tests {
         // An endpoint nobody measured is told nothing, per block no less than
         // per request.
         let mut cold = spec();
-        cold.format = Format::Anthropic { cache_control: CacheControl::Off };
+        cold.format = Format::Anthropic {
+            cache_control: CacheControl::Off,
+        };
         let body = build_body(&cold, &req);
         assert!(body.get("cache_control").is_none());
-        assert!(body["messages"][0]["content"][0].get("cache_control").is_none());
+        assert!(
+            body["messages"][0]["content"][0]
+                .get("cache_control")
+                .is_none()
+        );
     }
 
     /// Notes with nowhere to land take no marker, so it comes back unplaced and
@@ -799,12 +823,17 @@ mod tests {
             ..Default::default()
         };
         let body = build_body(&spec(), &req);
-        assert_eq!(body["cache_control"], json!({ "type": "ephemeral", "ttl": "1h" }));
+        assert_eq!(
+            body["cache_control"],
+            json!({ "type": "ephemeral", "ttl": "1h" })
+        );
         assert!(body["system"][0].get("cache_control").is_none());
         assert!(body["messages"][0].get("cache_control").is_none());
 
         let mut short = spec();
-        short.format = Format::Anthropic { cache_control: CacheControl::Standard };
+        short.format = Format::Anthropic {
+            cache_control: CacheControl::Standard,
+        };
         assert_eq!(
             build_body(&short, &req)["cache_control"],
             json!({ "type": "ephemeral" })
@@ -812,7 +841,9 @@ mod tests {
 
         // An endpoint nobody measured is not told to cache at all.
         let mut cold = spec();
-        cold.format = Format::Anthropic { cache_control: CacheControl::Off };
+        cold.format = Format::Anthropic {
+            cache_control: CacheControl::Off,
+        };
         assert!(build_body(&cold, &req).get("cache_control").is_none());
     }
 
@@ -854,7 +885,10 @@ mod tests {
         let kept = with(ReplayThinking::Tagged);
 
         let sent = |s: &ModelSpec| build_body(s, &req(s)).to_string();
-        assert!(!sent(&dropped).contains(&thinking), "it was dropped from the body");
+        assert!(
+            !sent(&dropped).contains(&thinking),
+            "it was dropped from the body"
+        );
         assert!(sent(&kept).contains(&thinking), "it rode the body");
 
         let counted = |s: &ModelSpec| crate::estimate::tokens(&req(s).messages, s);

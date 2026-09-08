@@ -49,7 +49,11 @@ impl Body {
                 let shown = if hidden {
                     "…".to_string()
                 } else if journal::secret(journal::leaf(path)) {
-                    if value.is_empty() { "<unset>".to_string() } else { "<set>".to_string() }
+                    if value.is_empty() {
+                        "<unset>".to_string()
+                    } else {
+                        "<set>".to_string()
+                    }
                 } else {
                     value.clone()
                 };
@@ -75,9 +79,9 @@ impl Body {
     /// What a finished edit asks the loop for.
     fn commit(&self, at: usize, text: String) -> Option<Intent> {
         match self {
-            Body::Settings(rows) => {
-                rows.get(at).map(|(path, _)| Intent::CommitSetting(path.clone(), text))
-            }
+            Body::Settings(rows) => rows
+                .get(at)
+                .map(|(path, _)| Intent::CommitSetting(path.clone(), text)),
             Body::Shelf(rows) => rows.get(at).map(|r| Intent::ShelfWrite(r.id, text)),
         }
     }
@@ -160,7 +164,12 @@ pub enum Took {
 
 impl Panel {
     pub fn new(body: Body) -> Self {
-        Self { body, at: 0, editing: None, refused: None }
+        Self {
+            body,
+            at: 0,
+            editing: None,
+            refused: None,
+        }
     }
 
     pub fn body(&self) -> &Body {
@@ -266,7 +275,9 @@ impl Panel {
             _ if self.editing.is_some() => {
                 if let Some(e) = &mut self.editing {
                     if let KeyCode::Char(c) = key.code
-                        && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                        && !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
                     {
                         e.insert(c);
                     } else if matches!(bound, Some(Action::DeleteCharBack)) {
@@ -314,7 +325,10 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn act(panel: &mut Panel, action: Action) -> Took {
-        panel.press(Some(action), KeyEvent::new(KeyCode::Null, KeyModifiers::NONE))
+        panel.press(
+            Some(action),
+            KeyEvent::new(KeyCode::Null, KeyModifiers::NONE),
+        )
     }
 
     fn typed(panel: &mut Panel, text: &str) {
@@ -361,7 +375,10 @@ mod tests {
     #[test]
     fn an_empty_shelf_has_nothing_to_rewrite_or_take_away() {
         let mut p = Panel::new(shelf(0));
-        assert!(matches!(intent(act(&mut p, Action::MenuDelete)), Intent::None));
+        assert!(matches!(
+            intent(act(&mut p, Action::MenuDelete)),
+            Intent::None
+        ));
         act(&mut p, Action::MenuNext);
         act(&mut p, Action::MenuAccept);
         assert!(!p.editing());
@@ -391,7 +408,11 @@ mod tests {
             ("base_url".into(), "http://y".into()),
         ]);
         p.refresh(after);
-        assert_eq!(p.editing_value(), "deepseek", "the same path, wherever it moved to");
+        assert_eq!(
+            p.editing_value(),
+            "deepseek",
+            "the same path, wherever it moved to"
+        );
         act(&mut p, Action::MenuAccept);
         assert!(matches!(
             intent(act(&mut p, Action::MenuAccept)),
@@ -406,10 +427,16 @@ mod tests {
         let mut p = Panel::new(shelf(3));
         act(&mut p, Action::MenuNext);
         act(&mut p, Action::MenuNext);
-        assert!(matches!(intent(act(&mut p, Action::MenuDelete)), Intent::ShelfDrop(3)));
+        assert!(matches!(
+            intent(act(&mut p, Action::MenuDelete)),
+            Intent::ShelfDrop(3)
+        ));
         p.refresh(shelf(2));
         assert!(
-            matches!(intent(act(&mut p, Action::MenuDelete)), Intent::ShelfDrop(2)),
+            matches!(
+                intent(act(&mut p, Action::MenuDelete)),
+                Intent::ShelfDrop(2)
+            ),
             "the last row, not past it"
         );
     }
@@ -421,7 +448,11 @@ mod tests {
         let mut p = Panel::new(shelf(3));
         act(&mut p, Action::MenuAccept);
         assert_eq!(p.editing_value(), "note 0");
-        assert_eq!(p.layer(), None, "its verbs are letters while a note is typed");
+        assert_eq!(
+            p.layer(),
+            None,
+            "its verbs are letters while a note is typed"
+        );
         act(&mut p, Action::MenuNext);
         act(&mut p, Action::MenuNext);
         typed(&mut p, "!");
@@ -437,7 +468,10 @@ mod tests {
     fn dismiss_leaves_the_edit_before_it_leaves_the_panel() {
         let mut p = Panel::new(shelf(1));
         act(&mut p, Action::MenuAccept);
-        assert!(matches!(act(&mut p, Action::MenuDismiss), Took::Intent(Intent::None)));
+        assert!(matches!(
+            act(&mut p, Action::MenuDismiss),
+            Took::Intent(Intent::None)
+        ));
         assert!(!p.editing());
         assert!(matches!(act(&mut p, Action::MenuDismiss), Took::Close));
     }

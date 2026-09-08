@@ -197,7 +197,6 @@ pub enum PatchError {
     Unbalanced,
 }
 
-
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
     /// A refusal whose prose the model reads, plus the category the loop

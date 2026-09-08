@@ -1,8 +1,8 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
-use agent::session::Session;
 use agent::Totals;
+use agent::session::Session;
 use tools::skills::Skill;
 use tools::{Tool, ToolError};
 
@@ -101,7 +101,11 @@ const BUILTIN: &[Command] = &[
         "",
         "re-read ~/.pi/settings.toml, the instructions and the skills",
     ),
-    Command::builtin("/status", "", "what this run is standing on, and where it is writing"),
+    Command::builtin(
+        "/status",
+        "",
+        "what this run is standing on, and where it is writing",
+    ),
     Command::builtin(
         "/keys",
         "",
@@ -459,7 +463,8 @@ impl Repl {
             Ok(p) => p,
             Err(e) => return failed(e),
         };
-        let mut resolved = match crate::resolve(&self.args, &root, &config, &project, &self.claimed) {
+        let mut resolved = match crate::resolve(&self.args, &root, &config, &project, &self.claimed)
+        {
             Ok(r) => r,
             Err(e) => return failed(e),
         };
@@ -512,7 +517,8 @@ impl Repl {
             Ok(_) => {}
             Err(e) => notes.push(format!(
                 "`{}` not re-dialled — {}",
-                self.lane_mut().agent.spec.model, e
+                self.lane_mut().agent.spec.model,
+                e
             )),
         }
         tracing::info!(
@@ -668,7 +674,12 @@ impl Repl {
         ));
         // An absent transcript is one a run has, and it is writing this
         // model's reasoning into it as we speak — so say it either way.
-        if self.lane_mut().session.as_ref().is_none_or(carries_reasoning) {
+        if self
+            .lane_mut()
+            .session
+            .as_ref()
+            .is_none_or(carries_reasoning)
+        {
             said.push(demotion(spec.replay_thinking).into());
         }
         tracing::info!(
@@ -688,7 +699,11 @@ impl Repl {
     /// `Task` holds a snapshot of the agent it was built from, so a retarget
     /// that stopped at the lane would leave the child on the old provider —
     /// with the old key — while the status line named the new model.
-    fn retarget(&mut self, transport: std::sync::Arc<dyn brain::Transport>, spec: brain::ModelSpec) {
+    fn retarget(
+        &mut self,
+        transport: std::sync::Arc<dyn brain::Transport>,
+        spec: brain::ModelSpec,
+    ) {
         let home = self.home(
             self.lane().ctx.workspace.root().to_path_buf(),
             spec.model.clone(),
@@ -827,9 +842,9 @@ impl Repl {
         let Some(lane) = self.lanes.get(at) else {
             return 0;
         };
-        lane.session
-            .as_ref()
-            .map_or(0, |s| brain::estimate::tokens(&s.context(), &lane.agent.spec))
+        lane.session.as_ref().map_or(0, |s| {
+            brain::estimate::tokens(&s.context(), &lane.agent.spec)
+        })
     }
 
     /// What `/cost` answers: one line per lane that has spent, then the
@@ -987,7 +1002,10 @@ pub enum Intent {
     LoopRound(String),
     /// Not a built-in word. It may name a skill and it may name nothing; the
     /// command table settles that, and `read` does not have it.
-    Other { word: String, args: String },
+    Other {
+        word: String,
+        args: String,
+    },
     /// `/new`, and `ctrl+l` twice: a fresh session, the old one kept on disk,
     /// and the screen rebuilt from the empty one. One variant, because they
     /// are one intent however it was expressed.
@@ -1052,7 +1070,9 @@ impl Intent {
         match self {
             // Answered from the config, the key map or the surface's own
             // totals — none of which the run is holding.
-            Intent::Help | Intent::Keys | Intent::Status | Intent::Cost | Intent::Name(_) => Fate::Now,
+            Intent::Help | Intent::Keys | Intent::Status | Intent::Cost | Intent::Name(_) => {
+                Fate::Now
+            }
             // The shelf is a file, not the transcript: writing to it needs no
             // turn and waits for none.
             Intent::Mem(_) => Fate::Now,
@@ -1067,12 +1087,12 @@ impl Intent {
             // A lane of its own to move to, and the one being left keeps
             // working in the tree it was already in.
             Intent::Worktree(_) => Fate::Now,
-            Intent::New => Fate::Refused(
-                "/new would replace the transcript this run is writing — esc first",
-            ),
-            Intent::Compact(_) => Fate::Refused(
-                "/compact rewrites the transcript this run is writing — esc first",
-            ),
+            Intent::New => {
+                Fate::Refused("/new would replace the transcript this run is writing — esc first")
+            }
+            Intent::Compact(_) => {
+                Fate::Refused("/compact rewrites the transcript this run is writing — esc first")
+            }
             // `set`/`get`/`reset` are lines; bare opens a panel, which wants
             // the surface to itself.
             Intent::Settings(rest) if !rest.trim().is_empty() => Fate::Now,
@@ -1092,9 +1112,9 @@ impl Intent {
             // `read` never answers `Submit`, so this ends.
             Intent::Submit(line) => read(line).fate(),
             // Both reach for the transcript, and the run is holding it.
-            Intent::OpenRewind | Intent::Rewind(_) => Fate::Refused(
-                "rewinding needs the transcript this run is writing — esc first",
-            ),
+            Intent::OpenRewind | Intent::Rewind(_) => {
+                Fate::Refused("rewinding needs the transcript this run is writing — esc first")
+            }
             // Writes the settings file and rebuilds through `Arc::make_mut`,
             // like `/settings set`, which is the same act from a panel.
             Intent::CommitSetting(..) => Fate::Now,
@@ -1400,8 +1420,7 @@ impl Repl {
             | Intent::CommitSetting(..)
             | Intent::ShelfWrite(..)
             | Intent::ShelfDrop(_)
-            | Intent::EditExternally
-            => Step::Handled(Vec::new()),
+            | Intent::EditExternally => Step::Handled(Vec::new()),
             // The surface's, like `Submit`: arming a lane and re-submitting a
             // line through `read` are both things only it can do, so it takes
             // this before `run` is reached.
@@ -1458,9 +1477,7 @@ impl Repl {
                 "" => Step::Wechat(WechatCmd::Status),
                 "on" => Step::Wechat(WechatCmd::On),
                 "off" => Step::Wechat(WechatCmd::Off),
-                other => Step::Flash(format!(
-                    "unknown /wechat verb `{other}` — bare, on or off"
-                )),
+                other => Step::Flash(format!("unknown /wechat verb `{other}` — bare, on or off")),
             },
             Intent::Settings(rest) => self.settings(&rest),
         }
@@ -1558,7 +1575,11 @@ impl Repl {
         crate::journal::switched(&path, &id);
         // Spills are filed under the session id; a session has to own its own
         // namespace or the one before it keeps swallowing them.
-        self.lane_mut().ctx = self.lane_mut().ctx.clone().with_session(&self.lane_mut().id);
+        self.lane_mut().ctx = self
+            .lane_mut()
+            .ctx
+            .clone()
+            .with_session(&self.lane_mut().id);
     }
 
     /// Drop the in-memory conversation and open a fresh session under a new
@@ -1671,15 +1692,20 @@ impl Repl {
         let root = ws.root().to_path_buf();
         let failed = |e| format!("nothing opened — {}", refused("worktree", e));
         let project = crate::config::load_project(&root).map_err(failed)?;
-        let mut resolved =
-            crate::resolve(&self.args, &root, &self.config, &project, &self.claimed).map_err(failed)?;
+        let mut resolved = crate::resolve(&self.args, &root, &self.config, &project, &self.claimed)
+            .map_err(failed)?;
 
         let (events, inbox) = Lane::channel();
         // The model travels; what the root decides does not. A switch changes
         // trees, and which model is answering was a decision made elsewhere.
         let home = self.home(root.clone(), self.lane().agent.spec.model.clone());
         let mut ag = (*self.lane().agent).clone();
-        crate::arm(&mut ag, &mut resolved, home, crate::memory::shelf(self.store.memory_path(&root)));
+        crate::arm(
+            &mut ag,
+            &mut resolved,
+            home,
+            crate::memory::shelf(self.store.memory_path(&root)),
+        );
 
         // Built, not cloned from the lane being left: a `Ctx`'s tables key on
         // absolute paths in one tree, and none of that lane's describe this.
@@ -1743,7 +1769,11 @@ impl Repl {
         let mut out: Vec<String> = trees
             .iter()
             .map(|t| {
-                let mark = if at.as_ref() == Some(&t.path) { "*" } else { " " };
+                let mark = if at.as_ref() == Some(&t.path) {
+                    "*"
+                } else {
+                    " "
+                };
                 let on = t.branch.as_deref().unwrap_or("detached HEAD");
                 format!("{mark} {}  {on}", crate::render::pad(&t.name, width))
             })
@@ -1808,7 +1838,11 @@ impl Repl {
     fn resume(&mut self, id: &str) -> Result<Vec<String>, String> {
         // The session being left has to survive too, or /resume throws it
         // away. An empty one — just opened, nothing said — has nothing to keep.
-        if self.lane_mut().session.as_ref().is_some_and(|s| !s.is_empty())
+        if self
+            .lane_mut()
+            .session
+            .as_ref()
+            .is_some_and(|s| !s.is_empty())
             && let Err(e) = self.save()
         {
             tracing::warn!(target: "pi::session", error = %e, "resume could not save the leaving session");
@@ -1816,7 +1850,6 @@ impl Repl {
         let stored = self.store.load(id).map_err(|e| refused("resume", e))?;
         Ok(self.adopt_session(stored))
     }
-
 }
 
 /// What a `!` command left behind, kept apart because the two are easy to
@@ -1855,7 +1888,11 @@ pub async fn run_bash(ctx: &tools::Ctx, command: &str) -> Bashed {
     Bashed {
         text: format!(
             "Ran `{command}`\n{}",
-            if body.is_empty() { "(no output)" } else { &body }
+            if body.is_empty() {
+                "(no output)"
+            } else {
+                &body
+            }
         ),
         said: body
             .lines()
@@ -1895,8 +1932,7 @@ fn mask_secret(path: &str, value: &toml::Value) -> String {
 mod tests {
     use super::{
         BUILTIN, Candidate, Choice, Command, Fate, Intent, ResumeChoice, Source, Step, ago,
-        bash_command, commands, complete, dispatch, expand, gist, help, read,
-        standing_head,
+        bash_command, commands, complete, dispatch, expand, gist, help, read, standing_head,
     };
     use agent::session::{Entry, Session, UserBody, UserText};
     use tools::skills::Skill;
@@ -1998,7 +2034,10 @@ mod tests {
         // The branch is what tells two checkouts apart when the names do not.
         let all = complete("/worktree ", &table(), &[], &[], &[], &trees);
         assert_eq!(all.len(), 3);
-        assert_eq!((all[0].show.as_str(), all[0].help.as_str()), ("pi-rs", "master"));
+        assert_eq!(
+            (all[0].show.as_str(), all[0].help.as_str()),
+            ("pi-rs", "master")
+        );
     }
 
     #[test]
@@ -2310,7 +2349,14 @@ mod tests {
 
     #[test]
     fn a_submitted_line_inherits_the_fate_of_what_it_says() {
-        for line in ["/new", "/status", "/compact keep this", "fix the bug", "!ls", "/nope"] {
+        for line in [
+            "/new",
+            "/status",
+            "/compact keep this",
+            "fix the bug",
+            "!ls",
+            "/nope",
+        ] {
             assert_eq!(
                 format!("{:?}", Intent::Submit(line.into()).fate()),
                 format!("{:?}", read(line).fate()),
@@ -2377,7 +2423,10 @@ mod tests {
             Intent::Unsend,
             Intent::CommitSetting("a.b".into(), "1".into()),
         ] {
-            assert!(matches!(intent.fate(), Fate::Now), "{intent:?} should proceed");
+            assert!(
+                matches!(intent.fate(), Fate::Now),
+                "{intent:?} should proceed"
+            );
         }
     }
 
@@ -2387,9 +2436,15 @@ mod tests {
             Intent::Bash("ls".into()),
             Intent::Settings(String::new()),
             Intent::Wechat("on".into()),
-            Intent::Other { word: "/commit".into(), args: String::new() },
+            Intent::Other {
+                word: "/commit".into(),
+                args: String::new(),
+            },
         ] {
-            assert!(matches!(intent.fate(), Fate::Queued), "{intent:?} should wait");
+            assert!(
+                matches!(intent.fate(), Fate::Queued),
+                "{intent:?} should wait"
+            );
         }
     }
 
@@ -2398,9 +2453,7 @@ mod tests {
     #[test]
     fn prose_reaches_the_run_rather_than_waiting_for_it() {
         let said = "the bug is in parse.rs";
-        assert!(
-            matches!(Intent::Prompt(said.into()).fate(), Fate::Steered(text) if text == said)
-        );
+        assert!(matches!(Intent::Prompt(said.into()).fate(), Fate::Steered(text) if text == said));
         // A raw line answers as whatever it reads as, so both doors agree.
         assert!(matches!(
             Intent::Submit(said.into()).fate(),
@@ -2456,13 +2509,18 @@ mod tests {
 
     #[test]
     fn a_prompt_that_merely_mentions_a_slash_stays_a_prompt() {
-        assert_eq!(read("what does /help do?"), Intent::Prompt("what does /help do?".into()));
-        assert_eq!(read("read src/main.rs"), Intent::Prompt("read src/main.rs".into()));
+        assert_eq!(
+            read("what does /help do?"),
+            Intent::Prompt("what does /help do?".into())
+        );
+        assert_eq!(
+            read("read src/main.rs"),
+            Intent::Prompt("read src/main.rs".into())
+        );
     }
 
     #[test]
-    fn trailing_words_do_not_break_a_command() {
-    }
+    fn trailing_words_do_not_break_a_command() {}
 
     #[test]
     fn a_command_that_takes_words_keeps_all_of_them() {
@@ -2672,8 +2730,9 @@ mod tests {
             &self,
             spec: &brain::model::ModelSpec,
             req: &brain::request::Request,
-        ) -> brain::Result<futures::stream::BoxStream<'static, brain::Result<brain::stream::StreamEvent>>>
-        {
+        ) -> brain::Result<
+            futures::stream::BoxStream<'static, brain::Result<brain::stream::StreamEvent>>,
+        > {
             self.saw.lock().unwrap().push(spec.model.clone());
             self.notes.lock().unwrap().push(req.notes.join("\n"));
             let done = Ok(brain::stream::StreamEvent::Done {
@@ -2766,11 +2825,19 @@ mod tests {
 
     /// What the child asked for, once.
     async fn run_the_child(core: &crate::repl::Repl) {
-        let task = core.lane().agent.registry.get(agent::task::Task::NAME).unwrap();
-        let ctx = tools::Ctx::new(core.lane().ctx.workspace.clone());
-        task.execute(serde_json::json!({ "description": "go", "prompt": "go" }), &ctx)
-            .await
+        let task = core
+            .lane()
+            .agent
+            .registry
+            .get(agent::task::Task::NAME)
             .unwrap();
+        let ctx = tools::Ctx::new(core.lane().ctx.workspace.clone());
+        task.execute(
+            serde_json::json!({ "description": "go", "prompt": "go" }),
+            &ctx,
+        )
+        .await
+        .unwrap();
     }
 
     /// `/mem` has to reach the subagent too. `Task` snapshots the agent it was
@@ -2785,7 +2852,10 @@ mod tests {
 
         run_the_child(&core).await;
         let before = notes.lock().unwrap().join("|");
-        assert!(!before.contains("<memory>"), "nothing on the shelf yet: {before}");
+        assert!(
+            !before.contains("<memory>"),
+            "nothing on the shelf yet: {before}"
+        );
 
         core.remember("prefers xh over curl");
         run_the_child(&core).await;
@@ -2800,13 +2870,17 @@ mod tests {
     async fn retarget_rebuilds_the_subagent_on_the_new_model() {
         let dir = tempfile::tempdir().unwrap();
         let old_saw = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let old_transport =
-            std::sync::Arc::new(Recording { saw: old_saw.clone(), ..Default::default() });
+        let old_transport = std::sync::Arc::new(Recording {
+            saw: old_saw.clone(),
+            ..Default::default()
+        });
         let mut core = a_repl(dir.path(), old_transport, "model-a");
 
         let new_saw = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let new_transport =
-            std::sync::Arc::new(Recording { saw: new_saw.clone(), ..Default::default() });
+        let new_transport = std::sync::Arc::new(Recording {
+            saw: new_saw.clone(),
+            ..Default::default()
+        });
         core.retarget(new_transport, test_spec("model-b"));
         run_the_child(&core).await;
 
@@ -2816,6 +2890,9 @@ mod tests {
             "the child asks the new model: {saw:?}"
         );
         assert!(!saw.iter().any(|m| m == "model-a"), "{saw:?}");
-        assert!(old_saw.lock().unwrap().is_empty(), "the old endpoint is gone");
+        assert!(
+            old_saw.lock().unwrap().is_empty(),
+            "the old endpoint is gone"
+        );
     }
 }

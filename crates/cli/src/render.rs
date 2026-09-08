@@ -3,8 +3,8 @@ use std::io::{IsTerminal, Write};
 use std::sync::{Arc, OnceLock};
 
 use agent::Event;
-use brain::count::{in_out, short};
 use anyhow::{Result, bail};
+use brain::count::{in_out, short};
 use serde::de::{Error as _, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 const RESET: &str = "\x1b[0m";
@@ -48,7 +48,10 @@ impl Escape {
     /// The state directly after an `\x1b`. Feed it every character that
     /// follows; it answers true on the one that closes the sequence.
     pub fn new() -> Self {
-        Self { kind: None, st: false }
+        Self {
+            kind: None,
+            st: false,
+        }
     }
 
     pub fn closed(&mut self, c: char) -> bool {
@@ -1165,14 +1168,14 @@ mod tests {
     #[test]
     fn every_shape_of_escape_costs_no_columns() {
         for (s, text) in [
-            ("\u{1b}cab", "ab"),                 // two-byte, final by either range
-            ("\u{1b}7ab", "ab"),                 // save cursor: 0x37, the wider range
-            ("\u{1b}8ab", "ab"),                 // restore cursor
-            ("\u{1b}(Bab", "ab"),                // intermediate 0x28, then final 0x42
-            ("\u{1b}[1mab\u{1b}[0m", "ab"),      // the ordinary SGR shape
-            ("\u{1b}]0;title\u{7}ab", "ab"),     // OSC closed by BEL
-            ("\u{1b}]0;title\u{1b}\\ab", "ab"),  // OSC closed by ST
-            ("\u{1b}Pq~~\u{1b}\\ab", "ab"),      // DCS, same terminator
+            ("\u{1b}cab", "ab"),                // two-byte, final by either range
+            ("\u{1b}7ab", "ab"),                // save cursor: 0x37, the wider range
+            ("\u{1b}8ab", "ab"),                // restore cursor
+            ("\u{1b}(Bab", "ab"),               // intermediate 0x28, then final 0x42
+            ("\u{1b}[1mab\u{1b}[0m", "ab"),     // the ordinary SGR shape
+            ("\u{1b}]0;title\u{7}ab", "ab"),    // OSC closed by BEL
+            ("\u{1b}]0;title\u{1b}\\ab", "ab"), // OSC closed by ST
+            ("\u{1b}Pq~~\u{1b}\\ab", "ab"),     // DCS, same terminator
         ] {
             assert_eq!(super::visible_width(s), 2, "{s:?}");
             assert_eq!(super::strip_ansi(s), text, "{s:?}");
@@ -1183,7 +1186,10 @@ mod tests {
     /// `fit` take, so a border's column can be spared from a body's width.
     #[test]
     fn visible_width_counts_columns() {
-        assert_eq!(super::visible_width("\u{1b}[38;2;0;255;255m\u{258c}\u{1b}[0m "), 2);
+        assert_eq!(
+            super::visible_width("\u{1b}[38;2;0;255;255m\u{258c}\u{1b}[0m "),
+            2
+        );
         assert_eq!(super::visible_width("\u{4e2d}\u{6587}"), 4);
         assert_eq!(super::visible_width(""), 0);
         // An escape cut off by the end of the string ends the walk rather
@@ -1198,7 +1204,11 @@ mod tests {
     #[test]
     fn clip_counts_columns_and_not_the_escapes_between_them() {
         let painted = "\u{1b}[38;2;0;255;255m\u{203a} pi-rs\u{1b}[0m";
-        assert_eq!(super::clip(painted, 7), painted, "seven columns fit in seven");
+        assert_eq!(
+            super::clip(painted, 7),
+            painted,
+            "seven columns fit in seven"
+        );
         assert_eq!(super::clip(painted, 40), painted);
 
         // Plain text is measured exactly as before.
@@ -1219,7 +1229,10 @@ mod tests {
         );
 
         // CJK still counts two columns a character, escapes or not.
-        assert_eq!(super::clip("\u{1b}[2m\u{4f60}\u{597d}\u{1b}[0m", 2), "\u{1b}[2m\u{4f60}\u{1b}[0m\u{2026}");
+        assert_eq!(
+            super::clip("\u{1b}[2m\u{4f60}\u{597d}\u{1b}[0m", 2),
+            "\u{1b}[2m\u{4f60}\u{1b}[0m\u{2026}"
+        );
     }
 
     use super::{Attr, Color, Markdown, Paint, Style, spent, summarize};

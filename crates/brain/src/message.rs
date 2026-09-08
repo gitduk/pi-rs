@@ -6,15 +6,9 @@ use crate::model::{Format, ModelSpec, ReplayThinking};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "lowercase")]
 pub enum Message {
-    System {
-        content: String,
-    },
-    User {
-        content: Vec<UserContent>,
-    },
-    Assistant {
-        content: Vec<AssistantContent>,
-    },
+    System { content: String },
+    User { content: Vec<UserContent> },
+    Assistant { content: Vec<AssistantContent> },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -252,7 +246,11 @@ impl ToolResult {
         }
     }
 
-    pub fn error(call: impl Into<String>, name: impl Into<String>, body: impl Into<String>) -> Self {
+    pub fn error(
+        call: impl Into<String>,
+        name: impl Into<String>,
+        body: impl Into<String>,
+    ) -> Self {
         Self {
             is_error: true,
             ..Self::text(call, name, body)

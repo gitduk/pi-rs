@@ -98,7 +98,11 @@ pub fn list(dir: &Path) -> Result<Vec<Tree>> {
             *gone = true;
         }
     }
-    Ok(out.into_iter().filter(|(_, gone)| !gone).map(|(t, _)| t).collect())
+    Ok(out
+        .into_iter()
+        .filter(|(_, gone)| !gone)
+        .map(|(t, _)| t)
+        .collect())
 }
 
 // Under `.worktrees` the name is the path below it, so `feat/one` keeps both
@@ -126,7 +130,10 @@ fn vetted(name: &str) -> Result<&str> {
     if name.starts_with('/') || name.starts_with('-') {
         bail!("`{name}` cannot start with `/` or `-`");
     }
-    if name.split('/').any(|part| part.is_empty() || part == ".." || part == ".") {
+    if name
+        .split('/')
+        .any(|part| part.is_empty() || part == ".." || part == ".")
+    {
         bail!("`{name}` is not a path under {DIR}/");
     }
     if let Some(bad) = name
@@ -196,7 +203,12 @@ pub fn enter(dir: &Path, name: &str) -> Result<(Tree, Entered)> {
     // that exists fails, and asking twice means the same feature both times.
     let known = git(
         dir,
-        &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{name}")],
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{name}"),
+        ],
     )?
     .status
     .success();
@@ -325,7 +337,12 @@ mod tests {
 
         std::fs::remove_dir_all(&gone.path).expect("the directory goes");
         let trees = list(dir.path()).unwrap();
-        assert_eq!(trees.len(), 2, "{:?}", trees.iter().map(|t| &t.name).collect::<Vec<_>>());
+        assert_eq!(
+            trees.len(),
+            2,
+            "{:?}",
+            trees.iter().map(|t| &t.name).collect::<Vec<_>>()
+        );
         assert!(!trees.iter().any(|t| t.name == "fix-2"));
         // The one beside it is untouched, and the main checkout still leads.
         assert!(trees[0].main);

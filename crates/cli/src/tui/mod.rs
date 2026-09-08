@@ -27,9 +27,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::journal;
 use crate::keys::{Action, Keys, Mode, Press};
+use crate::lane::{Lane, Turn};
 use crate::render::Style as ThemeStyle;
 use crate::render::{self, Markdown, Paint};
-use crate::lane::{Lane, Turn};
 use crate::repl::{self, Candidate, Choice, Command, Fate, Intent, Repl, Rewound, Step};
 use crate::session::ResumeChoice;
 use editor::Editor;
@@ -40,8 +40,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState};
 use row::Row;
 use screen::{Rows, Screen};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // What a folded run shows instead of what it is thinking.
 const THINKING: &str = "thinking...";
@@ -77,7 +77,9 @@ fn secret_settings_set(line: &str) -> bool {
         Intent::Settings(rest) => {
             let mut parts = rest.splitn(3, char::is_whitespace);
             matches!(parts.next(), Some("set"))
-                && parts.next().is_some_and(|p| journal::secret(journal::leaf(p)))
+                && parts
+                    .next()
+                    .is_some_and(|p| journal::secret(journal::leaf(p)))
         }
         _ => false,
     }
@@ -740,7 +742,6 @@ struct Ui {
     flash: Option<(String, Instant)>,
 }
 
-
 /// What to call a checkout. The root answers to its directory name, as
 /// `worktree list` already names it — a fixed word would collide with a
 /// checkout that happens to be called that.
@@ -928,7 +929,11 @@ impl Ui {
     /// dropped — every frame passes through here, so nothing else has to
     /// remember to clear it.
     fn flash_line(&mut self, width: usize) -> Option<String> {
-        if self.flash.as_ref().is_some_and(|(_, at)| at.elapsed() >= FLASH) {
+        if self
+            .flash
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() >= FLASH)
+        {
             self.flash = None;
         }
         let (text, _) = self.flash.as_ref()?;
@@ -1070,7 +1075,8 @@ impl Ui {
                 lane.view.tools.retain(|t| t.id != *id);
                 // The same row the rebuild produces, from the same parts. Two
                 // renderings of this is what the second producer used to buy.
-                lane.view.scrollback
+                lane.view
+                    .scrollback
                     .push(Row::result(!is_error, name.clone(), preview.clone()));
             }
             _ => {
@@ -1341,10 +1347,17 @@ impl Ui {
             let items = (lane.view.scrollback.len(), live.len());
             // A frame whose item counts match the last measurement has not
             // grown — nothing to fold, and no reason to re-wrap the history.
-            if lane.view.counted.is_none_or(|(sb, lv, _)| (sb, lv) != items) {
+            if lane
+                .view
+                .counted
+                .is_none_or(|(sb, lv, _)| (sb, lv) != items)
+            {
                 let total = self.scrollback_rows(&lane.view, width) + live.len();
-                lane.view.scroll =
-                    absorb_growth(lane.view.scroll, lane.view.counted.map(|(_, _, t)| t), total);
+                lane.view.scroll = absorb_growth(
+                    lane.view.scroll,
+                    lane.view.counted.map(|(_, _, t)| t),
+                    total,
+                );
                 lane.view.counted = Some((items.0, items.1, total));
             }
         } else {
@@ -1425,12 +1438,8 @@ impl Ui {
         view.thinking.last = view.thinking.folded;
         view.md.reset();
         view.scroll = 0;
-        view.scrollback = scrollback_from(
-            session,
-            &self.paint,
-            &self.bang_prompt,
-            &mut view.thinking,
-        );
+        view.scrollback =
+            scrollback_from(session, &self.paint, &self.bang_prompt, &mut view.thinking);
     }
 
     /// Accept a submitted input: echo it so the prompt survives the editor
@@ -1503,7 +1512,9 @@ impl Ui {
 
         // A key that means something breaks the escape sequence: `j`, a
         // command, then `k` is two commands and a `j`, not a mode change.
-        if bound.is_some() && let Some(v) = &mut self.vim {
+        if bound.is_some()
+            && let Some(v) = &mut self.vim
+        {
             v.last = None;
         }
 
@@ -1673,10 +1684,18 @@ impl Ui {
             Some(Action::MoveLineEnd) => self.editor.end(),
             Some(Action::HistoryOlder) => self.editor.up(),
             Some(Action::HistoryNewer) => self.editor.down(),
-            Some(Action::ScrollPageUp) => self.scroll_view(&mut lane.view, true, self.page_scroll_step()),
-            Some(Action::ScrollPageDown) => self.scroll_view(&mut lane.view, false, self.page_scroll_step()),
-            Some(Action::ScrollHalfUp) => self.scroll_view(&mut lane.view, true, self.half_scroll_step()),
-            Some(Action::ScrollHalfDown) => self.scroll_view(&mut lane.view, false, self.half_scroll_step()),
+            Some(Action::ScrollPageUp) => {
+                self.scroll_view(&mut lane.view, true, self.page_scroll_step())
+            }
+            Some(Action::ScrollPageDown) => {
+                self.scroll_view(&mut lane.view, false, self.page_scroll_step())
+            }
+            Some(Action::ScrollHalfUp) => {
+                self.scroll_view(&mut lane.view, true, self.half_scroll_step())
+            }
+            Some(Action::ScrollHalfDown) => {
+                self.scroll_view(&mut lane.view, false, self.half_scroll_step())
+            }
             Some(Action::ThinkFold) => {
                 // The last block only: the one streaming, or the newest
                 // finished one when nothing is. The switch is left alone, so
@@ -1875,7 +1894,11 @@ fn land_handled(ui: &mut Ui, core: &Repl, view: &mut View, lines: Vec<String>) {
     // skills — the last one did not.
     ui.choices = core.choices();
     if ui.paint.theme.as_ref() != &core.config.theme {
-        ui.set_theme(view, &core.lane().context, Arc::new(core.config.theme.clone()));
+        ui.set_theme(
+            view,
+            &core.lane().context,
+            Arc::new(core.config.theme.clone()),
+        );
     }
     if !Arc::ptr_eq(&ui.commands, &core.commands) {
         ui.commands = core.commands.clone();
@@ -2062,28 +2085,30 @@ fn reader() -> (UnboundedReceiver<TermEvent>, Hold) {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let hold = Hold::default();
     let mine = hold.clone();
-    std::thread::spawn(move || loop {
-        if mine.paused.load(Ordering::Acquire) {
-            mine.parked.store(true, Ordering::Release);
-            std::thread::sleep(INPUT_POLL);
-            continue;
-        }
-        mine.parked.store(false, Ordering::Release);
-        match crossterm::event::poll(INPUT_POLL) {
-            // Re-checked: the terminal may have gone to a child while this
-            // poll was waiting, and that keystroke belongs to the child now.
-            Ok(true) if !mine.paused.load(Ordering::Acquire) => {
-                match crossterm::event::read() {
-                    Ok(event) => {
-                        if tx.send(event).is_err() {
-                            return;
-                        }
-                    }
-                    Err(_) => return,
-                }
+    std::thread::spawn(move || {
+        loop {
+            if mine.paused.load(Ordering::Acquire) {
+                mine.parked.store(true, Ordering::Release);
+                std::thread::sleep(INPUT_POLL);
+                continue;
             }
-            Ok(_) => {}
-            Err(_) => return,
+            mine.parked.store(false, Ordering::Release);
+            match crossterm::event::poll(INPUT_POLL) {
+                // Re-checked: the terminal may have gone to a child while this
+                // poll was waiting, and that keystroke belongs to the child now.
+                Ok(true) if !mine.paused.load(Ordering::Acquire) => {
+                    match crossterm::event::read() {
+                        Ok(event) => {
+                            if tx.send(event).is_err() {
+                                return;
+                            }
+                        }
+                        Err(_) => return,
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => return,
+            }
         }
     });
     (rx, hold)
@@ -2301,8 +2326,7 @@ impl Tui {
             self.close_run(out);
             // Esc asked for the prompt back before the screen moved on. The
             // asking does not go stale because the answer arrived late.
-            if unsend
-                && let Some(id) = self.core.lane().session.as_ref().and_then(|s| s.last_ask())
+            if unsend && let Some(id) = self.core.lane().session.as_ref().and_then(|s| s.last_ask())
             {
                 self.rewind_turn(id);
             }
@@ -2317,7 +2341,11 @@ impl Tui {
         // `at` forgets both lists, so it stands in for `refresh_sessions`: a
         // swap that did not move repeats the root, and drops them either way.
         self.ui.lists.at(self.core.lane_mut().ctx.workspace.root());
-        self.core.lane_mut().view.scrollback.extend(said.into_iter().map(Row::notice));
+        self.core
+            .lane_mut()
+            .view
+            .scrollback
+            .extend(said.into_iter().map(Row::notice));
     }
 
     /// Take what every lane's run has posted since the last look: into the view
@@ -2400,7 +2428,10 @@ impl Tui {
         };
         let said = match round {
             crate::lane::Round::Again { goal, next } => {
-                self.core.lanes[lane].view.queued.push(Intent::LoopRound(goal));
+                self.core.lanes[lane]
+                    .view
+                    .queued
+                    .push(Intent::LoopRound(goal));
                 format!("loop round {next}")
             }
             crate::lane::Round::Cut => return,
@@ -2534,7 +2565,12 @@ impl Tui {
     fn stop_current(&mut self, unsend: bool) {
         // Said here rather than at the callers: the state is the only thing
         // that knows, and every way of asking to stop arrives through it.
-        let Turn::Running { cancel, unsend: take_back, .. } = &mut self.core.lane_mut().turn else {
+        let Turn::Running {
+            cancel,
+            unsend: take_back,
+            ..
+        } = &mut self.core.lane_mut().turn
+        else {
             self.ui.flash("nothing running to stop");
             return;
         };
@@ -2708,7 +2744,10 @@ impl Tui {
                 // Refused rather than replacing: the round already queued would
                 // still run, and it would be counted against the new loop.
                 if let Some(l) = &self.core.lane().looping {
-                    let said = format!("`{}` is already looping here — /loop to stop it first", l.goal);
+                    let said = format!(
+                        "`{}` is already looping here — /loop to stop it first",
+                        l.goal
+                    );
                     self.ui.flash(said);
                     continue;
                 }
@@ -2717,7 +2756,11 @@ impl Tui {
                     continue;
                 }
                 self.core.lane_mut().loop_start(goal.clone());
-                self.core.lane_mut().view.queued.push(Intent::LoopRound(goal));
+                self.core
+                    .lane_mut()
+                    .view
+                    .queued
+                    .push(Intent::LoopRound(goal));
                 continue;
             }
             // Bare `/mem` and `/settings` open a panel rather than printing
@@ -2774,13 +2817,17 @@ impl Tui {
                         repl::WechatCmd::On => match self.bridge.on().await {
                             Ok(said) => said,
                             Err(e) => {
-                                self.ui.say(&mut self.core.lane_mut().view, format!("wechat: {e:#}"));
+                                self.ui
+                                    .say(&mut self.core.lane_mut().view, format!("wechat: {e:#}"));
                                 Vec::new()
                             }
                         },
                         repl::WechatCmd::Off => self.bridge.off(),
                     };
-                    self.core.lane_mut().view.scrollback
+                    self.core
+                        .lane_mut()
+                        .view
+                        .scrollback
                         .extend(said.into_iter().map(Row::notice));
                 }
                 // What was submitted while the run worked is taken up by the
@@ -2813,7 +2860,10 @@ impl Tui {
         if left == 0 {
             return;
         }
-        self.ui.say(&mut self.core.lane_mut().view, "stopping — saving what the runs have written");
+        self.ui.say(
+            &mut self.core.lane_mut().view,
+            "stopping — saving what the runs have written",
+        );
         self.ui.flush(self.core.lane_mut());
         let waited = tokio::time::timeout(EXIT_GRACE, async {
             while left > 0 {
@@ -2876,8 +2926,7 @@ impl Tui {
                     }
                 };
                 let text = self.ui.paint.on(&self.ui.paint.theme.muted, &said);
-                self.ui.say(
-                    &mut self.core.lane_mut().view, text);
+                self.ui.say(&mut self.core.lane_mut().view, text);
             }
             Err(e) => {
                 self.ui.say(
@@ -3024,9 +3073,10 @@ impl Tui {
             Ok(Err(e)) => (false, Some(format!("could not run the editor: {e}"))),
             // `:cq` is how vim says "forget it". Git reads a non-zero exit the
             // same way, and the line the user had is worth more than the file.
-            Ok(Ok(s)) if !s.success() => {
-                (false, Some(format!("editor exited {s} — the line is unchanged")))
-            }
+            Ok(Ok(s)) if !s.success() => (
+                false,
+                Some(format!("editor exited {s} — the line is unchanged")),
+            ),
             Ok(Ok(_)) => match std::fs::read_to_string(&path) {
                 Ok(text) => {
                     self.ui.editor.set_line(text.trim_end());
@@ -3036,7 +3086,10 @@ impl Tui {
                 // the file beats deleting it.
                 Err(e) => (
                     true,
-                    Some(format!("saved at {} — could not read it back: {e}", path.display())),
+                    Some(format!(
+                        "saved at {} — could not read it back: {e}",
+                        path.display()
+                    )),
                 ),
             },
         };
@@ -3044,7 +3097,10 @@ impl Tui {
         // stays as the way out and its name is what the message carries.
         if let Err(e) = resumed {
             keep = true;
-            said = Some(format!("the screen did not come back: {e} — line at {}", path.display()));
+            said = Some(format!(
+                "the screen did not come back: {e} — line at {}",
+                path.display()
+            ));
         }
         if !keep {
             let _ = std::fs::remove_file(&path);
@@ -3207,7 +3263,10 @@ impl Tui {
                 self.core.lanes[lane].session = Some(session);
                 (true, out)
             }
-            None => (self.recover_session(lane, "run"), Err(AgentError::Cancelled)),
+            None => (
+                self.recover_session(lane, "run"),
+                Err(AgentError::Cancelled),
+            ),
         };
 
         // A panic never came back, and Esc that took the prompt back produced
@@ -3225,9 +3284,7 @@ impl Tui {
         // Saved either way: an interrupted turn is exactly the one worth
         // keeping. Not when the transcript never came back, though — the empty
         // one standing in for it would land on top of what is on disk.
-        if recovered
-            && let Err(e) = self.core.save_lane(lane)
-        {
+        if recovered && let Err(e) = self.core.save_lane(lane) {
             self.say_of(lane, format!("warning: the transcript was not saved: {e}"));
         }
         // The save put the session on disk, the one `/resume` is likeliest to
@@ -3265,9 +3322,7 @@ impl Tui {
             return;
         }
         self.close_run(out);
-        if unsend
-            && let Some(id) = self.core.lane().session.as_ref().and_then(|s| s.last_ask())
-        {
+        if unsend && let Some(id) = self.core.lane().session.as_ref().and_then(|s| s.last_ask()) {
             self.rewind_turn(id);
         }
     }
@@ -3322,16 +3377,17 @@ impl Tui {
             self.core.lanes[lane].totals.merge(&spent);
             self.totals.merge(&spent);
             let _ = self.core.lanes[lane].events.send(Event::Compacted(report));
-            if back
-                && let Err(e) = self.core.save_lane(lane)
-            {
+            if back && let Err(e) = self.core.save_lane(lane) {
                 self.say_of(lane, format!("warning: the transcript was not saved: {e}"));
             }
             self.refresh_sessions();
         } else if stopped {
             // Nothing was written, so there is nothing to report and nothing
             // to save — only the same word a stopped turn ends on.
-            self.say_of(lane, self.ui.paint.on(&self.ui.paint.theme.muted, "stopped"));
+            self.say_of(
+                lane,
+                self.ui.paint.on(&self.ui.paint.theme.muted, "stopped"),
+            );
         } else if back {
             let held = self.core.lanes[lane].agent.kept_tokens();
             let now = self.core.tokens_now_at(lane);
@@ -3359,8 +3415,7 @@ impl Tui {
             Ok(_) => {}
             Err(AgentError::Cancelled) => {
                 let text = self.ui.paint.on(&self.ui.paint.theme.muted, "stopped");
-                self.ui.say(
-                    &mut self.core.lane_mut().view, text);
+                self.ui.say(&mut self.core.lane_mut().view, text);
             }
             Err(e) => {
                 let text = format!(
@@ -3380,16 +3435,18 @@ mod tests {
         scrollback_from, secret_settings_set, tool_row,
     };
     use crate::keys::Action;
-    use crossterm::event::KeyCode;
     use crate::render::Markdown;
     use crate::render::Paint;
     use crate::tui::screen;
+    use crossterm::event::KeyCode;
 
     #[test]
     fn a_secret_settings_set_is_detected_by_its_path() {
         assert!(secret_settings_set("/settings set api_key x"));
         assert!(secret_settings_set("/settings set models.flash.api_key x"));
-        assert!(!secret_settings_set("/settings set models.flash.context_window 1000"));
+        assert!(!secret_settings_set(
+            "/settings set models.flash.context_window 1000"
+        ));
         assert!(!secret_settings_set("/settings get api_key"));
         assert!(!secret_settings_set("/cost"));
     }
@@ -3716,7 +3773,10 @@ mod tests {
         assert!(out.len() > 1);
         assert!(out[0].starts_with("! "));
         for row in &out[1..] {
-            assert!(!row.starts_with("! "), "a continuation row wore the mark: {row:?}");
+            assert!(
+                !row.starts_with("! "),
+                "a continuation row wore the mark: {row:?}"
+            );
         }
     }
 
@@ -3894,9 +3954,10 @@ mod tests {
         // shown are still the same entry: folding them takes them back.
         let mut entry = block(1, 2, false);
         let paint = Paint::new(false);
-        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(std::slice::from_ref(&entry), &paint, &[], 80)
-            .map(|(s, _)| s)
-            .collect();
+        let rows: Vec<Cow<'_, str>> =
+            ScrollbackRows::new(std::slice::from_ref(&entry), &paint, &[], 80)
+                .map(|(s, _)| s)
+                .collect();
         assert_eq!(rows, vec!["line 1", "line 2"]);
         entry.set_folded(true);
         let rows: Vec<Cow<'_, str>> =
@@ -4168,9 +4229,18 @@ mod tests {
         tui.after_shelf(None);
 
         let after = crate::memory::Memory::load(&path);
-        assert_eq!(after.notes[1].text, "the parser lives in syntax/ and hashline/");
-        assert_eq!(after.notes[1].at, shelf.notes[1].at, "the same note, said better");
-        assert!(!tui.ui.panel.as_ref().expect("open").editing(), "the line closed");
+        assert_eq!(
+            after.notes[1].text,
+            "the parser lives in syntax/ and hashline/"
+        );
+        assert_eq!(
+            after.notes[1].at, shelf.notes[1].at,
+            "the same note, said better"
+        );
+        assert!(
+            !tui.ui.panel.as_ref().expect("open").editing(),
+            "the line closed"
+        );
 
         // And take it away.
         let panel = tui.ui.panel.as_mut().expect("open");
@@ -4251,7 +4321,9 @@ mod tests {
         // `on_test_screen` skips the startup seed `Tui::new` does, so stand in
         // for it. What is under test is that a switch replaces this, and that
         // it does not reach for the bucket of the checkout being left.
-        tui.ui.editor.seed_history(vec!["what the first was asked".to_string()]);
+        tui.ui
+            .editor
+            .seed_history(vec!["what the first was asked".to_string()]);
         tui.core.lanes.push(running_lane(second.path()));
         tui.core.current = 1;
         tui.reconcile(0);
@@ -4274,8 +4346,14 @@ mod tests {
         let mut tui = surface(dir.path());
         tui.core.lanes.push(running_lane(dir.path()));
         tui.ui.tabs = vec![
-            super::Tab { mark: super::Mark::Idle, name: "pi-rs".into() },
-            super::Tab { mark: super::Mark::Front, name: "f1".into() },
+            super::Tab {
+                mark: super::Mark::Idle,
+                name: "pi-rs".into(),
+            },
+            super::Tab {
+                mark: super::Mark::Front,
+                name: "f1".into(),
+            },
         ];
 
         tui.ui.flash("nothing running to stop");
@@ -4313,9 +4391,10 @@ mod tests {
         // By content, not by count: the banner this would lay over it is one
         // row too, so a length check cannot tell them apart.
         let paint = Paint::new(false);
-        let rows: Vec<String> = ScrollbackRows::new(&tui.core.lanes[1].view.scrollback, &paint, &[], 80)
-            .map(|(r, _)| r.to_string())
-            .collect();
+        let rows: Vec<String> =
+            ScrollbackRows::new(&tui.core.lanes[1].view.scrollback, &paint, &[], 80)
+                .map(|(r, _)| r.to_string())
+                .collect();
         assert!(
             rows.iter().any(|r| r.contains("what was said before")),
             "the transcript survives the switch: {rows:?}"
@@ -4362,7 +4441,12 @@ mod tests {
         // And the same when the job panicked and brought no transcript home.
         for (what, kind) in kinds() {
             let mut tui = surface(dir.path());
-            tui.settle(super::Done { lane: 0, kind, ran: None }).await;
+            tui.settle(super::Done {
+                lane: 0,
+                kind,
+                ran: None,
+            })
+            .await;
             assert!(
                 !tui.core.lanes[0].is_running(),
                 "a panicked {what} left its lane running"
@@ -4388,7 +4472,10 @@ mod tests {
                     ran: Some((session, Err(agent::AgentError::Cancelled))),
                 })
                 .await;
-                let mut back = tui.core.lanes[0].session.take().expect("the transcript back");
+                let mut back = tui.core.lanes[0]
+                    .session
+                    .take()
+                    .expect("the transcript back");
                 back.send_prompt(String::from("now something else"), None::<String>);
                 format!("{:?}", back.entries())
             }
@@ -4415,9 +4502,18 @@ mod tests {
     fn the_lane_bar_separates_names_the_way_every_other_line_does() {
         let mut ui = test_ui(80, 24);
         ui.tabs = vec![
-            super::Tab { mark: super::Mark::Front, name: "pi-rs".into() },
-            super::Tab { mark: super::Mark::Idle, name: "f1".into() },
-            super::Tab { mark: super::Mark::Done, name: "f2".into() },
+            super::Tab {
+                mark: super::Mark::Front,
+                name: "pi-rs".into(),
+            },
+            super::Tab {
+                mark: super::Mark::Idle,
+                name: "f1".into(),
+            },
+            super::Tab {
+                mark: super::Mark::Done,
+                name: "f2".into(),
+            },
         ];
         let plain = crate::render::strip_ansi(&ui.lane_bar(80).expect("two lanes make a bar"));
         assert_eq!(plain, "pi-rs \u{b7} f1 \u{b7} \u{2713} f2");
@@ -4425,7 +4521,10 @@ mod tests {
         // Wide enough for the names, far too narrow once escapes are counted
         // as columns — the whole row still has to survive.
         let narrow = crate::render::strip_ansi(&ui.lane_bar(30).expect("a bar"));
-        assert!(!narrow.contains('\u{2026}'), "clipped a row that fits: {narrow}");
+        assert!(
+            !narrow.contains('\u{2026}'),
+            "clipped a row that fits: {narrow}"
+        );
     }
 
     /// The input prompt's icon belongs to the line you type on. The bar sat
@@ -4436,8 +4535,14 @@ mod tests {
         let icon = crate::render::Theme::default().prompt.icon;
         let mut ui = test_ui(80, 24);
         ui.tabs = vec![
-            super::Tab { mark: super::Mark::Front, name: "pi-rs".into() },
-            super::Tab { mark: super::Mark::Idle, name: "f1".into() },
+            super::Tab {
+                mark: super::Mark::Front,
+                name: "pi-rs".into(),
+            },
+            super::Tab {
+                mark: super::Mark::Idle,
+                name: "f1".into(),
+            },
         ];
         let plain = crate::render::strip_ansi(&ui.lane_bar(80).expect("two lanes make a bar"));
         assert!(
@@ -4453,8 +4558,14 @@ mod tests {
     fn the_bar_sits_above_the_input_line() {
         let mut ui = test_ui(40, 8);
         ui.tabs = vec![
-            super::Tab { mark: super::Mark::Front, name: "pi-rs".into() },
-            super::Tab { mark: super::Mark::Idle, name: "f1".into() },
+            super::Tab {
+                mark: super::Mark::Front,
+                name: "pi-rs".into(),
+            },
+            super::Tab {
+                mark: super::Mark::Idle,
+                name: "f1".into(),
+            },
         ];
         let (_dir, mut lane) = a_running_lane();
         ui.flush(&mut lane);
@@ -4462,9 +4573,16 @@ mod tests {
         let rows = ui.screen.painted();
         let icon = crate::render::Theme::default().prompt.icon;
         let last = rows.last().expect("a drawn frame");
-        assert!(last.starts_with(&icon), "the input line is the bottom row: {last:?}");
+        assert!(
+            last.starts_with(&icon),
+            "the input line is the bottom row: {last:?}"
+        );
         let above = &rows[rows.len() - 2];
-        assert_eq!(above.trim(), "pi-rs \u{b7} f1", "the bar is the row above it");
+        assert_eq!(
+            above.trim(),
+            "pi-rs \u{b7} f1",
+            "the bar is the row above it"
+        );
     }
 
     /// A flash answers the keypress on the bar row and leaves no trace in the
@@ -4475,8 +4593,14 @@ mod tests {
     fn a_flash_takes_the_bar_row_and_gives_it_back() {
         let mut ui = test_ui(40, 8);
         ui.tabs = vec![
-            super::Tab { mark: super::Mark::Front, name: "pi-rs".into() },
-            super::Tab { mark: super::Mark::Idle, name: "f1".into() },
+            super::Tab {
+                mark: super::Mark::Front,
+                name: "pi-rs".into(),
+            },
+            super::Tab {
+                mark: super::Mark::Idle,
+                name: "f1".into(),
+            },
         ];
         let (_dir, mut lane) = a_running_lane();
         let before = lane.view.scrollback.len();
@@ -4495,10 +4619,19 @@ mod tests {
         // Backdated past the window: the next frame is the one that drops it,
         // which is what an idle screen relies on.
         let (text, _) = ui.flash.take().expect("a flash is up");
-        ui.flash = Some((text, super::Instant::now().checked_sub(super::FLASH).expect("a clock")));
+        ui.flash = Some((
+            text,
+            super::Instant::now()
+                .checked_sub(super::FLASH)
+                .expect("a clock"),
+        ));
         ui.flush(&mut lane);
         let painted = ui.screen.painted();
-        assert_eq!(painted[painted.len() - 2].trim(), "pi-rs \u{b7} f1", "{painted:?}");
+        assert_eq!(
+            painted[painted.len() - 2].trim(),
+            "pi-rs \u{b7} f1",
+            "{painted:?}"
+        );
         assert!(ui.flash.is_none(), "the expired flash was dropped");
     }
 
@@ -4539,7 +4672,10 @@ mod tests {
             let ui = test_ui(80, 24);
             let trees = ["pi-rs", "f1", "f2"]
                 .iter()
-                .map(|n| crate::repl::Choice { name: n.to_string(), note: String::new() })
+                .map(|n| crate::repl::Choice {
+                    name: n.to_string(),
+                    note: String::new(),
+                })
                 .collect();
             ui.lists.worktrees.set(trees).ok();
             let (_dir, mut lane) = a_running_lane();
@@ -4563,7 +4699,10 @@ mod tests {
         let ui = test_ui(80, 24);
         ui.lists
             .worktrees
-            .set(vec![crate::repl::Choice { name: "pi-rs".into(), note: String::new() }])
+            .set(vec![crate::repl::Choice {
+                name: "pi-rs".into(),
+                note: String::new(),
+            }])
             .ok();
         let (_dir, lane) = a_running_lane();
         assert_eq!(ui.step_checkout(&lane, true), None);
@@ -4581,7 +4720,11 @@ mod tests {
 
         ui.leave_lane();
 
-        assert_eq!(ui.editor.text(), "", "the draft stays with the lane it was typed at");
+        assert_eq!(
+            ui.editor.text(),
+            "",
+            "the draft stays with the lane it was typed at"
+        );
     }
 
     /// Normal mode: `L` is the next checkout and `H` the previous one, and the
@@ -4592,7 +4735,10 @@ mod tests {
         let mut ui = vim_ui();
         let trees = ["pi-rs", "f1", "f2"]
             .iter()
-            .map(|n| crate::repl::Choice { name: n.to_string(), note: String::new() })
+            .map(|n| crate::repl::Choice {
+                name: n.to_string(),
+                note: String::new(),
+            })
             .collect();
         ui.lists.worktrees.set(trees).ok();
         ui.vim.as_mut().unwrap().mode = crate::keys::Mode::Normal;
@@ -4613,7 +4759,10 @@ mod tests {
         // The lowercase pair no longer leaves the lane it is typed in.
         for lower in ['h', 'l'] {
             let intent = ui.key(&mut lane, typed(lower), false);
-            assert!(matches!(intent, crate::repl::Intent::None), "`{lower}`: {intent:?}");
+            assert!(
+                matches!(intent, crate::repl::Intent::None),
+                "`{lower}`: {intent:?}"
+            );
         }
 
         // And the window moves without the caret: scrolled up by J, back by K.
@@ -4622,7 +4771,11 @@ mod tests {
         let up = lane.view.scroll;
         assert!(up > 0, "K went back through the window: {up}");
         ui.key(&mut lane, typed('J'), false);
-        assert!(lane.view.scroll < up, "J came forward again: {}", lane.view.scroll);
+        assert!(
+            lane.view.scroll < up,
+            "J came forward again: {}",
+            lane.view.scroll
+        );
     }
 
     /// The completion list stays up during a run — `/help` and `/model` answer
@@ -4650,10 +4803,16 @@ mod tests {
         lane.view.committed = true;
         assert!(ui.menu().is_empty(), "an empty line completes to nothing");
         let intent = ui.key(&mut lane, esc(), true);
-        assert!(matches!(intent, crate::repl::Intent::Interrupt), "{intent:?}");
+        assert!(
+            matches!(intent, crate::repl::Intent::Interrupt),
+            "{intent:?}"
+        );
 
         ui.editor.set_line("/ne");
-        assert!(!ui.menu().is_empty(), "the word is worth completing mid-run");
+        assert!(
+            !ui.menu().is_empty(),
+            "the word is worth completing mid-run"
+        );
 
         // First press: the list, and nothing asked of the loop.
         let intent = ui.key(&mut lane, esc(), true);
@@ -4661,21 +4820,31 @@ mod tests {
         assert!(ui.menu().is_empty(), "the list went");
         // Second: through where the list was, to the run.
         let intent = ui.key(&mut lane, esc(), true);
-        assert!(matches!(intent, crate::repl::Intent::Interrupt), "{intent:?}");
+        assert!(
+            matches!(intent, crate::repl::Intent::Interrupt),
+            "{intent:?}"
+        );
 
         // Typing past the dismissal brings the list back, and Tab still
         // completes mid-run — the half of the menu the run never claimed.
         ui.editor.set_line("/n");
         let tab = super::TermEvent::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         ui.key(&mut lane, tab, true);
-        assert_eq!(ui.editor.text(), "/new", "the half-typed word was completed");
+        assert_eq!(
+            ui.editor.text(),
+            "/new",
+            "the half-typed word was completed"
+        );
 
         // A panel is modal — `/mem` opens one while a run is in flight — and
         // `esc` there is about the panel, the way it is about the list.
         ui.panel = Some(Panel::new(Body::Shelf(Vec::new())));
         let intent = ui.key(&mut lane, esc(), true);
         assert!(matches!(intent, crate::repl::Intent::None), "{intent:?}");
-        assert!(ui.panel.is_none(), "esc closed the panel rather than the run");
+        assert!(
+            ui.panel.is_none(),
+            "esc closed the panel rather than the run"
+        );
     }
 
     /// A surface with an in-memory screen, for the drawing tests below.
@@ -4687,8 +4856,14 @@ mod tests {
     fn the_newest_row_survives_a_frame_with_the_lane_bar_on_it() {
         let mut ui = test_ui(40, 8);
         ui.tabs = vec![
-            super::Tab { mark: super::Mark::Front, name: "pi-rs".into() },
-            super::Tab { mark: super::Mark::Idle, name: "f1".into() },
+            super::Tab {
+                mark: super::Mark::Front,
+                name: "pi-rs".into(),
+            },
+            super::Tab {
+                mark: super::Mark::Idle,
+                name: "f1".into(),
+            },
         ];
         let (_dir, mut lane) = a_running_lane();
         lane.turn = crate::lane::Turn::Idle;
@@ -4726,11 +4901,7 @@ mod tests {
         );
     }
 
-    fn spelled(
-        rows: &[Row],
-        paint: &Paint,
-        done: &[crate::status::Segment],
-    ) -> Vec<String> {
+    fn spelled(rows: &[Row], paint: &Paint, done: &[crate::status::Segment]) -> Vec<String> {
         ScrollbackRows::new(rows, paint, done, 80)
             .map(|(r, _)| crate::render::strip_ansi(&r))
             .collect()
@@ -4746,7 +4917,11 @@ mod tests {
         let (_dir, mut lane) = a_running_lane();
         a_finished_run(&mut ui, &mut lane);
 
-        let rows = spelled(&lane.view.scrollback, &ui.paint, &crate::status::default_done());
+        let rows = spelled(
+            &lane.view.scrollback,
+            &ui.paint,
+            &crate::status::default_done(),
+        );
         assert_eq!(
             rows.last().map(String::as_str),
             Some("2 turns · 8.4k in / 390 out · ctx 72.4k/114.0k · $0.0012")
@@ -4825,7 +5000,10 @@ mod tests {
 
     fn vim_ui() -> super::Ui {
         let mut ui = test_ui(80, 24);
-        ui.set_vim(&crate::config::Vim { enabled: true, ..Default::default() });
+        ui.set_vim(&crate::config::Vim {
+            enabled: true,
+            ..Default::default()
+        });
         ui
     }
 
@@ -4969,13 +5147,19 @@ mod tests {
         let insert = ui.prompt.clone();
         ui.vim.as_mut().unwrap().mode = crate::keys::Mode::Normal;
         ui.show_mode();
-        assert_eq!(ui.prompt, insert, "one bar either way; the caret is what changes");
+        assert_eq!(
+            ui.prompt, insert,
+            "one bar either way; the caret is what changes"
+        );
 
         let mut theme = crate::render::Theme::default();
         theme.prompt.normal = "›".into();
         ui.paint.theme = std::sync::Arc::new(theme);
         ui.show_mode();
-        assert_ne!(ui.prompt, insert, "a theme that does tell them apart is obeyed");
+        assert_ne!(
+            ui.prompt, insert,
+            "a theme that does tell them apart is obeyed"
+        );
         ui.leave_normal();
         assert_eq!(ui.prompt, insert, "and back to the bar on the way out");
     }
@@ -4988,10 +5172,16 @@ mod tests {
         let mut ui = vim_ui();
         ui.vim.as_mut().unwrap().mode = crate::keys::Mode::Normal;
 
-        ui.set_vim(&crate::config::Vim { enabled: false, ..Default::default() });
+        ui.set_vim(&crate::config::Vim {
+            enabled: false,
+            ..Default::default()
+        });
         assert!(ui.vim.is_none());
 
-        ui.set_vim(&crate::config::Vim { enabled: true, ..Default::default() });
+        ui.set_vim(&crate::config::Vim {
+            enabled: true,
+            ..Default::default()
+        });
         assert_eq!(mode(&ui), Some(crate::keys::Mode::Insert));
     }
 
@@ -5008,8 +5198,6 @@ mod tests {
             Paint::new(true),
         )
     }
-
-
 
     // ------------------------------------------------------------- looping
 
@@ -5040,14 +5228,20 @@ mod tests {
         // counted distinct paths would call this round idle and stop here.
         lane.loop_running();
         wrote(&mut lane, "a.rs");
-        assert!(matches!(lane.loop_step(true, None), Some(Round::Again { next: 3, .. })));
+        assert!(matches!(
+            lane.loop_step(true, None),
+            Some(Round::Again { next: 3, .. })
+        ));
 
         // Nothing changed: a pass with nothing to do has nothing to do next
         // time either.
         lane.loop_running();
         assert!(matches!(lane.loop_step(true, None), Some(Round::Quiet)));
         assert!(lane.looping.is_none(), "and the loop is gone");
-        assert!(lane.loop_step(true, None).is_none(), "a later turn is not a round");
+        assert!(
+            lane.loop_step(true, None).is_none(),
+            "a later turn is not a round"
+        );
     }
 
     /// A line typed between rounds ends a turn too. Counting it would move the
@@ -5064,7 +5258,10 @@ mod tests {
 
         lane.loop_running();
         wrote(&mut lane, "a.rs");
-        assert!(matches!(lane.loop_step(true, None), Some(Round::Again { .. })));
+        assert!(matches!(
+            lane.loop_step(true, None),
+            Some(Round::Again { .. })
+        ));
     }
 
     /// Esc is the only brake when `loop_max_turns` is unset, so it has to stop
@@ -5087,14 +5284,20 @@ mod tests {
         lane.loop_start("go".into());
         lane.loop_running();
         wrote(&mut lane, "a.rs");
-        assert!(matches!(lane.loop_step(true, Some(1)), Some(Round::Capped(1))));
+        assert!(matches!(
+            lane.loop_step(true, Some(1)),
+            Some(Round::Capped(1))
+        ));
         assert!(lane.looping.is_none());
 
         // Unset, the same round goes on: the ceiling is a config, not a default.
         lane.loop_start("go".into());
         lane.loop_running();
         wrote(&mut lane, "b.rs");
-        assert!(matches!(lane.loop_step(true, None), Some(Round::Again { .. })));
+        assert!(matches!(
+            lane.loop_step(true, None),
+            Some(Round::Again { .. })
+        ));
     }
 
     /// A round can outlive the loop that queued it — the surface drops those,
@@ -5117,6 +5320,9 @@ mod tests {
     /// A loop whose goal is another loop would arm itself every round.
     #[test]
     fn a_loop_cannot_be_read_as_its_own_goal() {
-        assert!(matches!(crate::repl::read("/loop go"), crate::repl::Intent::Loop(_)));
+        assert!(matches!(
+            crate::repl::read("/loop go"),
+            crate::repl::Intent::Loop(_)
+        ));
     }
 }

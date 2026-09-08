@@ -40,7 +40,10 @@ async fn async_main() -> Result<()> {
             read_verify_code: None,
         };
         let credentials = wechat::login_flow(&mut client, &mut view).await?;
-        println!("connected as {} (host {})", credentials.bot_id, credentials.base_url);
+        println!(
+            "connected as {} (host {})",
+            credentials.bot_id, credentials.base_url
+        );
         state.token = Some(credentials.token);
         state.base_url = credentials.base_url;
         state.bot_id = Some(credentials.bot_id);
@@ -77,7 +80,10 @@ async fn handle(
 ) -> Result<()> {
     if update.is_error() {
         if update.is_stale_token() {
-            eprintln!("token stale — delete {} and re-run to scan again", path.display());
+            eprintln!(
+                "token stale — delete {} and re-run to scan again",
+                path.display()
+            );
             std::process::exit(1);
         }
         eprintln!(

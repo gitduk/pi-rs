@@ -224,7 +224,11 @@ async fn drive(
 #[tokio::test]
 async fn the_child_answers_into_the_parents_transcript() {
     let (_dir, agent, ctx, seen, kept) = harness(vec![
-        call_turn("c1", "task", r#"{"description":"count the files","prompt":"count the files"}"#),
+        call_turn(
+            "c1",
+            "task",
+            r#"{"description":"count the files","prompt":"count the files"}"#,
+        ),
         call_turn("c2", "probe", "{}"),
         text_turn("there are four files"),
         text_turn("the subagent says four"),
@@ -255,7 +259,10 @@ async fn the_child_answers_into_the_parents_transcript() {
         sessions[0].1
     );
     let ns = seen.namespace.lock().unwrap().clone().unwrap();
-    assert!(ns.contains("task"), "the child files under its own name: {ns}");
+    assert!(
+        ns.contains("task"),
+        "the child files under its own name: {ns}"
+    );
     assert_ne!(ns, ctx.spill_namespace(), "and not the parent's");
 }
 
@@ -292,7 +299,10 @@ async fn a_child_reads_the_shelf_and_cannot_write_to_it() {
         .await
         .expect("the child ran");
 
-    assert!(watched.reads.load(Ordering::SeqCst) > 0, "the child saw nothing");
+    assert!(
+        watched.reads.load(Ordering::SeqCst) > 0,
+        "the child saw nothing"
+    );
     assert!(
         watched.wrote.lock().unwrap().is_empty(),
         "a note nobody watched arrive"
@@ -328,7 +338,10 @@ async fn a_finished_call_still_names_the_job() {
         .await
         .expect("the child ran")
         .preview();
-    assert_eq!(bare, "1 turn · 1.0k/7", "no brackets around a bare bill: {bare}");
+    assert_eq!(
+        bare, "1 turn · 1.0k/7",
+        "no brackets around a bare bill: {bare}"
+    );
 }
 
 #[tokio::test]
@@ -362,9 +375,17 @@ async fn the_child_shares_the_tree_and_its_bookkeeping() {
 #[tokio::test]
 async fn the_child_cannot_send_out_a_child_of_its_own() {
     let (_dir, agent, ctx, _seen, kept) = harness(vec![
-        call_turn("c1", "task", r#"{"description":"delegate this","prompt":"delegate this"}"#),
+        call_turn(
+            "c1",
+            "task",
+            r#"{"description":"delegate this","prompt":"delegate this"}"#,
+        ),
         // The child tries to do the same thing to someone else.
-        call_turn("c2", "task", r#"{"description":"no you","prompt":"no you"}"#),
+        call_turn(
+            "c2",
+            "task",
+            r#"{"description":"no you","prompt":"no you"}"#,
+        ),
         text_turn("could not"),
         text_turn("fine"),
     ]);
@@ -384,7 +405,11 @@ async fn the_child_cannot_send_out_a_child_of_its_own() {
 #[tokio::test]
 async fn a_child_that_says_nothing_still_says_something() {
     let (_dir, agent, ctx, _seen, _kept) = harness(vec![
-        call_turn("c1", "task", r#"{"description":"be quiet","prompt":"be quiet"}"#),
+        call_turn(
+            "c1",
+            "task",
+            r#"{"description":"be quiet","prompt":"be quiet"}"#,
+        ),
         vec![StreamEvent::Done {
             stop: StopReason::EndTurn,
             usage: Usage::default(),
@@ -405,7 +430,11 @@ async fn a_child_that_says_nothing_still_says_something() {
 async fn running_out_of_time_is_an_answer_not_a_failure() {
     let (_dir, agent, ctx, _seen, _kept) = rigged(
         vec![
-            call_turn("c1", "task", r#"{"description":"go round","prompt":"go round"}"#),
+            call_turn(
+                "c1",
+                "task",
+                r#"{"description":"go round","prompt":"go round"}"#,
+            ),
             call_turn("c2", "sleeper", "{}"),
             text_turn("it reported back"),
         ],
@@ -418,7 +447,10 @@ async fn running_out_of_time_is_an_answer_not_a_failure() {
     // D10's whole point: the work done before the limit is still work. Handing
     // it back as an error means the caller paid for it and got nothing — and
     // handing it back as `Cancelled` would end the caller's turn outright.
-    assert!(out.is_ok(), "the caller's turn survives a child that ran out");
+    assert!(
+        out.is_ok(),
+        "the caller's turn survives a child that ran out"
+    );
     let transcript = format!("{:?}", session.entries());
     assert!(transcript.contains("unfinished"), "{transcript}");
     assert!(transcript.contains("stopped after"), "{transcript}");
@@ -428,7 +460,11 @@ async fn running_out_of_time_is_an_answer_not_a_failure() {
 async fn esc_reaches_through_the_child_and_ends_the_callers_turn() {
     let (_dir, agent, ctx, _seen, _kept) = rigged(
         vec![
-            call_turn("c1", "task", r#"{"description":"long one","prompt":"long one"}"#),
+            call_turn(
+                "c1",
+                "task",
+                r#"{"description":"long one","prompt":"long one"}"#,
+            ),
             call_turn("c2", "probe", "{}"),
             call_turn("c3", "sleeper", "{}"),
             text_turn("never gets here"),
@@ -461,7 +497,11 @@ async fn the_child_gets_no_tool_the_parent_was_denied() {
     let mut parent = Agent::new(
         Arc::new(Scripted {
             turns: vec![
-                call_turn("c1", "task", r#"{"description":"try it","prompt":"try it"}"#),
+                call_turn(
+                    "c1",
+                    "task",
+                    r#"{"description":"try it","prompt":"try it"}"#,
+                ),
                 call_turn("c2", "sleeper", "{}"),
                 text_turn("could not"),
                 text_turn("nor could I"),
@@ -538,9 +578,21 @@ async fn the_child_is_told_what_the_checkout_says() {
 async fn what_the_child_wrote_comes_back_beside_what_it_says() {
     let (_dir, agent, ctx, _seen, _kept) = harness(vec![
         // The parent writes first, in the tree the child is about to share.
-        call_turn("p0", "write", r#"{"path":"parent.rs","content":"pub fn p() {}\n"}"#),
-        call_turn("c1", "task", r#"{"description":"add one","prompt":"add one"}"#),
-        call_turn("c2", "write", r#"{"path":"child.rs","content":"pub fn c() {}\n"}"#),
+        call_turn(
+            "p0",
+            "write",
+            r#"{"path":"parent.rs","content":"pub fn p() {}\n"}"#,
+        ),
+        call_turn(
+            "c1",
+            "task",
+            r#"{"description":"add one","prompt":"add one"}"#,
+        ),
+        call_turn(
+            "c2",
+            "write",
+            r#"{"path":"child.rs","content":"pub fn c() {}\n"}"#,
+        ),
         text_turn("I rewrote the whole crate"),
         text_turn("it says it rewrote the crate"),
     ]);
@@ -549,7 +601,9 @@ async fn what_the_child_wrote_comes_back_beside_what_it_says() {
 
     // Read out of the result rather than searched for across the transcript,
     // which holds the caller's own write as well and would match it.
-    let (_, after) = transcript.split_once("[wrote ").expect("a ledger: {transcript}");
+    let (_, after) = transcript
+        .split_once("[wrote ")
+        .expect("a ledger: {transcript}");
     let ledger = after.split_once(']').expect("a closed ledger").0;
     // The two runs share a tree but not a record. A shared one would hand the
     // caller its own edit back as the child's — worse than no record at all,
@@ -609,9 +663,18 @@ async fn a_check_that_fails_comes_back_with_what_it_printed() {
         .expect("the child ran")
         .flatten();
 
-    assert!(out.contains("[verify `cat out.txt; exit 3`: exit 3]"), "{out}");
-    assert!(out.contains("SPECIMEN"), "a failing check is what was asked for: {out}");
-    assert!(out.contains("did it"), "and the child still gets its say: {out}");
+    assert!(
+        out.contains("[verify `cat out.txt; exit 3`: exit 3]"),
+        "{out}"
+    );
+    assert!(
+        out.contains("SPECIMEN"),
+        "a failing check is what was asked for: {out}"
+    );
+    assert!(
+        out.contains("did it"),
+        "and the child still gets its say: {out}"
+    );
 }
 
 #[tokio::test]
@@ -622,8 +685,8 @@ async fn a_child_that_ran_out_of_time_is_still_checked() {
         std::time::Duration::from_millis(50),
         false,
     );
-    let task = Task::new(&parent, kept, STANDING)
-        .with_limits(20, std::time::Duration::from_millis(50));
+    let task =
+        Task::new(&parent, kept, STANDING).with_limits(20, std::time::Duration::from_millis(50));
     let out = task
         .execute(
             json!({ "description": "go", "prompt": "go", "verify": "true" }),

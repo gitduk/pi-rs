@@ -107,14 +107,20 @@ mod tests {
     use super::{Kept, parse};
 
     fn kept(text: &str, weight: u8) -> Kept {
-        Kept { text: text.into(), weight }
+        Kept {
+            text: text.into(),
+            weight,
+        }
     }
 
     #[test]
     fn a_weight_and_a_line_make_a_note() {
         assert_eq!(
             parse("3 prefers xh over curl\n1 the parser is in syntax/\n"),
-            vec![kept("prefers xh over curl", 3), kept("the parser is in syntax/", 1)]
+            vec![
+                kept("prefers xh over curl", 3),
+                kept("the parser is in syntax/", 1)
+            ]
         );
     }
 
@@ -136,8 +142,14 @@ mod tests {
     /// different thing — only a decorated one.
     #[test]
     fn a_bulleted_note_is_still_a_note() {
-        assert_eq!(parse("- 3 no private-address filter"), vec![kept("no private-address filter", 3)]);
-        assert_eq!(parse("* 2. the fence is tier.fenced()"), vec![kept("the fence is tier.fenced()", 2)]);
+        assert_eq!(
+            parse("- 3 no private-address filter"),
+            vec![kept("no private-address filter", 3)]
+        );
+        assert_eq!(
+            parse("* 2. the fence is tier.fenced()"),
+            vec![kept("the fence is tier.fenced()", 2)]
+        );
     }
 
     #[test]

@@ -231,13 +231,14 @@ impl Fetch {
 
         // Read in chunks rather than whole: the length a server declares is
         // not the length it sends, and the cap has to hold either way.
-        let mut body = Vec::with_capacity(
-            resp.content_length().unwrap_or(0).min(MAX_BYTES as u64) as usize,
-        );
+        let mut body =
+            Vec::with_capacity(resp.content_length().unwrap_or(0).min(MAX_BYTES as u64) as usize);
         let mut clipped = false;
-        while let Some(chunk) = resp.chunk().await.map_err(|e| {
-            ToolError::Invalid(format!("{url} stopped mid-response: {}", why(&e)))
-        })? {
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|e| ToolError::Invalid(format!("{url} stopped mid-response: {}", why(&e))))?
+        {
             // One byte past the cap is enough to know something was cut, and
             // taking only that much keeps an oversized chunk from carrying the
             // buffer far past it.
@@ -328,7 +329,12 @@ enum Kind {
 /// Whether a content type is something the model can read, and if so whether
 /// it carries markup. Judged on the type alone, before the body is looked at.
 fn kind_of(ctype: &str) -> Option<Kind> {
-    let ctype = ctype.split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
+    let ctype = ctype
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
     if ctype.contains("html") || ctype.contains("xhtml") {
         return Some(Kind::Html);
     }
@@ -352,9 +358,41 @@ fn breaks(name: &str) -> bool {
 }
 
 const BREAKS: &[&str] = &[
-    "address", "article", "aside", "blockquote", "br", "dd", "div", "dl", "dt", "figcaption",
-    "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr", "li", "main",
-    "nav", "ol", "option", "p", "pre", "section", "table", "td", "th", "title", "tr", "ul",
+    "address",
+    "article",
+    "aside",
+    "blockquote",
+    "br",
+    "dd",
+    "div",
+    "dl",
+    "dt",
+    "figcaption",
+    "figure",
+    "footer",
+    "form",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "header",
+    "hr",
+    "li",
+    "main",
+    "nav",
+    "ol",
+    "option",
+    "p",
+    "pre",
+    "section",
+    "table",
+    "td",
+    "th",
+    "title",
+    "tr",
+    "ul",
 ];
 
 /// The tag's own name, from the text between `<` and `>`.
@@ -378,8 +416,12 @@ fn find_ci(haystack: &str, needle: &str) -> Option<usize> {
     if n.is_empty() || h.len() < n.len() {
         return None;
     }
-    (0..=h.len() - n.len())
-        .find(|&i| h[i..i + n.len()].iter().zip(n).all(|(a, b)| a.eq_ignore_ascii_case(b)))
+    (0..=h.len() - n.len()).find(|&i| {
+        h[i..i + n.len()]
+            .iter()
+            .zip(n)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+    })
 }
 
 /// Where `name`'s closing tag begins, or nothing.
@@ -463,9 +505,16 @@ fn detag(html: &str) -> String {
         if name.eq_ignore_ascii_case("pre") {
             // Nested `<pre>` is not a second region: only the outermost pair
             // opens and closes one, or an inner close would end it early.
-            depth = if closing { depth.saturating_sub(1) } else { depth + 1 };
+            depth = if closing {
+                depth.saturating_sub(1)
+            } else {
+                depth + 1
+            };
             if depth <= 1 {
-                segs.push(Seg { pre, text: std::mem::take(&mut out) });
+                segs.push(Seg {
+                    pre,
+                    text: std::mem::take(&mut out),
+                });
                 pre = !closing && depth == 1;
             }
             continue;
@@ -640,18 +689,20 @@ mod tests {
         let out = detag(
             "<p>Like  so:</p><pre><code>def f():\n    if x:\n        return 1\n</code></pre><p>Done.</p>",
         );
-        assert_eq!(out, "Like so:\ndef f():\n    if x:\n        return 1\nDone.");
+        assert_eq!(
+            out,
+            "Like so:\ndef f():\n    if x:\n        return 1\nDone."
+        );
     }
 
-/// `</script` is a prefix of plenty of things that are not the close tag.
+    /// `</script` is a prefix of plenty of things that are not the close tag.
     /// Taking one for the other resumes inside the script — printing its code
     /// as prose — and then reads the real close as an open, swallowing the
     /// rest of the document.
     #[test]
     fn a_close_tag_must_end_where_the_name_does() {
-        let out = detag(
-            "<p>a</p><script>var x = \"</scriptable-widget>LEAK\"; f();</script><p>b</p>",
-        );
+        let out =
+            detag("<p>a</p><script>var x = \"</scriptable-widget>LEAK\"; f();</script><p>b</p>");
         assert_eq!(out, "a\nb");
     }
 
@@ -663,7 +714,7 @@ mod tests {
         assert_eq!(detag("<p>a</p></style><p>b</p>"), "a\nb");
     }
 
-        #[test]
+    #[test]
     fn entities_are_decoded_and_a_bare_ampersand_survives() {
         assert_eq!(
             unescape("Tom &amp; Jerry &lt;a&gt; &#65;&#x42; &nbsp;fin"),
@@ -689,7 +740,10 @@ mod tests {
         let out = defuse(forged);
         assert!(!out.contains("</fetched>"), "{out}");
         assert!(!out.contains("<fetched "), "{out}");
-        assert!(out.contains("trusted.example"), "the text itself stays: {out}");
+        assert!(
+            out.contains("trusted.example"),
+            "the text itself stays: {out}"
+        );
         // Case is not a way around it either.
         assert!(!defuse("</FeTcHeD>").contains("</FeTcHeD>"));
     }
@@ -724,7 +778,10 @@ mod tests {
 
     #[test]
     fn text_types_are_read_and_binary_ones_refused() {
-        assert!(matches!(kind_of("text/html; charset=utf-8"), Some(Kind::Html)));
+        assert!(matches!(
+            kind_of("text/html; charset=utf-8"),
+            Some(Kind::Html)
+        ));
         assert!(matches!(kind_of("APPLICATION/XHTML+XML"), Some(Kind::Html)));
         for text in [
             "text/plain",
@@ -740,4 +797,3 @@ mod tests {
         }
     }
 }
-

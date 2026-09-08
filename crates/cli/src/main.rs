@@ -19,9 +19,9 @@ mod memory;
 mod render;
 mod repl;
 mod session;
-mod subagent;
 mod settings;
 mod status;
+mod subagent;
 mod tui;
 mod wechat;
 mod worktree;
@@ -187,7 +187,6 @@ pub struct Args {
     /// Answer only; no progress, no usage line.
     #[arg(short, long)]
     quiet: bool,
-
 }
 
 // `configured` is the config's `api_key`; the environment variable is the
@@ -340,11 +339,7 @@ pub fn arm(
 /// has to build a new one, or the child goes on talking to the old endpoint
 /// with the old key.
 ///
-pub fn hang(
-    ag: &mut agent::Agent,
-    home: std::sync::Arc<dyn agent::task::Home>,
-    standing: &str,
-) {
+pub fn hang(ag: &mut agent::Agent, home: std::sync::Arc<dyn agent::task::Home>, standing: &str) {
     let task = agent::task::Task::new(ag, home, standing);
     ag.registry = std::mem::take(&mut ag.registry).with(task);
 }
@@ -651,7 +646,9 @@ async fn main() -> Result<()> {
         // side and the repaint goes out the other. Missing either, there is
         // nothing to hold still, and printing a line at a time is right.
         if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-            let out = tui::Tui::new(core, key_map, wechat::Bridge::new())?.run().await;
+            let out = tui::Tui::new(core, key_map, wechat::Bridge::new())?
+                .run()
+                .await;
             // Subagents handed their transcripts to a background save; wait
             // for those to land before the runtime goes with them.
             subagent::flush().await;

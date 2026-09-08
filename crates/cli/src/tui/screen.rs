@@ -735,11 +735,11 @@ mod tests {
     #[test]
     fn the_escape_scanners_agree_on_where_a_sequence_ends() {
         for s in [
-            "\u{1b}7ab",              // two-byte: ESC and a final byte
-            "\u{1b}(Bab",             // an intermediate byte before the final one
-            "\u{1b}[1mab\u{1b}[0m",    // the ordinary SGR shape
+            "\u{1b}7ab",            // two-byte: ESC and a final byte
+            "\u{1b}(Bab",           // an intermediate byte before the final one
+            "\u{1b}[1mab\u{1b}[0m", // the ordinary SGR shape
             "\u{1b}[38;5;9mab",
-            "\u{1b}]0;title\u{7}ab",   // a control string closed by BEL
+            "\u{1b}]0;title\u{7}ab",    // a control string closed by BEL
             "\u{1b}]0;title\u{1b}\\ab", // and one closed by ST
         ] {
             let width = crate::render::visible_width(s);
@@ -768,7 +768,11 @@ mod tests {
                 );
             }
         }
-        assert_eq!(wrap(Some("▌ "), "ab", 2), ["ab"], "the text keeps the frame");
+        assert_eq!(
+            wrap(Some("▌ "), "ab", 2),
+            ["ab"],
+            "the text keeps the frame"
+        );
     }
 
     #[test]

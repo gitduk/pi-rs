@@ -155,9 +155,7 @@ mod tests {
     #[test]
     fn a_tool_result_counts_its_body_not_just_its_name() {
         let bare = vec![Message::tool_results(vec![ToolResult::text(
-            "c",
-            "read",
-            "",
+            "c", "read", "",
         )])];
         let full = vec![Message::tool_results(vec![ToolResult::text(
             "c",
