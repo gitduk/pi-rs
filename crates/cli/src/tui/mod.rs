@@ -2309,6 +2309,16 @@ impl Tui {
         }
     }
 
+    /// Put a handled command's lines into the view of the lane in front. Lent
+    /// out rather than borrowed in place: the view lives inside `core`, which
+    /// this also reads.
+    fn land_lines(&mut self, lines: Vec<String>) {
+        let at = self.core.current;
+        let mut view = std::mem::take(&mut self.core.lanes[at].view);
+        land_handled(&mut self.ui, &self.core, &mut view, lines);
+        self.core.lanes[at].view = view;
+    }
+
     fn land_swap(&mut self, said: Vec<String>) {
         let lane = self.core.lane_mut();
         if let Some(session) = lane.session.as_ref() {
@@ -2757,14 +2767,12 @@ impl Tui {
                 Step::Flash(line) => self.ui.flash(line),
                 Step::Bash(command) => self.start_bash(command, &done_tx),
                 Step::Swap(said) => self.land_swap(said),
-                Step::Handled(lines) => {
-                    // Lent out rather than borrowed in place: the view lives
-                    // inside `core`, which this also reads.
-                    let at = self.core.current;
-                    let mut view = std::mem::take(&mut self.core.lanes[at].view);
-                    land_handled(&mut self.ui, &self.core, &mut view, lines);
-                    self.core.lanes[at].view = view;
+                Step::Worktrees(lines) => {
+                    self.land_lines(lines);
+                    // A checkout went; the cached list would go on offering it.
+                    self.ui.lists.forget();
                 }
+                Step::Handled(lines) => self.land_lines(lines),
                 Step::Compact(focus) => self.start_compact(focus, &done_tx),
                 Step::Wechat(cmd) => {
                     let said = match cmd {
