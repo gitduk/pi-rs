@@ -270,7 +270,7 @@ async fn the_child_answers_into_the_parents_transcript() {
 ///
 /// Both halves have been wrong in the same afternoon: a child given no shelf
 /// reads nothing, and a child given the parent's own writes to it out of
-/// sight. `arm` sets the parent's before `hang` freezes the copy the child
+/// sight. `Agent::apply` sets the parent's before `Agent::hang` freezes the copy the child
 /// keeps for the life of the run.
 #[tokio::test]
 async fn a_child_reads_the_shelf_and_cannot_write_to_it() {

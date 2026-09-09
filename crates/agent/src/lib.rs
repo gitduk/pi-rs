@@ -9,7 +9,7 @@ use brain::transport::Transport;
 use futures::StreamExt;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
-use tools::{Concurrency, Ctx, Registry, ToolError, ToolOutput};
+use tools::{Concurrency, Ctx, Registry, Tier, ToolError, ToolOutput};
 use tracing::Instrument as _;
 
 use crate::session::Session;
@@ -164,6 +164,17 @@ enum Action {
     Reject(String),
     Run(Arc<dyn tools::Tool>),
 }
+/// Everything the config and the workspace decide, in one bundle for
+/// [`Agent::apply`] to put onto an agent.
+pub struct Setup<'a> {
+    pub registry: Registry,
+    pub system: String,
+    pub tier: Tier,
+    pub effort: Effort,
+    pub shelf: Arc<dyn Shelf>,
+    pub home: Arc<dyn task::Home>,
+    pub standing: &'a str,
+}
 
 impl Agent {
     pub fn new(transport: Arc<dyn Transport>, spec: ModelSpec) -> Self {
@@ -185,6 +196,32 @@ impl Agent {
     pub fn retarget(&mut self, transport: Arc<dyn Transport>, spec: ModelSpec) {
         self.transport = transport;
         self.spec = spec;
+    }
+    /// Put everything the config and workspace decide onto this agent — the
+    /// tools, the ceiling, the system prompt, the effort, the shelf — and
+    /// hang the subagent tool off the result.
+    ///
+    /// **Call it last.** `Task` clones the agent it is handed, so any field set
+    /// after this is one the child does not have — which is how the startup path
+    /// once gave the parent its retry policy and the child none.
+    pub fn apply(&mut self, setup: Setup<'_>) {
+        self.registry = setup.registry;
+        self.approver = Arc::new(Ceiling(setup.tier));
+        self.system = setup.system;
+        self.effort = setup.effort;
+        self.shelf = Some(setup.shelf);
+        self.hang(setup.home, setup.standing);
+    }
+
+    /// Hang a subagent off this agent, replacing any it already carries.
+    ///
+    /// Separate from `apply` because `Task` keeps a snapshot of the parent:
+    /// anything that changes the parent afterwards — `/model` re-dialling the
+    /// transport — has to build a new one, or the child goes on talking to the
+    /// old endpoint with the old key.
+    pub fn hang(&mut self, home: Arc<dyn task::Home>, standing: &str) {
+        let task = task::Task::new(self, home, standing);
+        self.registry = std::mem::take(&mut self.registry).with(task);
     }
 
     /// A run nobody is talking to. What a subagent, a `--print` and a test all

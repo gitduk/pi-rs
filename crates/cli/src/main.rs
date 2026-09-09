@@ -308,42 +308,6 @@ fn read_prompt(args: &Args) -> Result<Option<String>> {
     Ok(Some(body))
 }
 
-/// Put what `resolve` settled onto an agent, and hang the subagent tool off the
-/// result.
-///
-/// **Call it last.** `Task` clones the agent it is handed, so any field set
-/// after this is one the child does not have — which is how the startup path
-/// once gave the parent its retry policy and the child none.
-///
-/// Takes the fields it installs out of `from`, which the callers do not read
-/// again — the rest of `Resolved` is theirs.
-pub fn arm(
-    ag: &mut agent::Agent,
-    from: &mut Resolved,
-    home: std::sync::Arc<dyn agent::task::Home>,
-    shelf: std::sync::Arc<dyn agent::Shelf>,
-) {
-    ag.registry = std::mem::take(&mut from.registry);
-    ag.approver = std::sync::Arc::new(agent::Ceiling(from.tier));
-    ag.system = std::mem::take(&mut from.system);
-    ag.effort = from.effort;
-    ag.shelf = Some(shelf);
-    hang(ag, home, &from.standing);
-}
-
-/// Hang a subagent off an agent that is otherwise ready, replacing any it
-/// already carries.
-///
-/// Separate from `arm` because `Task` keeps a snapshot of the parent: anything
-/// that changes the parent afterwards — `/model` re-dialling the transport —
-/// has to build a new one, or the child goes on talking to the old endpoint
-/// with the old key.
-///
-pub fn hang(ag: &mut agent::Agent, home: std::sync::Arc<dyn agent::task::Home>, standing: &str) {
-    let task = agent::task::Task::new(ag, home, standing);
-    ag.registry = std::mem::take(&mut ag.registry).with(task);
-}
-
 /// Everything the config and the workspace decide, as opposed to what the
 /// command line fixed for the whole run. `/reload` recomputes exactly this.
 pub struct Resolved {
@@ -572,19 +536,22 @@ async fn main() -> Result<()> {
     if let Some(secs) = config.idle_timeout {
         ag.retry.idle = std::time::Duration::from_secs(secs.max(1));
     }
-    // Before `arm`, which is where the child is cloned: a shelf hung after it
-    // would reach this run and none of the subagents it spawns. Here rather
-    // than beside the Repl, so a one-shot `pi "..."` reads the same shelf an
-    // interactive session writes — outliving one transcript is the whole point.
-    // Last, so the child is cloned from an agent that is finished.
-    arm(
-        &mut ag,
-        &mut resolved,
-        subagent::Filed::armed(store.clone(), root.clone(), model_id.clone()),
-        memory::shelf(store.memory_path(&root)),
-    );
-    // After `arm`, which needs the whole of `resolved`: this takes a field out
-    // of it.
+    // Before `Agent::apply`, which is where the child is cloned: a shelf hung
+    // after it would reach this run and none of the subagents it spawns. Here
+    // rather than beside the Repl, so a one-shot `pi "..."` reads the same
+    // shelf an interactive session writes — outliving one transcript is the
+    // whole point. Last, so the child is cloned from an agent that is finished.
+    ag.apply(agent::Setup {
+        registry: std::mem::take(&mut resolved.registry),
+        system: std::mem::take(&mut resolved.system),
+        tier: resolved.tier,
+        effort: resolved.effort,
+        shelf: memory::shelf(store.memory_path(&root)),
+        home: subagent::Filed::armed(store.clone(), root.clone(), model_id.clone()),
+        standing: &resolved.standing,
+    });
+    // After `Agent::apply`, which has taken what the agent needs: this takes a
+    // field out of what is left.
     let key_map = std::sync::Arc::new(resolved.keys);
 
     let (tx, rx) = mpsc::unbounded_channel();

@@ -396,7 +396,7 @@ impl Repl {
     /// leaving the last lane's in place had this one answering to another
     /// tree's.
     ///
-    /// The shelf is not here: `arm` hands the agent a handle to this
+    /// The shelf is not here: `Agent::apply` hands the agent a handle to this
     /// checkout's file, and the handle reads it every turn.
     fn in_force(&mut self) {
         self.keys = self.lane().keys.clone();
@@ -490,7 +490,15 @@ impl Repl {
         let home = self.home(root.clone(), self.lane().agent.spec.model.clone());
         let shelf = crate::memory::shelf(self.store.memory_path(&root));
         let ag = std::sync::Arc::make_mut(&mut self.lane_mut().agent);
-        crate::arm(ag, &mut resolved, home, shelf);
+        ag.apply(agent::Setup {
+            registry: std::mem::take(&mut resolved.registry),
+            system: std::mem::take(&mut resolved.system),
+            tier: resolved.tier,
+            effort: resolved.effort,
+            shelf,
+            home,
+            standing: &resolved.standing,
+        });
         self.lane_mut().context = resolved.context;
         self.lane_mut().standing = resolved.standing;
         // A skill can appear between one turn and the next, so the table of
@@ -724,7 +732,7 @@ impl Repl {
         let standing = self.lane().standing.clone();
         let ag = std::sync::Arc::make_mut(&mut self.lane_mut().agent);
         ag.retarget(transport, spec);
-        crate::hang(ag, home, &standing);
+        ag.hang(home, &standing);
     }
 
     /// This workspace's shelf, and the file it lives in.
@@ -1779,12 +1787,15 @@ impl Repl {
         // trees, and which model is answering was a decision made elsewhere.
         let home = self.home(root.clone(), self.lane().agent.spec.model.clone());
         let mut ag = (*self.lane().agent).clone();
-        crate::arm(
-            &mut ag,
-            &mut resolved,
+        ag.apply(agent::Setup {
+            registry: std::mem::take(&mut resolved.registry),
+            system: std::mem::take(&mut resolved.system),
+            tier: resolved.tier,
+            effort: resolved.effort,
+            shelf: crate::memory::shelf(self.store.memory_path(&root)),
             home,
-            crate::memory::shelf(self.store.memory_path(&root)),
-        );
+            standing: &resolved.standing,
+        });
 
         // Built, not cloned from the lane being left: a `Ctx`'s tables key on
         // absolute paths in one tree, and none of that lane's describe this.
@@ -1811,7 +1822,7 @@ impl Repl {
         });
         self.current = self.lanes.len() - 1;
         // The agent was cloned from the lane being left, and its shelf with
-        // it; `arm` put this checkout's own in its place.
+        // it; `Agent::apply` put this checkout's own in its place.
         self.in_force();
 
         // Asked with the root the next save will file under, so a tree is found
@@ -2896,11 +2907,11 @@ mod tests {
         let ws = tools::Workspace::new(root).unwrap();
         let mut agent = agent::Agent::new(transport, test_spec(model));
         let store = crate::session::Store::new(root.join("state"));
-        // What `arm` does before `hang`, which this stands in for: the child
-        // is cloned here, and a shelf set afterwards is one it never sees.
+        // What `Agent::apply` does before `Agent::hang`, which this stands in
+        // for: the child is cloned here, and a shelf set afterwards is one it
+        // never sees.
         agent.shelf = Some(crate::memory::shelf(store.memory_path(root)));
-        crate::hang(
-            &mut agent,
+        agent.hang(
             crate::subagent::Filed::armed(
                 crate::session::Store::new(root.join("state")),
                 root.to_path_buf(),
