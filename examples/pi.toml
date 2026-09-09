@@ -44,10 +44,10 @@ summarize_model = "claude-haiku-4-5"
 effort = "medium"                # off | low | medium | high
 tier   = "exec"                  # read | write | exec
 
-# How many rounds a `/loop` may run before it stops on its own. Unset there is
-# no ceiling — a loop ends when a round changes nothing, and the one shape that
-# never reaches is a round that undoes the last one. Worth setting for that
-# alone: without it, esc is the only brake.
+# How many rounds a `/loop` may run before it stops on its own. Unset is 10 —
+# a loop ends on its own when a round changes nothing, when a round undoes the
+# last one, or when rounds only nibble; this is the floor for a loop that keeps
+# changing files forever. Esc is always the brake.
 loop_max_turns = 10
 
 # How many times to retry a request the provider could not serve, and how many

@@ -89,11 +89,14 @@ pub struct Config {
     /// Vim keys: on unless a file turns them off.
     #[serde(default)]
     pub vim: Vim,
-    /// How many rounds a `/loop` may run before it stops on its own. Unset is
-    /// no ceiling: a loop ends when a round changes nothing, and the one shape
-    /// that never reaches is a round that undoes the last one. Set this and
-    /// that shape has a floor; leave it unset and esc is the only brake.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// How many rounds a `/loop` may run before it stops on its own. Defaults
+    /// to 10 — the fingerprint and thin-round brakes catch a converging loop,
+    /// and this is the floor for the shape they cannot (a round that keeps
+    /// changing files forever). Unset reads as 10; esc is always the brake.
+    #[serde(
+        default = "default_loop_max_turns",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub loop_max_turns: Option<usize>,
 
     /// How many times to retry a request the provider could not serve. Unset
@@ -139,6 +142,9 @@ fn default_escape() -> String {
 fn default_escape_ms() -> u64 {
     250
 }
+fn default_loop_max_turns() -> Option<usize> {
+    Some(10)
+}
 
 impl Default for Vim {
     fn default() -> Self {
@@ -178,6 +184,12 @@ impl Config {
             .map(|(id, b)| (id.clone(), b.clone().into_vec()))
             .collect();
         crate::keys::Keys::resolve(&overrides)
+    }
+    /// How many rounds a `/loop` may run before it stops on its own. The
+    /// field is `Option` for serde, but the default of 10 means an unset
+    /// config reads the same as one that says `loop_max_turns = 10`.
+    pub fn loop_cap(&self) -> Option<usize> {
+        self.loop_max_turns.or(Some(10))
     }
 }
 

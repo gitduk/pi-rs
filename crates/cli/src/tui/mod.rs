@@ -2490,20 +2490,32 @@ impl Tui {
     /// has nothing left to do. Asking the model instead would hand back the
     /// judgement this exists to take away from it.
     fn step_loop(&mut self, lane: usize, finished: bool) {
-        let cap = self.core.config.loop_max_turns;
+        let cap = self.core.config.loop_cap();
         let Some(round) = self.core.lanes[lane].loop_step(finished, cap) else {
             return;
         };
         let said = match round {
             crate::lane::Round::Again { goal, next } => {
+                // The round number and the running total reach the model as a
+                // note, not glued to the goal: the goal must stay exactly what
+                // `read` would parse, so a skill round reads as its skill.
+                let note = self.core.lanes[lane]
+                    .looping
+                    .as_ref()
+                    .map(|l| l.note.clone())
+                    .unwrap_or_default();
                 self.core.lanes[lane]
                     .view
                     .queued
-                    .push(Intent::LoopRound(goal));
+                    .push(Intent::LoopRound { goal, note });
                 format!("loop round {next}")
             }
             crate::lane::Round::Cut => return,
             crate::lane::Round::Quiet => "loop done — that round changed nothing".to_string(),
+            crate::lane::Round::Oscillating => {
+                "loop stopped — a round undid the work before it".to_string()
+            }
+            crate::lane::Round::Thin => "loop stopped — rounds are only nibbling now".to_string(),
             crate::lane::Round::Capped(n) => {
                 format!("loop stopped at loop_max_turns ({n}) — rounds were still changing files")
             }
@@ -2763,7 +2775,7 @@ impl Tui {
                 // read — the echo wants the text, which reading spends.
                 // A loop's own round: echoed and read like a typed line, and
                 // marked so the turn it starts is the one the loop counts.
-                Intent::LoopRound(line) => {
+                Intent::LoopRound { goal, note } => {
                     // The loop that queued this may have been stopped since.
                     // Running it then would be a turn nobody asked for, and
                     // one that reads on screen as if it had been typed.
@@ -2771,9 +2783,14 @@ impl Tui {
                         continue;
                     }
                     from_loop = true;
-                    self.ui.submit(&mut self.core.lane_mut().view, &line);
+                    self.ui.submit(&mut self.core.lane_mut().view, &goal);
                     self.core.lane_mut().view.scroll = 0;
-                    crate::repl::read(&line)
+                    if !note.is_empty()
+                        && let Some(session) = self.core.lane_mut().session.as_mut()
+                    {
+                        session.push_note(&note);
+                    }
+                    crate::repl::read(&goal)
                 }
                 Intent::Submit(line) => {
                     self.echo_sent(&line);
@@ -2795,7 +2812,7 @@ impl Tui {
                         .lane_mut()
                         .view
                         .queued
-                        .retain(|q| !matches!(q, Intent::LoopRound(_)));
+                        .retain(|q| !matches!(q, Intent::LoopRound { .. }));
                     match self.core.lane_mut().looping.take() {
                         // A loop really ended: that belongs in the transcript.
                         Some(l) => {
@@ -2826,11 +2843,10 @@ impl Tui {
                     continue;
                 }
                 self.core.lane_mut().loop_start(goal.clone());
-                self.core
-                    .lane_mut()
-                    .view
-                    .queued
-                    .push(Intent::LoopRound(goal));
+                self.core.lane_mut().view.queued.push(Intent::LoopRound {
+                    goal,
+                    note: String::new(),
+                });
                 continue;
             }
             // Bare `/mem` and `/settings` open a panel rather than printing
@@ -5438,8 +5454,12 @@ mod tests {
 
     use crate::lane::Round;
 
-    fn wrote(lane: &mut crate::lane::Lane, name: &str) {
-        lane.ctx.note_write(&lane.ctx.workspace.root().join(name));
+    /// Write `body` to `name` in the lane's workspace and record the write, so
+    /// the tree fingerprint the loop reads has real bytes to hash.
+    fn wrote(lane: &mut crate::lane::Lane, name: &str, body: &str) {
+        let path = lane.ctx.workspace.root().join(name);
+        std::fs::write(&path, body).expect("writes into the temp workspace");
+        lane.ctx.note_write(&path);
     }
 
     /// The whole point of the command: what decides another round is the tree,
@@ -5451,18 +5471,23 @@ mod tests {
         lane.loop_start("/code-review high".into());
 
         lane.loop_running();
-        wrote(&mut lane, "a.rs");
+        wrote(&mut lane, "a.rs", "fn main() {}\n");
         let again = lane.loop_step(true, None).expect("a loop is in force");
         assert!(
             matches!(&again, Round::Again { goal, next: 2 } if goal == "/code-review high"),
             "the goal goes back verbatim, as the round it now is",
         );
 
-        // The same file again. What a loop like this does most of the time is
-        // keep working the files it has already touched, so a record that
-        // counted distinct paths would call this round idle and stop here.
+        // The same file again, with different content — what a loop like this
+        // does most of the time is keep working the files it has already
+        // touched. A record that only counted writes would call this idle and
+        // stop; the fingerprint sees the rewrite.
         lane.loop_running();
-        wrote(&mut lane, "a.rs");
+        wrote(
+            &mut lane,
+            "a.rs",
+            "fn main() {\n    let x = 1;\n    let y = 2;\n    println!(\"{}\", x + y);\n}\n",
+        );
         assert!(matches!(
             lane.loop_step(true, None),
             Some(Round::Again { next: 3, .. })
@@ -5492,7 +5517,7 @@ mod tests {
         assert_eq!(lane.looping.as_ref().map(|l| l.round), Some(0));
 
         lane.loop_running();
-        wrote(&mut lane, "a.rs");
+        wrote(&mut lane, "a.rs", "fn main() {}\n");
         assert!(matches!(
             lane.loop_step(true, None),
             Some(Round::Again { .. })
@@ -5506,19 +5531,19 @@ mod tests {
         let (_dir, mut lane) = a_running_lane();
         lane.loop_start("go".into());
         lane.loop_running();
-        wrote(&mut lane, "a.rs");
+        wrote(&mut lane, "a.rs", "fn main() {}\n");
         assert!(matches!(lane.loop_step(false, None), Some(Round::Cut)));
         assert!(lane.looping.is_none());
     }
 
-    /// The ceiling exists for the one shape convergence cannot catch: a round
-    /// that undoes the last one changes files forever.
+    /// The ceiling is the floor for a loop no other brake can catch: one that
+    /// keeps changing files forever without ever repeating itself.
     #[test]
     fn a_loop_stops_at_the_configured_ceiling_with_work_still_left() {
         let (_dir, mut lane) = a_running_lane();
         lane.loop_start("go".into());
         lane.loop_running();
-        wrote(&mut lane, "a.rs");
+        wrote(&mut lane, "a.rs", "fn main() {}\n");
         assert!(matches!(
             lane.loop_step(true, Some(1)),
             Some(Round::Capped(1))
@@ -5528,7 +5553,7 @@ mod tests {
         // Unset, the same round goes on: the ceiling is a config, not a default.
         lane.loop_start("go".into());
         lane.loop_running();
-        wrote(&mut lane, "b.rs");
+        wrote(&mut lane, "b.rs", "fn b() {}\n");
         assert!(matches!(
             lane.loop_step(true, None),
             Some(Round::Again { .. })
@@ -5547,11 +5572,65 @@ mod tests {
         // What a `LoopRound` still sitting in the queue would do on its way
         // through: neither of these may bring the loop back.
         lane.loop_running();
-        wrote(&mut lane, "a.rs");
+        wrote(&mut lane, "a.rs", "fn main() {}\n");
         assert!(lane.looping.is_none(), "no loop to mark as running");
         assert!(lane.loop_step(true, None).is_none(), "and none to step");
     }
 
+    /// A round that restores the tree to a fingerprint it wore earlier is a
+    /// loop seesawing forever — the round after the rewrite undid it.
+    #[test]
+    fn a_round_that_undoes_the_last_one_stops_as_oscillating() {
+        let (_dir, mut lane) = a_running_lane();
+        lane.loop_start("go".into());
+        let six = "a\nb\nc\nd\ne\nf\n";
+        let six_more = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\n";
+        lane.loop_running();
+        wrote(&mut lane, "a.rs", six);
+        assert!(matches!(
+            lane.loop_step(true, None),
+            Some(Round::Again { .. })
+        ));
+
+        // Round 2 rewrites at full size; round 3 puts the first bytes back —
+        // the tree is exactly what round 1 wore, and any later round would
+        // seesaw between the two.
+        lane.loop_running();
+        wrote(&mut lane, "a.rs", six_more);
+        assert!(matches!(
+            lane.loop_step(true, None),
+            Some(Round::Again { .. })
+        ));
+
+        lane.loop_running();
+        wrote(&mut lane, "a.rs", six);
+        assert!(
+            matches!(lane.loop_step(true, None), Some(Round::Oscillating)),
+            "the tree returned to a fingerprint the loop has already worn"
+        );
+        assert!(lane.looping.is_none(), "and the loop is gone");
+    }
+
+    /// The fingerprint cannot catch a loop that keeps nibbling — one line an
+    /// hour, forever. Two such rounds in a row are the noise floor, and the
+    /// loop stops rather than polish past the point of return.
+    #[test]
+    fn rounds_that_only_nibble_stop_as_thin() {
+        let (_dir, mut lane) = a_running_lane();
+        lane.loop_start("go".into());
+
+        lane.loop_running();
+        wrote(&mut lane, "a.rs", "one\n");
+        assert!(matches!(
+            lane.loop_step(true, None),
+            Some(Round::Again { .. })
+        ));
+
+        lane.loop_running();
+        wrote(&mut lane, "a.rs", "one\ntwo\n");
+        assert!(matches!(lane.loop_step(true, None), Some(Round::Thin)));
+        assert!(lane.looping.is_none());
+    }
     /// A loop whose goal is another loop would arm itself every round.
     #[test]
     fn a_loop_cannot_be_read_as_its_own_goal() {

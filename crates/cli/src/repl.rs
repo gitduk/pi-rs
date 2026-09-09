@@ -1020,8 +1020,13 @@ pub enum Intent {
     Loop(String),
     /// One round of a loop, put back through the door by the surface. Apart
     /// from `Submit` only so the turn it starts can be told from a line typed
-    /// between rounds — `read` never answers it.
-    LoopRound(String),
+    /// between rounds — `read` never answers it. `note` is the loop's word to
+    /// the model, filed as machine prose rather than glued to the goal, which
+    /// must stay what `read` would parse.
+    LoopRound {
+        goal: String,
+        note: String,
+    },
     /// Not a built-in word. It may name a skill and it may name nothing; the
     /// command table settles that, and `read` does not have it.
     Other {
@@ -1123,7 +1128,7 @@ impl Intent {
             Intent::Wechat(_) | Intent::Other { .. } => Fate::Queued,
             // Arms the lane and submits its first round like a typed line;
             // both want the lane free.
-            Intent::Loop(_) | Intent::LoopRound(_) => Fate::Queued,
+            Intent::Loop(_) | Intent::LoopRound { .. } => Fate::Queued,
             // Prose reaches the run that is already talking to the model:
             // waiting for it is what makes a correction arrive too late to be
             // one.
@@ -1450,7 +1455,7 @@ impl Repl {
             // The surface's, like `Submit`: arming a lane and re-submitting a
             // line through `read` are both things only it can do, so it takes
             // this before `run` is reached.
-            Intent::Loop(_) | Intent::LoopRound(_) => Step::Handled(Vec::new()),
+            Intent::Loop(_) | Intent::LoopRound { .. } => Step::Handled(Vec::new()),
             Intent::Quit => Step::Quit,
             Intent::Help => Step::Handled(help(&self.commands)),
             Intent::Keys => Step::Handled(self.keys.listing()),
