@@ -29,49 +29,52 @@ const BANNER: &str = concat!("π ", env!("CARGO_PKG_VERSION"));
 pub struct Row(Kind);
 
 enum Kind {
-    /// One logical line of a prompt the user said: the border and the body
-    /// kept apart, so wrapping can repeat the border on every screen row the
-    /// body spans. A single border in the text would be cut at the first
-    /// wrap — the bar would end mid-air and the rest of the line would run
-    /// flush against the left edge.
+    // One logical line of a prompt the user said: the border and the body
+    // kept apart, so wrapping can repeat the border on every screen row the
+    // body spans. A single border in the text would be cut at the first
+    // wrap — the bar would end mid-air and the rest of the line would run
+    // flush against the left edge.
     Said {
-        /// The painted rule and its column: `▌ ` in the prompt colour.
+        // The painted rule and its column: `▌ ` in the prompt colour.
         border: String,
-        /// The line's text, painted in the input style, without the border.
+        // The line's text, painted in the input style, without the border.
         body: String,
     },
-    /// A painted line the screen alone knows about: the banner, a command's
-    /// output, a warning. Colour does not depend on width, so painting it
-    /// early costs nothing.
-    ///
-    /// `times` counts the same notice landing again with nothing between it
-    /// and the last one: a key held down, or a refusal repeated. It renders as
-    /// one row with a count rather than as a column of identical lines.
-    Notice { text: String, times: usize },
-    /// A tool's result, kept as its parts. Clipping waits for the frame that
-    /// needs it: a row clipped at the width it landed at can never grow back
-    /// when the window does.
-    ///
-    /// `painted` holds the last frame's clipping, keyed by the width it was
-    /// done at. The screen asks for one row at a time, and a result is as many
-    /// rows as its diff has lines, so painting the whole result per row asked
-    /// for made a redraw quadratic in the size of the diff — on every spinner
-    /// tick, for as long as it stayed on screen.
+    // A painted line the screen alone knows about: the banner, a command's
+    // output, a warning. Colour does not depend on width, so painting it
+    // early costs nothing.
+    //
+    // `times` counts the same notice landing again with nothing between it
+    // and the last one: a key held down, or a refusal repeated. It renders as
+    // one row with a count rather than as a column of identical lines.
+    Notice {
+        text: String,
+        times: usize,
+    },
+    // A tool's result, kept as its parts. Clipping waits for the frame that
+    // needs it: a row clipped at the width it landed at can never grow back
+    // when the window does.
+    //
+    // `painted` holds the last frame's clipping, keyed by the width it was
+    // done at. The screen asks for one row at a time, and a result is as many
+    // rows as its diff has lines, so painting the whole result per row asked
+    // for made a redraw quadratic in the size of the diff — on every spinner
+    // tick, for as long as it stayed on screen.
     Result {
         ok: bool,
         name: String,
         preview: String,
         painted: RefCell<Option<(usize, Vec<String>)>>,
     },
-    /// What a finished run left behind, kept as its numbers rather than as the
-    /// string they render to. The segments the config asks for and the theme
-    /// they are painted in both outlive the run, and a string frozen when it
-    /// ended answers to neither.
+    // What a finished run left behind, kept as its numbers rather than as the
+    // string they render to. The segments the config asks for and the theme
+    // they are painted in both outlive the run, and a string frozen when it
+    // ended answers to neither.
     Tally(Snapshot),
-    /// A block of reasoning that can be folded or unfolded.
+    // A block of reasoning that can be folded or unfolded.
     Reasoning {
-        /// Which block this row belongs to; the stream appends completed lines
-        /// to the open block's row and nothing else.
+        // Which block this row belongs to; the stream appends completed lines
+        // to the open block's row and nothing else.
         block: u64,
         lines: Vec<String>,
         folded: bool,
@@ -184,9 +187,9 @@ impl Row {
         Self::notice(paint.on(&paint.theme.muted, &tool_start_line(name, summary)))
     }
 
-    /// One logical line of a prompt the user said: the rule it wears, and the
-    /// text under it. The border lives apart from the body so the screen can
-    /// repeat it on every row the body wraps to — see `Kind::Said`.
+    // One logical line of a prompt the user said: the rule it wears, and the
+    // text under it. The border lives apart from the body so the screen can
+    // repeat it on every row the body wraps to — see `Kind::Said`.
     fn said(border: String, body: String) -> Self {
         Row(Kind::Said { border, body })
     }
@@ -379,10 +382,10 @@ mod said_tests {
             .collect()
     }
 
-    /// A line that has landed wears a rule, not the prompt icon: the icon
-    /// marks the line being typed, and one above the input read as a second
-    /// place to type. The rule runs down every line, so a multi-line say is
-    /// one bar rather than a mark and some indent.
+    // A line that has landed wears a rule, not the prompt icon: the icon
+    // marks the line being typed, and one above the input read as a second
+    // place to type. The rule runs down every line, so a multi-line say is
+    // one bar rather than a mark and some indent.
     #[test]
     fn a_said_line_wears_a_rule_and_never_the_prompt_icon() {
         let icon = crate::render::Theme::default().prompt.icon;
@@ -397,14 +400,14 @@ mod said_tests {
         }
     }
 
-    /// A `!` is a command, not something said, and keeps its own mark.
+    // A `!` is a command, not something said, and keeps its own mark.
     #[test]
     fn a_bang_command_keeps_its_own_mark() {
         assert_eq!(said("!cargo test"), ["! cargo test"]);
     }
 
-    /// The rule spends the same two columns the prompt did, so nothing that
-    /// lines up against a said line moves.
+    // The rule spends the same two columns the prompt did, so nothing that
+    // lines up against a said line moves.
     #[test]
     fn the_rule_costs_what_the_prompt_did() {
         let icon = crate::render::Theme::default().prompt.icon;

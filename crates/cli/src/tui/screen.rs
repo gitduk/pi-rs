@@ -294,14 +294,14 @@ impl Widget for Rows<'_> {
     }
 }
 
-/// The terminal this screen draws on. An enum rather than a generic so the
-/// backend stays out of `Screen`'s type — and out of `Ui`'s and `Tui`'s with
-/// it, which is the whole reason the surface was untestable.
+// The terminal this screen draws on. An enum rather than a generic so the
+// backend stays out of `Screen`'s type — and out of `Ui`'s and `Tui`'s with
+// it, which is the whole reason the surface was untestable.
 enum Term {
     Live(Terminal<CrosstermBackend<Stdout>>),
-    /// An in-memory grid. It never enters raw mode or the alternate screen, so
-    /// `leave` has nothing to undo — which is what keeps a test off the
-    /// terminal the test runner itself is using.
+    // An in-memory grid. It never enters raw mode or the alternate screen, so
+    // `leave` has nothing to undo — which is what keeps a test off the
+    // terminal the test runner itself is using.
     #[cfg(test)]
     Test(Terminal<ratatui::backend::TestBackend>),
 }
@@ -312,8 +312,8 @@ pub struct Screen {
     pub height: u16,
 }
 
-/// Raw mode and the three modes the surface draws under. One function so `new`
-/// and `resume` claim exactly what `leave` gives back, rather than nearly.
+// Raw mode and the three modes the surface draws under. One function so `new`
+// and `resume` claim exactly what `leave` gives back, rather than nearly.
 fn enter(stdout: &mut Stdout) -> std::io::Result<()> {
     crossterm::terminal::enable_raw_mode()?;
     crossterm::execute!(
@@ -660,7 +660,7 @@ mod tests {
         assert_eq!(buf[(0, 0)].symbol(), "中\u{301}");
     }
 
-    /// The window's rows, plain, for a history of `lines` at width `width`.
+    // The window's rows, plain, for a history of `lines` at width `width`.
     fn shown(lines: &[&str], width: usize, room: usize, scroll: usize) -> Vec<String> {
         let owned: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
         let (rows, _) = window(
@@ -708,8 +708,8 @@ mod tests {
         assert_eq!(scroll, 1, "clamped, so one press down comes back");
     }
 
-    /// A bordered line repeats its border on every row it wraps to, so a said
-    /// line keeps its rule unbroken instead of cutting it at the first wrap.
+    // A bordered line repeats its border on every row it wraps to, so a said
+    // line keeps its rule unbroken instead of cutting it at the first wrap.
     #[test]
     fn a_bordered_line_repeats_its_border_on_every_wrapped_row() {
         // `fit` closes each cut piece with a reset; the border rides on top.
@@ -728,10 +728,10 @@ mod tests {
         );
     }
 
-    /// The three escape scanners — `fit` here, `clip` and `visible_width` in
-    /// `render` — each need something different out of a sequence, so they
-    /// stay three functions. Nothing structural makes them agree on where one
-    /// ends, which is what this is for.
+    // The three escape scanners — `fit` here, `clip` and `visible_width` in
+    // `render` — each need something different out of a sequence, so they
+    // stay three functions. Nothing structural makes them agree on where one
+    // ends, which is what this is for.
     #[test]
     fn the_escape_scanners_agree_on_where_a_sequence_ends() {
         for s in [
@@ -749,15 +749,15 @@ mod tests {
         }
     }
 
-    /// A bordered line that fits gets one row, its border and all.
+    // A bordered line that fits gets one row, its border and all.
     #[test]
     fn a_bordered_line_that_fits_stays_one_row() {
         assert_eq!(wrap(Some("▌ "), "abc", 6), ["▌ abc"]);
     }
 
-    /// Every row `wrap` returns fits the width it was given — the promise
-    /// `window` counts rows on. A frame with no room for the rule and a column
-    /// of text both gives up the rule, not the promise.
+    // Every row `wrap` returns fits the width it was given — the promise
+    // `window` counts rows on. A frame with no room for the rule and a column
+    // of text both gives up the rule, not the promise.
     #[test]
     fn a_frame_too_narrow_for_the_rule_drops_it_rather_than_overflowing() {
         for width in 1..=4 {

@@ -249,9 +249,9 @@ mod tests {
         assert_eq!(p, root.join("x.txt"));
     }
 
-    /// A write root widens every tier above read, `bash`'s working directory
-    /// included. Documented as such because it is what the check does: the
-    /// boundary turns on `tier != Read`, not on the tier being `Write`.
+    // A write root widens every tier above read, `bash`'s working directory
+    // included. Documented as such because it is what the check does: the
+    // boundary turns on `tier != Read`, not on the tier being `Write`.
     #[test]
     fn a_write_root_widens_the_exec_tier_too() {
         let (_d, ws) = ws();
@@ -265,9 +265,9 @@ mod tests {
         assert!(ws.resolve(&named, Tier::Write).is_ok());
     }
 
-    /// The claim `with_write_roots` makes: a write root is reduced the way a
-    /// target is, so a symlink standing where the root is named cannot widen
-    /// the boundary to whatever it points at.
+    // The claim `with_write_roots` makes: a write root is reduced the way a
+    // target is, so a symlink standing where the root is named cannot widen
+    // the boundary to whatever it points at.
     #[cfg(unix)]
     #[test]
     fn a_symlinked_write_root_is_reduced_to_what_it_points_at() {
@@ -295,7 +295,7 @@ mod tests {
         ));
     }
 
-    /// A symlink inside a write root cannot carry a write back out of it.
+    // A symlink inside a write root cannot carry a write back out of it.
     #[cfg(unix)]
     #[test]
     fn a_symlink_inside_a_write_root_cannot_escape_it() {

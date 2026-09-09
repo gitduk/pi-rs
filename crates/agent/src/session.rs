@@ -112,41 +112,41 @@ impl UserText {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum UserBody {
-    /// What the user asked. It opens a round, and the drop tier's unit is a
-    /// round: a question and everything that answered it go together or not at
-    /// all. Never omitted — what someone asked is not the answer's spare
-    /// context.
+    // What the user asked. It opens a round, and the drop tier's unit is a
+    // round: a question and everything that answered it go together or not at
+    // all. Never omitted — what someone asked is not the answer's spare
+    // context.
     Prompt(UserText),
-    /// User-side text that is not a question: the output of a `!` command.
-    ///
-    /// A separate variant rather than a flag, because four places ask whether
-    /// an entry is a question and three of them need a different answer for
-    /// this one — it opens no round, it does not name the session, and it *is*
-    /// omittable, since nothing downstream is waiting on an answer to it. A
-    /// boolean cannot carry four answers, and inferring them from `shown` is
-    /// what let a `!cargo test` be dropped out from under the `fix that` that
-    /// referred to it.
+    // User-side text that is not a question: the output of a `!` command.
+    //
+    // A separate variant rather than a flag, because four places ask whether
+    // an entry is a question and three of them need a different answer for
+    // this one — it opens no round, it does not name the session, and it *is*
+    // omittable, since nothing downstream is waiting on an answer to it. A
+    // boolean cannot carry four answers, and inferring them from `shown` is
+    // what let a `!cargo test` be dropped out from under the `fix that` that
+    // referred to it.
     Aside(UserText),
 
-    /// Machine-authored text meant for the model, not the person: what the
-    /// session says about a run that ended without answering its prompt. It
-    /// opens no round and names no session, and it is omittable, like an
-    /// [`Aside`] — but unlike one it is not the user's words, so nothing may
-    /// treat it as theirs: no rewind node, nothing an unsend hands back to
-    /// the editor. That one difference is why it is a variant of its own.
+    // Machine-authored text meant for the model, not the person: what the
+    // session says about a run that ended without answering its prompt. It
+    // opens no round and names no session, and it is omittable, like an
+    // [`Aside`] — but unlike one it is not the user's words, so nothing may
+    // treat it as theirs: no rewind node, nothing an unsend hands back to
+    // the editor. That one difference is why it is a variant of its own.
     Note(UserText),
-    /// The result, and what the screen showed for it when that is more than the
-    /// result's own first line — the rows an edit sketched, which the stored
-    /// content does not contain.
-    ///
-    /// Beside the result rather than inside it. `ToolResult` is the wire type:
-    /// a screen-only field there would be one every encoder has to remember not
-    /// to send, and one the token estimate would count for bytes that never
-    /// leave. Here neither is possible — `brain` cannot see this type, and
-    /// `user_block` carries only the `ToolResult` across.
-    ///
-    /// The same distinction `UserText` makes with `shown`, one variant along:
-    /// what the model reads, beside what a person sees.
+    // The result, and what the screen showed for it when that is more than the
+    // result's own first line — the rows an edit sketched, which the stored
+    // content does not contain.
+    //
+    // Beside the result rather than inside it. `ToolResult` is the wire type:
+    // a screen-only field there would be one every encoder has to remember not
+    // to send, and one the token estimate would count for bytes that never
+    // leave. Here neither is possible — `brain` cannot see this type, and
+    // `user_block` carries only the `ToolResult` across.
+    //
+    // The same distinction `UserText` makes with `shown`, one variant along:
+    // what the model reads, beside what a person sees.
     Result {
         result: ToolResult,
         preview: Option<String>,
@@ -164,9 +164,9 @@ pub enum Entry {
         at: u64,
         body: UserBody,
     },
-    /// One response, whole. Its blocks are never addressed separately: nothing
-    /// reads them apart, and holding them together is what keeps a `tool_use`
-    /// beside the reasoning that produced it.
+    // One response, whole. Its blocks are never addressed separately: nothing
+    // reads them apart, and holding them together is what keeps a `tool_use`
+    // beside the reasoning that produced it.
     Assistant {
         id: EntryId,
         at: u64,
@@ -243,7 +243,7 @@ impl Node {
     }
 }
 
-/// What an assistant turn said, when it said anything at all.
+// What an assistant turn said, when it said anything at all.
 fn said(blocks: &[AssistantContent]) -> Option<String> {
     blocks.iter().find_map(|b| match b {
         AssistantContent::Text(t) if !t.text.trim().is_empty() => Some(t.text.clone()),
@@ -251,7 +251,7 @@ fn said(blocks: &[AssistantContent]) -> Option<String> {
     })
 }
 
-/// The place this entry offers to go back to, or `None` when it is not one.
+// The place this entry offers to go back to, or `None` when it is not one.
 fn node_of(entry: &Entry) -> Option<Node> {
     match entry {
         Entry::User {
@@ -275,11 +275,8 @@ fn node_of(entry: &Entry) -> Option<Node> {
 #[derive(Debug, Clone, Copy)]
 pub enum Seen<'a> {
     As(&'a Entry),
-    /// Content replaced, shell kept — a `tool_use` must keep its `tool_result`.
-    Omitted {
-        entry: &'a Entry,
-        notice: &'a str,
-    },
+    // Content replaced, shell kept — a `tool_use` must keep its `tool_result`.
+    Omitted { entry: &'a Entry, notice: &'a str },
 }
 
 impl<'a> Seen<'a> {
@@ -310,28 +307,28 @@ pub struct Session {
     entries: Vec<Entry>,
     #[serde(default)]
     next: u64,
-    /// Why the last run ended unanswered. Saved, so a resumed session still
-    /// knows; cleared by the next prompt, and by a rewind that cuts the round
-    /// it describes.
+    // Why the last run ended unanswered. Saved, so a resumed session still
+    // knows; cleared by the next prompt, and by a rewind that cuts the round
+    // it describes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     interrupted: Option<StopCause>,
 }
 
-/// Why the most recent run ended before its prompt was answered, if it did.
-/// The transcript alone cannot say whether the stop was the user's or the
-/// run's own, so the caller records it here and the next prompt carries it on.
+// Why the most recent run ended before its prompt was answered, if it did.
+// The transcript alone cannot say whether the stop was the user's or the
+// run's own, so the caller records it here and the next prompt carries it on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum StopCause {
-    /// The user asked the run to stop: Esc, `/stop`, an interrupt.
+    // The user asked the run to stop: Esc, `/stop`, an interrupt.
     User,
-    /// It died on its own — an error or a crash — and no more is known.
+    // It died on its own — an error or a crash — and no more is known.
     Other,
 }
 
-/// What the model is told after a run the user stopped.
+// What the model is told after a run the user stopped.
 const STOPPED_BY_USER: &str = "The user stopped the previous run before it finished. Treat the \
      request it was working on as cancelled; the message below is what to act on.";
-/// What the model is told after a run that died for an unknown reason.
+// What the model is told after a run that died for an unknown reason.
 const STOPPED_UNKNOWN: &str = "The previous run ended before it finished, for an unknown \
      reason. Treat the request it was working on as unresolved; the message below is what to act on.";
 
@@ -447,7 +444,7 @@ impl Session {
         }
     }
 
-    /// Feed a cause straight in, for tests shaping a session by hand.
+    // Feed a cause straight in, for tests shaping a session by hand.
     #[cfg(test)]
     fn mark_stopped(&mut self, cause: StopCause) {
         self.interrupted = Some(cause);
@@ -628,10 +625,10 @@ impl Session {
             .collect()
     }
 
-    /// Later passes win: an entry omitted as superseded and later aged out
-    /// shows the newer notice. Whole-entry omissions only — the ones naming a
-    /// block are `block_omissions`, and mixing them would let a block notice
-    /// hide an entry that is still shown in full.
+    // Later passes win: an entry omitted as superseded and later aged out
+    // shows the newer notice. Whole-entry omissions only — the ones naming a
+    // block are `block_omissions`, and mixing them would let a block notice
+    // hide an entry that is still shown in full.
     fn omissions(&self) -> HashMap<EntryId, &str> {
         let mut out = HashMap::new();
         for e in &self.entries {
@@ -857,9 +854,9 @@ mod tests {
     use super::*;
     use brain::message::{Text as MsgText, ToolCall, ToolResult};
 
-    /// The contract the Anthropic encoder's join is written against: what a
-    /// turn holds arrives as separate messages, and joining them is the wire's
-    /// business, not this projection's.
+    // The contract the Anthropic encoder's join is written against: what a
+    // turn holds arrives as separate messages, and joining them is the wire's
+    // business, not this projection's.
     #[test]
     fn the_view_hands_over_one_message_per_entry() {
         let mut s = Session::new();
@@ -889,10 +886,10 @@ mod tests {
         }
     }
 
-    /// Compaction is the model losing sight of history, not the user. What
-    /// names a session is read out of the archive, so it has to stay in the
-    /// archive — a compaction that removed it would rename the session the
-    /// first time the window filled.
+    // Compaction is the model losing sight of history, not the user. What
+    // names a session is read out of the archive, so it has to stay in the
+    // archive — a compaction that removed it would rename the session the
+    // first time the window filled.
     #[test]
     fn compacting_the_opening_turn_leaves_it_in_the_transcript() {
         let mut s = Session::new();
@@ -914,8 +911,8 @@ mod tests {
         assert_eq!(s.rewind_nodes().first().map(Node::id), Some(first));
     }
 
-    /// And because the menu can still name it, rewinding to it truncates the
-    /// compaction entry too — which puts the dropped turns back.
+    // And because the menu can still name it, rewinding to it truncates the
+    // compaction entry too — which puts the dropped turns back.
     #[test]
     fn rewinding_past_a_compaction_undoes_it() {
         let mut s = Session::new();
@@ -942,8 +939,8 @@ mod tests {
         assert!(s.view().iter().any(|seen| seen.id() == first));
     }
 
-    /// Unsending is the other half of the rewind: the message itself has to
-    /// leave, or the editor holds a line the model is still being sent.
+    // Unsending is the other half of the rewind: the message itself has to
+    // leave, or the editor holds a line the model is still being sent.
     #[test]
     fn unsending_a_message_takes_it_out_of_the_transcript() {
         let mut s = Session::new();
@@ -967,8 +964,8 @@ mod tests {
         assert_eq!(s.rewind_nodes().len(), 2, "the first turn, both halves");
     }
 
-    /// A turn that only called tools is a step of the work; the menu offering
-    /// one row per `read` is a menu nothing can be found in.
+    // A turn that only called tools is a step of the work; the menu offering
+    // one row per `read` is a menu nothing can be found in.
     #[test]
     fn only_answers_reach_the_rewind_menu() {
         let mut s = Session::new();
@@ -990,8 +987,8 @@ mod tests {
         assert_eq!(nodes[1].show(), "it says a");
     }
 
-    /// The caller records why the last run died; the next prompt carries the
-    /// cause on to the model instead of leaving it to read the shape.
+    // The caller records why the last run died; the next prompt carries the
+    // cause on to the model instead of leaving it to read the shape.
     #[test]
     fn a_user_stop_is_named_before_the_next_prompt() {
         let mut s = Session::new();
@@ -1025,9 +1022,9 @@ mod tests {
         assert_eq!(s.entries().len(), 4, "no second note");
     }
 
-    /// The note is the session's words, not the user's: it stays out of the
-    /// rewind menu, nothing an unsend hands to the editor, and the model
-    /// still reads it beside the next prompt.
+    // The note is the session's words, not the user's: it stays out of the
+    // rewind menu, nothing an unsend hands to the editor, and the model
+    // still reads it beside the next prompt.
     #[test]
     fn a_stop_note_is_model_only_and_not_rewindable() {
         let mut s = Session::new();
@@ -1063,7 +1060,7 @@ mod tests {
         assert_eq!(back, s);
     }
 
-    /// A run that died on its own is named as such, not blamed on the user.
+    // A run that died on its own is named as such, not blamed on the user.
     #[test]
     fn an_unknown_stop_is_not_blamed_on_the_user() {
         let mut s = Session::new();
@@ -1103,7 +1100,7 @@ mod tests {
         ));
     }
 
-    /// An answered run leaves no marker, and a clean send stays clean.
+    // An answered run leaves no marker, and a clean send stays clean.
     #[test]
     fn a_run_that_finished_adds_no_note() {
         let mut s = Session::new();
@@ -1138,7 +1135,7 @@ mod tests {
         );
     }
 
-    /// A rewind cuts the round the marker described; the marker goes with it.
+    // A rewind cuts the round the marker described; the marker goes with it.
     #[test]
     fn rewinding_drops_the_stop_marker() {
         let mut s = Session::new();
@@ -1164,8 +1161,8 @@ mod tests {
         ));
     }
 
-    /// The mapping the callers rely on: an answer records nothing, a stop the
-    /// user asked for records itself.
+    // The mapping the callers rely on: an answer records nothing, a stop the
+    // user asked for records itself.
     #[test]
     fn note_outcome_tells_an_answer_from_a_user_stop() {
         let mut answered = Session::new();
@@ -1192,8 +1189,8 @@ mod tests {
         );
     }
 
-    /// Rewinding to an answer is the opposite call: the answer stays, and the
-    /// conversation continues from it.
+    // Rewinding to an answer is the opposite call: the answer stays, and the
+    // conversation continues from it.
     #[test]
     fn rewinding_to_an_answer_keeps_it() {
         let mut s = Session::new();
@@ -1213,7 +1210,7 @@ mod tests {
         );
     }
 
-    /// The one user message that legitimately carries more than one block.
+    // The one user message that legitimately carries more than one block.
     #[test]
     fn summaries_ride_the_first_user_message_rather_than_one_of_their_own() {
         let mut s = Session::new();

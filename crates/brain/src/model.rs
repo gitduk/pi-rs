@@ -20,11 +20,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "format", rename_all = "snake_case")]
 pub enum Format {
-    /// `POST /v1/messages`
+    // `POST /v1/messages`
     Anthropic { cache_control: CacheControl },
-    /// `POST /v1/responses`
+    // `POST /v1/responses`
     OpenAi,
-    /// `POST /chat/completions`, the OpenAI chat wire
+    // `POST /chat/completions`, the OpenAI chat wire
     Chat,
 }
 
@@ -51,14 +51,14 @@ impl Format {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheControl {
-    /// Say nothing at all. An endpoint nobody has measured is not told to
-    /// cache: an unknown top-level field is a 400 on some of them.
+    // Say nothing at all. An endpoint nobody has measured is not told to
+    // cache: an unknown top-level field is a 400 on some of them.
     #[default]
     Off,
-    /// `{"type": "ephemeral"}`, the five-minute window.
+    // `{"type": "ephemeral"}`, the five-minute window.
     Standard,
-    /// `{"type": "ephemeral", "ttl": "1h"}`, at twice the write price. The
-    /// canonical API honors it; a shim may accept it and do nothing.
+    // `{"type": "ephemeral", "ttl": "1h"}`, at twice the write price. The
+    // canonical API honors it; a shim may accept it and do nothing.
     LongTtl,
 }
 
@@ -67,13 +67,13 @@ pub enum CacheControl {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThinkingControl {
-    /// Anthropic 4.6 and later: `thinking: {type: "adaptive"}`, with the depth
-    /// set by the separate top-level `output_config.effort`.
+    // Anthropic 4.6 and later: `thinking: {type: "adaptive"}`, with the depth
+    // set by the separate top-level `output_config.effort`.
     Adaptive,
-    /// Anthropic 4.5 and earlier: `thinking: {type: "enabled", budget_tokens}`.
-    /// 4.7 and later reject this shape outright.
+    // Anthropic 4.5 and earlier: `thinking: {type: "enabled", budget_tokens}`.
+    // 4.7 and later reject this shape outright.
     Budget,
-    /// OpenAI Responses: the top-level `reasoning: {effort}` object.
+    // OpenAI Responses: the top-level `reasoning: {effort}` object.
     Effort,
 }
 
@@ -86,12 +86,12 @@ pub enum ThinkingControl {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplayThinking {
-    /// Leave it out. What the docs say to do when the model changes, and the
-    /// cheapest of the three: a target that ignores a foreign block still
-    /// bills for reading it.
+    // Leave it out. What the docs say to do when the model changes, and the
+    // cheapest of the three: a target that ignores a foreign block still
+    // bills for reading it.
     #[default]
     Off,
-    /// Wrapped in `<think>`, for the models trained to read that.
+    // Wrapped in `<think>`, for the models trained to read that.
     Tagged,
 }
 

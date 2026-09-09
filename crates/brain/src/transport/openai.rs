@@ -18,8 +18,8 @@ use crate::stream::{BlockKind, InvalidToolArgs, StopReason, StreamEvent, Usage};
 pub struct OpenAi {
     http: reqwest::Client,
     api_key: Option<String>,
-    /// Session-lived, not per-request: what a host gets wrong it gets wrong
-    /// every turn, and the reader needs to hear it once.
+    // Session-lived, not per-request: what a host gets wrong it gets wrong
+    // every turn, and the reader needs to hear it once.
     gaps: Shared,
 }
 
@@ -391,17 +391,17 @@ fn read_output(
 struct Decoder {
     origin: String,
     gaps: Shared,
-    /// Which of the two reasoning streams opened an item. They describe the
-    /// same thinking, so letting both through prints it twice.
+    // Which of the two reasoning streams opened an item. They describe the
+    // same thinking, so letting both through prints it twice.
     reasoning_stream: BTreeMap<usize, bool>,
 }
 
 impl Decoder {
-    /// Takes the whole identity rather than a model name. It stamps every
-    /// reasoning block it decodes, and `replay_for` later compares that stamp
-    /// against `spec.model.clone()` — so a decoder that names the provider itself
-    /// can only ever name it wrong, and the ciphertext it stamped stops
-    /// replaying without anything failing.
+    // Takes the whole identity rather than a model name. It stamps every
+    // reasoning block it decodes, and `replay_for` later compares that stamp
+    // against `spec.model.clone()` — so a decoder that names the provider itself
+    // can only ever name it wrong, and the ciphertext it stamped stops
+    // replaying without anything failing.
     fn new(origin: String, gaps: Shared) -> Self {
         Self {
             origin,
@@ -606,8 +606,8 @@ mod tests {
         build_body(&spec(), &req)
     }
 
-    /// Scaffolding, not an assertion: dumps a request body to `$PI_SNAP` for
-    /// eyeballing against a live endpoint, and is a no-op without it.
+    // Scaffolding, not an assertion: dumps a request body to `$PI_SNAP` for
+    // eyeballing against a live endpoint, and is a no-op without it.
     #[test]
     fn tmp_dump_live_body() {
         let Ok(dir) = std::env::var("PI_SNAP") else {
@@ -641,9 +641,9 @@ mod tests {
         .unwrap();
     }
 
-    /// The whole request, written out by hand. There is no old encoder to
-    /// compare against — Chat Completions is gone — so this test is the only
-    /// statement of what pi puts on the wire.
+    // The whole request, written out by hand. There is no old encoder to
+    // compare against — Chat Completions is gone — so this test is the only
+    // statement of what pi puts on the wire.
     #[test]
     fn a_turn_of_traffic_encodes_to_exactly_this() {
         let req = Request {
@@ -710,7 +710,7 @@ mod tests {
         );
     }
 
-    /// The wire has no `is_error`, so an unmarked failure reads as a result.
+    // The wire has no `is_error`, so an unmarked failure reads as a result.
     #[test]
     fn a_failed_tool_result_says_so_in_the_only_place_the_wire_leaves() {
         let req = Request {
@@ -731,8 +731,8 @@ mod tests {
         );
     }
 
-    /// The other half of the same defect: Chat Completions flattened an image
-    /// to the literal `[image]`.
+    // The other half of the same defect: Chat Completions flattened an image
+    // to the literal `[image]`.
     #[test]
     fn an_image_in_a_tool_result_travels_as_an_image() {
         let req = Request {
@@ -762,7 +762,7 @@ mod tests {
         );
     }
 
-    /// Both defects at once, which is the shape a failing screenshot takes.
+    // Both defects at once, which is the shape a failing screenshot takes.
     #[test]
     fn a_failed_result_carrying_an_image_keeps_both_facts() {
         let req = Request {
@@ -823,8 +823,8 @@ mod tests {
         }
     }
 
-    /// A demoted block ships as prose rather than vanishing; `Drop` is what
-    /// makes it vanish, and then the turn leaves nothing behind at all.
+    // A demoted block ships as prose rather than vanishing; `Drop` is what
+    // makes it vanish, and then the turn leaves nothing behind at all.
     #[test]
     fn a_reasoning_block_this_model_cannot_replay_is_demoted_not_dropped() {
         let msgs = vec![Message::Assistant {
@@ -860,8 +860,8 @@ mod tests {
         assert_eq!(dropped["input"].as_array().unwrap().len(), 0);
     }
 
-    /// `input` is flat, so the turn's own ordering is the only thing carrying
-    /// which reasoning belongs to which call.
+    // `input` is flat, so the turn's own ordering is the only thing carrying
+    // which reasoning belongs to which call.
     #[test]
     fn an_assistant_turn_splits_into_items_in_the_order_it_produced_them() {
         let req = Request {
@@ -895,8 +895,8 @@ mod tests {
         );
     }
 
-    /// A user turn holding both leaves as two items, in order — the shape a
-    /// tool result followed by a prompt takes.
+    // A user turn holding both leaves as two items, in order — the shape a
+    // tool result followed by a prompt takes.
     #[test]
     fn a_result_and_the_prose_after_it_are_two_items() {
         let req = Request {
@@ -950,8 +950,8 @@ mod tests {
         acc.finish()
     }
 
-    /// Replay a stream recorded off a live endpoint. `data:` lines only — the
-    /// same thing `eventsource` hands the transport.
+    // Replay a stream recorded off a live endpoint. `data:` lines only — the
+    // same thing `eventsource` hands the transport.
     fn replay(sse: &str) -> crate::stream::Completion {
         let frames: Vec<Value> = sse
             .lines()
@@ -961,10 +961,10 @@ mod tests {
         drive(&frames)
     }
 
-    /// Recorded against DeepSeek's Responses endpoint, 2026-08-29. Hand-written
-    /// frames prove pi reads what the SDK types say; these prove it reads what
-    /// a server actually sends, which is the stronger claim and the one the
-    /// landing plan asked for.
+    // Recorded against DeepSeek's Responses endpoint, 2026-08-29. Hand-written
+    // frames prove pi reads what the SDK types say; these prove it reads what
+    // a server actually sends, which is the stronger claim and the one the
+    // landing plan asked for.
     #[test]
     fn a_recorded_tool_call_replays_into_the_call_the_model_made() {
         let done = replay(include_str!("../../tests/fixtures/responses_tools.sse"));
@@ -1019,8 +1019,8 @@ mod tests {
         assert_eq!(u.output, 45);
     }
 
-    /// The reasoning models are half of why `accepts_temperature` exists, and
-    /// this wire is where they are. It gated on the other one only.
+    // The reasoning models are half of why `accepts_temperature` exists, and
+    // this wire is where they are. It gated on the other one only.
     #[test]
     fn sampling_params_dropped_when_the_model_rejects_them() {
         let req = Request {
@@ -1034,9 +1034,9 @@ mod tests {
         assert_eq!(build_body(&spec(), &req)["temperature"], 0.7);
     }
 
-    /// One `function_call` on the wire must be one call in the turn. Recorded
-    /// off the gateway, whose terminal frame states no output, so the whole
-    /// turn is rebuilt from the deltas.
+    // One `function_call` on the wire must be one call in the turn. Recorded
+    // off the gateway, whose terminal frame states no output, so the whole
+    // turn is rebuilt from the deltas.
     #[test]
     fn one_streamed_call_is_one_call() {
         let done = replay(include_str!("../../tests/fixtures/responses_one_call.sse"));
@@ -1054,10 +1054,10 @@ mod tests {
         assert_eq!(calls[0].args["path"], "a.txt");
     }
 
-    /// Recorded against a local gateway translating for DeepSeek, 2026-08-30.
-    /// Its terminal frame carries status and usage and no `output` at all, so
-    /// the turn is only ever stated by the deltas — the shape that ended every
-    /// tool-calling run after the thinking and before the call.
+    // Recorded against a local gateway translating for DeepSeek, 2026-08-30.
+    // Its terminal frame carries status and usage and no `output` at all, so
+    // the turn is only ever stated by the deltas — the shape that ended every
+    // tool-calling run after the thinking and before the call.
     #[test]
     fn a_terminal_frame_that_states_no_output_leaves_the_deltas_standing() {
         let done = replay(include_str!("../../tests/fixtures/responses_no_output.sse"));
@@ -1077,11 +1077,11 @@ mod tests {
         assert_eq!(done.stop, StopReason::ToolUse);
     }
 
-    /// The seam neither suite either side of it crossed. One drove a stream and
-    /// read what came out; the other replayed reasoning it had built by hand.
-    /// Between them sat the decoder's idea of who produced the block, and while
-    /// it named the provider itself, every ciphertext it stamped quietly
-    /// demoted to prose on the way back out — with both suites still green.
+    // The seam neither suite either side of it crossed. One drove a stream and
+    // read what came out; the other replayed reasoning it had built by hand.
+    // Between them sat the decoder's idea of who produced the block, and while
+    // it named the provider itself, every ciphertext it stamped quietly
+    // demoted to prose on the way back out — with both suites still green.
     #[test]
     fn reasoning_decoded_from_a_stream_replays_as_reasoning() {
         let done = replay(include_str!("../../tests/fixtures/responses_reason.sse"));
@@ -1164,8 +1164,8 @@ mod tests {
         assert_eq!(c.args["path"], "a.rs");
     }
 
-    /// The whole reason the accumulator was split. Deltas are for the screen;
-    /// what lands in the transcript is what the terminal frame states.
+    // The whole reason the accumulator was split. Deltas are for the screen;
+    // what lands in the transcript is what the terminal frame states.
     #[test]
     fn the_terminal_frame_outranks_the_deltas_that_preceded_it() {
         let mut frames = a_turn();
@@ -1185,9 +1185,9 @@ mod tests {
         );
     }
 
-    /// `input_tokens` counts both halves of the cache. Taking out only the read
-    /// half — which is what the Chat Completions decoder did — bills the write
-    /// twice, once as fresh input and once as a write.
+    // `input_tokens` counts both halves of the cache. Taking out only the read
+    // half — which is what the Chat Completions decoder did — bills the write
+    // twice, once as fresh input and once as a write.
     #[test]
     fn the_three_token_counts_add_back_up_to_what_was_billed() {
         let done = drive(&a_turn());
@@ -1203,8 +1203,8 @@ mod tests {
         assert_eq!(u.output, 42);
     }
 
-    /// Two levels, not one: reading `status` alone files a truncated turn as
-    /// one that ended normally, and the loop never retries it.
+    // Two levels, not one: reading `status` alone files a truncated turn as
+    // one that ended normally, and the loop never retries it.
     #[test]
     fn a_truncated_turn_is_not_a_turn_that_ended() {
         let cases = [
@@ -1233,8 +1233,8 @@ mod tests {
         }
     }
 
-    /// Body and summary are two streams of the same thinking. Letting both
-    /// through prints the reasoning twice.
+    // Body and summary are two streams of the same thinking. Letting both
+    // through prints the reasoning twice.
     #[test]
     fn only_one_of_the_two_reasoning_streams_reaches_the_screen() {
         let frames = [
@@ -1257,8 +1257,8 @@ mod tests {
         assert_eq!(seen, "summary", "the second stream must not join the first");
     }
 
-    /// The body is the real thinking; the summary stands in only when an
-    /// organisation is not shown the body.
+    // The body is the real thinking; the summary stands in only when an
+    // organisation is not shown the body.
     #[test]
     fn the_recorded_reasoning_prefers_the_body_over_the_summary() {
         let with_both = json!({ "type": "response.completed", "response": {
@@ -1303,15 +1303,15 @@ mod tests {
         assert_eq!(c.args, json!({}));
     }
 
-    /// `input` is flat, so a trailing item changes nothing before it and the
-    /// cached prefix reaches exactly as far as it did last turn.
-    /// The estimate and the encoder must answer the same question. They are
-    /// separate walks of the same transcript — one decides when to compact, the
-    /// other decides what ships — and a gap between them is invisible: the
-    /// budget simply runs out early, and what pays is real context dropped to
-    /// make room for bytes that were never sent. Measured on real sessions the
-    /// gap was 53%, because prior reasoning was counted whatever the spec did
-    /// with it.
+    // `input` is flat, so a trailing item changes nothing before it and the
+    // cached prefix reaches exactly as far as it did last turn.
+    // The estimate and the encoder must answer the same question. They are
+    // separate walks of the same transcript — one decides when to compact, the
+    // other decides what ships — and a gap between them is invisible: the
+    // budget simply runs out early, and what pays is real context dropped to
+    // make room for bytes that were never sent. Measured on real sessions the
+    // gap was 53%, because prior reasoning was counted whatever the spec did
+    // with it.
     #[test]
     fn the_estimate_counts_what_the_wire_carries() {
         let thinking = "z".repeat(20_000);
@@ -1378,10 +1378,10 @@ mod tests {
         assert_eq!(items[2]["content"][0]["text"], "[true only this turn]");
     }
 
-    /// Caching is on by default here, with one implicit breakpoint that moves
-    /// with the conversation. Naming `prompt_cache_options.mode = "explicit"`
-    /// and then setting no breakpoint turns caching off entirely and says
-    /// nothing — so the field is never written at all.
+    // Caching is on by default here, with one implicit breakpoint that moves
+    // with the conversation. Naming `prompt_cache_options.mode = "explicit"`
+    // and then setting no breakpoint turns caching off entirely and says
+    // nothing — so the field is never written at all.
     #[test]
     fn nothing_is_said_about_caching_because_saying_it_can_only_turn_it_off() {
         let out = body(Request {
@@ -1392,9 +1392,9 @@ mod tests {
         assert!(out.get("prompt_cache_key").is_none());
     }
 
-    /// Neither field has a documented default, and the wrong value for either
-    /// fails silently: a stored transcript, or a reasoning item with nothing
-    /// to replay.
+    // Neither field has a documented default, and the wrong value for either
+    // fails silently: a stored transcript, or a reasoning item with nothing
+    // to replay.
     #[test]
     fn a_stateless_run_says_so_and_asks_for_what_it_will_need_next_turn() {
         let out = body(Request::default());

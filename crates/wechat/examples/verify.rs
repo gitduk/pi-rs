@@ -17,7 +17,7 @@ use anyhow::{Context, Result};
 use tokio::sync::Mutex;
 use wechat::{Client, LoginView, Update};
 
-/// How long the long-poll may hold between polls (the server holds 35s).
+// How long the long-poll may hold between polls (the server holds 35s).
 const LONG_POLL: Duration = Duration::from_millis(35_000);
 
 fn main() -> Result<()> {

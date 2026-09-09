@@ -59,12 +59,10 @@ pub struct ToolResult {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolResultContent {
-    /// Literal text. Transports must not reinterpret it as structured JSON.
+    // Literal text. Transports must not reinterpret it as structured JSON.
     Text(Text),
     Image(Image),
-    Json {
-        value: Value,
-    },
+    Json { value: Value },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,13 +103,13 @@ pub enum ReasoningContent {
 /// bytes that never leave, and one that lags it walks into a 400. Decided here
 /// once, they cannot disagree.
 pub enum Replay<'a> {
-    /// The target's own, signed: the block replays as itself.
+    // The target's own, signed: the block replays as itself.
     Signed { signature: &'a str },
-    /// The target's own, encrypted: the ciphertext is the whole of what goes.
+    // The target's own, encrypted: the ciphertext is the whole of what goes.
     Encrypted { id: &'a str, encrypted: &'a str },
-    /// Foreign or unsigned, and the target reads `<think>`: demoted to prose.
+    // Foreign or unsigned, and the target reads `<think>`: demoted to prose.
     Demoted,
-    /// Nothing leaves.
+    // Nothing leaves.
     Dropped,
 }
 

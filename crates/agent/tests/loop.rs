@@ -23,11 +23,11 @@ use tools::{Concurrency, Ctx, Registry, Tier, Tool, ToolError, ToolOutput, Works
 struct Scripted {
     turns: Vec<Vec<StreamEvent>>,
     next: AtomicUsize,
-    /// What each turn put on the wire beside the transcript.
+    // What each turn put on the wire beside the transcript.
     notes: std::sync::Mutex<Vec<Vec<String>>>,
-    /// Where a test that needs the user to speak mid-run leaves the line: said
-    /// as the turn at this index goes out, which is past that turn's own look
-    /// at the mailbox and so exercises the seam rather than the start.
+    // Where a test that needs the user to speak mid-run leaves the line: said
+    // as the turn at this index goes out, which is past that turn's own look
+    // at the mailbox and so exercises the seam rather than the start.
     interject: std::sync::Mutex<Option<(usize, Steer, String)>>,
 }
 
@@ -118,9 +118,9 @@ fn wired(turns: Vec<Vec<StreamEvent>>) -> (tempfile::TempDir, Agent, Ctx, Arc<Sc
     (dir, agent, Ctx::new(ws), wire)
 }
 
-/// The window rides a note, not the transcript: it is true of the request it
-/// went out on and of no other, so the next turn replaces it instead of
-/// leaving a stale reading behind to be read back as fact.
+// The window rides a note, not the transcript: it is true of the request it
+// went out on and of no other, so the next turn replaces it instead of
+// leaving a stale reading behind to be read back as fact.
 #[tokio::test]
 async fn the_turn_ships_its_window_as_a_note() {
     let (_dir, agent, ctx, wire) = wired(vec![text_turn("done")]);
@@ -1308,9 +1308,9 @@ async fn a_coded_tool_error_reaches_the_model_with_its_code() {
     assert!(body.ends_with("[code: TOOL_TIMEOUT]"), "{body}");
 }
 
-/// A line said while the run worked lands at the next seam — after the results
-/// it interrupted, never among them. Among them it would leave a `tool_use`
-/// unanswered, which both wires refuse.
+// A line said while the run worked lands at the next seam — after the results
+// it interrupted, never among them. Among them it would leave a `tool_use`
+// unanswered, which both wires refuse.
 #[tokio::test]
 async fn a_line_said_mid_run_lands_after_the_results_it_interrupted() {
     let (_d, mut a, ctx, wire) =
@@ -1347,9 +1347,9 @@ async fn a_line_said_mid_run_lands_after_the_results_it_interrupted() {
     );
 }
 
-/// The model stopped, but the user had already spoken. Posting `Done` here
-/// would leave the line to start a second run saying what this one can still
-/// hear: the same words, an extra turn, and an ending that was not one.
+// The model stopped, but the user had already spoken. Posting `Done` here
+// would leave the line to start a second run saying what this one can still
+// hear: the same words, an extra turn, and an ending that was not one.
 #[tokio::test]
 async fn a_line_said_while_the_model_finished_keeps_the_run_going() {
     let (_d, a, ctx, wire) = wired(vec![text_turn("all done"), text_turn("noted")]);

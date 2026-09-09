@@ -99,10 +99,10 @@ pub fn sources(workspace: &Path) -> Vec<PathBuf> {
 // What a skill directory turned out to be.
 enum Read {
     Skill(Box<Skill>),
-    /// Present but unusable, and worth saying so: a skill that silently fails
-    /// to appear is one the user goes looking for in the wrong place.
+    // Present but unusable, and worth saying so: a skill that silently fails
+    // to appear is one the user goes looking for in the wrong place.
     Problem(String),
-    /// No SKILL.md here; keep descending.
+    // No SKILL.md here; keep descending.
     None,
 }
 

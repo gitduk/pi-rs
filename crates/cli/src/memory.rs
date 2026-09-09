@@ -18,9 +18,9 @@ use crate::session::now;
 /// really caps is how many the model may keep.
 pub const CAP: usize = 30;
 
-/// What a note loses per day, against a weight of 1 to 3. A weight-3 note is
-/// worth keeping for a month, a weight-1 note for ten days — recency and
-/// importance in one number, which is what deciding between them needs.
+// What a note loses per day, against a weight of 1 to 3. A weight-3 note is
+// worth keeping for a month, a weight-1 note for ten days — recency and
+// importance in one number, which is what deciding between them needs.
 const PER_DAY: f64 = 0.1;
 
 const DAY: u64 = 60 * 60 * 24;
@@ -68,8 +68,8 @@ impl Note {
         self.weight.is_none()
     }
 
-    /// What it is still worth, `now` being the moment asked about. Yours have
-    /// no score: they are not in the running.
+    // What it is still worth, `now` being the moment asked about. Yours have
+    // no score: they are not in the running.
     fn score(&self, now: u64) -> Option<f64> {
         let days = now.saturating_sub(self.at) as f64 / DAY as f64;
         self.weight.map(|w| w as f64 - days * PER_DAY)
@@ -105,9 +105,9 @@ impl Memory {
         shelf
     }
 
-    /// Give an id to whatever lacks one. Zero is not an id — it is what a
-    /// note written before ids reads as, and what `Note::yours` mints before
-    /// it knows what else is on the shelf.
+    // Give an id to whatever lacks one. Zero is not an id — it is what a
+    // note written before ids reads as, and what `Note::yours` mints before
+    // it knows what else is on the shelf.
     fn number(&mut self) {
         let taken = self.notes.iter().map(|n| n.id).max().unwrap_or(0);
         for (nth, note) in self.notes.iter_mut().filter(|n| n.id == 0).enumerate() {
@@ -146,11 +146,11 @@ impl Memory {
         self.evict(now());
     }
 
-    /// Drop the model's lowest-scoring notes until the shelf fits.
-    ///
-    /// Only the model's: yours are the reason the cap is on its notes rather
-    /// than on the shelf, so a shelf you filled yourself is full and holds no
-    /// model notes at all, rather than dropping what you put there.
+    // Drop the model's lowest-scoring notes until the shelf fits.
+    //
+    // Only the model's: yours are the reason the cap is on its notes rather
+    // than on the shelf, so a shelf you filled yourself is full and holds no
+    // model notes at all, rather than dropping what you put there.
     fn evict(&mut self, now: u64) {
         let yours = self.notes.iter().filter(|n| n.is_yours()).count();
         let room = CAP.saturating_sub(yours);
@@ -226,9 +226,9 @@ impl Memory {
     }
 }
 
-/// The shelf's write lock, held for one whole read-change-write. A sibling
-/// file, never the shelf: `save` replaces the shelf by temp-and-rename, so a
-/// lock on the shelf's inode would guard a file nothing else opens any more.
+// The shelf's write lock, held for one whole read-change-write. A sibling
+// file, never the shelf: `save` replaces the shelf by temp-and-rename, so a
+// lock on the shelf's inode would guard a file nothing else opens any more.
 #[cfg(unix)]
 struct ShelfLock {
     _file: std::fs::File,
@@ -260,8 +260,8 @@ fn lock_shelf(_path: &Path) -> anyhow::Result<ShelfLock> {
     Ok(ShelfLock(lock.lock().unwrap_or_else(|e| e.into_inner())))
 }
 
-/// The date part of an instant, which is all a note needs: what matters is
-/// whether this was said today or last month.
+// The date part of an instant, which is all a note needs: what matters is
+// whether this was said today or last month.
 fn day(at: u64) -> String {
     crate::journal::rfc3339(std::time::UNIX_EPOCH + std::time::Duration::from_secs(at))[..10]
         .to_string()
@@ -335,8 +335,8 @@ mod tests {
         m.notes.iter().map(|n| n.text.as_str()).collect()
     }
 
-    /// Importance and age in one number, which is what choosing between them
-    /// needs: a weight-3 note outlives a weight-1 note by twenty days.
+    // Importance and age in one number, which is what choosing between them
+    // needs: a weight-3 note outlives a weight-1 note by twenty days.
     #[test]
     fn the_weakest_and_the_stalest_go_first() {
         let mut m = shelf(vec![
@@ -363,8 +363,8 @@ mod tests {
         );
     }
 
-    /// You put it there; only you take it away. A shelf you filled yourself is
-    /// full, and the model keeps none — rather than yours being pushed off.
+    // You put it there; only you take it away. A shelf you filled yourself is
+    // full, and the model keeps none — rather than yours being pushed off.
     #[test]
     fn your_own_notes_are_never_crowded_out() {
         let mut m = shelf((0..CAP).map(|i| yours(&format!("mine {i}"))).collect());
@@ -374,7 +374,7 @@ mod tests {
         assert!(m.notes.iter().all(|n| n.is_yours()));
     }
 
-    /// Half the shelf yours leaves half of it for the model, not all of it.
+    // Half the shelf yours leaves half of it for the model, not all of it.
     #[test]
     fn yours_take_room_from_theirs_rather_than_from_the_cap() {
         let mut m = shelf((0..10).map(|i| yours(&format!("mine {i}"))).collect());
@@ -383,9 +383,9 @@ mod tests {
         assert_eq!(m.notes.iter().filter(|n| n.is_yours()).count(), 10);
     }
 
-    /// The panel draws rows, then a compaction rewrites the file underneath
-    /// it. A row number would name a different note by the time the user
-    /// pressed `x`; a name names the note.
+    // The panel draws rows, then a compaction rewrites the file underneath
+    // it. A row number would name a different note by the time the user
+    // pressed `x`; a name names the note.
     #[test]
     fn a_note_is_named_not_numbered() {
         let mut m = shelf(vec![yours("first"), yours("second"), yours("third")]);
@@ -415,8 +415,8 @@ mod tests {
         );
     }
 
-    /// Ids are minted against what is already there, so a shelf that grew and
-    /// shrank never hands two notes the same name.
+    // Ids are minted against what is already there, so a shelf that grew and
+    // shrank never hands two notes the same name.
     #[test]
     fn a_name_is_never_handed_out_twice() {
         let mut m = shelf(vec![yours("a"), yours("b")]);
@@ -430,8 +430,8 @@ mod tests {
         assert!(!ids.contains(&a), "a name that went stays gone: {ids:?}");
     }
 
-    /// A bare statement is read in the present tense however old it is, so
-    /// every line says when it was written.
+    // A bare statement is read in the present tense however old it is, so
+    // every line says when it was written.
     #[test]
     fn every_note_is_rendered_with_its_day() {
         assert!(Memory::default().render().is_none(), "nothing to say");
@@ -445,8 +445,8 @@ mod tests {
         assert_eq!(line.split(' ').next().unwrap().len(), 10, "a day: {line}");
     }
 
-    /// Memory is an aid. A run that refused to start because the aid would not
-    /// parse would be the worse trade.
+    // Memory is an aid. A run that refused to start because the aid would not
+    // parse would be the worse trade.
     #[test]
     fn an_unreadable_shelf_reads_as_an_empty_one() {
         let dir = tempfile::tempdir().unwrap();
@@ -467,8 +467,8 @@ mod tests {
         assert_eq!(Memory::load(&path), m);
     }
 
-    /// Two writers reaching the same shelf at once — the case the lock
-    /// exists for — each keep their note.
+    // Two writers reaching the same shelf at once — the case the lock
+    // exists for — each keep their note.
     #[test]
     fn concurrent_updates_keep_both_notes() {
         let dir = tempfile::tempdir().unwrap();

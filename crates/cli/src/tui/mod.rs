@@ -114,9 +114,9 @@ impl Lists {
             .get_or_init(|| self.store.choices(&self.workspace))
     }
 
-    /// The checkouts named with the branch each is on. Empty outside a git
-    /// repository, which is where it belongs: `/worktree` has nothing to offer
-    /// there.
+    // The checkouts named with the branch each is on. Empty outside a git
+    // repository, which is where it belongs: `/worktree` has nothing to offer
+    // there.
     fn worktrees(&self) -> &[Choice] {
         self.worktrees.get_or_init(|| {
             crate::worktree::list(&self.workspace)
@@ -133,17 +133,17 @@ impl Lists {
         })
     }
 
-    /// A turn or a switch can change what either list would say — a session
-    /// saved, a worktree the model added. Dropped rather than recomputed:
-    /// whoever asks next pays, and most of the time nobody does.
+    // A turn or a switch can change what either list would say — a session
+    // saved, a worktree the model added. Dropped rather than recomputed:
+    // whoever asks next pays, and most of the time nobody does.
     fn forget(&mut self) {
         self.sessions.take();
         self.worktrees.take();
     }
 
-    /// Point at a workspace, dropping what the last one answered with. Both
-    /// lists are keyed by it, so after a `/worktree` move neither is merely
-    /// stale — each is another tree's.
+    // Point at a workspace, dropping what the last one answered with. Both
+    // lists are keyed by it, so after a `/worktree` move neither is merely
+    // stale — each is another tree's.
     fn at(&mut self, workspace: &std::path::Path) {
         self.workspace = workspace.to_path_buf();
         self.forget();
@@ -158,17 +158,17 @@ impl Lists {
 // can still be folded. A block's own state lasts only while it is last; the
 // next block pushes it back to `folded`, the switch.
 struct Thinking {
-    /// The next block id; closed rows keep the id they were born with, so
-    /// `land` appends only to the open block's entry.
+    // The next block id; closed rows keep the id they were born with, so
+    // `land` appends only to the open block's entry.
     next: u64,
-    /// The block streaming right now, if any.
+    // The block streaming right now, if any.
     streaming: Option<u64>,
-    /// What untouched blocks are folded to: the value a block that stops being
-    /// last folds back to, and the target a global flip is measured from.
+    // What untouched blocks are folded to: the value a block that stops being
+    // last folds back to, and the target a global flip is measured from.
     folded: bool,
-    /// How the last block — the one `ctrl+t` names, finished or streaming —
-    /// is folded. It survives the block itself, so the next block is born
-    /// with it until the key flips it again.
+    // How the last block — the one `ctrl+t` names, finished or streaming —
+    // is folded. It survives the block itself, so the next block is born
+    // with it until the key flips it again.
     last: bool,
 }
 
@@ -190,15 +190,15 @@ impl Default for Thinking {
 }
 
 impl Thinking {
-    /// Whether a reasoning row is hidden behind the count line: dim, and the
-    /// streaming block folded — its own entry when it has one, the last
-    /// value it will be born with otherwise.
+    // Whether a reasoning row is hidden behind the count line: dim, and the
+    // streaming block folded — its own entry when it has one, the last
+    // value it will be born with otherwise.
     fn holds(&self, reasoning: bool, scrollback: &[Row]) -> bool {
         reasoning && self.stream_fold(scrollback)
     }
 
-    /// How the block streaming now is folded: its entry's own state, or —
-    /// before its first line lands — the last value.
+    // How the block streaming now is folded: its entry's own state, or —
+    // before its first line lands — the last value.
     fn stream_fold(&self, scrollback: &[Row]) -> bool {
         if let Some(id) = self.streaming
             && let Some(folded) = scrollback
@@ -212,51 +212,51 @@ impl Thinking {
         self.last
     }
 
-    /// The block that was last stops being so: it folds back to the switch.
-    /// A new input and a new block both push it out of last.
+    // The block that was last stops being so: it folds back to the switch.
+    // A new input and a new block both push it out of last.
     fn retire_last(&mut self, scrollback: &mut [Row]) {
         if let Some(row) = last_folded(scrollback) {
             row.set_folded(self.folded);
         }
     }
 
-    /// The next block id. The one place ids come from, so a rebuilt block and
-    /// a streamed one can never mean the same number.
+    // The next block id. The one place ids come from, so a rebuilt block and
+    // a streamed one can never mean the same number.
     fn take_id(&mut self) -> u64 {
         let id = self.next;
         self.next += 1;
         id
     }
 
-    /// A new reasoning block is about to start. It gets an id the scrollback
-    /// entry will be born with; its first line takes `birth_fold`.
+    // A new reasoning block is about to start. It gets an id the scrollback
+    // entry will be born with; its first line takes `birth_fold`.
     fn start(&mut self, scrollback: &mut [Row]) {
         self.retire_last(scrollback);
         self.streaming = Some(self.take_id());
     }
 
-    /// The block that was last stops being so the moment a new input is
-    /// submitted: it folds to the switch, its unfold lasting only while it
-    /// was last.
+    // The block that was last stops being so the moment a new input is
+    // submitted: it folds to the switch, its unfold lasting only while it
+    // was last.
     fn fold_previous(&mut self, scrollback: &mut [Row]) {
         self.retire_last(scrollback);
     }
 
-    /// The streaming block is over; the entry it filled stays where it is.
+    // The streaming block is over; the entry it filled stays where it is.
     fn close_block(&mut self) {
         self.streaming = None;
     }
 
-    /// The value the next block's entry is born with: however `ctrl+t` last
-    /// left the last block.
+    // The value the next block's entry is born with: however `ctrl+t` last
+    // left the last block.
     fn birth_fold(&self) -> bool {
         self.last
     }
 
-    /// Fold or unfold every block in the scrollback and move the switch with
-    /// them, the last block included: rows and switch must never disagree,
-    /// or the next block is born with a stale value and a mixed screen can
-    /// never fold back to a single state.
+    // Fold or unfold every block in the scrollback and move the switch with
+    // them, the last block included: rows and switch must never disagree,
+    // or the next block is born with a stale value and a mixed screen can
+    // never fold back to a single state.
     fn flip_all(&mut self, scrollback: &mut [Row]) {
         self.folded = !self.folded;
         self.last = self.folded;
@@ -265,10 +265,10 @@ impl Thinking {
         }
     }
 
-    /// Flip the last block only: the one streaming, or the newest finished
-    /// one when nothing is. The switch is left alone, so the blocks no one is
-    /// touching keep what they had; a block with no entry yet is born with
-    /// the flip.
+    // Flip the last block only: the one streaming, or the newest finished
+    // one when nothing is. The switch is left alone, so the blocks no one is
+    // touching keep what they had; a block with no entry yet is born with
+    // the flip.
     fn toggle_current(&mut self, scrollback: &mut [Row]) {
         self.last = !self.last;
         let flipped = if let Some(id) = self.streaming {
@@ -292,17 +292,17 @@ fn last_folded(scrollback: &mut [Row]) -> Option<&mut Row> {
 // unfolded thinking block is not worth re-materializing per frame.
 struct ScrollbackRows<'a> {
     rows: &'a [Row],
-    /// The frame's width, for the rows that clip to fit.
+    // The frame's width, for the rows that clip to fit.
     width: usize,
-    /// For the folded summary row, which is synthesized at draw time and so
-    /// carries no paint of its own.
+    // For the folded summary row, which is synthesized at draw time and so
+    // carries no paint of its own.
     paint: &'a Paint,
-    /// What a finished run's row spells itself out with, for the same reason:
-    /// it is rendered here, not when the run ended.
+    // What a finished run's row spells itself out with, for the same reason:
+    // it is rendered here, not when the run ended.
     done: &'a [crate::status::Segment],
-    /// Next entry to read from the front, and the row offset inside it.
+    // Next entry to read from the front, and the row offset inside it.
     front: (usize, usize),
-    /// Next entry to read from the back, and the row offset inside it.
+    // Next entry to read from the back, and the row offset inside it.
     back: (usize, usize),
 }
 
@@ -556,92 +556,92 @@ fn scrollback_from(
 /// terminal, the one keyboard and whatever menu is open over them.
 #[derive(Default)]
 pub struct View {
-    /// Model output with no newline after it yet. Kept live because it is still
-    /// being written; a completed line goes straight to scrollback.
+    // Model output with no newline after it yet. Kept live because it is still
+    // being written; a completed line goes straight to scrollback.
     partial: String,
-    /// Whether `partial` is reasoning rather than the answer.
+    // Whether `partial` is reasoning rather than the answer.
     reasoning: bool,
-    /// Where the answer's markdown stands: what a row means depends on the
-    /// rows before it, and only a fence carries that far.
+    // Where the answer's markdown stands: what a row means depends on the
+    // rows before it, and only a fence carries that far.
     md: Markdown,
     thinking: Thinking,
-    /// The conversation as the screen holds it: finished rows, oldest first,
-    /// everything above the editor. Not a projection of the session — it also
-    /// carries what only the screen ever knew, the banner and every notice a
-    /// command or a warning left behind, interleaved where they happened.
+    // The conversation as the screen holds it: finished rows, oldest first,
+    // everything above the editor. Not a projection of the session — it also
+    // carries what only the screen ever knew, the banner and every notice a
+    // command or a warning left behind, interleaved where they happened.
     scrollback: Vec<Row>,
-    /// Tool calls still running, one animated row each. A finished call
-    /// replaces its row with the ✓/✗ line in scrollback, so a call that never
-    /// answered would leave a spinning row behind; `abandon_tools` clears it.
+    // Tool calls still running, one animated row each. A finished call
+    // replaces its row with the ✓/✗ line in scrollback, so a call that never
+    // answered would leave a spinning row behind; `abandon_tools` clears it.
     tools: Vec<RunTool>,
-    /// What arrived while the run was working, kept as intents rather than
-    /// lines: their fate was settled at the door, and re-reading them on the
-    /// way out would ask a question that has already been answered.
+    // What arrived while the run was working, kept as intents rather than
+    // lines: their fate was settled at the door, and re-reading them on the
+    // way out would ask a question that has already been answered.
     queued: Vec<Intent>,
-    /// Whether this lane's opening block has been built. A rebuild drops the
-    /// banner along with everything else, so neither an empty scrollback nor a
-    /// zero `opened` can stand in for "never drawn" — and drawing it a second
-    /// time would stack two banners on one lane.
+    // Whether this lane's opening block has been built. A rebuild drops the
+    // banner along with everything else, so neither an empty scrollback nor a
+    // zero `opened` can stand in for "never drawn" — and drawing it a second
+    // time would stack two banners on one lane.
     drawn: bool,
-    /// How many rows the opening block occupies. A theme change replaces
-    /// exactly those and leaves the conversation under them alone.
+    // How many rows the opening block occupies. A theme change replaces
+    // exactly those and leaves the conversation under them alone.
     opened: usize,
-    /// When the work in flight began, for the segment that times it. A clock
-    /// and nothing else: whether a run is on is `Lane::turn`'s to say, and one
-    /// field answering both left every ending path to put the clock back or
-    /// leave a spinner running over a finished lane.
+    // When the work in flight began, for the segment that times it. A clock
+    // and nothing else: whether a run is on is `Lane::turn`'s to say, and one
+    // field answering both left every ending path to put the clock back or
+    // leave a spinner running over a finished lane.
     started: Option<Instant>,
-    /// Whether this run has produced anything yet — a word, a thought, a call.
-    /// Once it has, Esc means stop rather than unsend.
+    // Whether this run has produced anything yet — a word, a thought, a call.
+    // Once it has, Esc means stop rather than unsend.
     committed: bool,
-    /// Every number this run has reported, as the events stated them. Both
-    /// status lines read it, so the line the run ends on is the live line's
-    /// last frame rather than a second count of the same turns.
+    // Every number this run has reported, as the events stated them. Both
+    // status lines read it, so the line the run ends on is the live line's
+    // last frame rather than a second count of the same turns.
     tally: crate::status::Tally,
     stopping: bool,
-    /// Rows the view is scrolled up by. Zero shows the newest rows.
+    // Rows the view is scrolled up by. Zero shows the newest rows.
     scroll: usize,
-    /// The last measurement of a scrolled-up view: item counts then, and the
-    /// rows they wrapped to. A reflow in place (resize, fold-all) re-bases.
+    // The last measurement of a scrolled-up view: item counts then, and the
+    // rows they wrapped to. A reflow in place (resize, fold-all) re-bases.
     counted: Option<(usize, usize, usize)>,
-    /// The model in force. Copied in before the run borrows the agent, which
-    /// is what puts it out of reach for the rest of the turn.
+    // The model in force. Copied in before the run borrows the agent, which
+    // is what puts it out of reach for the rest of the turn.
     model: String,
-    /// The half-typed line parked when the surface last left this lane,
-    /// waiting in the view to come back to the editor with it.
+    // The half-typed line parked when the surface last left this lane,
+    // waiting in the view to come back to the editor with it.
     draft: String,
 }
 
-/// What a typed character means to the modal keys.
+// What a typed character means to the modal keys.
 enum Typed {
-    /// It lands in the line, as it would with vim keys off.
+    // It lands in the line, as it would with vim keys off.
     Insert,
-    /// It closed the escape sequence: the half already on screen has to come
-    /// back off, and the mode has changed.
+    // It closed the escape sequence: the half already on screen has to come
+    // back off, and the mode has changed.
     Escape,
-    /// Normal mode. An unbound character commands nothing and types nothing —
-    /// without this the mode would be a costume, every key still typing.
+    // Normal mode. An unbound character commands nothing and types nothing —
+    // without this the mode would be a costume, every key still typing.
     Ignore,
 }
 
-/// The modal keys' whole state: the mode that is up, the sequence that leaves
-/// Insert, and the character that may be its first half.
-///
-/// One struct rather than four fields on `Ui`: none of them means anything
-/// without the others, and `Ui` already carries more loose state than it
-/// should. `Ui` holds it as an `Option`, so vim being off is the absence of
-/// the state rather than a flag beside it — "off, but in Normal" cannot be
-/// written down.
+// The modal keys' whole state: the mode that is up, the sequence that leaves
+// Insert, and the character that may be its first half.
+//
+// One struct rather than four fields on `Ui`: none of them means anything
+// without the others, and `Ui` already carries more loose state than it
+// should. `Ui` holds it as an `Option`, so vim being off is the absence of
+// the state rather than a flag beside it — "off, but in Normal" cannot be
+// written down.
 struct Vim {
     mode: Mode,
-    /// The two characters that leave Insert, resolved once. `None` — an empty
-    /// setting, or any other length — is no sequence, and with it no way into
-    /// Normal at all.
+    // The two characters that leave Insert, resolved once. `None` — an empty
+    // setting, or any other length — is no sequence, and with it no way into
+    // Normal at all.
     escape: Option<(char, char)>,
     window: std::time::Duration,
-    /// The last character typed, and when. Lazy, like the double-taps: the
-    /// character is on screen already and nothing is held pending, so the line
-    /// is never a guess about a key that has not arrived.
+    // The last character typed, and when. Lazy, like the double-taps: the
+    // character is on screen already and nothing is held pending, so the line
+    // is never a guess about a key that has not arrived.
     last: Option<(char, Instant)>,
 }
 
@@ -657,10 +657,10 @@ impl Vim {
         vim
     }
 
-    /// Take what the config says about the sequence, resolving the two
-    /// characters here rather than at every keystroke. Anything that is not
-    /// exactly two of them is no sequence — the documented way to leave
-    /// Normal unreachable while keeping the layer's bindings listed.
+    // Take what the config says about the sequence, resolving the two
+    // characters here rather than at every keystroke. Anything that is not
+    // exactly two of them is no sequence — the documented way to leave
+    // Normal unreachable while keeping the layer's bindings listed.
     fn configure(&mut self, cfg: &crate::config::Vim) {
         let mut chars = cfg.escape.chars();
         self.escape = match (chars.next(), chars.next(), chars.next()) {
@@ -670,7 +670,7 @@ impl Vim {
         self.window = std::time::Duration::from_millis(cfg.escape_timeout_ms);
     }
 
-    /// What `c` does, and the mode change if it makes one.
+    // What `c` does, and the mode change if it makes one.
     fn typed(&mut self, c: char, now: Instant) -> Typed {
         if self.mode == Mode::Normal {
             return Typed::Ignore;
@@ -696,60 +696,60 @@ struct Ui {
     keys: Arc<Keys>,
     editor: Editor,
     paint: Paint,
-    /// The painted prompt sigil, shared by the editor and the echoed lines.
+    // The painted prompt sigil, shared by the editor and the echoed lines.
     prompt: String,
-    /// The same sigil for a `!` line, where the bang takes the icon's place.
+    // The same sigil for a `!` line, where the bang takes the icon's place.
     bang_prompt: String,
-    /// The lane bar's separator, painted once beside the two above it: the bar
-    /// is rebuilt every frame and this depends only on the theme.
+    // The lane bar's separator, painted once beside the two above it: the bar
+    // is rebuilt every frame and this depends only on the theme.
     tab_sep: String,
-    /// Which row of the open list is highlighted; kept rather than the list
-    /// itself, which is a function of what has been typed. `None` anchors a
-    /// fresh list on its bottom row, the best match, beside the input line.
+    // Which row of the open list is highlighted; kept rather than the list
+    // itself, which is a function of what has been typed. `None` anchors a
+    // fresh list on its bottom row, the best match, beside the input line.
     picked: Option<usize>,
-    /// The text the list was dismissed at. Any edit changes the text and the
-    /// list comes back, which is what makes Esc mean "not that" rather than
-    /// "never again".
+    // The text the list was dismissed at. Any edit changes the text and the
+    // list comes back, which is what makes Esc mean "not that" rather than
+    // "never again".
     dismissed_at: Option<String>,
-    /// What `/model` can complete to. A copy rather than a borrow of the
-    /// config: the loop holds the session mutably while it draws.
+    // What `/model` can complete to. A copy rather than a borrow of the
+    // config: the loop holds the session mutably while it draws.
     choices: Vec<Choice>,
     lists: Lists,
-    /// The same copy, of the same list `/help` prints.
+    // The same copy, of the same list `/help` prints.
     commands: Arc<Vec<Command>>,
-    /// The config paths `/settings` can reach, from `settings::leaves`.
-    /// Rebuilt whenever the config tree is replaced.
+    // The config paths `/settings` can reach, from `settings::leaves`.
+    // Rebuilt whenever the config tree is replaced.
     setting_paths: Vec<String>,
-    /// The open panel, or None — one at a time, which is what one field
-    /// rather than one per panel is for. While it is up it owns the menu rows
-    /// and intercepts the menu keys before the editor does.
+    // The open panel, or None — one at a time, which is what one field
+    // rather than one per panel is for. While it is up it owns the menu rows
+    // and intercepts the menu keys before the editor does.
     panel: Option<Panel>,
-    /// When the last `ctrl+l` was pressed, for the new-session double-tap.
+    // When the last `ctrl+l` was pressed, for the new-session double-tap.
     last_l: Option<Instant>,
     last_interrupt: Option<Instant>,
-    /// When the last Esc was pressed, for the rewind selector's double-tap.
+    // When the last Esc was pressed, for the rewind selector's double-tap.
     last_esc: Option<Instant>,
-    /// The rewind selector's rows, session order, newest last. Empty is closed;
-    /// while it is open it replaces the completion list in the same rows.
+    // The rewind selector's rows, session order, newest last. Empty is closed;
+    // while it is open it replaces the completion list in the same rows.
     rewind: Vec<MenuEntry>,
     spinner: usize,
-    /// The modal keys, or None while they are off.
+    // The modal keys, or None while they are off.
     vim: Option<Vim>,
-    /// The segments each line shows, in the order the config named them.
+    // The segments each line shows, in the order the config named them.
     live: Vec<crate::status::Segment>,
     done: Vec<crate::status::Segment>,
-    /// What the lane strip says, in lane order. Empty until there is a second
-    /// lane, and the strip is absent with it — though a flash can still take
-    /// that row.
+    // What the lane strip says, in lane order. Empty until there is a second
+    // lane, and the strip is absent with it — though a flash can still take
+    // that row.
     tabs: Vec<Tab>,
-    /// A note answering the last keypress, painted, and when it landed. It
-    /// takes the bar's row for `FLASH` and then goes — see `flash`.
+    // A note answering the last keypress, painted, and when it landed. It
+    // takes the bar's row for `FLASH` and then goes — see `flash`.
     flash: Option<(String, Instant)>,
 }
 
-/// What to call a checkout. The root answers to its directory name, as
-/// `worktree list` already names it — a fixed word would collide with a
-/// checkout that happens to be called that.
+// What to call a checkout. The root answers to its directory name, as
+// `worktree list` already names it — a fixed word would collide with a
+// checkout that happens to be called that.
 fn lane_name(lane: &crate::lane::Lane) -> String {
     lane.worktree.clone().unwrap_or_else(|| {
         lane.ctx
@@ -761,10 +761,10 @@ fn lane_name(lane: &crate::lane::Lane) -> String {
     })
 }
 
-/// How a lane shows in the bottom bar.
-///
-/// `Done`/`Failed` are unread marks, not history: the tool rows' ✓ stays for
-/// good, this one goes the moment you look at the lane it belongs to.
+// How a lane shows in the bottom bar.
+//
+// `Done`/`Failed` are unread marks, not history: the tool rows' ✓ stays for
+// good, this one goes the moment you look at the lane it belongs to.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mark {
     Front,
@@ -774,8 +774,8 @@ enum Mark {
     Idle,
 }
 
-/// One lane as the bar shows it, rebuilt before every draw — the bar is a view
-/// of state the surface does not own.
+// One lane as the bar shows it, rebuilt before every draw — the bar is a view
+// of state the surface does not own.
 struct Tab {
     mark: Mark,
     name: String,
@@ -786,8 +786,8 @@ struct Tab {
 #[derive(Clone)]
 enum MenuEntry {
     Completion(Candidate),
-    /// `help` says who a row belongs to: two rows of prose read alike, and
-    /// which one it is decides whether picking it unsends or continues from.
+    // `help` says who a row belongs to: two rows of prose read alike, and
+    // which one it is decides whether picking it unsends or continues from.
     Message {
         id: EntryId,
         show: String,
@@ -826,11 +826,11 @@ impl View {
 }
 
 impl Ui {
-    /// What leaves with the checkout being left: the half-typed line, parked
-    /// in its lane's view — the editor is the surface's, and a line left
-    /// standing in it would be filed in whichever checkout came next — and
-    /// the state built against that lane: a flash, the rewind selector over
-    /// its transcript, a lane-scoped panel.
+    // What leaves with the checkout being left: the half-typed line, parked
+    // in its lane's view — the editor is the surface's, and a line left
+    // standing in it would be filed in whichever checkout came next — and
+    // the state built against that lane: a flash, the rewind selector over
+    // its transcript, a lane-scoped panel.
     fn leave_lane(&mut self, lane: &mut Lane) {
         lane.view.draft = self.editor.take_composing();
         self.flash = None;
@@ -882,7 +882,7 @@ impl Ui {
         }
     }
 
-    /// The values both lines draw on, as this surface currently knows them.
+    // The values both lines draw on, as this surface currently knows them.
     fn snapshot(&self, lane: &Lane) -> crate::status::Snapshot {
         lane.view.tally.snapshot(
             &lane.view.model,
@@ -895,14 +895,14 @@ impl Ui {
         )
     }
 
-    /// The separator between lanes on the bar: the one every other line on
-    /// this surface uses, dimmed so the names it divides are what the eye
-    /// lands on.
+    // The separator between lanes on the bar: the one every other line on
+    // this surface uses, dimmed so the names it divides are what the eye
+    // lands on.
     fn paint_sep(paint: &Paint) -> String {
         paint.on(&paint.theme.muted, " · ")
     }
 
-    /// The prompt sigil as the terminal shows it, colour and all.
+    // The prompt sigil as the terminal shows it, colour and all.
     fn paint_prompt(paint: &Paint, icon: &str) -> String {
         format!("{} ", paint.on(&paint.theme.prompt.color, icon))
     }
@@ -917,20 +917,20 @@ impl Ui {
         view.scrollback.push(Row::notice(line));
     }
 
-    /// Answer one keypress on the bar row and leave nothing behind.
-    ///
-    /// The scrollback is a transcript, and what a press did *not* do is not
-    /// part of one — sent there it also stacked a row per press, which is how
-    /// holding the step key in a single checkout wrote a screenful of one line.
-    /// Muted here rather than at the callers, which had drifted apart on it.
+    // Answer one keypress on the bar row and leave nothing behind.
+    //
+    // The scrollback is a transcript, and what a press did *not* do is not
+    // part of one — sent there it also stacked a row per press, which is how
+    // holding the step key in a single checkout wrote a screenful of one line.
+    // Muted here rather than at the callers, which had drifted apart on it.
     fn flash(&mut self, line: impl Into<String>) {
         let text = self.paint.on(&self.paint.theme.muted, &line.into());
         self.flash = Some((text, Instant::now()));
     }
 
-    /// The bar row while a flash is up, and the only place an expired one is
-    /// dropped — every frame passes through here, so nothing else has to
-    /// remember to clear it.
+    // The bar row while a flash is up, and the only place an expired one is
+    // dropped — every frame passes through here, so nothing else has to
+    // remember to clear it.
     fn flash_line(&mut self, width: usize) -> Option<String> {
         if self
             .flash
@@ -943,8 +943,8 @@ impl Ui {
         Some(render::clip(text, width))
     }
 
-    /// Where a finished row goes: a reasoning line into the streaming block's
-    /// foldable entry, anything else straight into scrollback.
+    // Where a finished row goes: a reasoning line into the streaming block's
+    // foldable entry, anything else straight into scrollback.
     fn land(&mut self, view: &mut View, painted: String, reasoning: bool) {
         if reasoning && let Some(id) = view.thinking.streaming {
             if let Some(row) = self.streaming_row(view, id) {
@@ -963,7 +963,7 @@ impl Ui {
         view.scrollback.push(Row::notice(painted));
     }
 
-    /// The scrollback entry for a streaming block, if it has one yet.
+    // The scrollback entry for a streaming block, if it has one yet.
     fn streaming_row<'a>(&mut self, view: &'a mut View, id: u64) -> Option<&'a mut Row> {
         view.scrollback
             .iter_mut()
@@ -971,9 +971,9 @@ impl Ui {
             .find(|r| r.block() == Some(id))
     }
 
-    /// End the open paragraph and send it up into scrollback.
-    /// A finished row, styled for what it is: reasoning, or the answer's
-    /// markdown. The one place either decision is made.
+    // End the open paragraph and send it up into scrollback.
+    // A finished row, styled for what it is: reasoning, or the answer's
+    // markdown. The one place either decision is made.
     fn paint_row(&mut self, view: &mut View, line: &str, reasoning: bool) -> String {
         if reasoning {
             return Row::reasoning_line(line, &self.paint);
@@ -1094,10 +1094,10 @@ impl Ui {
         }
     }
 
-    /// A run that ended without answering a call leaves its animated row
-    /// dangling. The call's own end event is never sent — a cancelled run
-    /// returns before its results are reported — so give the scrollback the
-    /// start line the row stood for and clear the row.
+    // A run that ended without answering a call leaves its animated row
+    // dangling. The call's own end event is never sent — a cancelled run
+    // returns before its results are reported — so give the scrollback the
+    // start line the row stood for and clear the row.
     fn abandon_tools(&mut self, view: &mut View) {
         for t in std::mem::take(&mut view.tools) {
             let row = Row::tool_start(&t.name, &t.summary, &self.paint);
@@ -1105,14 +1105,14 @@ impl Ui {
         }
     }
 
-    /// What the line could still become: a completion while a command word is
-    /// being typed, or — with the rewind selector open — the user messages a
-    /// conversation can be rewound to.
-    ///
-    /// A run does not close it. The editor is a queue then, but `/help`,
-    /// `/cost` and `/model` answer on the spot and the rest queue as what they
-    /// are, so the word being typed is still worth completing. `esc` reaches
-    /// `run.interrupt` past the list — see `keys::Menu`.
+    // What the line could still become: a completion while a command word is
+    // being typed, or — with the rewind selector open — the user messages a
+    // conversation can be rewound to.
+    //
+    // A run does not close it. The editor is a queue then, but `/help`,
+    // `/cost` and `/model` answer on the spot and the rest queue as what they
+    // are, so the word being typed is still worth completing. `esc` reaches
+    // `run.interrupt` past the list — see `keys::Menu`.
     fn menu(&self) -> Vec<MenuEntry> {
         if self.panel.is_some() {
             // The panel owns this space; the completion list waits.
@@ -1139,13 +1139,13 @@ impl Ui {
         .collect()
     }
 
-    /// Open the rewind selector on the given messages, newest selected first.
+    // Open the rewind selector on the given messages, newest selected first.
     fn open_rewind(&mut self, rows: Vec<MenuEntry>) {
         self.picked = Some(rows.len().saturating_sub(1));
         self.rewind = rows;
     }
 
-    /// The highlighted row, clamped: the list shrinks as the word grows.
+    // The highlighted row, clamped: the list shrinks as the word grows.
     fn highlighted(&self) -> Option<MenuEntry> {
         let mut menu = self.menu();
         if menu.is_empty() {
@@ -1155,8 +1155,8 @@ impl Ui {
         Some(menu.swap_remove(at))
     }
 
-    /// The menu's rows as ratatui list items. The selected row is styled by
-    /// the list itself; everything else sits muted.
+    // The menu's rows as ratatui list items. The selected row is styled by
+    // the list itself; everything else sits muted.
     fn menu_items(&self, menu: &[MenuEntry]) -> Vec<ListItem<'static>> {
         let head = menu
             .iter()
@@ -1172,13 +1172,13 @@ impl Ui {
             .collect()
     }
 
-    /// A theme style, as ratatui sees it.
+    // A theme style, as ratatui sees it.
     fn rat_style(&self, s: &ThemeStyle) -> RStyle {
         screen::parse_sgr(s.codes(), RStyle::default())
     }
 
-    /// The rows above the input line: running tools, the open stream, and
-    /// the status line. The editor draws separately, pinned to the bottom.
+    // The rows above the input line: running tools, the open stream, and
+    // the status line. The editor draws separately, pinned to the bottom.
     fn live(&self, lane: &Lane, room: usize) -> Vec<String> {
         let width = self.screen.usable();
         let mut rows = Vec::new();
@@ -1223,8 +1223,8 @@ impl Ui {
         rows
     }
 
-    /// The bottom bar, or None when there is nothing it could say. One lane is
-    /// the whole surface, and a bar naming it is a row spent on nothing.
+    // The bottom bar, or None when there is nothing it could say. One lane is
+    // the whole surface, and a bar naming it is a row spent on nothing.
     fn lane_bar(&self, width: usize) -> Option<String> {
         if self.tabs.len() < 2 {
             return None;
@@ -1256,16 +1256,16 @@ impl Ui {
         Some(render::clip(&painted.join(&self.tab_sep), width))
     }
 
-    /// The checkout a step from this one, wrapping at either end — where the
-    /// Normal `L`/`H` go. `forward` picks the ring's next
-    /// checkout, `!forward` its previous. The ring walks the checkouts in
-    /// the order the bar shows them — the ones already open, in the order
-    /// they were opened — and puts the ones not open yet after them, in the
-    /// order `worktree::list` reports. `Intent::Worktree` opens one that is
-    /// not, which is the same thing the picker did when you chose an unopened
-    /// row.
-    ///
-    /// None when there is nowhere else to go.
+    // The checkout a step from this one, wrapping at either end — where the
+    // Normal `L`/`H` go. `forward` picks the ring's next
+    // checkout, `!forward` its previous. The ring walks the checkouts in
+    // the order the bar shows them — the ones already open, in the order
+    // they were opened — and puts the ones not open yet after them, in the
+    // order `worktree::list` reports. `Intent::Worktree` opens one that is
+    // not, which is the same thing the picker did when you chose an unopened
+    // row.
+    //
+    // None when there is nowhere else to go.
     fn step_checkout(&self, lane: &Lane, forward: bool) -> Option<String> {
         let trees = self.lists.worktrees();
         let n = trees.len();
@@ -1430,16 +1430,16 @@ impl Ui {
         });
     }
 
-    /// Rows the scrollback renders to at this width, wraps included.
+    // Rows the scrollback renders to at this width, wraps included.
     fn scrollback_rows(&self, view: &View, width: usize) -> usize {
         ScrollbackRows::new(&view.scrollback, &self.paint, &self.done, width)
             .map(|(text, border)| screen::wrap(border, &text, width).len())
             .sum()
     }
 
-    /// Rebuild the history from the transcript, forgetting everything the old
-    /// drawing showed: a rewind changes what the conversation is, and the
-    /// screen has to show the new one, not the old one with a note on it.
+    // Rebuild the history from the transcript, forgetting everything the old
+    // drawing showed: a rewind changes what the conversation is, and the
+    // screen has to show the new one, not the old one with a note on it.
     fn rebuild(&mut self, view: &mut View, session: &agent::session::Session) {
         view.scrollback.clear();
         // The opening block went with it; a rebuilt screen is the conversation.
@@ -1455,9 +1455,9 @@ impl Ui {
             scrollback_from(session, &self.paint, &self.bang_prompt, &mut view.thinking);
     }
 
-    /// Accept a submitted input: echo it so the prompt survives the editor
-    /// being cleared, then fold the block that was current back to the switch
-    /// — the input pushes it out of current no matter what it turns out to be.
+    // Accept a submitted input: echo it so the prompt survives the editor
+    // being cleared, then fold the block that was current back to the switch
+    // — the input pushes it out of current no matter what it turns out to be.
     fn submit(&mut self, view: &mut View, line: &str) {
         let rows = Row::prompt(line, &self.bang_prompt, &self.paint);
         view.scrollback.extend(rows);
@@ -1798,7 +1798,7 @@ impl Ui {
         Intent::None
     }
 
-    /// Nudge the scrolled history window by `step` rows, up or down.
+    // Nudge the scrolled history window by `step` rows, up or down.
     fn scroll_view(&mut self, view: &mut View, up: bool, step: usize) {
         view.scroll = if up {
             view.scroll.saturating_add(step)
@@ -1807,8 +1807,8 @@ impl Ui {
         };
     }
 
-    /// A page keeps 4 rows of context at the edge, the way the upstream pi
-    /// TUI does (`Math.max(1, viewportHeight - 4)`).
+    // A page keeps 4 rows of context at the edge, the way the upstream pi
+    // TUI does (`Math.max(1, viewportHeight - 4)`).
     fn page_scroll_step(&self) -> usize {
         (self.screen.height as usize).saturating_sub(4).max(1)
     }
@@ -1817,8 +1817,8 @@ impl Ui {
         ((self.screen.height as usize) / 2).max(1)
     }
 
-    /// Back to Insert. The half-typed escape character goes with the mode: it
-    /// belonged to a line nobody is commanding any more.
+    // Back to Insert. The half-typed escape character goes with the mode: it
+    // belonged to a line nobody is commanding any more.
     fn leave_normal(&mut self) {
         if let Some(v) = &mut self.vim {
             v.mode = Mode::Insert;
@@ -1827,15 +1827,15 @@ impl Ui {
         self.show_mode();
     }
 
-    /// Put the mode where it can be seen: the shape of the caret, and the
-    /// the prompt sigil where the theme gives the two modes different ones. It
-    /// does not by default — one bar either way — because the caret is where
-    /// the eye already is; a terminal that will not reshape it is what
-    /// `prompt.normal` is for.
-    ///
-    /// This is what pays for the mode never resetting itself. A mode that
-    /// persists across submitted lines and cannot be seen would be a trap;
-    /// one that can be seen is just where you left it.
+    // Put the mode where it can be seen: the shape of the caret, and the
+    // the prompt sigil where the theme gives the two modes different ones. It
+    // does not by default — one bar either way — because the caret is where
+    // the eye already is; a terminal that will not reshape it is what
+    // `prompt.normal` is for.
+    //
+    // This is what pays for the mode never resetting itself. A mode that
+    // persists across submitted lines and cannot be seen would be a trap;
+    // one that can be seen is just where you left it.
     fn show_mode(&mut self) {
         // Three states, not two: vim off is not "Insert", and a caret shaped
         // for a mode nobody turned on is a change to somebody else's terminal.
@@ -1850,13 +1850,13 @@ impl Ui {
         self.screen.cursor_shape(normal);
     }
 
-    /// Follow what the config says about the modal keys.
-    ///
-    /// Turning them off drops the state rather than parking it: coming back
-    /// later in Normal, with no keystroke between having asked to go there,
-    /// is the one surprise this has to rule out. Turning them off is also the
-    /// only thing that changes the mode without a key — everything else keeps
-    /// whichever mode was last asked for, submitted lines included.
+    // Follow what the config says about the modal keys.
+    //
+    // Turning them off drops the state rather than parking it: coming back
+    // later in Normal, with no keystroke between having asked to go there,
+    // is the one surprise this has to rule out. Turning them off is also the
+    // only thing that changes the mode without a key — everything else keeps
+    // whichever mode was last asked for, submitted lines included.
     fn set_vim(&mut self, cfg: &crate::config::Vim) {
         match (&mut self.vim, cfg.enabled) {
             (slot @ None, true) => *slot = Some(Vim::new(cfg)),
@@ -1866,9 +1866,9 @@ impl Ui {
         self.show_mode();
     }
 
-    /// One key, three meanings, and the escalation travels with the binding
-    /// rather than with Ctrl-C: stop the run, clear the line, or — pressed
-    /// twice inside the window — leave.
+    // One key, three meanings, and the escalation travels with the binding
+    // rather than with Ctrl-C: stop the run, clear the line, or — pressed
+    // twice inside the window — leave.
     fn interrupt_or_clear(&mut self, running: bool) -> Intent {
         if double_tap(&mut self.last_interrupt, Instant::now()) {
             return Intent::Quit;
@@ -1934,61 +1934,61 @@ fn land_handled(ui: &mut Ui, core: &Repl, view: &mut View, lines: Vec<String>) {
 // a run is under way — and a `/worktree` that opens a lane is landed by the
 // same code that lands it from an idle prompt.
 
-/// A turn that has ended, on its way back to the loop that started it.
-///
-/// The transcript comes home this way rather than through a `JoinHandle`, so
-/// one channel serves every lane and nothing has to poll a growing list of
-/// them. `session` is None only when the run panicked and took its copy down.
-/// What woke the loop this time round. One value out of the select rather than
-/// a pair of optional locals, so what happened is read in one place.
+// A turn that has ended, on its way back to the loop that started it.
+//
+// The transcript comes home this way rather than through a `JoinHandle`, so
+// one channel serves every lane and nothing has to poll a growing list of
+// them. `session` is None only when the run panicked and took its copy down.
+// What woke the loop this time round. One value out of the select rather than
+// a pair of optional locals, so what happened is read in one place.
 enum Wake {
-    /// Something to carry out, once the select's borrows are gone.
+    // Something to carry out, once the select's borrows are gone.
     Do(Intent),
-    /// A turn ended and has to be settled, whichever lane it belongs to.
+    // A turn ended and has to be settled, whichever lane it belongs to.
     Turn(Done),
-    /// Something only the screen cares about.
+    // Something only the screen cares about.
     Nothing,
-    /// Leave. Not a `break` at the arm: the way out has lanes to settle.
+    // Leave. Not a `break` at the arm: the way out has lanes to settle.
     Leave,
 }
 
-/// What kind of job a finished `Done` was, carrying what only that kind
-/// leaves behind — so no arm can be built holding another's.
+// What kind of job a finished `Done` was, carrying what only that kind
+// leaves behind — so no arm can be built holding another's.
 enum Kind {
-    /// A turn: the agent loop ran, and `ran` says how it went. Its output
-    /// reached the view through the lane's event channel as it happened.
+    // A turn: the agent loop ran, and `ran` says how it went. Its output
+    // reached the view through the lane's event channel as it happened.
     Turn,
-    /// A `!` command, and the lines it printed. They come home whole rather
-    /// than as events, so settling is the only place they can be shown.
-    ///
-    /// Kept apart from a turn's silence because `Bridge` is one accumulator
-    /// for the whole surface, filled by whichever turn is streaming and
-    /// emptied only by `Event::TurnStart`; a `!` emits no events, so letting
-    /// one speak for the bridge flushes another lane's half-written answer to
-    /// the phone as though it were finished.
+    // A `!` command, and the lines it printed. They come home whole rather
+    // than as events, so settling is the only place they can be shown.
+    //
+    // Kept apart from a turn's silence because `Bridge` is one accumulator
+    // for the whole surface, filled by whichever turn is streaming and
+    // emptied only by `Event::TurnStart`; a `!` emits no events, so letting
+    // one speak for the bridge flushes another lane's half-written answer to
+    // the phone as though it were finished.
     Bash(Vec<String>),
-    /// A `/compact`, and what it shrank and spent. None means the transcript
-    /// already fit — or, with a cancelled `ran`, that nobody ever looked.
+    // A `/compact`, and what it shrank and spent. None means the transcript
+    // already fit — or, with a cancelled `ran`, that nobody ever looked.
     Compact(Option<(agent::compact::Report, Totals)>),
 }
-/// A job that ran off the loop, reporting back to the loop that started it.
-///
-/// The transcript comes home this way rather than through a `JoinHandle`, so
-/// one channel serves every lane and nothing has to poll a growing list of
-/// them. `ran` is None only when the job panicked and took its copy down.
+// A job that ran off the loop, reporting back to the loop that started it.
+//
+// The transcript comes home this way rather than through a `JoinHandle`, so
+// one channel serves every lane and nothing has to poll a growing list of
+// them. `ran` is None only when the job panicked and took its copy down.
 struct Done {
     lane: usize,
     kind: Kind,
-    /// The transcript back, and how the job went. None when it panicked and
-    /// took its copy down with it — one field, because those two are never
-    /// separately absent.
+    // The transcript back, and how the job went. None when it panicked and
+    // took its copy down with it — one field, because those two are never
+    // separately absent.
     ran: Option<(Session, Result<Totals, AgentError>)>,
 }
 
-/// Run `job` off the loop, turning a panic into a `None` the settle side can
-/// act on. One guard for every task that carries the transcript, so the
-/// panic contract is written once: a job that never reports leaves its lane
-/// looking "working" forever.
+// Run `job` off the loop, turning a panic into a `None` the settle side can
+// act on. One guard for every task that carries the transcript, so the
+// panic contract is written once: a job that never reports leaves its lane
+// looking "working" forever.
 async fn guard<F, T>(job: F) -> Option<T>
 where
     F: std::future::Future<Output = T>,
@@ -2000,7 +2000,7 @@ pub struct Tui {
     core: Repl,
     ui: Ui,
     events: UnboundedReceiver<TermEvent>,
-    /// Stops the reader while a child holds the terminal.
+    // Stops the reader while a child holds the terminal.
     hold: Hold,
     totals: Totals,
     bridge: crate::wechat::Bridge,
@@ -2008,20 +2008,20 @@ pub struct Tui {
 
 // crossterm reads blockingly, so the keyboard gets a thread of its own and
 // reaches the loop as just another channel.
-/// What the reader waits on when nothing has been typed. `poll` returns the
-/// moment a key arrives, so it costs idle wakeups and no latency.
+// What the reader waits on when nothing has been typed. `poll` returns the
+// moment a key arrives, so it costs idle wakeups and no latency.
 const INPUT_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// How long `park` waits to be told the reader stopped. Twice the poll: one
-/// just entered has that long before it looks at the flag again.
+// How long `park` waits to be told the reader stopped. Twice the poll: one
+// just entered has that long before it looks at the flag again.
 const PARK_WAIT: std::time::Duration =
     std::time::Duration::from_millis(INPUT_POLL.as_millis() as u64 * 2);
 
-/// How often `park` looks while it waits.
+// How often `park` looks while it waits.
 const PARK_STEP: std::time::Duration = std::time::Duration::from_millis(10);
 
-/// The reader's pause switch. Two readers on one stdin would split the user's
-/// keystrokes between them, and a thread inside `read` cannot be told to stop.
+// The reader's pause switch. Two readers on one stdin would split the user's
+// keystrokes between them, and a thread inside `read` cannot be told to stop.
 #[derive(Clone, Default)]
 struct Hold {
     paused: Arc<AtomicBool>,
@@ -2029,8 +2029,8 @@ struct Hold {
 }
 
 impl Hold {
-    /// Stop reading, and wait to be told it stopped. Bounded: a reader starved
-    /// past `PARK_WAIT` is handed the race rather than hanging the editor.
+    // Stop reading, and wait to be told it stopped. Bounded: a reader starved
+    // past `PARK_WAIT` is handed the race rather than hanging the editor.
     async fn park(&self) -> Parked {
         self.paused.store(true, Ordering::Release);
         let mut waited = std::time::Duration::ZERO;
@@ -2042,8 +2042,8 @@ impl Hold {
     }
 }
 
-/// SIGINT and SIGQUIT ignored while a child holds the terminal. Cooked mode
-/// sends both to the whole foreground group, which this process is in.
+// SIGINT and SIGQUIT ignored while a child holds the terminal. Cooked mode
+// sends both to the whole foreground group, which this process is in.
 #[cfg(unix)]
 struct Deafened([libc::sighandler_t; 2]);
 
@@ -2084,8 +2084,8 @@ impl Deafened {
     }
 }
 
-/// Restarts the reader on the way out, however it goes. A reader left parked
-/// is a dead keyboard with nothing on screen to say why.
+// Restarts the reader on the way out, however it goes. A reader left parked
+// is a dead keyboard with nothing on screen to say why.
 struct Parked(Hold);
 
 impl Drop for Parked {
@@ -2127,14 +2127,14 @@ fn reader() -> (UnboundedReceiver<TermEvent>, Hold) {
     (rx, hold)
 }
 
-/// How long leaving waits for the runs it just cancelled. Long enough for a
-/// turn to notice the token, short enough that a wedged one does not hold the
-/// terminal hostage.
+// How long leaving waits for the runs it just cancelled. Long enough for a
+// turn to notice the token, short enough that a wedged one does not hold the
+// terminal hostage.
 const EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
 // Where recalled prompts are kept between sessions.
-/// `$VISUAL` before `$EDITOR` before `vi`, the order every terminal program
-/// that asks uses.
+// `$VISUAL` before `$EDITOR` before `vi`, the order every terminal program
+// that asks uses.
 fn external_editor() -> (String, Vec<String>) {
     let raw = ["VISUAL", "EDITOR"]
         .into_iter()
@@ -2142,16 +2142,16 @@ fn external_editor() -> (String, Vec<String>) {
     split_editor(raw.as_deref().unwrap_or("vi"))
 }
 
-/// Split rather than run whole (`code -w`), and never through a shell, which
-/// would make every character in it live. The price is that quoting cannot.
+// Split rather than run whole (`code -w`), and never through a shell, which
+// would make every character in it live. The price is that quoting cannot.
 fn split_editor(raw: &str) -> (String, Vec<String>) {
     let mut parts = raw.split_whitespace();
     let program = parts.next().unwrap_or("vi").to_string();
     (program, parts.map(str::to_string).collect())
 }
 
-/// A file for the editor to work in, `0600` because `/tmp` is shared and the
-/// line holds whatever the user was about to say. `.md` buys highlighting.
+// A file for the editor to work in, `0600` because `/tmp` is shared and the
+// line holds whatever the user was about to say. `.md` buys highlighting.
 fn scratch_file(text: &str) -> std::io::Result<std::path::PathBuf> {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2170,16 +2170,16 @@ fn scratch_file(text: &str) -> std::io::Result<std::path::PathBuf> {
     Ok(path)
 }
 
-/// What this run recalls in `workspace`, or nothing.
+// What this run recalls in `workspace`, or nothing.
 fn history_of(store: &crate::session::Store, workspace: &std::path::Path) -> Vec<String> {
     std::fs::read_to_string(store.history_path(workspace))
         .map(|prior| editor::decode(&prior))
         .unwrap_or_default()
 }
 
-/// The one file every workspace used to share. Its contents are the bug itself
-/// — every project's lines in one list — so there is nothing in it worth
-/// carrying into the buckets that replace it.
+// The one file every workspace used to share. Its contents are the bug itself
+// — every project's lines in one list — so there is nothing in it worth
+// carrying into the buckets that replace it.
 fn drop_shared_history() {
     if let Some(old) = tools::state::dir().map(|d| d.join("history")) {
         let _ = std::fs::remove_file(&old);
@@ -2237,9 +2237,9 @@ impl Tui {
         })
     }
 
-    /// A surface on an in-memory screen, for tests that drive the loop's
-    /// settle side. No reader thread and no history file: the terminal the
-    /// test runner owns is not this test's to touch.
+    // A surface on an in-memory screen, for tests that drive the loop's
+    // settle side. No reader thread and no history file: the terminal the
+    // test runner owns is not this test's to touch.
     #[cfg(test)]
     fn on_test_screen(mut core: Repl, keys: Arc<Keys>) -> Self {
         let paint = Paint::with_theme(false, Arc::new(core.config.theme.clone()));
@@ -2265,20 +2265,20 @@ impl Tui {
         }
     }
 
-    /// A line the surface has taken from the user: onto the screen, at the
-    /// newest row, and into the history file.
-    ///
-    /// One place rather than one per door. A fresh turn starts at the newest
-    /// row — a view scrolled up to read would otherwise stream output out of
-    /// sight — and the history is written per line rather than on the way out,
-    /// because quitting with two Ctrl-Cs skips every tidy exit path there is.
+    // A line the surface has taken from the user: onto the screen, at the
+    // newest row, and into the history file.
+    //
+    // One place rather than one per door. A fresh turn starts at the newest
+    // row — a view scrolled up to read would otherwise stream output out of
+    // sight — and the history is written per line rather than on the way out,
+    // because quitting with two Ctrl-Cs skips every tidy exit path there is.
     fn echo_sent(&mut self, line: &str) {
         self.ui.submit(&mut self.core.lane_mut().view, line);
         self.core.lane_mut().view.scroll = 0;
         self.save_history();
     }
 
-    /// Best effort: losing a recall list is not worth a message on the way out.
+    // Best effort: losing a recall list is not worth a message on the way out.
     fn save_history(&self) {
         let path = self
             .core
@@ -2292,19 +2292,19 @@ impl Tui {
         let _ = std::fs::write(path, editor::encode(keep));
     }
 
-    /// Sessions change on the commands that create, delete or switch them;
-    /// refresh the copy the completion menu reads.
-    /// A turn or a switch can change what `/resume` would list. Dropped
-    /// rather than recomputed: whoever asks next pays, and most of the time
-    /// nobody does.
+    // Sessions change on the commands that create, delete or switch them;
+    // refresh the copy the completion menu reads.
+    // A turn or a switch can change what `/resume` would list. Dropped
+    // rather than recomputed: whoever asks next pays, and most of the time
+    // nobody does.
     fn refresh_sessions(&mut self) {
         self.ui.lists.forget();
     }
 
-    /// Bring the screen into step with the lanes after a command. A switch
-    /// parks the line being typed in the view of the lane it was typed at
-    /// and takes the lane in front's own parked line back up; the lists
-    /// follow, and what that lane posted while away is replayed here.
+    // Bring the screen into step with the lanes after a command. A switch
+    // parks the line being typed in the view of the lane it was typed at
+    // and takes the lane in front's own parked line back up; the lists
+    // follow, and what that lane posted while away is replayed here.
     fn reconcile(&mut self, was: usize) {
         if was == self.core.current {
             return;
@@ -2344,9 +2344,9 @@ impl Tui {
         }
     }
 
-    /// Put a handled command's lines into the view of the lane in front. Lent
-    /// out rather than borrowed in place: the view lives inside `core`, which
-    /// this also reads.
+    // Put a handled command's lines into the view of the lane in front. Lent
+    // out rather than borrowed in place: the view lives inside `core`, which
+    // this also reads.
     fn land_lines(&mut self, lines: Vec<String>) {
         let at = self.core.current;
         let mut view = std::mem::take(&mut self.core.lanes[at].view);
@@ -2369,11 +2369,11 @@ impl Tui {
             .extend(said.into_iter().map(Row::notice));
     }
 
-    /// Take what every lane's run has posted since the last look: into the view
-    /// when the lane is in front, into its own backlog when it is not.
-    ///
-    /// A lane out of sight is not drawn — only its transcript has to be kept
-    /// whole. What arrived meanwhile is replayed when it comes back.
+    // Take what every lane's run has posted since the last look: into the view
+    // when the lane is in front, into its own backlog when it is not.
+    //
+    // A lane out of sight is not drawn — only its transcript has to be kept
+    // whole. What arrived meanwhile is replayed when it comes back.
     async fn serve_lanes(&mut self) {
         for at in 0..self.core.lanes.len() {
             while let Ok(event) = self.core.lanes[at].inbox.try_recv() {
@@ -2405,9 +2405,9 @@ impl Tui {
         }
     }
 
-    /// Rebuild the bottom bar from the lanes, before every draw. A run that
-    /// ended out of sight has to reach the screen without anyone asking, and
-    /// this is the only thing that looks.
+    // Rebuild the bottom bar from the lanes, before every draw. A run that
+    // ended out of sight has to reach the screen without anyone asking, and
+    // this is the only thing that looks.
     fn refresh_tabs(&mut self) {
         let current = self.core.current;
         self.ui.tabs = self
@@ -2433,8 +2433,8 @@ impl Tui {
             .collect();
     }
 
-    /// Drop lanes whose checkout was deleted outside pi — idle ones only, a
-    /// running or looping lane still answering to the index it was given.
+    // Drop lanes whose checkout was deleted outside pi — idle ones only, a
+    // running or looping lane still answering to the index it was given.
     fn drop_vanished_lanes(&mut self) {
         let mut gone: Vec<(usize, String)> = Vec::new();
         // Back to front, stopping at a working lane: removing one before it
@@ -2480,15 +2480,15 @@ impl Tui {
         self.ui.lists.forget();
     }
 
-    /// Carry the lane's loop past a round that has just ended: queue the next
-    /// one under a `loop round {n}` marker, or say why there is no next round
-    /// when one ended it. A round the user cut speaks for itself — the notice
-    /// is for the loop that went on, and for the one that ended on its own.
-    ///
-    /// What decides is the tree, never the model: a round that changed a file
-    /// is a round whose work was not finished, and one that changed nothing
-    /// has nothing left to do. Asking the model instead would hand back the
-    /// judgement this exists to take away from it.
+    // Carry the lane's loop past a round that has just ended: queue the next
+    // one under a `loop round {n}` marker, or say why there is no next round
+    // when one ended it. A round the user cut speaks for itself — the notice
+    // is for the loop that went on, and for the one that ended on its own.
+    //
+    // What decides is the tree, never the model: a round that changed a file
+    // is a round whose work was not finished, and one that changed nothing
+    // has nothing left to do. Asking the model instead would hand back the
+    // judgement this exists to take away from it.
     fn step_loop(&mut self, lane: usize, finished: bool) {
         let cap = self.core.config.loop_cap();
         let Some(round) = self.core.lanes[lane].loop_step(finished, cap) else {
@@ -2522,11 +2522,11 @@ impl Tui {
         };
         self.say_of(lane, said);
     }
-    /// News from a lane, onto the screen actually being watched rather than
-    /// into the lane it came from — where nobody would see it until they
-    /// switched. The `whose:` prefix is what makes that readable, and it is
-    /// why this lands on `current`: a background lane's own view would need no
-    /// name on it.
+    // News from a lane, onto the screen actually being watched rather than
+    // into the lane it came from — where nobody would see it until they
+    // switched. The `whose:` prefix is what makes that readable, and it is
+    // why this lands on `current`: a background lane's own view would need no
+    // name on it.
     fn say_of(&mut self, lane: usize, what: String) {
         let text = if lane == self.core.current {
             what
@@ -2540,14 +2540,14 @@ impl Tui {
         self.ui.say(&mut self.core.lane_mut().view, text);
     }
 
-    /// The one gate every input passes: a key, the phone, or an intent coming
-    /// back off the queue, so two ways of asking the same thing cannot get two
-    /// different answers.
-    ///
-    /// The answer is in two halves and they live apart on purpose: whether a
-    /// run is in flight is state, and is read here; what an intent may do while
-    /// one is, is a property of the intent, and `fate` holds it. An idle lane
-    /// admits everything, which is why `fate` never has to mention idleness.
+    // The one gate every input passes: a key, the phone, or an intent coming
+    // back off the queue, so two ways of asking the same thing cannot get two
+    // different answers.
+    //
+    // The answer is in two halves and they live apart on purpose: whether a
+    // run is in flight is state, and is read here; what an intent may do while
+    // one is, is a property of the intent, and `fate` holds it. An idle lane
+    // admits everything, which is why `fate` never has to mention idleness.
     fn admit(&mut self, intent: Intent) -> Wake {
         if !self.core.lane().is_running() {
             return Wake::Do(intent);
@@ -2585,9 +2585,9 @@ impl Tui {
         }
     }
 
-    /// Write one edited value from the settings panel, and show the panel what
-    /// became of it. A refusal stays in the panel, beside the edit that earned
-    /// it; there is nowhere else for it to be read.
+    // Write one edited value from the settings panel, and show the panel what
+    // became of it. A refusal stays in the panel, beside the edit that earned
+    // it; there is nowhere else for it to be read.
     fn commit_setting(&mut self, path: &str, value: &str) {
         match self.core.commit_file(path, value) {
             Ok(said) => {
@@ -2612,9 +2612,9 @@ impl Tui {
         }
     }
 
-    /// Show the panel what became of a write, and say so in the scrollback
-    /// when it did not take: the panel is a list of notes, with nowhere in it
-    /// for a sentence about the disk.
+    // Show the panel what became of a write, and say so in the scrollback
+    // when it did not take: the panel is a list of notes, with nowhere in it
+    // for a sentence about the disk.
     fn after_shelf(&mut self, failed: Option<String>) {
         if let Some(why) = failed {
             self.core
@@ -2626,9 +2626,9 @@ impl Tui {
         self.reload_panel();
     }
 
-    /// Re-read the open panel's rows from whatever they are a view of, after a
-    /// commit changed it underneath them. One match, and it is the only place
-    /// that has to know where a panel's rows come from.
+    // Re-read the open panel's rows from whatever they are a view of, after a
+    // commit changed it underneath them. One match, and it is the only place
+    // that has to know where a panel's rows come from.
     fn reload_panel(&mut self) {
         let body = match self.ui.panel.as_ref().map(Panel::body) {
             Some(Body::Settings(_)) => Body::Settings(crate::settings::leaves(&self.core.file)),
@@ -2640,8 +2640,8 @@ impl Tui {
         }
     }
 
-    /// Stop the run in front, if there is one. `unsend` also takes the prompt
-    /// back once it has stopped.
+    // Stop the run in front, if there is one. `unsend` also takes the prompt
+    // back once it has stopped.
     fn stop_current(&mut self, unsend: bool) {
         // Said here rather than at the callers: the state is the only thing
         // that knows, and every way of asking to stop arrives through it.
@@ -2926,13 +2926,13 @@ impl Tui {
         Ok(())
     }
 
-    /// Stop every lane still working and settle it, so leaving cannot drop a
-    /// transcript that lives in a task.
-    ///
-    /// Cancelling, not waiting for the work to finish: a run stops at its next
-    /// cancellation point, which is the wait Esc already asks of anyone. The
-    /// deadline is for the run that will not stop — what is on disk is then the
-    /// last save, which is what leaving without this gave every time.
+    // Stop every lane still working and settle it, so leaving cannot drop a
+    // transcript that lives in a task.
+    //
+    // Cancelling, not waiting for the work to finish: a run stops at its next
+    // cancellation point, which is the wait Esc already asks of anyone. The
+    // deadline is for the run that will not stop — what is on disk is then the
+    // last save, which is what leaving without this gave every time.
     async fn settle_all(&mut self, done: &mut UnboundedReceiver<Done>) {
         let mut left = 0;
         for lane in &self.core.lanes {
@@ -2969,8 +2969,8 @@ impl Tui {
         }
     }
 
-    /// Cut the transcript at an entry — chosen from the selector, or the
-    /// prompt an Esc took back — and say what is left.
+    // Cut the transcript at an entry — chosen from the selector, or the
+    // prompt an Esc took back — and say what is left.
     fn rewind_turn(&mut self, id: EntryId) {
         match self.core.rewind_to(id) {
             Ok(Rewound::Nothing) => {
@@ -3021,8 +3021,8 @@ impl Tui {
         }
     }
 
-    /// Open the rewind selector on every point the conversation can go back
-    /// to: what the user asked, and what the model answered.
+    // Open the rewind selector on every point the conversation can go back
+    // to: what the user asked, and what the model answered.
     fn open_rewind(&mut self) {
         let rows: Vec<MenuEntry> = self
             .core
@@ -3048,14 +3048,14 @@ impl Tui {
         self.ui.open_rewind(rows);
     }
 
-    /// Start a turn on the lane in front and come straight back.
-    ///
-    /// The run keeps the transcript for its length and posts what it is doing
-    /// to that lane's own channel, so the loop is free to draw, read keys and
-    /// serve the other lanes — including this one after the screen moves on.
-    /// Hand the view over to a job about to start: the clock runs, and the
-    /// per-run figures start from nothing rather than from the last run's.
-    /// `committed` says whether the prompt behind it can still be taken back.
+    // Start a turn on the lane in front and come straight back.
+    //
+    // The run keeps the transcript for its length and posts what it is doing
+    // to that lane's own channel, so the loop is free to draw, read keys and
+    // serve the other lanes — including this one after the screen moves on.
+    // Hand the view over to a job about to start: the clock runs, and the
+    // per-run figures start from nothing rather than from the last run's.
+    // `committed` says whether the prompt behind it can still be taken back.
     fn arm_view(&mut self, committed: bool) {
         self.core.lane_mut().view.started = Some(std::time::Instant::now());
         self.core.lane_mut().view.committed = committed;
@@ -3102,13 +3102,13 @@ impl Tui {
         };
     }
 
-    /// Run a `!` command the way a turn runs: off the loop, so the screen stays
-    /// live and the lane can be left to it.
-    ///
-    /// It borrows the transcript like a turn, and for the same reason: the
-    /// result is filed in it, and nothing else may replace it meanwhile.
-    /// Hand the terminal to `$EDITOR` on a copy of the line, and take back what
-    /// was saved. On its own thread: a run in flight still has a stream to serve.
+    // Run a `!` command the way a turn runs: off the loop, so the screen stays
+    // live and the lane can be left to it.
+    //
+    // It borrows the transcript like a turn, and for the same reason: the
+    // result is filed in it, and nothing else may replace it meanwhile.
+    // Hand the terminal to `$EDITOR` on a copy of the line, and take back what
+    // was saved. On its own thread: a run in flight still has a stream to serve.
     async fn edit_externally(&mut self) {
         let path = match scratch_file(self.ui.editor.text()) {
             Ok(path) => path,
@@ -3238,9 +3238,9 @@ impl Tui {
         };
     }
 
-    /// Run a `/compact` off the loop. It can spend real time — summarising
-    /// what it drops is a model call — and the lane must keep drawing and
-    /// serving the others meanwhile.
+    // Run a `/compact` off the loop. It can spend real time — summarising
+    // what it drops is a model call — and the lane must keep drawing and
+    // serving the others meanwhile.
     fn start_compact(&mut self, focus: Option<String>, done: &UnboundedSender<Done>) {
         let Some(mut carried) = self.core.lane_mut().session.take() else {
             self.ui.flash(NO_TRANSCRIPT);
@@ -3285,8 +3285,8 @@ impl Tui {
         };
     }
 
-    /// A job came home. Every kind settles on the lane that lent it the
-    /// transcript, whichever lane is on screen by the time it lands.
+    // A job came home. Every kind settles on the lane that lent it the
+    // transcript, whichever lane is on screen by the time it lands.
     async fn settle(&mut self, done: Done) {
         // The run posts its last events and only then says it is over, so both
         // are in flight at once and the end can win the race. Take what is
@@ -3315,12 +3315,12 @@ impl Tui {
         }
     }
 
-    /// A turn or a `!` has ended. Put the transcript back and save it,
-    /// whichever lane it belongs to; show the end of it only when that lane
-    /// is the one on screen.
-    ///
-    /// The saving cannot wait — a lane the user never returns to still has to
-    /// have its work on disk — but nothing about drawing it does.
+    // A turn or a `!` has ended. Put the transcript back and save it,
+    // whichever lane it belongs to; show the end of it only when that lane
+    // is the one on screen.
+    //
+    // The saving cannot wait — a lane the user never returns to still has to
+    // have its work on disk — but nothing about drawing it does.
     async fn settle_run(&mut self, done: Done, unsend: bool) {
         let Done { lane, ran, kind } = done;
         // Only a turn is a request the model was working on, and only a turn's
@@ -3411,10 +3411,10 @@ impl Tui {
         }
     }
 
-    /// Put back the archive when the job that borrowed the live transcript
-    /// never returned it, naming the job as `verb`. Says whether the lane now
-    /// holds something safe to write over its save — without one it refuses
-    /// work until `/new`, where exiting would cost every other lane its run.
+    // Put back the archive when the job that borrowed the live transcript
+    // never returned it, naming the job as `verb`. Says whether the lane now
+    // holds something safe to write over its save — without one it refuses
+    // work until `/new`, where exiting would cost every other lane its run.
     fn recover_session(&mut self, lane: usize, verb: &str) -> bool {
         let id = self.core.lanes[lane].id.clone();
         match self.core.store.load(&id) {
@@ -3439,8 +3439,8 @@ impl Tui {
         }
     }
 
-    /// A `/compact` has finished: put the transcript back, and show what the
-    /// pass did — or say there was nothing to shrink.
+    // A `/compact` has finished: put the transcript back, and show what the
+    // pass did — or say there was nothing to shrink.
     async fn settle_compact(&mut self, done: Done) {
         let Done { lane, ran, kind } = done;
         let Kind::Compact(report) = kind else {
@@ -3487,7 +3487,7 @@ impl Tui {
         self.core.lanes[lane].view.started = None;
     }
 
-    /// Draw the end of a run into the view that is on screen.
+    // Draw the end of a run into the view that is on screen.
     fn close_run(&mut self, out: Result<Totals, AgentError>) {
         self.ui.close(&mut self.core.lane_mut().view);
         // A cancelled run's calls got no `ToolEnd`; their animated rows have to
@@ -3534,11 +3534,11 @@ mod tests {
         assert!(!secret_settings_set("/settings get api_key"));
         assert!(!secret_settings_set("/cost"));
     }
-    /// Both scrollback producers draw block ids from one counter. They used
-    /// not to: a rebuilt block was always `0`, which held only while nothing
-    /// looked one up — and `streaming_row` and `stream_fold` both do, taking the
-    /// last match, so two blocks sharing a number is two blocks the lookup
-    /// cannot tell apart.
+    // Both scrollback producers draw block ids from one counter. They used
+    // not to: a rebuilt block was always `0`, which held only while nothing
+    // looked one up — and `streaming_row` and `stream_fold` both do, taking the
+    // last match, so two blocks sharing a number is two blocks the lookup
+    // cannot tell apart.
     #[test]
     fn rebuilt_reasoning_blocks_get_ids_of_their_own() {
         use agent::session::Session;
@@ -3570,9 +3570,9 @@ mod tests {
         assert!(!ids.contains(&thinking.take_id()), "{ids:?}");
     }
 
-    /// The screen opens with what this run is standing on. It used to be said
-    /// as a startup note, which scrolled away; here it stays at the top, which
-    /// is where "what is my agent obeying" belongs.
+    // The screen opens with what this run is standing on. It used to be said
+    // as a startup note, which scrolled away; here it stays at the top, which
+    // is where "what is my agent obeying" belongs.
     #[test]
     fn the_opening_block_names_the_instruction_files() {
         let paint = Paint::new(false);
@@ -3593,20 +3593,20 @@ mod tests {
         );
     }
 
-    /// Nothing loaded, nothing said — the common case is one personal file and
-    /// a heading over an empty list is worse than no heading.
+    // Nothing loaded, nothing said — the common case is one personal file and
+    // a heading over an empty list is worse than no heading.
     #[test]
     fn an_opening_block_with_no_instruction_files_is_the_banner_alone() {
         let rows = Row::banner(&[], &Paint::new(false));
         assert_eq!(rows.len(), 1);
     }
 
-    /// A closed reasoning block of id `id` and `n` lines in the scrollback.
+    // A closed reasoning block of id `id` and `n` lines in the scrollback.
     fn block(id: u64, n: usize, folded: bool) -> Row {
         Row::reasoning(id, (1..=n).map(|i| format!("line {i}")).collect(), folded)
     }
 
-    /// What the screen shows for a run in the middle of reasoning.
+    // What the screen shows for a run in the middle of reasoning.
     fn shown(t: &Thinking, partial: &str) -> Vec<String> {
         body(
             t,
@@ -3646,10 +3646,10 @@ mod tests {
         assert_eq!(rows, vec!["line 1", "line 2"]);
     }
 
-    /// The divergence this change removes. The live stream rendered an edit's
-    /// sketch; the rebuild rendered the stored result's first line — so the
-    /// same turn looked one way while it happened and another after a rewind.
-    /// Now both build the same row from the same parts.
+    // The divergence this change removes. The live stream rendered an edit's
+    // sketch; the rebuild rendered the stored result's first line — so the
+    // same turn looked one way while it happened and another after a rewind.
+    // Now both build the same row from the same parts.
     #[test]
     fn the_live_row_and_the_rebuilt_row_are_the_same_row() {
         let sketched = "2 files, +3 -1\n  12 + added\n  13 - gone";
@@ -3670,10 +3670,10 @@ mod tests {
         assert_eq!(a.len(), 3, "head plus the two diff rows");
     }
 
-    /// The rows of one result are painted once per width and handed out one at
-    /// a time, so a stale cache would show the narrow frame's clipping in the
-    /// wide one — and only below the head row, where the single-row case
-    /// cannot see it.
+    // The rows of one result are painted once per width and handed out one at
+    // a time, so a stale cache would show the narrow frame's clipping in the
+    // wide one — and only below the head row, where the single-row case
+    // cannot see it.
     #[test]
     fn every_row_of_a_result_is_repainted_when_the_window_changes() {
         let paint = Paint::new(false);
@@ -3701,9 +3701,9 @@ mod tests {
         assert_eq!(narrow, again, "the narrow frame came back different");
     }
 
-    /// A tool that sketched nothing has nothing to store, and the rebuild falls
-    /// back to the first line of what it did store — which is what
-    /// `ToolOutput::preview` falls back to on the live side.
+    // A tool that sketched nothing has nothing to store, and the rebuild falls
+    // back to the first line of what it did store — which is what
+    // `ToolOutput::preview` falls back to on the live side.
     #[test]
     fn a_result_without_a_sketch_falls_back_to_its_first_line() {
         let stored = brain::message::ToolResult::text("c1", "read", "fn main() {}\nmore");
@@ -3717,9 +3717,9 @@ mod tests {
         assert!(!out[0].contains("more"), "only the first line");
     }
 
-    /// The bug this shape exists to fix: a result row used to be clipped when
-    /// it landed and stored as the clipped string, so widening the terminal
-    /// could never bring back what had been cut.
+    // The bug this shape exists to fix: a result row used to be clipped when
+    // it landed and stored as the clipped string, so widening the terminal
+    // could never bring back what had been cut.
     #[test]
     fn widening_the_window_gives_back_what_was_clipped() {
         let paint = Paint::new(false);
@@ -3742,7 +3742,7 @@ mod tests {
         assert!(narrow[0].contains("read") && wide[0].contains("read"));
     }
 
-    /// A failure is not a result that happens to read badly.
+    // A failure is not a result that happens to read badly.
     #[test]
     fn a_failed_result_is_marked_as_one() {
         let paint = Paint::new(false);
@@ -3817,10 +3817,10 @@ mod tests {
         assert_eq!(back, vec!["d", "line 2"]);
     }
 
-    /// A said line wider than the terminal keeps its rule down every row it
-    /// wraps to. Before the border lived apart from the text, the wrap cut it
-    /// at the first row and the rest of the line ran flush against the left
-    /// edge — the bar ended mid-air.
+    // A said line wider than the terminal keeps its rule down every row it
+    // wraps to. Before the border lived apart from the text, the wrap cut it
+    // at the first row and the rest of the line ran flush against the left
+    // edge — the bar ended mid-air.
     #[test]
     fn a_wrapped_said_line_keeps_its_rule_down_every_row() {
         let paint = Paint::new(false);
@@ -3846,8 +3846,8 @@ mod tests {
         assert_eq!(joined, "curl ".repeat(30));
     }
 
-    /// A `!` command keeps its own mark and nothing is repeated: its wrapped
-    /// rows are the command's continuation, not a new command each row.
+    // A `!` command keeps its own mark and nothing is repeated: its wrapped
+    // rows are the command's continuation, not a new command each row.
     #[test]
     fn a_wrapped_bang_command_repeats_nothing() {
         let paint = Paint::new(false);
@@ -4108,8 +4108,8 @@ mod tests {
         assert!(scrollback[1].folded() == Some(false));
     }
 
-    /// One frame of the scrolled-up view: what the window shows, through the
-    /// same growth absorption `flush` applies.
+    // One frame of the scrolled-up view: what the window shows, through the
+    // same growth absorption `flush` applies.
     fn frame(
         content: &[String],
         room: usize,
@@ -4177,18 +4177,18 @@ mod tests {
 
     // ---------------------------------------------------------- settling
 
-    /// A lane wired up enough to be settled: a real transcript, a real agent,
-    /// and a `Turn::Running` standing in for the job that is about to report.
-    /// A lane and the directory it lives in — the guard comes back so the
-    /// caller keeps it alive for as long as the lane is used.
+    // A lane wired up enough to be settled: a real transcript, a real agent,
+    // and a `Turn::Running` standing in for the job that is about to report.
+    // A lane and the directory it lives in — the guard comes back so the
+    // caller keeps it alive for as long as the lane is used.
     fn a_running_lane() -> (tempfile::TempDir, crate::lane::Lane) {
         let dir = tempfile::tempdir().expect("a temp dir");
         let lane = running_lane(dir.path());
         (dir, lane)
     }
 
-    /// An idle worktree lane whose checkout has been deleted from disk —
-    /// exactly what `drop_vanished_lanes` exists to find.
+    // An idle worktree lane whose checkout has been deleted from disk —
+    // exactly what `drop_vanished_lanes` exists to find.
     fn vanished_lane(name: &str) -> crate::lane::Lane {
         let (_dir, mut lane) = a_running_lane();
         lane.turn = crate::lane::Turn::Idle;
@@ -4197,8 +4197,8 @@ mod tests {
         lane
     }
 
-    /// A bare press, for the panel tests: they drive `press` by the action it
-    /// resolved to, and the event itself only carries the printable character.
+    // A bare press, for the panel tests: they drive `press` by the action it
+    // resolved to, and the event itself only carries the printable character.
     fn stroke(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
         crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
     }
@@ -4277,8 +4277,8 @@ mod tests {
         super::Tui::on_test_screen(core, keys)
     }
 
-    /// Put another lane in front, the way a checkout switch would, and
-    /// reconcile the surface against the lane it displaced.
+    // Put another lane in front, the way a checkout switch would, and
+    // reconcile the surface against the lane it displaced.
     fn switch_to(tui: &mut super::Tui, lane: crate::lane::Lane) {
         let was = tui.core.current;
         tui.core.lanes.push(lane);
@@ -4286,9 +4286,9 @@ mod tests {
         tui.reconcile(was);
     }
 
-    /// The panel is the whole reason a shelf is worth having: what is on it
-    /// steers the model, and a shelf you cannot see is a shelf you cannot
-    /// correct. Browse it, rewrite a note, take one away.
+    // The panel is the whole reason a shelf is worth having: what is on it
+    // steers the model, and a shelf you cannot see is a shelf you cannot
+    // correct. Browse it, rewrite a note, take one away.
     #[tokio::test]
     async fn the_panel_rewrites_and_removes_what_is_on_the_shelf() {
         let dir = tempfile::tempdir().expect("a checkout");
@@ -4368,8 +4368,8 @@ mod tests {
         assert_eq!(id, first, "the cursor followed the row that went");
     }
 
-    /// The shelf belongs to a checkout. Open across a switch it would show one
-    /// tree's notes while `x` took a note off another's.
+    // The shelf belongs to a checkout. Open across a switch it would show one
+    // tree's notes while `x` took a note off another's.
     #[tokio::test]
     async fn switching_checkouts_closes_the_shelf() {
         let first = tempfile::tempdir().expect("a checkout");
@@ -4382,8 +4382,8 @@ mod tests {
         assert!(tui.ui.panel.is_none(), "still showing the tree behind you");
     }
 
-    /// Emptying the line is the same intent as deleting the row: a blank note
-    /// on the shelf is a row nothing else can reach.
+    // Emptying the line is the same intent as deleting the row: a blank note
+    // on the shelf is a row nothing else can reach.
     #[tokio::test]
     async fn a_note_rewritten_to_nothing_leaves() {
         let dir = tempfile::tempdir().expect("a checkout");
@@ -4400,9 +4400,9 @@ mod tests {
         assert!(crate::memory::Memory::load(&path).notes.is_empty());
     }
 
-    /// Recall belongs to the checkout, like the transcripts and the completion
-    /// lists. One file for the whole machine put the lines typed in one project
-    /// under `k` in another — a leak as much as a nuisance.
+    // Recall belongs to the checkout, like the transcripts and the completion
+    // lists. One file for the whole machine put the lines typed in one project
+    // under `k` in another — a leak as much as a nuisance.
     #[tokio::test]
     async fn recall_follows_the_checkout() {
         let first = tempfile::tempdir().expect("a checkout");
@@ -4435,9 +4435,9 @@ mod tests {
         assert_eq!(landed.len(), 1, "replaced, not appended: {landed:?}");
     }
 
-    /// A flash belongs to the lane it answered. Carried across a switch it
-    /// names the wrong checkout, and it does it on the row the lane strip
-    /// would have used to say which checkout you just landed in.
+    // A flash belongs to the lane it answered. Carried across a switch it
+    // names the wrong checkout, and it does it on the row the lane strip
+    // would have used to say which checkout you just landed in.
     #[tokio::test]
     async fn a_flash_does_not_follow_the_surface_to_another_lane() {
         let dir = tempfile::tempdir().expect("a temp dir");
@@ -4466,10 +4466,10 @@ mod tests {
         );
     }
 
-    /// A rebuilt lane has already been drawn, whatever its row counts say.
-    /// `rebuild` clears the banner along with the rest — `/resume` and a
-    /// rewind both do it — so a switch back must not read that as a lane
-    /// never drawn and lay a fresh opening block over the transcript.
+    // A rebuilt lane has already been drawn, whatever its row counts say.
+    // `rebuild` clears the banner along with the rest — `/resume` and a
+    // rewind both do it — so a switch back must not read that as a lane
+    // never drawn and lay a fresh opening block over the transcript.
     #[tokio::test]
     async fn switching_back_to_a_rebuilt_lane_keeps_its_transcript() {
         let dir = tempfile::tempdir().expect("a temp dir");
@@ -4494,10 +4494,10 @@ mod tests {
         );
     }
 
-    /// The bug this guards: `/compact` used to settle without ever putting the
-    /// lane back to `Idle`, and a lane left `Running` queues every later
-    /// prompt into a queue that only drains once it is not running — so the
-    /// checkout was wedged for good. Every kind has to come back idle.
+    // The bug this guards: `/compact` used to settle without ever putting the
+    // lane back to `Idle`, and a lane left `Running` queues every later
+    // prompt into a queue that only drains once it is not running — so the
+    // checkout was wedged for good. Every kind has to come back idle.
     #[tokio::test]
     async fn every_kind_of_job_leaves_its_lane_idle() {
         let dir = tempfile::tempdir().expect("a temp dir");
@@ -4547,9 +4547,9 @@ mod tests {
         }
     }
 
-    /// A `!` the user stopped is not a cancelled request. Telling the model
-    /// otherwise sends it a note about a task it never had, and the note says
-    /// to treat that phantom request as cancelled.
+    // A `!` the user stopped is not a cancelled request. Telling the model
+    // otherwise sends it a note about a task it never had, and the note says
+    // to treat that phantom request as cancelled.
     #[tokio::test]
     async fn a_stopped_bash_does_not_tell_the_model_a_request_was_cancelled() {
         let dir = tempfile::tempdir().expect("a temp dir");
@@ -4588,9 +4588,9 @@ mod tests {
         );
     }
 
-    /// The bar reads as a row of names, not a scatter: the sign column holds
-    /// only what a lane is doing — the one in front says so in colour, and
-    /// never with the input prompt's own `\u{203a}`.
+    // The bar reads as a row of names, not a scatter: the sign column holds
+    // only what a lane is doing — the one in front says so in colour, and
+    // never with the input prompt's own `\u{203a}`.
     #[test]
     fn the_lane_bar_separates_names_the_way_every_other_line_does() {
         let mut ui = test_ui(80, 24);
@@ -4620,9 +4620,9 @@ mod tests {
         );
     }
 
-    /// The input prompt's icon belongs to the line you type on. The bar sat
-    /// directly under it wearing the same mark, which read as a second place
-    /// to type — whatever the theme sets that icon to.
+    // The input prompt's icon belongs to the line you type on. The bar sat
+    // directly under it wearing the same mark, which read as a second place
+    // to type — whatever the theme sets that icon to.
     #[test]
     fn the_lane_bar_never_wears_the_input_prompt() {
         let icon = crate::render::Theme::default().prompt.icon;
@@ -4644,9 +4644,9 @@ mod tests {
         );
     }
 
-    /// The input line is the bottom row, and the bar sits above it as the
-    /// edge of the history — not hanging off the line being typed, where it
-    /// read as a second prompt.
+    // The input line is the bottom row, and the bar sits above it as the
+    // edge of the history — not hanging off the line being typed, where it
+    // read as a second prompt.
     #[test]
     fn the_bar_sits_above_the_input_line() {
         let mut ui = test_ui(40, 8);
@@ -4678,10 +4678,10 @@ mod tests {
         );
     }
 
-    /// A flash answers the keypress on the bar row and leaves no trace in the
-    /// transcript: it outranks the lane strip while it is up, and the strip
-    /// comes back on its own once the window passes — with no help from
-    /// whoever set the flash, who is long gone by then.
+    // A flash answers the keypress on the bar row and leaves no trace in the
+    // transcript: it outranks the lane strip while it is up, and the strip
+    // comes back on its own once the window passes — with no help from
+    // whoever set the flash, who is long gone by then.
     #[test]
     fn a_flash_takes_the_bar_row_and_gives_it_back() {
         let mut ui = test_ui(40, 8);
@@ -4728,9 +4728,9 @@ mod tests {
         assert!(ui.flash.is_none(), "the expired flash was dropped");
     }
 
-    /// The same notice landing again with nothing between it and the last one
-    /// is one row and a count — a screenful of identical lines is the failure
-    /// this stops, and only an unbroken run folds.
+    // The same notice landing again with nothing between it and the last one
+    // is one row and a count — a screenful of identical lines is the failure
+    // this stops, and only an unbroken run folds.
     #[test]
     fn the_same_notice_twice_running_is_one_row_and_a_count() {
         let mut ui = test_ui(40, 8);
@@ -4755,10 +4755,10 @@ mod tests {
         assert_eq!(shown(&ui, &lane, 2), "nothing to rewind to");
     }
 
-    /// The Normal `L` walks the checkouts in a ring forward; `H` walks it
-    /// back. Every checkout on disk is in it, not only the open ones
-    /// — the main one first, because that is the order `worktree::list`
-    /// reports and a lane in it carries no name.
+    // The Normal `L` walks the checkouts in a ring forward; `H` walks it
+    // back. Every checkout on disk is in it, not only the open ones
+    // — the main one first, because that is the order `worktree::list`
+    // reports and a lane in it carries no name.
     #[test]
     fn stepping_the_checkouts_walks_the_ring_and_wraps_both_ways() {
         let ring = |at: Option<&str>, forward: bool| {
@@ -4786,9 +4786,9 @@ mod tests {
         assert_eq!(ring(Some("f2"), false).as_deref(), Some("f1"));
     }
 
-    /// The ring agrees with the tabs the bar shows: a step lands on the next
-    /// checkout in the order they were opened, not the order git reports
-    /// them, with the ones not open yet after the open ones.
+    // The ring agrees with the tabs the bar shows: a step lands on the next
+    // checkout in the order they were opened, not the order git reports
+    // them, with the ones not open yet after the open ones.
     #[test]
     fn the_ring_walks_the_tabs_order_not_gits() {
         let mut ui = test_ui(80, 24);
@@ -4833,9 +4833,9 @@ mod tests {
         assert_eq!(ui.step_checkout(&lane, false).as_deref(), Some("fw-rm"));
     }
 
-    /// A checkout deleted from the shell leaves its lane a dead end; the loop
-    /// drops idle ones so the bar's tab and the step ring stop pretending it
-    /// is there, and the lane in front keeps its place.
+    // A checkout deleted from the shell leaves its lane a dead end; the loop
+    // drops idle ones so the bar's tab and the step ring stop pretending it
+    // is there, and the lane in front keeps its place.
     #[test]
     fn a_lane_whose_checkout_vanished_is_dropped_and_current_follows() {
         let dir = tempfile::tempdir().expect("a checkout");
@@ -4873,8 +4873,8 @@ mod tests {
         assert_eq!(tui.core.current, 0, "the front lane follows its index");
     }
 
-    /// A vanished lane that sits before a running one waits: removing it
-    /// would shift the index the running lane's end reports back by.
+    // A vanished lane that sits before a running one waits: removing it
+    // would shift the index the running lane's end reports back by.
     #[test]
     fn a_vanished_lane_before_a_running_one_waits_for_it() {
         let dir = tempfile::tempdir().expect("a checkout");
@@ -4894,7 +4894,7 @@ mod tests {
         assert_eq!(tui.core.lanes.len(), 2);
     }
 
-    /// Nowhere to go is said, not walked to: one checkout has no next.
+    // Nowhere to go is said, not walked to: one checkout has no next.
     #[test]
     fn a_lone_checkout_has_no_next() {
         let ui = test_ui(80, 24);
@@ -4910,10 +4910,10 @@ mod tests {
         assert_eq!(ui.step_checkout(&lane, false), None);
     }
 
-    /// The half-typed line belongs to the lane it was typed at. A switch
-    /// parks it on that lane — the editor is the surface's, and Enter on the
-    /// checkout just landed on must not file another lane's draft into its
-    /// session — and it comes back to the editor when the lane does.
+    // The half-typed line belongs to the lane it was typed at. A switch
+    // parks it on that lane — the editor is the surface's, and Enter on the
+    // checkout just landed on must not file another lane's draft into its
+    // session — and it comes back to the editor when the lane does.
     #[tokio::test]
     async fn a_draft_is_parked_on_the_lane_it_was_typed_at_and_comes_back() {
         let first = tempfile::tempdir().expect("a checkout");
@@ -4946,8 +4946,8 @@ mod tests {
             "the parked draft was taken up, not left behind"
         );
     }
-    /// Up browsing recall puts the composed line aside and shows a recalled
-    /// one; switching then must park the composed line, not the recall.
+    // Up browsing recall puts the composed line aside and shows a recalled
+    // one; switching then must park the composed line, not the recall.
     #[tokio::test]
     async fn a_switch_mid_recall_keeps_the_line_being_typed() {
         let first = tempfile::tempdir().expect("a checkout");
@@ -4969,9 +4969,9 @@ mod tests {
         );
     }
 
-    /// Normal mode: `L` is the next checkout and `H` the previous one, and the
-    /// lowercase pair is left to the caret. `J`/`K` take the window in the
-    /// same hand, half a screen at a time.
+    // Normal mode: `L` is the next checkout and `H` the previous one, and the
+    // lowercase pair is left to the caret. `J`/`K` take the window in the
+    // same hand, half a screen at a time.
     #[test]
     fn normal_capitals_step_the_checkouts_and_the_window() {
         let mut ui = vim_ui();
@@ -5020,10 +5020,10 @@ mod tests {
         );
     }
 
-    /// The completion list stays up during a run — `/help` and `/model` answer
-    /// on the spot then, and the rest queue as what they are. `esc` is the one
-    /// key it costs, and it costs it for a press: innermost first, so the list
-    /// goes and the next `esc` reaches the run.
+    // The completion list stays up during a run — `/help` and `/model` answer
+    // on the spot then, and the rest queue as what they are. `esc` is the one
+    // key it costs, and it costs it for a press: innermost first, so the list
+    // goes and the next `esc` reaches the run.
     #[test]
     fn esc_takes_the_list_first_and_the_run_next() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -5089,11 +5089,11 @@ mod tests {
         );
     }
 
-    /// A surface with an in-memory screen, for the drawing tests below.
-    /// The history area is what is left after the menu, the bar and the input.
-    /// Measured without the bar's row, `window` is handed one row more than the
-    /// frame can paint and `Rows` fills top-down — so the row that goes over
-    /// the edge is the newest one, which is the one being read.
+    // A surface with an in-memory screen, for the drawing tests below.
+    // The history area is what is left after the menu, the bar and the input.
+    // Measured without the bar's row, `window` is handed one row more than the
+    // frame can paint and `Rows` fills top-down — so the row that goes over
+    // the edge is the newest one, which is the one being read.
     #[test]
     fn the_newest_row_survives_a_frame_with_the_lane_bar_on_it() {
         let mut ui = test_ui(40, 8);
@@ -5149,10 +5149,10 @@ mod tests {
             .collect()
     }
 
-    /// The row a run ends on keeps its numbers, not the string they rendered
-    /// to. The segment list that spells it out and the theme that paints it
-    /// both outlive the run, and a string frozen at the end of it answers to
-    /// neither.
+    // The row a run ends on keeps its numbers, not the string they rendered
+    // to. The segment list that spells it out and the theme that paints it
+    // both outlive the run, and a string frozen at the end of it answers to
+    // neither.
     #[test]
     fn the_line_a_run_ends_on_is_respelled_from_its_numbers() {
         let mut ui = test_ui(80, 24);
@@ -5179,8 +5179,8 @@ mod tests {
         assert_eq!(narrowed.last().map(String::as_str), Some("$0.0012"));
     }
 
-    /// A run that begins no turn — a `!` command — spends no tokens, and a row
-    /// of dashes under it reads as a model call that cost nothing.
+    // A run that begins no turn — a `!` command — spends no tokens, and a row
+    // of dashes under it reads as a model call that cost nothing.
     #[test]
     fn a_bang_command_shows_no_token_counts() {
         let ui = test_ui(80, 24);
@@ -5197,9 +5197,9 @@ mod tests {
         assert!(!live.contains(" in / "), "nothing was spent: {live}");
     }
 
-    /// The live region follows the lane's turn, not the clock beside it. One
-    /// field answering both meant every ending path had to put the clock back
-    /// or leave a spinner running over a lane that had finished.
+    // The live region follows the lane's turn, not the clock beside it. One
+    // field answering both meant every ending path had to put the clock back
+    // or leave a spinner running over a lane that had finished.
     #[test]
     fn the_live_region_ends_with_the_turn_and_not_with_the_clock() {
         let ui = test_ui(80, 24);
@@ -5221,7 +5221,7 @@ mod tests {
         );
     }
 
-    /// A surface with the modal keys on, at their defaults.
+    // A surface with the modal keys on, at their defaults.
     #[test]
     fn the_editor_setting_splits_into_a_program_and_its_arguments() {
         assert_eq!(super::split_editor("nvim"), ("nvim".into(), vec![]));
@@ -5234,8 +5234,8 @@ mod tests {
         assert_eq!(super::split_editor("   "), ("vi".into(), vec![]));
     }
 
-    /// The line can hold anything the user was about to say, and `/tmp` is
-    /// shared, so the mode is part of the contract rather than a detail.
+    // The line can hold anything the user was about to say, and `/tmp` is
+    // shared, so the mode is part of the contract rather than a detail.
     #[test]
     fn the_scratch_file_carries_the_line_and_is_private() {
         let path = super::scratch_file("hello\nworld").unwrap();
@@ -5267,9 +5267,9 @@ mod tests {
         ui.vim.as_ref().map(|v| v.mode)
     }
 
-    /// The sequence is read where unbound characters are typed, and its first
-    /// half is a real `j` on a real line until the `k` arrives — nothing is
-    /// held pending, so the screen is never a guess.
+    // The sequence is read where unbound characters are typed, and its first
+    // half is a real `j` on a real line until the `k` arrives — nothing is
+    // held pending, so the screen is never a guess.
     #[test]
     fn jk_leaves_insert_and_takes_its_first_half_back_off_the_line() {
         let mut ui = vim_ui();
@@ -5284,8 +5284,8 @@ mod tests {
         assert_eq!(mode(&ui), Some(crate::keys::Mode::Normal));
     }
 
-    /// Outside the window the two characters are just two characters. Without
-    /// this, a `j` typed minutes ago would still be armed.
+    // Outside the window the two characters are just two characters. Without
+    // this, a `j` typed minutes ago would still be armed.
     #[test]
     fn a_j_left_behind_does_not_arm_a_later_k() {
         let mut ui = vim_ui();
@@ -5300,8 +5300,8 @@ mod tests {
         assert_eq!(mode(&ui), Some(crate::keys::Mode::Insert));
     }
 
-    /// A command between the halves breaks the sequence: `j`, a keystroke that
-    /// means something, then `k` is two commands and a `j`, not a mode change.
+    // A command between the halves breaks the sequence: `j`, a keystroke that
+    // means something, then `k` is two commands and a `j`, not a mode change.
     #[test]
     fn a_bound_key_between_the_halves_breaks_the_sequence() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -5317,9 +5317,9 @@ mod tests {
         assert_eq!(mode(&ui), Some(crate::keys::Mode::Insert));
     }
 
-    /// Normal has to refuse the keys it does not bind. Without this the mode
-    /// is a costume: `z` would still type a `z` and only the bound keys would
-    /// behave, which is worse than no mode at all.
+    // Normal has to refuse the keys it does not bind. Without this the mode
+    // is a costume: `z` would still type a `z` and only the bound keys would
+    // behave, which is worse than no mode at all.
     #[test]
     fn an_unbound_character_types_nothing_in_normal() {
         let mut ui = vim_ui();
@@ -5336,7 +5336,7 @@ mod tests {
         assert_eq!(ui.editor.text(), "ello");
     }
 
-    /// The way back, and what `a` does that `i` does not.
+    // The way back, and what `a` does that `i` does not.
     #[test]
     fn i_and_a_return_to_insert_on_either_side_of_the_caret() {
         let mut ui = vim_ui();
@@ -5357,8 +5357,8 @@ mod tests {
         assert_eq!(ui.editor.text(), "ZYab", "a types past it");
     }
 
-    /// `x` and `D` delete and stay in Normal; these delete the same ranges and
-    /// leave. The landing is the whole difference, so it is asserted twice.
+    // `x` and `D` delete and stay in Normal; these delete the same ranges and
+    // leave. The landing is the whole difference, so it is asserted twice.
     #[test]
     fn s_and_c_delete_their_range_and_land_in_insert() {
         let mut ui = vim_ui();
@@ -5387,11 +5387,11 @@ mod tests {
         assert_eq!(ui.editor.text(), "ZY", "C leaves the caret where it cut");
     }
 
-    /// The mode outlives a submitted line, which is the whole reason it has to
-    /// be visible — and by default that is the caret's shape, not the sigil:
-    /// both modes wear the same bar. `prompt.normal` is what a terminal that
-    /// will not reshape its caret sets to get the difference back, so the
-    /// sigil still follows it.
+    // The mode outlives a submitted line, which is the whole reason it has to
+    // be visible — and by default that is the caret's shape, not the sigil:
+    // both modes wear the same bar. `prompt.normal` is what a terminal that
+    // will not reshape its caret sets to get the difference back, so the
+    // sigil still follows it.
     #[test]
     fn the_sigil_follows_the_theme_rather_than_the_mode() {
         let mut ui = vim_ui();
@@ -5415,9 +5415,9 @@ mod tests {
         assert_eq!(ui.prompt, insert, "and back to the bar on the way out");
     }
 
-    /// Turning the keys off is the one thing that moves the mode without a
-    /// keystroke — otherwise switching back on would land in Normal with
-    /// nothing having asked to go there.
+    // Turning the keys off is the one thing that moves the mode without a
+    // keystroke — otherwise switching back on would land in Normal with
+    // nothing having asked to go there.
     #[test]
     fn turning_the_keys_off_drops_the_mode_rather_than_parking_it() {
         let mut ui = vim_ui();
@@ -5454,17 +5454,17 @@ mod tests {
 
     use crate::lane::Round;
 
-    /// Write `body` to `name` in the lane's workspace and record the write, so
-    /// the tree fingerprint the loop reads has real bytes to hash.
+    // Write `body` to `name` in the lane's workspace and record the write, so
+    // the tree fingerprint the loop reads has real bytes to hash.
     fn wrote(lane: &mut crate::lane::Lane, name: &str, body: &str) {
         let path = lane.ctx.workspace.root().join(name);
         std::fs::write(&path, body).expect("writes into the temp workspace");
         lane.ctx.note_write(&path);
     }
 
-    /// The whole point of the command: what decides another round is the tree,
-    /// so a pass that believes it is finished is overruled by the file it just
-    /// changed.
+    // The whole point of the command: what decides another round is the tree,
+    // so a pass that believes it is finished is overruled by the file it just
+    // changed.
     #[test]
     fn a_loop_goes_round_while_the_tree_keeps_changing() {
         let (_dir, mut lane) = a_running_lane();
@@ -5504,8 +5504,8 @@ mod tests {
         );
     }
 
-    /// A line typed between rounds ends a turn too. Counting it would move the
-    /// loop on work it never ran — and end it, if that line wrote nothing.
+    // A line typed between rounds ends a turn too. Counting it would move the
+    // loop on work it never ran — and end it, if that line wrote nothing.
     #[test]
     fn a_turn_the_loop_did_not_start_is_not_one_of_its_rounds() {
         let (_dir, mut lane) = a_running_lane();
@@ -5524,8 +5524,8 @@ mod tests {
         ));
     }
 
-    /// Esc stops the loop and not merely the round it caught: a cut round is
-    /// the loop ending, not a pause before the next one.
+    // Esc stops the loop and not merely the round it caught: a cut round is
+    // the loop ending, not a pause before the next one.
     #[test]
     fn a_cut_round_takes_the_loop_with_it() {
         let (_dir, mut lane) = a_running_lane();
@@ -5536,8 +5536,8 @@ mod tests {
         assert!(lane.looping.is_none());
     }
 
-    /// The ceiling is the floor for a loop no other brake can catch: one that
-    /// keeps changing files forever without ever repeating itself.
+    // The ceiling is the floor for a loop no other brake can catch: one that
+    // keeps changing files forever without ever repeating itself.
     #[test]
     fn a_loop_stops_at_the_configured_ceiling_with_work_still_left() {
         let (_dir, mut lane) = a_running_lane();
@@ -5561,8 +5561,8 @@ mod tests {
         ));
     }
 
-    /// A round can outlive the loop that queued it — the surface drops those,
-    /// and nothing about them may arm a loop that is over.
+    // A round can outlive the loop that queued it — the surface drops those,
+    // and nothing about them may arm a loop that is over.
     #[test]
     fn a_loop_that_has_ended_cannot_be_revived_by_a_stale_round() {
         let (_dir, mut lane) = a_running_lane();
@@ -5578,8 +5578,8 @@ mod tests {
         assert!(lane.loop_step(true, None).is_none(), "and none to step");
     }
 
-    /// A round that restores the tree to a fingerprint it wore earlier is a
-    /// loop seesawing forever — the round after the rewrite undid it.
+    // A round that restores the tree to a fingerprint it wore earlier is a
+    // loop seesawing forever — the round after the rewrite undid it.
     #[test]
     fn a_round_that_undoes_the_last_one_stops_as_oscillating() {
         let (_dir, mut lane) = a_running_lane();
@@ -5612,9 +5612,9 @@ mod tests {
         assert!(lane.looping.is_none(), "and the loop is gone");
     }
 
-    /// The fingerprint cannot catch a loop that keeps nibbling — one line an
-    /// hour, forever. Two such rounds in a row are the noise floor, and the
-    /// loop stops rather than polish past the point of return.
+    // The fingerprint cannot catch a loop that keeps nibbling — one line an
+    // hour, forever. Two such rounds in a row are the noise floor, and the
+    // loop stops rather than polish past the point of return.
     #[test]
     fn rounds_that_only_nibble_stop_as_thin() {
         let (_dir, mut lane) = a_running_lane();
@@ -5632,7 +5632,7 @@ mod tests {
         assert!(matches!(lane.loop_step(true, None), Some(Round::Thin)));
         assert!(lane.looping.is_none());
     }
-    /// A loop whose goal is another loop would arm itself every round.
+    // A loop whose goal is another loop would arm itself every round.
     #[test]
     fn a_loop_cannot_be_read_as_its_own_goal() {
         assert!(matches!(

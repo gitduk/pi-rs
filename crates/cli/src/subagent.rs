@@ -12,9 +12,9 @@ use agent::task::Home;
 
 use crate::session::Store;
 
-/// The saves a subagent handed off to a background thread, still in flight.
-/// The exit path drains these — a transcript promised on disk has to be there
-/// when the process goes, or the handoff was just a faster way to lose it.
+// The saves a subagent handed off to a background thread, still in flight.
+// The exit path drains these — a transcript promised on disk has to be there
+// when the process goes, or the handoff was just a faster way to lose it.
 fn pending() -> &'static std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>> {
     static PENDING: OnceLock<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> = OnceLock::new();
     PENDING.get_or_init(|| std::sync::Mutex::new(Vec::new()))
@@ -32,8 +32,8 @@ pub(crate) async fn flush() {
 
 pub struct Filed {
     store: Store,
-    /// The checkout it ran in — the same one its caller is in, because a
-    /// subagent does not get a tree of its own.
+    // The checkout it ran in — the same one its caller is in, because a
+    // subagent does not get a tree of its own.
     root: std::path::PathBuf,
     model: String,
 }
@@ -48,13 +48,13 @@ impl Filed {
 }
 
 impl Home for Filed {
-    /// Named rather than left blank: `/resume`'s listing offers sessions to go
-    /// back to, and this is not one — it is a record of something that already
-    /// happened inside somebody else's turn.
-    ///
-    /// The save runs on a blocking thread so several parallel subagents do not
-    /// each serialize megabytes on the tool path; the handle is registered so
-    /// [`flush`] can wait for it before the process goes.
+    // Named rather than left blank: `/resume`'s listing offers sessions to go
+    // back to, and this is not one — it is a record of something that already
+    // happened inside somebody else's turn.
+    //
+    // The save runs on a blocking thread so several parallel subagents do not
+    // each serialize megabytes on the tool path; the handle is registered so
+    // [`flush`] can wait for it before the process goes.
     fn keep(&self, id: &str, session: Session) {
         let (store, root, model, id) = (
             self.store.clone(),

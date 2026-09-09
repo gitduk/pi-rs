@@ -19,56 +19,51 @@ pub const PROMPT: &str = include_str!("../prompts/task.md");
 /// This layer says what it needs and the surface provides it; what a child
 /// spent travels back on the tool result instead.
 pub trait Home: Send + Sync {
-    /// A subagent has no screen, so its transcript is the only account of what
-    /// it did. Called once with the whole transcript, whether the run finished
-    /// or was cut short.
+    // A subagent has no screen, so its transcript is the only account of what
+    // it did. Called once with the whole transcript, whether the run finished
+    // or was cut short.
     fn keep(&self, id: &str, session: Session);
 }
 
-/// Ids only have to be distinct inside one process; the parent's own namespace
-/// makes them distinct across runs.
+// Ids only have to be distinct inside one process; the parent's own namespace
+// makes them distinct across runs.
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(serde::Deserialize)]
 struct Args {
-    /// Never read by the child — this is the caller's word to the screen and
-    /// the journal, which otherwise show a delegated job as a bare `task`.
+    // Never read by the child — this is the caller's word to the screen and
+    // the journal, which otherwise show a delegated job as a bare `task`.
     description: String,
     prompt: String,
-    /// Run after the child stops, in the same checkout. Never seen by the
-    /// child: a check it knows about is a check it can write itself around.
+    // Run after the child stops, in the same checkout. Never seen by the
+    // child: a check it knows about is a check it can write itself around.
     #[serde(default)]
     verify: Option<String>,
 }
 
-/// How many of a child's written paths the result names before it counts the
-/// rest. A note, not a view: `spill::fit` budgets a list the caller asked for,
-/// where this one rides along on every result and has to stay small. The tree
-/// is what a caller reads for the whole manifest.
+// How many of a child's written paths the result names before it counts the
+// rest. A note, not a view: `spill::fit` budgets a list the caller asked for,
+// where this one rides along on every result and has to stay small. The tree
+// is what a caller reads for the whole manifest.
 const NAMED: usize = 20;
 
-/// What ran after the child, and how it went.
+// What ran after the child, and how it went.
 struct Checked {
     command: String,
     outcome: Outcome,
 }
 
-/// A check that ran and one that never got to run are different answers, and
-/// so is the text each carries: what the command printed, or why nothing did.
+// A check that ran and one that never got to run are different answers, and
+// so is the text each carries: what the command printed, or why nothing did.
 enum Outcome {
-    Ran {
-        code: i32,
-        body: String,
-    },
-    /// Killed at the cap. It ran, possibly far enough to leave changes behind,
-    /// and only its verdict is missing — never say this one did not run.
-    CutOff {
-        ms: u64,
-    },
-    /// No verdict, for a reason that is not the cap. Deliberately silent on
-    /// whether the command ran: a shell that would not start and an output
-    /// that would not spill both arrive as one error, and guessing between
-    /// them is how a caller is told the tree is clean when it is not.
+    Ran { code: i32, body: String },
+    // Killed at the cap. It ran, possibly far enough to leave changes behind,
+    // and only its verdict is missing — never say this one did not run.
+    CutOff { ms: u64 },
+    // No verdict, for a reason that is not the cap. Deliberately silent on
+    // whether the command ran: a shell that would not start and an output
+    // that would not spill both arrive as one error, and guessing between
+    // them is how a caller is told the tree is clean when it is not.
     NoVerdict(String),
 }
 
@@ -78,12 +73,12 @@ enum Outcome {
 /// in between is a second agent with a window of its own — which is the point:
 /// a long search costs the caller one paragraph instead of forty turns.
 pub struct Task {
-    /// Cloned for each call and thrown away after. Its registry has no `task`
-    /// of its own, so this does not nest.
+    // Cloned for each call and thrown away after. Its registry has no `task`
+    // of its own, so this does not nest.
     agent: Arc<Agent>,
     home: Arc<dyn Home>,
-    /// Two limits, because they stop different things: turns stop a loop that
-    /// keeps failing, the deadline stops a single call that has wedged.
+    // Two limits, because they stop different things: turns stop a loop that
+    // keeps failing, the deadline stops a single call that has wedged.
     max_turns: usize,
     deadline: Duration,
 }
@@ -121,15 +116,15 @@ impl Task {
     }
 }
 
-/// What the child's event stream said, once it has closed.
+// What the child's event stream said, once it has closed.
 #[derive(Default)]
 struct Heard {
-    /// The last turn's prose only. Every earlier turn was followed by tool
-    /// calls, which is what makes it not the answer.
+    // The last turn's prose only. Every earlier turn was followed by tool
+    // calls, which is what makes it not the answer.
     text: String,
     turns: usize,
-    /// Accumulated per turn rather than taken from `run`, which hands back
-    /// nothing when it ends early — and a run cut short has still been paid for.
+    // Accumulated per turn rather than taken from `run`, which hands back
+    // nothing when it ends early — and a run cut short has still been paid for.
     spent: Totals,
 }
 
@@ -193,7 +188,7 @@ impl Tool for Task {
         })
     }
 
-    /// What the child may do, because that is what the caller is authorising.
+    // What the child may do, because that is what the caller is authorising.
     fn tier(&self) -> Tier {
         Tier::Exec
     }
@@ -339,10 +334,10 @@ impl Tool for Task {
     }
 }
 
-/// The line a finished call leaves on the screen: the job it was, and in
-/// brackets what it took. The job leads because several children run at once
-/// and a bill alone names none of them; the brackets are what keep the bill
-/// from reading as a second thing the caller asked for.
+// The line a finished call leaves on the screen: the job it was, and in
+// brackets what it took. The job leads because several children run at once
+// and a bill alone names none of them; the brackets are what keep the bill
+// from reading as a second thing the caller asked for.
 fn sketch(description: &str, heard: &Heard) -> String {
     let spent = format!(
         "{} turn{} · {}",
@@ -361,15 +356,15 @@ fn sketch(description: &str, heard: &Heard) -> String {
     }
 }
 
-/// What the caller reads: the child's own words, then the notes that were not
-/// taken from them.
-///
-/// A subagent's account of itself is the one part of this result nothing else
-/// checks, and the caller cannot tell a job done from a job merely reported
-/// done. `wrote` and `check` are taken from the tree instead — the paths from
-/// the bookkeeping every write goes through, the status from running the
-/// caller's own command afterwards. Never empty: a subagent that said nothing
-/// is a fact the caller has to be told, not an empty string to interpret.
+// What the caller reads: the child's own words, then the notes that were not
+// taken from them.
+//
+// A subagent's account of itself is the one part of this result nothing else
+// checks, and the caller cannot tell a job done from a job merely reported
+// done. `wrote` and `check` are taken from the tree instead — the paths from
+// the bookkeeping every write goes through, the status from running the
+// caller's own command afterwards. Never empty: a subagent that said nothing
+// is a fact the caller has to be told, not an empty string to interpret.
 fn answer(heard: &Heard, cut: Option<&str>, wrote: &[String], check: Option<&Checked>) -> String {
     let said = heard.text.trim();
     let body = if said.is_empty() {
@@ -391,8 +386,8 @@ fn answer(heard: &Heard, cut: Option<&str>, wrote: &[String], check: Option<&Che
     format!("{body}\n\n{}", notes.join("\n"))
 }
 
-/// The paths the child wrote — or that it wrote none, which is the line worth
-/// having when it has just finished describing the changes it made.
+// The paths the child wrote — or that it wrote none, which is the line worth
+// having when it has just finished describing the changes it made.
 fn wrote_line(wrote: &[String]) -> String {
     let n = wrote.len();
     if n == 0 {
@@ -411,8 +406,8 @@ fn wrote_line(wrote: &[String]) -> String {
     }
 }
 
-/// A passing check says all it has to with its exit status; a failing one is
-/// what the caller asked for, so its output comes too.
+// A passing check says all it has to with its exit status; a failing one is
+// what the caller asked for, so its output comes too.
 fn check_line(check: &Checked) -> String {
     let command = &check.command;
     match &check.outcome {
@@ -457,8 +452,8 @@ mod tests {
         assert_eq!(many.matches("src/f").count(), NAMED, "{many}");
     }
 
-    /// The cap is ten minutes, so the endings a caller most needs told apart
-    /// are the two no run in a test can reach.
+    // The cap is ten minutes, so the endings a caller most needs told apart
+    // are the two no run in a test can reach.
     #[test]
     fn a_check_that_may_have_run_is_never_reported_as_one_that_did_not() {
         let of = |outcome| {

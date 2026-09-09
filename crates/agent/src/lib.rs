@@ -77,8 +77,8 @@ impl Default for Retry {
 }
 
 impl Retry {
-    /// Exponential, capped, with jitter so concurrent agents do not retry in
-    /// lockstep against a provider that is already struggling.
+    // Exponential, capped, with jitter so concurrent agents do not retry in
+    // lockstep against a provider that is already struggling.
     fn delay(&self, attempt: usize) -> std::time::Duration {
         let grown = self.base.saturating_mul(1u32 << attempt.min(10));
         let capped = grown.min(self.max);
@@ -135,9 +135,9 @@ pub struct Agent {
 // different error starts a new count.
 type Failures = HashMap<(String, String), usize>;
 
-/// The window, as the turn that ships it sees it. Shaped as a tag rather than
-/// a sentence because a note is read in the user's voice: a reading is a fact
-/// about the run, where a sentence would be someone talking.
+// The window, as the turn that ships it sees it. Shaped as a tag rather than
+// a sentence because a note is read in the user's voice: a reading is a fact
+// about the run, where a sentence would be someone talking.
 fn context_note(used: usize, budget: usize, trimmed: bool) -> String {
     // Says only that the transcript shrank, never how: a summary that replaced
     // part of it is in the transcript to be read, where the taking is not. The
@@ -146,12 +146,12 @@ fn context_note(used: usize, budget: usize, trimmed: bool) -> String {
     format!("<context used=\"{used}\" budget=\"{budget}\"{trimmed}/>")
 }
 
-/// Everything the turn says about itself, in the order it is read: what the
-/// window is doing now, then what outlived the transcripts before it.
-///
-/// Read from the shelf each turn rather than held: compaction writes to it
-/// mid-run, and a copy taken at startup would show the model a shelf without
-/// the note it had just put there.
+// Everything the turn says about itself, in the order it is read: what the
+// window is doing now, then what outlived the transcripts before it.
+//
+// Read from the shelf each turn rather than held: compaction writes to it
+// mid-run, and a copy taken at startup would show the model a shelf without
+// the note it had just put there.
 fn turn_notes(used: usize, budget: usize, trimmed: bool, shelf: Option<String>) -> Vec<String> {
     let mut out = vec![context_note(used, budget, trimmed)];
     out.extend(shelf.filter(|m| !m.trim().is_empty()));
@@ -460,13 +460,13 @@ impl Agent {
         unreachable!("an unlimited run can only leave by returning inside the loop")
     }
 
-    /// Shrink the transcript to `budget` if it is over, recording what went,
-    /// and hand back what to send.
-    ///
-    /// The context comes back rather than being rebuilt by the caller: this has
-    /// to build one to measure, and when nothing changed that is exactly the
-    /// one to send. Building it twice a turn walked every entry and cloned
-    /// every block for an answer already in hand.
+    // Shrink the transcript to `budget` if it is over, recording what went,
+    // and hand back what to send.
+    //
+    // The context comes back rather than being rebuilt by the caller: this has
+    // to build one to measure, and when nothing changed that is exactly the
+    // one to send. Building it twice a turn walked every entry and cloned
+    // every block for an answer already in hand.
     async fn maybe_compact(
         &self,
         session: &mut Session,
@@ -511,10 +511,10 @@ impl Agent {
         self.tail_within(self.budget())
     }
 
-    /// The working tail to hold back, against a transcript budget of `budget`.
-    ///
-    /// A flat 16k is a seventh of a 114k budget and more than a 9k one holds,
-    /// and a tail the size of the budget leaves the drop tier nothing to take.
+    // The working tail to hold back, against a transcript budget of `budget`.
+    //
+    // A flat 16k is a seventh of a 114k budget and more than a 9k one holds,
+    // and a tail the size of the budget leaves the drop tier nothing to take.
     fn tail_within(&self, budget: usize) -> usize {
         self.compaction.protect_tail.min(budget / 4)
     }
@@ -554,22 +554,22 @@ impl Agent {
         Some((report, spent))
     }
 
-    /// Ask what the span being dropped is worth, and to whom.
-    ///
-    /// Two judgements about one span, so one function and one round trip: a
-    /// summary that carries this session's work forward, folding in any
-    /// summary already in force and retiring it, and a few facts for the shelf
-    /// that should outlive the session entirely.
-    ///
-    /// A failure in either is not fatal: the entries still go. Losing the
-    /// summary costs context and losing a note costs a fact; failing the turn
-    /// costs the whole run.
-    ///
-    /// Returns the usage *and what it cost*, because only here is it known
-    /// which spec priced it. Handing back a bare usage let both callers pick a
-    /// spec themselves, and both picked the main model's — so a cheaper
-    /// summarizer would have been billed at the expensive model's rates, twice
-    /// over and without a word.
+    // Ask what the span being dropped is worth, and to whom.
+    //
+    // Two judgements about one span, so one function and one round trip: a
+    // summary that carries this session's work forward, folding in any
+    // summary already in force and retiring it, and a few facts for the shelf
+    // that should outlive the session entirely.
+    //
+    // A failure in either is not fatal: the entries still go. Losing the
+    // summary costs context and losing a note costs a fact; failing the turn
+    // costs the whole run.
+    //
+    // Returns the usage *and what it cost*, because only here is it known
+    // which spec priced it. Handing back a bare usage let both callers pick a
+    // spec themselves, and both picked the main model's — so a cheaper
+    // summarizer would have been billed at the expensive model's rates, twice
+    // over and without a word.
     async fn retire_span(
         &self,
         session: &Session,
@@ -609,11 +609,11 @@ impl Agent {
         (usage, cost)
     }
 
-    /// Ask what should outlive the session and put it on the shelf, when there
-    /// is one. Answers with what the asking cost, zero when nothing was asked.
-    ///
-    /// A failure is swallowed for the same reason the summary's is: losing a
-    /// note costs a fact, failing the compaction costs the run.
+    // Ask what should outlive the session and put it on the shelf, when there
+    // is one. Answers with what the asking cost, zero when nothing was asked.
+    //
+    // A failure is swallowed for the same reason the summary's is: losing a
+    // note costs a fact, failing the compaction costs the run.
     async fn fill_shelf(
         &self,
         transport: &dyn Transport,
@@ -646,8 +646,8 @@ impl Agent {
         self.budget_within(self.spec.context_window as usize)
     }
 
-    /// The same accounting against a window the provider named instead of the
-    /// one the spec claims.
+    // The same accounting against a window the provider named instead of the
+    // one the spec claims.
     fn budget_within(&self, window: usize) -> usize {
         // A spec may declare an output cap larger than the window it is being
         // used against — an overridden window, a proxy, a stale entry. Reserving
@@ -662,7 +662,7 @@ impl Agent {
         window.saturating_sub(fixed).max(window / 4)
     }
 
-    /// Run one request, retrying while the provider says it is a passing problem.
+    // Run one request, retrying while the provider says it is a passing problem.
     async fn stream_turn(
         &self,
         req: &Request,
@@ -709,8 +709,8 @@ impl Agent {
         }
     }
 
-    /// One attempt. Deltas reach the renderer as they arrive, so a retry shows
-    /// as a false start — which the Retrying event is there to explain.
+    // One attempt. Deltas reach the renderer as they arrive, so a retry shows
+    // as a false start — which the Retrying event is there to explain.
     async fn attempt(
         &self,
         req: &Request,
@@ -769,11 +769,11 @@ impl Agent {
         Ok(acc.finish())
     }
 
-    /// Every call gets exactly one result, in call order: an unanswered
-    /// `tool_use` makes the next request invalid on both wires.
-    ///
-    /// `spent` is where a nested call's costs land — a subagent's whole run —
-    /// so the run that called it reports them.
+    // Every call gets exactly one result, in call order: an unanswered
+    // `tool_use` makes the next request invalid on both wires.
+    //
+    // `spent` is where a nested call's costs land — a subagent's whole run —
+    // so the run that called it reports them.
     async fn run_calls(
         &self,
         calls: &[ToolCall],
@@ -1093,16 +1093,16 @@ mod tests {
     use super::*;
     use brain::message::ToolCall;
 
-    /// A reclaim is an event, not a running total: what the model has to act on
-    /// is that its transcript just shrank, and that is true of one turn only. A
-    /// count would be read as a standing fact on every later one.
-    ///
-    /// It claims a taking and never a summary. `plan` spends its cheaper
-    /// measures before it drops anything, and a summary is written only for a
-    /// drop — so on the common path there is nothing to promise.
-    /// The window first, the shelf after: what the turn is doing now, then
-    /// what outlived the transcripts before it. An empty shelf says nothing at
-    /// all rather than an empty tag for the model to interpret.
+    // A reclaim is an event, not a running total: what the model has to act on
+    // is that its transcript just shrank, and that is true of one turn only. A
+    // count would be read as a standing fact on every later one.
+    //
+    // It claims a taking and never a summary. `plan` spends its cheaper
+    // measures before it drops anything, and a summary is written only for a
+    // drop — so on the common path there is nothing to promise.
+    // The window first, the shelf after: what the turn is doing now, then
+    // what outlived the transcripts before it. An empty shelf says nothing at
+    // all rather than an empty tag for the model to interpret.
     #[test]
     fn the_shelf_rides_the_turn_behind_the_window_reading() {
         let window = context_note(10, 100, false);
@@ -1154,9 +1154,9 @@ mod tests {
         assert!(n.unwrap().contains("edit"));
     }
 
-    /// The transcript says a call failed; only the journal says what the call
-    /// actually carried. A loop is exactly when that difference starts to
-    /// matter, so the notice that names the loop is where the journal is named.
+    // The transcript says a call failed; only the journal says what the call
+    // actually carried. A loop is exactly when that difference starts to
+    // matter, so the notice that names the loop is where the journal is named.
     #[test]
     fn the_notice_points_at_the_journal_it_cannot_otherwise_reach() {
         let journal = std::path::Path::new("/fixture/sessions/-w/s1/journal.jsonl");

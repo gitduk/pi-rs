@@ -20,8 +20,8 @@ const MIN_THINKING_BUDGET: u32 = 1024;
 pub struct Anthropic {
     http: reqwest::Client,
     api_key: Option<String>,
-    /// Session-lived, not per-request: what a host gets wrong it gets wrong
-    /// every turn, and the reader needs to hear it once.
+    // Session-lived, not per-request: what a host gets wrong it gets wrong
+    // every turn, and the reader needs to hear it once.
     gaps: Shared,
 }
 
@@ -160,7 +160,7 @@ fn encode_messages(msgs: &[Message], spec: &ModelSpec) -> Vec<Value> {
     out
 }
 
-/// The cache marker this endpoint is known to take, if any.
+// The cache marker this endpoint is known to take, if any.
 fn marker(cache: CacheControl) -> Option<Value> {
     match cache {
         // An endpoint nobody has measured is not told to cache, per block no
@@ -467,7 +467,7 @@ mod tests {
         ToolResult::text(call, name, "ok")
     }
 
-    /// One block per message, the way `Session::context` hands them over now.
+    // One block per message, the way `Session::context` hands them over now.
     fn apart() -> Vec<Message> {
         vec![
             Message::user("go"),
@@ -496,8 +496,8 @@ mod tests {
         ]
     }
 
-    /// The same conversation as the view used to merge it, before the join
-    /// moved into the encoder.
+    // The same conversation as the view used to merge it, before the join
+    // moved into the encoder.
     fn together() -> Vec<Message> {
         let mut msgs = apart();
         let tail: Vec<UserContent> = msgs
@@ -754,10 +754,10 @@ mod tests {
         assert_eq!(body["messages"].as_array().unwrap().len(), 0);
     }
 
-    /// A breakpoint caches up to and including the block it lands on, so
-    /// anything after it is outside — which is where something recomputed every
-    /// turn has to sit, or the prefix breaks on it. The top-level field cannot
-    /// do that job: it lands on the *last* block, which is the note itself.
+    // A breakpoint caches up to and including the block it lands on, so
+    // anything after it is outside — which is where something recomputed every
+    // turn has to sit, or the prefix breaks on it. The top-level field cannot
+    // do that job: it lands on the *last* block, which is the note itself.
     #[test]
     fn a_note_pushes_the_breakpoint_onto_the_block_before_it() {
         let req = Request {
@@ -792,9 +792,9 @@ mod tests {
         );
     }
 
-    /// Notes with nowhere to land take no marker, so it comes back unplaced and
-    /// the top-level field still gets it. Keying that on `notes.is_empty()`
-    /// instead would cache nothing at all — worse than before.
+    // Notes with nowhere to land take no marker, so it comes back unplaced and
+    // the top-level field still gets it. Keying that on `notes.is_empty()`
+    // instead would cache nothing at all — worse than before.
     #[test]
     fn notes_that_are_dropped_do_not_take_the_breakpoint_with_them() {
         let req = Request {
@@ -812,9 +812,9 @@ mod tests {
         );
     }
 
-    /// One field, placed once. The breakpoint used to sit on the system block
-    /// and nowhere else, so the transcript — much the largest part of the
-    /// request — was re-read at full price every turn.
+    // One field, placed once. The breakpoint used to sit on the system block
+    // and nowhere else, so the transcript — much the largest part of the
+    // request — was re-read at full price every turn.
     #[test]
     fn caching_is_asked_for_once_at_the_top_and_not_per_block() {
         let req = Request {
@@ -847,13 +847,13 @@ mod tests {
         assert!(build_body(&cold, &req).get("cache_control").is_none());
     }
 
-    /// The estimate and the encoder must answer the same question. They are
-    /// separate walks of the same transcript — one decides when to compact, the
-    /// other decides what ships — and a gap between them is invisible: the
-    /// budget simply runs out early, and what pays is real context dropped to
-    /// make room for bytes that were never sent. Measured on real sessions the
-    /// gap was 53%, because prior reasoning was counted whatever the spec did
-    /// with it.
+    // The estimate and the encoder must answer the same question. They are
+    // separate walks of the same transcript — one decides when to compact, the
+    // other decides what ships — and a gap between them is invisible: the
+    // budget simply runs out early, and what pays is real context dropped to
+    // make room for bytes that were never sent. Measured on real sessions the
+    // gap was 53%, because prior reasoning was counted whatever the spec did
+    // with it.
     #[test]
     fn the_estimate_counts_what_the_wire_carries() {
         let thinking = "z".repeat(20_000);

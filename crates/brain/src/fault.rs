@@ -3,12 +3,12 @@ use crate::error::BrainError;
 /// What to do about a failed request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fault {
-    /// Load, throttling, or transport trouble. Worth another attempt.
+    // Load, throttling, or transport trouble. Worth another attempt.
     Transient,
-    /// The request did not fit the model's window. Retrying it unchanged will
-    /// fail identically; it has to get smaller first.
+    // The request did not fit the model's window. Retrying it unchanged will
+    // fail identically; it has to get smaller first.
     Overflow,
-    /// Retrying changes nothing, and for a spent quota it also costs money.
+    // Retrying changes nothing, and for a spent quota it also costs money.
     Permanent,
 }
 

@@ -534,12 +534,12 @@ class A:
 mod agreement {
     use super::*;
 
-    /// The one property that made `block` and `outline` two implementations of
-    /// the same idea worth unifying: every row a skeleton offers must resolve,
-    /// through the other entry point, to exactly the range the skeleton showed.
-    ///
-    /// Run over this crate's own source, which carries doc comments, attributes
-    /// and nesting, plus one fixture per remaining shape.
+    // The one property that made `block` and `outline` two implementations of
+    // the same idea worth unifying: every row a skeleton offers must resolve,
+    // through the other entry point, to exactly the range the skeleton showed.
+    //
+    // Run over this crate's own source, which carries doc comments, attributes
+    // and nesting, plus one fixture per remaining shape.
     #[test]
     fn every_listed_row_resolves_to_the_range_it_was_listed_with() {
         let cases: &[(Lang, &str)] = &[

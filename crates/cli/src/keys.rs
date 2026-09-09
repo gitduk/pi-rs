@@ -19,11 +19,11 @@ use crossterm::event::{KeyCode, KeyModifiers};
 /// more layers — nothing here can express being in both at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Mode {
-    /// Keys type. The layer is empty: everything Insert does, it does by
-    /// falling through to `Editor`.
+    // Keys type. The layer is empty: everything Insert does, it does by
+    // falling through to `Editor`.
     #[default]
     Insert,
-    /// Keys command. Bare characters move and delete instead of typing.
+    // Keys command. Bare characters move and delete instead of typing.
     Normal,
 }
 
@@ -31,22 +31,22 @@ pub enum Mode {
 /// the menu claims never reaches the editor underneath it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum When {
-    /// The completion list is open.
+    // The completion list is open.
     Menu,
-    /// A panel is open and browsing, not editing a row: its own verbs.
-    ///
-    /// Their own layer rather than `Menu`, which the completion list shares: a
-    /// bare letter bound there is a letter the completion list can no longer
-    /// be filtered by, and `x` and `e` are letters. One layer per panel rather
-    /// than one shared by all of them, for the same reason one step down: a
-    /// letter one panel binds is one the next panel cannot.
+    // A panel is open and browsing, not editing a row: its own verbs.
+    //
+    // Their own layer rather than `Menu`, which the completion list shares: a
+    // bare letter bound there is a letter the completion list can no longer
+    // be filtered by, and `x` and `e` are letters. One layer per panel rather
+    // than one shared by all of them, for the same reason one step down: a
+    // letter one panel binds is one the next panel cannot.
     Panel(Which),
-    /// A turn is in flight.
+    // A turn is in flight.
     Run,
-    /// Only in that mode, and only while vim keys are on at all.
+    // Only in that mode, and only while vim keys are on at all.
     Mode(Mode),
-    /// Always — in both modes, so the thirty bindings that were here before
-    /// vim existed keep working under it.
+    // Always — in both modes, so the thirty bindings that were here before
+    // vim existed keep working under it.
     Editor,
 }
 
@@ -66,11 +66,11 @@ pub enum Which {
 pub enum Menu {
     #[default]
     Off,
-    /// A completion list, the rewind selector, or a panel with no verbs of
-    /// its own: the menu's movement and dismissal keys, and nothing more.
+    // A completion list, the rewind selector, or a panel with no verbs of
+    // its own: the menu's movement and dismissal keys, and nothing more.
     On,
-    /// A panel browsing rather than editing, so its own verbs are letters no
-    /// longer. Everything `On` has, and these over the top of it.
+    // A panel browsing rather than editing, so its own verbs are letters no
+    // longer. Everything `On` has, and these over the top of it.
     Verbs(Which),
 }
 
@@ -98,8 +98,8 @@ pub enum Action {
     MoveCharRight,
     MoveWordLeft,
     MoveWordRight,
-    /// To the start of the next word, which `MoveWordRight` does not do: it
-    /// lands on the end of this one. Vim's `w` beside vim's `e`.
+    // To the start of the next word, which `MoveWordRight` does not do: it
+    // lands on the end of this one. Vim's `w` beside vim's `e`.
     MoveWordNext,
     MoveLineStart,
     MoveLineEnd,
@@ -111,7 +111,7 @@ pub enum Action {
     MenuNext,
     MenuPrevious,
     MenuDismiss,
-    /// Take the focused row away, where a list has rows that can go.
+    // Take the focused row away, where a list has rows that can go.
     MenuDelete,
     RunInterrupt,
     Rewind,
@@ -135,7 +135,7 @@ pub enum Action {
     // no operator here, so the two ranges worth having are bound directly.
     ChangeChar,
     ChangeToLineEnd,
-    /// The line, in `$EDITOR`. The one action that leaves the process.
+    // The line, in `$EDITOR`. The one action that leaves the process.
     EditExternally,
 }
 
@@ -713,10 +713,10 @@ pub fn parse(spec: &str) -> Result<Press> {
 #[derive(Debug)]
 pub struct Keys {
     map: HashMap<(When, Press), Action>,
-    /// Which binding owns each key. `resolve` builds this to catch conflicts
-    /// and it used to be thrown away; keeping it is what lets `listing` ask
-    /// "what is bound to this id" instead of reconstructing the answer from
-    /// the action, which two ids in one layer are allowed to share.
+    // Which binding owns each key. `resolve` builds this to catch conflicts
+    // and it used to be thrown away; keeping it is what lets `listing` ask
+    // "what is bound to this id" instead of reconstructing the answer from
+    // the action, which two ids in one layer are allowed to share.
     who: HashMap<(When, Press), &'static str>,
 }
 
@@ -905,11 +905,11 @@ mod tests {
         );
     }
 
-    /// `menu.dismiss` and `run.interrupt` are the only two bindings that claim
-    /// one key. With nothing over the editor the run gets it in every mode —
-    /// which is the whole of the common case, since an empty line completes to
-    /// nothing and raises no list. Read from the table rather than written as
-    /// `esc`, so rebinding either one does not make this pass by never firing.
+    // `menu.dismiss` and `run.interrupt` are the only two bindings that claim
+    // one key. With nothing over the editor the run gets it in every mode —
+    // which is the whole of the common case, since an empty line completes to
+    // nothing and raises no list. Read from the table rather than written as
+    // `esc`, so rebinding either one does not make this pass by never firing.
     #[test]
     fn nothing_over_the_editor_leaves_the_stop_key_to_the_run() {
         let k = Keys::default();
@@ -953,9 +953,9 @@ mod tests {
         );
     }
 
-    /// The reason the shelf has a layer of its own. `x` and `e` are letters,
-    /// and the completion list is filtered by letters — bound under `Menu`
-    /// they would be letters the list could no longer be narrowed by.
+    // The reason the shelf has a layer of its own. `x` and `e` are letters,
+    // and the completion list is filtered by letters — bound under `Menu`
+    // they would be letters the list could no longer be narrowed by.
     #[test]
     fn the_shelf_letters_reach_no_further_than_the_shelf() {
         let k = Keys::default();

@@ -87,10 +87,10 @@ pub(crate) async fn exchange(
 /// model id: identity is resolved once, into the spec.
 #[async_trait]
 pub trait Transport: Send + Sync {
-    /// What this host owed and did not send, since the last time it was asked.
-    /// Drained per turn and shown once per session, so a host quietly losing
-    /// content is something the reader is told rather than something they have
-    /// to go looking for.
+    // What this host owed and did not send, since the last time it was asked.
+    // Drained per turn and shown once per session, so a host quietly losing
+    // content is something the reader is told rather than something they have
+    // to go looking for.
     fn gaps(&self) -> Vec<String> {
         Vec::new()
     }
@@ -149,14 +149,14 @@ impl Shared {
 /// transport was speaking.
 pub(crate) struct Gaps {
     format: &'static str,
-    /// One line per (event, thing) for the life of the *session*, not the
-    /// stream. A malformed delta otherwise repeats once per token and a missing
-    /// field once per turn; a defect belongs to the host, and said every turn
-    /// it teaches the reader to skip it.
+    // One line per (event, thing) for the life of the *session*, not the
+    // stream. A malformed delta otherwise repeats once per token and a missing
+    // field once per turn; a defect belongs to the host, and said every turn
+    // it teaches the reader to skip it.
     said: BTreeSet<(String, String)>,
-    /// Reported gaps waiting to reach the reader. The journal has them either
-    /// way — this is the half that gets seen without being grepped for, which
-    /// is the half that matters when every turn is quietly losing content.
+    // Reported gaps waiting to reach the reader. The journal has them either
+    // way — this is the half that gets seen without being grepped for, which
+    // is the half that matters when every turn is quietly losing content.
     pending: Vec<String>,
 }
 
@@ -251,8 +251,8 @@ mod tests {
         assert_eq!(gaps.reported(), 1);
     }
 
-    /// A malformed delta arrives once per token. Said every time, the one line
-    /// that matters is buried under two thousand copies of itself.
+    // A malformed delta arrives once per token. Said every time, the one line
+    // that matters is buried under two thousand copies of itself.
     #[test]
     fn the_same_gap_is_said_once_however_often_it_arrives() {
         let mut gaps = Gaps::new("openai");

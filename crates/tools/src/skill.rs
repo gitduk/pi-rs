@@ -10,7 +10,7 @@ pub const NAME: &str = "skill";
 #[derive(Deserialize)]
 struct Args {
     name: String,
-    /// A file inside the skill's own directory, when the body points at one.
+    // A file inside the skill's own directory, when the body points at one.
     #[serde(default)]
     file: Option<String>,
 }

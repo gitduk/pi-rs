@@ -4,8 +4,8 @@ use tools::Tier;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decision {
     Allow,
-    /// The model reads this and can pick another route; a denial is a result,
-    /// not the end of the turn.
+    // The model reads this and can pick another route; a denial is a result,
+    // not the end of the turn.
     Deny(String),
 }
 

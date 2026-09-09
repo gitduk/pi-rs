@@ -23,9 +23,9 @@ use crate::repl::Intent;
 /// Which panel is open, and the rows it is showing. A new panel is a variant
 /// here, and the matches below are what the compiler then asks it to answer.
 pub enum Body {
-    /// Every path the config has, and the value it holds.
+    // Every path the config has, and the value it holds.
     Settings(Vec<(String, String)>),
-    /// What this workspace remembers.
+    // What this workspace remembers.
     Shelf(Vec<memory::Row>),
 }
 
@@ -37,9 +37,9 @@ impl Body {
         }
     }
 
-    /// One row as it paints, without the caret the list puts in front of it.
-    /// `hidden` marks the row being rewritten: the edit line below carries its
-    /// text, so the row itself stands aside.
+    // One row as it paints, without the caret the list puts in front of it.
+    // `hidden` marks the row being rewritten: the edit line below carries its
+    // text, so the row itself stands aside.
     fn row(&self, at: usize, hidden: bool) -> String {
         match self {
             Body::Settings(rows) => {
@@ -67,8 +67,8 @@ impl Body {
         }
     }
 
-    /// The text an edit of this row starts from, or None where the cursor is
-    /// on nothing: a panel can be empty, and an empty one has no row.
+    // The text an edit of this row starts from, or None where the cursor is
+    // on nothing: a panel can be empty, and an empty one has no row.
     fn text(&self, at: usize) -> Option<&str> {
         match self {
             Body::Settings(rows) => rows.get(at).map(|(_, v)| v.as_str()),
@@ -76,7 +76,7 @@ impl Body {
         }
     }
 
-    /// What a finished edit asks the loop for.
+    // What a finished edit asks the loop for.
     fn commit(&self, at: usize, text: String) -> Option<Intent> {
         match self {
             Body::Settings(rows) => rows
@@ -86,8 +86,8 @@ impl Body {
         }
     }
 
-    /// What taking the focused row away asks for, where rows can go at all.
-    /// The config has no row to take away, and `x` is not bound over it.
+    // What taking the focused row away asks for, where rows can go at all.
+    // The config has no row to take away, and `x` is not bound over it.
     fn remove(&self, at: usize) -> Option<Intent> {
         match self {
             Body::Settings(_) => None,
@@ -95,8 +95,8 @@ impl Body {
         }
     }
 
-    /// The layer this panel's own verbs sit under, over the menu bindings it
-    /// borrows. None where it has no verbs of its own.
+    // The layer this panel's own verbs sit under, over the menu bindings it
+    // borrows. None where it has no verbs of its own.
     fn layer(&self) -> Option<Which> {
         match self {
             Body::Settings(_) => None,
@@ -104,8 +104,8 @@ impl Body {
         }
     }
 
-    /// What to say when there are no rows, where an empty panel would
-    /// otherwise be an empty space.
+    // What to say when there are no rows, where an empty panel would
+    // otherwise be an empty space.
     fn empty(&self) -> Option<&'static str> {
         match self {
             Body::Settings(_) => None,
@@ -126,10 +126,10 @@ impl Body {
         }
     }
 
-    /// Where the cursor goes when the rows are re-read. It stays where the eye
-    /// is — on whatever took the place of the row that went — except over the
-    /// config, whose rows are a set rather than a list: there it follows the
-    /// path it was on.
+    // Where the cursor goes when the rows are re-read. It stays where the eye
+    // is — on whatever took the place of the row that went — except over the
+    // config, whose rows are a set rather than a list: there it follows the
+    // path it was on.
     fn keep(&self, at: usize, new: &Body) -> usize {
         match (self, new) {
             (Body::Settings(old), Body::Settings(new)) => old
@@ -146,19 +146,19 @@ impl Body {
 pub struct Panel {
     body: Body,
     at: usize,
-    /// Some while a row is being rewritten; browsing otherwise.
+    // Some while a row is being rewritten; browsing otherwise.
     editing: Option<Editor>,
-    /// What the last commit refused, shown under the rows.
+    // What the last commit refused, shown under the rows.
     refused: Option<String>,
 }
 
 /// What the panel made of a press.
 pub enum Took {
-    /// Not the panel's key: the editor underneath it gets it.
+    // Not the panel's key: the editor underneath it gets it.
     Nothing,
-    /// Handled, and this is what it asks the loop for.
+    // Handled, and this is what it asks the loop for.
     Intent(Intent),
-    /// Handled, and the panel is done: the caller drops it.
+    // Handled, and the panel is done: the caller drops it.
     Close,
 }
 
@@ -214,9 +214,9 @@ impl Panel {
         self.refused = Some(why);
     }
 
-    /// Enter the editing state for the focused row, pre-filled with what it
-    /// holds. The secret value shows in clear here: a pasted key has to be
-    /// checkable. A panel with nothing in it has nothing to edit.
+    // Enter the editing state for the focused row, pre-filled with what it
+    // holds. The secret value shows in clear here: a pasted key has to be
+    // checkable. A panel with nothing in it has nothing to edit.
     fn begin_edit(&mut self) {
         let Some(text) = self.body.text(self.at) else {
             return;
@@ -420,8 +420,8 @@ mod tests {
         ));
     }
 
-    /// Deleting the last row leaves the cursor on what is now last, rather
-    /// than one past the end where the panel would answer about nothing.
+    // Deleting the last row leaves the cursor on what is now last, rather
+    // than one past the end where the panel would answer about nothing.
     #[test]
     fn the_shelf_cursor_survives_the_row_under_it_going() {
         let mut p = Panel::new(shelf(3));
@@ -441,8 +441,8 @@ mod tests {
         );
     }
 
-    /// The cursor moves only while browsing, and the panel's own layer is off
-    /// then so that `j` reaches it as a letter.
+    // The cursor moves only while browsing, and the panel's own layer is off
+    // then so that `j` reaches it as a letter.
     #[test]
     fn typing_a_note_pins_the_cursor_and_drops_the_layer() {
         let mut p = Panel::new(shelf(3));
@@ -462,8 +462,8 @@ mod tests {
         ));
     }
 
-    /// Dismiss is two steps: the edit first, the panel only once there is
-    /// nothing left inside it to cancel.
+    // Dismiss is two steps: the edit first, the panel only once there is
+    // nothing left inside it to cancel.
     #[test]
     fn dismiss_leaves_the_edit_before_it_leaves_the_panel() {
         let mut p = Panel::new(shelf(1));
@@ -476,8 +476,8 @@ mod tests {
         assert!(matches!(act(&mut p, Action::MenuDismiss), Took::Close));
     }
 
-    /// A key the panel does not know goes on to the editor underneath, the
-    /// way it did when each panel had its own copy of this dispatch.
+    // A key the panel does not know goes on to the editor underneath, the
+    // way it did when each panel had its own copy of this dispatch.
     #[test]
     fn a_browsing_panel_leaves_a_key_it_does_not_know_alone() {
         let mut p = Panel::new(shelf(1));

@@ -20,7 +20,7 @@ use tools::{Ctx, FileLocks, FileShifts, Registry, Tier, Tool, ToolError, ToolOut
 struct Scripted {
     turns: Vec<Vec<StreamEvent>>,
     next: AtomicUsize,
-    /// Every system prompt that went out, parent's and child's alike.
+    // Every system prompt that went out, parent's and child's alike.
     saw: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
@@ -40,7 +40,7 @@ impl Transport for Scripted {
     }
 }
 
-/// What a checkout says to whoever works in it, as `resolve` composes it.
+// What a checkout says to whoever works in it, as `resolve` composes it.
 const STANDING: &str = "\n\n<workspace path=\"/anywhere\"/>\nnever touch infra/\n";
 
 fn text_turn(body: &str) -> Vec<StreamEvent> {
@@ -88,8 +88,8 @@ fn call_turn(id: &str, name: &str, args: &str) -> Vec<StreamEvent> {
     ]
 }
 
-/// What the child's `Ctx` turned out to be, captured from inside its own run —
-/// the only place the split in §4.1 is observable.
+// What the child's `Ctx` turned out to be, captured from inside its own run —
+// the only place the split in §4.1 is observable.
 #[derive(Default)]
 struct Seen {
     locks: std::sync::Mutex<Option<FileLocks>>,
@@ -100,8 +100,8 @@ struct Seen {
 
 struct Probe {
     seen: Arc<Seen>,
-    /// Tripped from inside the child's run, which is where Esc arrives from
-    /// the child's point of view.
+    // Tripped from inside the child's run, which is where Esc arrives from
+    // the child's point of view.
     trip: Option<tokio_util::sync::CancellationToken>,
 }
 
@@ -131,10 +131,10 @@ impl Tool for Probe {
     }
 }
 
-/// Finishes only when its token is tripped, so a test of the limits does not
-/// have to win a race with a scripted stream that is ready the instant it is
-/// polled. A real provider is never that fast, which is why the limits work in
-/// production and cannot be observed here any other way.
+// Finishes only when its token is tripped, so a test of the limits does not
+// have to win a race with a scripted stream that is ready the instant it is
+// polled. A real provider is never that fast, which is why the limits work in
+// production and cannot be observed here any other way.
 struct Sleeper;
 
 #[async_trait]
@@ -159,8 +159,8 @@ impl Tool for Sleeper {
 
 #[derive(Default)]
 struct Kept {
-    /// The child's whole transcript, the only way anything outside it can see
-    /// what it was allowed to do.
+    // The child's whole transcript, the only way anything outside it can see
+    // what it was allowed to do.
     sessions: std::sync::Mutex<Vec<(String, String)>>,
 }
 
@@ -173,8 +173,8 @@ impl Home for Kept {
     }
 }
 
-/// Parent and child share one scripted transport, so the turns run in the order
-/// written: the parent's call, then the whole child, then the parent's answer.
+// Parent and child share one scripted transport, so the turns run in the order
+// written: the parent's call, then the whole child, then the parent's answer.
 fn harness(turns: Vec<Vec<StreamEvent>>) -> (tempfile::TempDir, Agent, Ctx, Arc<Seen>, Arc<Kept>) {
     rigged(turns, 20, std::time::Duration::from_secs(600), false)
 }
@@ -266,12 +266,12 @@ async fn the_child_answers_into_the_parents_transcript() {
     assert_ne!(ns, ctx.spill_namespace(), "and not the parent's");
 }
 
-/// The child works from the same facts and leaves none behind.
-///
-/// Both halves have been wrong in the same afternoon: a child given no shelf
-/// reads nothing, and a child given the parent's own writes to it out of
-/// sight. `Agent::apply` sets the parent's before `Agent::hang` freezes the copy the child
-/// keeps for the life of the run.
+// The child works from the same facts and leaves none behind.
+//
+// Both halves have been wrong in the same afternoon: a child given no shelf
+// reads nothing, and a child given the parent's own writes to it out of
+// sight. `Agent::apply` sets the parent's before `Agent::hang` freezes the copy the child
+// keeps for the life of the run.
 #[tokio::test]
 async fn a_child_reads_the_shelf_and_cannot_write_to_it() {
     #[derive(Default)]
@@ -309,8 +309,8 @@ async fn a_child_reads_the_shelf_and_cannot_write_to_it() {
     );
 }
 
-/// The row a finished call leaves has to say which job ended. Several
-/// children run at once, and their bills are indistinguishable.
+// The row a finished call leaves has to say which job ended. Several
+// children run at once, and their bills are indistinguishable.
 #[tokio::test]
 async fn a_finished_call_still_names_the_job() {
     let (_dir, parent, ctx, _seen, kept) = harness(vec![text_turn("four")]);
@@ -571,9 +571,9 @@ async fn the_child_is_told_what_the_checkout_says() {
     );
 }
 
-/// The child's account of its own work is the one part of the result nothing
-/// else checks, and it cannot be asked again. What the tree recorded as the
-/// child wrote it comes back beside that account, whatever the account says.
+// The child's account of its own work is the one part of the result nothing
+// else checks, and it cannot be asked again. What the tree recorded as the
+// child wrote it comes back beside that account, whatever the account says.
 #[tokio::test]
 async fn what_the_child_wrote_comes_back_beside_what_it_says() {
     let (_dir, agent, ctx, _seen, _kept) = harness(vec![

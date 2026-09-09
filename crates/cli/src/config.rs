@@ -146,8 +146,8 @@ fn default_loop_max_turns() -> Option<usize> {
     Some(DEFAULT_LOOP_MAX_TURNS)
 }
 
-/// The ceiling an unset `loop_max_turns` reads as: the floor for a loop that
-/// keeps changing files without ever repeating itself.
+// The ceiling an unset `loop_max_turns` reads as: the floor for a loop that
+// keeps changing files without ever repeating itself.
 const DEFAULT_LOOP_MAX_TURNS: usize = 10;
 
 impl Default for Vim {
@@ -271,10 +271,10 @@ impl Default for ModelEntry {
 }
 
 impl Config {
-    /// The endpoint's shape, refused rather than guessed: naming the wrong one
-    /// is a 400 on the first turn, and neither is a safer bet than the other.
-    /// The endpoint's shape, refused rather than guessed: naming the wrong one
-    /// is a 400 on the first turn, and neither is a safer bet than the other.
+    // The endpoint's shape, refused rather than guessed: naming the wrong one
+    // is a 400 on the first turn, and neither is a safer bet than the other.
+    // The endpoint's shape, refused rather than guessed: naming the wrong one
+    // is a 400 on the first turn, and neither is a safer bet than the other.
     fn format(&self) -> Result<Format> {
         let named = self
             .format
@@ -315,8 +315,8 @@ impl Config {
         })
     }
 
-    /// A `$NAME` that names nothing is a typo now and a missing key much later,
-    /// pointing at the endpoint rather than at the file.
+    // A `$NAME` that names nothing is a typo now and a missing key much later,
+    // pointing at the endpoint rather than at the file.
     fn check_key(&self) -> Result<()> {
         let Some(name) = self.api_key.as_deref().and_then(|k| k.strip_prefix('$')) else {
             return Ok(());
@@ -330,8 +330,8 @@ impl Config {
         Ok(())
     }
 
-    /// A thinking control the format cannot carry is otherwise accepted, then
-    /// silently dropped when the request is built.
+    // A thinking control the format cannot carry is otherwise accepted, then
+    // silently dropped when the request is built.
     fn check_thinking(&self, name: &str, model: &ModelEntry) -> Result<()> {
         match (self.format, model.thinking) {
             (Some(FormatArg::Anthropic), Some(ThinkingControl::Effort)) => bail!(
@@ -789,8 +789,8 @@ fn to_edit_value(value: &toml::Value) -> toml_edit::Value {
 
 #[cfg(test)]
 mod tests {
-    /// The reference config is documentation, and `deny_unknown_fields` means
-    /// a key misspelled there is a key nobody can use.
+    // The reference config is documentation, and `deny_unknown_fields` means
+    // a key misspelled there is a key nobody can use.
     #[test]
     fn the_reference_config_is_one_this_build_would_load() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/pi.toml");
@@ -819,7 +819,7 @@ input_per_mtok = 0.14
 output_per_mtok = 0
 "#;
 
-    /// The fewest keys that parse.
+    // The fewest keys that parse.
     fn one(format: &str, extra: &str) -> String {
         format!("base_url = \"http://x/v1\"\nformat = \"{format}\"\n{extra}")
     }
@@ -852,10 +852,10 @@ output_per_mtok = 0
         parse(include_str!("../../../examples/pi.toml")).unwrap();
     }
 
-    /// The block the README opens with is what a new reader copies first, and
-    /// it went on saying `[models.x]` with a `wire` key for a whole release
-    /// after the parser stopped accepting either. Read out of the file rather
-    /// than retyped here, because a copy is what rotted the first time.
+    // The block the README opens with is what a new reader copies first, and
+    // it went on saying `[models.x]` with a `wire` key for a whole release
+    // after the parser stopped accepting either. Read out of the file rather
+    // than retyped here, because a copy is what rotted the first time.
     #[test]
     fn the_readme_config_example_parses() {
         let readme = include_str!("../../../README.md");
@@ -925,9 +925,9 @@ output_per_mtok = 0
         assert!(e.contains("accepts_temperatur"), "{e}");
     }
 
-    /// The old shapes are found by their keys and tables. Said in prose — a
-    /// comment, a system-prompt path, a model whose name contains one — they
-    /// are just words, and refusing a valid file over them is the worse error.
+    // The old shapes are found by their keys and tables. Said in prose — a
+    // comment, a system-prompt path, a model whose name contains one — they
+    // are just words, and refusing a valid file over them is the worse error.
     #[test]
     fn a_valid_config_that_merely_mentions_the_old_words_still_loads() {
         let body = "# the wire this speaks, and what [compat] used to hold\n\
@@ -937,7 +937,7 @@ output_per_mtok = 0
         assert!(parse(body).is_ok(), "{:?}", parse(body).err());
     }
 
-    /// A file that worked yesterday must say what to do, not "unknown field".
+    // A file that worked yesterday must say what to do, not "unknown field".
     #[test]
     fn the_shapes_before_this_one_are_named_and_pointed_somewhere() {
         // One shape back: the endpoint was a provider table.
@@ -960,9 +960,9 @@ output_per_mtok = 0
         }
     }
 
-    /// Each of these configured a shape only Chat Completions had. There is no
-    /// quirk record left to put them in, so they fail here rather than being
-    /// accepted and then quietly ignored on the wire.
+    // Each of these configured a shape only Chat Completions had. There is no
+    // quirk record left to put them in, so they fail here rather than being
+    // accepted and then quietly ignored on the wire.
     #[test]
     fn a_quirk_the_responses_api_never_had_is_refused_rather_than_ignored() {
         for key in [
@@ -1092,9 +1092,9 @@ output_per_mtok = 0
         );
     }
 
-    /// `max_tier` is a ceiling, and two ceilings with no order between them
-    /// leave only what they share. A checkout that declared itself read-only
-    /// plus the web does not thereby hand a `--tier write` run the web.
+    // `max_tier` is a ceiling, and two ceilings with no order between them
+    // leave only what they share. A checkout that declared itself read-only
+    // plus the web does not thereby hand a `--tier write` run the web.
     #[test]
     fn a_ceiling_beside_the_tier_rather_than_above_it_leaves_read() {
         let c: Config = parse("tier = \"write\"\n").unwrap();

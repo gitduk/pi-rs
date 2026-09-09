@@ -28,28 +28,28 @@ pub enum Event {
         name: String,
         reason: String,
     },
-    /// The transcript was shrunk to fit before this turn was sent.
+    // The transcript was shrunk to fit before this turn was sent.
     Compacted(crate::compact::Report),
-    /// What the transcript occupies against what it may, for the request just
-    /// sent. Ours rather than the provider's: this is what compaction acts on.
+    // What the transcript occupies against what it may, for the request just
+    // sent. Ours rather than the provider's: this is what compaction acts on.
     Context {
         used: usize,
         budget: usize,
     },
-    /// The request failed in a way worth another attempt.
+    // The request failed in a way worth another attempt.
     Retrying {
         attempt: usize,
         delay_ms: u64,
         reason: String,
     },
-    /// Something the run recovered from but the user should know about.
+    // Something the run recovered from but the user should know about.
     Warning(String),
-    /// What the turn has cost so far, as the provider has reported it.
-    ///
-    /// Cumulative for the turn, not a delta, and not every wire sends one: the
-    /// Anthropic wire states the input count before the first token, while an
-    /// OpenAI host reports nothing until the stream ends. A surface that shows
-    /// a running count treats its absence as "not known yet", never as zero.
+    // What the turn has cost so far, as the provider has reported it.
+    //
+    // Cumulative for the turn, not a delta, and not every wire sends one: the
+    // Anthropic wire states the input count before the first token, while an
+    // OpenAI host reports nothing until the stream ends. A surface that shows
+    // a running count treats its absence as "not known yet", never as zero.
     Usage(Usage),
 
     TurnEnd {
@@ -60,10 +60,10 @@ pub enum Event {
         turns: usize,
         usage: Usage,
         cost: f64,
-        /// What the transcript occupied against what it was allowed to, in
-        /// tokens, for the request that ended the run.
+        // What the transcript occupied against what it was allowed to, in
+        // tokens, for the request that ended the run.
         ctx: (usize, usize),
-        /// How many times the transcript was shrunk to fit during this run.
+        // How many times the transcript was shrunk to fit during this run.
         compactions: usize,
     },
 }

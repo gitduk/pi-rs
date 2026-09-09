@@ -30,7 +30,7 @@ pub fn header(path: &str, tag: &str) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinePos {
     At(usize),
-    /// From `N*:DOWN` — after the construct opening at N, wherever it closes.
+    // From `N*:DOWN` — after the construct opening at N, wherever it closes.
     AfterBlock(usize),
 }
 
@@ -38,24 +38,19 @@ pub enum LinePos {
 /// anything is applied, so the applier only ever sees line ranges.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
-    Range {
-        start: usize,
-        end: usize,
-    },
-    /// `N*` — the whole construct at N, annotations above it included, so the
-    /// range it resolves to may begin above N. One of the three address forms
-    /// (`N`, `N-M`, `N*`); `:UP`/`:DOWN` belong to `PUT`, not to an address.
-    Block {
-        line: usize,
-    },
+    Range { start: usize, end: usize },
+    // `N*` — the whole construct at N, annotations above it included, so the
+    // range it resolves to may begin above N. One of the three address forms
+    // (`N`, `N-M`, `N*`); `:UP`/`:DOWN` belong to `PUT`, not to an address.
+    Block { line: usize },
 }
 
 /// Resolves `N*` to the construct it names. Injected rather than linked so this
 /// crate stays a pure function of its inputs.
 pub trait Blocks {
-    /// The inclusive 1-based rows of the construct at `line`, if there is one.
-    /// Both ends: an annotation above the row belongs to what it annotates, so
-    /// the start may sit above `line`.
+    // The inclusive 1-based rows of the construct at `line`, if there is one.
+    // Both ends: an annotation above the row belongs to what it annotates, so
+    // the start may sit above `line`.
     fn extent_of(&self, path: &str, content: &str, line: usize) -> Option<(usize, usize)>;
 }
 
@@ -71,7 +66,7 @@ impl Blocks for NoBlocks {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Body {
     Lines(Vec<String>),
-    /// `None` is the anonymous register.
+    // `None` is the anonymous register.
     Register(Option<String>),
 }
 

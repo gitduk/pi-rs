@@ -593,8 +593,8 @@ mod budget {
         ]
     }
 
-    /// Fourteen distinct reads: enough weight that a compaction has something
-    /// to drop, and distinct paths so the supersede tier cannot take it first.
+    // Fourteen distinct reads: enough weight that a compaction has something
+    // to drop, and distinct paths so the supersede tier cannot take it first.
     fn bulky_session() -> Session {
         let mut s = Session::with_prompt("go");
         for i in 0..14 {
@@ -613,10 +613,10 @@ mod budget {
 
     struct Never;
 
-    /// A summary that does not come back. The manual pass always summarizes
-    /// what it drops, so the one test that drops anything does reach a
-    /// network — and an empty answer is not fatal, which is what lets the
-    /// rest of `Never`'s neighbours keep asserting they never reach one.
+    // A summary that does not come back. The manual pass always summarizes
+    // what it drops, so the one test that drops anything does reach a
+    // network — and an empty answer is not fatal, which is what lets the
+    // rest of `Never`'s neighbours keep asserting they never reach one.
     struct Empty;
 
     #[async_trait]
@@ -665,9 +665,9 @@ mod budget {
         assert!(b > 120_000 && b < 200_000, "{b}");
     }
 
-    /// One transport, two prompts: the compaction asks for a summary and for
-    /// what should outlive the session, and tells them apart by what it is
-    /// holding when each answer comes back.
+    // One transport, two prompts: the compaction asks for a summary and for
+    // what should outlive the session, and tells them apart by what it is
+    // holding when each answer comes back.
     struct Both {
         answer: &'static str,
         asked: Arc<std::sync::Mutex<Vec<String>>>,
@@ -704,9 +704,9 @@ mod budget {
         }
     }
 
-    /// The shelf is filled from the same span the summary covers, in the same
-    /// round trip, and what is already on it rides along so the model does not
-    /// write the same fact down twice in new words.
+    // The shelf is filled from the same span the summary covers, in the same
+    // round trip, and what is already on it rides along so the model does not
+    // write the same fact down twice in new words.
     #[tokio::test]
     async fn a_compaction_asks_what_should_outlive_the_session() {
         let kept = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -759,7 +759,7 @@ mod budget {
         assert!(spent.usage.input >= 6_000, "{:?}", spent.usage);
     }
 
-    /// A run with no shelf still summarizes, and asks nobody anything else.
+    // A run with no shelf still summarizes, and asks nobody anything else.
     #[tokio::test]
     async fn no_shelf_means_no_second_call() {
         let asked = Arc::new(std::sync::Mutex::new(Vec::new()));

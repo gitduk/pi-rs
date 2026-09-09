@@ -151,10 +151,10 @@ async fn bash_runs_in_the_workspace_and_can_be_redirected() {
     assert!(out.contains("sub"), "{out}");
 }
 
-/// A removed worktree takes the shell's ground with it, and spawn answers
-/// with a bare ENOENT that reads exactly like a missing command. Saying which
-/// directory went is the difference between the model moving on and the model
-/// running the same call again — which is what one session did, three times.
+// A removed worktree takes the shell's ground with it, and spawn answers
+// with a bare ENOENT that reads exactly like a missing command. Saying which
+// directory went is the difference between the model moving on and the model
+// running the same call again — which is what one session did, three times.
 #[tokio::test]
 async fn a_working_directory_that_went_says_which_one() {
     let (d, c) = ctx();

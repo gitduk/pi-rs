@@ -68,7 +68,7 @@ pub enum StreamEvent {
         index: usize,
         signature: String,
     },
-    /// Raw JSON fragment; accumulated per index and parsed when the block closes.
+    // Raw JSON fragment; accumulated per index and parsed when the block closes.
     ToolArgsDelta {
         index: usize,
         delta: String,
@@ -76,16 +76,16 @@ pub enum StreamEvent {
     BlockEnd {
         index: usize,
     },
-    /// The turn's finished content, handed over whole rather than folded from
-    /// the deltas before it.
-    ///
-    /// Responses puts the complete `output[]` on `response.completed`, so the
-    /// deltas are free to be what they are — something to paint on screen, with
-    /// no claim to correctness. It is also the only way to get
-    /// `encrypted_content` intact: the copy on `output_item.added` may be
-    /// truncated, and a truncated one is not rejected, just unreadable next
-    /// turn. Anthropic's terminal frame carries usage and nothing else, so that
-    /// wire still folds.
+    // The turn's finished content, handed over whole rather than folded from
+    // the deltas before it.
+    //
+    // Responses puts the complete `output[]` on `response.completed`, so the
+    // deltas are free to be what they are — something to paint on screen, with
+    // no claim to correctness. It is also the only way to get
+    // `encrypted_content` intact: the copy on `output_item.added` may be
+    // truncated, and a truncated one is not rejected, just unreadable next
+    // turn. Anthropic's terminal frame carries usage and nothing else, so that
+    // wire still folds.
     Complete {
         content: Vec<AssistantContent>,
         invalid: Vec<InvalidToolArgs>,
@@ -126,11 +126,11 @@ struct Block {
 /// transport: the events are already normalized, so this exists exactly once.
 #[derive(Debug)]
 pub struct Accumulator {
-    /// The model these blocks are attributed to, as the endpoint names it.
+    // The model these blocks are attributed to, as the endpoint names it.
     by: String,
     blocks: BTreeMap<usize, Block>,
-    /// Set by a wire whose terminal frame states the turn outright; the folded
-    /// blocks are then only what was painted while it arrived.
+    // Set by a wire whose terminal frame states the turn outright; the folded
+    // blocks are then only what was painted while it arrived.
     complete: Option<(Vec<AssistantContent>, Vec<InvalidToolArgs>)>,
     stop: StopReason,
     usage: Usage,
@@ -193,14 +193,14 @@ impl Accumulator {
         }
     }
 
-    /// The provider's own id, or a local stand-in when it named none. Only
-    /// gateways that drop the field reach the second arm; both native formats
-    /// make the id mandatory.
-    ///
-    /// Ids repeated within one turn are deliberately not rewritten. Every
-    /// archive checked had the provider's id used verbatim, and a host that
-    /// repeats one is answered by the wire's own duplicate-id refusal rather
-    /// than by carrying a de-duplicating table for a case never observed.
+    // The provider's own id, or a local stand-in when it named none. Only
+    // gateways that drop the field reach the second arm; both native formats
+    // make the id mandatory.
+    //
+    // Ids repeated within one turn are deliberately not rewritten. Every
+    // archive checked had the provider's id used verbatim, and a host that
+    // repeats one is answered by the wire's own duplicate-id refusal rather
+    // than by carrying a de-duplicating table for a case never observed.
     fn call_id(&mut self, provider: Option<String>) -> String {
         provider.unwrap_or_else(|| {
             self.next_local_id += 1;
@@ -259,8 +259,8 @@ impl Accumulator {
         }
     }
 
-    /// The turn rebuilt from the deltas, for a wire whose terminal frame does
-    /// not state it.
+    // The turn rebuilt from the deltas, for a wire whose terminal frame does
+    // not state it.
     fn fold(&mut self) -> (Vec<AssistantContent>, Vec<InvalidToolArgs>) {
         let mut content = Vec::new();
         let mut invalid = Vec::new();
@@ -312,9 +312,9 @@ impl Accumulator {
 mod tests {
     use super::*;
 
-    /// A result is addressed by its call's id, so two calls sharing one can
-    /// never both be answered — the next request is invalid whichever result
-    /// goes back. Seen once against a translating gateway.
+    // A result is addressed by its call's id, so two calls sharing one can
+    // never both be answered — the next request is invalid whichever result
+    // goes back. Seen once against a translating gateway.
     #[test]
     fn a_call_id_the_turn_names_twice_is_answered_once() {
         let mut a = acc();

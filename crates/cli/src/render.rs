@@ -16,31 +16,31 @@ const RESET: &str = "\x1b[0m";
 /// copy them, drop them) but not in where the sequence stops. This decides
 /// that for all three. Each used to decide it alone, and they disagreed.
 pub struct Escape {
-    /// What shape it is, once the first character has said. `None` until then.
+    // What shape it is, once the first character has said. `None` until then.
     kind: Option<Kind>,
-    /// Inside a control string: the last character was `\x1b`, so a `\` now
-    /// closes it.
+    // Inside a control string: the last character was `\x1b`, so a `\` now
+    // closes it.
     st: bool,
 }
 
 enum Kind {
-    /// `ESC [`, `ESC O` — parameters and intermediates, then a byte in
-    /// 0x40-0x7e.
+    // `ESC [`, `ESC O` — parameters and intermediates, then a byte in
+    // 0x40-0x7e.
     Control,
-    /// `ESC P`, `ESC X`, `ESC ]`, `ESC ^`, `ESC _` — DCS, SOS, OSC, PM, APC.
-    /// Arbitrary text closed by BEL or by ST (`ESC \`), not by any byte
-    /// range: an OSC setting the window title carries a `;` and the title,
-    /// and a scanner reading it as a control sequence stops on the first
-    /// letter and draws the rest of the title.
+    // `ESC P`, `ESC X`, `ESC ]`, `ESC ^`, `ESC _` — DCS, SOS, OSC, PM, APC.
+    // Arbitrary text closed by BEL or by ST (`ESC \`), not by any byte
+    // range: an OSC setting the window title carries a `;` and the title,
+    // and a scanner reading it as a control sequence stops on the first
+    // letter and draws the rest of the title.
     Str,
-    /// A bare `ESC` with an intermediate byte, ending on a byte in 0x30-0x7e
-    /// — wider than a control sequence's, which is where `ESC 7` lives.
+    // A bare `ESC` with an intermediate byte, ending on a byte in 0x30-0x7e
+    // — wider than a control sequence's, which is where `ESC 7` lives.
     Bare,
-    /// Over already: the first character was itself the final byte. `ESC 7`
-    /// saves the cursor and `ESC 8` restores it — what `less`, `vim` and
-    /// every progress bar emit most — and 0x37 is outside a control
-    /// sequence's range, so reading one as a control sequence leaves it
-    /// looking unfinished and eats the character after it.
+    // Over already: the first character was itself the final byte. `ESC 7`
+    // saves the cursor and `ESC 8` restores it — what `less`, `vim` and
+    // every progress bar emit most — and 0x37 is outside a control
+    // sequence's range, so reading one as a control sequence leaves it
+    // looking unfinished and eats the character after it.
     Done,
 }
 
@@ -88,9 +88,9 @@ impl Default for Escape {
     }
 }
 
-/// The characters a terminal actually shows, escapes stepped over: they cost
-/// a dozen bytes and zero columns, so anything measuring or reproducing what
-/// is on screen has to skip them the same way.
+// The characters a terminal actually shows, escapes stepped over: they cost
+// a dozen bytes and zero columns, so anything measuring or reproducing what
+// is on screen has to skip them the same way.
 fn visible(s: &str) -> impl Iterator<Item = char> + '_ {
     let mut chars = s.chars();
     std::iter::from_fn(move || {
@@ -153,7 +153,7 @@ const NAMED_ATTRS: &[(&str, Attr, &str)] = &[
 ];
 
 impl Attr {
-    /// A known name, or else any non-empty `;`-separated SGR parameter list.
+    // A known name, or else any non-empty `;`-separated SGR parameter list.
     fn parse(s: &str) -> Result<Self> {
         if let Some((_, attr, _)) = NAMED_ATTRS.iter().find(|(name, _, _)| *name == s) {
             return Ok(attr.clone());
@@ -208,13 +208,13 @@ impl Serialize for Attr {
 /// and vice versa.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Color {
-    /// A bare SGR parameter, 0-255, passed through exactly as written: the
-    /// ANSI base colours are 30-37/40-47 and 90-107, whatever the terminal does
-    /// with the rest is its business.
+    // A bare SGR parameter, 0-255, passed through exactly as written: the
+    // ANSI base colours are 30-37/40-47 and 90-107, whatever the terminal does
+    // with the rest is its business.
     Basic(u8),
-    /// 256-colour palette index, `38;5;N`.
+    // 256-colour palette index, `38;5;N`.
     Indexed(u8),
-    /// Truecolour, `38;2;R;G;B`, usually from a `#hex`.
+    // Truecolour, `38;2;R;G;B`, usually from a `#hex`.
     Rgb(u8, u8, u8),
 }
 
@@ -277,9 +277,9 @@ impl Serialize for Color {
 pub struct Style {
     pub color: Option<Color>,
     pub sgr: Vec<Attr>,
-    /// The one rendered SGR list behind `codes()`. A Style is immutable once
-    /// loaded, while the painted rows re-read it on every frame, so the
-    /// rendering is computed once rather than once per use.
+    // The one rendered SGR list behind `codes()`. A Style is immutable once
+    // loaded, while the painted rows re-read it on every frame, so the
+    // rendering is computed once rather than once per use.
     rendered: OnceLock<String>,
 }
 
@@ -624,7 +624,7 @@ impl Paint {
 /// emits.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Markdown {
-    /// Inside a ``` block, where nothing is markup and everything is code.
+    // Inside a ``` block, where nothing is markup and everything is code.
     fenced: bool,
 }
 
@@ -726,9 +726,9 @@ const NESTING: u8 = 3;
 // start swallowing the spans inside it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SpanKind {
-    /// Literal all the way down, no markup inside.
+    // Literal all the way down, no markup inside.
     Code,
-    /// Emphasis — may hold deeper spans.
+    // Emphasis — may hold deeper spans.
     Markup,
 }
 
@@ -924,18 +924,18 @@ pub fn describe(event: &Event, p: &Paint, width: usize) -> Option<String> {
 pub struct Renderer {
     paint: Paint,
     quiet: bool,
-    /// The segments this surface ends a run with. A pipe times nothing and
-    /// queues nothing, so `elapsed` and `queued` have nothing to say here.
+    // The segments this surface ends a run with. A pipe times nothing and
+    // queues nothing, so `elapsed` and `queued` have nothing to say here.
     done: Vec<crate::status::Segment>,
-    /// Read off the same events the terminal reads, so a piped run ends on the
-    /// line the terminal would have shown it.
+    // Read off the same events the terminal reads, so a piped run ends on the
+    // line the terminal would have shown it.
     tally: crate::status::Tally,
     model: String,
-    /// The worktree this run is working in, for the segment that names it.
+    // The worktree this run is working in, for the segment that names it.
     worktree: Option<String>,
     thinking: bool,
-    /// Each stream is tracked separately: they share a terminal when both are
-    /// a tty, but only the dirty one may be terminated when piped apart.
+    // Each stream is tracked separately: they share a terminal when both are
+    // a tty, but only the dirty one may be terminated when piped apart.
     out_dirty: bool,
     err_dirty: bool,
 }
@@ -1018,8 +1018,8 @@ impl Renderer {
         self.thinking = false;
     }
 
-    /// Terminate the answer stream's partial line. Never called between two
-    /// text deltas: they continue one line, they do not each start one.
+    // Terminate the answer stream's partial line. Never called between two
+    // text deltas: they continue one line, they do not each start one.
     fn settle_out(&mut self) {
         if self.out_dirty {
             println!();
@@ -1034,7 +1034,7 @@ impl Renderer {
         }
     }
 
-    /// Before a whole-line write, which must start at column zero on both.
+    // Before a whole-line write, which must start at column zero on both.
     fn settle(&mut self) {
         self.settle_out();
         self.settle_err();
@@ -1162,10 +1162,10 @@ pub fn summarize(args: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    /// Every shape of escape prints nothing and costs no columns. Each line
-    /// is one the old per-scanner range tests got wrong: a bare `ESC 7` ends
-    /// outside a control sequence's byte range, and a control string ends on
-    /// a terminator rather than on any range at all.
+    // Every shape of escape prints nothing and costs no columns. Each line
+    // is one the old per-scanner range tests got wrong: a bare `ESC 7` ends
+    // outside a control sequence's byte range, and a control string ends on
+    // a terminator rather than on any range at all.
     #[test]
     fn every_shape_of_escape_costs_no_columns() {
         for (s, text) in [
@@ -1183,8 +1183,8 @@ mod tests {
         }
     }
 
-    /// Columns, not characters and not bytes — the same measure `clip` and
-    /// `fit` take, so a border's column can be spared from a body's width.
+    // Columns, not characters and not bytes — the same measure `clip` and
+    // `fit` take, so a border's column can be spared from a body's width.
     #[test]
     fn visible_width_counts_columns() {
         assert_eq!(
@@ -1199,9 +1199,9 @@ mod tests {
         assert_eq!(super::visible_width("ab\u{1b}["), 2);
     }
 
-    /// `clip` measures columns. An escape prints nothing, so counting its
-    /// bytes cut a painted row to a fraction of the width asked for — the
-    /// lane bar lost most of its lanes to a cyan prompt colour.
+    // `clip` measures columns. An escape prints nothing, so counting its
+    // bytes cut a painted row to a fraction of the width asked for — the
+    // lane bar lost most of its lanes to a cyan prompt colour.
     #[test]
     fn clip_counts_columns_and_not_the_escapes_between_them() {
         let painted = "\u{1b}[38;2;0;255;255m\u{203a} pi-rs\u{1b}[0m";
@@ -1314,9 +1314,9 @@ mod tests {
         assert_eq!(summarize(&json!({ "nothing": 1 })), "");
     }
 
-    /// A delegating call is the one a watcher can least afford to see bare:
-    /// the work happens in a window they never see, so the row naming it is
-    /// their only account of what was sent.
+    // A delegating call is the one a watcher can least afford to see bare:
+    // the work happens in a window they never see, so the row naming it is
+    // their only account of what was sent.
     #[test]
     fn a_delegated_job_shows_what_it_was_sent() {
         // The word written for this line wins over the paragraph it names.
@@ -1386,8 +1386,8 @@ mod tests {
         assert!(super::compaction_line(&r).ends_with("still over budget"));
     }
 
-    /// The styling, with the escapes spelled out so a test reads as what the
-    /// terminal receives.
+    // The styling, with the escapes spelled out so a test reads as what the
+    // terminal receives.
     fn md(text: &str) -> String {
         Markdown::default()
             .line(text, &Paint::new(true))

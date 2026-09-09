@@ -172,9 +172,9 @@ struct Sink {
     out: BufWriter<File>,
     written: u64,
     capped: bool,
-    /// Which file `out` is writing to right now; `retarget` moves it when the
-    /// run switches sessions. Kept here, under the sink's own lock, so [`path`]
-    /// reads it back rather than from a second copy that could drift.
+    // Which file `out` is writing to right now; `retarget` moves it when the
+    // run switches sessions. Kept here, under the sink's own lock, so [`path`]
+    // reads it back rather than from a second copy that could drift.
     path: PathBuf,
 }
 
@@ -183,8 +183,8 @@ struct Sink {
 // reads it back from the journal itself rather than from a second copy that
 // could drift.
 struct Journal {
-    /// Wall clock is what pairs a record with everything else on the machine;
-    /// the monotonic one is what measures. Neither substitutes for the other.
+    // Wall clock is what pairs a record with everything else on the machine;
+    // the monotonic one is what measures. Neither substitutes for the other.
     start: Instant,
     field_cap: usize,
     sink: Mutex<Sink>,
@@ -229,9 +229,9 @@ impl Journal {
         })
     }
 
-    /// Point the same journal at another session's file — a `/resume` or a
-    /// `/new` — without re-installing the subscriber. The run's clock keeps
-    /// counting, and the cap applies to the new file from empty.
+    // Point the same journal at another session's file — a `/resume` or a
+    // `/new` — without re-installing the subscriber. The run's clock keeps
+    // counting, and the cap applies to the new file from empty.
     fn retarget(&self, path: &Path) -> std::io::Result<()> {
         let file = open_file(path)?;
         let Ok(mut sink) = self.sink.lock() else {
@@ -242,9 +242,9 @@ impl Journal {
         Ok(())
     }
 
-    /// One record. Every failure here is swallowed: a run must not die of its
-    /// own logging, and a poisoned lock would otherwise take the process with
-    /// it on the next record.
+    // One record. Every failure here is swallowed: a run must not die of its
+    // own logging, and a poisoned lock would otherwise take the process with
+    // it on the next record.
     fn write(&self, record: Map<String, Value>) {
         let Ok(mut sink) = self.sink.lock() else {
             return;
@@ -333,9 +333,9 @@ impl Visit for Fields<'_> {
         self.put(field, Value::Bool(value));
     }
 
-    /// The whole chain, not the outermost link. An error's own line is
-    /// routinely the least specific thing about it — "error sending request"
-    /// over "Connection refused" — and the cause is what a journal is read for.
+    // The whole chain, not the outermost link. An error's own line is
+    // routinely the least specific thing about it — "error sending request"
+    // over "Connection refused" — and the cause is what a journal is read for.
     fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {
         let mut text = value.to_string();
         let mut source = value.source();
@@ -383,7 +383,7 @@ fn ours(level: LevelFilter) -> Targets {
 }
 
 impl JournalLayer {
-    /// The skeleton every record shares.
+    // The skeleton every record shares.
     fn head(&self, meta: &Metadata, ev: &str, ctx_names: String) -> Map<String, Value> {
         let mut rec = Map::new();
         rec.insert("ts".into(), Value::String(rfc3339(SystemTime::now())));
@@ -490,8 +490,8 @@ where
         self.journal.write(rec);
     }
 
-    /// A span's close is where its duration is known, which is most of why the
-    /// spans exist: "which step was slow" is not answerable from events alone.
+    // A span's close is where its duration is known, which is most of why the
+    // spans exist: "which step was slow" is not answerable from events alone.
     fn on_close(&self, id: tracing::Id, ctx: Context<'_, S>) {
         let Some(span) = ctx.span(&id) else { return };
         // Released before `path_of` and the walk below, which read this same
@@ -714,7 +714,7 @@ mod tests {
         );
     }
 
-    /// Run `f` against a real layer and read back what it wrote.
+    // Run `f` against a real layer and read back what it wrote.
     fn recorded(level: LogLevel, f: impl FnOnce()) -> Vec<Value> {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.jsonl");

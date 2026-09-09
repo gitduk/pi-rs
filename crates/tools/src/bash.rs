@@ -7,7 +7,7 @@ use tokio::process::Command;
 use crate::{Ctx, Tier, Tool, ToolError, ToolOutput, spill};
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
-/// The longest any command may run, whatever its caller asked for.
+// The longest any command may run, whatever its caller asked for.
 const MAX_TIMEOUT_MS: u64 = 600_000;
 
 #[derive(Deserialize)]
@@ -225,7 +225,7 @@ pub async fn run(
     Ok(Ran { code, body })
 }
 
-/// Whether a failed run tripped over git's own locking.
+// Whether a failed run tripped over git's own locking.
 fn git_lock(stderr: &str) -> bool {
     (stderr.contains(".lock") && stderr.contains("fatal"))
         || stderr.contains("Another git process seems to be running")

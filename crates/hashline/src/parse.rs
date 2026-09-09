@@ -77,8 +77,8 @@ impl Target {
 }
 
 impl std::fmt::Display for Target {
-    /// The inverse of `addr`, so a view that prints an address and the parser
-    /// that reads it back cannot drift into two grammars.
+    // The inverse of `addr`, so a view that prints an address and the parser
+    // that reads it back cannot drift into two grammars.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Target::Range { start, end } if start == end => write!(f, "{start}"),

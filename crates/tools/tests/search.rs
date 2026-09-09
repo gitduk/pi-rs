@@ -81,8 +81,8 @@ async fn glob_scopes_to_a_subdirectory_and_reports_no_match() {
     assert!(empty.useless && empty.flatten().contains("no file matches"));
 }
 
-/// The row a finished search leaves has to name what was searched for. A
-/// tally alone is the same row for every search that found that many.
+// The row a finished search leaves has to name what was searched for. A
+// tally alone is the same row for every search that found that many.
 #[tokio::test]
 async fn a_finished_search_names_what_it_looked_for() {
     let (_d, c) = tree();

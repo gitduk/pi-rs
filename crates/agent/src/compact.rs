@@ -83,14 +83,14 @@ struct Item<'a> {
     id: EntryId,
     entry: &'a Entry,
     tokens: usize,
-    /// What the view already shows in its place, from this pass or an earlier
-    /// one. `fresh` is what separates the two: only this pass's decisions go
-    /// into the record, or every pass would restate the ones before it.
+    // What the view already shows in its place, from this pass or an earlier
+    // one. `fresh` is what separates the two: only this pass's decisions go
+    // into the record, or every pass would restate the ones before it.
     notice: Option<String>,
     fresh: bool,
     gone: bool,
-    /// Blocks of this turn whose arguments this pass is taking. Separate from
-    /// `notice`: the entry is still shown, only its bulk is not.
+    // Blocks of this turn whose arguments this pass is taking. Separate from
+    // `notice`: the entry is still shown, only its bulk is not.
     args_gone: Vec<usize>,
 }
 
@@ -105,9 +105,9 @@ impl<'a> Item<'a> {
         }
     }
 
-    /// The text an omission would stand in for. A tool's result, or a `!`
-    /// command's output — the two things on the user's side that carry bulk
-    /// nobody is waiting on.
+    // The text an omission would stand in for. A tool's result, or a `!`
+    // command's output — the two things on the user's side that carry bulk
+    // nobody is waiting on.
     fn prunable(&self) -> Option<String> {
         if self.notice.is_some() {
             return None;
@@ -125,8 +125,8 @@ impl<'a> Item<'a> {
         }
     }
 
-    /// Assistant turns are never taken: a `tool_use` with no answering
-    /// `tool_result` makes the next request invalid on both formats.
+    // Assistant turns are never taken: a `tool_use` with no answering
+    // `tool_result` makes the next request invalid on both formats.
     fn omittable(&self) -> bool {
         match self.entry {
             Entry::User { body, .. } => match body {

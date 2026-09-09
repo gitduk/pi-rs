@@ -17,7 +17,7 @@ struct Args {
     pattern: String,
     #[serde(default)]
     path: Option<String>,
-    /// File-name globs; only matching files are searched.
+    // File-name globs; only matching files are searched.
     #[serde(default)]
     glob: Vec<String>,
     #[serde(default)]

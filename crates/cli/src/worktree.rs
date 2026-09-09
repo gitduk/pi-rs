@@ -55,7 +55,7 @@ fn checked(dir: &Path, args: &[&str]) -> Result<String> {
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
-/// Whether the branch `name` exists in the repository `dir` belongs to.
+// Whether the branch `name` exists in the repository `dir` belongs to.
 fn branch_exists(dir: &Path, name: &str) -> Result<bool> {
     Ok(git(
         dir,
@@ -133,9 +133,9 @@ fn name_of(path: &Path, root: &Path, main: bool) -> String {
         .unwrap_or_else(|_| path.display().to_string())
 }
 
-/// Refuse a name that would not stay under `.worktrees`, or that git would not
-/// take as a branch. The check is on the name rather than the joined path
-/// because the error should say which word was wrong.
+// Refuse a name that would not stay under `.worktrees`, or that git would not
+// take as a branch. The check is on the name rather than the joined path
+// because the error should say which word was wrong.
 fn vetted(name: &str) -> Result<&str> {
     let name = name.trim().trim_end_matches('/');
     if name.is_empty() {
@@ -207,11 +207,11 @@ pub fn home(dir: &Path) -> Option<PathBuf> {
 /// What entering a name did, so the caller can say it.
 #[derive(Debug)]
 pub enum Entered {
-    /// It was already there.
+    // It was already there.
     Existing,
-    /// The branch existed and now has a checkout.
+    // The branch existed and now has a checkout.
     Checkout,
-    /// Both the branch and the checkout are new.
+    // Both the branch and the checkout are new.
     Created,
 }
 
@@ -433,10 +433,10 @@ mod tests {
         assert_eq!(home(std::path::Path::new("/no/such/checkout")), None);
     }
 
-    /// A checkout deleted from the shell rather than through git stays
-    /// registered until `worktree prune` runs, and git goes on listing it —
-    /// marked `prunable`. Listing it here would offer a switch into a
-    /// directory that is not there.
+    // A checkout deleted from the shell rather than through git stays
+    // registered until `worktree prune` runs, and git goes on listing it —
+    // marked `prunable`. Listing it here would offer a switch into a
+    // directory that is not there.
     #[test]
     fn a_checkout_deleted_behind_gits_back_stops_being_listed() {
         let dir = repo();

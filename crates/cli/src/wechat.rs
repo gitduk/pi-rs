@@ -20,16 +20,16 @@ use wechat::Update;
 
 /// What the bridge hands the surface.
 pub enum Inbound {
-    /// A text message from the peer.
+    // A text message from the peer.
     Text { text: String },
-    /// Something worth saying on the local terminal (status, errors, QR).
+    // Something worth saying on the local terminal (status, errors, QR).
     Notice(String),
-    /// The peer typed `/stop` or `/esc`: interrupt the running turn now.
+    // The peer typed `/stop` or `/esc`: interrupt the running turn now.
     Stop,
 }
 
-/// What persists between runs, under the pi root. One peer per session in
-/// this build, so the reply address and the context token are single slots.
+// What persists between runs, under the pi root. One peer per session in
+// this build, so the reply address and the context token are single slots.
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 struct State {
     token: Option<String>,
@@ -39,31 +39,31 @@ struct State {
     context_token: Option<String>,
 }
 
-/// How long tool notices are held before going out as one message; a turn
-/// can call dozens of tools and each as its own message would flood the phone.
+// How long tool notices are held before going out as one message; a turn
+// can call dozens of tools and each as its own message would flood the phone.
 const TOOL_INTERVAL: Duration = Duration::from_secs(5);
 
-/// The byte budget for one outbound message. The protocol documents no limit
-/// and the reference implementation never splits, so this is a floor we chose,
-/// not a ceiling anyone published. Bytes rather than characters: nothing says
-/// whether the server counts UTF-8 bytes or UTF-16 units, and for the CJK an
-/// answer is likely to contain, bytes are the smaller of the two budgets.
+// The byte budget for one outbound message. The protocol documents no limit
+// and the reference implementation never splits, so this is a floor we chose,
+// not a ceiling anyone published. Bytes rather than characters: nothing says
+// whether the server counts UTF-8 bytes or UTF-16 units, and for the CJK an
+// answer is likely to contain, bytes are the smaller of the two budgets.
 const MESSAGE_LIMIT: usize = 2000;
 
-/// Room held back for the `(n/m)` marker so a piece plus its marker still fits
-/// the budget. Ten bytes at three digits a side, rounded up.
+// Room held back for the `(n/m)` marker so a piece plus its marker still fits
+// the budget. Ten bytes at three digits a side, rounded up.
 const MARKER_RESERVE: usize = 12;
 
-/// The pause between pieces of one split message. The terms of use let the
-/// server rate-limit, and a burst is what a rate limiter watches for; at this
-/// length the reader cannot tell.
+// The pause between pieces of one split message. The terms of use let the
+// server rate-limit, and a burst is what a rate limiter watches for; at this
+// length the reader cannot tell.
 const PIECE_INTERVAL: Duration = Duration::from_millis(500);
 
 /// What `/wechat` alone reports when the bridge is idle.
 pub const OFF_MESSAGE: &str = "wechat: off — /wechat on to connect";
 
-/// The typing indicator's shared state: the ticket cache, serialized with
-/// the on/off sends by the same lock.
+// The typing indicator's shared state: the ticket cache, serialized with
+// the on/off sends by the same lock.
 #[derive(Default)]
 struct Typing {
     ticket: Option<String>,
@@ -76,27 +76,27 @@ pub struct Bridge {
     client: wechat::Client,
     abort: Option<CancellationToken>,
     task: Option<JoinHandle<()>>,
-    /// Reply text accumulated for the running turn.
+    // Reply text accumulated for the running turn.
     out: String,
-    /// True once `Done` has flushed; a failed turn flushes what is left.
+    // True once `Done` has flushed; a failed turn flushes what is left.
     flushed: bool,
-    /// When the last tool batch went out, for the interval above.
+    // When the last tool batch went out, for the interval above.
     last_tool: Option<Instant>,
-    /// Tool notices held since that send. Coalescing them is what keeps a
-    /// parallel call — same instant as its sibling — from being lost.
+    // Tool notices held since that send. Coalescing them is what keeps a
+    // parallel call — same instant as its sibling — from being lost.
     tool_buf: Vec<String>,
-    /// Whether the indicator is currently marked on. Optimistic: the send
-    /// tasks correct the server side, so a failed send only leaves the mark
-    /// stale, never freezes the surface.
+    // Whether the indicator is currently marked on. Optimistic: the send
+    // tasks correct the server side, so a failed send only leaves the mark
+    // stale, never freezes the surface.
     typing_on: bool,
-    /// Orders the indicator's on/off sends and caches the per-peer ticket.
+    // Orders the indicator's on/off sends and caches the per-peer ticket.
     typing: Arc<Mutex<Typing>>,
-    /// The outbound task last spawned. The next one awaits it, so a split
-    /// answer's tail cannot be overtaken by the next turn's first notice.
+    // The outbound task last spawned. The next one awaits it, so a split
+    // answer's tail cannot be overtaken by the next turn's first notice.
     last_send: Option<JoinHandle<()>>,
-    /// Stops the chain above. A single send was over before `off` could
-    /// matter; a split one runs for seconds, and until this the phone kept
-    /// receiving pieces after the bridge had reported itself stopped.
+    // Stops the chain above. A single send was over before `off` could
+    // matter; a split one runs for seconds, and until this the phone kept
+    // receiving pieces after the bridge had reported itself stopped.
     outbound: CancellationToken,
 }
 
@@ -127,8 +127,8 @@ impl Bridge {
         }
     }
 
-    /// Whether the poll or login task is still running. The stored handle
-    /// outlives its task, so a finished one must read as off.
+    // Whether the poll or login task is still running. The stored handle
+    // outlives its task, so a finished one must read as off.
     fn alive(&self) -> bool {
         self.task.as_ref().is_some_and(|h| !h.is_finished())
     }
@@ -274,8 +274,8 @@ impl Bridge {
         self.typing(false).await;
     }
 
-    /// Send what the interval has held as one multi-line message. Empty is
-    /// the ordinary case — most drains find nothing to say.
+    // Send what the interval has held as one multi-line message. Empty is
+    // the ordinary case — most drains find nothing to say.
     async fn flush_tools(&mut self) {
         if self.tool_buf.is_empty() {
             return;
@@ -284,17 +284,17 @@ impl Bridge {
         self.send_line(&text).await;
     }
 
-    /// One outbound line that is not a tool notice. Held tool lines go first,
-    /// so the phone reads the turn in the order it happened.
+    // One outbound line that is not a tool notice. Held tool lines go first,
+    // so the phone reads the turn in the order it happened.
     async fn say(&mut self, text: &str) {
         self.flush_tools().await;
         self.send_line(text).await;
     }
 
-    /// One outbound message, sent from its own task so a slow or failing
-    /// send cannot stall the surface that called it. Failures land on the
-    /// local terminal rather than vanishing: the terms of use allow the
-    /// server to rate-limit or block, and that has to be visible here.
+    // One outbound message, sent from its own task so a slow or failing
+    // send cannot stall the surface that called it. Failures land on the
+    // local terminal rather than vanishing: the terms of use allow the
+    // server to rate-limit or block, and that has to be visible here.
     async fn send_line(&mut self, text: &str) {
         // The surface calls `observe` whether or not the bridge is on, and
         // `off` keeps the credentials, so an ended bridge would keep sending.
@@ -350,9 +350,9 @@ impl Bridge {
         self.last_send = Some(handle);
     }
 
-    /// The client for the base the session currently talks to. A redirected
-    /// login saves its host to state; the outbound path rebuilds only when
-    /// that host changed, so a session keeps one connection pool.
+    // The client for the base the session currently talks to. A redirected
+    // login saves its host to state; the outbound path rebuilds only when
+    // that host changed, so a session keeps one connection pool.
     async fn client_for(&mut self) -> wechat::Client {
         let base = {
             let s = self.state.lock().await;
@@ -369,9 +369,9 @@ impl Bridge {
         self.client.clone()
     }
 
-    /// The typing indicator, on or off, sent from a background task so the
-    /// send can never stall the surface. Best effort: no ticket, no effect;
-    /// a failed send only leaves the local mark stale.
+    // The typing indicator, on or off, sent from a background task so the
+    // send can never stall the surface. Best effort: no ticket, no effect;
+    // a failed send only leaves the local mark stale.
     async fn typing(&mut self, on: bool) {
         if !self.alive() || self.typing_on == on {
             return;
@@ -399,7 +399,7 @@ impl Bridge {
         });
     }
 
-    /// Long-poll immediately; a saved token already exists.
+    // Long-poll immediately; a saved token already exists.
     fn spawn_poll(&mut self) {
         let state = self.state.clone();
         let tx = self.tx.clone();
@@ -410,8 +410,8 @@ impl Bridge {
         self.task = Some(handle);
     }
 
-    /// Login first (the QR and progress go out on `rx`), then poll in the
-    /// same task so `/wechat off` can stop either half.
+    // Login first (the QR and progress go out on `rx`), then poll in the
+    // same task so `/wechat off` can stop either half.
     fn spawn_login(&mut self) {
         let state = self.state.clone();
         let tx = self.tx.clone();
@@ -476,9 +476,9 @@ impl Default for Bridge {
     }
 }
 
-/// The long-poll loop. Client-side timeouts are the normal empty result, real
-/// errors back off (2s, 30s after three in a row — the reference's rhythm);
-/// a stale token is reported and stops the bridge until a fresh login.
+// The long-poll loop. Client-side timeouts are the normal empty result, real
+// errors back off (2s, 30s after three in a row — the reference's rhythm);
+// a stale token is reported and stops the bridge until a fresh login.
 async fn poll(
     client: wechat::Client,
     state: Arc<Mutex<State>>,
@@ -519,8 +519,8 @@ async fn poll(
     }
 }
 
-/// The per-peer typing ticket, fetched once and cached under the typing
-/// lock so every on/off task reuses it.
+// The per-peer typing ticket, fetched once and cached under the typing
+// lock so every on/off task reuses it.
 async fn typing_ticket(
     t: &mut Typing,
     state: &Arc<Mutex<State>>,
@@ -615,8 +615,8 @@ async fn handle_update(
     }
 }
 
-/// 2s between ordinary retries, 30s once three have failed in a row (the
-/// reference monitor's numbers); the counter resets on the 30s step.
+// 2s between ordinary retries, 30s once three have failed in a row (the
+// reference monitor's numbers); the counter resets on the 30s step.
 fn backoff(failures: &mut u32) -> Duration {
     if *failures >= 3 {
         *failures = 0;
@@ -626,9 +626,9 @@ fn backoff(failures: &mut u32) -> Duration {
     }
 }
 
-/// The one-line tool notice the phone gets, same shape as the TUI's own
-/// `describe`: the name plus the argument the summary picked out. Empty args
-/// collapse to the bare name so the line never ends on a stray space.
+// The one-line tool notice the phone gets, same shape as the TUI's own
+// `describe`: the name plus the argument the summary picked out. Empty args
+// collapse to the bare name so the line never ends on a stray space.
 fn tool_line(name: &str, args: &serde_json::Value) -> String {
     match crate::render::summarize(args) {
         summary if summary.is_empty() => format!("⚙ {name}"),
@@ -636,11 +636,11 @@ fn tool_line(name: &str, args: &serde_json::Value) -> String {
     }
 }
 
-/// Cut an outbound message into pieces that each fit `limit` bytes. One that
-/// already fits comes back whole and unmarked; anything longer is marked
-/// `(n/m)`, so a reader on the phone can tell a message still arriving from one
-/// that ended — a send the server blocks reports on the local terminal only,
-/// and the phone would otherwise see a truncated answer as the whole answer.
+// Cut an outbound message into pieces that each fit `limit` bytes. One that
+// already fits comes back whole and unmarked; anything longer is marked
+// `(n/m)`, so a reader on the phone can tell a message still arriving from one
+// that ended — a send the server blocks reports on the local terminal only,
+// and the phone would otherwise see a truncated answer as the whole answer.
 fn split(text: &str, limit: usize) -> Vec<String> {
     // Against the real limit, not the loop's smaller budget: text that fits
     // unmarked should go out unmarked rather than become two marked pieces.
@@ -668,15 +668,15 @@ fn split(text: &str, limit: usize) -> Vec<String> {
     pieces
 }
 
-/// Where to end a piece that overflows `budget`, and how many separator bytes
-/// to drop after it: the last paragraph break within reach, else the last line
-/// break, else the last space, else the last character boundary. A hard cut
-/// drops nothing — indentation inside a code block is content, and the halves
-/// have to rejoin exactly. A boundary in the first half of the budget is worse
-/// than no boundary at all: taking it doubles the number of messages.
-///
-/// The cut is never zero: a budget shorter than the first character would
-/// otherwise leave the caller's loop exactly where it started, forever.
+// Where to end a piece that overflows `budget`, and how many separator bytes
+// to drop after it: the last paragraph break within reach, else the last line
+// break, else the last space, else the last character boundary. A hard cut
+// drops nothing — indentation inside a code block is content, and the halves
+// have to rejoin exactly. A boundary in the first half of the budget is worse
+// than no boundary at all: taking it doubles the number of messages.
+//
+// The cut is never zero: a budget shorter than the first character would
+// otherwise leave the caller's loop exactly where it started, forever.
 fn boundary(rest: &str, budget: usize) -> (usize, usize) {
     let first = rest.chars().next().map_or(1, char::len_utf8);
     let mut end = budget.max(first);
@@ -820,8 +820,8 @@ mod tests {
         }
     }
 
-    /// The bridge is not alive here, so every send is a no-op and the
-    /// accumulator is the only thing under test.
+    // The bridge is not alive here, so every send is a no-op and the
+    // accumulator is the only thing under test.
     #[tokio::test]
     async fn calls_inside_the_interval_are_held_rather_than_dropped() {
         let mut b = Bridge::new();
@@ -847,8 +847,8 @@ mod tests {
         assert!(b.tool_buf.is_empty(), "{:?}", b.tool_buf);
     }
 
-    /// The lane-switch case: the turn's events stop reaching the bridge, so
-    /// `finish_turn` never runs and the held lines outlive their turn.
+    // The lane-switch case: the turn's events stop reaching the bridge, so
+    // `finish_turn` never runs and the held lines outlive their turn.
     #[tokio::test]
     async fn a_turn_that_never_ended_leaves_nothing_for_the_next_one() {
         let mut b = Bridge::new();

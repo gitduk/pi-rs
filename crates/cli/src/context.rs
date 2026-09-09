@@ -20,7 +20,7 @@ fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-/// What both the personal file and a project's are called.
+// What both the personal file and a project's are called.
 const NAME: &str = "AGENTS.md";
 
 // The one file a directory contributes, or none.
@@ -146,9 +146,9 @@ mod tests {
         std::fs::write(path, body).unwrap();
     }
 
-    /// Every field has to hold still for a whole run — the block rides the
-    /// cached prefix. The date is the only one that moves at all, and it moves
-    /// once a day, so two runs an hour apart still share that prefix.
+    // Every field has to hold still for a whole run — the block rides the
+    // cached prefix. The date is the only one that moves at all, and it moves
+    // once a day, so two runs an hour apart still share that prefix.
     #[test]
     fn the_env_block_names_the_run_and_says_which_shell() {
         let got = env(tools::Tier::Read);
@@ -215,9 +215,9 @@ mod tests {
         );
     }
 
-    /// Editing your own config is an ordinary thing to do — `pi -C ~/.pi` —
-    /// and both files now answer to one name, so the walk up reaches the very
-    /// file the personal slot already took.
+    // Editing your own config is an ordinary thing to do — `pi -C ~/.pi` —
+    // and both files now answer to one name, so the walk up reaches the very
+    // file the personal slot already took.
     #[test]
     fn the_personal_file_is_not_sent_twice_when_it_is_also_the_workspace() {
         let tmp = tempfile::tempdir().unwrap();

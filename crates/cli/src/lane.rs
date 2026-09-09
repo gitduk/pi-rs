@@ -15,34 +15,34 @@ use crate::tui::View;
 /// or holding the end of a run nobody has seen — never two of those, and the
 /// compiler is what should say so.
 pub enum Turn {
-    /// Nothing running, nothing waiting to be looked at.
+    // Nothing running, nothing waiting to be looked at.
     Idle,
-    /// A run under way.
+    // A run under way.
     Running {
-        /// What `esc` cancels, and only for the lane in front.
+        // What `esc` cancels, and only for the lane in front.
         cancel: CancellationToken,
-        /// Where a line typed mid-run goes, when the job in flight is a turn
-        /// and can hear one: the run takes it at its next turn boundary.
-        ///
-        /// `None` for a `!` or a `/compact`. Neither calls a model, so neither
-        /// has a boundary to take a line at, and a line typed at one waits for
-        /// the lane the way every line used to. Optional rather than an empty
-        /// mailbox on every job, because the two are not the same thing to say.
+        // Where a line typed mid-run goes, when the job in flight is a turn
+        // and can hear one: the run takes it at its next turn boundary.
+        //
+        // `None` for a `!` or a `/compact`. Neither calls a model, so neither
+        // has a boundary to take a line at, and a line typed at one waits for
+        // the lane the way every line used to. Optional rather than an empty
+        // mailbox on every job, because the two are not the same thing to say.
         steer: Option<Steer>,
-        /// Esc caught the prompt on its way out: stop the run, then unsend it.
-        /// Set while the run works, acted on when it ends.
+        // Esc caught the prompt on its way out: stop the run, then unsend it.
+        // Set while the run works, acted on when it ends.
         unsend: bool,
     },
-    /// A run that ended while this lane was out of sight, kept until the screen
-    /// is looking at it and can show how it went.
-    ///
-    /// Only for work that can be finished off on the view in front: closing a
-    /// partial stream, landing animated tool rows, `say` without a prefix. A
-    /// job with none of those settles where it ended instead, or its report
-    /// waits on a screen that may never come back.
+    // A run that ended while this lane was out of sight, kept until the screen
+    // is looking at it and can show how it went.
+    //
+    // Only for work that can be finished off on the view in front: closing a
+    // partial stream, landing animated tool rows, `say` without a prefix. A
+    // job with none of those settles where it ended instead, or its report
+    // waits on a screen that may never come back.
     Ended {
         out: Result<Totals, agent::AgentError>,
-        /// Esc asked for the prompt back while this was still running.
+        // Esc asked for the prompt back while this was still running.
         unsend: bool,
     },
 }
@@ -59,45 +59,45 @@ pub struct Looping {
     /// Read into every round's prompt: how far the loop has got, what it has
     /// changed so far, and the standing licence to change nothing.
     pub note: String,
-    /// Fingerprints the tree has worn, oldest first, the starting state
-    /// included. The last one is the round that just ended; an earlier hit
-    /// means a round undid its way back.
+    // Fingerprints the tree has worn, oldest first, the starting state
+    // included. The last one is the round that just ended; an earlier hit
+    // means a round undid its way back.
     seen: Vec<String>,
-    /// The written tree as the last round left it, one entry per path. The
-    /// next round is diffed against this, path by path.
+    // The written tree as the last round left it, one entry per path. The
+    // next round is diffed against this, path by path.
     prev: TreeState,
-    /// Consecutive rounds that changed fewer than `THIN_CHANGES` lines.
+    // Consecutive rounds that changed fewer than `THIN_CHANGES` lines.
     thin: usize,
-    /// Lines changed since the loop began, fed into the next round's prompt.
+    // Lines changed since the loop began, fed into the next round's prompt.
     changed: usize,
-    /// Set when this loop puts a round in the queue, taken when that round
-    /// ends. A turn that did not come from here — a line typed between rounds
-    /// — also ends, and counting it would move the loop on something it never
-    /// ran.
+    // Set when this loop puts a round in the queue, taken when that round
+    // ends. A turn that did not come from here — a line typed between rounds
+    // — also ends, and counting it would move the loop on something it never
+    // ran.
     running: bool,
 }
 
-/// A round that moves fewer lines than this is below the noise floor; that
-/// many in a row end the loop. Tuned for simplify/review, which converge.
+// A round that moves fewer lines than this is below the noise floor; that
+// many in a row end the loop. Tuned for simplify/review, which converge.
 const THIN_CHANGES: usize = 5;
-/// Consecutive thin rounds that end the loop.
+// Consecutive thin rounds that end the loop.
 const THIN_ROUNDS: usize = 2;
 
-/// One written path as the loop last saw it: the bytes, and the stat that
-/// says whether they can be trusted next round without reading them again.
+// One written path as the loop last saw it: the bytes, and the stat that
+// says whether they can be trusted next round without reading them again.
 struct TreeFile {
     bytes: Vec<u8>,
     len: u64,
     mtime: Option<std::time::SystemTime>,
 }
 
-/// The written tree, one entry per path.
+// The written tree, one entry per path.
 type TreeState = std::collections::BTreeMap<std::path::PathBuf, TreeFile>;
 
-/// The tree as the loop measures it: a content fingerprint over every written
-/// path, plus the bytes to diff the next round against. A path whose stat is
-/// unchanged since `prev` keeps its cached bytes — reading every file again
-/// every round is work the diff will throw away.
+// The tree as the loop measures it: a content fingerprint over every written
+// path, plus the bytes to diff the next round against. A path whose stat is
+// unchanged since `prev` keeps its cached bytes — reading every file again
+// every round is work the diff will throw away.
 fn tree_mark(ctx: &Ctx, prev: &TreeState) -> (String, TreeState) {
     let mut h = 0xcbf2_9ce4_8422_2325u64;
     let mut tree = TreeState::new();
@@ -171,20 +171,20 @@ fn count_changes(prev: &[u8], now: &[u8]) -> usize {
 
 /// What a loop does now that one of its rounds has ended.
 pub enum Round {
-    /// Run this line again, as round `next`.
+    // Run this line again, as round `next`.
     Again { goal: String, next: usize },
-    /// The round changed nothing. Where a loop that is fixing things finishes:
-    /// a pass that found nothing to do has nothing to do next time either.
+    // The round changed nothing. Where a loop that is fixing things finishes:
+    // a pass that found nothing to do has nothing to do next time either.
     Quiet,
-    /// The tree is back at a fingerprint it wore earlier — a round undid its
-    /// own work. Such a loop would seesaw forever, so it stops.
+    // The tree is back at a fingerprint it wore earlier — a round undid its
+    // own work. Such a loop would seesaw forever, so it stops.
     Oscillating,
-    /// Several rounds in a row moved fewer than `THIN_CHANGES` lines. The
-    /// fingerprint cannot catch a round that keeps nibbling, so this does.
+    // Several rounds in a row moved fewer than `THIN_CHANGES` lines. The
+    // fingerprint cannot catch a round that keeps nibbling, so this does.
     Thin,
-    /// `loop_max_turns` reached, with rounds still changing the tree.
+    // `loop_max_turns` reached, with rounds still changing the tree.
     Capped(usize),
-    /// Esc, an error, or a prompt taken back. The loop goes with the run.
+    // Esc, an error, or a prompt taken back. The loop goes with the run.
     Cut,
 }
 

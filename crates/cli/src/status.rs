@@ -58,11 +58,11 @@ pub struct Snapshot {
 /// two moments rather than two tallies kept in step by hand.
 #[derive(Debug, Default, Clone)]
 pub struct Tally {
-    /// Turns that have reported, and what they were priced at.
+    // Turns that have reported, and what they were priced at.
     settled: Totals,
-    /// The turn in flight, as far as the provider has said. Superseded rather
-    /// than added to when its `TurnEnd` lands, or the input would count twice.
-    /// Unpriced: a turn is costed when it ends.
+    // The turn in flight, as far as the provider has said. Superseded rather
+    // than added to when its `TurnEnd` lands, or the input would count twice.
+    // Unpriced: a turn is costed when it ends.
     turn: Usage,
     turns: usize,
     ctx: Option<(usize, usize)>,
@@ -376,8 +376,8 @@ mod tests {
         }
     }
 
-    /// The running count is the turns that have reported plus the one in
-    /// flight, and a turn's own report supersedes what it had said so far.
+    // The running count is the turns that have reported plus the one in
+    // flight, and a turn's own report supersedes what it had said so far.
     #[test]
     fn a_tally_carries_the_finished_turns_and_the_one_in_flight() {
         let mut t = Tally::default();
@@ -398,9 +398,9 @@ mod tests {
         assert_eq!(s.cost, 0.001);
     }
 
-    /// A run's own total replaces the running one rather than joining it: the
-    /// two count the same turns, and an automatic compaction's summary is in
-    /// the first and in no event at all.
+    // A run's own total replaces the running one rather than joining it: the
+    // two count the same turns, and an automatic compaction's summary is in
+    // the first and in no event at all.
     #[test]
     fn a_finished_run_states_the_total_rather_than_adding_to_it() {
         let mut t = Tally::default();
@@ -442,9 +442,9 @@ mod tests {
         );
     }
 
-    /// A `!` command and a compaction begin no turn, so the counts have
-    /// nothing to be silent about; a turn the host said nothing for still
-    /// shows its dashes.
+    // A `!` command and a compaction begin no turn, so the counts have
+    // nothing to be silent about; a turn the host said nothing for still
+    // shows its dashes.
     #[test]
     fn work_that_begins_no_turn_shows_no_counts() {
         let quiet = Tally::default().snapshot("m", None, None, 0);
@@ -456,9 +456,9 @@ mod tests {
         assert_eq!(line(&[Segment::InOut], &started), "- in / - out");
     }
 
-    /// Every field the events can fill is filled here, and the four they
-    /// cannot are the surface's own — there is nowhere else for a caller to
-    /// patch one in afterwards.
+    // Every field the events can fill is filled here, and the four they
+    // cannot are the surface's own — there is nowhere else for a caller to
+    // patch one in afterwards.
     #[test]
     fn a_snapshot_asks_for_what_no_event_states() {
         let s = Tally::default().snapshot("sonnet", Some("f1"), Some(Duration::from_secs(3)), 2);

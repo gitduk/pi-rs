@@ -37,8 +37,8 @@ pub enum FormatArg {
 }
 
 impl FormatArg {
-    /// The format this names. Caching stays off: nothing on this path was
-    /// measured, and an unknown top-level field is a 400 on some servers.
+    // The format this names. Caching stays off: nothing on this path was
+    // measured, and an unknown top-level field is a 400 on some servers.
     fn format(self) -> Format {
         match self {
             FormatArg::Anthropic => Format::Anthropic {

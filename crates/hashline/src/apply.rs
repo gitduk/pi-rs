@@ -38,7 +38,7 @@ pub enum Change {
     Remove {
         path: String,
     },
-    /// Edits land on the source, then the final content moves to `to`.
+    // Edits land on the source, then the final content moves to `to`.
     Rename {
         from: String,
         to: String,

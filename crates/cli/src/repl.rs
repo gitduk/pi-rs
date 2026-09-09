@@ -16,9 +16,9 @@ use crate::session::{ResumeChoice, Store, Stored};
 /// Where a command came from, and so what running it means.
 #[derive(Clone)]
 pub enum Source {
-    /// A word `parse` knows and `command` answers itself.
+    // A word `parse` knows and `command` answers itself.
     Builtin,
-    /// A `SKILL.md` to read and hand to the model as if the user had typed it.
+    // A `SKILL.md` to read and hand to the model as if the user had typed it.
     Skill(Skill),
 }
 
@@ -225,8 +225,8 @@ pub struct Candidate {
     pub more: bool,
 }
 
-/// A worktree name completed against `prefix`; the whole line an accept makes
-/// is `head` plus the name, which is what tells entering from removing.
+// A worktree name completed against `prefix`; the whole line an accept makes
+// is `head` plus the name, which is what tells entering from removing.
 fn worktree_candidates(trees: &[Choice], head: &str, prefix: &str) -> Vec<Candidate> {
     trees
         .iter()
@@ -391,19 +391,19 @@ pub struct Repl {
 }
 
 impl Repl {
-    /// Put the lane in front's key map and command table in force. A skill
-    /// belongs to one tree and not another, and so does a rebound key;
-    /// leaving the last lane's in place had this one answering to another
-    /// tree's.
-    ///
-    /// The shelf is not here: `Agent::apply` hands the agent a handle to this
-    /// checkout's file, and the handle reads it every turn.
+    // Put the lane in front's key map and command table in force. A skill
+    // belongs to one tree and not another, and so does a rebound key;
+    // leaving the last lane's in place had this one answering to another
+    // tree's.
+    //
+    // The shelf is not here: `Agent::apply` hands the agent a handle to this
+    // checkout's file, and the handle reads it every turn.
     fn in_force(&mut self) {
         self.keys = self.lane().keys.clone();
         self.commands = self.lane().commands.clone();
     }
 
-    /// Where the lane in front keeps what outlives its transcripts.
+    // Where the lane in front keeps what outlives its transcripts.
     fn memory_path(&self) -> std::path::PathBuf {
         self.store.memory_path(self.lane().ctx.workspace.root())
     }
@@ -414,9 +414,9 @@ impl Repl {
         &self.lanes[self.current]
     }
 
-    /// Where a subagent started in this lane files what it did. Root and model
-    /// vary — a `/worktree` moves one, a `/model` the other — and the rest
-    /// never does.
+    // Where a subagent started in this lane files what it did. Root and model
+    // vary — a `/worktree` moves one, a `/model` the other — and the rest
+    // never does.
     fn home(
         &self,
         root: std::path::PathBuf,
@@ -465,10 +465,10 @@ impl Repl {
         said
     }
 
-    /// Take this config as the one in force: recompute everything it decides
-    /// and swap it in. Whole or not at all — nothing is touched until all of
-    /// it has been computed. `/reload` reads the file first; `/settings`
-    /// hands over a tree it has just edited.
+    // Take this config as the one in force: recompute everything it decides
+    // and swap it in. Whole or not at all — nothing is touched until all of
+    // it has been computed. `/reload` reads the file first; `/settings`
+    // hands over a tree it has just edited.
     fn adopt(&mut self, config: Config) -> Result<Vec<String>, String> {
         let root = self.lane().ctx.workspace.root().to_path_buf();
         let failed = |e| Err(format!("nothing reloaded — {}", refused("reload", e)));
@@ -554,13 +554,13 @@ impl Repl {
         Ok(notes)
     }
 
-    /// Recompute the config from the file tree plus the session's claimed
-    /// overrides, and adopt it.
+    // Recompute the config from the file tree plus the session's claimed
+    // overrides, and adopt it.
     fn rebuild(&mut self) -> Vec<String> {
         self.rebuilt().unwrap_or_else(|why| vec![why])
     }
 
-    /// The same, saying why when nothing could be adopted.
+    // The same, saying why when nothing could be adopted.
     fn rebuilt(&mut self) -> Result<Vec<String>, String> {
         let mut tree = self.file.clone();
         for (path, value) in &self.claimed {
@@ -715,11 +715,11 @@ impl Repl {
         said
     }
 
-    /// Point this lane at a new endpoint, and rebuild the subagent behind it.
-    ///
-    /// `Task` holds a snapshot of the agent it was built from, so a retarget
-    /// that stopped at the lane would leave the child on the old provider —
-    /// with the old key — while the status line named the new model.
+    // Point this lane at a new endpoint, and rebuild the subagent behind it.
+    //
+    // `Task` holds a snapshot of the agent it was built from, so a retarget
+    // that stopped at the lane would leave the child on the old provider —
+    // with the old key — while the status line named the new model.
     fn retarget(
         &mut self,
         transport: std::sync::Arc<dyn brain::Transport>,
@@ -735,7 +735,7 @@ impl Repl {
         ag.hang(home, &standing);
     }
 
-    /// This workspace's shelf, and the file it lives in.
+    // This workspace's shelf, and the file it lives in.
     fn shelf(&self) -> (crate::memory::Memory, std::path::PathBuf) {
         let path = self.memory_path();
         (crate::memory::Memory::load(&path), path)
@@ -771,10 +771,10 @@ impl Repl {
             .map(|e| e.to_string())
     }
 
-    /// Write a note to this workspace's shelf, or say what is on it.
-    ///
-    /// A note you typed carries no weight and never ages out: the cap falls on
-    /// what the model wrote, not on what you did.
+    // Write a note to this workspace's shelf, or say what is on it.
+    //
+    // A note you typed carries no weight and never ages out: the cap falls on
+    // what the model wrote, not on what you did.
     fn remember(&mut self, text: &str) -> Vec<String> {
         let path = self.memory_path();
         let text = text.trim();
@@ -797,7 +797,7 @@ impl Repl {
         }
     }
 
-    /// What `/model` on its own shows.
+    // What `/model` on its own shows.
     fn listing(&self) -> Vec<String> {
         let here = &self.lane().agent.spec.model;
         let choices = self.choices();
@@ -877,12 +877,12 @@ impl Repl {
         })
     }
 
-    /// What `/cost` answers: one line per lane that has spent, then the
-    /// total. A single lane keeps the old one-line answer — its label would
-    /// only echo the total back.
-    ///
-    /// Lanes are picked by tokens, not by price: an unpriced model spends
-    /// real context for $0.0000, and picking by cost would list none of them.
+    // What `/cost` answers: one line per lane that has spent, then the
+    // total. A single lane keeps the old one-line answer — its label would
+    // only echo the total back.
+    //
+    // Lanes are picked by tokens, not by price: an unpriced model spends
+    // real context for $0.0000, and picking by cost would list none of them.
     fn cost_lines(&self, total: &Totals) -> Vec<String> {
         let spent = |t: &Totals| crate::render::spent(&t.usage, t.cost);
         let billed: Vec<(usize, &Lane)> = self
@@ -991,17 +991,17 @@ fn carries_reasoning(session: &agent::session::Session) -> bool {
 /// intent gets the same answer however it was expressed.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Intent {
-    /// Nothing for the loop: the press changed only what `Ui` owns.
+    // Nothing for the loop: the press changed only what `Ui` owns.
     None,
-    /// A line the user submitted, not yet read. The one raw variant, because
-    /// the screen echoes the text and the queue holds it — parsing it at the
-    /// door would throw away what both of them need. `read` says what it is.
+    // A line the user submitted, not yet read. The one raw variant, because
+    // the screen echoes the text and the queue holds it — parsing it at the
+    // door would throw away what both of them need. `read` says what it is.
     Submit(String),
 
     // What `read` makes of a submitted line.
-    /// Prose for the model.
+    // Prose for the model.
     Prompt(String),
-    /// What `!` named.
+    // What `!` named.
     Bash(String),
     Help,
     Keys,
@@ -1009,62 +1009,56 @@ pub enum Intent {
     Cost,
     Reload,
     Name(String),
-    /// The session to switch to, or empty to list what there is.
+    // The session to switch to, or empty to list what there is.
     Resume(String),
-    /// Everything after the word focuses the summary.
+    // Everything after the word focuses the summary.
     Compact(String),
-    /// What to put on this workspace's shelf, or empty to show what is on it.
+    // What to put on this workspace's shelf, or empty to show what is on it.
     Mem(String),
-    /// The name to move to, or empty to list what there is.
+    // The name to move to, or empty to list what there is.
     Model(String),
-    /// The name to work in, or empty to list what there is.
+    // The name to work in, or empty to list what there is.
     Worktree(String),
-    /// A `set <path> <value>`, `get <path>`, `reset [path]`, or empty to open
-    /// the panel.
+    // A `set <path> <value>`, `get <path>`, `reset [path]`, or empty to open
+    // the panel.
     Settings(String),
-    /// The wechat verb: "" = status, "on" = connect, "off" = disconnect.
+    // The wechat verb: "" = status, "on" = connect, "off" = disconnect.
     Wechat(String),
-    /// What to run over and over, or empty to stop the loop in force.
+    // What to run over and over, or empty to stop the loop in force.
     Loop(String),
-    /// One round of a loop, put back through the door by the surface. Apart
-    /// from `Submit` only so the turn it starts can be told from a line typed
-    /// between rounds — `read` never answers it. `note` is the loop's word to
-    /// the model, filed as machine prose rather than glued to the goal, which
-    /// must stay what `read` would parse.
-    LoopRound {
-        goal: String,
-        note: String,
-    },
-    /// Not a built-in word. It may name a skill and it may name nothing; the
-    /// command table settles that, and `read` does not have it.
-    Other {
-        word: String,
-        args: String,
-    },
-    /// `/new`, and `ctrl+l` twice: a fresh session, the old one kept on disk,
-    /// and the screen rebuilt from the empty one. One variant, because they
-    /// are one intent however it was expressed.
+    // One round of a loop, put back through the door by the surface. Apart
+    // from `Submit` only so the turn it starts can be told from a line typed
+    // between rounds — `read` never answers it. `note` is the loop's word to
+    // the model, filed as machine prose rather than glued to the goal, which
+    // must stay what `read` would parse.
+    LoopRound { goal: String, note: String },
+    // Not a built-in word. It may name a skill and it may name nothing; the
+    // command table settles that, and `read` does not have it.
+    Other { word: String, args: String },
+    // `/new`, and `ctrl+l` twice: a fresh session, the old one kept on disk,
+    // and the screen rebuilt from the empty one. One variant, because they
+    // are one intent however it was expressed.
     New,
     // Only a key can ask for these: there is no line that says them.
-    /// The rewind selector wants everywhere the session can go back to.
+    // The rewind selector wants everywhere the session can go back to.
     OpenRewind,
-    /// A row chosen from the rewind selector: the conversation rewinds there,
-    /// and what the row was decides whether it is kept or unsent.
+    // A row chosen from the rewind selector: the conversation rewinds there,
+    // and what the row was decides whether it is kept or unsent.
     Rewind(agent::session::EntryId),
-    /// The settings panel submitted an edited value.
+    // The settings panel submitted an edited value.
     CommitSetting(String, String),
-    /// The shelf panel rewrote a note, or took it away. Named rather than
-    /// numbered: compaction writes to the same file mid-run, so the row a
-    /// note sat on when the panel drew it is not where it sits now.
+    // The shelf panel rewrote a note, or took it away. Named rather than
+    // numbered: compaction writes to the same file mid-run, so the row a
+    // note sat on when the panel drew it is not where it sits now.
     ShelfWrite(u64, String),
     ShelfDrop(u64),
-    /// The line being typed wants `$EDITOR`. The surface's own: the editor
-    /// takes the terminal, which only the surface knows how to give away.
+    // The line being typed wants `$EDITOR`. The surface's own: the editor
+    // takes the terminal, which only the surface knows how to give away.
     EditExternally,
-    /// Esc caught a prompt on its way out: stop the run, then unsend it.
+    // Esc caught a prompt on its way out: stop the run, then unsend it.
     Unsend,
-    /// Leave now — `/exit`, `/quit`, `ctrl+d`, a double `ctrl+c`. One intent,
-    /// so the four of them cannot answer differently.
+    // Leave now — `/exit`, `/quit`, `ctrl+d`, a double `ctrl+c`. One intent,
+    // so the four of them cannot answer differently.
     Quit,
 
     // A key or the phone.
@@ -1078,18 +1072,18 @@ pub enum Intent {
 /// `Step` can say what happened but never whether it should have.
 #[derive(Debug)]
 pub enum Fate {
-    /// Touches nothing the run is standing on.
+    // Touches nothing the run is standing on.
     Now,
-    /// Goes to the model, or needs the surface free, so it waits.
+    // Goes to the model, or needs the surface free, so it waits.
     Queued,
-    /// Prose, while a run is working: it goes to the run rather than waiting
-    /// for it, and is read at the run's next turn boundary.
-    ///
-    /// Carries the text because answering took a read of the line — `Submit`
-    /// cannot say what it is without one — and reading it a second time at the
-    /// door is how two readings drift apart.
+    // Prose, while a run is working: it goes to the run rather than waiting
+    // for it, and is read at the run's next turn boundary.
+    //
+    // Carries the text because answering took a read of the line — `Submit`
+    // cannot say what it is without one — and reading it a second time at the
+    // door is how two readings drift apart.
     Steered(String),
-    /// Would move what the run stands on. Says this rather than doing it.
+    // Would move what the run stands on. Says this rather than doing it.
     Refused(&'static str),
 }
 
@@ -1318,49 +1312,46 @@ fn rest(line: &str) -> String {
 /// What a rewind did. Which one it is says whether the entry was unsent or
 /// kept, rather than leaving that to be read off whether a string was there.
 pub enum Rewound {
-    /// The id named nothing the transcript still holds.
+    // The id named nothing the transcript still holds.
     Nothing,
-    /// The entry stayed, and what followed it went.
+    // The entry stayed, and what followed it went.
     Kept,
-    /// The entry went too, and its text belongs back in the editor.
+    // The entry went too, and its text belongs back in the editor.
     Unsent(String),
 }
 
 pub enum Step {
-    /// One line whose whole content is "nothing happened": a verb that is not
-    /// one, a command refused, a checkout you are already in. No state moved
-    /// and there is no detail to come back to, so a minute later the line says
-    /// nothing the screen does not already show.
-    ///
-    /// The surface shows it on the bar for a moment and keeps it out of the
-    /// scrollback — see `Ui::flash`. An error carrying detail is the other
-    /// side of that line and stays in the transcript.
+    // One line whose whole content is "nothing happened": a verb that is not
+    // one, a command refused, a checkout you are already in. No state moved
+    // and there is no detail to come back to, so a minute later the line says
+    // nothing the screen does not already show.
+    //
+    // The surface shows it on the bar for a moment and keeps it out of the
+    // scrollback — see `Ui::flash`. An error carrying detail is the other
+    // side of that line and stays in the transcript.
     Flash(String),
-    /// A `!` command to run. The surface runs and records it, because only it
-    /// can await; `run_bash` does the work and `record_bash` files it.
+    // A `!` command to run. The surface runs and records it, because only it
+    // can await; `run_bash` does the work and `record_bash` files it.
     Bash(String),
-    /// What to send, and — when a skill expanded into it — the line that was
-    /// typed. `rewind_nodes()` reads the second: a rewind menu offering four
-    /// thousand characters of `SKILL.md` is offering the wrong thing, and so
-    /// is a session named after one.
-    Prompt {
-        send: String,
-        typed: Option<String>,
-    },
-    /// Needs the network, so the surface runs it and reports.
+    // What to send, and — when a skill expanded into it — the line that was
+    // typed. `rewind_nodes()` reads the second: a rewind menu offering four
+    // thousand characters of `SKILL.md` is offering the wrong thing, and so
+    // is a session named after one.
+    Prompt { send: String, typed: Option<String> },
+    // Needs the network, so the surface runs it and reports.
     Compact(Option<String>),
-    /// Starts or stops the wechat bridge. Needs the network, so the surface
-    /// runs it and reports — the same rule as `Compact`.
+    // Starts or stops the wechat bridge. Needs the network, so the surface
+    // runs it and reports — the same rule as `Compact`.
     Wechat(WechatCmd),
-    /// Dealt with here; these lines are what there is to show for it. Returned
-    /// rather than printed because one surface prints and the other paints.
+    // Dealt with here; these lines are what there is to show for it. Returned
+    // rather than printed because one surface prints and the other paints.
     Handled(Vec<String>),
-    /// The session was replaced — a `/new` or a `/resume` — so the surface
-    /// has to rebuild its view from the new one, not just show the lines.
+    // The session was replaced — a `/new` or a `/resume` — so the surface
+    // has to rebuild its view from the new one, not just show the lines.
     Swap(Vec<String>),
-    /// The set of worktrees changed under the surface — a removal — so it
-    /// shows the lines and forgets the cached list, which would keep naming
-    /// the checkout that just went.
+    // The set of worktrees changed under the surface — a removal — so it
+    // shows the lines and forgets the cached list, which would keep naming
+    // the checkout that just went.
     Worktrees(Vec<String>),
     Quit,
 }
@@ -1374,10 +1365,10 @@ pub enum WechatCmd {
 }
 
 impl Repl {
-    /// What this run stands on, in one place: the tail of the system prompt as
-    /// the model receives it, then the two files a person opens when a run goes
-    /// wrong. The instruction files are named rather than quoted — `standing`
-    /// carries them whole, and their content is in the files themselves.
+    // What this run stands on, in one place: the tail of the system prompt as
+    // the model receives it, then the two files a person opens when a run goes
+    // wrong. The instruction files are named rather than quoted — `standing`
+    // carries them whole, and their content is in the files themselves.
     fn status_lines(&self) -> Vec<String> {
         let lane = self.lane();
         let mut out = standing_head(&lane.standing);
@@ -1399,10 +1390,10 @@ impl Repl {
     }
 }
 
-/// What the system prompt's tail says about the run, which is all of it up to
-/// the first instruction file. Split on the tag rather than counting parts, so
-/// that a field added to the head shows up here without being told to; the
-/// files are named separately because `standing` carries them whole.
+// What the system prompt's tail says about the run, which is all of it up to
+// the first instruction file. Split on the tag rather than counting parts, so
+// that a field added to the head shows up here without being told to; the
+// files are named separately because `standing` carries them whole.
 fn standing_head(standing: &str) -> Vec<String> {
     standing
         .split("<instructions")
@@ -1530,8 +1521,8 @@ impl Repl {
         }
     }
 
-    /// `/settings` surface. An empty argument opens the panel (the TUI takes
-    /// over); `set`/`get`/`reset` are line commands.
+    // `/settings` surface. An empty argument opens the panel (the TUI takes
+    // over); `set`/`get`/`reset` are line commands.
     fn settings(&mut self, rest: &str) -> Step {
         let mut parts = rest.splitn(3, char::is_whitespace);
         let verb = parts.next().unwrap_or("");
@@ -1581,8 +1572,8 @@ impl Repl {
         }
     }
 
-    /// The bare `/settings`: the TUI's panel, or a read-only list when this
-    /// is not a terminal.
+    // The bare `/settings`: the TUI's panel, or a read-only list when this
+    // is not a terminal.
     fn open_panel(&mut self) -> Step {
         // The TUI intercepts bare `/settings` before it reaches here; the
         // line surface can only list.
@@ -1605,13 +1596,13 @@ impl Repl {
         Step::Handled(out)
     }
 
-    /// Become the session this id names: the stamp that dates it, the journal
-    /// it writes to, and the namespace its spills are filed under.
-    ///
-    /// One place because the id and the stamp always travel together and the
-    /// two callers each set what the other did not — `created` was the one
-    /// that got missed, and a resumed session was then re-dated on its next
-    /// save with the stamp of the session it had just left.
+    // Become the session this id names: the stamp that dates it, the journal
+    // it writes to, and the namespace its spills are filed under.
+    //
+    // One place because the id and the stamp always travel together and the
+    // two callers each set what the other did not — `created` was the one
+    // that got missed, and a resumed session was then re-dated on its next
+    // save with the stamp of the session it had just left.
     fn becomes(&mut self, id: String, created: u64) {
         self.lane_mut().id = id;
         self.lane_mut().created = created;
@@ -1629,12 +1620,12 @@ impl Repl {
             .with_session(&self.lane_mut().id);
     }
 
-    /// Drop the in-memory conversation and open a fresh session under a new
-    /// id. The old transcript stays on disk.
-    ///
-    /// Says nothing: the screen it is rebuilt into is empty, which is the
-    /// whole of the news, and the id it opened under is the surface's own
-    /// business — as with a resumed one.
+    // Drop the in-memory conversation and open a fresh session under a new
+    // id. The old transcript stays on disk.
+    //
+    // Says nothing: the screen it is rebuilt into is empty, which is the
+    // whole of the news, and the id it opened under is the surface's own
+    // business — as with a resumed one.
     fn fresh_session(&mut self) {
         self.lane_mut().session = Some(Session::default());
         // A name identifies one session; carried over it would name two, which
@@ -1643,8 +1634,8 @@ impl Repl {
         self.becomes(crate::session::new_id(), crate::session::now());
     }
 
-    /// Take a stored transcript as the running one — entries, name and id.
-    /// Parting with what is being left is the caller's; they differ on when.
+    // Take a stored transcript as the running one — entries, name and id.
+    // Parting with what is being left is the caller's; they differ on when.
     fn adopt_session(&mut self, stored: Stored) -> Vec<String> {
         let (id, name, created) = (stored.id.clone(), stored.name.clone(), stored.created);
         let session = stored.into_session();
@@ -1660,14 +1651,14 @@ impl Repl {
         }
     }
 
-    /// `/worktree <name>`: create or reuse a checkout of this repository and
-    /// move the session into it.
-    ///
-    /// Each tree keeps its own transcript rather than one transcript following
-    /// the move: paths in it are workspace-relative, so under another root the
-    /// same string names a different file, and the file locks and edit shifts
-    /// are keyed by absolute path. Coming back therefore resumes what was being
-    /// said in that tree, not an empty page.
+    // `/worktree <name>`: create or reuse a checkout of this repository and
+    // move the session into it.
+    //
+    // Each tree keeps its own transcript rather than one transcript following
+    // the move: paths in it are workspace-relative, so under another root the
+    // same string names a different file, and the file locks and edit shifts
+    // are keyed by absolute path. Coming back therefore resumes what was being
+    // said in that tree, not an empty page.
     fn enter_worktree(&mut self, name: &str) -> Result<Step, String> {
         let from = self.lane_mut().ctx.workspace.root().to_path_buf();
         let (tree, how) = match crate::worktree::enter(&from, name) {
@@ -1726,10 +1717,10 @@ impl Repl {
         said.extend(self.open_lane(ws, (!tree.main).then(|| tree.name.clone()))?);
         Ok(Step::Swap(said))
     }
-    /// `/worktree rm <name>`: remove the checkout `name` refers to — its
-    /// directory, the branch it was on, and every transcript recorded under
-    /// it. Git says no to a checkout with changes in it, and that refusal is
-    /// passed on rather than forced past.
+    // `/worktree rm <name>`: remove the checkout `name` refers to — its
+    // directory, the branch it was on, and every transcript recorded under
+    // it. Git says no to a checkout with changes in it, and that refusal is
+    // passed on rather than forced past.
     fn remove_worktree(&mut self, name: &str) -> Result<Step, String> {
         let from = self.lane().ctx.workspace.root().to_path_buf();
         // No other lane of this run may hold the checkout: its transcript
@@ -1767,10 +1758,10 @@ impl Repl {
         Ok(Step::Worktrees(said))
     }
 
-    /// Open a checkout as a lane of its own, and put it in front.
-    ///
-    /// Whole or not at all, like every other path that reads a config: a tree
-    /// whose config or skills will not resolve leaves the run where it was.
+    // Open a checkout as a lane of its own, and put it in front.
+    //
+    // Whole or not at all, like every other path that reads a config: a tree
+    // whose config or skills will not resolve leaves the run where it was.
     fn open_lane(
         &mut self,
         ws: tools::Workspace,
@@ -1840,8 +1831,8 @@ impl Repl {
         })
     }
 
-    /// The checkouts `/worktree` can move to, the repository's own first, the
-    /// one the session is in marked.
+    // The checkouts `/worktree` can move to, the repository's own first, the
+    // one the session is in marked.
     fn worktree_listing(&self) -> Vec<String> {
         let here = self.lane().ctx.workspace.root();
         let trees = match crate::worktree::list(here) {
@@ -1876,8 +1867,8 @@ impl Repl {
         out
     }
 
-    /// The sessions `/resume` can switch to, newest first, the one running
-    /// now marked.
+    // The sessions `/resume` can switch to, newest first, the one running
+    // now marked.
     fn resume_listing(&self) -> Vec<String> {
         let list = self.store.choices(self.lane().ctx.workspace.root());
         if list.is_empty() {
@@ -1919,13 +1910,13 @@ impl Repl {
         out
     }
 
-    /// Switch to a saved session: its transcript, name and id become this
-    /// one's, and every further turn extends it. The session being left is
-    /// saved first, so nothing is lost on the way out.
-    ///
-    /// The model in charge does not change — that stays the prompt's decision
-    /// — so reasoning a different model wrote is demoted the way it is after
-    /// a `/model` switch.
+    // Switch to a saved session: its transcript, name and id become this
+    // one's, and every further turn extends it. The session being left is
+    // saved first, so nothing is lost on the way out.
+    //
+    // The model in charge does not change — that stays the prompt's decision
+    // — so reasoning a different model wrote is demoted the way it is after
+    // a `/model` switch.
     fn resume(&mut self, id: &str) -> Result<Vec<String>, String> {
         // The session being left has to survive too, or /resume throws it
         // away. An empty one — just opened, nothing said — has nothing to keep.
@@ -2521,8 +2512,8 @@ mod tests {
         }
     }
 
-    /// `/status` shows the run, not the instruction files' contents — those
-    /// are in the files, and one of them is thousands of words long.
+    // `/status` shows the run, not the instruction files' contents — those
+    // are in the files, and one of them is thousands of words long.
     #[test]
     fn the_status_head_stops_at_the_first_instruction_file() {
         let standing = concat!(
@@ -2581,8 +2572,8 @@ mod tests {
         }
     }
 
-    /// Prose is the one thing a working run can still hear, so it does not
-    /// wait for one — waiting is what makes a correction arrive too late.
+    // Prose is the one thing a working run can still hear, so it does not
+    // wait for one — waiting is what makes a correction arrive too late.
     #[test]
     fn prose_reaches_the_run_rather_than_waiting_for_it() {
         let said = "the bug is in parse.rs";
@@ -2686,10 +2677,10 @@ mod tests {
         assert_eq!(bash_command("!!git status"), Some("!git status"));
     }
 
-    /// The transcript and the screen want different strings from a `!` line:
-    /// the model needs the command *and* its output, the reader needs the line
-    /// they typed. Storing only the first is what made the rebuilt scrollback
-    /// print `Ran \`git status\`` as a prompt with the output indented beneath.
+    // The transcript and the screen want different strings from a `!` line:
+    // the model needs the command *and* its output, the reader needs the line
+    // they typed. Storing only the first is what made the rebuilt scrollback
+    // print `Ran \`git status\`` as a prompt with the output indented beneath.
     #[test]
     fn a_bang_line_stores_what_was_typed_beside_what_was_sent() {
         let mut s = Session::new();
@@ -2716,7 +2707,7 @@ mod tests {
         );
     }
 
-    /// One lane with the given totals, enough for `/cost` to bill.
+    // One lane with the given totals, enough for `/cost` to bill.
     fn billed_lane(name: &str, input: u64, output: u64, cost: f64) -> crate::lane::Lane {
         let dir = std::env::temp_dir();
         let ws = tools::Workspace::new(&dir).expect("a workspace");
@@ -2771,8 +2762,8 @@ mod tests {
         core.cost_lines(total)
     }
 
-    /// Two lanes get a line each, and each line carries the same figures the
-    /// single-lane answer gives — tokens, not the price alone.
+    // Two lanes get a line each, and each line carries the same figures the
+    // single-lane answer gives — tokens, not the price alone.
     #[test]
     fn cost_splits_by_lane_with_the_tokens_each_spent() {
         let mut total = agent::Totals::default();
@@ -2804,8 +2795,8 @@ mod tests {
         }
     }
 
-    /// An unpriced model still spends context. Billing by cost listed none of
-    /// them and collapsed the answer to a single line that said nothing.
+    // An unpriced model still spends context. Billing by cost listed none of
+    // them and collapsed the answer to a single line that said nothing.
     #[test]
     fn lanes_on_an_unpriced_model_still_split() {
         let mut total = agent::Totals::default();
@@ -2827,7 +2818,7 @@ mod tests {
         assert_eq!(lines.len(), 3, "free is still spent: {lines:?}");
     }
 
-    /// A lane that never ran is not a line: the total already says it.
+    // A lane that never ran is not a line: the total already says it.
     #[test]
     fn a_lane_that_spent_nothing_is_not_billed() {
         let mut total = agent::Totals::default();
@@ -2849,8 +2840,8 @@ mod tests {
         assert_eq!(lines.len(), 1, "one billed lane keeps the one-line answer");
     }
 
-    /// A transport that records the model each request asks for and the notes
-    /// riding it, and answers one empty turn.
+    // A transport that records the model each request asks for and the notes
+    // riding it, and answers one empty turn.
     #[derive(Default)]
     struct Recording {
         saw: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
@@ -2898,7 +2889,7 @@ mod tests {
         }
     }
 
-    /// One lane on the given transport, with a subagent hung off it.
+    // One lane on the given transport, with a subagent hung off it.
     fn a_repl(
         root: &std::path::Path,
         transport: std::sync::Arc<Recording>,
@@ -2908,8 +2899,8 @@ mod tests {
         let mut agent = agent::Agent::new(transport, test_spec(model));
         let store = crate::session::Store::new(root.join("state"));
         // What `Agent::apply` does before `Agent::hang`, which this stands in
-        // for: the child is cloned here, and a shelf set afterwards is one it
-        // never sees.
+        // for: the child is cloned by `hang`, and a shelf set afterwards is one
+        // it never sees.
         agent.shelf = Some(crate::memory::shelf(store.memory_path(root)));
         agent.hang(
             crate::subagent::Filed::armed(
@@ -2956,7 +2947,7 @@ mod tests {
         }
     }
 
-    /// What the child asked for, once.
+    // What the child asked for, once.
     async fn run_the_child(core: &crate::repl::Repl) {
         let task = core
             .lane()
@@ -2973,9 +2964,9 @@ mod tests {
         .unwrap();
     }
 
-    /// `/mem` has to reach the subagent too. `Task` snapshots the agent it was
-    /// built from, so what the child holds is a handle rather than the text:
-    /// it reads the file each turn, and a note written since is already there.
+    // `/mem` has to reach the subagent too. `Task` snapshots the agent it was
+    // built from, so what the child holds is a handle rather than the text:
+    // it reads the file each turn, and a note written since is already there.
     #[tokio::test]
     async fn a_written_note_reaches_the_child_the_next_time_it_runs() {
         let dir = tempfile::tempdir().unwrap();
@@ -2996,9 +2987,9 @@ mod tests {
         assert!(after.contains("prefers xh over curl"), "{after}");
     }
 
-    /// `/model` retargets the lane's agent and rebuilds the subagent behind
-    /// it; the rebuild has to carry the new endpoint and model, or a child
-    /// called after the switch keeps talking to the old one with the old key.
+    // `/model` retargets the lane's agent and rebuilds the subagent behind
+    // it; the rebuild has to carry the new endpoint and model, or a child
+    // called after the switch keeps talking to the old one with the old key.
     #[tokio::test]
     async fn retarget_rebuilds_the_subagent_on_the_new_model() {
         let dir = tempfile::tempdir().unwrap();

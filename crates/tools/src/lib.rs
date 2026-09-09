@@ -110,19 +110,19 @@ impl Tier {
 mod tier_tests {
     use super::Tier::{self, Exec, Net, Read, Write};
 
-    /// Every tier, for the tests that have to try them all.
+    // Every tier, for the tests that have to try them all.
     const ALL: [Tier; 4] = [Read, Write, Exec, Net];
 
-    /// `ALL` cannot be checked against the enum by the compiler, but this can:
-    /// a fifth variant makes this match non-exhaustive, and whoever adds it
-    /// has to come here — where `ALL` is one line up — to say so.
+    // `ALL` cannot be checked against the enum by the compiler, but this can:
+    // a fifth variant makes this match non-exhaustive, and whoever adds it
+    // has to come here — where `ALL` is one line up — to say so.
     fn _every_tier_is_in_all(t: Tier) {
         match t {
             Read | Write | Exec | Net => assert!(ALL.contains(&t)),
         }
     }
 
-    /// The shape of the thing, stated once: what each ceiling reaches.
+    // The shape of the thing, stated once: what each ceiling reaches.
     #[test]
     fn a_ceiling_reaches_what_it_says_and_nothing_further() {
         let reach = |c: Tier| ALL.into_iter().filter(|t| t.under(c)).collect::<Vec<_>>();
@@ -132,9 +132,9 @@ mod tier_tests {
         assert_eq!(reach(Exec), vec![Read, Write, Exec, Net]);
     }
 
-    /// The whole reason `Net` is a tier and not a rung: a run may reach the
-    /// web without gaining the right to change anything here, and a run that
-    /// may only read the tree does not silently gain the web.
+    // The whole reason `Net` is a tier and not a rung: a run may reach the
+    // web without gaining the right to change anything here, and a run that
+    // may only read the tree does not silently gain the web.
     #[test]
     fn net_and_write_are_beside_each_other_not_in_order() {
         assert!(!Net.under(Write));
@@ -145,10 +145,10 @@ mod tier_tests {
         assert!(Net.under(Exec));
     }
 
-    /// The property `capped_by` has to keep, whatever tiers exist: the cap is
-    /// under both ceilings, and nothing under both reaches past it. A fifth
-    /// tier whose pairwise meet is not itself a tier fails here rather than
-    /// silently taking the `Read` branch.
+    // The property `capped_by` has to keep, whatever tiers exist: the cap is
+    // under both ceilings, and nothing under both reaches past it. A fifth
+    // tier whose pairwise meet is not itself a tier fails here rather than
+    // silently taking the `Read` branch.
     #[test]
     fn the_cap_is_the_most_both_ceilings_allow() {
         for a in ALL {
@@ -162,8 +162,8 @@ mod tier_tests {
         }
     }
 
-    /// What `min` did while this was a total order. Two ceilings with no
-    /// order between them leave only what they share.
+    // What `min` did while this was a total order. Two ceilings with no
+    // order between them leave only what they share.
     #[test]
     fn a_project_ceiling_applies_downward() {
         assert_eq!(Exec.capped_by(Read), Read);
@@ -182,33 +182,33 @@ mod tier_tests {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Concurrency {
     Shared,
-    /// Runs alone; every other call in the turn waits.
+    // Runs alone; every other call in the turn waits.
     Exclusive,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 /// Why a patch was refused, for the loop to group repeat failures by.
 pub enum PatchError {
-    /// The patch does not follow the edit format (bad op, `-` rows, ...).
+    // The patch does not follow the edit format (bad op, `-` rows, ...).
     Malformed,
-    /// The file's own last edit moved the line numbers the patch addresses.
+    // The file's own last edit moved the line numbers the patch addresses.
     Renumbered,
-    /// The file as patched would not parse / compile.
+    // The file as patched would not parse / compile.
     Unbalanced,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
-    /// A refusal whose prose the model reads, plus the category the loop
-    /// groups repeat failures by when the prose alone keeps changing.
+    // A refusal whose prose the model reads, plus the category the loop
+    // groups repeat failures by when the prose alone keeps changing.
     #[error("{0}")]
     Invalid(String),
 
-    /// A refusal tagged with its `PatchError`, for the same purpose.
+    // A refusal tagged with its `PatchError`, for the same purpose.
     #[error("{1}")]
     Patch(PatchError, String),
 
-    /// The one failure the loop must not hand back to the model.
+    // The one failure the loop must not hand back to the model.
     #[error("cancelled")]
     Cancelled,
 
@@ -221,11 +221,11 @@ pub enum ToolError {
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
 
-    /// The command ran past its deadline and the process group was killed.
+    // The command ran past its deadline and the process group was killed.
     #[error("timed out after {ms}ms; the command and everything it spawned were killed")]
     Timeout { ms: u64 },
 
-    /// An over-long output could not be persisted for later reading.
+    // An over-long output could not be persisted for later reading.
     #[error("could not spill oversized output: {0}")]
     Spill(String),
 }
@@ -340,16 +340,16 @@ pub struct Ctx {
     /// The lowest line each file's own edits renumbered since it was last read.
     /// The tag says the model knows the bytes; this, whether it knows where.
     pub file_shifts: FileShifts,
-    /// Every path a tool in this run has reported changing. Split from a
-    /// cloned parent's rather
-    /// than shared, unlike the locks and the shifts: those describe the tree,
-    /// which parent and child share, while this answers what *one* run did —
-    /// and a shared set hands a caller its own edits back as the child's.
+    // Every path a tool in this run has reported changing. Split from a
+    // cloned parent's rather
+    // than shared, unlike the locks and the shifts: those describe the tree,
+    // which parent and child share, while this answers what *one* run did —
+    // and a shared set hands a caller its own edits back as the child's.
     writes: std::sync::Arc<std::sync::Mutex<Written>>,
-    /// The session this context runs in. None in tests and for embedders;
-    /// spills then land in the process temp directory.
+    // The session this context runs in. None in tests and for embedders;
+    // spills then land in the process temp directory.
     session: Option<String>,
-    /// Where over-long outputs land, `<root>/<session>/<n>.log`.
+    // Where over-long outputs land, `<root>/<session>/<n>.log`.
     spill_root: std::path::PathBuf,
 }
 
@@ -358,9 +358,9 @@ pub type FileLocks =
 
 pub type FileLock = std::sync::Arc<tokio::sync::Mutex<()>>;
 
-/// What a run has changed: the distinct paths. A set answers "did anything
-/// happen just now" — the loop that used to count writes now hashes the tree,
-/// so there is no second question to answer here.
+// What a run has changed: the distinct paths. A set answers "did anything
+// happen just now" — the loop that used to count writes now hashes the tree,
+// so there is no second question to answer here.
 #[derive(Default)]
 struct Written {
     paths: std::collections::BTreeSet<std::path::PathBuf>,

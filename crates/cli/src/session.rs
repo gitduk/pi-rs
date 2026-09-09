@@ -30,9 +30,9 @@ pub struct Stored {
     pub session: Session,
 }
 
-/// A save as its parts, borrowed. `Stored` owns a deep copy of the session;
-/// serializing through this keeps the same file without ever building one —
-/// `save` is called from inside tool calls, several subagents at once.
+// A save as its parts, borrowed. `Stored` owns a deep copy of the session;
+// serializing through this keeps the same file without ever building one —
+// `save` is called from inside tool calls, several subagents at once.
 #[derive(Serialize)]
 struct StoredRef<'a> {
     id: &'a str,
@@ -55,8 +55,8 @@ struct StoredRef<'a> {
 struct Peek {
     id: String,
     workspace: String,
-    /// Unused, and required anyway: it is what separates an archive this build
-    /// can resume from one written before the provider rename.
+    // Unused, and required anyway: it is what separates an archive this build
+    // can resume from one written before the provider rename.
     #[allow(dead_code)]
     model: String,
     #[serde(default)]
@@ -84,13 +84,13 @@ struct PeekBody {
 }
 
 impl Peek {
-    /// When this session was last worked on, which is what `/resume` sorts by.
+    // When this session was last worked on, which is what `/resume` sorts by.
     fn touched(&self) -> u64 {
         self.entries.last().map_or(self.created, |e| e.at)
     }
 
-    /// The first thing the user asked, which is what the list shows in place
-    /// of an id. A `!` command's output is not it.
+    // The first thing the user asked, which is what the list shows in place
+    // of an id. A `!` command's output is not it.
     fn opening(&self) -> Option<String> {
         self.entries
             .iter()
@@ -117,12 +117,12 @@ impl Stored {
     }
 }
 
-/// A session whose workspace is gone is unreachable, but a path can be absent
-/// for a morning as well as for good. Nothing younger than this is swept, so
-/// an unmounted disk costs a delay and never a transcript.
+// A session whose workspace is gone is unreachable, but a path can be absent
+// for a morning as well as for good. Nothing younger than this is swept, so
+// an unmounted disk costs a delay and never a transcript.
 const UNREACHED_KEEP: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 60 * 60);
 
-/// Just enough of an archive to say which tree it belongs to.
+// Just enough of an archive to say which tree it belongs to.
 #[derive(Deserialize)]
 struct Belongs {
     workspace: String,
@@ -136,8 +136,8 @@ pub struct Store {
 }
 
 impl Default for Store {
-    /// Outside the workspace: transcripts are the agent's state, not the
-    /// project's, and a stray file in a repo is one the user has to clean up.
+    // Outside the workspace: transcripts are the agent's state, not the
+    // project's, and a stray file in a repo is one the user has to clean up.
     fn default() -> Self {
         Self::new(
             tools::state::dir()
@@ -155,7 +155,7 @@ pub fn new_id() -> String {
     format!("{}-{}-{nth}", now(), std::process::id())
 }
 
-/// The transcripts one bucket holds, one per session in that workspace.
+// The transcripts one bucket holds, one per session in that workspace.
 fn bucket_transcripts(bucket: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(bucket) else {
         return Vec::new();
@@ -167,8 +167,8 @@ fn bucket_transcripts(bucket: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Which workspace a bucket belongs to, read off its first transcript: the
-/// bucket name is a lossy encoding of the path and would guess wrong.
+// Which workspace a bucket belongs to, read off its first transcript: the
+// bucket name is a lossy encoding of the path and would guess wrong.
 fn workspace_of(transcripts: &[PathBuf]) -> Option<String> {
     transcripts.iter().find_map(|p| {
         let text = std::fs::read_to_string(p).ok()?;
@@ -182,7 +182,7 @@ impl Store {
         Self { root: root.into() }
     }
 
-    /// The directory one workspace's transcripts live in.
+    // The directory one workspace's transcripts live in.
     fn dir_of(&self, workspace: &Path) -> PathBuf {
         self.root.join(tools::state::key_of(workspace))
     }
@@ -220,9 +220,9 @@ impl Store {
         &self.root
     }
 
-    /// Every bucket under the store root, each with its transcripts. The
-    /// sweep and the removal walk the same tree; they differ in what they do
-    /// with each bucket, not in how they find one.
+    // Every bucket under the store root, each with its transcripts. The
+    // sweep and the removal walk the same tree; they differ in what they do
+    // with each bucket, not in how they find one.
     fn buckets(&self) -> Vec<(PathBuf, Vec<PathBuf>)> {
         let Ok(dirs) = std::fs::read_dir(&self.root) else {
             return Vec::new();
@@ -322,10 +322,10 @@ impl Store {
         Ok(serde_json::from_str(&body)?)
     }
 
-    /// Every session recorded for this workspace, newest first, read as
-    /// shallowly as the answer allows. The legacy flat files under the root
-    /// are read too: a session saved before the bucketed layout would
-    /// otherwise vanish from `/resume` on upgrade.
+    // Every session recorded for this workspace, newest first, read as
+    // shallowly as the answer allows. The legacy flat files under the root
+    // are read too: a session saved before the bucketed layout would
+    // otherwise vanish from `/resume` on upgrade.
     fn peek(&self, workspace: &Path) -> Vec<Peek> {
         let want = workspace.display().to_string();
         let mut found: Vec<Peek> = std::fs::read_dir(self.dir_of(workspace))
@@ -379,8 +379,8 @@ impl Store {
         self.prune_older_than(UNREACHED_KEEP);
     }
 
-    /// The same, against a stated age rather than the constant — a test that
-    /// waits a month is not a test.
+    // The same, against a stated age rather than the constant — a test that
+    // waits a month is not a test.
     fn prune_older_than(&self, keep: std::time::Duration) {
         let now = std::time::SystemTime::now();
         for (bucket, transcripts) in self.buckets() {
@@ -512,11 +512,11 @@ mod tests {
         Session::from_messages(messages)
     }
 
-    /// Set what `touched()` reads — the last entry's stamp.
-    ///
-    /// A stamp is seconds, so archives saved in one second tie, and a tie is
-    /// settled by the id rather than by recency. Forced through the JSON
-    /// because an entry's stamp is the session's to set, not a caller's.
+    // Set what `touched()` reads — the last entry's stamp.
+    //
+    // A stamp is seconds, so archives saved in one second tie, and a tie is
+    // settled by the id rather than by recency. Forced through the JSON
+    // because an entry's stamp is the session's to set, not a caller's.
     fn touched_at(store: &Store, workspace: &Path, id: &str, at: u64) {
         let path = store.path_of(workspace, id);
         let mut raw: serde_json::Value =
@@ -539,9 +539,9 @@ mod tests {
         Message::tool_results(vec![brain::message::ToolResult::text("c1", "read", "body")])
     }
 
-    /// Unreachability is not enough on its own: a checkout that is merely
-    /// unmounted looks exactly like one that was removed, and only the second
-    /// is a reason to drop a transcript. Age is what tells them apart.
+    // Unreachability is not enough on its own: a checkout that is merely
+    // unmounted looks exactly like one that was removed, and only the second
+    // is a reason to drop a transcript. Age is what tells them apart.
     #[test]
     fn a_bucket_goes_when_its_tree_is_gone_and_not_before() {
         let tmp = tempfile::tempdir().unwrap();
@@ -568,10 +568,10 @@ mod tests {
             "nothing can reach a bucket whose tree went"
         );
     }
-    /// `/worktree rm` drops a tree's buckets outright — transcripts, journals
-    /// and recall — where the sweep only waits out the month of grace. A run
-    /// started in a subdirectory of the tree belongs to it too, and a sibling
-    /// tree's records must survive.
+    // `/worktree rm` drops a tree's buckets outright — transcripts, journals
+    // and recall — where the sweep only waits out the month of grace. A run
+    // started in a subdirectory of the tree belongs to it too, and a sibling
+    // tree's records must survive.
     #[test]
     fn drop_under_removes_the_buckets_of_one_checkout_and_no_others() {
         let tmp = tempfile::tempdir().unwrap();
@@ -593,9 +593,9 @@ mod tests {
         assert!(store.load("in-deep").is_err());
         assert!(store.load("in-sibling").is_ok());
     }
-    /// Two trees whose names fold to the same bucket key (`feature-x` and
-    /// `feature/x`) share one directory on disk; removing one must leave the
-    /// other's sessions alone.
+    // Two trees whose names fold to the same bucket key (`feature-x` and
+    // `feature/x`) share one directory on disk; removing one must leave the
+    // other's sessions alone.
     #[test]
     fn drop_under_spares_a_sibling_that_shares_a_bucket_key() {
         let tmp = tempfile::tempdir().unwrap();

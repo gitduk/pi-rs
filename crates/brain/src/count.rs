@@ -14,8 +14,8 @@ pub fn short(n: u64) -> String {
     }
 }
 
-/// A figure the provider reported, or the dash standing for one it left out —
-/// never a count of ours standing in for it.
+// A figure the provider reported, or the dash standing for one it left out —
+// never a count of ours standing in for it.
 fn reported(n: u64) -> String {
     if n > 0 { short(n) } else { "-".to_string() }
 }
@@ -50,8 +50,8 @@ mod tests {
         assert_eq!(in_out(0, 0), "- in / - out");
     }
 
-    /// The narrow spelling drops the words and nothing else: the same
-    /// shortening, and the same dash for what was never reported.
+    // The narrow spelling drops the words and nothing else: the same
+    // shortening, and the same dash for what was never reported.
     #[test]
     fn the_narrow_spelling_keeps_the_unit_and_the_dash() {
         assert_eq!(slash(8_400, 390), "8.4k/390");

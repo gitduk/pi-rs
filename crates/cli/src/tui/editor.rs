@@ -11,17 +11,17 @@ const CONT: &str = "  ";
 #[derive(Default)]
 pub struct Editor {
     text: String,
-    /// Byte offset of the caret. Always on a char boundary.
+    // Byte offset of the caret. Always on a char boundary.
     cursor: usize,
     history: Vec<String>,
-    /// Where Up/Down currently sit. `history.len()` means the line being typed.
+    // Where Up/Down currently sit. `history.len()` means the line being typed.
     at: usize,
-    /// The line being typed, parked while history is being browsed.
+    // The line being typed, parked while history is being browsed.
     draft: String,
-    /// The painted first-row sigil, so the theme can restyle it.
+    // The painted first-row sigil, so the theme can restyle it.
     prompt: String,
-    /// The same sigil for a `!` line: the bang takes the prompt's place, so
-    /// `! cmd` reads as a command rather than `› ! cmd`.
+    // The same sigil for a `!` line: the bang takes the prompt's place, so
+    // `! cmd` reads as a command rather than `› ! cmd`.
     prompt_bang: String,
 }
 
@@ -131,8 +131,8 @@ impl Editor {
         }
     }
 
-    /// Skip the run of spaces first, then the word: the caret lands where the
-    /// word starts rather than on the space in front of it.
+    // Skip the run of spaces first, then the word: the caret lands where the
+    // word starts rather than on the space in front of it.
     fn word_start(&self) -> usize {
         let head = &self.text[..self.cursor];
         let trimmed = head.trim_end_matches(char::is_whitespace);
@@ -367,14 +367,14 @@ fn floor_boundary(s: &str, mut i: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{Editor, Paint};
-    /// A painter the view tests share: colourless, so the rows they assert
-    /// on carry no escape sequences.
+    // A painter the view tests share: colourless, so the rows they assert
+    // on carry no escape sequences.
     fn paint() -> Paint {
         Paint::new(false)
     }
 
-    /// An editor with the two painted sigils a real Ui would set, so view
-    /// tests see the prompt a user would.
+    // An editor with the two painted sigils a real Ui would set, so view
+    // tests see the prompt a user would.
     fn typed(s: &str) -> Editor {
         let mut e = Editor::default();
         e.set_prompts("› ".into(), "! ".into());

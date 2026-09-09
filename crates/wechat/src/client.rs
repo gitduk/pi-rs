@@ -206,8 +206,8 @@ impl Client {
         Ok(serde_json::from_str(&raw)?)
     }
 
-    /// The shared send path: headers, timeout, and the non-2xx / non-zero
-    /// `ret` verdicts. Everything the reference's `apiPostFetch` does.
+    // The shared send path: headers, timeout, and the non-2xx / non-zero
+    // `ret` verdicts. Everything the reference's `apiPostFetch` does.
     async fn call(
         &self,
         mut req: RequestBuilder,
@@ -251,15 +251,15 @@ fn base_info() -> Value {
     })
 }
 
-/// A fresh random uint32, as its decimal string, base64 — one per request,
-/// which is the replay protection the server expects.
+// A fresh random uint32, as its decimal string, base64 — one per request,
+// which is the replay protection the server expects.
 fn wechat_uin() -> String {
     let n = rand::random::<u32>().to_string();
     STANDARD.encode(n.as_bytes())
 }
 
-/// The fixed request headers, mirroring the reference client: the two app
-/// headers on every request; the auth trio on POSTs once a token exists.
+// The fixed request headers, mirroring the reference client: the two app
+// headers on every request; the auth trio on POSTs once a token exists.
 fn headers(token: Option<&str>) -> HeaderMap {
     let mut h = HeaderMap::new();
     h.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -285,7 +285,7 @@ fn headers(token: Option<&str>) -> HeaderMap {
     h
 }
 
-/// Parse one `get_qrcode_status` body into a `QrStatus`.
+// Parse one `get_qrcode_status` body into a `QrStatus`.
 fn parse_status(v: Value) -> Result<QrStatus> {
     let status = v["status"].as_str().unwrap_or("wait");
     let q = |name: &str| v[name].as_str().map(str::to_string);
@@ -312,8 +312,8 @@ fn parse_status(v: Value) -> Result<QrStatus> {
     })
 }
 
-/// A client id the server accepts for tracing; shape mirrors the reference
-/// (`prefix:timestamp-hex`).
+// A client id the server accepts for tracing; shape mirrors the reference
+// (`prefix:timestamp-hex`).
 fn client_id() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

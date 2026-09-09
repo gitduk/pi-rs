@@ -15,12 +15,12 @@ const OUTLINE_OVER: usize = 300;
 #[derive(Deserialize)]
 struct Args {
     path: String,
-    /// 1-based first line to return.
+    // 1-based first line to return.
     #[serde(default)]
     offset: Option<usize>,
     #[serde(default)]
     limit: Option<usize>,
-    /// Force the skeleton on, or off for a file long enough to trigger it.
+    // Force the skeleton on, or off for a file long enough to trigger it.
     #[serde(default)]
     outline: Option<bool>,
 }
@@ -29,42 +29,42 @@ fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_SNIFF).any(|b| *b == 0)
 }
 
-/// A numbered view, held as rows until the transcript's budget is spent on it.
-///
-/// The rows stay apart from the text they will become for two reasons that are
-/// really one: the budget is then spent in whole rows, so no row is cut through
-/// the middle and left carrying a line number it no longer holds; and the line
-/// naming what survived is read off the same decision that built the body.
-/// Naming it from what the caller *meant* to send is how it came to name rows
-/// the model was never shown.
+// A numbered view, held as rows until the transcript's budget is spent on it.
+//
+// The rows stay apart from the text they will become for two reasons that are
+// really one: the budget is then spent in whole rows, so no row is cut through
+// the middle and left carrying a line number it no longer holds; and the line
+// naming what survived is read off the same decision that built the body.
+// Naming it from what the caller *meant* to send is how it came to name rows
+// the model was never shown.
 struct View {
-    /// The `[path#TAG]` line the model anchors a patch to.
+    // The `[path#TAG]` line the model anchors a patch to.
     head: String,
-    /// Each row as it prints — newline and all — beside the file line it holds.
+    // Each row as it prints — newline and all — beside the file line it holds.
     rows: Vec<(usize, String)>,
-    /// What follows the rows: how much of the file is still unread.
+    // What follows the rows: how much of the file is still unread.
     note: String,
     kind: Kind,
 }
 
-/// What the view is, which is what decides how it names itself. One field, not
-/// a `whole` flag beside an `outline` option: a skeleton is never a run of
-/// lines, and two flags can say it is.
+// What the view is, which is what decides how it names itself. One field, not
+// a `whole` flag beside an `outline` option: a skeleton is never a run of
+// lines, and two flags can say it is.
 enum Kind {
-    /// A run of file lines; `whole` when they reached both ends of the file.
+    // A run of file lines; `whole` when they reached both ends of the file.
     Lines { whole: bool },
-    /// A skeleton, and the length of the file it skips through.
+    // A skeleton, and the length of the file it skips through.
     Outline { lines: usize },
 }
 
-/// The rows a view keeps at each end when all of them will not fit. `None` when
-/// they do — the one value both the body and its name are read from.
+// The rows a view keeps at each end when all of them will not fit. `None` when
+// they do — the one value both the body and its name are read from.
 type Cut = Option<(usize, usize)>;
 
 impl View {
-    /// The view as the model reads it: every row, or the ends of them with
-    /// `cut`'s middle elided. One assembly, so the spill copy and the
-    /// transcript copy cannot come to disagree about anything but the middle.
+    // The view as the model reads it: every row, or the ends of them with
+    // `cut`'s middle elided. One assembly, so the spill copy and the
+    // transcript copy cannot come to disagree about anything but the middle.
     fn text(&self, cut: Cut) -> String {
         let total: usize = self.rows.iter().map(|(_, r)| r.len()).sum();
         let mut out = String::with_capacity(self.head.len() + 1 + total + self.note.len());
@@ -102,7 +102,7 @@ impl View {
         Some((head, tail.min(self.rows.len() - head)))
     }
 
-    /// The one line a person sees, named from the rows the body actually holds.
+    // The one line a person sees, named from the rows the body actually holds.
     fn shown(&self, rel: &str, cut: Cut) -> String {
         if let Kind::Outline { lines } = self.kind {
             let dropped = cut.map_or(String::new(), |(h, t)| {

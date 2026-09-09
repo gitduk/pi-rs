@@ -7,13 +7,13 @@ use std::path::Path;
 /// right: tree-sitter-rust tags its own doc comments, and knows that `////` is
 /// not one — a check on the `///` prefix does not.
 pub(crate) enum Mark {
-    /// Any node of this kind: an attribute, a decorator.
+    // Any node of this kind: an attribute, a decorator.
     Kind(&'static str),
-    /// A comment the grammar itself marks as documentation *of what follows*.
-    /// Rust's `//!` and `/*!` document the enclosing module instead, and are
-    /// the same node kind carrying the same `doc` field.
+    // A comment the grammar itself marks as documentation *of what follows*.
+    // Rust's `//!` and `/*!` document the enclosing module instead, and are
+    // the same node kind carrying the same `doc` field.
     Outer(&'static str),
-    /// A comment whose opener says so, where the grammar draws no line.
+    // A comment whose opener says so, where the grammar draws no line.
     Opener(&'static str, &'static str),
 }
 

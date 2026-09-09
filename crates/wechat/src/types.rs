@@ -50,21 +50,21 @@ pub struct Credentials {
 /// The result of one `get_qrcode_status` long-poll.
 #[derive(Debug, Clone)]
 pub enum QrStatus {
-    /// Nothing happened (including a client-side 35s timeout): keep polling.
+    // Nothing happened (including a client-side 35s timeout): keep polling.
     Wait,
-    /// Scanned; WeChat is still waiting for the user to confirm.
+    // Scanned; WeChat is still waiting for the user to confirm.
     Scanned,
-    /// The phone shows a verification code that has to be typed in.
+    // The phone shows a verification code that has to be typed in.
     NeedVerifyCode,
-    /// The code was wrong too many times; a fresh QR is needed.
+    // The code was wrong too many times; a fresh QR is needed.
     VerifyCodeBlocked,
-    /// The QR has expired; a fresh one is needed.
+    // The QR has expired; a fresh one is needed.
     Expired,
-    /// This bot is already bound to another client; no new login possible.
+    // This bot is already bound to another client; no new login possible.
     BindedRedirect,
-    /// The session is being redirected to another host; resume polling there.
+    // The session is being redirected to another host; resume polling there.
     Redirect { host: String },
-    /// Login confirmed.
+    // Login confirmed.
     Confirmed(Credentials),
 }
 

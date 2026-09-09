@@ -11,11 +11,11 @@ use brain::transport::Transport;
 
 pub const PROMPT: &str = include_str!("../prompts/remember.md");
 
-/// Enough for a handful of one-line notes and not enough for prose.
+// Enough for a handful of one-line notes and not enough for prose.
 const MAX_TOKENS: u32 = 600;
 
-/// More than the prompt asks for, so a model that overruns is trimmed rather
-/// than thrown away whole.
+// More than the prompt asks for, so a model that overruns is trimmed rather
+// than thrown away whole.
 const MAX_NOTES: usize = 8;
 
 /// One thing worth keeping, and what the model thought it was worth.
@@ -29,12 +29,12 @@ pub struct Kept {
 /// Where kept notes go. What file that is, and how it ages, belongs to
 /// whoever built the agent — this crate knows nothing of `~/.pi`.
 pub trait Shelf: Send + Sync {
-    /// What is already kept, rendered as the model should read it. Sent with
-    /// the request so the same fact is not written down twice in new words.
+    // What is already kept, rendered as the model should read it. Sent with
+    // the request so the same fact is not written down twice in new words.
     fn read(&self) -> Option<String>;
 
-    /// Put these on the shelf. Failing is not fatal: losing a note costs a
-    /// fact, failing the compaction costs the run.
+    // Put these on the shelf. Failing is not fatal: losing a note costs a
+    // fact, failing the compaction costs the run.
     fn keep(&self, notes: Vec<Kept>);
 }
 
@@ -124,8 +124,8 @@ mod tests {
         );
     }
 
-    /// A model that wrote prose has said something other than a note, and
-    /// prose on the shelf is read next month as a fact.
+    // A model that wrote prose has said something other than a note, and
+    // prose on the shelf is read next month as a fact.
     #[test]
     fn anything_that_is_not_a_note_is_not_kept() {
         let answer = "Here is what I found worth keeping:\n\
@@ -138,8 +138,8 @@ mod tests {
         assert_eq!(parse(answer), vec![kept("--tools was deleted", 2)]);
     }
 
-    /// The prompt forbids bullets, so a model that adds them has not written a
-    /// different thing — only a decorated one.
+    // The prompt forbids bullets, so a model that adds them has not written a
+    // different thing — only a decorated one.
     #[test]
     fn a_bulleted_note_is_still_a_note() {
         assert_eq!(
