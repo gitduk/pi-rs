@@ -143,8 +143,12 @@ fn default_escape_ms() -> u64 {
     250
 }
 fn default_loop_max_turns() -> Option<usize> {
-    Some(10)
+    Some(DEFAULT_LOOP_MAX_TURNS)
 }
+
+/// The ceiling an unset `loop_max_turns` reads as: the floor for a loop that
+/// keeps changing files without ever repeating itself.
+const DEFAULT_LOOP_MAX_TURNS: usize = 10;
 
 impl Default for Vim {
     fn default() -> Self {
@@ -185,11 +189,11 @@ impl Config {
             .collect();
         crate::keys::Keys::resolve(&overrides)
     }
-    /// How many rounds a `/loop` may run before it stops on its own. The
-    /// field is `Option` for serde, but the default of 10 means an unset
-    /// config reads the same as one that says `loop_max_turns = 10`.
+    /// The ceiling an unset `loop_max_turns` reads as — see the field. An
+    /// `Option` here mirrors the field, so `None` and the config staying
+    /// silent mean the same thing to callers.
     pub fn loop_cap(&self) -> Option<usize> {
-        self.loop_max_turns.or(Some(10))
+        self.loop_max_turns.or(Some(DEFAULT_LOOP_MAX_TURNS))
     }
 }
 

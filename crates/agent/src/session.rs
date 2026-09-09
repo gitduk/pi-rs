@@ -399,9 +399,10 @@ impl Session {
             shown: None,
         }))
     }
-    /// Machine prose in the user's voice — the loop's round number, the shelf.
-    /// Read by the model as if the user said it, which is why anything pushed
-    /// here must survive being read that way. Shown on screen as a notice.
+    /// Machine prose in the user's voice — the loop's round number, a stopped
+    /// run's cause. Read by the model as if the user said it, which is why
+    /// anything pushed here must survive being read that way. Shown on screen
+    /// as a notice.
     pub fn push_note(&mut self, text: impl Into<String>) -> EntryId {
         let text = text.into();
         self.push_user(UserBody::Note(UserText { text, shown: None }))

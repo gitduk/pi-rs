@@ -83,12 +83,22 @@ const THIN_CHANGES: usize = 5;
 /// Consecutive thin rounds that end the loop.
 const THIN_ROUNDS: usize = 2;
 
-/// The written tree, as bytes per path.
-type TreeState = std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>;
+/// One written path as the loop last saw it: the bytes, and the stat that
+/// says whether they can be trusted next round without reading them again.
+struct TreeFile {
+    bytes: Vec<u8>,
+    len: u64,
+    mtime: Option<std::time::SystemTime>,
+}
+
+/// The written tree, one entry per path.
+type TreeState = std::collections::BTreeMap<std::path::PathBuf, TreeFile>;
 
 /// The tree as the loop measures it: a content fingerprint over every written
-/// path, plus the bytes themselves to diff the next round against.
-fn tree_mark(ctx: &Ctx) -> (String, TreeState) {
+/// path, plus the bytes to diff the next round against. A path whose stat is
+/// unchanged since `prev` keeps its cached bytes — reading every file again
+/// every round is work the diff will throw away.
+fn tree_mark(ctx: &Ctx, prev: &TreeState) -> (String, TreeState) {
     let mut h = 0xcbf2_9ce4_8422_2325u64;
     let mut tree = TreeState::new();
     for path in ctx.writes() {
@@ -99,14 +109,24 @@ fn tree_mark(ctx: &Ctx) -> (String, TreeState) {
         }
         h ^= 0xff;
         h = h.wrapping_mul(0x100_0000_01b3);
+        let meta = std::fs::metadata(&path).ok();
+        let len = meta.as_ref().map_or(0, std::fs::Metadata::len);
+        let mtime = meta.as_ref().and_then(|m| m.modified().ok());
+        let fresh = prev
+            .get(&path)
+            .is_some_and(|f| f.len == len && f.mtime == mtime);
         // A written path that vanished reads as empty: the removal still
         // changes the tree, and the next round sees it as deleted.
-        let bytes = std::fs::read(&path).unwrap_or_default();
+        let bytes = if fresh {
+            prev[&path].bytes.clone()
+        } else {
+            std::fs::read(&path).unwrap_or_default()
+        };
         for b in &bytes {
             h ^= *b as u64;
             h = h.wrapping_mul(0x100_0000_01b3);
         }
-        tree.insert(path, bytes);
+        tree.insert(path, TreeFile { bytes, len, mtime });
     }
     (format!("{h:016x}"), tree)
 }
@@ -125,7 +145,12 @@ fn count_changes(prev: &[u8], now: &[u8]) -> usize {
         return n + m;
     }
     if n.saturating_mul(m) > 250_000 {
-        return n.abs_diff(m);
+        // Past the LCS budget: every positionally equal line is one kept, and
+        // every remaining line of either side is one remove or add. The count
+        // is an upper bound on the edit distance — a same-sized rewrite is
+        // never reported as zero change, and a true no-op is still zero.
+        let kept = a.iter().zip(&b).filter(|(x, y)| x == y).count();
+        return (n + m) - 2 * kept;
     }
     // Longest common subsequence, two rolling rows: a kept line is one fewer
     // edit, every other line is either added or removed.
@@ -292,7 +317,7 @@ impl Lane {
 
     /// Put this lane under a loop, marked from where the tree stands now.
     pub fn loop_start(&mut self, goal: String) {
-        let (seen, prev) = tree_mark(&self.ctx);
+        let (seen, prev) = tree_mark(&self.ctx, &TreeState::new());
         self.looping = Some(Looping {
             goal,
             round: 0,
@@ -324,13 +349,22 @@ impl Lane {
         if !finished {
             return Some(Round::Cut);
         }
-        let (fingerprint, now) = tree_mark(&self.ctx);
+        let (fingerprint, now) = tree_mark(&self.ctx, &looping.prev);
         let mut change = 0usize;
-        for path in now.keys().chain(looping.prev.keys()) {
-            let a = looping.prev.get(path);
-            let b = now.get(path);
+        // One iterator, not two chained: a path present in both maps would
+        // be visited twice and its diff counted twice.
+        for path in now.keys() {
+            let a = looping.prev.get(path).map(|f| f.bytes.as_slice());
+            let b = now.get(path).map(|f| f.bytes.as_slice());
             if a != b {
-                change += count_changes(a.map_or(&[][..], |v| v), b.map_or(&[][..], |v| v));
+                change += count_changes(a.unwrap_or_default(), b.unwrap_or_default());
+            }
+        }
+        // A path that was in the tree and is gone now — deleted, or no longer
+        // recorded as written — counts as its full removal.
+        for path in looping.prev.keys() {
+            if !now.contains_key(path) {
+                change += count_changes(&looping.prev[path].bytes, b"");
             }
         }
         looping.changed += change;

@@ -5524,8 +5524,8 @@ mod tests {
         ));
     }
 
-    /// Esc is the only brake when `loop_max_turns` is unset, so it has to stop
-    /// the loop and not merely the round it caught.
+    /// Esc stops the loop and not merely the round it caught: a cut round is
+    /// the loop ending, not a pause before the next one.
     #[test]
     fn a_cut_round_takes_the_loop_with_it() {
         let (_dir, mut lane) = a_running_lane();
@@ -5550,7 +5550,8 @@ mod tests {
         ));
         assert!(lane.looping.is_none());
 
-        // Unset, the same round goes on: the ceiling is a config, not a default.
+        // The lane primitive itself has no ceiling at `None` — the config's
+        // default is layered above it, at `Config::loop_cap`.
         lane.loop_start("go".into());
         lane.loop_running();
         wrote(&mut lane, "b.rs", "fn b() {}\n");

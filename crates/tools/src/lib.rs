@@ -358,15 +358,12 @@ pub type FileLocks =
 
 pub type FileLock = std::sync::Arc<tokio::sync::Mutex<()>>;
 
-/// What a run has changed: which files, and how many times over.
-///
-/// Two questions, and a set answers only the first. "Did anything happen just
-/// now" is asked of a run that has been writing all along, and the second
-/// change to a file already in the set has to be visible to it.
+/// What a run has changed: the distinct paths. A set answers "did anything
+/// happen just now" — the loop that used to count writes now hashes the tree,
+/// so there is no second question to answer here.
 #[derive(Default)]
 struct Written {
     paths: std::collections::BTreeSet<std::path::PathBuf>,
-    made: u64,
 }
 
 pub type FileShifts =
@@ -458,15 +455,6 @@ impl Ctx {
     pub fn note_write(&self, path: &std::path::Path) {
         let mut written = self.writes.lock().expect("writes poisoned");
         written.paths.insert(path.to_path_buf());
-        written.made += 1;
-    }
-
-    /// How many writes this run has made, a file written twice counting twice.
-    ///
-    /// Not `writes().len()`, which counts distinct paths: a run that keeps
-    /// working the same file would look to that like a run that had stopped.
-    pub fn writes_made(&self) -> u64 {
-        self.writes.lock().expect("writes poisoned").made
     }
 
     /// Every path this run has written, in sorted order.
