@@ -55,6 +55,15 @@ fn checked(dir: &Path, args: &[&str]) -> Result<String> {
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
+/// Whether the branch `name` exists in the repository `dir` belongs to.
+fn branch_exists(dir: &Path, name: &str) -> Result<bool> {
+    Ok(git(
+        dir,
+        &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{name}")],
+    )?
+    .status
+    .success())
+}
 
 /// Every checkout of the repository `dir` belongs to, the main one first.
 ///
@@ -201,17 +210,7 @@ pub fn enter(dir: &Path, name: &str) -> Result<(Tree, Entered)> {
 
     // An existing branch is checked out rather than re-created: `-b` on one
     // that exists fails, and asking twice means the same feature both times.
-    let known = git(
-        dir,
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("refs/heads/{name}"),
-        ],
-    )?
-    .status
-    .success();
+    let known = branch_exists(dir, name)?;
     let target = path.to_string_lossy().into_owned();
     let added = if known {
         git(dir, &["worktree", "add", &target, name])?
@@ -240,6 +239,73 @@ pub fn enter(dir: &Path, name: &str) -> Result<(Tree, Entered)> {
         Entered::Created
     };
     Ok((found, how))
+}
+/// What removing a checkout took, for the caller's receipt.
+#[derive(Debug)]
+pub struct Removed {
+    /// Where the checkout was, so the caller can sweep what was recorded
+    /// under it.
+    pub path: PathBuf,
+    /// The branch deleted with it, None when the checkout was detached or the
+    /// branch was already gone.
+    pub branch: Option<String>,
+    /// A step that came up short, for the receipt — a branch the deletion
+    /// left behind and why.
+    pub note: Option<String>,
+}
+
+/// Remove the checkout `name` refers to, and the branch it is on.
+///
+/// The directory goes first, then the branch: git will not delete a branch
+/// another checkout holds, and until the remove this checkout is that
+/// checkout. Git also refuses a checkout with changes in it unless forced,
+/// and that refusal is passed on unchanged — forcing would throw work away.
+pub fn remove(dir: &Path, name: &str) -> Result<Removed> {
+    let name = vetted(name)?;
+    let trees = list(dir)?;
+    // The main checkout answers to its directory name, and a linked tree may
+    // share it; removal means one under `.worktrees`, so that one wins.
+    let Some(at) = trees
+        .iter()
+        .position(|t| !t.main && t.name == name)
+        .or_else(|| trees.iter().position(|t| t.name == name))
+    else {
+        bail!("`{name}` is not one of this repository's worktrees");
+    };
+    let tree = &trees[at];
+    if tree.main {
+        bail!("`{name}` is the main checkout — it cannot be removed");
+    }
+    // From inside the checkout this session is in, removal would leave a live
+    // run standing in a directory that just went.
+    if let Some(here) = holding(&trees, dir)
+        && here.path == tree.path
+    {
+        bail!("`{name}` is where this session is — /worktree out of it first");
+    }
+    // Git answers from the repository, not from whichever checkout asked.
+    let root = trees[0].path.clone();
+    let target = tree.path.to_string_lossy().into_owned();
+    let removed = git(&root, &["worktree", "remove", &target])?;
+    if !removed.status.success() {
+        bail!("{}", stderr_of(&removed));
+    }
+    // With the checkout gone the branch it held is free — unless it was
+    // deleted behind git's back, which leaves nothing to delete.
+    let mut branch = None;
+    let mut note = None;
+    if let Some(on) = &tree.branch {
+        let dropped = git(&root, &["branch", "-D", on])?;
+        if dropped.status.success() {
+            branch = Some(on.clone());
+        } else {
+            let why = stderr_of(&dropped);
+            if !why.contains("not found") {
+                note = Some(format!("branch {on} was left — {why}"));
+            }
+        }
+    }
+    Ok(Removed { path: tree.path.clone(), branch, note })
 }
 
 #[cfg(test)]
@@ -404,5 +470,107 @@ mod tests {
         std::fs::create_dir_all(&squatting).unwrap();
         let err = enter(dir.path(), "taken").unwrap_err().to_string();
         assert!(err.contains("not a registered worktree"), "{err}");
+    }
+
+    #[test]
+    fn remove_deletes_the_checkout_and_the_branch_it_was_on() {
+        let dir = repo();
+        let (tree, _) = enter(dir.path(), "one").unwrap();
+        assert!(tree.path.is_dir());
+        assert!(branch_exists(dir.path(), "one").unwrap());
+
+        let removed = remove(dir.path(), "one").unwrap();
+        assert!(!removed.path.exists());
+        assert_eq!(removed.branch.as_deref(), Some("one"));
+        assert!(!branch_exists(dir.path(), "one").unwrap());
+        // The main checkout is the only one left.
+        let trees = list(dir.path()).unwrap();
+        assert_eq!(trees.len(), 1);
+        assert!(trees[0].main);
+    }
+
+    #[test]
+    fn remove_a_nested_name_takes_that_checkout_only() {
+        let dir = repo();
+        enter(dir.path(), "feat/one").unwrap();
+        enter(dir.path(), "keep").unwrap();
+        let removed = remove(dir.path(), "feat/one").unwrap();
+        assert_eq!(removed.path, dir.path().join(DIR).join("feat/one"));
+        assert!(!removed.path.exists());
+        let trees = list(dir.path()).unwrap();
+        assert_eq!(trees.len(), 2, "the main checkout and the survivor");
+        assert!(trees.iter().any(|t| t.name == "keep"));
+        assert!(!trees.iter().any(|t| t.name == "feat/one"));
+    }
+
+    #[test]
+    fn a_checkout_with_changes_is_left_alone_with_gits_reason() {
+        let dir = repo();
+        let (tree, _) = enter(dir.path(), "one").unwrap();
+        std::fs::write(tree.path.join("dirty.txt"), "uncommitted").unwrap();
+        let err = remove(dir.path(), "one").unwrap_err().to_string();
+        assert!(err.contains("modified or untracked files"), "{err}");
+        assert!(tree.path.is_dir());
+        assert!(branch_exists(dir.path(), "one").unwrap(), "the branch stays with the tree");
+    }
+
+    #[test]
+    fn the_main_checkout_and_the_one_this_session_is_in_are_refused() {
+        let dir = repo();
+        let main = dir.path().file_name().unwrap().to_string_lossy().to_string();
+        let err = remove(dir.path(), &main).unwrap_err().to_string();
+        assert!(err.contains("main checkout"), "{err}");
+
+        let (inside, _) = enter(dir.path(), "one").unwrap();
+        let err = remove(&inside.path, "one").unwrap_err().to_string();
+        assert!(err.contains("where this session is"), "{err}");
+        assert!(inside.path.is_dir());
+        // From the main checkout the same tree is removable again.
+        remove(dir.path(), "one").unwrap();
+    }
+
+    #[test]
+    fn a_detached_checkout_goes_without_a_branch() {
+        let dir = repo();
+        let target = dir.path().join(DIR).join("det");
+        checked(dir.path(), &["worktree", "add", "--detach", &target.to_string_lossy()]).unwrap();
+        let removed = remove(dir.path(), "det").unwrap();
+        assert_eq!(removed.branch, None);
+        assert!(!removed.path.exists());
+        // Removing it frees the name for a fresh worktree.
+        let (reborn, how) = enter(dir.path(), "det").unwrap();
+        assert!(matches!(how, Entered::Created));
+        assert_eq!(reborn.branch.as_deref(), Some("det"));
+    }
+
+    #[test]
+    fn a_name_that_is_not_a_worktree_is_refused_with_an_offer_to_list() {
+        let dir = repo();
+        let err = remove(dir.path(), "nope").unwrap_err().to_string();
+        assert!(err.contains("`nope` is not one of this repository's worktrees"), "{err}");
+        // An invalid name is refused the same way entering refuses it.
+        assert!(remove(dir.path(), "../escape").is_err());
+    }
+
+    #[test]
+    fn a_linked_tree_sharing_the_repos_name_wins_over_the_main_checkout() {
+        // The main checkout answers to its directory name, so a linked tree
+        // that chose the same word must still be removable by it.
+        let dir = repo();
+        let main = dir.path().file_name().unwrap().to_string_lossy().to_string();
+        let target = dir.path().join(DIR).join(&main);
+        checked(
+            dir.path(),
+            &["worktree", "add", "-b", "twin", &target.to_string_lossy()],
+        )
+        .unwrap();
+
+        let removed = remove(dir.path(), &main).unwrap();
+        assert_eq!(removed.path, target);
+        assert!(!removed.path.exists());
+        assert!(!branch_exists(dir.path(), "twin").unwrap());
+        let trees = list(dir.path()).unwrap();
+        assert_eq!(trees.len(), 1);
+        assert!(trees[0].main, "the main checkout survives");
     }
 }

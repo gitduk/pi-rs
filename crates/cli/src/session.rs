@@ -155,6 +155,28 @@ pub fn new_id() -> String {
     format!("{}-{}-{nth}", now(), std::process::id())
 }
 
+/// The transcripts one bucket holds, one per session in that workspace.
+fn bucket_transcripts(bucket: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(bucket) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|e| e.path().join("session.json"))
+        .filter(|p| p.is_file())
+        .collect()
+}
+
+/// Which workspace a bucket belongs to, read off its first transcript: the
+/// bucket name is a lossy encoding of the path and would guess wrong.
+fn workspace_of(transcripts: &[PathBuf]) -> Option<String> {
+    transcripts.iter().find_map(|p| {
+        let text = std::fs::read_to_string(p).ok()?;
+        let belongs: Belongs = serde_json::from_str(&text).ok()?;
+        Some(belongs.workspace)
+    })
+}
+
 impl Store {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
@@ -194,6 +216,23 @@ impl Store {
     /// The tree every bucket sits in, for the sweeps that walk all of them.
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Every bucket under the store root, each with its transcripts. The
+    /// sweep and the removal walk the same tree; they differ in what they do
+    /// with each bucket, not in how they find one.
+    fn buckets(&self) -> Vec<(PathBuf, Vec<PathBuf>)> {
+        let Ok(dirs) = std::fs::read_dir(&self.root) else {
+            return Vec::new();
+        };
+        dirs.flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .map(|bucket| {
+                let transcripts = bucket_transcripts(&bucket);
+                (bucket, transcripts)
+            })
+            .collect()
     }
 
     /// Where one session's transcript is, written or not yet. `/status` names
@@ -341,23 +380,8 @@ impl Store {
     /// The same, against a stated age rather than the constant — a test that
     /// waits a month is not a test.
     fn prune_older_than(&self, keep: std::time::Duration) {
-        let Ok(dirs) = std::fs::read_dir(&self.root) else {
-            return;
-        };
         let now = std::time::SystemTime::now();
-        for dir in dirs.flatten() {
-            let bucket = dir.path();
-            if !bucket.is_dir() {
-                continue;
-            }
-            let transcripts: Vec<PathBuf> = match std::fs::read_dir(&bucket) {
-                Ok(entries) => entries
-                    .flatten()
-                    .map(|e| e.path().join("session.json"))
-                    .filter(|p| p.is_file())
-                    .collect(),
-                Err(_) => continue,
-            };
+        for (bucket, transcripts) in self.buckets() {
             // Nothing here says which tree this bucket belongs to, so nothing
             // here can say it is gone. `remove_dir` takes the bucket only if it
             // is genuinely empty: one holding recall and no transcripts is
@@ -378,15 +402,60 @@ impl Store {
             }
             // One transcript answers for the bucket: they are grouped by the
             // very path being asked about.
-            let gone = transcripts.iter().find_map(|p| {
-                let text = std::fs::read_to_string(p).ok()?;
-                let belongs: Belongs = serde_json::from_str(&text).ok()?;
-                Some(!Path::new(&belongs.workspace).is_dir())
-            });
-            if gone == Some(true) {
+            if workspace_of(&transcripts).is_some_and(|w| !Path::new(&w).is_dir()) {
                 let _ = std::fs::remove_dir_all(&bucket);
             }
         }
+    }
+    /// Remove the records recorded under `root` — a checkout being removed
+    /// takes its transcripts and journals with it now, rather than after the
+    /// sweep's month of grace. Returns how many transcripts went, so the
+    /// removal can say what it did.
+    ///
+    /// One session at a time rather than whole buckets: bucket names are a
+    /// lossy encoding of the path (`key_of` folds a `/` and a `-` alike), so
+    /// two trees can share one — deleting the bucket would take a live
+    /// sibling tree's records with it. A bucket goes whole only when every
+    /// transcript in it was recorded under `root`.
+    pub fn drop_under(&self, root: &Path) -> usize {
+        let mut dropped = 0;
+        for (bucket, transcripts) in self.buckets() {
+            // Each transcript names the workspace it was saved under; split
+            // the bucket's sessions into ours and someone else's.
+            let mut owed: Vec<&Path> = Vec::new();
+            let mut shared = false;
+            for transcript in &transcripts {
+                let Ok(text) = std::fs::read_to_string(transcript) else {
+                    continue;
+                };
+                let Ok(belongs) = serde_json::from_str::<Belongs>(&text) else {
+                    continue;
+                };
+                if Path::new(&belongs.workspace).starts_with(root) {
+                    owed.push(transcript.parent().expect("a transcript has a session dir"));
+                } else {
+                    shared = true;
+                }
+            }
+            if owed.is_empty() {
+                continue;
+            }
+            if shared {
+                // The bucket holds another tree's sessions too, and its
+                // memory and recall cannot be told apart; only ours go.
+                for session_dir in owed {
+                    if std::fs::remove_dir_all(session_dir).is_ok() {
+                        dropped += 1;
+                    }
+                }
+            } else {
+                // Every session here belongs to `root`: the whole bucket —
+                // recall beside the transcripts — goes.
+                dropped += transcripts.len();
+                let _ = std::fs::remove_dir_all(&bucket);
+            }
+        }
+        dropped
     }
 
     /// Every session `/resume` can name for this workspace, newest first,
@@ -496,6 +565,50 @@ mod tests {
             store.load("gone").is_err(),
             "nothing can reach a bucket whose tree went"
         );
+    }
+    /// `/worktree rm` drops a tree's buckets outright — transcripts, journals
+    /// and recall — where the sweep only waits out the month of grace. A run
+    /// started in a subdirectory of the tree belongs to it too, and a sibling
+    /// tree's records must survive.
+    #[test]
+    fn drop_under_removes_the_buckets_of_one_checkout_and_no_others() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::new(tmp.path().join("store"));
+        let home = tempfile::tempdir().unwrap();
+        let log = log_with(vec![Message::user("hi")]);
+        let save = |id: &str, at: &std::path::Path| {
+            store.save(id, at, "test-model", None, 7, &log).unwrap();
+        };
+        let tree = home.path().join(".worktrees").join("feature-one");
+        let deep = tree.join("crates/cli");
+        let sibling = home.path().join(".worktrees").join("feature-two");
+        save("in-tree", &tree);
+        save("in-deep", &deep);
+        save("in-sibling", &sibling);
+
+        assert_eq!(store.drop_under(&tree), 2);
+        assert!(store.load("in-tree").is_err());
+        assert!(store.load("in-deep").is_err());
+        assert!(store.load("in-sibling").is_ok());
+    }
+    /// Two trees whose names fold to the same bucket key (`feature-x` and
+    /// `feature/x`) share one directory on disk; removing one must leave the
+    /// other's sessions alone.
+    #[test]
+    fn drop_under_spares_a_sibling_that_shares_a_bucket_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::new(tmp.path().join("store"));
+        let home = tempfile::tempdir().unwrap();
+        let log = log_with(vec![Message::user("hi")]);
+        let tree = home.path().join(".worktrees").join("feature-x");
+        let sibling = home.path().join(".worktrees").join("feature/x");
+        store.save("mine", &tree, "test-model", None, 7, &log).unwrap();
+        store.save("theirs", &sibling, "test-model", None, 7, &log).unwrap();
+        assert_eq!(tools::state::key_of(&tree), tools::state::key_of(&sibling));
+
+        assert_eq!(store.drop_under(&tree), 1);
+        assert!(store.load("mine").is_err());
+        assert!(store.load("theirs").is_ok());
     }
 
     #[test]

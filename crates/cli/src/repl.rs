@@ -68,7 +68,7 @@ const BUILTIN: &[Command] = &[
     Command::builtin(
         "/worktree",
         "[name]",
-        "list this repository's worktrees, or work in one",
+        "list this repository's worktrees, or work in one — rm removes one",
     ),
     Command::builtin(
         "/name",
@@ -225,6 +225,21 @@ pub struct Candidate {
     pub more: bool,
 }
 
+/// A worktree name completed against `prefix`; the whole line an accept makes
+/// is `head` plus the name, which is what tells entering from removing.
+fn worktree_candidates(trees: &[Choice], head: &str, prefix: &str) -> Vec<Candidate> {
+    trees
+        .iter()
+        .filter(|w| w.name.starts_with(prefix) && w.name != prefix)
+        .map(|w| Candidate {
+            show: w.name.clone(),
+            line: format!("{head}{}", w.name),
+            help: w.note.clone(),
+            more: false,
+        })
+        .collect()
+}
+
 /// What the line could still become: a command while its word is being typed,
 /// then that command's own argument once the word is settled.
 ///
@@ -274,19 +289,17 @@ pub fn complete(
                 more: false,
             })
             .collect(),
+        // `rm` marks what follows it for removal; a bare `rm` still means the
+        // name of a worktree, so nothing is offered until the space says.
+        "/worktree" if typed == "rm" => Vec::new(),
+        "/worktree" if typed.starts_with("rm ") => {
+            let arg = typed["rm ".len()..].trim_start();
+            worktree_candidates(worktrees, "/worktree rm ", arg)
+        }
         // A name may hold a slash (`feat/one`), so unlike a model it is not
         // settled by the first word — only whitespace after it settles it.
         "/worktree" if typed.contains(char::is_whitespace) => Vec::new(),
-        "/worktree" => worktrees
-            .iter()
-            .filter(|w| w.name.starts_with(typed) && w.name != typed)
-            .map(|w| Candidate {
-                show: w.name.clone(),
-                line: format!("/worktree {}", w.name),
-                help: w.note.clone(),
-                more: false,
-            })
-            .collect(),
+        "/worktree" => worktree_candidates(worktrees, "/worktree ", typed),
         // A session is named by what was asked first, though its id still
         // matches — someone may remember half of it. Accepting puts the id in
         // the line, because that is what `/resume` loads by. A first question
@@ -1323,6 +1336,10 @@ pub enum Step {
     /// The session was replaced — a `/new` or a `/resume` — so the surface
     /// has to rebuild its view from the new one, not just show the lines.
     Swap(Vec<String>),
+    /// The set of worktrees changed under the surface — a removal — so it
+    /// shows the lines and forgets the cached list, which would keep naming
+    /// the checkout that just went.
+    Worktrees(Vec<String>),
     Quit,
 }
 
@@ -1466,7 +1483,15 @@ impl Repl {
                 if name.is_empty() {
                     Step::Handled(self.worktree_listing())
                 } else {
-                    match self.enter_worktree(&name) {
+                    // `rm` + a name removes the tree; a bare `rm` still names
+                    // a tree of its own, so only the two-word form is the verb.
+                    let step = match name.split_once(char::is_whitespace) {
+                        Some(("rm", name)) if !name.trim().is_empty() => {
+                            self.remove_worktree(name.trim())
+                        }
+                        _ => self.enter_worktree(&name),
+                    };
+                    match step {
                         Ok(step) => step,
                         Err(why) => Step::Handled(vec![why]),
                     }
@@ -1679,6 +1704,45 @@ impl Repl {
         said.extend(self.open_lane(ws, (!tree.main).then(|| tree.name.clone()))?);
         Ok(Step::Swap(said))
     }
+    /// `/worktree rm <name>`: remove the checkout `name` refers to — its
+    /// directory, the branch it was on, and every transcript recorded under
+    /// it. Git says no to a checkout with changes in it, and that refusal is
+    /// passed on rather than forced past.
+    fn remove_worktree(&mut self, name: &str) -> Result<Step, String> {
+        let from = self.lane().ctx.workspace.root().to_path_buf();
+        // No other lane of this run may hold the checkout: its transcript
+        // would be dropped out from under a session that still has it, and a
+        // lane cannot be closed while runs route back by index. Refusing is
+        // how git answers a branch another worktree is using.
+        if let Some(target) = crate::worktree::list(&from)
+            .ok()
+            .and_then(|trees| trees.into_iter().find(|t| !t.main && t.name == name))
+        {
+            let held = self
+                .lanes
+                .iter()
+                .enumerate()
+                .any(|(i, lane)| i != self.current && lane.ctx.workspace.root().starts_with(&target.path));
+            if held {
+                return Err(format!(
+                    "`{name}` is open in another lane of this run — /worktree rm wants a checkout nothing here is in"
+                ));
+            }
+        }
+        let removed = crate::worktree::remove(&from, name).map_err(|e| refused("worktree", e))?;
+        let dropped = self.store.drop_under(&removed.path);
+        let mut said = vec![format!("removed {name}"), removed.path.display().to_string()];
+        if let Some(branch) = removed.branch {
+            said.push(format!("branch {branch} deleted"));
+        }
+        if let Some(note) = removed.note {
+            said.push(note);
+        }
+        if dropped > 0 {
+            said.push(format!("{dropped} session record(s) dropped"));
+        }
+        Ok(Step::Worktrees(said))
+    }
 
     /// Open a checkout as a lane of its own, and put it in front.
     ///
@@ -1782,6 +1846,7 @@ impl Repl {
             "/worktree <name> works in one, creating it under {}/ if it is not there",
             crate::worktree::DIR
         ));
+        out.push("/worktree rm <name> removes one — its checkout, sessions and branch".into());
         out
     }
 
@@ -2034,10 +2099,20 @@ mod tests {
         // The branch is what tells two checkouts apart when the names do not.
         let all = complete("/worktree ", &table(), &[], &[], &[], &trees);
         assert_eq!(all.len(), 3);
+        assert_eq!((all[0].show.as_str(), all[0].help.as_str()), ("pi-rs", "master"));
+        // The removal verb completes the same names, prefixed with `rm`.
         assert_eq!(
-            (all[0].show.as_str(), all[0].help.as_str()),
-            ("pi-rs", "master")
+            offered("/worktree rm feat"),
+            ["/worktree rm feature-one", "/worktree rm feat/two"]
         );
+        assert_eq!(offered("/worktree rm featu"), ["/worktree rm feature-one"]);
+        // Nothing to offer until a name follows the verb, or once one is whole.
+        assert!(offered("/worktree rm").is_empty());
+        assert!(offered("/worktree rm feature-one").is_empty());
+        assert_eq!(offered("/worktree rm r"), ["/worktree rm rmx"]);
+        // Entering the tree by its full name is untouched by the verb.
+        assert!(offered("/worktree rmx").is_empty());
+
     }
 
     #[test]
@@ -2050,6 +2125,13 @@ mod tests {
         assert!(matches!(read("/worktree"), Intent::Worktree(name) if name.is_empty()));
         // Not a built-in word: the command table settles what it is.
         assert!(matches!(read("/worktrees"), Intent::Other { .. }));
+        // `rm` + a name still comes through as one argument; a bare `rm` is
+        // the name of a worktree, which is how a tree called rm is reached.
+        assert!(matches!(
+            read("/worktree rm feature-one"),
+            Intent::Worktree(name) if name == "rm feature-one"
+        ));
+        assert!(matches!(read("/worktree rm"), Intent::Worktree(name) if name == "rm"));
     }
 
     #[test]
