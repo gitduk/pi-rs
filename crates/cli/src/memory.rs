@@ -119,10 +119,7 @@ impl Memory {
     /// lock across the whole of it. Every writer goes through here, so runs
     /// that share a repository's shelf — lanes of one session, or processes
     /// on unix — cannot save over each other's read.
-    pub fn update<T>(
-        path: &Path,
-        change: impl FnOnce(&mut Memory) -> T,
-    ) -> anyhow::Result<T> {
+    pub fn update<T>(path: &Path, change: impl FnOnce(&mut Memory) -> T) -> anyhow::Result<T> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
@@ -492,8 +489,11 @@ mod tests {
         for t in threads {
             t.join().unwrap();
         }
-        let notes: Vec<String> =
-            Memory::load(&path).notes.iter().map(|n| n.text.clone()).collect();
+        let notes: Vec<String> = Memory::load(&path)
+            .notes
+            .iter()
+            .map(|n| n.text.clone())
+            .collect();
         assert_eq!(notes.len(), 2, "both notes landed: {notes:?}");
     }
 }

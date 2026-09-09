@@ -604,8 +604,12 @@ mod tests {
         let log = log_with(vec![Message::user("hi")]);
         let tree = home.path().join(".worktrees").join("feature-x");
         let sibling = home.path().join(".worktrees").join("feature/x");
-        store.save("mine", &tree, "test-model", None, 7, &log).unwrap();
-        store.save("theirs", &sibling, "test-model", None, 7, &log).unwrap();
+        store
+            .save("mine", &tree, "test-model", None, 7, &log)
+            .unwrap();
+        store
+            .save("theirs", &sibling, "test-model", None, 7, &log)
+            .unwrap();
         assert_eq!(tools::state::key_of(&tree), tools::state::key_of(&sibling));
 
         assert_eq!(store.drop_under(&tree), 1);

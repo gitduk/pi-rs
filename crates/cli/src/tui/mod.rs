@@ -2465,7 +2465,9 @@ impl Tui {
             .join(", ");
         let is_are = if gone.len() == 1 { "is" } else { "are" };
         let lane_word = if gone.len() == 1 { "lane" } else { "lanes" };
-        self.ui.flash(format!("{names} {is_are} gone from disk — closing the {lane_word}"));
+        self.ui.flash(format!(
+            "{names} {is_are} gone from disk — closing the {lane_word}"
+        ));
         // Already highest first, so earlier indices stay put while they go.
         for (at, _) in gone {
             self.core.lanes.remove(at);
@@ -4776,16 +4778,31 @@ mod tests {
         let mut ui = test_ui(80, 24);
         let trees = ["pi-rs", "fw-rm", "fix-input", "fix-mem"]
             .iter()
-            .map(|n| crate::repl::Choice { name: n.to_string(), note: String::new() })
+            .map(|n| crate::repl::Choice {
+                name: n.to_string(),
+                note: String::new(),
+            })
             .collect();
         ui.lists.worktrees.set(trees).ok();
         // fix-input was created before fix-mem, but the user opened fix-mem
         // first — the bar's order, which a step from fw-rm must follow.
         ui.tabs = vec![
-            super::Tab { mark: super::Mark::Idle, name: "pi-rs".into() },
-            super::Tab { mark: super::Mark::Idle, name: "fw-rm".into() },
-            super::Tab { mark: super::Mark::Front, name: "fix-mem".into() },
-            super::Tab { mark: super::Mark::Idle, name: "fix-input".into() },
+            super::Tab {
+                mark: super::Mark::Idle,
+                name: "pi-rs".into(),
+            },
+            super::Tab {
+                mark: super::Mark::Idle,
+                name: "fw-rm".into(),
+            },
+            super::Tab {
+                mark: super::Mark::Front,
+                name: "fix-mem".into(),
+            },
+            super::Tab {
+                mark: super::Mark::Idle,
+                name: "fix-input".into(),
+            },
         ];
         let (_dir, mut lane) = a_running_lane();
         lane.worktree = Some("fw-rm".into());
@@ -4812,7 +4829,10 @@ mod tests {
         tui.ui
             .lists
             .worktrees
-            .set(vec![crate::repl::Choice { name: "fix-mem".into(), note: String::new() }])
+            .set(vec![crate::repl::Choice {
+                name: "fix-mem".into(),
+                note: String::new(),
+            }])
             .ok();
         let gone = vanished_lane("fix-mem");
         tui.core.lanes.push(gone);
@@ -4821,7 +4841,10 @@ mod tests {
         tui.drop_vanished_lanes();
         assert_eq!(tui.core.lanes.len(), 1);
         assert_eq!(tui.core.current, 0);
-        assert!(tui.ui.lists.worktrees().is_empty(), "the stale ring entry went too");
+        assert!(
+            tui.ui.lists.worktrees().is_empty(),
+            "the stale ring entry went too"
+        );
 
         // A vanished lane before the one in front shifts its index down.
         let mut tui = surface(dir.path());

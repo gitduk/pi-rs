@@ -1727,11 +1727,9 @@ impl Repl {
             .ok()
             .and_then(|trees| trees.into_iter().find(|t| !t.main && t.name == name))
         {
-            let held = self
-                .lanes
-                .iter()
-                .enumerate()
-                .any(|(i, lane)| i != self.current && lane.ctx.workspace.root().starts_with(&target.path));
+            let held = self.lanes.iter().enumerate().any(|(i, lane)| {
+                i != self.current && lane.ctx.workspace.root().starts_with(&target.path)
+            });
             if held {
                 return Err(format!(
                     "`{name}` is open in another lane of this run — /worktree rm wants a checkout nothing here is in"
@@ -1740,7 +1738,10 @@ impl Repl {
         }
         let removed = crate::worktree::remove(&from, name).map_err(|e| refused("worktree", e))?;
         let dropped = self.store.drop_under(&removed.path);
-        let mut said = vec![format!("removed {name}"), removed.path.display().to_string()];
+        let mut said = vec![
+            format!("removed {name}"),
+            removed.path.display().to_string(),
+        ];
         if let Some(branch) = removed.branch {
             said.push(format!("branch {branch} deleted"));
         }
@@ -2108,7 +2109,10 @@ mod tests {
         // The branch is what tells two checkouts apart when the names do not.
         let all = complete("/worktree ", &table(), &[], &[], &[], &trees);
         assert_eq!(all.len(), 3);
-        assert_eq!((all[0].show.as_str(), all[0].help.as_str()), ("pi-rs", "master"));
+        assert_eq!(
+            (all[0].show.as_str(), all[0].help.as_str()),
+            ("pi-rs", "master")
+        );
         // The removal verb completes the same names, prefixed with `rm`.
         assert_eq!(
             offered("/worktree rm feat"),
@@ -2118,10 +2122,32 @@ mod tests {
         // Nothing to offer until a name follows the verb, or once one is whole.
         assert!(offered("/worktree rm").is_empty());
         assert!(offered("/worktree rm feature-one").is_empty());
+    }
+
+    #[test]
+    fn a_tree_whose_name_starts_with_rm_does_not_confuse_the_verb() {
+        // A tree may be called `rmx`; the bare verb must still offer nothing
+        // (the guard arm earns its keep) while the removal verb completes it.
+        let trees = [
+            Choice {
+                name: "rmx".into(),
+                note: "rmx".into(),
+            },
+            Choice {
+                name: "feature-one".into(),
+                note: "feature-one".into(),
+            },
+        ];
+        let offered = |line: &str| -> Vec<String> {
+            complete(line, &table(), &[], &[], &[], &trees)
+                .into_iter()
+                .map(|c| c.line)
+                .collect()
+        };
+        assert!(offered("/worktree rm").is_empty());
         assert_eq!(offered("/worktree rm r"), ["/worktree rm rmx"]);
         // Entering the tree by its full name is untouched by the verb.
         assert!(offered("/worktree rmx").is_empty());
-
     }
 
     #[test]

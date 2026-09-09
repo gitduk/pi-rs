@@ -59,7 +59,12 @@ fn checked(dir: &Path, args: &[&str]) -> Result<String> {
 fn branch_exists(dir: &Path, name: &str) -> Result<bool> {
     Ok(git(
         dir,
-        &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{name}")],
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{name}"),
+        ],
     )?
     .status
     .success())
@@ -328,7 +333,11 @@ pub fn remove(dir: &Path, name: &str) -> Result<Removed> {
             }
         }
     }
-    Ok(Removed { path: tree.path.clone(), branch, note })
+    Ok(Removed {
+        path: tree.path.clone(),
+        branch,
+        note,
+    })
 }
 
 #[cfg(test)]
@@ -545,13 +554,21 @@ mod tests {
         let err = remove(dir.path(), "one").unwrap_err().to_string();
         assert!(err.contains("modified or untracked files"), "{err}");
         assert!(tree.path.is_dir());
-        assert!(branch_exists(dir.path(), "one").unwrap(), "the branch stays with the tree");
+        assert!(
+            branch_exists(dir.path(), "one").unwrap(),
+            "the branch stays with the tree"
+        );
     }
 
     #[test]
     fn the_main_checkout_and_the_one_this_session_is_in_are_refused() {
         let dir = repo();
-        let main = dir.path().file_name().unwrap().to_string_lossy().to_string();
+        let main = dir
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         let err = remove(dir.path(), &main).unwrap_err().to_string();
         assert!(err.contains("main checkout"), "{err}");
 
@@ -567,7 +584,11 @@ mod tests {
     fn a_detached_checkout_goes_without_a_branch() {
         let dir = repo();
         let target = dir.path().join(DIR).join("det");
-        checked(dir.path(), &["worktree", "add", "--detach", &target.to_string_lossy()]).unwrap();
+        checked(
+            dir.path(),
+            &["worktree", "add", "--detach", &target.to_string_lossy()],
+        )
+        .unwrap();
         let removed = remove(dir.path(), "det").unwrap();
         assert_eq!(removed.branch, None);
         assert!(!removed.path.exists());
@@ -581,7 +602,10 @@ mod tests {
     fn a_name_that_is_not_a_worktree_is_refused_with_an_offer_to_list() {
         let dir = repo();
         let err = remove(dir.path(), "nope").unwrap_err().to_string();
-        assert!(err.contains("`nope` is not one of this repository's worktrees"), "{err}");
+        assert!(
+            err.contains("`nope` is not one of this repository's worktrees"),
+            "{err}"
+        );
         // An invalid name is refused the same way entering refuses it.
         assert!(remove(dir.path(), "../escape").is_err());
     }
@@ -591,7 +615,12 @@ mod tests {
         // The main checkout answers to its directory name, so a linked tree
         // that chose the same word must still be removable by it.
         let dir = repo();
-        let main = dir.path().file_name().unwrap().to_string_lossy().to_string();
+        let main = dir
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         let target = dir.path().join(DIR).join(&main);
         checked(
             dir.path(),
