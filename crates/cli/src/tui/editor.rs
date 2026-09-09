@@ -77,6 +77,24 @@ impl Editor {
         self.draft.clear();
         line
     }
+    /// Hand over the line being composed, and clear to the bottom of recall.
+    ///
+    /// While Up is browsing history the composed line is parked in `draft`
+    /// and `text` shows a recalled one; a lane switch must keep the first,
+    /// or the half-typed prompt would still be lost to the switch. Nothing
+    /// is remembered, as with `take(false)`.
+    pub fn take_composing(&mut self) -> String {
+        let line = if self.at == self.history.len() {
+            std::mem::take(&mut self.text)
+        } else {
+            std::mem::take(&mut self.draft)
+        };
+        self.text.clear();
+        self.cursor = 0;
+        self.at = self.history.len();
+        self.draft.clear();
+        line
+    }
 
     pub fn insert(&mut self, c: char) {
         self.text.insert(self.cursor, c);
@@ -410,6 +428,22 @@ mod tests {
         // Still the same buffer: Up moved within it instead of recalling.
         assert_eq!(m.text, "one\ntwo");
         assert!(m.cursor < 4);
+    }
+    #[test]
+    fn taking_the_line_mid_browse_returns_the_composition_not_the_recall() {
+        let mut e = typed("older");
+        e.take(true);
+        e.insert_str("draft");
+        e.up();
+        assert_eq!(e.text, "older");
+        // A switch mid-browse keeps what was being typed; the recalled line
+        // and the browse position go with it.
+        assert_eq!(e.take_composing(), "draft");
+        assert_eq!(e.text, "");
+        assert_eq!(e.at, e.history.len());
+
+        let mut at_bottom = typed("typed at the bottom");
+        assert_eq!(at_bottom.take_composing(), "typed at the bottom");
     }
 
     #[test]
