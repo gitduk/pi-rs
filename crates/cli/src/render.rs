@@ -490,9 +490,10 @@ pub struct Prompt {
     pub color: Style,
     #[serde(default = "default_icon")]
     pub icon: String,
-    /// What the gutter shows while vim keys are in Normal. The same bar as
-    /// `icon` by default — the caret's shape is what says which mode is up —
-    /// but its own setting, for a terminal that will not reshape the caret.
+    /// What the prompt sigil shows while vim keys are in Normal. The same bar
+    /// as `icon` by default — the caret's shape is what says which mode is
+    /// up — but its own setting, for a terminal that will not reshape the
+    /// caret.
     #[serde(default = "default_normal_icon")]
     pub normal: String,
 }

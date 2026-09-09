@@ -137,6 +137,6 @@ replay_thinking = "tagged"
 #
 # A part with nothing to say is left out rather than shown empty, so a line
 # that asks for `cost` against an unpriced model simply does not carry it.
-# `esc to stop` is not a part: a run that can be interrupted always says so.
+# A running line carries no extra word: the spinner is what says a turn is on.
 live = ["elapsed", "in_out", "ctx", "queued", "worktree"]
 done = ["turns", "in_out", "cache", "ctx", "compacted", "cost", "worktree"]

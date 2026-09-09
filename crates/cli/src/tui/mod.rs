@@ -441,7 +441,9 @@ fn tool_row(frame: usize, name: &str, summary: &str) -> String {
 }
 
 // The transcript as rows, exactly as the live stream would have drawn them:
-// prompts with their gutter, answers as markdown, tool calls as their result
+// prompts with their sigil, answers as markdown, tool calls as their result
+// lines, reasoning as a foldable block. A rewind rebuilds the screen from
+// this, so the view returns to the point the conversation did.
 // lines, reasoning as a foldable block. A rewind rebuilds the screen from
 // this, so the view returns to the point the conversation did.
 fn scrollback_from(
@@ -487,7 +489,7 @@ fn scrollback_from(
                 }
                 // Machine prose, not the user's line: rebuilt in the muted
                 // voice of a screen notice rather than under the prompt
-                // gutter.
+                // sigil.
                 UserBody::Note(t) => {
                     for line in t.shown_text().lines() {
                         out.push(Row::notice(paint.on(&paint.theme.muted, line)));
@@ -691,9 +693,9 @@ struct Ui {
     keys: Arc<Keys>,
     editor: Editor,
     paint: Paint,
-    /// The painted prompt gutter, shared by the editor and the echoed lines.
+    /// The painted prompt sigil, shared by the editor and the echoed lines.
     prompt: String,
-    /// The same gutter for a `!` line, where the bang takes the icon's place.
+    /// The same sigil for a `!` line, where the bang takes the icon's place.
     bang_prompt: String,
     /// The lane bar's separator, painted once beside the two above it: the bar
     /// is rebuilt every frame and this depends only on the theme.
@@ -899,7 +901,7 @@ impl Ui {
         paint.on(&paint.theme.muted, " · ")
     }
 
-    /// The prompt gutter as the terminal shows it, colour and all.
+    /// The prompt sigil as the terminal shows it, colour and all.
     fn paint_prompt(paint: &Paint, icon: &str) -> String {
         format!("{} ", paint.on(&paint.theme.prompt.color, icon))
     }
@@ -1200,16 +1202,11 @@ impl Ui {
 
         if lane.is_running() {
             let mut parts = crate::status::parts(&self.live, &self.snapshot(lane));
-            // Not a segment: a run that can be stopped has to say so, and a
-            // config that left it out would strand the user mid-turn.
-            parts.push(
-                if lane.view.stopping {
-                    "stopping…"
-                } else {
-                    "esc to stop"
-                }
-                .to_string(),
-            );
+            // A run that is stopping says so; an ordinary running line needs
+            // no word for it — the spinner is what says the turn is on.
+            if lane.view.stopping {
+                parts.push("stopping…".to_string());
+            }
             let spin = if lane.view.stopping {
                 "·"
             } else {
@@ -1815,7 +1812,7 @@ impl Ui {
     }
 
     /// Put the mode where it can be seen: the shape of the caret, and the
-    /// gutter's icon where the theme gives the two modes different ones. It
+    /// the prompt sigil where the theme gives the two modes different ones. It
     /// does not by default — one bar either way — because the caret is where
     /// the eye already is; a terminal that will not reshape it is what
     /// `prompt.normal` is for.
@@ -4946,7 +4943,12 @@ mod tests {
         lane.view.started = Some(std::time::Instant::now());
 
         let live = ui.live(&lane, 10).join("\n");
-        assert!(live.contains("esc to stop"), "the run is on: {live}");
+        let frames = |text: &str| {
+            crate::status::FRAMES
+                .iter()
+                .any(|frame| text.contains(frame))
+        };
+        assert!(frames(&live), "the run is on: {live}");
         assert!(!live.contains(" in / "), "nothing was spent: {live}");
     }
 
@@ -4959,13 +4961,17 @@ mod tests {
         let (_dir, mut lane) = a_running_lane();
         lane.view.started = Some(std::time::Instant::now());
         assert!(
-            ui.live(&lane, 10).iter().any(|r| r.contains("esc to stop")),
-            "a running lane shows the line it can be stopped from"
+            ui.live(&lane, 10)
+                .iter()
+                .any(|r| crate::status::FRAMES.iter().any(|f| r.contains(f))),
+            "a running lane draws the status line"
         );
 
         lane.turn = crate::lane::Turn::Idle;
         assert!(
-            !ui.live(&lane, 10).iter().any(|r| r.contains("esc to stop")),
+            !ui.live(&lane, 10)
+                .iter()
+                .any(|r| crate::status::FRAMES.iter().any(|f| r.contains(f))),
             "the clock is still set; the turn is what says the run is over"
         );
     }
@@ -5137,12 +5143,12 @@ mod tests {
     }
 
     /// The mode outlives a submitted line, which is the whole reason it has to
-    /// be visible — and by default that is the caret's shape, not the gutter:
+    /// be visible — and by default that is the caret's shape, not the sigil:
     /// both modes wear the same bar. `prompt.normal` is what a terminal that
     /// will not reshape its caret sets to get the difference back, so the
-    /// gutter still follows it.
+    /// sigil still follows it.
     #[test]
-    fn the_gutter_follows_the_theme_rather_than_the_mode() {
+    fn the_sigil_follows_the_theme_rather_than_the_mode() {
         let mut ui = vim_ui();
         let insert = ui.prompt.clone();
         ui.vim.as_mut().unwrap().mode = crate::keys::Mode::Normal;

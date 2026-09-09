@@ -20,7 +20,7 @@ use brain::message::{ToolResult, ToolResultContent};
 use crate::render::{self, Markdown, Paint};
 use crate::status::{self, Segment, Snapshot};
 
-// The gutter a line already said wears, in the prompt's colour. Kept out
+// The sigil a line already said wears, in the prompt's colour. Kept out
 // of the row's text so wrapping can repeat it — see `Kind::Said`.
 const SAID: &str = "▌";
 
@@ -200,13 +200,13 @@ impl Row {
             // prompt's place, and the lines under it keep the plain indent.
             let mut rows = Vec::new();
             for (i, line) in text.lines().enumerate() {
-                let (gutter, body) = if i == 0 {
+                let (prefix, body) = if i == 0 {
                     (bang, line.strip_prefix('!').unwrap_or(line).trim_start())
                 } else {
                     ("  ", line)
                 };
                 let body = paint.on(&paint.theme.input, body);
-                rows.push(Self::notice(format!("{gutter}{body}")));
+                rows.push(Self::notice(format!("{prefix}{body}")));
             }
             return rows;
         }

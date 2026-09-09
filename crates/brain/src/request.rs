@@ -44,12 +44,9 @@ pub struct Request {
     /// unchanged from last turn, so the cached prefix still reaches as far as
     /// it did.
     ///
-    /// Nothing produces one today. The plan did, and that is exactly what went
-    /// wrong: appended to the user's turn it was indistinguishable from the
-    /// user speaking, so a stale list got argued with instead of updated. The
-    /// mechanism is kept because per-turn state that must not be read back as
-    /// fact is a real need — but whatever fills it next has to survive being
-    /// read in the user's voice, because that is how it will be read.
+    /// `agent` fills it every turn with the window note and the shelf, and
+    /// every wire reads it in the user's voice — so anything here has to
+    /// survive being read that way, which is what a plan once did not.
     pub notes: Vec<String>,
     pub tools: Vec<ToolDef>,
     pub max_output_tokens: Option<u32>,

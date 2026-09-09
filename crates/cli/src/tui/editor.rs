@@ -3,9 +3,9 @@
 use crate::render::Paint;
 use unicode_width::UnicodeWidthChar;
 
-// Columns the prompt marker occupies. Continuation rows are indented to match
-// so a wrapped line stays aligned under the first.
-const GUTTER: usize = 2;
+// Columns the sigil and its space occupy. Continuation rows are indented to
+// match, so a wrapped line stays aligned under the first.
+const SIGIL_W: usize = 2;
 const CONT: &str = "  ";
 
 #[derive(Default)]
@@ -18,9 +18,9 @@ pub struct Editor {
     at: usize,
     /// The line being typed, parked while history is being browsed.
     draft: String,
-    /// The painted first-row gutter, so the theme can restyle it.
+    /// The painted first-row sigil, so the theme can restyle it.
     prompt: String,
-    /// The same gutter for a `!` line: the bang takes the prompt's place, so
+    /// The same sigil for a `!` line: the bang takes the prompt's place, so
     /// `! cmd` reads as a command rather than `› ! cmd`.
     prompt_bang: String,
 }
@@ -256,7 +256,7 @@ impl Editor {
             self.cursor
         };
 
-        let avail = width.saturating_sub(GUTTER).max(1);
+        let avail = width.saturating_sub(SIGIL_W).max(1);
         let mut rows: Vec<String> = Vec::new();
         let mut row = String::new();
         let mut used = 0usize;
@@ -265,7 +265,7 @@ impl Editor {
         for (i, ch) in body.char_indices() {
             if ch == '\n' {
                 if i == cursor {
-                    caret = Some((rows.len() as u16, (GUTTER + used) as u16));
+                    caret = Some((rows.len() as u16, (SIGIL_W + used) as u16));
                 }
                 rows.push(std::mem::take(&mut row));
                 used = 0;
@@ -279,12 +279,12 @@ impl Editor {
             // After the wrap, so a caret sitting exactly on the break lands at
             // the start of the new row rather than off the end of the old one.
             if i == cursor {
-                caret = Some((rows.len() as u16, (GUTTER + used) as u16));
+                caret = Some((rows.len() as u16, (SIGIL_W + used) as u16));
             }
             row.push(ch);
             used += w;
         }
-        let caret = caret.unwrap_or((rows.len() as u16, (GUTTER + used) as u16));
+        let caret = caret.unwrap_or((rows.len() as u16, (SIGIL_W + used) as u16));
         rows.push(row);
 
         let prompt = if bang {
@@ -355,7 +355,7 @@ mod tests {
         Paint::new(false)
     }
 
-    /// An editor with the two painted gutters a real Ui would set, so view
+    /// An editor with the two painted sigils a real Ui would set, so view
     /// tests see the prompt a user would.
     fn typed(s: &str) -> Editor {
         let mut e = Editor::default();
@@ -420,7 +420,7 @@ mod tests {
         assert_eq!(
             caret,
             (0, 12),
-            "GUTTER 2 + the ten characters of `git status`"
+            "SIGIL_W 2 + the ten characters of `git status`"
         );
 
         let plain = typed("git status");
@@ -436,9 +436,9 @@ mod tests {
     }
 
     #[test]
-    fn a_bang_line_wraps_with_the_bang_in_the_gutter() {
+    fn a_bang_line_wraps_with_the_bang_in_the_sigil() {
         let e = typed("!abcdefgh");
-        // Width 6 leaves 4 columns after the gutter, as in the plain case;
+        // Width 6 leaves 4 columns after the sigil, as in the plain case;
         // the bang does not eat a column of the body.
         let (rows, caret) = e.view(&paint(), 6);
         assert_eq!(rows.len(), 2);
@@ -457,7 +457,7 @@ mod tests {
     #[test]
     fn a_wrapped_line_puts_the_caret_on_the_row_it_belongs_to() {
         let mut e = typed("abcdefgh");
-        // Width 6 leaves 4 columns after the gutter.
+        // Width 6 leaves 4 columns after the sigil.
         let (rows, caret) = e.view(&paint(), 6);
         assert_eq!(rows.len(), 2);
         assert_eq!(caret, (1, 6), "the caret is past the end of the second row");
@@ -465,7 +465,7 @@ mod tests {
         assert_eq!(
             e.view(&paint(), 6).1,
             (0, 2),
-            "and back in the gutter's shadow"
+            "and back in the sigil's shadow"
         );
     }
 
