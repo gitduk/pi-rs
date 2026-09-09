@@ -5,8 +5,8 @@
 //! first: a constraint stated once, a route proven closed, a decision that
 //! would otherwise be re-litigated.
 //!
-//! One file per workspace, beside its transcripts: a note is about the work,
-//! and the work is a checkout.
+//! One file per repository, in the bucket its main checkout owns: a note is
+//! about the work, and the work is the repository.
 
 use std::path::{Path, PathBuf};
 
@@ -85,7 +85,7 @@ pub struct Row {
     pub text: String,
 }
 
-/// One workspace's shelf.
+/// One repository's shelf.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Memory {
     #[serde(default)]
@@ -113,6 +113,24 @@ impl Memory {
         for (nth, note) in self.notes.iter_mut().filter(|n| n.id == 0).enumerate() {
             note.id = taken + nth as u64 + 1;
         }
+    }
+
+    /// Change the shelf on disk as one read-change-write, holding the shelf
+    /// lock across the whole of it. Every writer goes through here, so runs
+    /// that share a repository's shelf — lanes of one session, or processes
+    /// on unix — cannot save over each other's read.
+    pub fn update<T>(
+        path: &Path,
+        change: impl FnOnce(&mut Memory) -> T,
+    ) -> anyhow::Result<T> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let _lock = lock_shelf(path)?;
+        let mut shelf = Memory::load(path);
+        let out = change(&mut shelf);
+        shelf.save(path)?;
+        Ok(out)
     }
 
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
@@ -211,6 +229,40 @@ impl Memory {
     }
 }
 
+/// The shelf's write lock, held for one whole read-change-write. A sibling
+/// file, never the shelf: `save` replaces the shelf by temp-and-rename, so a
+/// lock on the shelf's inode would guard a file nothing else opens any more.
+#[cfg(unix)]
+struct ShelfLock {
+    _file: std::fs::File,
+}
+
+#[cfg(unix)]
+fn lock_shelf(path: &Path) -> anyhow::Result<ShelfLock> {
+    use std::os::unix::io::AsRawFd;
+    let lock = PathBuf::from(format!("{}.lock", path.display()));
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock)?;
+    // Blocks until the current holder finishes; the lock goes with the fd.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(ShelfLock { _file: file })
+}
+
+#[cfg(not(unix))]
+struct ShelfLock(std::sync::MutexGuard<'static, ()>);
+
+#[cfg(not(unix))]
+fn lock_shelf(_path: &Path) -> anyhow::Result<ShelfLock> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let lock = LOCK.get_or_init(|| std::sync::Mutex::new(()));
+    Ok(ShelfLock(lock.lock().unwrap_or_else(|e| e.into_inner())))
+}
+
 /// The date part of an instant, which is all a note needs: what matters is
 /// whether this was said today or last month.
 fn day(at: u64) -> String {
@@ -218,7 +270,7 @@ fn day(at: u64) -> String {
         .to_string()
 }
 
-/// This workspace's shelf, as the agent reaches it.
+/// This repository's shelf, as the agent reaches it.
 pub fn shelf(path: PathBuf) -> std::sync::Arc<dyn agent::Shelf> {
     std::sync::Arc::new(File::at(path))
 }
@@ -246,9 +298,11 @@ impl agent::Shelf for File {
     // one files megabyte transcripts from several lanes at once, this one
     // thirty short lines at a compaction.
     fn keep(&self, notes: Vec<agent::Kept>) {
-        let mut shelf = Memory::load(&self.path);
-        shelf.add(notes.into_iter().map(|n| Note::theirs(n.text, n.weight)));
-        if let Err(e) = shelf.save(&self.path) {
+        // The update takes the shelf lock, so a compaction running in another
+        // lane cannot lose notes to this lane's read-change-write.
+        if let Err(e) = Memory::update(&self.path, |shelf| {
+            shelf.add(notes.into_iter().map(|n| Note::theirs(n.text, n.weight)));
+        }) {
             tracing::warn!(target: "pi::memory", error = %e, "could not write the shelf");
         }
     }
@@ -414,5 +468,32 @@ mod tests {
         m.add([yours("prefers xh"), model("--tools was removed", 2, 0)]);
         m.save(&path).unwrap();
         assert_eq!(Memory::load(&path), m);
+    }
+
+    /// Two writers reaching the same shelf at once — the case the lock
+    /// exists for — each keep their note.
+    #[test]
+    fn concurrent_updates_keep_both_notes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.json");
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut threads = Vec::new();
+        for text in ["note a", "note b"] {
+            let path = path.clone();
+            let gate = gate.clone();
+            threads.push(std::thread::spawn(move || {
+                gate.wait();
+                Memory::update(&path, |s| {
+                    s.add([yours(text)]);
+                })
+                .unwrap();
+            }));
+        }
+        for t in threads {
+            t.join().unwrap();
+        }
+        let notes: Vec<String> =
+            Memory::load(&path).notes.iter().map(|n| n.text.clone()).collect();
+        assert_eq!(notes.len(), 2, "both notes landed: {notes:?}");
     }
 }

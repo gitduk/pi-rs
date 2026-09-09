@@ -743,18 +743,24 @@ impl Repl {
     /// line is the same intent as deleting it, and refusing it would leave a
     /// blank row nothing else can reach.
     pub fn shelf_write(&mut self, id: u64, text: &str) -> Option<String> {
-        let (mut shelf, path) = self.shelf();
-        match text.trim().is_empty() {
-            true => return self.shelf_drop(id),
-            false => shelf.rewrite(id, text.trim()),
-        }
-        shelf.save(&path).err().map(|e| e.to_string())
+        let path = self.memory_path();
+        let text = text.trim();
+        crate::memory::Memory::update(&path, |shelf| {
+            if text.is_empty() {
+                shelf.forget(id);
+            } else {
+                shelf.rewrite(id, text);
+            }
+        })
+        .err()
+        .map(|e| e.to_string())
     }
 
     pub fn shelf_drop(&mut self, id: u64) -> Option<String> {
-        let (mut shelf, path) = self.shelf();
-        shelf.forget(id);
-        shelf.save(&path).err().map(|e| e.to_string())
+        let path = self.memory_path();
+        crate::memory::Memory::update(&path, |shelf| shelf.forget(id))
+            .err()
+            .map(|e| e.to_string())
     }
 
     /// Write a note to this workspace's shelf, or say what is on it.
@@ -762,10 +768,10 @@ impl Repl {
     /// A note you typed carries no weight and never ages out: the cap falls on
     /// what the model wrote, not on what you did.
     fn remember(&mut self, text: &str) -> Vec<String> {
-        let (mut shelf, path) = self.shelf();
+        let path = self.memory_path();
         let text = text.trim();
         if text.is_empty() {
-            return match shelf.render() {
+            return match crate::memory::Memory::load(&path).render() {
                 None => vec![
                     "nothing on the shelf here yet — `/mem <what to keep>` puts something on it"
                         .into(),
@@ -773,9 +779,12 @@ impl Repl {
                 Some(text) => text.lines().map(str::to_string).collect(),
             };
         }
-        shelf.add([crate::memory::Note::yours(text)]);
-        match shelf.save(&path) {
-            Ok(()) => vec![format!("remembered — {} on the shelf", shelf.notes.len())],
+        let count = crate::memory::Memory::update(&path, |shelf| {
+            shelf.add([crate::memory::Note::yours(text)]);
+            shelf.notes.len()
+        });
+        match count {
+            Ok(n) => vec![format!("remembered — {n} on the shelf")],
             Err(e) => vec![format!("the shelf would not take it: {e}")],
         }
     }

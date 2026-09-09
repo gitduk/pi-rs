@@ -176,6 +176,29 @@ pub fn current(dir: &Path) -> Option<String> {
         .map(|t| t.name.clone())
 }
 
+/// The checkout every worktree of `dir`'s repository hangs off — the main
+/// one — or None when `dir` is not inside a git repository. Every checkout of
+/// one repository answers with the same home, so a repository-wide thing is
+/// one thing rather than one per worktree.
+pub fn home(dir: &Path) -> Option<PathBuf> {
+    // A repository carries a `.git` entry above `dir`. Ask git only when the
+    // walk finds one; a plain directory would spawn git to no end otherwise.
+    if !dir.ancestors().any(|d| d.join(".git").exists()) {
+        return None;
+    }
+    match list(dir) {
+        Ok(trees) => trees.into_iter().find(|t| t.main).map(|t| t.path),
+        Err(e) => {
+            tracing::warn!(
+                target: "pi::worktree",
+                error = %e,
+                "a repository marker is here, but git cannot name its main checkout"
+            );
+            None
+        }
+    }
+}
+
 /// What entering a name did, so the caller can say it.
 #[derive(Debug)]
 pub enum Entered {
@@ -388,6 +411,17 @@ mod tests {
         assert_eq!(trees.len(), 2);
         assert_eq!(trees[0].path, dir.path().canonicalize().unwrap());
         assert!(trees[0].main);
+    }
+
+    #[test]
+    fn home_is_the_main_checkout_every_worktree_shares() {
+        let dir = repo();
+        let (worktree, _) = enter(dir.path(), "feature-one").unwrap();
+        let expected = dir.path().canonicalize().unwrap();
+        assert_eq!(home(dir.path()), Some(expected.clone()));
+        assert_eq!(home(&worktree.path), Some(expected));
+        // Outside a repository there is no home.
+        assert_eq!(home(std::path::Path::new("/no/such/checkout")), None);
     }
 
     /// A checkout deleted from the shell rather than through git stays

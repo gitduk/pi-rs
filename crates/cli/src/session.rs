@@ -197,10 +197,12 @@ impl Store {
         self.dir_of(workspace).join("history")
     }
 
-    /// Where one workspace's shelf lives, beside its transcripts: a note is
-    /// about the work, and the work is a checkout.
+    /// Where one repository's shelf lives, in the bucket its main checkout
+    /// owns, so every checkout of the repository shares the file. Outside
+    /// git the checkout path itself is the bucket.
     pub fn memory_path(&self, workspace: &Path) -> PathBuf {
-        self.dir_of(workspace).join("memory.json")
+        let repo = crate::worktree::home(workspace).unwrap_or_else(|| workspace.to_path_buf());
+        self.dir_of(&repo).join("memory.json")
     }
 
     /// Where a session's journal is written. Beside its transcript, so that
