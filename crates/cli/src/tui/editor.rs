@@ -377,7 +377,10 @@ mod tests {
     // tests see the prompt a user would.
     fn typed(s: &str) -> Editor {
         let mut e = Editor::default();
-        e.set_prompts("› ".into(), "! ".into());
+        e.set_prompts(
+            format!("{} ", crate::icons::INPUT_SIGIL),
+            format!("{} ", crate::icons::BANG_SIGIL),
+        );
         e.insert_str(s);
         e
     }
@@ -458,7 +461,7 @@ mod tests {
         );
 
         let plain = typed("git status");
-        assert_eq!(plain.view(&paint(), 40).0[0], "› git status");
+        assert_eq!(plain.view(&paint(), 40).0[0], "│ git status");
     }
 
     #[test]
@@ -466,7 +469,7 @@ mod tests {
         let mut e = typed("!git");
         e.home();
         e.delete();
-        assert_eq!(e.view(&paint(), 40).0[0], "› git");
+        assert_eq!(e.view(&paint(), 40).0[0], "│ git");
     }
 
     #[test]

@@ -24,7 +24,7 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
 
     loop {
         if prompt {
-            eprint!("› ");
+            eprint!("{} ", crate::icons::PIPE_SIGIL);
             let _ = std::io::stderr().flush();
         }
         buffer.clear();

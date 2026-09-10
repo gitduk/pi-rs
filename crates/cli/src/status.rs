@@ -11,7 +11,6 @@ use brain::stream::Usage;
 use brain::totals::Totals;
 use serde::{Deserialize, Serialize};
 
-pub const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 pub const SPIN: Duration = Duration::from_millis(90);
 
 fn elapsed(d: Duration) -> String {
@@ -202,7 +201,7 @@ pub fn parts(segments: &[Segment], s: &Snapshot) -> Vec<String> {
 
 /// Those parts as one line.
 pub fn line(segments: &[Segment], s: &Snapshot) -> String {
-    parts(segments, s).join(" · ")
+    parts(segments, s).join(crate::icons::PART_SEP)
 }
 
 /// Which parts each line shows, as the config states it. An absent list is the

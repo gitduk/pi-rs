@@ -7,6 +7,9 @@ use anyhow::{Result, bail};
 use brain::count::{in_out, short};
 use serde::de::{Error as _, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+use crate::icons;
+
 const RESET: &str = "\x1b[0m";
 
 /// Where an escape sequence ends.
@@ -499,7 +502,7 @@ pub struct Prompt {
 }
 
 fn default_normal_icon() -> String {
-    "\u{2502}".to_string()
+    icons::INPUT_SIGIL_NORMAL.to_string()
 }
 
 impl Default for Prompt {
@@ -549,7 +552,7 @@ fn default_input() -> Style {
 }
 
 fn default_icon() -> String {
-    "\u{2502}".into()
+    icons::INPUT_SIGIL.to_string()
 }
 
 impl Default for Theme {
@@ -827,7 +830,7 @@ pub fn spent(usage: &brain::stream::Usage, cost: f64) -> String {
     if cost > 0.0 {
         parts.push(format!("${cost:.4}"));
     }
-    parts.join(" · ")
+    parts.join(icons::PART_SEP)
 }
 
 /// The wording for every event that occupies a whole line.
@@ -856,9 +859,9 @@ pub fn result_rows(
 ) -> Vec<String> {
     let room = width.saturating_sub(2).max(20);
     let mark = if is_error {
-        p.on(&p.theme.status.err, "✗")
+        p.on(&p.theme.status.err, icons::FAIL_MARK)
     } else {
-        p.on(&p.theme.status.ok, "✓")
+        p.on(&p.theme.status.ok, icons::DONE_MARK)
     };
     let (head, rest) = preview.split_once('\n').unwrap_or((preview, ""));
     let mut out = vec![format!(
@@ -884,7 +887,7 @@ pub fn describe(event: &Event, p: &Paint, width: usize) -> Option<String> {
         Event::ToolStart { name, args, .. } => {
             format!(
                 "{} {name} {}",
-                p.on(&p.theme.muted, "→"),
+                p.on(&p.theme.muted, icons::PENDING_MARK),
                 p.on(&p.theme.muted, &summarize(args))
             )
         }
@@ -897,7 +900,7 @@ pub fn describe(event: &Event, p: &Paint, width: usize) -> Option<String> {
         Event::ToolDenied { name, reason, .. } => {
             format!(
                 "{} {name} {}",
-                p.on(&p.theme.status.err, "✗"),
+                p.on(&p.theme.status.err, icons::FAIL_MARK),
                 p.on(&p.theme.muted, &clip(reason, room))
             )
         }
@@ -908,11 +911,15 @@ pub fn describe(event: &Event, p: &Paint, width: usize) -> Option<String> {
             reason,
         } => p.on(
             &p.theme.muted,
-            &format!("retry {attempt} in {delay_ms}ms · {}", clip(reason, room)),
+            &format!(
+                "retry {attempt} in {delay_ms}ms{}{}",
+                icons::PART_SEP,
+                clip(reason, room)
+            ),
         ),
         Event::Warning(w) => format!(
             "{} {}",
-            p.on(&p.theme.status.err, "!"),
+            p.on(&p.theme.status.err, icons::WARN_MARK),
             p.on(&p.theme.muted, w)
         ),
         // Done is a status line rather than an event's wording, and the two
@@ -1073,12 +1080,12 @@ fn compaction_line(r: &agent::compact::Report) -> String {
     let detail = if parts.is_empty() {
         String::new()
     } else {
-        format!(" · {}", parts.join(", "))
+        format!("{}{}", icons::PART_SEP, parts.join(", "))
     };
     let warn = if r.still_over {
-        " · still over budget"
+        format!("{}still over budget", icons::PART_SEP)
     } else {
-        ""
+        String::new()
     };
     format!("compacted {} → {} tokens{detail}{warn}", r.before, r.after)
 }
@@ -1111,8 +1118,8 @@ pub fn clip(s: &str, max: usize) -> String {
         if used > max {
             let cut = one[..i].trim_end();
             return match styled {
-                true => format!("{cut}{RESET}…"),
-                false => format!("{cut}…"),
+                true => format!("{cut}{RESET}{}", icons::ELLIPSIS),
+                false => format!("{cut}{}", icons::ELLIPSIS),
             };
         }
     }

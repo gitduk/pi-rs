@@ -18,6 +18,8 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use wechat::Update;
 
+use crate::icons;
+
 /// What the bridge hands the surface.
 pub enum Inbound {
     // A text message from the peer.
@@ -215,13 +217,15 @@ impl Bridge {
                 ..
             } => {
                 self.say(&format!(
-                    "✗ {name} failed — {}",
+                    "{} {name} failed — {}",
+                    icons::FAIL_MARK,
                     crate::render::clip(preview, 80)
                 ))
                 .await;
             }
             Event::ToolDenied { name, reason, .. } => {
-                self.say(&format!("✗ {name} denied — {reason}")).await
+                self.say(&format!("{} {name} denied — {reason}", icons::FAIL_MARK))
+                    .await
             }
             Event::Retrying {
                 attempt,
@@ -230,7 +234,8 @@ impl Bridge {
                 ..
             } => {
                 self.say(&format!(
-                    "↻ retry {attempt} in {}s — {reason}",
+                    "{} retry {attempt} in {}s — {reason}",
+                    icons::RETRY_ARROW,
                     delay_ms / 1000
                 ))
                 .await;
@@ -631,8 +636,8 @@ fn backoff(failures: &mut u32) -> Duration {
 // collapse to the bare name so the line never ends on a stray space.
 fn tool_line(name: &str, args: &serde_json::Value) -> String {
     match crate::render::summarize(args) {
-        summary if summary.is_empty() => format!("⚙ {name}"),
-        summary => format!("⚙ {name} {summary}"),
+        summary if summary.is_empty() => format!("{} {name}", icons::TOOL_GEAR),
+        summary => format!("{} {name} {summary}", icons::TOOL_GEAR),
     }
 }
 

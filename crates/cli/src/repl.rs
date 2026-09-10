@@ -9,6 +9,7 @@ use tools::{Tool, ToolError};
 use serde::Deserialize;
 
 use crate::config::Config;
+use crate::icons;
 use crate::journal;
 use crate::lane::Lane;
 use crate::session::{ResumeChoice, Store, Stored};
@@ -689,8 +690,9 @@ impl Repl {
         let mut said: Vec<String> = dialled.warning.into_iter().chain(dialled.notes).collect();
         let spec = &dialled.spec;
         said.push(format!(
-            "now on {} · {}",
+            "now on {}{}{}",
             spec.model,
+            icons::PART_SEP,
             summary(spec.format.name(), spec.context_window, &spec.pricing)
         ));
         // An absent transcript is one a run has, and it is writing this
@@ -811,7 +813,11 @@ impl Repl {
         choices
             .iter()
             .map(|c| {
-                let mark = if &c.name == here { "●" } else { " " };
+                let mark = if &c.name == here {
+                    icons::CURRENT_ITEM
+                } else {
+                    " "
+                };
                 format!("{mark} {:width$}  {}", c.name, c.note)
             })
             .collect()
@@ -953,7 +959,7 @@ fn summary(format: &str, window: u32, p: &brain::model::Pricing) -> String {
             p.input_per_mtok, p.output_per_mtok
         ));
     }
-    parts.join(" · ")
+    parts.join(icons::PART_SEP)
 }
 
 // What becomes of the transcript's reasoning once another model is reading it.
@@ -1900,7 +1906,7 @@ impl Repl {
             .map(|(mark, text, created)| {
                 format!(
                     "{} {}  {:>10}",
-                    if *mark { "●" } else { " " },
+                    if *mark { icons::CURRENT_ITEM } else { " " },
                     crate::render::pad(text, width),
                     ago(*created)
                 )

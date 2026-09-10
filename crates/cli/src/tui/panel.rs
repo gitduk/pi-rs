@@ -15,6 +15,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::Paint;
 use super::editor::Editor;
+use crate::icons;
 use crate::journal;
 use crate::keys::{Action, Which};
 use crate::memory;
@@ -47,7 +48,7 @@ impl Body {
                 // Set-or-not in the list; only the edit line carries the
                 // clear text, where a pasted key has to be checkable.
                 let shown = if hidden {
-                    "…".to_string()
+                    icons::ELLIPSIS.to_string()
                 } else if journal::secret(journal::leaf(path)) {
                     if value.is_empty() {
                         "<unset>".to_string()
@@ -61,7 +62,7 @@ impl Body {
             }
             Body::Shelf(rows) => {
                 let row = &rows[at];
-                let shown = if hidden { "…" } else { &row.text };
+                let shown = if hidden { icons::ELLIPSIS } else { &row.text };
                 format!("{}  {shown}", row.day)
             }
         }
@@ -300,7 +301,7 @@ impl Panel {
         }
         let mut out = Vec::new();
         for i in 0..self.body.len() {
-            let caret = if i == self.at { "›" } else { " " };
+            let caret = if i == self.at { icons::MENU_SIGIL } else { " " };
             let hidden = self.editing.is_some() && i == self.at;
             let line = format!("{caret} {}", self.body.row(i, hidden));
             out.push(paint.on(&paint.theme.menu.selected, &line));
@@ -310,7 +311,7 @@ impl Panel {
             out.extend(line);
         }
         if let Some(why) = &self.refused {
-            out.push(format!("  ✗ {why}"));
+            out.push(format!("  {} {why}", icons::FAIL_MARK));
         }
         out
     }

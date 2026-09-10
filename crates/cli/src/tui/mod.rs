@@ -25,13 +25,15 @@ use futures::FutureExt;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
+use crate::icons;
 use crate::journal;
-use crate::keys::{Action, Keys, Mode, Press};
-use crate::lane::{Lane, Turn};
+use crate::keys::{Action, Keys, Layers, Menu, Mode, Press};
+use crate::lane::{Lane, Round, Turn};
 use crate::render::Style as ThemeStyle;
 use crate::render::{self, Markdown, Paint};
 use crate::repl::{self, Candidate, Choice, Command, Fate, Intent, Repl, Rewound, Step};
-use crate::session::ResumeChoice;
+use crate::session::{ResumeChoice, Store};
+use crate::status::{self, Segment, Snapshot, Tally};
 use editor::Editor;
 use panel::{Body, Panel, Took};
 use ratatui::layout::{Constraint, Layout};
@@ -93,14 +95,14 @@ fn secret_settings_set(line: &str) -> bool {
 // noticeable startup pause. Neither command's bare form comes through here;
 // both ask directly, as they always did.
 struct Lists {
-    store: crate::session::Store,
+    store: Store,
     workspace: std::path::PathBuf,
     sessions: std::cell::OnceCell<Vec<ResumeChoice>>,
     worktrees: std::cell::OnceCell<Vec<Choice>>,
 }
 
 impl Lists {
-    fn new(store: crate::session::Store, workspace: std::path::PathBuf) -> Self {
+    fn new(store: Store, workspace: std::path::PathBuf) -> Self {
         Self {
             store,
             workspace,
@@ -299,7 +301,7 @@ struct ScrollbackRows<'a> {
     paint: &'a Paint,
     // What a finished run's row spells itself out with, for the same reason:
     // it is rendered here, not when the run ended.
-    done: &'a [crate::status::Segment],
+    done: &'a [Segment],
     // Next entry to read from the front, and the row offset inside it.
     front: (usize, usize),
     // Next entry to read from the back, and the row offset inside it.
@@ -307,12 +309,7 @@ struct ScrollbackRows<'a> {
 }
 
 impl<'a> ScrollbackRows<'a> {
-    fn new(
-        rows: &'a [Row],
-        paint: &'a Paint,
-        done: &'a [crate::status::Segment],
-        width: usize,
-    ) -> Self {
+    fn new(rows: &'a [Row], paint: &'a Paint, done: &'a [Segment], width: usize) -> Self {
         let back = rows.len().saturating_sub(1);
         let back_row = if rows.is_empty() { 0 } else { rows[back].len() };
         Self {
@@ -436,7 +433,7 @@ struct RunTool {
 // The one row a still-running tool occupies. The frame is the animation;
 // `ToolEnd` and `abandon_tools` replace the row with a final line.
 fn tool_row(frame: usize, name: &str, summary: &str) -> String {
-    let frame = crate::status::FRAMES[frame % crate::status::FRAMES.len()];
+    let frame = icons::SPINNER_FRAMES[frame % icons::SPINNER_FRAMES.len()];
     format!("{frame} {}", row::named(name, summary))
 }
 
@@ -478,7 +475,11 @@ fn scrollback_from(
             if gone {
                 out.push(Row::notice(paint.on(
                     &paint.theme.muted,
-                    "─── compacted; the model no longer sees the rest of this ───",
+                    &format!(
+                        "{} compacted; the model no longer sees the rest of this {}",
+                        icons::COMPACT_RULE,
+                        icons::COMPACT_RULE
+                    ),
                 )));
             }
         }
@@ -597,7 +598,7 @@ pub struct View {
     // Every number this run has reported, as the events stated them. Both
     // status lines read it, so the line the run ends on is the live line's
     // last frame rather than a second count of the same turns.
-    tally: crate::status::Tally,
+    tally: Tally,
     stopping: bool,
     // Rows the view is scrolled up by. Zero shows the newest rows.
     scroll: usize,
@@ -736,8 +737,8 @@ struct Ui {
     // The modal keys, or None while they are off.
     vim: Option<Vim>,
     // The segments each line shows, in the order the config named them.
-    live: Vec<crate::status::Segment>,
-    done: Vec<crate::status::Segment>,
+    live: Vec<Segment>,
+    done: Vec<Segment>,
     // What the lane strip says, in lane order. Empty until there is a second
     // lane, and the strip is absent with it — though a flash can still take
     // that row.
@@ -750,7 +751,7 @@ struct Ui {
 // What to call a checkout. The root answers to its directory name, as
 // `worktree list` already names it — a fixed word would collide with a
 // checkout that happens to be called that.
-fn lane_name(lane: &crate::lane::Lane) -> String {
+fn lane_name(lane: &Lane) -> String {
     lane.worktree.clone().unwrap_or_else(|| {
         lane.ctx
             .workspace
@@ -851,7 +852,7 @@ impl Ui {
         paint: Paint,
     ) -> Self {
         let prompt = Self::paint_prompt(&paint, &paint.theme.prompt.icon);
-        let bang_prompt = Self::paint_prompt(&paint, "!");
+        let bang_prompt = Self::paint_prompt(&paint, icons::BANG_SIGIL);
         let mut editor = Editor::default();
         editor.set_prompts(prompt.clone(), bang_prompt.clone());
         Self {
@@ -875,15 +876,15 @@ impl Ui {
             setting_paths: Vec::new(),
             panel: None,
             spinner: 0,
-            live: crate::status::default_live(),
-            done: crate::status::default_done(),
+            live: status::default_live(),
+            done: status::default_done(),
             tabs: Vec::new(),
             flash: None,
         }
     }
 
     // The values both lines draw on, as this surface currently knows them.
-    fn snapshot(&self, lane: &Lane) -> crate::status::Snapshot {
+    fn snapshot(&self, lane: &Lane) -> Snapshot {
         lane.view.tally.snapshot(
             &lane.view.model,
             lane.worktree.as_deref(),
@@ -899,7 +900,7 @@ impl Ui {
     // this surface uses, dimmed so the names it divides are what the eye
     // lands on.
     fn paint_sep(paint: &Paint) -> String {
-        paint.on(&paint.theme.muted, " · ")
+        paint.on(&paint.theme.muted, icons::PART_SEP)
     }
 
     // The prompt sigil as the terminal shows it, colour and all.
@@ -1052,7 +1053,7 @@ impl Ui {
                 // Asked now rather than at every draw: a run whose segments
                 // all had nothing to say leaves no row, and a blank one is
                 // worse than none.
-                if !crate::status::parts(&self.done, &snap).is_empty() {
+                if !status::parts(&self.done, &snap).is_empty() {
                     lane.view.scrollback.push(Row::tally(snap));
                 }
             }
@@ -1202,18 +1203,18 @@ impl Ui {
         ));
 
         if lane.is_running() {
-            let mut parts = crate::status::parts(&self.live, &self.snapshot(lane));
+            let mut parts = status::parts(&self.live, &self.snapshot(lane));
             // A run that is stopping says so; an ordinary running line needs
             // no word for it — the spinner is what says the turn is on.
             if lane.view.stopping {
-                parts.push("stopping…".to_string());
+                parts.push(format!("stopping{}", icons::ELLIPSIS));
             }
             let spin = if lane.view.stopping {
-                "·"
+                icons::SPIN_STOPPED
             } else {
-                crate::status::FRAMES[self.spinner % crate::status::FRAMES.len()]
+                icons::SPINNER_FRAMES[self.spinner % icons::SPINNER_FRAMES.len()]
             };
-            let line = format!("{spin} {}", parts.join(" · "));
+            let line = format!("{spin} {}", parts.join(icons::PART_SEP));
             rows.extend(screen::fit(
                 &self.paint.on(&self.paint.theme.muted, &line),
                 width,
@@ -1229,7 +1230,7 @@ impl Ui {
         if self.tabs.len() < 2 {
             return None;
         }
-        let spin = crate::status::FRAMES[self.spinner % crate::status::FRAMES.len()];
+        let spin = icons::SPINNER_FRAMES[self.spinner % icons::SPINNER_FRAMES.len()];
         let theme = &self.paint.theme;
         let painted: Vec<String> = self
             .tabs
@@ -1241,8 +1242,8 @@ impl Ui {
                 let (sign, style) = match tab.mark {
                     Mark::Front => ("", &theme.input),
                     Mark::Running => (spin, &theme.muted),
-                    Mark::Done => ("✓", &theme.status.ok),
-                    Mark::Failed => ("✗", &theme.status.err),
+                    Mark::Done => (icons::DONE_MARK, &theme.status.ok),
+                    Mark::Failed => (icons::FAIL_MARK, &theme.status.err),
                     Mark::Idle => ("", &theme.muted),
                 };
                 let label = if sign.is_empty() {
@@ -1301,7 +1302,7 @@ impl Ui {
 
     fn set_theme(&mut self, view: &mut View, context: &[String], theme: Arc<render::Theme>) {
         self.paint.theme = theme;
-        self.bang_prompt = Self::paint_prompt(&self.paint, "!");
+        self.bang_prompt = Self::paint_prompt(&self.paint, icons::BANG_SIGIL);
         self.tab_sep = Self::paint_sep(&self.paint);
         self.show_mode();
         // The opening block is painted once at construction; rebuild it so a
@@ -1506,17 +1507,17 @@ impl Ui {
         // `menu()` is empty while it is open, so the layer has to be forced on.
         let bound = self.keys.action(
             press,
-            crate::keys::Layers {
+            Layers {
                 // A panel counts as a menu whether or not it has verbs of its
                 // own: `menu()` is empty while one is open, so the layer it
                 // borrows has to be named here rather than inferred.
                 menu: match self.panel.as_ref().map(Panel::layer) {
                     // Its own verbs, off while a row is being typed so that
                     // `x` and `e` are letters again — `esc` still leaves it.
-                    Some(Some(which)) => crate::keys::Menu::Verbs(which),
-                    Some(None) => crate::keys::Menu::On,
-                    None if self.menu().is_empty() => crate::keys::Menu::Off,
-                    None => crate::keys::Menu::On,
+                    Some(Some(which)) => Menu::Verbs(which),
+                    Some(None) => Menu::On,
+                    None if self.menu().is_empty() => Menu::Off,
+                    None => Menu::On,
                 },
                 run: running,
                 mode: self.vim.as_ref().map(|v| v.mode),
@@ -2171,7 +2172,7 @@ fn scratch_file(text: &str) -> std::io::Result<std::path::PathBuf> {
 }
 
 // What this run recalls in `workspace`, or nothing.
-fn history_of(store: &crate::session::Store, workspace: &std::path::Path) -> Vec<String> {
+fn history_of(store: &Store, workspace: &std::path::Path) -> Vec<String> {
     std::fs::read_to_string(store.history_path(workspace))
         .map(|prior| editor::decode(&prior))
         .unwrap_or_default()
@@ -2495,7 +2496,7 @@ impl Tui {
             return;
         };
         let said = match round {
-            crate::lane::Round::Again { goal, next } => {
+            Round::Again { goal, next } => {
                 // The round number and the running total reach the model as a
                 // note, not glued to the goal: the goal must stay exactly what
                 // `read` would parse, so a skill round reads as its skill.
@@ -2510,13 +2511,11 @@ impl Tui {
                     .push(Intent::LoopRound { goal, note });
                 format!("loop round {next}")
             }
-            crate::lane::Round::Cut => return,
-            crate::lane::Round::Quiet => "loop done — that round changed nothing".to_string(),
-            crate::lane::Round::Oscillating => {
-                "loop stopped — a round undid the work before it".to_string()
-            }
-            crate::lane::Round::Thin => "loop stopped — rounds are only nibbling now".to_string(),
-            crate::lane::Round::Capped(n) => {
+            Round::Cut => return,
+            Round::Quiet => "loop done — that round changed nothing".to_string(),
+            Round::Oscillating => "loop stopped — a round undid the work before it".to_string(),
+            Round::Thin => "loop stopped — rounds are only nibbling now".to_string(),
+            Round::Capped(n) => {
                 format!("loop stopped at loop_max_turns ({n}) — rounds were still changing files")
             }
         };
@@ -2668,7 +2667,7 @@ impl Tui {
         // Every lane's runs report here when they end. One channel rather than a
         // handle per lane: the loop waits on it like any other source.
         let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel::<Done>();
-        let mut tick = tokio::time::interval(crate::status::SPIN);
+        let mut tick = tokio::time::interval(status::SPIN);
         // The branch is off while nothing runs, so the interval falls behind
         // the clock; bursting to catch up would spin the loop the moment a run
         // starts. One late tick, then the ordinary cadence.
@@ -2790,11 +2789,11 @@ impl Tui {
                     {
                         session.push_note(&note);
                     }
-                    crate::repl::read(&goal)
+                    repl::read(&goal)
                 }
                 Intent::Submit(line) => {
                     self.echo_sent(&line);
-                    crate::repl::read(&line)
+                    repl::read(&line)
                 }
                 // A key that means a command — `ctrl+l` twice is `/new` —
                 // arrives already read.
@@ -2838,7 +2837,7 @@ impl Tui {
                     self.ui.flash(said);
                     continue;
                 }
-                if matches!(crate::repl::read(&goal), Intent::Loop(_)) {
+                if matches!(repl::read(&goal), Intent::Loop(_)) {
                     self.ui.flash("a loop cannot be its own goal");
                     continue;
                 }
@@ -3209,7 +3208,7 @@ impl Tui {
         let done = done.clone();
         tokio::spawn(async move {
             let out = guard(async move {
-                let out = crate::repl::run_bash(&ctx, &command).await;
+                let out = repl::run_bash(&ctx, &command).await;
                 // Esc that stopped the `!` is a cancelled run too; `ran` says
                 // so instead of a success that spent nothing.
                 let ran = if ctx.cancel.is_cancelled() {
@@ -3217,7 +3216,7 @@ impl Tui {
                 } else {
                     Ok(Totals::default())
                 };
-                crate::repl::record_bash(&mut carried, &command, out.text);
+                repl::record_bash(&mut carried, &command, out.text);
                 (carried, ran, out.said)
             })
             .await;
@@ -3518,9 +3517,13 @@ mod tests {
         Body, Cow, Intent, Panel, Row, ScrollbackRows, Thinking, Took, absorb_growth, body,
         scrollback_from, secret_settings_set, tool_row,
     };
-    use crate::keys::Action;
-    use crate::render::Markdown;
-    use crate::render::Paint;
+    use crate::icons;
+    use crate::keys::{Action, Keys, Mode};
+    use crate::lane::{Lane, Round, Turn};
+    use crate::render::{self, Markdown, Paint};
+    use crate::repl::{self, Choice, Command, Repl, Source};
+    use crate::session::Store;
+    use crate::status::{self, Segment};
     use crate::tui::screen;
     use crossterm::event::KeyCode;
 
@@ -3838,7 +3841,7 @@ mod tests {
         let joined: String = out
             .iter()
             .map(|row| {
-                crate::render::strip_ansi(row)
+                render::strip_ansi(row)
                     .trim_start_matches("\u{258c} ")
                     .to_string()
             })
@@ -4181,7 +4184,7 @@ mod tests {
     // and a `Turn::Running` standing in for the job that is about to report.
     // A lane and the directory it lives in — the guard comes back so the
     // caller keeps it alive for as long as the lane is used.
-    fn a_running_lane() -> (tempfile::TempDir, crate::lane::Lane) {
+    fn a_running_lane() -> (tempfile::TempDir, Lane) {
         let dir = tempfile::tempdir().expect("a temp dir");
         let lane = running_lane(dir.path());
         (dir, lane)
@@ -4189,9 +4192,9 @@ mod tests {
 
     // An idle worktree lane whose checkout has been deleted from disk —
     // exactly what `drop_vanished_lanes` exists to find.
-    fn vanished_lane(name: &str) -> crate::lane::Lane {
+    fn vanished_lane(name: &str) -> Lane {
         let (_dir, mut lane) = a_running_lane();
-        lane.turn = crate::lane::Turn::Idle;
+        lane.turn = Turn::Idle;
         lane.worktree = Some(name.into());
         std::fs::remove_dir_all(lane.ctx.workspace.root()).expect("the checkout goes");
         lane
@@ -4203,7 +4206,7 @@ mod tests {
         crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
     }
 
-    fn running_lane(dir: &std::path::Path) -> crate::lane::Lane {
+    fn running_lane(dir: &std::path::Path) -> Lane {
         struct Mute;
         #[async_trait::async_trait]
         impl brain::Transport for Mute {
@@ -4233,8 +4236,8 @@ mod tests {
             replay_thinking: brain::model::ReplayThinking::Tagged,
             pricing: brain::model::Pricing::default(),
         };
-        let (events, inbox) = crate::lane::Lane::channel();
-        crate::lane::Lane {
+        let (events, inbox) = Lane::channel();
+        Lane {
             agent: std::sync::Arc::new(agent::Agent::new(std::sync::Arc::new(Mute), spec)),
             session: None,
             id: "s1".into(),
@@ -4250,21 +4253,21 @@ mod tests {
             pending: Vec::new(),
             looping: None,
             // What every `start_*` leaves behind while its job runs.
-            turn: crate::lane::Turn::Running {
+            turn: Turn::Running {
                 cancel: tokio_util::sync::CancellationToken::new(),
                 steer: None,
                 unsend: false,
             },
             view: Default::default(),
-            keys: std::sync::Arc::new(crate::keys::Keys::default()),
+            keys: std::sync::Arc::new(Keys::default()),
             commands: std::sync::Arc::new(Vec::new()),
         }
     }
 
     fn surface(dir: &std::path::Path) -> super::Tui {
-        let keys = std::sync::Arc::new(crate::keys::Keys::default());
-        let core = crate::repl::Repl {
-            store: crate::session::Store::new(dir.join("state")),
+        let keys = std::sync::Arc::new(Keys::default());
+        let core = Repl {
+            store: Store::new(dir.join("state")),
             keys: keys.clone(),
             config: std::sync::Arc::new(crate::config::Config::default()),
             args: std::sync::Arc::new(<crate::Args as clap::Parser>::parse_from(["pi"])),
@@ -4279,7 +4282,7 @@ mod tests {
 
     // Put another lane in front, the way a checkout switch would, and
     // reconcile the surface against the lane it displaced.
-    fn switch_to(tui: &mut super::Tui, lane: crate::lane::Lane) {
+    fn switch_to(tui: &mut super::Tui, lane: Lane) {
         let was = tui.core.current;
         tui.core.lanes.push(lane);
         tui.core.current = tui.core.lanes.len() - 1;
@@ -4608,12 +4611,12 @@ mod tests {
                 name: "f2".into(),
             },
         ];
-        let plain = crate::render::strip_ansi(&ui.lane_bar(80).expect("two lanes make a bar"));
+        let plain = render::strip_ansi(&ui.lane_bar(80).expect("two lanes make a bar"));
         assert_eq!(plain, "pi-rs \u{b7} f1 \u{b7} \u{2713} f2");
 
         // Wide enough for the names, far too narrow once escapes are counted
         // as columns — the whole row still has to survive.
-        let narrow = crate::render::strip_ansi(&ui.lane_bar(30).expect("a bar"));
+        let narrow = render::strip_ansi(&ui.lane_bar(30).expect("a bar"));
         assert!(
             !narrow.contains('\u{2026}'),
             "clipped a row that fits: {narrow}"
@@ -4625,7 +4628,7 @@ mod tests {
     // to type — whatever the theme sets that icon to.
     #[test]
     fn the_lane_bar_never_wears_the_input_prompt() {
-        let icon = crate::render::Theme::default().prompt.icon;
+        let icon = render::Theme::default().prompt.icon;
         let mut ui = test_ui(80, 24);
         ui.tabs = vec![
             super::Tab {
@@ -4637,7 +4640,7 @@ mod tests {
                 name: "f1".into(),
             },
         ];
-        let plain = crate::render::strip_ansi(&ui.lane_bar(80).expect("two lanes make a bar"));
+        let plain = render::strip_ansi(&ui.lane_bar(80).expect("two lanes make a bar"));
         assert!(
             !plain.contains(&icon),
             "the bar wears the prompt icon `{icon}`: {plain}"
@@ -4664,7 +4667,7 @@ mod tests {
         ui.flush(&mut lane);
 
         let rows = ui.screen.painted();
-        let icon = crate::render::Theme::default().prompt.icon;
+        let icon = render::Theme::default().prompt.icon;
         let last = rows.last().expect("a drawn frame");
         assert!(
             last.starts_with(&icon),
@@ -4736,9 +4739,9 @@ mod tests {
         let mut ui = test_ui(40, 8);
         let (_dir, mut lane) = a_running_lane();
         lane.view.scrollback.clear();
-        let shown = |ui: &super::Ui, lane: &crate::lane::Lane, i: usize| {
+        let shown = |ui: &super::Ui, lane: &Lane, i: usize| {
             let (text, _) = lane.view.scrollback[i].line(0, &ui.paint, &[], 80);
-            crate::render::strip_ansi(&text)
+            render::strip_ansi(&text)
         };
 
         ui.say(&mut lane.view, "nothing to rewind to");
@@ -4765,7 +4768,7 @@ mod tests {
             let ui = test_ui(80, 24);
             let trees = ["pi-rs", "f1", "f2"]
                 .iter()
-                .map(|n| crate::repl::Choice {
+                .map(|n| Choice {
                     name: n.to_string(),
                     note: String::new(),
                 })
@@ -4794,7 +4797,7 @@ mod tests {
         let mut ui = test_ui(80, 24);
         let trees = ["pi-rs", "fw-rm", "fix-input", "fix-mem"]
             .iter()
-            .map(|n| crate::repl::Choice {
+            .map(|n| Choice {
                 name: n.to_string(),
                 note: String::new(),
             })
@@ -4845,7 +4848,7 @@ mod tests {
         tui.ui
             .lists
             .worktrees
-            .set(vec![crate::repl::Choice {
+            .set(vec![Choice {
                 name: "fix-mem".into(),
                 note: String::new(),
             }])
@@ -4867,7 +4870,7 @@ mod tests {
         let earlier = vanished_lane("fix-old");
         tui.core.lanes.insert(0, earlier);
         tui.core.current = 1;
-        tui.core.lanes[1].turn = crate::lane::Turn::Idle;
+        tui.core.lanes[1].turn = Turn::Idle;
         tui.drop_vanished_lanes();
         assert_eq!(tui.core.lanes.len(), 1);
         assert_eq!(tui.core.current, 0, "the front lane follows its index");
@@ -4889,7 +4892,7 @@ mod tests {
         assert_eq!(tui.core.lanes.len(), 3, "the run's lane must not move");
 
         // The run over, the same pass now reaches the vanished lane.
-        tui.core.lanes[2].turn = crate::lane::Turn::Idle;
+        tui.core.lanes[2].turn = Turn::Idle;
         tui.drop_vanished_lanes();
         assert_eq!(tui.core.lanes.len(), 2);
     }
@@ -4900,7 +4903,7 @@ mod tests {
         let ui = test_ui(80, 24);
         ui.lists
             .worktrees
-            .set(vec![crate::repl::Choice {
+            .set(vec![Choice {
                 name: "pi-rs".into(),
                 note: String::new(),
             }])
@@ -4977,34 +4980,31 @@ mod tests {
         let mut ui = vim_ui();
         let trees = ["pi-rs", "f1", "f2"]
             .iter()
-            .map(|n| crate::repl::Choice {
+            .map(|n| Choice {
                 name: n.to_string(),
                 note: String::new(),
             })
             .collect();
         ui.lists.worktrees.set(trees).ok();
-        ui.vim.as_mut().unwrap().mode = crate::keys::Mode::Normal;
+        ui.vim.as_mut().unwrap().mode = Mode::Normal;
         let (_dir, mut lane) = a_running_lane();
 
         let next = ui.key(&mut lane, typed('L'), false);
         assert!(
-            matches!(&next, crate::repl::Intent::Worktree(name) if name == "f1"),
+            matches!(&next, Intent::Worktree(name) if name == "f1"),
             "{next:?}"
         );
         lane.worktree = Some("f1".into());
         let prev = ui.key(&mut lane, typed('H'), false);
         assert!(
-            matches!(&prev, crate::repl::Intent::Worktree(name) if name == "pi-rs"),
+            matches!(&prev, Intent::Worktree(name) if name == "pi-rs"),
             "{prev:?}"
         );
 
         // The lowercase pair no longer leaves the lane it is typed in.
         for lower in ['h', 'l'] {
             let intent = ui.key(&mut lane, typed(lower), false);
-            assert!(
-                matches!(intent, crate::repl::Intent::None),
-                "`{lower}`: {intent:?}"
-            );
+            assert!(matches!(intent, Intent::None), "`{lower}`: {intent:?}");
         }
 
         // And the window moves without the caret: scrolled up by J, back by K.
@@ -5029,11 +5029,11 @@ mod tests {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let mut ui = test_ui(80, 24);
-        ui.commands = std::sync::Arc::new(vec![crate::repl::Command {
+        ui.commands = std::sync::Arc::new(vec![Command {
             word: "/new".into(),
             args: "",
             help: "a fresh session".into(),
-            source: crate::repl::Source::Builtin,
+            source: Source::Builtin,
         }]);
         let (_dir, mut lane) = a_running_lane();
         let esc = || super::TermEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -5045,10 +5045,7 @@ mod tests {
         lane.view.committed = true;
         assert!(ui.menu().is_empty(), "an empty line completes to nothing");
         let intent = ui.key(&mut lane, esc(), true);
-        assert!(
-            matches!(intent, crate::repl::Intent::Interrupt),
-            "{intent:?}"
-        );
+        assert!(matches!(intent, Intent::Interrupt), "{intent:?}");
 
         ui.editor.set_line("/ne");
         assert!(
@@ -5058,14 +5055,11 @@ mod tests {
 
         // First press: the list, and nothing asked of the loop.
         let intent = ui.key(&mut lane, esc(), true);
-        assert!(matches!(intent, crate::repl::Intent::None), "{intent:?}");
+        assert!(matches!(intent, Intent::None), "{intent:?}");
         assert!(ui.menu().is_empty(), "the list went");
         // Second: through where the list was, to the run.
         let intent = ui.key(&mut lane, esc(), true);
-        assert!(
-            matches!(intent, crate::repl::Intent::Interrupt),
-            "{intent:?}"
-        );
+        assert!(matches!(intent, Intent::Interrupt), "{intent:?}");
 
         // Typing past the dismissal brings the list back, and Tab still
         // completes mid-run — the half of the menu the run never claimed.
@@ -5082,7 +5076,7 @@ mod tests {
         // `esc` there is about the panel, the way it is about the list.
         ui.panel = Some(Panel::new(Body::Shelf(Vec::new())));
         let intent = ui.key(&mut lane, esc(), true);
-        assert!(matches!(intent, crate::repl::Intent::None), "{intent:?}");
+        assert!(matches!(intent, Intent::None), "{intent:?}");
         assert!(
             ui.panel.is_none(),
             "esc closed the panel rather than the run"
@@ -5108,7 +5102,7 @@ mod tests {
             },
         ];
         let (_dir, mut lane) = a_running_lane();
-        lane.turn = crate::lane::Turn::Idle;
+        lane.turn = Turn::Idle;
         for i in 0..10 {
             lane.view.scrollback.push(Row::notice(format!("row-{i}")));
         }
@@ -5125,7 +5119,7 @@ mod tests {
         );
     }
 
-    fn a_finished_run(ui: &mut super::Ui, lane: &mut crate::lane::Lane) {
+    fn a_finished_run(ui: &mut super::Ui, lane: &mut Lane) {
         ui.on_event(lane, agent::Event::TurnStart { turn: 1 });
         ui.on_event(
             lane,
@@ -5143,9 +5137,9 @@ mod tests {
         );
     }
 
-    fn spelled(rows: &[Row], paint: &Paint, done: &[crate::status::Segment]) -> Vec<String> {
+    fn spelled(rows: &[Row], paint: &Paint, done: &[Segment]) -> Vec<String> {
         ScrollbackRows::new(rows, paint, done, 80)
-            .map(|(r, _)| crate::render::strip_ansi(&r))
+            .map(|(r, _)| render::strip_ansi(&r))
             .collect()
     }
 
@@ -5159,11 +5153,7 @@ mod tests {
         let (_dir, mut lane) = a_running_lane();
         a_finished_run(&mut ui, &mut lane);
 
-        let rows = spelled(
-            &lane.view.scrollback,
-            &ui.paint,
-            &crate::status::default_done(),
-        );
+        let rows = spelled(&lane.view.scrollback, &ui.paint, &status::default_done());
         assert_eq!(
             rows.last().map(String::as_str),
             Some("2 turns · 8.4k in / 390 out · ctx 72.4k/114.0k · $0.0012")
@@ -5171,11 +5161,7 @@ mod tests {
 
         // The same row, asked for differently. A stored string could not do
         // this, which is the whole of what changed.
-        let narrowed = spelled(
-            &lane.view.scrollback,
-            &ui.paint,
-            &[crate::status::Segment::Cost],
-        );
+        let narrowed = spelled(&lane.view.scrollback, &ui.paint, &[Segment::Cost]);
         assert_eq!(narrowed.last().map(String::as_str), Some("$0.0012"));
     }
 
@@ -5189,7 +5175,7 @@ mod tests {
 
         let live = ui.live(&lane, 10).join("\n");
         let frames = |text: &str| {
-            crate::status::FRAMES
+            icons::SPINNER_FRAMES
                 .iter()
                 .any(|frame| text.contains(frame))
         };
@@ -5208,15 +5194,15 @@ mod tests {
         assert!(
             ui.live(&lane, 10)
                 .iter()
-                .any(|r| crate::status::FRAMES.iter().any(|f| r.contains(f))),
+                .any(|r| icons::SPINNER_FRAMES.iter().any(|f| r.contains(f))),
             "a running lane draws the status line"
         );
 
-        lane.turn = crate::lane::Turn::Idle;
+        lane.turn = Turn::Idle;
         assert!(
             !ui.live(&lane, 10)
                 .iter()
-                .any(|r| crate::status::FRAMES.iter().any(|f| r.contains(f))),
+                .any(|r| icons::SPINNER_FRAMES.iter().any(|f| r.contains(f))),
             "the clock is still set; the turn is what says the run is over"
         );
     }
@@ -5263,7 +5249,7 @@ mod tests {
         super::TermEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
     }
 
-    fn mode(ui: &super::Ui) -> Option<crate::keys::Mode> {
+    fn mode(ui: &super::Ui) -> Option<Mode> {
         ui.vim.as_ref().map(|v| v.mode)
     }
 
@@ -5277,11 +5263,11 @@ mod tests {
 
         ui.key(&mut lane, typed('j'), false);
         assert_eq!(ui.editor.text(), "j", "a lone j is a j");
-        assert_eq!(mode(&ui), Some(crate::keys::Mode::Insert));
+        assert_eq!(mode(&ui), Some(Mode::Insert));
 
         ui.key(&mut lane, typed('k'), false);
         assert_eq!(ui.editor.text(), "", "the j goes with the mode change");
-        assert_eq!(mode(&ui), Some(crate::keys::Mode::Normal));
+        assert_eq!(mode(&ui), Some(Mode::Normal));
     }
 
     // Outside the window the two characters are just two characters. Without
@@ -5297,7 +5283,7 @@ mod tests {
         ui.key(&mut lane, typed('k'), false);
 
         assert_eq!(ui.editor.text(), "jk");
-        assert_eq!(mode(&ui), Some(crate::keys::Mode::Insert));
+        assert_eq!(mode(&ui), Some(Mode::Insert));
     }
 
     // A command between the halves breaks the sequence: `j`, a keystroke that
@@ -5314,7 +5300,7 @@ mod tests {
         ui.key(&mut lane, typed('k'), false);
 
         assert_eq!(ui.editor.text(), "kj", "the caret had moved before the k");
-        assert_eq!(mode(&ui), Some(crate::keys::Mode::Insert));
+        assert_eq!(mode(&ui), Some(Mode::Insert));
     }
 
     // Normal has to refuse the keys it does not bind. Without this the mode
@@ -5325,7 +5311,7 @@ mod tests {
         let mut ui = vim_ui();
         let (_dir, mut lane) = a_running_lane();
         ui.editor.set_line("hello");
-        ui.vim.as_mut().unwrap().mode = crate::keys::Mode::Normal;
+        ui.vim.as_mut().unwrap().mode = Mode::Normal;
 
         ui.key(&mut lane, typed('z'), false);
         assert_eq!(ui.editor.text(), "hello");
@@ -5342,15 +5328,15 @@ mod tests {
         let mut ui = vim_ui();
         let (_dir, mut lane) = a_running_lane();
         ui.editor.set_line("ab");
-        ui.vim.as_mut().unwrap().mode = crate::keys::Mode::Normal;
+        ui.vim.as_mut().unwrap().mode = Mode::Normal;
 
         ui.key(&mut lane, typed('0'), false);
         ui.key(&mut lane, typed('i'), false);
-        assert_eq!(mode(&ui), Some(crate::keys::Mode::Insert));
+        assert_eq!(mode(&ui), Some(Mode::Insert));
         ui.key(&mut lane, typed('Z'), false);
         assert_eq!(ui.editor.text(), "Zab", "i types where the caret is");
 
-        ui.vim.as_mut().unwrap().mode = crate::keys::Mode::Normal;
+        ui.vim.as_mut().unwrap().mode = Mode::Normal;
         ui.key(&mut lane, typed('0'), false);
         ui.key(&mut lane, typed('a'), false);
         ui.key(&mut lane, typed('Y'), false);
@@ -5364,16 +5350,16 @@ mod tests {
         let mut ui = vim_ui();
         let (_dir, mut lane) = a_running_lane();
         ui.editor.set_line("abcd");
-        ui.vim.as_mut().unwrap().mode = crate::keys::Mode::Normal;
+        ui.vim.as_mut().unwrap().mode = Mode::Normal;
 
         ui.key(&mut lane, typed('0'), false);
         ui.key(&mut lane, typed('s'), false);
         assert_eq!(ui.editor.text(), "bcd");
-        assert_eq!(mode(&ui), Some(crate::keys::Mode::Insert));
+        assert_eq!(mode(&ui), Some(Mode::Insert));
         ui.key(&mut lane, typed('Z'), false);
         assert_eq!(ui.editor.text(), "Zbcd", "s types where the character was");
 
-        ui.vim.as_mut().unwrap().mode = crate::keys::Mode::Normal;
+        ui.vim.as_mut().unwrap().mode = Mode::Normal;
         ui.key(&mut lane, typed('0'), false);
         let right = super::TermEvent::Key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Right,
@@ -5382,7 +5368,7 @@ mod tests {
         ui.key(&mut lane, right, false);
         ui.key(&mut lane, typed('C'), false);
         assert_eq!(ui.editor.text(), "Z");
-        assert_eq!(mode(&ui), Some(crate::keys::Mode::Insert));
+        assert_eq!(mode(&ui), Some(Mode::Insert));
         ui.key(&mut lane, typed('Y'), false);
         assert_eq!(ui.editor.text(), "ZY", "C leaves the caret where it cut");
     }
@@ -5396,14 +5382,14 @@ mod tests {
     fn the_sigil_follows_the_theme_rather_than_the_mode() {
         let mut ui = vim_ui();
         let insert = ui.prompt.clone();
-        ui.vim.as_mut().unwrap().mode = crate::keys::Mode::Normal;
+        ui.vim.as_mut().unwrap().mode = Mode::Normal;
         ui.show_mode();
         assert_eq!(
             ui.prompt, insert,
             "one bar either way; the caret is what changes"
         );
 
-        let mut theme = crate::render::Theme::default();
+        let mut theme = render::Theme::default();
         theme.prompt.normal = "›".into();
         ui.paint.theme = std::sync::Arc::new(theme);
         ui.show_mode();
@@ -5421,7 +5407,7 @@ mod tests {
     #[test]
     fn turning_the_keys_off_drops_the_mode_rather_than_parking_it() {
         let mut ui = vim_ui();
-        ui.vim.as_mut().unwrap().mode = crate::keys::Mode::Normal;
+        ui.vim.as_mut().unwrap().mode = Mode::Normal;
 
         ui.set_vim(&crate::config::Vim {
             enabled: false,
@@ -5433,30 +5419,25 @@ mod tests {
             enabled: true,
             ..Default::default()
         });
-        assert_eq!(mode(&ui), Some(crate::keys::Mode::Insert));
+        assert_eq!(mode(&ui), Some(Mode::Insert));
     }
 
     fn test_ui(width: u16, height: u16) -> super::Ui {
         super::Ui::new(
             crate::tui::screen::Screen::test(width, height),
-            std::sync::Arc::new(crate::keys::Keys::default()),
+            std::sync::Arc::new(Keys::default()),
             Vec::new(),
             std::sync::Arc::new(Vec::new()),
-            super::Lists::new(
-                crate::session::Store::new(std::env::temp_dir()),
-                std::env::temp_dir(),
-            ),
+            super::Lists::new(Store::new(std::env::temp_dir()), std::env::temp_dir()),
             Paint::new(true),
         )
     }
 
     // ------------------------------------------------------------- looping
 
-    use crate::lane::Round;
-
     // Write `body` to `name` in the lane's workspace and record the write, so
     // the tree fingerprint the loop reads has real bytes to hash.
-    fn wrote(lane: &mut crate::lane::Lane, name: &str, body: &str) {
+    fn wrote(lane: &mut Lane, name: &str, body: &str) {
         let path = lane.ctx.workspace.root().join(name);
         std::fs::write(&path, body).expect("writes into the temp workspace");
         lane.ctx.note_write(&path);
@@ -5635,9 +5616,6 @@ mod tests {
     // A loop whose goal is another loop would arm itself every round.
     #[test]
     fn a_loop_cannot_be_read_as_its_own_goal() {
-        assert!(matches!(
-            crate::repl::read("/loop go"),
-            crate::repl::Intent::Loop(_)
-        ));
+        assert!(matches!(repl::read("/loop go"), Intent::Loop(_)));
     }
 }

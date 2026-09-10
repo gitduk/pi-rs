@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 
 mod config;
 mod context;
+mod icons;
 mod journal;
 mod keys;
 mod lane;
@@ -673,7 +674,7 @@ async fn main() -> Result<()> {
         Ok(_) if !args.quiet => {
             let called = name.as_deref().map_or(String::new(), |n| format!(" “{n}”"));
             let carried = if resumed > 0 {
-                format!(" · resumed {resumed} messages")
+                format!("{}resumed {resumed} messages", crate::icons::PART_SEP)
             } else {
                 String::new()
             };

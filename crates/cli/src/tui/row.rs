@@ -17,14 +17,9 @@ use std::cell::RefCell;
 
 use brain::message::{ToolResult, ToolResultContent};
 
+use crate::icons;
 use crate::render::{self, Markdown, Paint};
 use crate::status::{self, Segment, Snapshot};
-
-// The sigil a line already said wears, in the prompt's colour. Kept out
-// of the row's text so wrapping can repeat it — see `Kind::Said`.
-const SAID: &str = "▌";
-
-const BANNER: &str = concat!("π ", env!("CARGO_PKG_VERSION"));
 
 pub struct Row(Kind);
 
@@ -35,7 +30,7 @@ enum Kind {
     // wrap — the bar would end mid-air and the rest of the line would run
     // flush against the left edge.
     Said {
-        // The painted rule and its column: `▌ ` in the prompt colour.
+        // The painted rule and its column: `SAID_RULE` in the prompt colour.
         border: String,
         // The line's text, painted in the input style, without the border.
         body: String,
@@ -216,7 +211,7 @@ impl Row {
         // Unbroken down every line said: the icon marks what is being typed,
         // and a landed line wearing it reads as another place to type. The
         // border is kept apart from the body so wrapping can repeat it.
-        let border = format!("{} ", paint.on(&paint.theme.prompt.color, SAID));
+        let border = format!("{} ", paint.on(&paint.theme.prompt.color, icons::SAID_RULE));
         text.lines()
             .map(|line| Self::said(border.clone(), paint.on(&paint.theme.input, line)))
             .collect()
@@ -335,7 +330,7 @@ impl Row {
     /// them scrolls away while this stays at the top where it belongs.
     pub fn banner(context: &[String], paint: &Paint) -> Vec<Self> {
         let muted = |line: &str| Self::notice(paint.on(&paint.theme.muted, line));
-        let mut rows = vec![muted(BANNER)];
+        let mut rows = vec![muted(icons::VERSION_BANNER)];
         if !context.is_empty() {
             rows.push(muted("context:"));
             rows.extend(context.iter().map(|f| muted(&format!("- {f}"))));
@@ -358,13 +353,13 @@ pub fn named(name: &str, summary: &str) -> String {
 
 // A tool's start line: what an unanswered call keeps in the view.
 fn tool_start_line(name: &str, summary: &str) -> String {
-    format!("→ {}", named(name, summary))
+    format!("{} {}", icons::PENDING_MARK, named(name, summary))
 }
 
 // The count line a shut thinking block leaves in the scrollback.
 fn thinking_summary(n: usize) -> String {
     let s = if n == 1 { "" } else { "s" };
-    format!("thinking · {n} line{s}")
+    format!("thinking{}{n} line{s}", icons::PART_SEP)
 }
 
 #[cfg(test)]
@@ -412,7 +407,7 @@ mod said_tests {
     fn the_rule_costs_what_the_prompt_did() {
         let icon = crate::render::Theme::default().prompt.icon;
         assert_eq!(
-            unicode_width::UnicodeWidthStr::width(SAID),
+            unicode_width::UnicodeWidthStr::width(icons::SAID_RULE),
             unicode_width::UnicodeWidthStr::width(icon.as_str()),
         );
     }
