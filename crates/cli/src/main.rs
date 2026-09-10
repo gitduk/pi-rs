@@ -462,11 +462,6 @@ async fn main() -> Result<()> {
             // reading back is a fortnight old at most, and the work is not.
             journal::prune(store.root());
             store.prune();
-            // One layout ago journals had a tree of their own. Nothing looks
-            // there now, so nothing would ever take them.
-            if let Some(logs) = tools::state::stale_logs() {
-                let _ = std::fs::remove_dir_all(logs);
-            }
         }
     });
     let prior = match (&args.resume, args.continue_last) {

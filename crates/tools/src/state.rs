@@ -23,12 +23,6 @@ pub fn session_dir(workspace: &Path, id: &str) -> Option<PathBuf> {
     sessions().map(|s| s.join(key_of(workspace)).join(file_stem(id)))
 }
 
-/// The tree journals used to have to themselves. Kept only so that the run
-/// that finds one can take it: nothing writes here any more.
-pub fn stale_logs() -> Option<PathBuf> {
-    dir().map(|d| d.join("logs"))
-}
-
 /// Write bytes where only this user can read them, whole or not at all.
 ///
 /// Under a temp name and renamed, so the final path never carries the wrong
