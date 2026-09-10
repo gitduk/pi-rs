@@ -365,6 +365,7 @@ fn thinking_summary(n: usize) -> String {
 #[cfg(test)]
 mod said_tests {
     use super::*;
+    use crate::icons;
 
     fn said(text: &str) -> Vec<String> {
         let paint = Paint::new(true);
@@ -384,10 +385,14 @@ mod said_tests {
     #[test]
     fn a_said_line_wears_a_rule_and_never_the_prompt_icon() {
         let icon = crate::render::Theme::default().prompt.icon;
-        assert_eq!(said("hi"), ["\u{258c} hi"]);
+        assert_eq!(said("hi"), [format!("{} hi", icons::SAID_RULE)]);
         assert_eq!(
             said("first\nsecond\nthird"),
-            ["\u{258c} first", "\u{258c} second", "\u{258c} third"],
+            [
+                format!("{} first", icons::SAID_RULE),
+                format!("{} second", icons::SAID_RULE),
+                format!("{} third", icons::SAID_RULE),
+            ],
             "the rule is unbroken"
         );
         for row in said("hi\nthere") {

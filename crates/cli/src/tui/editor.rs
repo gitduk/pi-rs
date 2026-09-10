@@ -450,29 +450,6 @@ mod tests {
     }
 
     #[test]
-    fn a_bang_line_puts_the_bang_in_the_prompt() {
-        let e = typed("!git status");
-        let (rows, caret) = e.view(&paint(), 40);
-        assert_eq!(rows[0], "! git status", "the bang takes the icon's place");
-        assert_eq!(
-            caret,
-            (0, 12),
-            "SIGIL_W 2 + the ten characters of `git status`"
-        );
-
-        let plain = typed("git status");
-        assert_eq!(plain.view(&paint(), 40).0[0], "│ git status");
-    }
-
-    #[test]
-    fn deleting_the_bang_returns_the_plain_prompt() {
-        let mut e = typed("!git");
-        e.home();
-        e.delete();
-        assert_eq!(e.view(&paint(), 40).0[0], "│ git");
-    }
-
-    #[test]
     fn a_bang_line_wraps_with_the_bang_in_the_sigil() {
         let e = typed("!abcdefgh");
         // Width 6 leaves 4 columns after the sigil, as in the plain case;

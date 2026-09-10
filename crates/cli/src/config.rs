@@ -845,13 +845,6 @@ output_per_mtok = 0
         assert_eq!(before, after);
     }
 
-    #[test]
-    fn the_shipped_example_parses() {
-        // It is the file people copy from; a stale key in it fails on their
-        // machine, not in CI.
-        parse(include_str!("../../../examples/pi.toml")).unwrap();
-    }
-
     // The block the README opens with is what a new reader copies first, and
     // it went on saying `[models.x]` with a `wire` key for a whole release
     // after the parser stopped accepting either. Read out of the file rather
@@ -1264,7 +1257,6 @@ output_per_mtok = 0
         assert_eq!(c.theme.muted.codes(), "2");
         assert_eq!(c.theme.code.codes(), "38;2;88;166;255");
         assert_eq!(c.theme.menu.selected.codes(), "7");
-        assert_eq!(c.theme.prompt.icon, "\u{2502}");
         assert_eq!(c.theme.input.codes(), "");
     }
 

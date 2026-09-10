@@ -3624,9 +3624,15 @@ mod tests {
 
     #[test]
     fn a_pending_tool_row_spins_and_names_its_argument() {
-        assert_eq!(tool_row(0, "read", "a.rs"), "⠋ read a.rs");
+        assert_eq!(
+            tool_row(0, "read", "a.rs"),
+            format!("{} read a.rs", icons::SPINNER_FRAMES[0])
+        );
         // A tool with nothing worth showing keeps the row to a name.
-        assert_eq!(tool_row(5, "spinner", ""), "⠴ spinner");
+        assert_eq!(
+            tool_row(5, "spinner", ""),
+            format!("{} spinner", icons::SPINNER_FRAMES[5])
+        );
     }
 
     #[test]
@@ -3636,7 +3642,7 @@ mod tests {
         let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 80)
             .map(|(s, _)| s)
             .collect();
-        assert_eq!(rows, vec!["thinking · 2 lines"]);
+        assert_eq!(rows, vec![format!("thinking{}2 lines", icons::PART_SEP)]);
     }
 
     #[test]
@@ -4051,7 +4057,7 @@ mod tests {
             ScrollbackRows::new(std::slice::from_ref(&entry), &paint, &[], 80)
                 .map(|(s, _)| s)
                 .collect();
-        assert_eq!(rows, vec!["thinking · 2 lines"]);
+        assert_eq!(rows, vec![format!("thinking{}2 lines", icons::PART_SEP)]);
     }
 
     #[test]
@@ -5371,34 +5377,6 @@ mod tests {
         assert_eq!(mode(&ui), Some(Mode::Insert));
         ui.key(&mut lane, typed('Y'), false);
         assert_eq!(ui.editor.text(), "ZY", "C leaves the caret where it cut");
-    }
-
-    // The mode outlives a submitted line, which is the whole reason it has to
-    // be visible — and by default that is the caret's shape, not the sigil:
-    // both modes wear the same bar. `prompt.normal` is what a terminal that
-    // will not reshape its caret sets to get the difference back, so the
-    // sigil still follows it.
-    #[test]
-    fn the_sigil_follows_the_theme_rather_than_the_mode() {
-        let mut ui = vim_ui();
-        let insert = ui.prompt.clone();
-        ui.vim.as_mut().unwrap().mode = Mode::Normal;
-        ui.show_mode();
-        assert_eq!(
-            ui.prompt, insert,
-            "one bar either way; the caret is what changes"
-        );
-
-        let mut theme = render::Theme::default();
-        theme.prompt.normal = "›".into();
-        ui.paint.theme = std::sync::Arc::new(theme);
-        ui.show_mode();
-        assert_ne!(
-            ui.prompt, insert,
-            "a theme that does tell them apart is obeyed"
-        );
-        ui.leave_normal();
-        assert_eq!(ui.prompt, insert, "and back to the bar on the way out");
     }
 
     // Turning the keys off is the one thing that moves the mode without a

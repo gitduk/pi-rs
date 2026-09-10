@@ -813,8 +813,14 @@ mod tests {
     #[test]
     fn a_tool_line_carries_the_summarized_argument() {
         let args = serde_json::json!({ "path": "crates/cli/src/wechat.rs" });
-        assert_eq!(tool_line("edit", &args), "⚙ edit crates/cli/src/wechat.rs");
-        assert_eq!(tool_line("read", &serde_json::json!({})), "⚙ read");
+        assert_eq!(
+            tool_line("edit", &args),
+            format!("{} edit crates/cli/src/wechat.rs", icons::TOOL_GEAR)
+        );
+        assert_eq!(
+            tool_line("read", &serde_json::json!({})),
+            format!("{} read", icons::TOOL_GEAR)
+        );
     }
 
     fn started(name: &str) -> Event {
@@ -836,7 +842,13 @@ mod tests {
         for name in ["read", "grep", "bash"] {
             b.observe(&started(name)).await;
         }
-        assert_eq!(b.tool_buf, ["⚙ grep", "⚙ bash"]);
+        assert_eq!(
+            b.tool_buf,
+            [
+                format!("{} grep", icons::TOOL_GEAR),
+                format!("{} bash", icons::TOOL_GEAR)
+            ]
+        );
         b.finish_turn(false).await;
         assert!(b.tool_buf.is_empty(), "{:?}", b.tool_buf);
     }
@@ -860,7 +872,7 @@ mod tests {
         b.observe(&Event::TurnStart { turn: 1 }).await;
         b.observe(&started("read")).await;
         b.observe(&started("grep")).await;
-        assert_eq!(b.tool_buf, ["⚙ grep"]);
+        assert_eq!(b.tool_buf, [format!("{} grep", icons::TOOL_GEAR)]);
         b.observe(&Event::TurnStart { turn: 1 }).await;
         assert!(b.tool_buf.is_empty(), "{:?}", b.tool_buf);
     }
@@ -871,7 +883,7 @@ mod tests {
         b.observe(&Event::TurnStart { turn: 1 }).await;
         b.observe(&started("read")).await;
         b.observe(&started("grep")).await;
-        assert_eq!(b.tool_buf, ["⚙ grep"]);
+        assert_eq!(b.tool_buf, [format!("{} grep", icons::TOOL_GEAR)]);
         b.observe(&Event::Warning("careful".into())).await;
         assert!(b.tool_buf.is_empty(), "{:?}", b.tool_buf);
     }

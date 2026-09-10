@@ -696,7 +696,7 @@ mod tests {
         let Value::String(s) = clip(&long, 33) else {
             panic!("a string clips to a string")
         };
-        assert!(s.contains("…+"));
+        assert!(s.contains(&format!("{}+", crate::icons::ELLIPSIS)));
         // Would have panicked on construction if the cut split the é.
         assert!(s.starts_with("élan"));
         assert_eq!(clip("short", 33), Value::String("short".into()));
@@ -837,7 +837,12 @@ mod tests {
             LogLevel::Debug,
             || tracing::warn!(target: "pi::t", patch, "rejected"),
         );
-        assert!(at_info[0]["patch"].as_str().unwrap().contains("…+"));
+        assert!(
+            at_info[0]["patch"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("{}+", crate::icons::ELLIPSIS))
+        );
         assert_eq!(at_debug[0]["patch"].as_str().unwrap().len(), 4_000);
     }
 

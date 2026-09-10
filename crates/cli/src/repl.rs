@@ -2650,9 +2650,6 @@ mod tests {
     }
 
     #[test]
-    fn trailing_words_do_not_break_a_command() {}
-
-    #[test]
     fn a_command_that_takes_words_keeps_all_of_them() {
         assert_eq!(
             read("/name the flaky test"),

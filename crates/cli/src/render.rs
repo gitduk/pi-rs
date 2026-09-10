@@ -1503,7 +1503,10 @@ mod tests {
             output: 390,
             ..Default::default()
         };
-        assert_eq!(spent(&usage, 0.0012), "8.4k in / 390 out · $0.0012");
+        assert_eq!(
+            spent(&usage, 0.0012),
+            format!("8.4k in / 390 out{}$0.0012", crate::icons::PART_SEP)
+        );
     }
 
     #[test]
