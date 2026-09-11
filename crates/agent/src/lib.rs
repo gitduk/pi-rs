@@ -121,7 +121,7 @@ pub struct Agent {
     /// Where facts that should outlive this session are kept. None for a
     /// subagent, a test or an embedder: a run nobody will return to has
     /// nothing to leave behind.
-    /// Read into every turn's notes and written when compaction drops a span.
+    /// Read each turn to see whether it changed, and written when a span goes.
     ///
     /// A note rather than part of the system prompt, because it moves: the
     /// prompt is the cached prefix, and changing its tail re-bills every
@@ -149,9 +149,8 @@ fn context_note(used: usize, budget: usize, trimmed: bool) -> String {
 // Everything the turn says about itself, in the order it is read: what the
 // window is doing now, then what outlived the transcripts before it.
 //
-// Read from the shelf each turn rather than held: compaction writes to it
-// mid-run, and a copy taken at startup would show the model a shelf without
-// the note it had just put there.
+// The shelf is reread each turn rather than held: compaction writes to it
+// mid-run, and that change is what the next turn should see.
 fn turn_notes(used: usize, budget: usize, trimmed: bool, shelf: Option<String>) -> Vec<String> {
     let mut out = vec![context_note(used, budget, trimmed)];
     out.extend(shelf.filter(|m| !m.trim().is_empty()));
@@ -257,6 +256,9 @@ impl Agent {
         // Across the whole run, not the turn: a status line that reset this
         // every turn would report "not compacted" for a run that just was.
         let mut compactions = 0usize;
+        // What the last request was shown as the shelf: unchanged, it rides
+        // no further requests; a run that never writes to it ships it once.
+        let mut seen_shelf: Option<String> = None;
 
         for turn in 1.. {
             // What was said while the run worked. Here and nowhere else: a
@@ -313,15 +315,18 @@ impl Agent {
                     effort = ?self.effort,
                     "sending"
                 );
+                // The shelf rides the request only when what the model would
+                // see of it just changed: first turn, or a compaction wrote.
+                let shelf = self.shelf.as_ref().and_then(|s| s.read());
+                let changed = seen_shelf.as_ref() != shelf.as_ref();
+                if changed {
+                    seen_shelf = shelf.clone();
+                }
+                let shown = if changed { shelf } else { None };
                 let req = Request {
                     system: Some(self.system.clone()),
                     messages: sent.clone(),
-                    notes: turn_notes(
-                        used,
-                        budget,
-                        trimmed,
-                        self.shelf.as_ref().and_then(|s| s.read()),
-                    ),
+                    notes: turn_notes(used, budget, trimmed, shown),
                     tools: self.registry.defs(),
                     max_output_tokens: None,
                     temperature: None,
