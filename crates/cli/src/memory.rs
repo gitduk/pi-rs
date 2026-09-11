@@ -85,6 +85,15 @@ pub struct Row {
     pub text: String,
 }
 
+#[cfg(test)]
+pub(crate) fn note(id: u64, text: impl Into<String>) -> Row {
+    Row {
+        id,
+        day: "2026-09-09".into(),
+        text: text.into(),
+    }
+}
+
 /// One repository's shelf.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Memory {

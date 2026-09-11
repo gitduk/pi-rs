@@ -15,6 +15,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::Paint;
 use super::editor::Editor;
+use super::screen;
 use crate::icons;
 use crate::journal;
 use crate::keys::{Action, Which};
@@ -293,25 +294,31 @@ impl Panel {
 
     /// The rows to paint, the selected one marked, then the edit line and
     /// whatever the last commit refused.
+    ///
+    /// Wrapped here rather than left to `Rows`: the panel is sized by counting
+    /// rows, and a row `Rows` wrapped on its own is a row the count misses.
     pub fn view(&self, paint: &Paint, width: usize) -> Vec<String> {
         if self.body.len() == 0
             && let Some(empty) = self.body.empty()
         {
-            return vec![empty.to_string()];
+            return screen::fit(empty, width);
         }
         let mut out = Vec::new();
         for i in 0..self.body.len() {
             let caret = if i == self.at { icons::MENU_SIGIL } else { " " };
             let hidden = self.editing.is_some() && i == self.at;
             let line = format!("{caret} {}", self.body.row(i, hidden));
-            out.push(paint.on(&paint.theme.menu.selected, &line));
+            out.extend(screen::fit(
+                &paint.on(&paint.theme.menu.selected, &line),
+                width,
+            ));
         }
         if let Some(editor) = &self.editing {
             let (line, _) = editor.view(paint, width);
             out.extend(line);
         }
         if let Some(why) = &self.refused {
-            out.push(format!("  {} {why}", icons::FAIL_MARK));
+            out.extend(screen::fit(&format!("  {} {why}", icons::FAIL_MARK), width));
         }
         out
     }
@@ -356,11 +363,7 @@ mod tests {
     fn shelf(n: usize) -> Body {
         Body::Shelf(
             (0..n)
-                .map(|i| memory::Row {
-                    id: i as u64 + 1,
-                    day: "2026-09-07".into(),
-                    text: format!("note {i}"),
-                })
+                .map(|i| memory::note(i as u64 + 1, format!("note {i}")))
                 .collect(),
         )
     }

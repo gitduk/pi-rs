@@ -4303,6 +4303,27 @@ mod tests {
         tui.reconcile(was);
     }
 
+    // A panel sized by its line count clips whatever wraps past the bottom;
+    // its rows come back one terminal row each, and the height is the len.
+    #[tokio::test]
+    async fn a_wrapping_shelf_panel_still_shows_its_last_note() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut tui = surface(dir.path());
+        let long = "x".repeat(200);
+        let mut rows: Vec<crate::memory::Row> = (1..=3)
+            .map(|id| crate::memory::note(id, long.clone()))
+            .collect();
+        rows.push(crate::memory::note(4, "the last note"));
+        tui.ui.panel = Some(Panel::new(Body::Shelf(rows)));
+
+        tui.ui.flush(&mut tui.core.lanes[0]);
+        let painted = tui.ui.screen.painted();
+        assert!(
+            painted.iter().any(|line| line.contains("the last note")),
+            "the panel was sized past its last note: {painted:?}"
+        );
+    }
+
     // The panel is the whole reason a shelf is worth having: what is on it
     // steers the model, and a shelf you cannot see is a shelf you cannot
     // correct. Browse it, rewrite a note, take one away.
