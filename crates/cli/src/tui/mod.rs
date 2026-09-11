@@ -824,6 +824,11 @@ impl View {
             ..Self::default()
         }
     }
+    /// The counts back to nothing: a session switch must not render the
+    /// session that was as this one's.
+    pub fn clear_tally(&mut self) {
+        self.tally = Tally::default();
+    }
 }
 
 impl Ui {
@@ -3053,13 +3058,15 @@ impl Tui {
     // to that lane's own channel, so the loop is free to draw, read keys and
     // serve the other lanes — including this one after the screen moves on.
     // Hand the view over to a job about to start: the clock runs, and the
-    // per-run figures start from nothing rather than from the last run's.
+    // per-run figures start from the session's running total rather than
+    // from nothing, so the line reads the whole session throughout.
     // `committed` says whether the prompt behind it can still be taken back.
     fn arm_view(&mut self, committed: bool) {
-        self.core.lane_mut().view.started = Some(std::time::Instant::now());
-        self.core.lane_mut().view.committed = committed;
-        self.core.lane_mut().view.stopping = false;
-        self.core.lane_mut().view.tally.clear();
+        let lane = self.core.lane_mut();
+        lane.view.started = Some(std::time::Instant::now());
+        lane.view.committed = committed;
+        lane.view.stopping = false;
+        lane.view.tally.seed(lane.totals);
     }
 
     fn start_turn(&mut self, prompt: String, typed: Option<String>, done: &UnboundedSender<Done>) {
@@ -3378,13 +3385,14 @@ impl Tui {
         if said.is_none() && lane == self.core.current {
             self.bridge.finish_turn(cancelled).await;
         }
-        // The run's totals (its subagents' included) land on the lane it ran
-        // in, and on the surface's grand total, so `/cost` can split the bill.
-
-        if let Ok(totals) = &out {
-            self.core.lanes[lane].totals.merge(totals);
-            self.totals.merge(totals);
-        }
+        // The run's totals (subagents' included) land on its lane and the
+        // surface total; an interrupted run lands as the spend the view showed.
+        let spent = match &out {
+            Ok(totals) => *totals,
+            Err(_) => self.core.lanes[lane].view.tally.run_spend(),
+        };
+        self.core.lanes[lane].totals.merge(&spent);
+        self.totals.merge(&spent);
 
         // A `!` command's output comes home whole rather than as events, so
         // this is the only place it can reach the view that asked for it.
@@ -4595,6 +4603,42 @@ mod tests {
             after_turn.contains("stopped the previous run"),
             "a stopped turn still has to be named: {after_turn}"
         );
+    }
+
+    // An interrupted turn never states its own word, so the spend the view
+    // was already showing is what lands in the totals — the next run's base
+    // carries it rather than stepping back to what the session had before.
+    #[tokio::test]
+    async fn an_interrupted_turn_keeps_its_spend_in_the_session_totals() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut tui = surface(dir.path());
+        let mut session = agent::session::Session::new();
+        session.prompt("the task the user actually asked for");
+
+        tui.core.lanes[0]
+            .view
+            .tally
+            .on(&agent::Event::TurnStart { turn: 1 });
+        tui.core.lanes[0]
+            .view
+            .tally
+            .on(&agent::Event::Usage(brain::stream::Usage {
+                input: 100,
+                output: 20,
+                ..Default::default()
+            }));
+
+        tui.settle(super::Done {
+            lane: 0,
+            kind: super::Kind::Turn,
+            ran: Some((session, Err(agent::AgentError::Cancelled))),
+        })
+        .await;
+
+        assert_eq!(tui.core.lanes[0].totals.usage.input, 100);
+        assert_eq!(tui.core.lanes[0].totals.usage.output, 20);
+        assert_eq!(tui.totals.usage.input, 100);
+        assert_eq!(tui.totals.usage.output, 20);
     }
 
     // The bar reads as a row of names, not a scatter: the sign column holds

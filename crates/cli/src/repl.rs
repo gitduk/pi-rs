@@ -1612,6 +1612,10 @@ impl Repl {
     fn becomes(&mut self, id: String, created: u64) {
         self.lane_mut().id = id;
         self.lane_mut().created = created;
+        // The status line reads session totals, live from the view's tally;
+        // a new session starts both at nothing rather than the one just left.
+        self.lane_mut().totals = Totals::default();
+        self.lane_mut().view.clear_tally();
         let id = self.lane().id.clone();
         let path = self
             .store
@@ -1924,6 +1928,11 @@ impl Repl {
     // — so reasoning a different model wrote is demoted the way it is after
     // a `/model` switch.
     fn resume(&mut self, id: &str) -> Result<Vec<String>, String> {
+        // Resuming the session already running is no switch; going through
+        // would only zero the totals the bar is mid-way through showing.
+        if id == self.lane().id {
+            return Ok(Vec::new());
+        }
         // The session being left has to survive too, or /resume throws it
         // away. An empty one — just opened, nothing said — has nothing to keep.
         if self

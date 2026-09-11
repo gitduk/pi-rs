@@ -1,0 +1,1 @@
+- commit 之前使用 cargo fmt 格式化代码

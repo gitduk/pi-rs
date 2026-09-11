@@ -50,14 +50,19 @@ pub struct Snapshot {
     pub worktree: Option<String>,
 }
 
-/// What the events have said a run has spent, kept as they arrive.
+/// What the events have said the session has spent, kept as they arrive.
 ///
-/// One per surface. Every number a status line shows comes from here, which is
-/// what makes the live line and the line the run ends on the same reading at
-/// two moments rather than two tallies kept in step by hand.
+/// One per surface. `seed` starts it from what earlier runs spent, so every
+/// number a status line shows is a session total — the live line and the
+/// line the run ends on read the same figure at two moments rather than two
+/// tallies kept in step by hand.
 #[derive(Debug, Default, Clone)]
 pub struct Tally {
-    // Turns that have reported, and what they were priced at.
+    // What earlier runs of this session had spent when this one started.
+    // The surface injects it; absent it is zero and the line reads as the
+    // run's own counts, which is what a pipe sees.
+    base: Totals,
+    // Turns of this run that have reported, and what they were priced at.
     settled: Totals,
     // The turn in flight, as far as the provider has said. Superseded rather
     // than added to when its `TurnEnd` lands, or the input would count twice.
@@ -69,9 +74,10 @@ pub struct Tally {
 }
 
 impl Tally {
-    /// Start a run from nothing; the clock and the queue belong to the surface.
-    pub fn clear(&mut self) {
+    /// Start a run's counts with the session's earlier runs already spent.
+    pub fn seed(&mut self, base: Totals) {
         *self = Self::default();
+        self.base = base;
     }
 
     /// Read one event for whatever number it carries.
@@ -87,8 +93,8 @@ impl Tally {
             }
             agent::Event::Context { used, budget } => self.ctx = Some((*used, *budget)),
             agent::Event::Compacted(_) => self.compactions += 1,
-            // The run's own word, which replaces the running count rather than
-            // adding to it. It is not merely the same sum: an automatic
+            // The run's own word, which replaces the running count rather
+            // than adding to it. Not merely the same sum: an automatic
             // compaction's summary is a call the run pays for and no event
             // states, so only the total that comes home includes it.
             agent::Event::Done {
@@ -121,12 +127,15 @@ impl Tally {
         elapsed: Option<Duration>,
         queued: usize,
     ) -> Snapshot {
+        let mut usage = self.base.usage;
+        usage.add(&self.settled.usage);
+        usage.add(&self.turn);
         Snapshot {
             elapsed,
-            input: self.settled.usage.input + self.turn.input,
-            output: self.settled.usage.output + self.turn.output,
-            cache_read: self.settled.usage.cache_read + self.turn.cache_read,
-            cost: self.settled.cost,
+            input: usage.input,
+            output: usage.output,
+            cache_read: usage.cache_read,
+            cost: self.base.cost + self.settled.cost,
             turns: self.turns,
             ctx: self.ctx,
             compactions: self.compactions,
@@ -134,6 +143,15 @@ impl Tally {
             model: model.to_string(),
             worktree: worktree.map(str::to_string),
         }
+    }
+
+    /// What this run has spent so far, apart from what the session had
+    /// before it. The surface reads it when a run ends without its own word
+    /// — an interrupted turn — so the spend still lands in the totals.
+    pub fn run_spend(&self) -> Totals {
+        let mut t = self.settled;
+        t.usage.add(&self.turn);
+        t
     }
 }
 
@@ -158,10 +176,9 @@ impl Segment {
     pub fn render(self, s: &Snapshot) -> Option<String> {
         Some(match self {
             Segment::Elapsed => elapsed(s.elapsed?),
-            // Dashes say "a turn ran and the host stated nothing". Work that
-            // begins no turn at all — a `!` command, a compaction — has no
-            // counts to be silent about, and a row of dashes under it reads as
-            // a model call that cost nothing.
+            // Dashes say "a turn ran and the host stated nothing". A session
+            // nothing has ever been spent on — no run has stated a count —
+            // drops the part instead of showing a row of zeros.
             Segment::InOut if s.turns == 0 && s.input == 0 && s.output == 0 => return None,
             Segment::InOut => brain::count::in_out(s.input, s.output),
             Segment::Cache if s.cache_read == 0 => return None,
@@ -420,6 +437,43 @@ mod tests {
             line(&default_done(), &s),
             "2 turns · 8.4k in / 390 out · ctx 72.4k/114.0k · compacted 1× · $0.0031"
         );
+    }
+
+    // The surface seeds the tally with the session's earlier runs, so the
+    // line reads session totals from the first turn of a run to its last —
+    // and the run's own word lands on top of the same base.
+    #[test]
+    fn a_seeded_tally_reads_the_session_total_throughout() {
+        let base = Totals {
+            usage: Usage {
+                input: 10_000,
+                output: 4_000,
+                cache_read: 300_000,
+                ..Default::default()
+            },
+            cost: 0.02,
+        };
+        let mut t = Tally::default();
+        t.seed(base);
+        t.on(&agent::Event::TurnStart { turn: 1 });
+        t.on(&agent::Event::Usage(usage(100, 5)));
+        let mid = t.snapshot("m", None, None, 0);
+        assert_eq!(
+            (mid.input, mid.output, mid.cache_read),
+            (10_100, 4_005, 300_000)
+        );
+        assert_eq!(mid.cost, 0.02);
+
+        t.on(&agent::Event::Done {
+            turns: 1,
+            usage: usage(200, 30),
+            cost: 0.003,
+            ctx: (72_400, 114_000),
+            compactions: 0,
+        });
+        let s = t.snapshot("m", None, None, 0);
+        assert_eq!((s.input, s.output), (10_200, 4_030));
+        assert_eq!(s.cost, 0.023);
     }
 
     // A host that reported none of its usage: the line says the turns and shows
