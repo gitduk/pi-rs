@@ -306,6 +306,20 @@ fn stop_reason(raw: &str) -> StopReason {
     }
 }
 
+// Dialect endpoints (z.ai, Volces) defer the input-side counts to the final
+// `message_delta`; counts there are cumulative, so a present field is current.
+fn repair_usage(usage: &mut Usage, u: &Value) {
+    if let Some(v) = u["input_tokens"].as_u64() {
+        usage.input = v;
+    }
+    if let Some(v) = u["cache_read_input_tokens"].as_u64() {
+        usage.cache_read = v;
+    }
+    if let Some(v) = u["cache_creation_input_tokens"].as_u64() {
+        usage.cache_write = v;
+    }
+}
+
 fn decode_frame(
     data: &Value,
     stop: &mut StopReason,
@@ -381,6 +395,7 @@ fn decode_frame(
             if let Some(o) = data["usage"]["output_tokens"].as_u64() {
                 usage.output = o;
             }
+            repair_usage(usage, &data["usage"]);
             None
         }
         "message_stop" => Some(StreamEvent::Done {
@@ -527,6 +542,61 @@ mod tests {
         };
         assert_eq!(body(apart()), body(together()));
         assert_eq!(body(apart())["messages"].as_array().unwrap().len(), 3);
+    }
+
+    // Feed frames through the decoder the way the wire delivers them, and hand
+    // back the usage it ends with.
+    fn stream(frames: &[Value]) -> Usage {
+        let mut stop = StopReason::default();
+        let mut usage = Usage::default();
+        let mut gaps = Gaps::new("anthropic");
+        for frame in frames {
+            let _ = decode_frame(frame, &mut stop, &mut usage, &mut gaps);
+        }
+        usage
+    }
+
+    #[test]
+    fn dialect_input_counts_deferred_to_the_final_delta_still_land() {
+        // z.ai reports zeros at `message_start` and the real counts only in
+        // the final `message_delta`; the repair fills the start's zeros in.
+        let done = stream(&[
+            json!({ "type": "message_start", "message": { "usage": { "input_tokens": 0, "output_tokens": 0 } } }),
+            json!({
+                "type": "message_delta",
+                "delta": { "stop_reason": "end_turn" },
+                "usage": {
+                    "input_tokens": 11214,
+                    "cache_read_input_tokens": 600,
+                    "cache_creation_input_tokens": 40,
+                    "output_tokens": 32
+                }
+            }),
+            json!({ "type": "message_stop" }),
+        ]);
+        assert_eq!(done.input, 11214);
+        assert_eq!(done.cache_read, 600);
+        assert_eq!(done.cache_write, 40);
+        assert_eq!(done.output, 32);
+    }
+
+    #[test]
+    fn an_official_delta_leaves_the_start_s_counts_standing() {
+        // The official shape states input once, at the start, and the delta
+        // carries output only — the repair must not touch what is already set.
+        let done = stream(&[
+            json!({ "type": "message_start", "message": { "usage": { "input_tokens": 472, "output_tokens": 2 } } }),
+            json!({
+                "type": "message_delta",
+                "delta": { "stop_reason": "end_turn" },
+                "usage": { "output_tokens": 89 }
+            }),
+            json!({ "type": "message_stop" }),
+        ]);
+        assert_eq!(done.input, 472);
+        assert_eq!(done.output, 89);
+        assert_eq!(done.cache_read, 0);
+        assert_eq!(done.cache_write, 0);
     }
 
     #[test]
