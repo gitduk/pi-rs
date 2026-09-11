@@ -210,16 +210,18 @@ impl Memory {
 
     /// The shelf as the model reads it, or nothing when it is empty.
     ///
-    /// Each note carries the day it was written. A standing fact and a
-    /// three-week-old guess look identical as bare statements, and the model
-    /// has no way to tell them apart but this.
+    /// Yours first, each line saying who wrote it: a fact you stated outranks
+    /// the model's own guess, and a prefix is all that tells the reader which
+    /// is which a month later.
     pub fn render(&self) -> Option<String> {
         if self.notes.is_empty() {
             return None;
         }
         let mut out = String::from("<memory>\n");
-        for note in &self.notes {
-            out.push_str(&format!("{} {}\n", day(note.at), note.text.trim()));
+        for (tag, mine) in [("[user]", true), ("[assistant]", false)] {
+            for note in self.notes.iter().filter(|n| n.is_yours() == mine) {
+                out.push_str(&format!("{tag} {} {}\n", day(note.at), note.text.trim()));
+            }
         }
         out.push_str("</memory>");
         Some(out)
@@ -431,18 +433,34 @@ mod tests {
     }
 
     // A bare statement is read in the present tense however old it is, so
-    // every line says when it was written.
+    // every line says when it was written — and who wrote it.
     #[test]
-    fn every_note_is_rendered_with_its_day() {
+    fn every_note_is_rendered_with_its_day_and_source() {
         assert!(Memory::default().render().is_none(), "nothing to say");
 
         let m = shelf(vec![yours("  prefers xh over curl  ")]);
         let got = m.render().unwrap();
         assert!(got.starts_with("<memory>\n"), "{got}");
         assert!(got.ends_with("</memory>"), "{got}");
+        assert!(got.contains("[user]"), "{got}");
         assert!(got.contains(" prefers xh over curl\n"), "trimmed: {got}");
         let line = got.lines().nth(1).unwrap();
-        assert_eq!(line.split(' ').next().unwrap().len(), 10, "a day: {line}");
+        assert_eq!(line.split(' ').nth(1).unwrap().len(), 10, "a day: {line}");
+    }
+
+    // Yours outrank the model's guesses, and the reader has to see that at a
+    // glance: the user's notes come first, each line marked with who wrote it.
+    #[test]
+    fn user_notes_come_first_and_are_marked() {
+        let m = shelf(vec![
+            model("the parser is in syntax/", 3, 0),
+            yours("prefers xh"),
+        ]);
+        let got = m.render().unwrap();
+        let first = got.lines().nth(1).unwrap();
+        let second = got.lines().nth(2).unwrap();
+        assert!(first.starts_with("[user] "), "{first}");
+        assert!(second.starts_with("[assistant] "), "{second}");
     }
 
     // Memory is an aid. A run that refused to start because the aid would not
