@@ -5743,8 +5743,7 @@ mod tests {
 
         assert_eq!(tui.ui.at_root, now.path());
         tui.ui.editor.set_line("see @mar");
-        tui.ui
-            .key(&mut tui.core.lane_mut(), key(KeyCode::Tab), false);
+        tui.ui.key(tui.core.lane_mut(), key(KeyCode::Tab), false);
         assert_eq!(tui.ui.editor.text(), "see @marker.rs ");
     }
 
