@@ -414,3 +414,53 @@ async fn an_over_long_glob_spills_its_tail() {
         "the spill must hold every path"
     );
 }
+
+#[tokio::test]
+async fn grep_takes_several_targets_directories_or_files() {
+    let (_d, c) = tree();
+    // A match outside every target, so the scoping below has something to refuse.
+    std::fs::write(c.workspace.root().join("STRAY.md"), "TODO: stray\n").unwrap();
+    let out = run(
+        &tools::grep::Grep,
+        json!({ "pattern": "TODO", "path": ["src", "README.md"] }),
+        &c,
+    )
+    .await;
+    assert!(out.contains("src/deep/util.rs"), "{out}");
+    assert!(out.contains("README.md"), "{out}");
+    assert!(!out.contains("STRAY.md"), "{out}");
+}
+
+#[tokio::test]
+async fn overlapping_roots_report_one_file_once() {
+    let (_d, c) = tree();
+    let out = run(
+        &tools::grep::Grep,
+        json!({ "pattern": "TODO", "path": ["src", "src/deep"] }),
+        &c,
+    )
+    .await;
+    assert_eq!(out.matches("[src/deep/util.rs#").count(), 1, "{out}");
+}
+
+#[tokio::test]
+async fn exclude_skips_files_by_glob_and_directories_by_name() {
+    let (_d, c) = tree();
+    let out = run(
+        &tools::grep::Grep,
+        json!({ "pattern": "TODO", "exclude": ["*.md"] }),
+        &c,
+    )
+    .await;
+    assert!(out.contains("src/deep/util.rs"), "{out}");
+    assert!(!out.contains("README.md"), "{out}");
+
+    let out = run(
+        &tools::grep::Grep,
+        json!({ "pattern": "TODO", "exclude": ["deep"] }),
+        &c,
+    )
+    .await;
+    assert!(!out.contains("util.rs"), "{out}");
+    assert!(out.contains("README.md"), "{out}");
+}

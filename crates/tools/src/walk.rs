@@ -7,19 +7,42 @@ use crate::{Tier, ToolError, Workspace};
 /// Compile a comma-free list of globs. A bare name like `*.rs` should match at
 /// any depth, which `**/` prefixing is what makes true.
 pub fn globs(patterns: &[String]) -> Result<Option<GlobSet>, ToolError> {
+    compile(patterns, |p| {
+        vec![if p.contains('/') {
+            p.to_string()
+        } else {
+            format!("**/{p}")
+        }]
+    })
+}
+
+/// Compile exclusion globs. A bare name excludes the subtree of that name as
+/// well as any file carrying it: an exclude names territory, not just files.
+pub fn excludes(patterns: &[String]) -> Result<Option<GlobSet>, ToolError> {
+    compile(patterns, |p| {
+        let head = if p.contains('/') {
+            p.to_string()
+        } else {
+            format!("**/{p}")
+        };
+        vec![head.clone(), format!("{head}/**")]
+    })
+}
+
+fn compile(
+    patterns: &[String],
+    forms: impl Fn(&str) -> Vec<String>,
+) -> Result<Option<GlobSet>, ToolError> {
     if patterns.is_empty() {
         return Ok(None);
     }
     let mut set = GlobSetBuilder::new();
     for p in patterns {
-        let expanded = if p.contains('/') {
-            p.clone()
-        } else {
-            format!("**/{p}")
-        };
-        let glob =
-            Glob::new(&expanded).map_err(|e| ToolError::Invalid(format!("bad glob `{p}`: {e}")))?;
-        set.add(glob);
+        for f in forms(p) {
+            let glob =
+                Glob::new(&f).map_err(|e| ToolError::Invalid(format!("bad glob `{p}`: {e}")))?;
+            set.add(glob);
+        }
     }
     Ok(Some(
         set.build().map_err(|e| ToolError::Invalid(e.to_string()))?,
@@ -34,14 +57,18 @@ pub fn globs(patterns: &[String]) -> Result<Option<GlobSet>, ToolError> {
 /// noise no model can act on, and it is never what a search meant to find.
 /// The machine-wide global gitignore only applies inside the workspace: a
 /// search outside it is scoped to what the user named, not to their config.
-pub fn walker(ws: &Workspace, root: &Path) -> ignore::WalkBuilder {
+/// An exclude set prunes matching entries here, at the walk: one matching
+/// directory skips its whole subtree instead of being filtered file by file.
+pub fn walker(ws: &Workspace, root: &Path, skip: Option<GlobSet>) -> ignore::WalkBuilder {
     let mut b = ignore::WalkBuilder::new(root);
     b.hidden(false)
         .follow_links(false)
         .git_ignore(true)
         .git_global(root.starts_with(ws.root()))
         .require_git(false)
-        .filter_entry(|e| e.file_name() != ".git");
+        .filter_entry(move |e| {
+            e.file_name() != ".git" && skip.as_ref().is_none_or(|s| !s.is_match(e.path()))
+        });
     b
 }
 
@@ -54,8 +81,55 @@ pub fn root_of(ws: &Workspace, path: &Option<String>, tier: Tier) -> Result<Path
     }
 }
 
+/// Resolve one-or-more targets to distinct walk roots; none at all is the
+/// workspace root. Duplicates collapse, so overlaps never search one file twice.
+pub fn roots_of(ws: &Workspace, targets: &[&str], tier: Tier) -> Result<Vec<PathBuf>, ToolError> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for t in targets {
+        let r = ws.resolve(t, tier)?;
+        if !roots.contains(&r) {
+            roots.push(r);
+        }
+    }
+    if roots.is_empty() {
+        roots.push(ws.root().to_path_buf());
+    }
+    Ok(roots)
+}
+
 /// A NUL in the first block is the same sniff `read` uses; searching a binary
 /// yields noise the model cannot act on.
 pub fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(8_000).any(|b| *b == 0)
+}
+
+#[cfg(test)]
+mod exclude_tests {
+    use super::excludes;
+    use globset::GlobSet;
+
+    fn set(patterns: &[&str]) -> GlobSet {
+        excludes(&patterns.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+            .unwrap()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_bare_name_excludes_files_under_the_directory_of_that_name() {
+        let s = set(&["__pycache__"]);
+        assert!(s.is_match("app/__pycache__/x.py"));
+        assert!(!s.is_match("app/x.py"));
+    }
+
+    #[test]
+    fn a_bare_name_still_excludes_a_file_carrying_it() {
+        assert!(set(&["x.py"]).is_match("deep/nested/x.py"));
+    }
+
+    #[test]
+    fn a_slashed_pattern_excludes_its_subtree() {
+        let s = set(&["app/gen"]);
+        assert!(s.is_match("app/gen/out.rs"));
+        assert!(!s.is_match("app/general.rs"));
+    }
 }

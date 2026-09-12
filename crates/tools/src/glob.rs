@@ -61,7 +61,7 @@ impl Tool for Glob {
         // every other tool in the same turn.
         let found = tokio::task::spawn_blocking(move || {
             let mut hits: Vec<(SystemTime, String)> = Vec::new();
-            for entry in walker(&ws, &root).build().flatten() {
+            for entry in walker(&ws, &root, None).build().flatten() {
                 if !entry.file_type().is_some_and(|t| t.is_file()) {
                     continue;
                 }
