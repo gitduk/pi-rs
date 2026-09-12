@@ -16,7 +16,7 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::time::Instant;
 
-use agent::session::{Entry as LogEntry, EntryId, Node, Session, UserBody};
+use agent::session::{Entry as LogEntry, EntryId, Node, Session};
 use agent::{AgentError, Event, Totals};
 use anyhow::Result;
 use brain::message::{AssistantContent, ReasoningContent};
@@ -155,11 +155,11 @@ impl Lists {
 // Whether reasoning is folded to its count line, and which block the stream
 // is filling right now.
 //
-// Thinking always lives in a foldable scrollback entry, folded or not: the
+// Reasoning always lives in a foldable scrollback entry, folded or not: the
 // screen is repainted from its rows every frame, so a line already shown
 // can still be folded. A block's own state lasts only while it is last; the
 // next block pushes it back to `folded`, the switch.
-struct Thinking {
+struct Folds {
     // The next block id; closed rows keep the id they were born with, so
     // `land` appends only to the open block's entry.
     next: u64,
@@ -180,7 +180,7 @@ struct Thinking {
 // The only constructor, because a derived one would answer `false` here — the
 // opposite of what the type says two lines up, in the one place nobody would
 // think to look.
-impl Default for Thinking {
+impl Default for Folds {
     fn default() -> Self {
         Self {
             next: 1,
@@ -191,7 +191,7 @@ impl Default for Thinking {
     }
 }
 
-impl Thinking {
+impl Folds {
     // Whether a reasoning row is hidden behind the count line: dim, and the
     // streaming block folded — its own entry when it has one, the last
     // value it will be born with otherwise.
@@ -384,7 +384,7 @@ impl<'a> DoubleEndedIterator for ScrollbackRows<'a> {
 // `Ui` cannot be built without a terminal — a decision no test can reach is
 // one that gets its second chance in front of the user.
 fn body(
-    thinking: &Thinking,
+    folds: &Folds,
     scrollback: &[Row],
     md: &Markdown,
     reasoning: bool,
@@ -393,11 +393,11 @@ fn body(
     paint: &Paint,
 ) -> Vec<String> {
     let (width, room) = space;
-    if thinking.holds(reasoning, scrollback) {
+    if folds.holds(reasoning, scrollback) {
         // The block's count row in the scrollback already answers the fold
         // switch; the live placeholder is only for the moment before the
         // block's first completed line exists to count.
-        let counted = thinking
+        let counted = folds
             .streaming
             .is_some_and(|id| scrollback.iter().rev().any(|r| r.block() == Some(id)));
         if !counted {
@@ -428,6 +428,9 @@ struct RunTool {
     id: String,
     name: String,
     summary: String,
+    // Set when the call ended: the row its entry will adopt, parked in the
+    // live region until the committed entries arrive to check it against.
+    done: Option<Row>,
 }
 
 // The one row a still-running tool occupies. The frame is the animation;
@@ -447,7 +450,7 @@ fn scrollback_from(
     session: &agent::session::Session,
     paint: &Paint,
     bang_prompt: &str,
-    thinking: &mut Thinking,
+    folds: &mut Folds,
 ) -> Vec<Row> {
     // A call whose result is in the session shows only its result row; one that
     // never got an answer (an interrupted turn) shows the start line instead,
@@ -455,10 +458,7 @@ fn scrollback_from(
     let answered: HashSet<String> = session
         .history()
         .filter_map(|e| match e {
-            LogEntry::User {
-                body: UserBody::Result { result: r, .. },
-                ..
-            } => Some(r.call.clone()),
+            LogEntry::Tool { result: r, .. } => Some(r.call.clone()),
             _ => None,
         })
         .collect();
@@ -484,24 +484,7 @@ fn scrollback_from(
             }
         }
         match entry {
-            LogEntry::User { body, .. } => match body {
-                UserBody::Prompt(t) | UserBody::Aside(t) => {
-                    out.extend(Row::prompt(t.shown_text(), bang_prompt, paint));
-                }
-                // Machine prose, not the user's line: rebuilt in the muted
-                // voice of a screen notice rather than under the prompt
-                // sigil.
-                UserBody::Note(t) => {
-                    for line in t.shown_text().lines() {
-                        out.push(Row::notice(paint.on(&paint.theme.muted, line)));
-                    }
-                }
-                UserBody::Result { result: r, preview } => {
-                    out.push(Row::stored_result(r, preview.as_deref()));
-                }
-                UserBody::Image(_) => {}
-            },
-            LogEntry::Assistant { blocks, .. } => {
+            LogEntry::Answer { blocks, .. } => {
                 for b in blocks {
                     match b {
                         AssistantContent::Text(t) => {
@@ -537,16 +520,48 @@ fn scrollback_from(
                             // worked only for as long as nothing looked one up
                             // by id — and `streaming_row` and `stream_fold` both
                             // do, taking the last match.
-                            out.push(Row::reasoning(thinking.take_id(), lines, thinking.folded));
+                            out.push(Row::reasoning(folds.take_id(), lines, folds.folded));
                         }
                     }
                 }
             }
             // Neither is anything the screen shows.
             LogEntry::Compaction { .. } => {}
+            // Everything else the A table covers, the rebuild and a fresh
+            // adoption draw from one place.
+            other => {
+                if let Some(rows) = f_entry(other, paint, bang_prompt) {
+                    out.extend(rows);
+                }
+            }
         }
     }
     out
+}
+
+/// One entry's rows, as the rebuild and a fresh adoption both draw them:
+/// the A table without its cross-entry markers. Answers do not pass through
+/// here — their streamed rows are adopted by construction.
+fn f_entry(entry: &LogEntry, paint: &Paint, bang_prompt: &str) -> Option<Vec<Row>> {
+    match entry {
+        LogEntry::Ask { ask, .. } => Some(Row::prompt(ask.shown_text(), bang_prompt, paint)),
+        LogEntry::Bash { run, .. } => {
+            let mut rows = Row::prompt(run.shown_text(), bang_prompt, paint);
+            rows.extend(repl::bash_said(&run.text).into_iter().map(Row::notice));
+            Some(rows)
+        }
+        // Machine prose, not the user's line: rebuilt in the muted voice of
+        // a screen notice rather than under the prompt sigil.
+        LogEntry::Note { note, .. } => Some(
+            note.lines()
+                .map(|l| Row::notice(paint.on(&paint.theme.muted, l)))
+                .collect(),
+        ),
+        LogEntry::Tool {
+            result: r, preview, ..
+        } => Some(vec![Row::stored_result(r, preview.as_deref())]),
+        _ => None,
+    }
 }
 
 // Everything the terminal shows, and nothing the session knows.
@@ -557,36 +572,65 @@ fn scrollback_from(
 /// terminal, the one keyboard and whatever menu is open over them.
 #[derive(Default)]
 pub struct View {
-    // Model output with no newline after it yet. Kept live because it is still
-    // being written; a completed line goes straight to scrollback.
-    partial: String,
-    // Whether `partial` is reasoning rather than the answer.
-    reasoning: bool,
-    // Where the answer's markdown stands: what a row means depends on the
-    // rows before it, and only a fence carries that far.
-    md: Markdown,
-    thinking: Thinking,
+    // What this screen shows: a rewind replaces it whole.
+    surface: Surface,
+    // This run's readings and interaction state: it lives and dies with the
+    // run, and `arm_view` resets it.
+    state: State,
+    // What arrived while the run was working, kept as intents rather than
+    // lines: their fate was settled at the door, and re-reading them on the
+    // way out would ask a question that has already been answered.
+    queued: Vec<Intent>,
+    // Whether this lane's opening block has been built. A rebuild swaps the
+    // whole surface and does not touch this — neither an empty scrollback nor
+    // a zero `opened` can stand in for "never drawn" — and drawing it a
+    // second time would stack two banners on one lane.
+    drawn: bool,
+    // The model in force. Copied in before the run borrows the agent, which
+    // is what puts it out of reach for the rest of the turn.
+    model: String,
+    // The half-typed line parked when the surface last left this lane,
+    // waiting in the view to come back to the editor with it.
+    draft: String,
+}
+
+// What the screen shows: the settled rows, the stream still completing them,
+// and the layout between.
+#[derive(Default)]
+pub struct Surface {
     // The conversation as the screen holds it: finished rows, oldest first,
     // everything above the editor. Not a projection of the session — it also
     // carries what only the screen ever knew, the banner and every notice a
     // command or a warning left behind, interleaved where they happened.
     scrollback: Vec<Row>,
-    // Tool calls still running, one animated row each. A finished call
-    // replaces its row with the ✓/✗ line in scrollback, so a call that never
-    // answered would leave a spinning row behind; `abandon_tools` clears it.
-    tools: Vec<RunTool>,
-    // What arrived while the run was working, kept as intents rather than
-    // lines: their fate was settled at the door, and re-reading them on the
-    // way out would ask a question that has already been answered.
-    queued: Vec<Intent>,
-    // Whether this lane's opening block has been built. A rebuild drops the
-    // banner along with everything else, so neither an empty scrollback nor a
-    // zero `opened` can stand in for "never drawn" — and drawing it a second
-    // time would stack two banners on one lane.
-    drawn: bool,
+    // The stream still writing the next row, and which kind it is.
+    stream: Stream,
+    // Where the answer's markdown stands: what a row means depends on the
+    // rows before it, and only a fence carries that far.
+    md: Markdown,
+    // The reasoning folds ledger.
+    folds: Folds,
     // How many rows the opening block occupies. A theme change replaces
     // exactly those and leaves the conversation under them alone.
     opened: usize,
+    // Rows the view is scrolled up by. Zero shows the newest rows.
+    scroll: usize,
+    // The last measurement of a scrolled-up view: item counts then, and the
+    // rows they wrapped to. A reflow in place (resize, fold-all) re-bases.
+    counted: Option<(usize, usize, usize)>,
+    // The id of the last entry this surface adopted into the scrollback.
+    // Entries beyond it are folded in through the A table as they commit, so
+    // live never waits on a rebuild to show what happened.
+    tail: Option<EntryId>,
+}
+
+// This run's readings and interaction state. It ends with the run: no tools
+// running, no clock, no figures of its own.
+#[derive(Default)]
+pub struct State {
+    // Calls in flight, plus ended calls whose entries are not adopted yet:
+    // their row parks in the live region; `abandon_tools` files the rest.
+    tools: Vec<RunTool>,
     // When the work in flight began, for the segment that times it. A clock
     // and nothing else: whether a run is on is `Lane::turn`'s to say, and one
     // field answering both left every ending path to put the clock back or
@@ -599,18 +643,55 @@ pub struct View {
     // status lines read it, so the line the run ends on is the live line's
     // last frame rather than a second count of the same turns.
     tally: Tally,
+    // The run has been asked to stop and is still winding down.
     stopping: bool,
-    // Rows the view is scrolled up by. Zero shows the newest rows.
-    scroll: usize,
-    // The last measurement of a scrolled-up view: item counts then, and the
-    // rows they wrapped to. A reflow in place (resize, fold-all) re-bases.
-    counted: Option<(usize, usize, usize)>,
-    // The model in force. Copied in before the run borrows the agent, which
-    // is what puts it out of reach for the rest of the turn.
-    model: String,
-    // The half-typed line parked when the surface last left this lane,
-    // waiting in the view to come back to the editor with it.
-    draft: String,
+}
+
+// The stream still writing itself into the screen, and the kind of line it
+// is completing. The model emits one interleaved sequence — a reasoning
+// delta and an answer delta never arrive together — so one buffer with one
+// kind is the whole state space: two half lines, one of each kind, cannot
+// be written down.
+#[derive(Default)]
+pub struct Stream {
+    // Which pipeline a completed line lands through: reasoning appends into
+    // the fold blocks, the answer goes through markdown into the scrollback.
+    kind: StreamKind,
+    // Model output with no newline after it yet. Kept live because it is
+    // still being written; a completed line goes straight to scrollback.
+    text: String,
+}
+
+#[derive(Default, PartialEq, Eq)]
+pub enum StreamKind {
+    // The reasoning half, drawn muted and folded to its count line.
+    Reasoning,
+    // The answer half, drawn through markdown.
+    #[default]
+    Answer,
+}
+
+impl Surface {
+    // The screen a session rebuilds to: the transcript as rows, the fold
+    // switch where the user left it, and nothing streaming yet.
+    fn from(
+        session: &agent::session::Session,
+        paint: &Paint,
+        bang_prompt: &str,
+        folded: bool,
+    ) -> Self {
+        let mut folds = Folds {
+            folded,
+            last: folded,
+            ..Default::default()
+        };
+        Self {
+            scrollback: scrollback_from(session, paint, bang_prompt, &mut folds),
+            folds,
+            tail: session.entries().last().map(|e| e.id()),
+            ..Default::default()
+        }
+    }
 }
 
 // What a typed character means to the modal keys.
@@ -817,17 +898,21 @@ impl View {
     /// stands on, and everything else empty.
     pub fn opening(context: &[String], paint: &Paint) -> Self {
         let scrollback = Row::banner(context, paint);
+        let opened = scrollback.len();
         Self {
             drawn: true,
-            opened: scrollback.len(),
-            scrollback,
+            surface: Surface {
+                opened,
+                scrollback,
+                ..Default::default()
+            },
             ..Self::default()
         }
     }
     /// The counts back to nothing: a session switch must not render the
     /// session that was as this one's.
     pub fn clear_tally(&mut self) {
-        self.tally = Tally::default();
+        self.state.tally = Tally::default();
     }
 }
 
@@ -890,10 +975,10 @@ impl Ui {
 
     // The values both lines draw on, as this surface currently knows them.
     fn snapshot(&self, lane: &Lane) -> Snapshot {
-        lane.view.tally.snapshot(
+        lane.view.state.tally.snapshot(
             &lane.view.model,
             lane.worktree.as_deref(),
-            lane.view.started.map(|s| s.elapsed()),
+            lane.view.state.started.map(|s| s.elapsed()),
             // Both are lines the user has given the surface that have not
             // reached the model. Which side of the seam one waits on is the
             // loop's business, not the reader's.
@@ -915,12 +1000,12 @@ impl Ui {
     fn say(&mut self, view: &mut View, line: impl Into<String>) {
         let line = line.into();
         // A backstop: what repeats most is a refusal, and those go to `flash`.
-        if let Some(last) = view.scrollback.last_mut()
+        if let Some(last) = view.surface.scrollback.last_mut()
             && last.repeated(&line)
         {
             return;
         }
-        view.scrollback.push(Row::notice(line));
+        view.surface.scrollback.push(Row::notice(line));
     }
 
     // Answer one keypress on the bar row and leave nothing behind.
@@ -952,26 +1037,27 @@ impl Ui {
     // Where a finished row goes: a reasoning line into the streaming block's
     // foldable entry, anything else straight into scrollback.
     fn land(&mut self, view: &mut View, painted: String, reasoning: bool) {
-        if reasoning && let Some(id) = view.thinking.streaming {
+        if reasoning && let Some(id) = view.surface.folds.streaming {
             if let Some(row) = self.streaming_row(view, id) {
                 row.push_line(painted);
                 return;
             }
             // The block's first line: born the way `ctrl+t` last left the last
             // block — its own fold, not the switch.
-            view.scrollback.push(Row::reasoning(
+            view.surface.scrollback.push(Row::reasoning(
                 id,
                 vec![painted],
-                view.thinking.birth_fold(),
+                view.surface.folds.birth_fold(),
             ));
             return;
         }
-        view.scrollback.push(Row::notice(painted));
+        view.surface.scrollback.push(Row::notice(painted));
     }
 
     // The scrollback entry for a streaming block, if it has one yet.
     fn streaming_row<'a>(&mut self, view: &'a mut View, id: u64) -> Option<&'a mut Row> {
-        view.scrollback
+        view.surface
+            .scrollback
             .iter_mut()
             .rev()
             .find(|r| r.block() == Some(id))
@@ -984,46 +1070,52 @@ impl Ui {
         if reasoning {
             return Row::reasoning_line(line, &self.paint);
         }
-        Row::answer_line(line, &mut view.md, &self.paint)
+        Row::answer_line(line, &mut view.surface.md, &self.paint)
     }
 
     fn close(&mut self, view: &mut View) {
-        if !view.partial.is_empty() {
-            let text = std::mem::take(&mut view.partial);
-            let painted = self.paint_row(view, &text, view.reasoning);
-            self.land(view, painted, view.reasoning);
+        let reasoning = view.surface.stream.kind == StreamKind::Reasoning;
+        if !view.surface.stream.text.is_empty() {
+            let text = std::mem::take(&mut view.surface.stream.text);
+            let painted = self.paint_row(view, &text, reasoning);
+            self.land(view, painted, reasoning);
         }
-        if view.reasoning {
+        if reasoning {
             // The block is over: it stops taking lines; its entry is already
             // in the scrollback, folded or not.
-            view.thinking.close_block();
+            view.surface.folds.close_block();
         } else {
             // A fence the answer left open stays open only within the answer.
             // A tool call ends the block, and the block is as far as markdown
             // state can honestly reach.
-            view.md.reset();
+            view.surface.md.reset();
         }
-        view.reasoning = false;
+        view.surface.stream.kind = StreamKind::Answer;
     }
 
     fn write(&mut self, view: &mut View, delta: &str, reasoning: bool) {
-        if reasoning != view.reasoning {
+        let kind = if reasoning {
+            StreamKind::Reasoning
+        } else {
+            StreamKind::Answer
+        };
+        if view.surface.stream.kind != kind {
             self.close(view);
-            view.reasoning = reasoning;
+            view.surface.stream.kind = kind;
             if reasoning {
                 // A new reasoning block: `close` just settled the previous
                 // one; this one gets a fresh id and pushes the old last one
                 // back to the switch.
-                view.thinking.start(&mut view.scrollback);
+                view.surface.folds.start(&mut view.surface.scrollback);
             }
         }
 
-        view.partial.push_str(delta);
+        view.surface.stream.text.push_str(delta);
         // A finished line is no longer changing, so it belongs in the
         // scrollback rather than in the region we repaint: reasoning into
         // the streaming block's foldable entry, answer text as a plain row.
-        while let Some(i) = view.partial.find('\n') {
-            let line: String = view.partial.drain(..=i).collect();
+        while let Some(i) = view.surface.stream.text.find('\n') {
+            let line: String = view.surface.stream.text.drain(..=i).collect();
             let line = line.trim_end_matches('\n').to_string();
             let painted = self.paint_row(view, &line, reasoning);
             self.land(view, painted, reasoning);
@@ -1037,11 +1129,11 @@ impl Ui {
             event,
             Event::TextDelta(_) | Event::ReasoningDelta(_) | Event::ToolStart { .. }
         ) {
-            lane.view.committed = true;
+            lane.view.state.committed = true;
         }
         // Every number either status line shows is read here, once. The arms
         // below decide only what reaches the scrollback.
-        lane.view.tally.on(&event);
+        lane.view.state.tally.on(&event);
         match &event {
             Event::TextDelta(d) => self.write(&mut lane.view, d, false),
             Event::ReasoningDelta(d) => self.write(&mut lane.view, d, true),
@@ -1059,7 +1151,7 @@ impl Ui {
                 // all had nothing to say leaves no row, and a blank one is
                 // worse than none.
                 if !status::parts(&self.done, &snap).is_empty() {
-                    lane.view.scrollback.push(Row::tally(snap));
+                    lane.view.surface.scrollback.push(Row::tally(snap));
                 }
             }
             // A call's two events are one line here: the start takes a row in
@@ -1068,10 +1160,11 @@ impl Ui {
             // row, matched back by id because they end out of order.
             Event::ToolStart { id, name, args, .. } => {
                 self.close(&mut lane.view);
-                lane.view.tools.push(RunTool {
+                lane.view.state.tools.push(RunTool {
                     id: id.clone(),
                     name: name.clone(),
                     summary: render::summarize(args),
+                    done: None,
                 });
             }
             Event::ToolEnd {
@@ -1081,12 +1174,19 @@ impl Ui {
                 preview,
             } => {
                 self.close(&mut lane.view);
-                lane.view.tools.retain(|t| t.id != *id);
-                // The same row the rebuild produces, from the same parts. Two
-                // renderings of this is what the second producer used to buy.
-                lane.view
-                    .scrollback
-                    .push(Row::result(!is_error, name.clone(), preview.clone()));
+                // Not a row yet: the line parks in the live region until the
+                // committed entries arrive, and adoption checks it against
+                // what the entry itself derives to.
+                if let Some(t) = lane.view.state.tools.iter_mut().find(|t| t.id == *id) {
+                    t.done = Some(Row::result(!*is_error, name.clone(), preview.clone()));
+                }
+            }
+            // The transcript gained entries. Derive their rows through the A
+            // table, check them against the pending live-region lines, and
+            // file them: the event carries state, never drawing instructions.
+            Event::Committed { entries } => {
+                self.close(&mut lane.view);
+                self.adopt(lane, entries);
             }
             _ => {
                 self.close(&mut lane.view);
@@ -1094,7 +1194,10 @@ impl Ui {
                     // Row by row: a scrollback line is written with a carriage
                     // return of its own, and an embedded newline would stair-
                     // step down the screen without one.
-                    lane.view.scrollback.extend(said.lines().map(Row::notice));
+                    lane.view
+                        .surface
+                        .scrollback
+                        .extend(said.lines().map(Row::notice));
                 }
             }
         }
@@ -1105,9 +1208,49 @@ impl Ui {
     // returns before its results are reported — so give the scrollback the
     // start line the row stood for and clear the row.
     fn abandon_tools(&mut self, view: &mut View) {
-        for t in std::mem::take(&mut view.tools) {
-            let row = Row::tool_start(&t.name, &t.summary, &self.paint);
-            view.scrollback.push(row);
+        for t in std::mem::take(&mut view.state.tools) {
+            let row = t
+                .done
+                .unwrap_or_else(|| Row::tool_start(&t.name, &t.summary, &self.paint));
+            view.surface.scrollback.push(row);
+        }
+    }
+
+    // Fold freshly committed entries into the scrollback through the A table
+    // itself, and retire the pending live-region lines they supersede. The
+    // two lines are built from different halves — the event's facts and the
+    // entry's content — so their equality is the drift alarm the
+    // two-producer layout used to lack.
+    fn adopt(&self, lane: &mut Lane, entries: &[LogEntry]) {
+        let width = self.screen.usable();
+        for entry in entries {
+            if lane.view.surface.tail.is_some_and(|t| entry.id() <= t) {
+                continue;
+            }
+            if let Some(rows) = f_entry(entry, &self.paint, &self.bang_prompt) {
+                if let LogEntry::Tool { result: r, .. } = entry {
+                    self.check_pending(lane, &r.call, rows.last(), width);
+                }
+                lane.view.surface.scrollback.extend(rows);
+            }
+            lane.view.surface.tail = Some(entry.id());
+        }
+    }
+
+    // Retire the pending line a `ToolEnd` parked in the live region, checking
+    // it against the row the committed entry derives to. Equality is
+    // expected; anything else is drift the old layout shipped silently.
+    fn check_pending(&self, lane: &mut Lane, call: &str, row: Option<&Row>, width: usize) {
+        let Some(at) = lane.view.state.tools.iter().position(|t| t.id == call) else {
+            return;
+        };
+        let Some(pending) = lane.view.state.tools.remove(at).done else {
+            return;
+        };
+        if let Some(row) = row {
+            let parked = pending.line(0, &self.paint, &[], width).0;
+            let derived = row.line(0, &self.paint, &[], width).0;
+            debug_assert_eq!(parked, derived, "a tool's two lines disagreed");
         }
     }
 
@@ -1189,7 +1332,7 @@ impl Ui {
         let width = self.screen.usable();
         let mut rows = Vec::new();
 
-        for t in &lane.view.tools {
+        for t in &lane.view.state.tools {
             let line = tool_row(self.spinner, &t.name, &t.summary);
             rows.extend(screen::fit(
                 &self.paint.on(&self.paint.theme.muted, &line),
@@ -1198,11 +1341,11 @@ impl Ui {
         }
 
         rows.extend(body(
-            &lane.view.thinking,
-            &lane.view.scrollback,
-            &lane.view.md,
-            lane.view.reasoning,
-            &lane.view.partial,
+            &lane.view.surface.folds,
+            &lane.view.surface.scrollback,
+            &lane.view.surface.md,
+            lane.view.surface.stream.kind == StreamKind::Reasoning,
+            &lane.view.surface.stream.text,
             (width, room),
             &self.paint,
         ));
@@ -1211,10 +1354,10 @@ impl Ui {
             let mut parts = status::parts(&self.live, &self.snapshot(lane));
             // A run that is stopping says so; an ordinary running line needs
             // no word for it — the spinner is what says the turn is on.
-            if lane.view.stopping {
+            if lane.view.state.stopping {
                 parts.push(format!("stopping{}", icons::ELLIPSIS));
             }
-            let spin = if lane.view.stopping {
+            let spin = if lane.view.state.stopping {
                 icons::SPIN_STOPPED
             } else {
                 icons::SPINNER_FRAMES[self.spinner % icons::SPINNER_FRAMES.len()]
@@ -1313,9 +1456,9 @@ impl Ui {
         // The opening block is painted once at construction; rebuild it so a
         // /reload lands on the new theme instead of the old.
         let opening = Row::banner(context, &self.paint);
-        let rest = view.scrollback.split_off(view.opened);
-        view.opened = opening.len();
-        view.scrollback = opening.into_iter().chain(rest).collect();
+        let rest = view.surface.scrollback.split_off(view.surface.opened);
+        view.surface.opened = opening.len();
+        view.surface.scrollback = opening.into_iter().chain(rest).collect();
     }
 
     fn flush(&mut self, lane: &mut Lane) {
@@ -1362,39 +1505,45 @@ impl Ui {
 
         // While the view is scrolled up, rows the bottom gained since the
         // last measurement fold back into `scroll`, keeping the window put.
-        if lane.view.scroll > 0 {
-            let items = (lane.view.scrollback.len(), live.len());
+        if lane.view.surface.scroll > 0 {
+            let items = (lane.view.surface.scrollback.len(), live.len());
             // A frame whose item counts match the last measurement has not
             // grown — nothing to fold, and no reason to re-wrap the history.
             if lane
                 .view
+                .surface
                 .counted
                 .is_none_or(|(sb, lv, _)| (sb, lv) != items)
             {
                 let total = self.scrollback_rows(&lane.view, width) + live.len();
-                lane.view.scroll = absorb_growth(
-                    lane.view.scroll,
-                    lane.view.counted.map(|(_, _, t)| t),
+                lane.view.surface.scroll = absorb_growth(
+                    lane.view.surface.scroll,
+                    lane.view.surface.counted.map(|(_, _, t)| t),
                     total,
                 );
-                lane.view.counted = Some((items.0, items.1, total));
+                lane.view.surface.counted = Some((items.0, items.1, total));
             }
         } else {
-            lane.view.counted = None;
+            lane.view.surface.counted = None;
         }
         // Measured in rows, not lines: a line wider than the terminal wraps
         // into several, and counting lines here would put more rows in the
         // area than fit — pushing the newest ones off the bottom, underneath
         // the input, where nothing shows them.
-        let scrollback = ScrollbackRows::new(&lane.view.scrollback, &self.paint, &self.done, width);
+        let scrollback = ScrollbackRows::new(
+            &lane.view.surface.scrollback,
+            &self.paint,
+            &self.done,
+            width,
+        );
         let (rows, scroll) = screen::window(
             scrollback.chain(live.iter().map(|s| (Cow::Borrowed(s.as_str()), None))),
             width,
             hist_view,
-            lane.view.scroll,
+            lane.view.surface.scroll,
         );
 
-        lane.view.scroll = scroll;
+        lane.view.surface.scroll = scroll;
         let items = self.menu_items(&menu);
         let picked = self
             .picked
@@ -1438,7 +1587,7 @@ impl Ui {
 
     // Rows the scrollback renders to at this width, wraps included.
     fn scrollback_rows(&self, view: &View, width: usize) -> usize {
-        ScrollbackRows::new(&view.scrollback, &self.paint, &self.done, width)
+        ScrollbackRows::new(&view.surface.scrollback, &self.paint, &self.done, width)
             .map(|(text, border)| screen::wrap(border, &text, width).len())
             .sum()
     }
@@ -1447,18 +1596,8 @@ impl Ui {
     // drawing showed: a rewind changes what the conversation is, and the
     // screen has to show the new one, not the old one with a note on it.
     fn rebuild(&mut self, view: &mut View, session: &agent::session::Session) {
-        view.scrollback.clear();
-        // The opening block went with it; a rebuilt screen is the conversation.
-        view.opened = 0;
-        view.partial.clear();
-        view.reasoning = false;
-        view.tools.clear();
-        view.thinking.streaming = None;
-        view.thinking.last = view.thinking.folded;
-        view.md.reset();
-        view.scroll = 0;
-        view.scrollback =
-            scrollback_from(session, &self.paint, &self.bang_prompt, &mut view.thinking);
+        let folded = view.surface.folds.folded;
+        view.surface = Surface::from(session, &self.paint, &self.bang_prompt, folded);
     }
 
     // Accept a submitted input: echo it so the prompt survives the editor
@@ -1466,8 +1605,10 @@ impl Ui {
     // — the input pushes it out of current no matter what it turns out to be.
     fn submit(&mut self, view: &mut View, line: &str) {
         let rows = Row::prompt(line, &self.bang_prompt, &self.paint);
-        view.scrollback.extend(rows);
-        view.thinking.fold_previous(&mut view.scrollback);
+        view.surface.scrollback.extend(rows);
+        view.surface
+            .folds
+            .fold_previous(&mut view.surface.scrollback);
     }
 
     fn key(&mut self, lane: &mut Lane, event: TermEvent, running: bool) -> Intent {
@@ -1476,7 +1617,7 @@ impl Ui {
                 self.screen.resized(w, h);
                 // Re-measuring starts at the new width: the re-wrap is a
                 // change of layout, not output, and must not move the view.
-                lane.view.counted = None;
+                lane.view.surface.counted = None;
                 return Intent::None;
             }
             TermEvent::Paste(text) => {
@@ -1610,7 +1751,7 @@ impl Ui {
             Some(Action::RunInterrupt) => {
                 // Esc before the model has moved means "I didn't mean to send
                 // that"; an empty editor, or unsending overwrites a line.
-                if self.editor.is_empty() && lane.is_running() && !lane.view.committed {
+                if self.editor.is_empty() && lane.is_running() && !lane.view.state.committed {
                     return Intent::Unsend;
                 }
                 return Intent::Interrupt;
@@ -1719,15 +1860,21 @@ impl Ui {
                 // The last block only: the one streaming, or the newest
                 // finished one when nothing is. The switch is left alone, so
                 // the blocks no one is touching keep what they had.
-                lane.view.thinking.toggle_current(&mut lane.view.scrollback);
+                lane.view
+                    .surface
+                    .folds
+                    .toggle_current(&mut lane.view.surface.scrollback);
             }
             Some(Action::ThinkFoldAll) => {
                 // Every block in the scrollback, the last one included, and
                 // the switch with them: one key presses the whole screen to a
                 // single state.
-                lane.view.thinking.flip_all(&mut lane.view.scrollback);
+                lane.view
+                    .surface
+                    .folds
+                    .flip_all(&mut lane.view.surface.scrollback);
                 // A fold-all reflows blocks above the view too; re-baseline.
-                lane.view.counted = None;
+                lane.view.surface.counted = None;
             }
 
             Some(Action::MenuAccept) => {
@@ -1806,10 +1953,10 @@ impl Ui {
 
     // Nudge the scrolled history window by `step` rows, up or down.
     fn scroll_view(&mut self, view: &mut View, up: bool, step: usize) {
-        view.scroll = if up {
-            view.scroll.saturating_add(step)
+        view.surface.scroll = if up {
+            view.surface.scroll.saturating_add(step)
         } else {
-            view.scroll.saturating_sub(step)
+            view.surface.scroll.saturating_sub(step)
         };
     }
 
@@ -1903,7 +2050,9 @@ fn absorb_growth(scroll: usize, last: Option<usize>, total: usize) -> usize {
 // changed under the surface. A free function because a run in flight lands
 // them from inside its own borrow, where `self` is in pieces.
 fn land_handled(ui: &mut Ui, core: &Repl, view: &mut View, lines: Vec<String>) {
-    view.scrollback.extend(lines.into_iter().map(Row::notice));
+    view.surface
+        .scrollback
+        .extend(lines.into_iter().map(Row::notice));
     // The key map lives in two places; a reload has to reach both or the
     // screen keeps answering to the old bindings.
     if !Arc::ptr_eq(&ui.keys, &core.keys) {
@@ -1972,7 +2121,14 @@ enum Kind {
     // emptied only by `Event::TurnStart`; a `!` emits no events, so letting
     // one speak for the bridge flushes another lane's half-written answer to
     // the phone as though it were finished.
-    Bash(Vec<String>),
+    Bash {
+        // The output lines, derived by the same function the rebuild draws
+        // with — plus the flash for a command that never ran.
+        lines: Vec<String>,
+        // The transcript tail after the run filed its entry, so the surface's
+        // adoption cursor jumps past it.
+        tail: Option<EntryId>,
+    },
     // A `/compact`, and what it shrank and spent. None means the transcript
     // already fit — or, with a cancelled `ran`, that nobody ever looked.
     Compact(Option<(agent::compact::Report, Totals)>),
@@ -2280,7 +2436,7 @@ impl Tui {
     // because quitting with two Ctrl-Cs skips every tidy exit path there is.
     fn echo_sent(&mut self, line: &str) {
         self.ui.submit(&mut self.core.lane_mut().view, line);
-        self.core.lane_mut().view.scroll = 0;
+        self.core.lane_mut().view.surface.scroll = 0;
         self.save_history();
     }
 
@@ -2371,6 +2527,7 @@ impl Tui {
         self.core
             .lane_mut()
             .view
+            .surface
             .scrollback
             .extend(said.into_iter().map(Row::notice));
     }
@@ -2510,10 +2667,11 @@ impl Tui {
                     .as_ref()
                     .map(|l| l.note.clone())
                     .unwrap_or_default();
-                self.core.lanes[lane]
-                    .view
-                    .queued
-                    .push(Intent::LoopRound { goal, note });
+                self.core.lanes[lane].view.queued.push(Intent::LoopRound {
+                    goal,
+                    note,
+                    round: Some(next as u64),
+                });
                 format!("loop round {next}")
             }
             Round::Cut => return,
@@ -2578,7 +2736,7 @@ impl Tui {
                 // line was said takes the prompt back and the line — never
                 // heard, handed back at `finish` — starts a turn of its own,
                 // which is the opposite of what the user just asked for.
-                self.core.lane_mut().view.committed = true;
+                self.core.lane_mut().view.state.committed = true;
                 steer.say(text);
                 Wake::Nothing
             }
@@ -2598,6 +2756,7 @@ impl Tui {
                 self.core
                     .lane_mut()
                     .view
+                    .surface
                     .scrollback
                     .extend(said.into_iter().map(Row::notice));
                 // The completion list views the same tree, and outlives the
@@ -2624,6 +2783,7 @@ impl Tui {
             self.core
                 .lane_mut()
                 .view
+                .surface
                 .scrollback
                 .push(Row::notice(format!("the shelf would not take it: {why}")));
         }
@@ -2660,7 +2820,7 @@ impl Tui {
         };
         cancel.cancel();
         *take_back = unsend;
-        self.core.lane_mut().view.stopping = true;
+        self.core.lane_mut().view.state.stopping = true;
     }
 
     /// Drive the terminal until the user leaves.
@@ -2735,6 +2895,9 @@ impl Tui {
                 Wake::Leave => break,
                 Wake::Do(intent) => intent,
             };
+            // A round number only rides the ask the loop's own round opens;
+            // anything else this iteration does leaves it unset.
+            self.core.lane_mut().pending_round = None;
             // What the surface answers for itself: the screen, the keyboard
             // and the process are not `Repl`'s to move.
             // Whether the line about to run is a loop's own round.
@@ -2779,7 +2942,7 @@ impl Tui {
                 // read — the echo wants the text, which reading spends.
                 // A loop's own round: echoed and read like a typed line, and
                 // marked so the turn it starts is the one the loop counts.
-                Intent::LoopRound { goal, note } => {
+                Intent::LoopRound { goal, note, round } => {
                     // The loop that queued this may have been stopped since.
                     // Running it then would be a turn nobody asked for, and
                     // one that reads on screen as if it had been typed.
@@ -2787,8 +2950,9 @@ impl Tui {
                         continue;
                     }
                     from_loop = true;
+                    self.core.lane_mut().pending_round = round;
                     self.ui.submit(&mut self.core.lane_mut().view, &goal);
-                    self.core.lane_mut().view.scroll = 0;
+                    self.core.lane_mut().view.surface.scroll = 0;
                     if !note.is_empty()
                         && let Some(session) = self.core.lane_mut().session.as_mut()
                     {
@@ -2850,6 +3014,7 @@ impl Tui {
                 self.core.lane_mut().view.queued.push(Intent::LoopRound {
                     goal,
                     note: String::new(),
+                    round: None,
                 });
                 continue;
             }
@@ -2915,6 +3080,7 @@ impl Tui {
                     self.core
                         .lane_mut()
                         .view
+                        .surface
                         .scrollback
                         .extend(said.into_iter().map(Row::notice));
                 }
@@ -3063,10 +3229,10 @@ impl Tui {
     // `committed` says whether the prompt behind it can still be taken back.
     fn arm_view(&mut self, committed: bool) {
         let lane = self.core.lane_mut();
-        lane.view.started = Some(std::time::Instant::now());
-        lane.view.committed = committed;
-        lane.view.stopping = false;
-        lane.view.tally.seed(lane.totals);
+        lane.view.state.started = Some(std::time::Instant::now());
+        lane.view.state.committed = committed;
+        lane.view.state.stopping = false;
+        lane.view.state.tally.seed(lane.totals);
     }
 
     fn start_turn(&mut self, prompt: String, typed: Option<String>, done: &UnboundedSender<Done>) {
@@ -3077,7 +3243,19 @@ impl Tui {
             self.ui.flash(NO_TRANSCRIPT);
             return;
         };
-        carried.send_prompt(prompt, typed);
+        let round = self.core.lane_mut().pending_round.take();
+        carried.send_prompt(prompt, typed, round);
+        // The repair results and the stop note the send filed are entries
+        // now: derive their rows like any commit, so they show without a
+        // rebuild. The ask itself stays unadopted — the door echoed it.
+        let tail = self.core.lane().view.surface.tail;
+        let fresh: Vec<LogEntry> = carried
+            .entries()
+            .iter()
+            .filter(|e| tail.is_none_or(|t| e.id() > t) && !matches!(e, LogEntry::Ask { .. }))
+            .cloned()
+            .collect();
+        self.ui.adopt(self.core.lane_mut(), &fresh);
         let cancel = CancellationToken::new();
         let steer = agent::Steer::default();
         let ctx = self.core.lane_mut().ctx.clone().with_cancel(cancel.clone());
@@ -3154,7 +3332,7 @@ impl Tui {
         self.ui.show_mode();
         // A resize while the child held the terminal raised no event, so the
         // view's measurements are against a width that may no longer exist.
-        self.core.lane_mut().view.counted = None;
+        self.core.lane_mut().view.surface.counted = None;
 
         // Judged on its own: a save that succeeded is still a save when the
         // screen comes back badly, and reading the two together threw it away.
@@ -3223,15 +3401,24 @@ impl Tui {
                 } else {
                     Ok(Totals::default())
                 };
-                repl::record_bash(&mut carried, &command, out.text);
-                (carried, ran, out.said)
+                let tail = carried.entries().last().map(|e| e.id());
+                repl::record_bash(&mut carried, &command, out.text.clone());
+                (carried, ran, out.screen(), tail)
             })
             .await;
             // A panic printed nothing anyone can still show; the empty lines
             // and the missing transcript say the same thing from both sides.
             let (kind, ran) = match out {
-                Some((carried, ran, said)) => (Kind::Bash(said), Some((carried, ran))),
-                None => (Kind::Bash(Vec::new()), None),
+                Some((carried, ran, lines, tail)) => {
+                    (Kind::Bash { lines, tail }, Some((carried, ran)))
+                }
+                None => (
+                    Kind::Bash {
+                        lines: Vec::new(),
+                        tail: None,
+                    },
+                    None,
+                ),
             };
             let _ = done.send(Done { lane, kind, ran });
         });
@@ -3316,7 +3503,7 @@ impl Tui {
             None => false,
         };
         match done.kind {
-            Kind::Turn | Kind::Bash(_) => self.settle_run(done, unsend).await,
+            Kind::Turn | Kind::Bash { .. } => self.settle_run(done, unsend).await,
             Kind::Compact(_) => self.settle_compact(done).await,
         }
     }
@@ -3335,7 +3522,10 @@ impl Tui {
         // A `!` brings its lines home to be shown here; a turn's reached the
         // view as events, and a compact never arrives at this function.
         let said = match kind {
-            Kind::Bash(lines) => Some(lines),
+            Kind::Bash { lines, tail } => {
+                self.core.lanes[lane].view.surface.tail = tail;
+                Some(lines)
+            }
             _ => None,
         };
 
@@ -3389,7 +3579,7 @@ impl Tui {
         // surface total; an interrupted run lands as the spend the view showed.
         let spent = match &out {
             Ok(totals) => *totals,
-            Err(_) => self.core.lanes[lane].view.tally.run_spend(),
+            Err(_) => self.core.lanes[lane].view.state.tally.run_spend(),
         };
         self.core.lanes[lane].totals.merge(&spent);
         self.totals.merge(&spent);
@@ -3398,7 +3588,7 @@ impl Tui {
         // this is the only place it can reach the view that asked for it.
         if let Some(said) = said.filter(|lines| !lines.is_empty()) {
             let rows = said.into_iter().map(Row::notice);
-            self.core.lanes[lane].view.scrollback.extend(rows);
+            self.core.lanes[lane].view.surface.scrollback.extend(rows);
         }
 
         // Before the split below, so a round that ended off-screen still arms
@@ -3491,7 +3681,7 @@ impl Tui {
         }
         // The pass is over, so the clock stops. What it was driving — the
         // live region — already went with the turn.
-        self.core.lanes[lane].view.started = None;
+        self.core.lanes[lane].view.state.started = None;
     }
 
     // Draw the end of a run into the view that is on screen.
@@ -3501,7 +3691,7 @@ impl Tui {
         // reach scrollback some other way before the next flush draws them as a
         // frozen spinner.
         self.ui.abandon_tools(&mut self.core.lane_mut().view);
-        self.core.lane_mut().view.started = None;
+        self.core.lane_mut().view.state.started = None;
         match out {
             Ok(_) => {}
             Err(AgentError::Cancelled) => {
@@ -3522,7 +3712,7 @@ impl Tui {
 #[cfg(test)]
 mod tests {
     use super::{
-        Body, Cow, Intent, Panel, Row, ScrollbackRows, Thinking, Took, absorb_growth, body,
+        Body, Cow, Folds, Intent, Panel, Row, ScrollbackRows, Took, absorb_growth, body,
         scrollback_from, secret_settings_set, tool_row,
     };
     use crate::icons;
@@ -3568,8 +3758,8 @@ mod tests {
             })]);
         }
 
-        let mut thinking = Thinking::default();
-        let rows = scrollback_from(&s, &Paint::new(false), "! ", &mut thinking);
+        let mut folds = Folds::default();
+        let rows = scrollback_from(&s, &Paint::new(false), "! ", &mut folds);
         let ids: Vec<u64> = rows.iter().filter_map(Row::block).collect();
         assert_eq!(ids.len(), 3, "{} rows, {ids:?}", rows.len());
         let mut sorted = ids.clone();
@@ -3578,7 +3768,73 @@ mod tests {
         assert_eq!(sorted.len(), 3, "two blocks share a number: {ids:?}");
         // And the counter moved, so a block streamed after the rebuild cannot
         // land on one of these.
-        assert!(!ids.contains(&thinking.take_id()), "{ids:?}");
+        assert!(!ids.contains(&folds.take_id()), "{ids:?}");
+    }
+
+    // The rebuilt screen shows a `!` run's output, derived from the entry's
+    // text by the same function the live path draws with — the ruling that
+    // retired `out.said`.
+    #[test]
+    fn a_bash_entry_rebuilds_its_output_rows() {
+        use agent::session::Session;
+        let mut s = Session::new();
+        crate::repl::record_bash(
+            &mut s,
+            "git status",
+            "Ran `git status`\n<stdout>\nnothing to commit\n</stdout>\n".into(),
+        );
+
+        let mut folds = Folds::default();
+        let rows = scrollback_from(&s, &Paint::new(false), "! ", &mut folds);
+        assert_eq!(rows.len(), 2, "the echo and the output, got {}", rows.len());
+    }
+
+    // A multi-line error body reaches the pending live line and the committed
+    // entry alike, so adoption's equality check compares two rows born from
+    // one source — and a dropped preview would panic right here.
+    #[test]
+    fn an_errored_tool_adopts_its_full_body() {
+        use agent::session::{Entry, EntryId};
+
+        let mut ui = test_ui(80, 24);
+        let (_dir, mut lane) = a_running_lane();
+        let body = "patch refused:\nline one\nline two";
+
+        ui.on_event(
+            &mut lane,
+            agent::Event::ToolStart {
+                id: "c1".into(),
+                name: "edit".into(),
+                args: serde_json::json!({}),
+            },
+        );
+        ui.on_event(
+            &mut lane,
+            agent::Event::ToolEnd {
+                id: "c1".into(),
+                name: "edit".into(),
+                is_error: true,
+                preview: body.into(),
+            },
+        );
+        // What the loop files for the call: error content, and the preview
+        // the event showed riding along (see `run_calls`'s error arm).
+        ui.on_event(
+            &mut lane,
+            agent::Event::Committed {
+                entries: vec![Entry::Tool {
+                    id: EntryId(7),
+                    at: 0,
+                    result: brain::message::ToolResult::error("c1", "edit", body),
+                    preview: Some(body.into()),
+                }],
+            },
+        );
+
+        // The pending spinner retired, the ✗ row filed once.
+        assert!(lane.view.state.tools.is_empty());
+        let after = lane.view.surface.scrollback.len();
+        assert_eq!(after, 1, "one adopted row, got {after}");
     }
 
     // The screen opens with what this run is standing on. It used to be said
@@ -3618,7 +3874,7 @@ mod tests {
     }
 
     // What the screen shows for a run in the middle of reasoning.
-    fn shown(t: &Thinking, partial: &str) -> Vec<String> {
+    fn shown(t: &Folds, partial: &str) -> Vec<String> {
         body(
             t,
             &[],
@@ -3885,7 +4141,7 @@ mod tests {
     fn a_shut_window_is_one_row_whatever_it_holds() {
         // Including the line still arriving: it is reasoning too, and putting
         // it on screen is the window this row exists to replace.
-        let t = Thinking::default();
+        let t = Folds::default();
         assert_eq!(shown(&t, "half a sentence"), vec!["thinking..."]);
     }
 
@@ -3893,7 +4149,7 @@ mod tests {
     fn an_unfolded_block_streams_its_line_live() {
         // One switch on the last block: folded, the live row is the
         // placeholder; unfolded, it is the reasoning itself.
-        let mut t = Thinking::default();
+        let mut t = Folds::default();
         t.start(&mut []);
         t.last = false;
         assert_eq!(shown(&t, "half a sentence"), vec!["half a sentence"]);
@@ -3905,7 +4161,7 @@ mod tests {
     fn a_counted_block_needs_no_live_placeholder() {
         // The count row in the scrollback already stands for the folded
         // block; a second "thinking..." live row would show it twice.
-        let mut t = Thinking::default();
+        let mut t = Folds::default();
         t.start(&mut []);
         let scrollback = [block(1, 1, true)];
         let rows = body(
@@ -3924,7 +4180,7 @@ mod tests {
     fn toggling_moves_the_last_block_and_nothing_else() {
         // `ctrl+t` flips the block that is last now, and only it: the block
         // pushed out of last by the new one folds back to the switch.
-        let mut t = Thinking::default();
+        let mut t = Folds::default();
         let mut scrollback = vec![Row::reasoning(9, vec!["old".to_string()], false)];
         t.start(&mut scrollback);
         scrollback.push(Row::reasoning(1, vec!["new".to_string()], true));
@@ -3938,7 +4194,7 @@ mod tests {
     fn a_finished_block_keeps_its_fold_until_the_next_question() {
         // An unfold survives the answer — a finished block is still last —
         // and folds back to the switch the moment a new input is submitted.
-        let mut t = Thinking::default();
+        let mut t = Folds::default();
         t.start(&mut []);
         let mut scrollback = vec![block(1, 1, t.birth_fold())];
         t.toggle_current(&mut scrollback);
@@ -3956,7 +4212,7 @@ mod tests {
     fn a_finished_block_follows_a_global_unfold() {
         // The fold follows the switch both ways: a screen the global key
         // opened keeps its block open once the next question takes over.
-        let mut t = Thinking {
+        let mut t = Folds {
             folded: false,
             ..Default::default()
         };
@@ -3972,7 +4228,7 @@ mod tests {
         // A second reasoning block in the same answer is the new last: the
         // first one folds back to the switch, and the second is born the way
         // `ctrl+t` left the last block.
-        let mut t = Thinking::default();
+        let mut t = Folds::default();
         t.start(&mut []);
         let mut scrollback = vec![block(1, 1, t.birth_fold())];
         t.toggle_current(&mut scrollback);
@@ -3988,7 +4244,7 @@ mod tests {
     fn a_flip_before_the_first_line_lands_on_birth() {
         // `ctrl+t` on a block with no entry yet flips the last value, not the
         // switch: it outlives close_block, and it is not a one-shot.
-        let mut t = Thinking::default();
+        let mut t = Folds::default();
         t.start(&mut []);
         let mut scrollback: Vec<Row> = Vec::new();
         t.toggle_current(&mut scrollback);
@@ -4004,7 +4260,7 @@ mod tests {
         // Once the block has an entry, the live region reads its own state,
         // not the last value: a block the user unfolded streams its lines
         // even though the switch still says folded.
-        let mut t = Thinking::default();
+        let mut t = Folds::default();
         t.start(&mut []);
         assert!(t.holds(true, &[]));
         let scrollback = [block(1, 1, false)];
@@ -4017,7 +4273,7 @@ mod tests {
         // block folded on its own. The global key folds the whole screen —
         // the current block keeps its fold, because the fold is where the
         // rest are going.
-        let mut t = Thinking {
+        let mut t = Folds {
             folded: false,
             ..Default::default()
         };
@@ -4033,7 +4289,7 @@ mod tests {
         // The global key folds or unfolds every block, the current one
         // included, and moves the switch with them: rows and switch never
         // disagree, so the screen always folds back to a single state.
-        let mut t = Thinking::default();
+        let mut t = Folds::default();
         t.start(&mut []);
         let mut scrollback = vec![block(1, 1, true)];
         t.toggle_current(&mut scrollback); // unfold the current block on its own
@@ -4070,7 +4326,7 @@ mod tests {
 
     #[test]
     fn the_answer_is_never_folded() {
-        let t = Thinking::default();
+        let t = Folds::default();
         assert!(!t.holds(false, &[]));
         let rows = body(
             &t,
@@ -4086,7 +4342,7 @@ mod tests {
 
     #[test]
     fn a_long_paragraph_is_trimmed_to_the_room_it_is_given() {
-        let t = Thinking::default();
+        let t = Folds::default();
         let rows = body(
             &t,
             &[],
@@ -4105,7 +4361,7 @@ mod tests {
         // first one is born unfolded, and each new block that takes over as
         // last is born unfolded too, while the one it displaces folds back to
         // the switch.
-        let mut t = Thinking::default();
+        let mut t = Folds::default();
 
         // Startup: the key names a block that does not exist yet.
         t.toggle_current(&mut []);
@@ -4266,6 +4522,7 @@ mod tests {
             inbox,
             pending: Vec::new(),
             looping: None,
+            pending_round: None,
             // What every `start_*` leaves behind while its job runs.
             turn: Turn::Running {
                 cancel: tokio_util::sync::CancellationToken::new(),
@@ -4515,15 +4772,15 @@ mod tests {
         let mut lane = running_lane(dir.path());
         // As `rebuild` leaves it: the conversation, and no banner.
         lane.view = super::View::opening(&[], &tui.ui.paint);
-        lane.view.scrollback = vec![Row::notice("what was said before")];
-        lane.view.opened = 0;
+        lane.view.surface.scrollback = vec![Row::notice("what was said before")];
+        lane.view.surface.opened = 0;
         switch_to(&mut tui, lane);
 
         // By content, not by count: the banner this would lay over it is one
         // row too, so a length check cannot tell them apart.
         let paint = Paint::new(false);
         let rows: Vec<String> =
-            ScrollbackRows::new(&tui.core.lanes[1].view.scrollback, &paint, &[], 80)
+            ScrollbackRows::new(&tui.core.lanes[1].view.surface.scrollback, &paint, &[], 80)
                 .map(|(r, _)| r.to_string())
                 .collect();
         assert!(
@@ -4542,7 +4799,13 @@ mod tests {
         let kinds = || {
             vec![
                 ("turn", super::Kind::Turn),
-                ("bash", super::Kind::Bash(vec!["out".into()])),
+                (
+                    "bash",
+                    super::Kind::Bash {
+                        lines: vec!["out".into()],
+                        tail: None,
+                    },
+                ),
                 ("compact", super::Kind::Compact(None)),
                 (
                     "compact with a report",
@@ -4607,12 +4870,16 @@ mod tests {
                     .session
                     .take()
                     .expect("the transcript back");
-                back.send_prompt(String::from("now something else"), None::<String>);
+                back.send_prompt(String::from("now something else"), None::<String>, None);
                 format!("{:?}", back.entries())
             }
         };
 
-        let after_bash = stopped(super::Kind::Bash(vec!["some output".into()])).await;
+        let after_bash = stopped(super::Kind::Bash {
+            lines: vec!["some output".into()],
+            tail: None,
+        })
+        .await;
         assert!(
             !after_bash.contains("stopped the previous run"),
             "a stopped `!` is the user's own command, not a request the model owes: {after_bash}"
@@ -4638,10 +4905,12 @@ mod tests {
 
         tui.core.lanes[0]
             .view
+            .state
             .tally
             .on(&agent::Event::TurnStart { turn: 1 });
         tui.core.lanes[0]
             .view
+            .state
             .tally
             .on(&agent::Event::Usage(brain::stream::Usage {
                 input: 100,
@@ -4770,7 +5039,7 @@ mod tests {
             },
         ];
         let (_dir, mut lane) = a_running_lane();
-        let before = lane.view.scrollback.len();
+        let before = lane.view.surface.scrollback.len();
 
         ui.flash("the only checkout there is");
         ui.flush(&mut lane);
@@ -4778,7 +5047,7 @@ mod tests {
         let bar = &painted[painted.len() - 2];
         assert_eq!(bar.trim(), "the only checkout there is", "{painted:?}");
         assert_eq!(
-            lane.view.scrollback.len(),
+            lane.view.surface.scrollback.len(),
             before,
             "a flash is not part of the transcript"
         );
@@ -4809,23 +5078,23 @@ mod tests {
     fn the_same_notice_twice_running_is_one_row_and_a_count() {
         let mut ui = test_ui(40, 8);
         let (_dir, mut lane) = a_running_lane();
-        lane.view.scrollback.clear();
+        lane.view.surface.scrollback.clear();
         let shown = |ui: &super::Ui, lane: &Lane, i: usize| {
-            let (text, _) = lane.view.scrollback[i].line(0, &ui.paint, &[], 80);
+            let (text, _) = lane.view.surface.scrollback[i].line(0, &ui.paint, &[], 80);
             render::strip_ansi(&text)
         };
 
         ui.say(&mut lane.view, "nothing to rewind to");
         ui.say(&mut lane.view, "nothing to rewind to");
         ui.say(&mut lane.view, "nothing to rewind to");
-        assert_eq!(lane.view.scrollback.len(), 1);
+        assert_eq!(lane.view.surface.scrollback.len(), 1);
         assert_eq!(shown(&ui, &lane, 0), "nothing to rewind to \u{d7}3");
 
         // Broken by another line, the next repeat starts its own row rather
         // than reaching back over it.
         ui.say(&mut lane.view, "stopped");
         ui.say(&mut lane.view, "nothing to rewind to");
-        assert_eq!(lane.view.scrollback.len(), 3);
+        assert_eq!(lane.view.surface.scrollback.len(), 3);
         assert_eq!(shown(&ui, &lane, 2), "nothing to rewind to");
     }
 
@@ -5079,15 +5348,15 @@ mod tests {
         }
 
         // And the window moves without the caret: scrolled up by J, back by K.
-        lane.view.scroll = 0;
+        lane.view.surface.scroll = 0;
         ui.key(&mut lane, typed('K'), false);
-        let up = lane.view.scroll;
+        let up = lane.view.surface.scroll;
         assert!(up > 0, "K went back through the window: {up}");
         ui.key(&mut lane, typed('J'), false);
         assert!(
-            lane.view.scroll < up,
+            lane.view.surface.scroll < up,
             "J came forward again: {}",
-            lane.view.scroll
+            lane.view.surface.scroll
         );
     }
 
@@ -5113,7 +5382,7 @@ mod tests {
         // press, as the running row says it is. Committed, or an empty line
         // would mean `Unsend` — a different answer to the same key, and not
         // the one this is about.
-        lane.view.committed = true;
+        lane.view.state.committed = true;
         assert!(ui.menu().is_empty(), "an empty line completes to nothing");
         let intent = ui.key(&mut lane, esc(), true);
         assert!(matches!(intent, Intent::Interrupt), "{intent:?}");
@@ -5175,7 +5444,10 @@ mod tests {
         let (_dir, mut lane) = a_running_lane();
         lane.turn = Turn::Idle;
         for i in 0..10 {
-            lane.view.scrollback.push(Row::notice(format!("row-{i}")));
+            lane.view
+                .surface
+                .scrollback
+                .push(Row::notice(format!("row-{i}")));
         }
         ui.flush(&mut lane);
 
@@ -5224,7 +5496,11 @@ mod tests {
         let (_dir, mut lane) = a_running_lane();
         a_finished_run(&mut ui, &mut lane);
 
-        let rows = spelled(&lane.view.scrollback, &ui.paint, &status::default_done());
+        let rows = spelled(
+            &lane.view.surface.scrollback,
+            &ui.paint,
+            &status::default_done(),
+        );
         assert_eq!(
             rows.last().map(String::as_str),
             Some("2 turns · 8.4k in / 390 out · ctx 72.4k/114.0k · $0.0012")
@@ -5232,7 +5508,7 @@ mod tests {
 
         // The same row, asked for differently. A stored string could not do
         // this, which is the whole of what changed.
-        let narrowed = spelled(&lane.view.scrollback, &ui.paint, &[Segment::Cost]);
+        let narrowed = spelled(&lane.view.surface.scrollback, &ui.paint, &[Segment::Cost]);
         assert_eq!(narrowed.last().map(String::as_str), Some("$0.0012"));
     }
 
@@ -5242,7 +5518,7 @@ mod tests {
     fn a_bang_command_shows_no_token_counts() {
         let ui = test_ui(80, 24);
         let (_dir, mut lane) = a_running_lane();
-        lane.view.started = Some(std::time::Instant::now());
+        lane.view.state.started = Some(std::time::Instant::now());
 
         let live = ui.live(&lane, 10).join("\n");
         let frames = |text: &str| {
@@ -5261,7 +5537,7 @@ mod tests {
     fn the_live_region_ends_with_the_turn_and_not_with_the_clock() {
         let ui = test_ui(80, 24);
         let (_dir, mut lane) = a_running_lane();
-        lane.view.started = Some(std::time::Instant::now());
+        lane.view.state.started = Some(std::time::Instant::now());
         assert!(
             ui.live(&lane, 10)
                 .iter()

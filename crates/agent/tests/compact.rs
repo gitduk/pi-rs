@@ -1,5 +1,5 @@
 use agent::compact::{Policy, Report, plan};
-use agent::session::{Session, UserBody, UserText};
+use agent::session::{Prompt, Session};
 use brain::estimate;
 
 mod common;
@@ -557,7 +557,7 @@ mod budget {
     use super::big;
     use super::spec;
     use agent::Agent;
-    use agent::session::{Session, UserBody};
+    use agent::session::Session;
     use async_trait::async_trait;
     #[allow(unused_imports)]
     use brain::message::Text as _Text;
@@ -603,10 +603,10 @@ mod budget {
                 name: "read".into(),
                 args: json!({ "path": format!("f{i}.rs") }),
             })]);
-            s.push_user(UserBody::Result {
-                result: ToolResult::text(format!("c{i}"), "read", big(4_000)),
-                preview: None,
-            });
+            s.push_previewed(vec![(
+                ToolResult::text(format!("c{i}"), "read", big(4_000)),
+                None,
+            )]);
         }
         s
     }
@@ -792,10 +792,10 @@ mod budget {
                 name: "read".into(),
                 args: json!({ "path": path }),
             })]);
-            s.push_user(UserBody::Result {
-                result: ToolResult::text(format!("c{i}"), "read", big(4_000)),
-                preview: None,
-            });
+            s.push_previewed(vec![(
+                ToolResult::text(format!("c{i}"), "read", big(4_000)),
+                None,
+            )]);
         }
         let before = brain::estimate::tokens(&s.context(), &spec());
         assert!(before < a.budget(), "the automatic pass would decline this");
@@ -820,10 +820,10 @@ mod budget {
                 name: "read".into(),
                 args: json!({ "path": format!("f{i}.rs") }),
             })]);
-            s.push_user(UserBody::Result {
-                result: ToolResult::text(format!("c{i}"), "read", big(4_000)),
-                preview: None,
-            });
+            s.push_previewed(vec![(
+                ToolResult::text(format!("c{i}"), "read", big(4_000)),
+                None,
+            )]);
         }
         let budget = a.budget();
         assert!(
@@ -945,10 +945,11 @@ fn a_bang_command_goes_with_the_question_that_refers_to_it() {
     s.push_assistant(vec![AssistantContent::Text(brain::message::Text {
         text: big(9_000),
     })]);
-    let ran = s.push_user(UserBody::Aside(UserText {
+    let ran = s.push_bash(Prompt {
         text: "Ran `cargo test`\nFAILED at auth.rs:14".into(),
+        image: None,
         shown: Some("!cargo test".into()),
-    }));
+    });
     s.prompt("fix that");
     s.push_assistant(vec![AssistantContent::Text(brain::message::Text {
         text: "on it".into(),
@@ -989,10 +990,11 @@ fn a_bang_command_goes_with_the_question_that_refers_to_it() {
 fn a_bang_command_can_be_shrunk_where_a_question_cannot() {
     let mut s = Session::new();
     s.prompt("the task");
-    s.push_user(UserBody::Aside(UserText {
+    s.push_bash(Prompt {
         text: big(30_000),
+        image: None,
         shown: Some("!cargo test".into()),
-    }));
+    });
     s.prompt("fix that");
     s.push_assistant(vec![AssistantContent::Text(brain::message::Text {
         text: "on it".into(),

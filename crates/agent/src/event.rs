@@ -66,6 +66,12 @@ pub enum Event {
         // How many times the transcript was shrunk to fit during this run.
         compactions: usize,
     },
+    // The transcript gained entries — clones of what just landed. A state
+    // update, not a drawing instruction: the renderer derives their rows
+    // through the A table itself.
+    Committed {
+        entries: Vec<crate::session::Entry>,
+    },
 }
 
 /// Say it to the user, and to the journal, in that order and in one call.
@@ -86,7 +92,10 @@ pub(crate) fn say(tx: &tokio::sync::mpsc::UnboundedSender<Event>, event: Event) 
 // a time, and the transcript is saved beside the journal already.
 fn note(event: &Event) {
     match event {
-        Event::TextDelta(_) | Event::ReasoningDelta(_) | Event::Usage(_) => {}
+        Event::TextDelta(_)
+        | Event::ReasoningDelta(_)
+        | Event::Usage(_)
+        | Event::Committed { .. } => {}
         // The loop's own "sending" record carries these two already.
         Event::Context { .. } => {}
         Event::TurnStart { turn } => tracing::info!(target: "pi::loop", turn, "turn start"),

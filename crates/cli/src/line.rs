@@ -48,12 +48,12 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
                     .with_cancel(agent::cancel_on_interrupt());
                 let out = crate::repl::run_bash(&ctx, &command).await;
                 if let Some(session) = core.lane_mut().session.as_mut() {
-                    crate::repl::record_bash(session, &command, out.text);
+                    crate::repl::record_bash(session, &command, out.text.clone());
                 }
                 if let Err(e) = core.save() {
                     eprintln!("warning: the transcript was not saved: {e}");
                 }
-                for line in out.said {
+                for line in out.screen() {
                     println!("{line}");
                 }
             }
@@ -107,7 +107,7 @@ async fn turn(
     let Some(mut session) = core.lane_mut().session.take() else {
         return Totals::default();
     };
-    session.send_prompt(prompt, typed);
+    session.send_prompt(prompt, typed, None);
     let ctx = core
         .lane_mut()
         .ctx

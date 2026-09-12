@@ -5,7 +5,7 @@ use brain::model::ModelSpec;
 use serde_json::Value;
 
 use crate::session::{
-    Compaction, Entry, EntryId, Omission, Seen, Session, UserBody, oversized_args, user_block,
+    Compaction, Entry, EntryId, Omission, Seen, Session, oversized_args, user_block,
 };
 
 // Tools whose results describe current state rather than an action taken. Only
@@ -97,10 +97,7 @@ struct Item<'a> {
 impl<'a> Item<'a> {
     fn result(&self) -> Option<&'a brain::message::ToolResult> {
         match self.entry {
-            Entry::User {
-                body: UserBody::Result { result: r, .. },
-                ..
-            } if self.notice.is_none() => Some(r),
+            Entry::Tool { result: r, .. } if self.notice.is_none() => Some(r),
             _ => None,
         }
     }
@@ -113,14 +110,8 @@ impl<'a> Item<'a> {
             return None;
         }
         match self.entry {
-            Entry::User {
-                body: UserBody::Result { result: r, .. },
-                ..
-            } => Some(r.flatten_text()),
-            Entry::User {
-                body: UserBody::Aside(t),
-                ..
-            } => Some(t.text.clone()),
+            Entry::Tool { result: r, .. } => Some(r.flatten_text()),
+            Entry::Bash { run, .. } => Some(run.text.clone()),
             _ => None,
         }
     }
@@ -129,19 +120,17 @@ impl<'a> Item<'a> {
     // `tool_result` makes the next request invalid on both formats.
     fn omittable(&self) -> bool {
         match self.entry {
-            Entry::User { body, .. } => match body {
-                UserBody::Result { result: r, .. } => !PROTECTED.contains(&r.name.as_str()),
-                // A question stays whatever the budget says: what someone
-                // asked is not the answer's spare context. An aside is the
-                // other half of that — a `!` command's output, which nothing
-                // downstream waits on — and the variant is what makes the two
-                // answerable apart at all.
-                UserBody::Aside(_) => true,
-                // A note is the same half: machine prose nothing downstream
-                // waits on once the run it explains is past.
-                UserBody::Note(_) => true,
-                UserBody::Prompt(_) | UserBody::Image(_) => false,
-            },
+            Entry::Tool { result: r, .. } => !PROTECTED.contains(&r.name.as_str()),
+            // A `!` command's output is the other half of a question — bulk
+            // nothing downstream waits on — and the variant is what makes the
+            // two answerable apart at all.
+            Entry::Bash { .. } => true,
+            // A note is the same half: machine prose nothing downstream waits
+            // on once the run it explains is past.
+            Entry::Note { .. } => true,
+            // A question stays whatever the budget says: what someone asked is
+            // not the answer's spare context.
+            Entry::Ask { .. } => false,
             _ => false,
         }
     }
@@ -158,13 +147,12 @@ impl<'a> Item<'a> {
 // direction — the estimate decides *when* to compact, and compacting a little
 // early costs tokens where compacting a little late costs the request.
 fn tokens_of(seen: &Seen<'_>, spec: &ModelSpec, gone: &HashMap<(EntryId, usize), &str>) -> usize {
-    let body = match seen.entry() {
-        Entry::User { body, .. } => estimate::user_block(&user_block(body)),
-        Entry::Assistant { id, blocks, .. } => Session::shown_blocks(blocks, *id, gone)
+    let body: usize = match seen.entry() {
+        Entry::Answer { id, blocks, .. } => Session::shown_blocks(blocks, *id, gone)
             .iter()
             .map(|b| estimate::assistant_block(b, spec))
             .sum(),
-        _ => return 0,
+        entry => user_block(entry).iter().map(estimate::user_block).sum(),
     };
     estimate::MESSAGE_OVERHEAD + body
 }
@@ -350,7 +338,7 @@ pub fn plan(
             if total(&items) <= budget || suffix[n] < policy.protect_tail {
                 break;
             }
-            let Entry::Assistant { id, blocks, .. } = items[n].entry else {
+            let Entry::Answer { id, blocks, .. } = items[n].entry else {
                 continue;
             };
             let fat: Vec<usize> = blocks
@@ -445,28 +433,12 @@ pub fn plan(
 //
 // A round is a prompt and everything that answered it. What sits *ahead* of a
 // prompt with nothing between belongs to it, not to the round that ended
-// before: an image is the attachment the question is about, and a `!` command
-// is what the user ran in order to ask. Attaching either backwards lets the
-// drop tier take it out from under the question that refers to it.
+// before: a `!` command is what the user ran in order to ask. Attaching it
+// backwards lets the drop tier take it out from under the question that
+// refers to it.
 fn round_starts(items: &[Item<'_>]) -> Vec<usize> {
-    let is_prompt = |it: &Item<'_>| {
-        matches!(
-            it.entry,
-            Entry::User {
-                body: UserBody::Prompt(_),
-                ..
-            }
-        )
-    };
-    let leads_in = |it: &Item<'_>| {
-        matches!(
-            it.entry,
-            Entry::User {
-                body: UserBody::Image(_) | UserBody::Aside(_),
-                ..
-            }
-        )
-    };
+    let is_prompt = |it: &Item<'_>| matches!(it.entry, Entry::Ask { .. });
+    let leads_in = |it: &Item<'_>| matches!(it.entry, Entry::Bash { .. });
     let mut out = Vec::new();
     for n in 0..items.len() {
         if !is_prompt(&items[n]) {
@@ -486,10 +458,7 @@ fn round_starts(items: &[Item<'_>]) -> Vec<usize> {
 fn protected(it: &Item<'_>) -> bool {
     matches!(
         it.entry,
-        Entry::User {
-            body: UserBody::Result { result: r, .. },
-            ..
-        } if PROTECTED.contains(&r.name.as_str())
+        Entry::Tool { result: r, .. } if PROTECTED.contains(&r.name.as_str())
     )
 }
 
@@ -508,15 +477,7 @@ fn takeable(items: &[Item<'_>], span: std::ops::Range<usize>) -> Option<Vec<usiz
 fn after_prompt(items: &[Item<'_>], start: usize, end: usize) -> usize {
     items[start..end]
         .iter()
-        .position(|it| {
-            matches!(
-                it.entry,
-                Entry::User {
-                    body: UserBody::Prompt(_),
-                    ..
-                }
-            )
-        })
+        .position(|it| matches!(it.entry, Entry::Ask { .. }))
         .map_or(start, |p| start + p + 1)
 }
 
@@ -563,7 +524,7 @@ fn droppable(items: &[Item<'_>], policy: &Policy, suffix: &[usize]) -> Option<Ve
         if suffix[n] < policy.protect_tail {
             break;
         }
-        if items[n].gone || !matches!(items[n].entry, Entry::Assistant { .. }) {
+        if items[n].gone || !matches!(items[n].entry, Entry::Answer { .. }) {
             continue;
         }
         let span = exchange(items, n);
@@ -593,7 +554,7 @@ fn exchange(items: &[Item<'_>], start: usize) -> Vec<usize> {
         return out;
     }
     for (n, it) in items.iter().enumerate().skip(start + 1) {
-        let answers = matches!(it.entry, Entry::User { body: UserBody::Result { result: r, .. }, .. }
+        let answers = matches!(it.entry, Entry::Tool { result: r, .. }
             if calls.contains(&r.call.as_str()));
         if answers && !it.gone {
             out.push(n);

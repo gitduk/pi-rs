@@ -1037,10 +1037,20 @@ pub enum Intent {
     // between rounds — `read` never answers it. `note` is the loop's word to
     // the model, filed as machine prose rather than glued to the goal, which
     // must stay what `read` would parse.
-    LoopRound { goal: String, note: String },
+    LoopRound {
+        goal: String,
+        note: String,
+        // Which automatic round this is: `None` for the loop's first — that
+        // one is the `/loop goal` line itself — `Some(n)` for n ≥ 2.
+        // Recorded on the ask the round opens.
+        round: Option<u64>,
+    },
     // Not a built-in word. It may name a skill and it may name nothing; the
     // command table settles that, and `read` does not have it.
-    Other { word: String, args: String },
+    Other {
+        word: String,
+        args: String,
+    },
     // `/new`, and `ctrl+l` twice: a fresh session, the old one kept on disk,
     // and the screen rebuilt from the empty one. One variant, because they
     // are one intent however it was expressed.
@@ -1818,6 +1828,7 @@ impl Repl {
             inbox,
             pending: Vec::new(),
             looping: None,
+            pending_round: None,
             turn: crate::lane::Turn::Idle,
             view: Default::default(),
         });
@@ -1958,8 +1969,9 @@ pub struct Bashed {
     /// `Ran \`git status\`` as a prompt with the output indented under it —
     /// the live path never did that, because it had the typed line.
     pub text: String,
-    /// What the terminal shows, the wrapper tags dropped.
-    pub said: Vec<String>,
+    /// Said on screen only — `cancelled`, or why the runner refused. There
+    /// is no entry to file, so there is nothing to rebuild from either.
+    pub flash: Option<String>,
 }
 
 /// Run what `!` named. Same runner, workspace and timeout as the model's own
@@ -1969,17 +1981,17 @@ pub struct Bashed {
 /// await pinned the whole loop, which is what left the `!` path with an event
 /// loop of its own. Recording the result is the caller's, and needs no await.
 pub async fn run_bash(ctx: &tools::Ctx, command: &str) -> Bashed {
-    let only = |line: String| Bashed {
+    let refused = |flash: String| Bashed {
         text: String::new(),
-        said: vec![line],
+        flash: Some(flash),
     };
     let out = match tools::bash::Bash
         .execute(serde_json::json!({ "command": command }), ctx)
         .await
     {
         Ok(out) => out,
-        Err(ToolError::Cancelled) => return only("cancelled".into()),
-        Err(e) => return only(format!("failed to run `{command}`: {e}")),
+        Err(ToolError::Cancelled) => return refused("cancelled".into()),
+        Err(e) => return refused(format!("failed to run `{command}`: {e}")),
     };
     let body = out.flatten();
     Bashed {
@@ -1991,11 +2003,28 @@ pub async fn run_bash(ctx: &tools::Ctx, command: &str) -> Bashed {
                 &body
             }
         ),
-        said: body
-            .lines()
-            .filter(|l| !matches!(*l, "<stdout>" | "</stdout>" | "<stderr>" | "</stderr>"))
-            .map(str::to_string)
-            .collect(),
+        flash: None,
+    }
+}
+
+/// The lines the screen shows for a filed `!` run: everything under the
+/// `Ran …` head, minus the stream tags the model reads. The one derivation
+/// for the live path and the rebuild, so the two cannot drift.
+pub fn bash_said(text: &str) -> Vec<String> {
+    text.lines()
+        .skip(1)
+        .filter(|l| !matches!(*l, "<stdout>" | "</stdout>" | "<stderr>" | "</stderr>"))
+        .map(str::to_string)
+        .collect()
+}
+
+impl Bashed {
+    /// What the screen shows for this run: the derived lines, plus the flash
+    /// for one that never ran. Everything the surface turns into notice rows.
+    pub fn screen(self) -> Vec<String> {
+        let mut lines = bash_said(&self.text);
+        lines.extend(self.flash);
+        lines
     }
 }
 
@@ -2007,10 +2036,11 @@ pub fn record_bash(session: &mut Session, command: &str, text: String) {
     if text.is_empty() {
         return;
     }
-    session.push_user(agent::session::UserBody::Aside(agent::session::UserText {
+    session.push_bash(agent::session::Prompt {
         text,
+        image: None,
         shown: Some(format!("!{command}")),
-    }));
+    });
 }
 
 // A secret value as a change line shows it: set or unset, never the value.
@@ -2027,11 +2057,24 @@ fn mask_secret(path: &str, value: &toml::Value) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn bash_said_strips_the_head_and_the_stream_tags() {
+        let said = super::bash_said(
+            "Ran `git status`\n<stdout>\nnothing\n</stdout>\n<stderr>\n</stderr>\n",
+        );
+        assert_eq!(said, vec!["nothing".to_string()]);
+        // Nothing to show still says so, in the model's own words.
+        assert_eq!(
+            super::bash_said("Ran `ls`\n(no output)"),
+            vec!["(no output)".to_string()]
+        );
+    }
     use super::{
         BUILTIN, Candidate, Choice, Command, Fate, Intent, ResumeChoice, Source, Step, ago,
         bash_command, commands, complete, dispatch, expand, gist, help, read, standing_head,
     };
-    use agent::session::{Entry, Session, UserBody, UserText};
+    use agent::session::{Entry, Prompt, Session};
     use tools::skills::Skill;
 
     #[test]
@@ -2696,16 +2739,13 @@ mod tests {
     #[test]
     fn a_bang_line_stores_what_was_typed_beside_what_was_sent() {
         let mut s = Session::new();
-        s.push_user(UserBody::Aside(UserText {
+        s.push_bash(Prompt {
             text: "Ran `git status`\nnothing to commit".into(),
+            image: None,
             shown: Some("!git status".into()),
-        }));
+        });
 
-        let Entry::User {
-            body: UserBody::Aside(t),
-            ..
-        } = &s.entries()[0]
-        else {
+        let Entry::Bash { run: t, .. } = &s.entries()[0] else {
             panic!("a text entry")
         };
         assert!(
@@ -2751,6 +2791,7 @@ mod tests {
             inbox,
             pending: Vec::new(),
             looping: None,
+            pending_round: None,
             turn: crate::lane::Turn::Idle,
             view: Default::default(),
             keys: std::sync::Arc::new(crate::keys::Keys::default()),
@@ -2941,6 +2982,7 @@ mod tests {
             inbox,
             pending: Vec::new(),
             looping: None,
+            pending_round: None,
             turn: crate::lane::Turn::Idle,
             view: Default::default(),
             keys: keys.clone(),

@@ -599,6 +599,7 @@ async fn main() -> Result<()> {
                 inbox,
                 pending: Vec::new(),
                 looping: None,
+                pending_round: None,
                 turn: lane::Turn::Idle,
                 view: Default::default(),
                 keys: key_map.clone(),
@@ -655,7 +656,7 @@ async fn main() -> Result<()> {
     // Always through the log: a loaded session whose view happens to be empty
     // still has history worth keeping, and `resume` handles an empty session.
     let mut session = carried;
-    session.send_prompt(prompt, None);
+    session.send_prompt(prompt, None, None);
     let outcome = ag.run(&mut session, &ctx, &tx).await;
 
     session.note_outcome(&outcome);

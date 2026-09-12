@@ -69,14 +69,13 @@ struct Peek {
 struct PeekEntry {
     #[serde(default)]
     at: u64,
+    /// The ask, when this entry is one — what names the session.
     #[serde(default)]
-    body: Option<PeekBody>,
+    ask: Option<PeekAsk>,
 }
 
 #[derive(Deserialize)]
-struct PeekBody {
-    #[serde(rename = "type", default)]
-    kind: String,
+struct PeekAsk {
     #[serde(default)]
     text: String,
     #[serde(default)]
@@ -94,10 +93,9 @@ impl Peek {
     fn opening(&self) -> Option<String> {
         self.entries
             .iter()
-            .filter_map(|e| e.body.as_ref())
-            .find(|b| b.kind == "prompt")
+            .filter_map(|e| e.ask.as_ref())
             .map(|b| b.shown.clone().unwrap_or_else(|| b.text.clone()))
-            .filter(|t| !t.is_empty())
+            .find(|t| !t.is_empty())
     }
 }
 

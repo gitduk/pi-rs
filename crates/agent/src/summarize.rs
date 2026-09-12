@@ -1,7 +1,7 @@
 use brain::message::AssistantContent;
 use brain::model::ModelSpec;
 
-use crate::session::{Entry, UserBody};
+use crate::session::Entry;
 use brain::stream::Usage;
 use brain::transport::Transport;
 
@@ -36,25 +36,26 @@ pub fn render(earlier: &[&str], entries: &[&Entry]) -> String {
     }
     for e in entries {
         match e {
-            Entry::User { body, .. } => match body {
-                UserBody::Prompt(t) => lines.push(format!("[user] {}", clip(&t.text, BLOCK_CHARS))),
-                UserBody::Aside(t) => {
-                    lines.push(format!("[user ran] {}", clip(&t.text, BLOCK_CHARS)))
-                }
-                // A note is a directive for the one turn it opened; by the
-                // time a summary carries it, it is stale.
-                UserBody::Note(_) => {}
-                UserBody::Image(_) => lines.push("[user] (image)".into()),
-                UserBody::Result { result: r, .. } => {
-                    let mark = if r.is_error { " error" } else { "" };
-                    lines.push(format!(
-                        "[{} result{mark}] {}",
-                        r.name,
-                        clip(&r.flatten_text(), BLOCK_CHARS)
-                    ));
-                }
-            },
-            Entry::Assistant { blocks, .. } => {
+            Entry::Ask { ask, .. } => lines.push(format!(
+                "[user]{} {}",
+                if ask.image.is_some() { " (image)" } else { "" },
+                clip(&ask.text, BLOCK_CHARS)
+            )),
+            Entry::Bash { run, .. } => {
+                lines.push(format!("[user ran] {}", clip(&run.text, BLOCK_CHARS)))
+            }
+            // A note is a directive for the one turn it opened; by the
+            // time a summary carries it, it is stale.
+            Entry::Note { .. } => {}
+            Entry::Tool { result: r, .. } => {
+                let mark = if r.is_error { " error" } else { "" };
+                lines.push(format!(
+                    "[{} result{mark}] {}",
+                    r.name,
+                    clip(&r.flatten_text(), BLOCK_CHARS)
+                ));
+            }
+            Entry::Answer { blocks, .. } => {
                 for b in blocks {
                     match b {
                         AssistantContent::Text(t) => {
@@ -121,34 +122,34 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::{EntryId, UserText};
+    use crate::session::{EntryId, Prompt};
     use brain::message::{ToolCall, ToolResult};
     use serde_json::json;
 
     fn user(text: &str) -> Entry {
-        Entry::User {
+        Entry::Ask {
             id: EntryId(0),
             at: 0,
-            body: UserBody::Prompt(UserText {
+            round: None,
+            ask: Prompt {
                 text: text.into(),
+                image: None,
                 shown: None,
-            }),
-        }
-    }
-
-    fn result(call: &str, name: &str, body: impl Into<String>) -> Entry {
-        Entry::User {
-            id: EntryId(0),
-            at: 0,
-            body: UserBody::Result {
-                result: ToolResult::text(call, name, body),
-                preview: None,
             },
         }
     }
 
+    fn result(call: &str, name: &str, body: impl Into<String>) -> Entry {
+        Entry::Tool {
+            id: EntryId(0),
+            at: 0,
+            result: ToolResult::text(call, name, body),
+            preview: None,
+        }
+    }
+
     fn assistant(blocks: Vec<AssistantContent>) -> Entry {
-        Entry::Assistant {
+        Entry::Answer {
             id: EntryId(0),
             at: 0,
             blocks,

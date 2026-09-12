@@ -459,7 +459,15 @@ impl Agent {
                 .run_calls(&calls, &bad, ctx, tx, &mut failures, &mut totals)
                 .instrument(span.clone())
                 .await?;
-            session.push_previewed(results);
+            let ids = session.push_previewed(results);
+            // A state update, not a drawing instruction: the renderer derives
+            // the results' rows from these entries through the A table.
+            say(
+                tx,
+                Event::Committed {
+                    entries: session.entries_for(&ids).into_iter().cloned().collect(),
+                },
+            );
         }
 
         unreachable!("an unlimited run can only leave by returning inside the loop")
@@ -905,6 +913,11 @@ impl Agent {
                         // instead of parsing the prose; the prose still leads.
                         body = format!("Error: {body} [code: {code}]");
                     }
+                    // The pending live line draws from this same text, so
+                    // adoption's equality check gets both halves from one
+                    // source; without it a multi-line error renders one way
+                    // live and another after a rebuild.
+                    sketched = Some(body.clone());
                     say(
                         tx,
                         Event::ToolEnd {

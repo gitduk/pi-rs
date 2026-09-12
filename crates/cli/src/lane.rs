@@ -259,6 +259,9 @@ pub struct Lane {
     pub commands: std::sync::Arc<Vec<crate::repl::Command>>,
     /// The `/loop` this lane is under, if any.
     pub looping: Option<Looping>,
+    /// The `/loop` round waiting in the queue, taken by the turn it arms: the
+    /// ask it opens records which automatic round it is.
+    pub pending_round: Option<u64>,
 }
 
 impl Lane {

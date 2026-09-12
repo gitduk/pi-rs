@@ -87,18 +87,27 @@ pub struct Compaction {
     pub tokens_after: usize,
 }
 
-/// Text from the user's side of the conversation.
+/// One thing the user side said, kept in both voices: what the model reads,
+/// and — when the two differ — what the person saw.
+///
+/// `text` is the only field that reaches the wire. `shown` is the screen
+/// echo and the rewind menu's label; `image` is a picture pasted with an
+/// ask, and an ask is its only carrier. Notes carry neither, which is why
+/// a note is a bare `String`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UserText {
+pub struct Prompt {
     /// What the model reads.
     pub text: String,
+    /// A picture pasted with the ask. An ask is the only carrier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<Image>,
     /// What a person reads — the rollback menu, `/resume` naming, the screen.
     /// `None` when it is the same as `text`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shown: Option<String>,
 }
 
-impl UserText {
+impl Prompt {
     /// What to put in front of a person. One question, answered here rather
     /// than at each call site, where the answers drift.
     pub fn shown_text(&self) -> &str {
@@ -106,72 +115,80 @@ impl UserText {
     }
 }
 
-/// The user side, one block per entry. Splitting them is what lets compaction
-/// address a single tool result — or a single pasted command's output —
-/// without touching what sits beside it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum UserBody {
-    // What the user asked. It opens a round, and the drop tier's unit is a
-    // round: a question and everything that answered it go together or not at
-    // all. Never omitted — what someone asked is not the answer's spare
-    // context.
-    Prompt(UserText),
-    // User-side text that is not a question: the output of a `!` command.
-    //
-    // A separate variant rather than a flag, because four places ask whether
-    // an entry is a question and three of them need a different answer for
-    // this one — it opens no round, it does not name the session, and it *is*
-    // omittable, since nothing downstream is waiting on an answer to it. A
-    // boolean cannot carry four answers, and inferring them from `shown` is
-    // what let a `!cargo test` be dropped out from under the `fix that` that
-    // referred to it.
-    Aside(UserText),
-
-    // Machine-authored text meant for the model, not the person: what the
-    // session says about a run that ended without answering its prompt. It
-    // opens no round and names no session, and it is omittable, like an
-    // [`Aside`] — but unlike one it is not the user's words, so nothing may
-    // treat it as theirs: no rewind node, nothing an unsend hands back to
-    // the editor. That one difference is why it is a variant of its own.
-    Note(UserText),
-    // The result, and what the screen showed for it when that is more than the
-    // result's own first line — the rows an edit sketched, which the stored
-    // content does not contain.
-    //
-    // Beside the result rather than inside it. `ToolResult` is the wire type:
-    // a screen-only field there would be one every encoder has to remember not
-    // to send, and one the token estimate would count for bytes that never
-    // leave. Here neither is possible — `brain` cannot see this type, and
-    // `user_block` carries only the `ToolResult` across.
-    //
-    // The same distinction `UserText` makes with `shown`, one variant along:
-    // what the model reads, beside what a person sees.
-    Result {
-        result: ToolResult,
-        preview: Option<String>,
-    },
-    Image(Image),
+/// Who said or did a thing. Derived from the entry's variant, never stored:
+/// the variant is the author, and a stored field could disagree with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Author {
+    User,
+    Assistant,
+    Agent,
 }
 
 /// The session's atom. Append only, or truncated by a rollback; the content of
 /// an entry is never rewritten.
+///
+/// Flat on purpose: the author is the variant (see [`Entry::author`]), not a
+/// field, so no illegal combination can be built.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Entry {
-    User {
+    // What the user asked. It opens a round, and compaction's drop tier is a
+    // round: a question and everything that answered it go together or not at
+    // all. Never omitted — what someone asked is not the answer's spare
+    // context.
+    //
+    // `round` numbers a `/loop` turn: `None` is a hand-typed line — including
+    // the loop's first round, which is the `/loop goal` line itself; `Some(n)`
+    // is one of the loop's automatic rounds, n ≥ 2.
+    Ask {
         id: EntryId,
         at: u64,
-        body: UserBody,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        round: Option<u64>,
+        ask: Prompt,
+    },
+    // A `!` command with its output. `run.text` is what the model reads (the
+    // command named, the output under it); `run.shown` is the `!cmd` line the
+    // screen echoes. The screen's output rows derive from `run.text`, so a
+    // rebuild and a live run draw from one source.
+    Bash {
+        id: EntryId,
+        at: u64,
+        run: Prompt,
     },
     // One response, whole. Its blocks are never addressed separately: nothing
     // reads them apart, and holding them together is what keeps a `tool_use`
     // beside the reasoning that produced it.
-    Assistant {
+    Answer {
         id: EntryId,
         at: u64,
         blocks: Vec<AssistantContent>,
     },
+    // A tool's result, and what the screen showed for it when that is more
+    // than the result's own first line — the rows an edit sketched, which the
+    // stored content does not hold.
+    //
+    // `preview` sits beside the result rather than inside it: `ToolResult` is
+    // the wire type, and a screen-only field there would be one every encoder
+    // has to remember not to send, and one the token estimate would count for
+    // bytes that never leave.
+    Tool {
+        id: EntryId,
+        at: u64,
+        result: ToolResult,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preview: Option<String>,
+    },
+    // Machine prose in the user's voice — a stopped run's cause, the loop's
+    // round note. The model reads it; the screen shows it as a muted notice.
+    // It opens no round and names no session, and it is omittable.
+    Note {
+        id: EntryId,
+        at: u64,
+        note: String,
+    },
+    // The session's own mechanism: one compaction pass's record. Input to the
+    // view, never content on the wire.
     Compaction {
         id: EntryId,
         at: u64,
@@ -182,37 +199,63 @@ pub enum Entry {
 impl Entry {
     pub fn id(&self) -> EntryId {
         match self {
-            Entry::User { id, .. } | Entry::Assistant { id, .. } | Entry::Compaction { id, .. } => {
-                *id
-            }
+            Entry::Ask { id, .. }
+            | Entry::Bash { id, .. }
+            | Entry::Answer { id, .. }
+            | Entry::Tool { id, .. }
+            | Entry::Note { id, .. }
+            | Entry::Compaction { id, .. } => *id,
         }
     }
 
     pub fn at(&self) -> u64 {
         match self {
-            Entry::User { at, .. } | Entry::Assistant { at, .. } | Entry::Compaction { at, .. } => {
-                *at
-            }
+            Entry::Ask { at, .. }
+            | Entry::Bash { at, .. }
+            | Entry::Answer { at, .. }
+            | Entry::Tool { at, .. }
+            | Entry::Note { at, .. }
+            | Entry::Compaction { at, .. } => *at,
+        }
+    }
+
+    /// Who said or did this. The variant is the author; there is nothing to
+    /// keep in step.
+    pub fn author(&self) -> Author {
+        match self {
+            Entry::Ask { .. } | Entry::Bash { .. } => Author::User,
+            Entry::Answer { .. } => Author::Assistant,
+            Entry::Tool { .. } | Entry::Note { .. } | Entry::Compaction { .. } => Author::Agent,
         }
     }
 
     /// An assistant turn's blocks; `None` for every other kind.
     pub fn blocks(&self) -> Option<&[AssistantContent]> {
         match self {
-            Entry::Assistant { blocks, .. } => Some(blocks),
+            Entry::Answer { blocks, .. } => Some(blocks),
             _ => None,
         }
     }
 
     pub fn tool_calls(&self) -> impl Iterator<Item = &ToolCall> {
         let blocks = match self {
-            Entry::Assistant { blocks, .. } => blocks.as_slice(),
+            Entry::Answer { blocks, .. } => blocks.as_slice(),
             _ => &[],
         };
         blocks.iter().filter_map(|b| match b {
             AssistantContent::ToolCall(c) => Some(c),
             _ => None,
         })
+    }
+
+    /// The prompt side of a user entry — an ask or a `!` command. `None` for
+    /// every other kind.
+    pub fn prompt(&self) -> Option<&Prompt> {
+        match self {
+            Entry::Ask { ask, .. } => Some(ask),
+            Entry::Bash { run, .. } => Some(run),
+            _ => None,
+        }
     }
 }
 
@@ -254,17 +297,15 @@ fn said(blocks: &[AssistantContent]) -> Option<String> {
 // The place this entry offers to go back to, or `None` when it is not one.
 fn node_of(entry: &Entry) -> Option<Node> {
     match entry {
-        Entry::User {
-            id,
-            body: UserBody::Prompt(t) | UserBody::Aside(t),
-            ..
-        } => Some(Node::Ask {
+        Entry::Ask { id, ask, .. } => Some(Node::Ask {
             id: *id,
-            show: t.shown_text().to_string(),
+            show: ask.shown_text().to_string(),
         }),
-        Entry::Assistant { id, blocks, .. } => {
-            said(blocks).map(|show| Node::Reply { id: *id, show })
-        }
+        Entry::Bash { id, run, .. } => Some(Node::Ask {
+            id: *id,
+            show: run.shown_text().to_string(),
+        }),
+        Entry::Answer { id, blocks, .. } => said(blocks).map(|show| Node::Reply { id: *id, show }),
         _ => None,
     }
 }
@@ -344,28 +385,57 @@ impl Session {
         session
     }
 
-    /// Build a session from a transcript's worth of messages, one entry per
-    /// block. The seam exists because a message is what a request looks like
-    /// while an entry is what the session stores; nothing in the run needs it,
-    /// but a test that wants to say "given this conversation" does.
+    /// Build a session from a transcript's worth of messages. A user
+    /// message's text and image merge into one ask — the shape an entry
+    /// keeps — while each tool result lands as its own entry. The seam exists
+    /// because a message is what a request looks like while an entry is what
+    /// the session stores; nothing in the run needs it, but a test that wants
+    /// to say "given this conversation" does.
     pub fn from_messages(messages: impl IntoIterator<Item = Message>) -> Self {
         let mut log = Self::new();
         for m in messages {
             match m {
                 Message::User { content } => {
+                    // The ask a message's text and image gather into; a tool
+                    // result in the middle flushes it, so block order holds.
+                    let mut pending: Option<Prompt> = None;
+                    let flush = |log: &mut Self, pending: &mut Option<Prompt>| {
+                        if let Some(ask) = pending.take() {
+                            log.push_ask(ask, None);
+                        }
+                    };
                     for b in content {
-                        log.push_user(match b {
-                            UserContent::Text(t) => UserBody::Prompt(UserText {
-                                text: t.text,
-                                shown: None,
-                            }),
-                            UserContent::ToolResult(r) => UserBody::Result {
-                                result: r,
-                                preview: None,
+                        match b {
+                            UserContent::Text(t) => match &mut pending {
+                                Some(ask) => {
+                                    ask.text.push('\n');
+                                    ask.text.push_str(&t.text);
+                                }
+                                None => {
+                                    pending = Some(Prompt {
+                                        text: t.text,
+                                        image: None,
+                                        shown: None,
+                                    });
+                                }
                             },
-                            UserContent::Image(i) => UserBody::Image(i),
-                        });
+                            UserContent::Image(i) => match &mut pending {
+                                Some(ask) => ask.image = Some(i),
+                                None => {
+                                    pending = Some(Prompt {
+                                        text: String::new(),
+                                        image: Some(i),
+                                        shown: None,
+                                    });
+                                }
+                            },
+                            UserContent::ToolResult(r) => {
+                                flush(&mut log, &mut pending);
+                                log.push_previewed(vec![(r, None)]);
+                            }
+                        }
                     }
+                    flush(&mut log, &mut pending);
                 }
                 Message::Assistant { content, .. } => {
                     log.push_assistant(content);
@@ -382,27 +452,43 @@ impl Session {
         (id, now())
     }
 
-    pub fn push_user(&mut self, body: UserBody) -> EntryId {
+    /// Text from the person at the keyboard, opening no loop round.
+    pub fn prompt(&mut self, text: impl Into<String>) -> EntryId {
+        self.push_ask(
+            Prompt {
+                text: text.into(),
+                image: None,
+                shown: None,
+            },
+            None,
+        )
+    }
+
+    fn push_ask(&mut self, ask: Prompt, round: Option<u64>) -> EntryId {
         let (id, at) = self.mint();
-        self.entries.push(Entry::User { id, at, body });
+        self.entries.push(Entry::Ask { id, at, round, ask });
         id
     }
 
-    /// Text from the person at the keyboard. `shown` differs only when what
-    /// was typed is not what was sent — a `!` command and its output.
-    pub fn prompt(&mut self, text: impl Into<String>) -> EntryId {
-        self.push_user(UserBody::Prompt(UserText {
-            text: text.into(),
-            shown: None,
-        }))
+    /// A `!` command and its output, filed by the door that ran it.
+    pub fn push_bash(&mut self, run: Prompt) -> EntryId {
+        let (id, at) = self.mint();
+        self.entries.push(Entry::Bash { id, at, run });
+        id
     }
+
     /// Machine prose in the user's voice — the loop's round number, a stopped
     /// run's cause. Read by the model as if the user said it, which is why
     /// anything pushed here must survive being read that way. Shown on screen
     /// as a notice.
     pub fn push_note(&mut self, text: impl Into<String>) -> EntryId {
-        let text = text.into();
-        self.push_user(UserBody::Note(UserText { text, shown: None }))
+        let (id, at) = self.mint();
+        self.entries.push(Entry::Note {
+            id,
+            at,
+            note: text.into(),
+        });
+        id
     }
 
     /// One entry per result: compaction decides about them one at a time.
@@ -417,13 +503,22 @@ impl Session {
     pub fn push_previewed(&mut self, results: Vec<(ToolResult, Option<String>)>) -> Vec<EntryId> {
         results
             .into_iter()
-            .map(|(result, preview)| self.push_user(UserBody::Result { result, preview }))
+            .map(|(result, preview)| {
+                let (id, at) = self.mint();
+                self.entries.push(Entry::Tool {
+                    id,
+                    at,
+                    result,
+                    preview,
+                });
+                id
+            })
             .collect()
     }
 
     pub fn push_assistant(&mut self, blocks: Vec<AssistantContent>) -> EntryId {
         let (id, at) = self.mint();
-        self.entries.push(Entry::Assistant { id, at, blocks });
+        self.entries.push(Entry::Answer { id, at, blocks });
         id
     }
 
@@ -462,17 +557,19 @@ impl Session {
     /// `shown` is what the user typed, when that differs from what the model
     /// is sent — a `!cmd` line becomes the command *and its output*, and the
     /// screen has to show the line, not the transcript of running it.
-    pub fn send_prompt(&mut self, prompt: impl Into<String>, shown: Option<String>) {
+    pub fn send_prompt(
+        &mut self,
+        prompt: impl Into<String>,
+        shown: Option<String>,
+        round: Option<u64>,
+    ) {
         let answered: HashSet<&str> = self
             .entries
             .iter()
             .rev()
-            .take_while(|e| !matches!(e, Entry::Assistant { .. }))
+            .take_while(|e| !matches!(e, Entry::Answer { .. }))
             .filter_map(|e| match e {
-                Entry::User {
-                    body: UserBody::Result { result: r, .. },
-                    ..
-                } => Some(r.call.as_str()),
+                Entry::Tool { result: r, .. } => Some(r.call.as_str()),
                 _ => None,
             })
             .collect();
@@ -480,21 +577,21 @@ impl Session {
             .entries
             .iter()
             .rev()
-            .find(|e| matches!(e, Entry::Assistant { .. }))
+            .find(|e| matches!(e, Entry::Answer { .. }))
             .into_iter()
             .flat_map(Entry::tool_calls)
             .filter(|c| !answered.contains(c.id.as_str()))
             .cloned()
             .collect();
         for c in unanswered {
-            self.push_user(UserBody::Result {
-                result: ToolResult::error(
+            self.push_previewed(vec![(
+                ToolResult::error(
                     c.id,
                     c.name,
                     "The user stopped this call before it returned; nothing about the call itself failed.",
                 ),
-                preview: None,
-            });
+                None,
+            )]);
         }
         // The run that just ended may have died unanswered; the caller said
         // why, and the model is told rather than left to read the shape.
@@ -503,15 +600,14 @@ impl Session {
                 StopCause::User => STOPPED_BY_USER,
                 StopCause::Other => STOPPED_UNKNOWN,
             };
-            self.push_user(UserBody::Note(UserText {
-                text: text.to_string(),
-                shown: None,
-            }));
+            self.push_note(text);
         }
-        self.push_user(UserBody::Prompt(UserText {
+        let ask = Prompt {
             text: prompt.into(),
+            image: None,
             shown,
-        }));
+        };
+        self.push_ask(ask, round);
     }
 
     /// Everywhere the conversation can be rewound to, in session order.
@@ -548,13 +644,8 @@ impl Session {
         self.entries
             .iter()
             .find(|e| e.id() == entry)
-            .and_then(|e| match e {
-                Entry::User {
-                    body: UserBody::Prompt(t) | UserBody::Aside(t),
-                    ..
-                } => Some(t.shown_text().to_string()),
-                _ => None,
-            })
+            .and_then(Entry::prompt)
+            .map(|p| p.shown_text().to_string())
     }
 
     /// The last question the user asked, when there is one to take back.
@@ -564,11 +655,7 @@ impl Session {
     /// as a question.
     pub fn last_ask(&self) -> Option<EntryId> {
         self.entries.iter().rev().find_map(|e| match e {
-            Entry::User {
-                id,
-                body: UserBody::Prompt(_),
-                ..
-            } => Some(*id),
+            Entry::Ask { id, .. } => Some(*id),
             _ => None,
         })
     }
@@ -608,10 +695,9 @@ impl Session {
     }
 
     pub fn is_empty(&self) -> bool {
-        !self
-            .entries
+        self.entries
             .iter()
-            .any(|e| matches!(e, Entry::User { .. } | Entry::Assistant { .. }))
+            .all(|e| matches!(e, Entry::Compaction { .. }))
     }
 
     fn dropped(&self) -> HashSet<EntryId> {
@@ -717,7 +803,7 @@ impl Session {
         let omissions = self.omissions();
         self.entries
             .iter()
-            .filter(|e| matches!(e, Entry::User { .. } | Entry::Assistant { .. }))
+            .filter(|e| !matches!(e, Entry::Compaction { .. }))
             .filter(|e| !dropped.contains(&e.id()))
             .map(|entry| match omissions.get(&entry.id()) {
                 Some(notice) => Seen::Omitted { entry, notice },
@@ -766,12 +852,6 @@ impl Session {
             .collect()
     }
 
-    /// The view as messages: one entry, one message, in view order.
-    ///
-    /// Deliberately unmerged. Anthropic wants a turn's user blocks in one
-    /// `role:"user"` message and Responses wants them apart, so joining them is
-    /// a format rule and lives in the encoder. Doing it here would write one
-    /// wire's requirement into the projection both of them read.
     pub fn context(&self) -> Vec<Message> {
         let summaries = self.summaries();
         let gone = self.block_omissions();
@@ -779,8 +859,8 @@ impl Session {
         let mut first_user = true;
 
         for seen in self.view() {
-            let block = match seen {
-                Seen::As(Entry::Assistant { id, blocks, .. }) => {
+            let blocks = match seen {
+                Seen::As(Entry::Answer { id, blocks, .. }) => {
                     out.push(Message::Assistant {
                         content: Self::shown_blocks(blocks, *id, &gone),
                     });
@@ -789,7 +869,7 @@ impl Session {
                 // An assistant turn is never omitted: its `tool_use` blocks
                 // must stay to keep the answering results legal.
                 Seen::Omitted {
-                    entry: Entry::Assistant { id, blocks, .. },
+                    entry: Entry::Answer { id, blocks, .. },
                     ..
                 } => {
                     out.push(Message::Assistant {
@@ -797,15 +877,11 @@ impl Session {
                     });
                     continue;
                 }
-                Seen::As(Entry::User { body, .. }) => user_block(body),
-                Seen::Omitted {
-                    entry: Entry::User { body, .. },
-                    notice,
-                } => omitted_block(body, notice),
-                _ => continue,
+                Seen::As(entry) => user_block(entry),
+                Seen::Omitted { entry, notice } => omitted_block(entry, notice),
             };
 
-            let mut content = vec![block];
+            let mut content = blocks;
             if first_user {
                 first_user = false;
                 for s in &summaries {
@@ -820,31 +896,49 @@ impl Session {
     }
 }
 
-pub fn user_block(body: &UserBody) -> UserContent {
-    match body {
-        UserBody::Prompt(t) | UserBody::Aside(t) | UserBody::Note(t) => UserContent::Text(Text {
-            text: t.text.clone(),
-        }),
-        UserBody::Result { result: r, .. } => UserContent::ToolResult(r.clone()),
-        UserBody::Image(i) => UserContent::Image(i.clone()),
+/// The wire blocks one entry projects to. Empty for what never reaches the
+/// wire; callers skip it. `shown` and `preview` stay behind — the screen's
+/// fields are not the model's.
+pub fn user_block(entry: &Entry) -> Vec<UserContent> {
+    match entry {
+        Entry::Ask { ask, .. } => {
+            let mut out = Vec::new();
+            // An image-only ask sends no text block: providers reject the
+            // empty one.
+            if !ask.text.is_empty() || ask.image.is_none() {
+                out.push(UserContent::Text(Text {
+                    text: ask.text.clone(),
+                }));
+            }
+            if let Some(image) = &ask.image {
+                out.push(UserContent::Image(image.clone()));
+            }
+            out
+        }
+        Entry::Bash { run, .. } => vec![UserContent::Text(Text {
+            text: run.text.clone(),
+        })],
+        Entry::Note { note, .. } => vec![UserContent::Text(Text { text: note.clone() })],
+        Entry::Tool { result, .. } => vec![UserContent::ToolResult(result.clone())],
+        _ => Vec::new(),
     }
 }
 
-/// The shell an omitted entry keeps. A result must stay a result, or the
+/// The blocks an omitted entry keeps. A result must stay a result, or the
 /// `tool_use` it answers is left dangling.
-pub fn omitted_block(body: &UserBody, notice: &str) -> UserContent {
-    match body {
-        UserBody::Result { result: r, .. } => {
+pub fn omitted_block(entry: &Entry, notice: &str) -> Vec<UserContent> {
+    match entry {
+        Entry::Tool { result: r, .. } => {
             let mut out = r.clone();
             out.content = vec![ToolResultContent::Text(Text {
                 text: notice.to_string(),
             })];
             out.useless = false;
-            UserContent::ToolResult(out)
+            vec![UserContent::ToolResult(out)]
         }
-        _ => UserContent::Text(Text {
+        _ => vec![UserContent::Text(Text {
             text: notice.to_string(),
-        }),
+        })],
     }
 }
 
@@ -868,18 +962,23 @@ mod tests {
             ToolResult::text("c1", "read", "a"),
             ToolResult::text("c2", "grep", "b"),
         ]);
-        s.push_user(UserBody::Image(Image::Url {
-            url: "http://x/i.png".into(),
-        }));
-        s.prompt("and now this");
+        s.push_ask(
+            Prompt {
+                text: "and now this".into(),
+                image: Some(Image::Url {
+                    url: "http://x/i.png".into(),
+                }),
+                shown: None,
+            },
+            None,
+        );
 
         let msgs = s.context();
         assert_eq!(msgs.len(), s.view().len());
         for m in &msgs {
             if let Message::User { content } = m {
-                assert_eq!(
-                    content.len(),
-                    1,
+                assert!(
+                    (1..=2).contains(&content.len()),
                     "a user message carried more than its entry"
                 );
             }
@@ -995,30 +1094,21 @@ mod tests {
         s.prompt("version up");
         s.mark_stopped(StopCause::User);
 
-        s.send_prompt("delete the branch", None);
+        s.send_prompt("delete the branch", None, None);
 
         let entries = s.entries();
         assert_eq!(entries.len(), 3, "prompt, the note, the new prompt");
         assert_eq!(
             match &entries[1] {
-                Entry::User {
-                    body: UserBody::Note(t),
-                    ..
-                } => t.text.as_str(),
+                Entry::Note { note, .. } => note.as_str(),
                 other => panic!("expected the stop note, got {other:?}"),
             },
             STOPPED_BY_USER
         );
-        assert!(matches!(
-            &entries[2],
-            Entry::User {
-                body: UserBody::Prompt(_),
-                ..
-            }
-        ));
+        assert!(matches!(&entries[2], Entry::Ask { .. }));
 
         // One note per dead run: the send that followed consumed the marker.
-        s.send_prompt("and now this", None);
+        s.send_prompt("and now this", None, None);
         assert_eq!(s.entries().len(), 4, "no second note");
     }
 
@@ -1030,7 +1120,7 @@ mod tests {
         let mut s = Session::new();
         s.prompt("version up");
         s.mark_stopped(StopCause::User);
-        s.send_prompt("delete the branch", None);
+        s.send_prompt("delete the branch", None, None);
 
         let entries = s.entries();
         let note = entries[1].id();
@@ -1073,7 +1163,7 @@ mod tests {
         s.push_results(vec![ToolResult::text("c1", "bash", "1.1.1")]);
         s.mark_stopped(StopCause::Other);
 
-        s.send_prompt("delete the branch", None);
+        s.send_prompt("delete the branch", None, None);
 
         let entries = s.entries();
         assert_eq!(
@@ -1083,21 +1173,12 @@ mod tests {
         );
         assert_eq!(
             match &entries[3] {
-                Entry::User {
-                    body: UserBody::Note(t),
-                    ..
-                } => t.text.as_str(),
+                Entry::Note { note, .. } => note.as_str(),
                 other => panic!("expected the stop note, got {other:?}"),
             },
             STOPPED_UNKNOWN
         );
-        assert!(matches!(
-            &entries[4],
-            Entry::User {
-                body: UserBody::Prompt(_),
-                ..
-            }
-        ));
+        assert!(matches!(&entries[4], Entry::Ask { .. }));
     }
 
     // An answered run leaves no marker, and a clean send stays clean.
@@ -1115,7 +1196,7 @@ mod tests {
             text: "it says a".into(),
         })]);
 
-        s.send_prompt("and now this", None);
+        s.send_prompt("and now this", None, None);
 
         let entries = s.entries();
         assert_eq!(
@@ -1124,13 +1205,7 @@ mod tests {
             "no note: prompt, call, result, reply, prompt"
         );
         assert!(
-            !entries.iter().any(|e| matches!(
-                e,
-                Entry::User {
-                    body: UserBody::Note(_),
-                    ..
-                }
-            )),
+            !entries.iter().any(|e| matches!(e, Entry::Note { .. })),
             "an answered round adds no note"
         );
     }
@@ -1148,17 +1223,11 @@ mod tests {
         s.mark_stopped(StopCause::User);
         s.rollback_before(ask);
 
-        s.send_prompt("a fresh start", None);
+        s.send_prompt("a fresh start", None, None);
 
         let entries = s.entries();
         assert_eq!(entries.len(), 1, "only the new prompt follows the rewind");
-        assert!(matches!(
-            &entries[0],
-            Entry::User {
-                body: UserBody::Prompt(_),
-                ..
-            }
-        ));
+        assert!(matches!(&entries[0], Entry::Ask { .. }));
     }
 
     // The mapping the callers rely on: an answer records nothing, a stop the
@@ -1168,21 +1237,18 @@ mod tests {
         let mut answered = Session::new();
         answered.prompt("go");
         answered.note_outcome(&Ok(crate::Totals::default()));
-        answered.send_prompt("and now this", None);
+        answered.send_prompt("and now this", None, None);
         assert_eq!(answered.entries().len(), 2, "no note after an answer");
 
         let mut stopped = Session::new();
         stopped.prompt("go");
         stopped.note_outcome(&Err(crate::AgentError::Cancelled));
-        stopped.send_prompt("and now this", None);
+        stopped.send_prompt("and now this", None, None);
         let entries = stopped.entries();
         assert_eq!(entries.len(), 3, "prompt, the note, the new prompt");
         assert_eq!(
             match &entries[1] {
-                Entry::User {
-                    body: UserBody::Note(t),
-                    ..
-                } => t.text.as_str(),
+                Entry::Note { note, .. } => note.as_str(),
                 other => panic!("expected the note aside, got {other:?}"),
             },
             STOPPED_BY_USER
@@ -1229,5 +1295,24 @@ mod tests {
         };
         assert_eq!(content.len(), 2);
         assert!(matches!(&content[1], UserContent::Text(t) if t.text.contains("<earlier-work>")));
+    }
+    // The loop's round marker rides the ask it opens: `None` is a hand-typed
+    // line (the loop's first round included), `Some(n)` an automatic one.
+    #[test]
+    fn a_loop_round_is_numbered_on_the_ask_it_opens() {
+        let mut s = Session::new();
+        s.prompt("the task");
+        s.send_prompt("loop round two", None, Some(2));
+        s.send_prompt("typed by hand", None, None);
+
+        let rounds: Vec<Option<u64>> = s
+            .entries()
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Ask { round, .. } => Some(*round),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rounds, vec![None, Some(2), None]);
     }
 }
