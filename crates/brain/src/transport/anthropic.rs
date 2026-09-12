@@ -146,13 +146,16 @@ fn encode_message(msg: &Message, spec: &ModelSpec) -> Option<Value> {
 // the encoder's job and not the session view's.
 fn encode_messages(msgs: &[Message], spec: &ModelSpec) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
-    for msg in msgs.iter().filter_map(|m| encode_message(m, spec)) {
+    for mut msg in msgs.iter().filter_map(|m| encode_message(m, spec)) {
         let join = msg["role"] == "user" && out.last().is_some_and(|p| p["role"] == "user");
         if join
-            && let Some(blocks) = msg["content"].as_array()
-            && let Some(prev) = out.last_mut().and_then(|p| p["content"].as_array_mut())
+            && let Some(blocks) = msg.get_mut("content").and_then(|c| c.as_array_mut())
+            && let Some(prev) = out
+                .last_mut()
+                .and_then(|p| p.get_mut("content"))
+                .and_then(|c| c.as_array_mut())
         {
-            prev.extend(blocks.iter().cloned());
+            prev.append(blocks);
             continue;
         }
         out.push(msg);

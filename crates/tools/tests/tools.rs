@@ -139,6 +139,30 @@ async fn bash_captures_streams_and_the_exit_code() {
 }
 
 #[tokio::test]
+async fn bash_marks_whitespace_only_output_useless() {
+    let (_d, c) = ctx();
+    let out = run(&tools::bash::Bash, json!({ "command": "echo" }), &c).await;
+    assert!(out.contains("exit 0, no output"), "{out}");
+    assert!(!out.contains("<stdout>"), "{out}");
+}
+
+#[tokio::test]
+async fn bash_spills_a_runaway_output_instead_of_holding_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace::new(dir.path()).unwrap();
+    let c = Ctx::new(ws).with_spill_root(dir.path().join("spill"));
+    let out = run(
+        &tools::bash::Bash,
+        json!({ "command": "head -c 40000 /dev/zero | tr '\\0' 'x'" }),
+        &c,
+    )
+    .await;
+    assert!(out.contains("<stdout>\nxxx"), "{out}");
+    assert!(out.contains("bytes omitted"), "{out}");
+    assert!(out.contains("full output: spill:"), "{out}");
+}
+
+#[tokio::test]
 async fn bash_runs_in_the_workspace_and_can_be_redirected() {
     let (_d, c) = ctx();
     std::fs::create_dir(c.workspace.root().join("sub")).unwrap();

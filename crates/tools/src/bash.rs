@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use std::process::Stdio;
 use tokio::process::Command;
 
-use crate::{Ctx, Tier, Tool, ToolError, ToolOutput, spill};
+use crate::{Ctx, Tier, Tool, ToolError, ToolOutput, output};
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 // The longest any command may run, whatever its caller asked for.
@@ -143,7 +143,7 @@ pub async fn run(
     // A working directory that has gone — a removed worktree, a deleted
     // checkout — fails here as a bare ENOENT, which reads exactly like a
     // missing command. Nothing else says the ground went, so the model retries.
-    let child = cmd.spawn().map_err(|e| {
+    let mut child = cmd.spawn().map_err(|e| {
         if cwd.is_dir() {
             ToolError::from(e)
         } else {
@@ -154,11 +154,21 @@ pub async fn run(
             ))
         }
     })?;
-    // wait_with_output consumes the child, so the group id is taken first.
+    // wait_with_output buffers all output in memory — a runaway `yes` would
+    // take the process with it. Both pipes stream into bounded captures instead.
     let group = child.id();
+    let mut out_pipe = child.stdout.take().expect("stdout is piped");
+    let mut err_pipe = child.stderr.take().expect("stderr is piped");
+    let mut out = output::Capture::new();
+    let mut err = output::Capture::new();
 
     let waited = tokio::select! {
-        r = child.wait_with_output() => Some(r?),
+        r = async {
+            let drained =
+                tokio::try_join!(out.drain(&mut out_pipe, ctx), err.drain(&mut err_pipe, ctx));
+            let status = child.wait().await?;
+            drained.map(|_| status)
+        } => Some(r?),
         _ = tokio::time::sleep(timeout) => None,
         _ = ctx.cancel.cancelled() => {
             reap(group).await;
@@ -166,7 +176,7 @@ pub async fn run(
         }
     };
 
-    let Some(out) = waited else {
+    let Some(status) = waited else {
         tracing::warn!(
             target: "pi::bash",
             command = %command,
@@ -178,21 +188,10 @@ pub async fn run(
             ms: timeout.as_millis() as u64,
         });
     };
+    let code = status.code().unwrap_or(-1);
 
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let code = out.status.code().unwrap_or(-1);
-
-    // Anything omitted is written out first, so a build log the model needs
-    // the middle of is one grep away rather than gone. The combined whole
-    // is only assembled once either stream is known to be over the
-    // threshold — a normal output must not pay for a full copy it drops.
-    let spilled = if stdout.len() > spill::MAX_OUTPUT || stderr.len() > spill::MAX_OUTPUT {
-        let whole = format!("<stdout>\n{stdout}\n</stdout>\n<stderr>\n{stderr}\n</stderr>\n");
-        spill::write(ctx, &whole)?
-    } else {
-        None
-    };
+    let stdout = out.finish();
+    let stderr = err.finish();
 
     // The exit code and the command, always. What the command printed is
     // in the transcript; what it was run against — the directory — is not.
@@ -201,20 +200,22 @@ pub async fn run(
         command = %command,
         cwd = %cwd.display(),
         code,
-        stdout_bytes = stdout.len(),
-        stderr_bytes = stderr.len(),
+        stdout_bytes = stdout.total,
+        stderr_bytes = stderr.total,
         "exited"
     );
 
     let mut body = String::new();
-    body.push_str(&spill::clamp("stdout", stdout.trim_end()));
-    body.push_str(&spill::clamp("stderr", stderr.trim_end()));
-    if let Some(s) = spilled {
-        body.push_str(&format!("{}\n", s.note()));
+    body.push_str(&section("stdout", &stdout));
+    body.push_str(&section("stderr", &stderr));
+    for captured in [&stdout, &stderr] {
+        if let Some(s) = &captured.spill {
+            body.push_str(&format!("{}\n", s.note()));
+        }
     }
     // The note travels with the output; the exit line does not — `code` says
     // that, and a caller that renders it as well would say it twice.
-    if code != 0 && git_lock(&stderr) {
+    if code != 0 && git_lock(&stderr.text) {
         // Two lanes committing at once collide on shared `.git/*.lock`;
         // the raw fatal reads as a broken repository, not a busy one.
         body.push_str(
@@ -223,6 +224,15 @@ pub async fn run(
         );
     }
     Ok(Ran { code, body })
+}
+
+// Shapes a bounded capture into the `<label>` section the transcript reads.
+fn section(label: &str, s: &output::Captured) -> String {
+    let body = s.text.trim_end();
+    if body.is_empty() {
+        return String::new();
+    }
+    format!("<{label}>\n{body}\n</{label}>\n")
 }
 
 // Whether a failed run tripped over git's own locking.

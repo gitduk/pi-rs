@@ -325,7 +325,7 @@ impl Agent {
                 let shown = if changed { shelf } else { None };
                 let req = Request {
                     system: Some(self.system.clone()),
-                    messages: sent.clone(),
+                    messages: sent,
                     notes: turn_notes(used, budget, trimmed, shown),
                     tools: self.registry.defs(),
                     max_output_tokens: None,

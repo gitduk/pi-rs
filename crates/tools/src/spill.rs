@@ -76,13 +76,9 @@ pub fn locate(root: &Path, locator: &str) -> Result<PathBuf, ToolError> {
     Ok(path)
 }
 
-/// Persist `body` under the session's spill directory, or say there was
-/// nothing worth keeping. Storage failure is a loud error, never a silent
-/// fallback: a locator the model cannot read back is worse than no spill.
-pub fn write(ctx: &Ctx, body: &str) -> Result<Option<SpillRef>, ToolError> {
-    if body.len() <= MAX_OUTPUT {
-        return Ok(None);
-    }
+/// Mint a fresh spill path and locator without writing: the directory is
+/// made, the file is not. [`persist`] fills it in one shot.
+pub(crate) fn allocate(ctx: &Ctx) -> Result<(PathBuf, String), ToolError> {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // The pid in the name is what keeps a resumed session's fresh counter from
@@ -92,12 +88,37 @@ pub fn write(ctx: &Ctx, body: &str) -> Result<Option<SpillRef>, ToolError> {
     let path = dir.join(format!("{name}.log"));
     std::fs::create_dir_all(&dir)
         .map_err(|e| ToolError::Spill(format!("{}: {e}", dir.display())))?;
-    state::write_private(&path, body.as_bytes())
+    Ok((path, format!("spill:{}/{}", ctx.spill_namespace(), name)))
+}
+
+/// Write `body` to a fresh spill file. Storage failure is a loud error, never
+/// a silent fallback: a locator the model cannot read back is worse than none.
+pub(crate) fn persist(ctx: &Ctx, body: &[u8]) -> Result<SpillRef, ToolError> {
+    let (path, locator) = allocate(ctx)?;
+    state::write_private(&path, body)
         .map_err(|e| ToolError::Spill(format!("{}: {e}", path.display())))?;
-    Ok(Some(SpillRef {
+    Ok(SpillRef {
         bytes: body.len(),
-        locator: format!("spill:{}/{}", ctx.spill_namespace(), name),
-    }))
+        locator,
+    })
+}
+
+/// Persist `body` under the session's spill directory, or say there was
+/// nothing worth keeping.
+pub fn write(ctx: &Ctx, body: &str) -> Result<Option<SpillRef>, ToolError> {
+    if body.len() <= MAX_OUTPUT {
+        return Ok(None);
+    }
+    Ok(Some(persist(ctx, body.as_bytes())?))
+}
+
+/// The elided-body view: head, a named omission, tail. The one wording both
+/// `prune` and a streamed capture show, so it stays spelled one way.
+pub(crate) fn elided(head: &str, whole: usize, tail: &str) -> String {
+    format!(
+        "{head}\n… {} bytes omitted …\n{tail}",
+        whole.saturating_sub(head.len() + tail.len())
+    )
 }
 
 /// Keep both ends of an over-long body: the head says what it was about, the
@@ -108,8 +129,7 @@ pub fn prune(body: &str) -> String {
     }
     let half = MAX_OUTPUT / 2;
     let (h, t) = (head_bytes(body, half), tail_bytes(body, half));
-    let dropped = body.len() - h.len() - t.len();
-    format!("{h}\n… {dropped} bytes omitted …\n{t}")
+    elided(h, body.len(), t)
 }
 
 /// A body assembled from items that must not be split, held to the transcript's
@@ -149,19 +169,6 @@ pub fn fit(ctx: &Ctx, items: &[String], unit: &str, notice: &str) -> Result<Stri
         &full[..head],
         say(items.len() - kept)
     ))
-}
-
-/// The `<label>`-wrapped form bash uses for stdout and stderr. Under the
-/// threshold the body is interpolated directly, so a normal output costs one
-/// allocation, not a copy through `prune` first.
-pub fn clamp(label: &str, body: &str) -> String {
-    if body.is_empty() {
-        return String::new();
-    }
-    if body.len() <= MAX_OUTPUT {
-        return format!("<{label}>\n{body}\n</{label}>\n");
-    }
-    format!("<{label}>\n{}\n</{label}>\n", prune(body))
 }
 
 #[cfg(test)]
