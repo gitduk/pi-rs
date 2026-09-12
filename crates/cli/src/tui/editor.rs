@@ -96,6 +96,18 @@ impl Editor {
         line
     }
 
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    /// Replace `[start..end)` with `s`, the caret landing after it. For
+    /// applying an @-completion mid-line: `set_line` would strand the caret
+    /// at the end of whatever followed the token.
+    pub fn splice(&mut self, start: usize, end: usize, s: &str) {
+        self.text.replace_range(start..end, s);
+        self.cursor = start + s.len();
+    }
+
     pub fn insert(&mut self, c: char) {
         self.text.insert(self.cursor, c);
         self.cursor += c.len_utf8();

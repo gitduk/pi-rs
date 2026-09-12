@@ -7,6 +7,7 @@
 //! services three sources at once — the agent's events, the keyboard, and a
 //! timer for the spinner — so nothing has to be bolted on beside it.
 
+mod complete;
 mod editor;
 mod panel;
 mod row;
@@ -814,6 +815,11 @@ struct Ui {
     // The rewind selector's rows, session order, newest last. Empty is closed;
     // while it is open it replaces the completion list in the same rows.
     rewind: Vec<MenuEntry>,
+    // The @-completion cache, keyed by the query the walk was built for —
+    // a directory walk sits behind every keystroke otherwise.
+    at_menu: Option<(String, Vec<complete::FileEntry>)>,
+    // The directory @ paths resolve against: the lane's workspace root.
+    at_root: std::path::PathBuf,
     spinner: usize,
     // The modal keys, or None while they are off.
     vim: Option<Vim>,
@@ -863,11 +869,21 @@ struct Tab {
     name: String,
 }
 
-// One row either menu can offer: a completion of the line, or a message
-// from the rewind selector to go back to.
+// One row either menu can offer: a completion of the line, an @ path, or a
+// message from the rewind selector to go back to.
 #[derive(Clone)]
 enum MenuEntry {
     Completion(Candidate),
+    // An @ path: accepting splices `@path` over the token it grew from —
+    // Enter applies it and stays, where a command submits.
+    File {
+        start: usize,
+        end: usize,
+        // The row's left column: the file's own name, `/` for a directory.
+        show: String,
+        path: String,
+        dir: bool,
+    },
     // `help` says who a row belongs to: two rows of prose read alike, and
     // which one it is decides whether picking it unsends or continues from.
     Message {
@@ -881,6 +897,7 @@ impl MenuEntry {
     fn show(&self) -> &str {
         match self {
             MenuEntry::Completion(c) => &c.show,
+            MenuEntry::File { show, .. } => show,
             MenuEntry::Message { show, .. } => show,
         }
     }
@@ -888,8 +905,20 @@ impl MenuEntry {
     fn help(&self) -> &str {
         match self {
             MenuEntry::Completion(c) => &c.help,
+            MenuEntry::File { path, .. } => path,
             MenuEntry::Message { help, .. } => help,
         }
+    }
+}
+
+// The menu row's left column for an @ path: the file's own name, `/` when
+// it is a directory the walk can descend into.
+fn at_row_name(path: &str, dir: bool) -> String {
+    let name = path.rsplit('/').find(|s| !s.is_empty()).unwrap_or(path);
+    if dir {
+        format!("{name}/")
+    } else {
+        name.to_string()
     }
 }
 
@@ -962,6 +991,8 @@ impl Ui {
             last_interrupt: None,
             last_esc: None,
             rewind: Vec::new(),
+            at_menu: None,
+            at_root: std::path::PathBuf::new(),
             vim: None,
             setting_paths: Vec::new(),
             panel: None,
@@ -1262,7 +1293,7 @@ impl Ui {
     // `/cost` and `/model` answer on the spot and the rest queue as what they
     // are, so the word being typed is still worth completing. `esc` reaches
     // `run.interrupt` past the list — see `keys::Menu`.
-    fn menu(&self) -> Vec<MenuEntry> {
+    fn menu(&mut self) -> Vec<MenuEntry> {
         if self.panel.is_some() {
             // The panel owns this space; the completion list waits.
             return Vec::new();
@@ -1272,6 +1303,35 @@ impl Ui {
         }
         if self.dismissed_at.as_deref() == Some(self.editor.text()) {
             return Vec::new();
+        }
+        // An @ token outranks the word completions: it names a path, and the
+        // filesystem holds the answer, not the command tables.
+        if let Some((start, end, query)) =
+            complete::at_prefix(self.editor.text(), self.editor.cursor())
+        {
+            // The cache is keyed by the query: every keystroke moves it, but
+            // every frame redraws the menu against the same one.
+            if self
+                .at_menu
+                .as_ref()
+                .is_none_or(|(q, _)| q.as_str() != query)
+            {
+                let items = complete::candidates(query, &self.at_root);
+                self.at_menu = Some((query.to_string(), items));
+                self.picked = None;
+            }
+            let (_, items) = self.at_menu.as_ref().expect("set above");
+            return items
+                .iter()
+                .rev()
+                .map(|f| MenuEntry::File {
+                    start,
+                    end,
+                    show: at_row_name(&f.path, f.dir),
+                    path: f.path.clone(),
+                    dir: f.dir,
+                })
+                .collect();
         }
         // Bottom-up: the best match belongs on the row right above the input.
         repl::complete(
@@ -1295,13 +1355,25 @@ impl Ui {
     }
 
     // The highlighted row, clamped: the list shrinks as the word grows.
-    fn highlighted(&self) -> Option<MenuEntry> {
+    fn highlighted(&mut self) -> Option<MenuEntry> {
         let mut menu = self.menu();
         if menu.is_empty() {
             return None;
         }
         let at = self.picked.unwrap_or(menu.len() - 1).min(menu.len() - 1);
         Some(menu.swap_remove(at))
+    }
+
+    // Splice the accepted @ path over the token the list grew from. A
+    // directory keeps completing: no trailing space, the caret stays on it.
+    fn apply_file(&mut self, start: usize, end: usize, path: &str, dir: bool) {
+        let token = if dir {
+            format!("@{path}/")
+        } else {
+            format!("@{path} ")
+        };
+        self.editor.splice(start, end, &token);
+        self.picked = None;
     }
 
     // The menu's rows as ratatui list items. The selected row is styled by
@@ -1651,20 +1723,20 @@ impl Ui {
         let press = Press::of(key.code, key.modifiers);
         // The panel counts as a menu: its own keys are the Menu bindings, and
         // `menu()` is empty while it is open, so the layer has to be forced on.
+        // The layer is computed before `action`, not inside it: `menu()` mutates
+        // the @-completion cache while `keys` stays borrowed.
+        let menu = match self.panel.as_ref().map(Panel::layer) {
+            // Its own verbs, off while a row is being typed so that
+            // `x` and `e` are letters again — `esc` still leaves it.
+            Some(Some(which)) => Menu::Verbs(which),
+            Some(None) => Menu::On,
+            None if self.menu().is_empty() => Menu::Off,
+            None => Menu::On,
+        };
         let bound = self.keys.action(
             press,
             Layers {
-                // A panel counts as a menu whether or not it has verbs of its
-                // own: `menu()` is empty while one is open, so the layer it
-                // borrows has to be named here rather than inferred.
-                menu: match self.panel.as_ref().map(Panel::layer) {
-                    // Its own verbs, off while a row is being typed so that
-                    // `x` and `e` are letters again — `esc` still leaves it.
-                    Some(Some(which)) => Menu::Verbs(which),
-                    Some(None) => Menu::On,
-                    None if self.menu().is_empty() => Menu::Off,
-                    None => Menu::On,
-                },
+                menu,
                 run: running,
                 mode: self.vim.as_ref().map(|v| v.mode),
             },
@@ -1733,6 +1805,18 @@ impl Ui {
                         } else {
                             Intent::Submit(line)
                         };
+                    }
+                    Some(MenuEntry::File {
+                        start,
+                        end,
+                        path,
+                        dir,
+                        ..
+                    }) => {
+                        // Enter on a path applies it and stays: the prompt
+                        // is not done until the user says so.
+                        self.apply_file(start, end, &path, dir);
+                        return Intent::None;
                     }
                     None => {
                         // A secret value must not reach the recall history,
@@ -1890,6 +1974,15 @@ impl Ui {
                             self.editor.insert(' ');
                         }
                         self.picked = None;
+                    }
+                    Some(MenuEntry::File {
+                        start,
+                        end,
+                        path,
+                        dir,
+                        ..
+                    }) => {
+                        self.apply_file(start, end, &path, dir);
                     }
                     None => {}
                 }
@@ -2366,6 +2459,7 @@ impl Tui {
             ),
             paint,
         );
+        ui.at_root = core.lane().ctx.workspace.root().to_path_buf();
         ui.setting_paths = crate::settings::leaves(&core.file)
             .into_iter()
             .map(|(p, _)| p)
@@ -2405,7 +2499,7 @@ impl Tui {
     #[cfg(test)]
     fn on_test_screen(mut core: Repl, keys: Arc<Keys>) -> Self {
         let paint = Paint::with_theme(false, Arc::new(core.config.theme.clone()));
-        let ui = Ui::new(
+        let mut ui = Ui::new(
             screen::Screen::test(80, 24),
             keys,
             core.choices(),
@@ -2416,6 +2510,7 @@ impl Tui {
             ),
             paint,
         );
+        ui.at_root = core.lane_mut().ctx.workspace.root().to_path_buf();
         let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             core,
@@ -2475,6 +2570,7 @@ impl Tui {
         let parked = std::mem::take(&mut self.core.lane_mut().view.draft);
         self.ui.editor.set_line(&parked);
         self.ui.lists.at(self.core.lane().ctx.workspace.root());
+        self.ui.at_root = self.core.lane().ctx.workspace.root().to_path_buf();
         // Recall follows the checkout for the same reason the lists do. The
         // line just typed is already filed: `save_history` runs per line, and
         // ran while this lane was still the one in front.
@@ -5598,6 +5694,62 @@ mod tests {
 
     fn mode(ui: &super::Ui) -> Option<Mode> {
         ui.vim.as_ref().map(|v| v.mode)
+    }
+
+    // The @ completion rides the same menu: Tab lands the path, Enter lands
+    // it and stays — the prompt is not sent until the user says so.
+    #[test]
+    fn an_at_token_completes_by_tab_and_stays_on_enter() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let key = |code: KeyCode| super::TermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
+        let mut ui = test_ui(80, 24);
+        let (dir, mut lane) = a_running_lane();
+        std::fs::write(dir.path().join("at_probe.rs"), "").unwrap();
+        std::fs::write(dir.path().join("at_probe2.rs"), "").unwrap();
+        std::fs::create_dir(dir.path().join("probe_dir")).unwrap();
+        ui.at_root = dir.path().to_path_buf();
+
+        ui.editor.set_line("look at @at_pro");
+        let intent = ui.key(&mut lane, key(KeyCode::Tab), false);
+        assert_eq!(ui.editor.text(), "look at @at_probe.rs ");
+        assert!(matches!(intent, Intent::None));
+
+        // A directory keeps completing: no space, so the walk can descend.
+        ui.editor.set_line("in @probe_d");
+        ui.key(&mut lane, key(KeyCode::Tab), false);
+        assert_eq!(ui.editor.text(), "in @probe_dir/");
+
+        // Enter with the list open applies the path instead of sending.
+        ui.editor.set_line("look at @at_pro");
+        let intent = ui.key(&mut lane, key(KeyCode::Enter), false);
+        assert_eq!(ui.editor.text(), "look at @at_probe.rs ");
+        assert!(matches!(intent, Intent::None));
+
+        // A changed query re-anchors the highlight on the best row: the
+        // stale index sat on the worse of the two matches above.
+        ui.editor.set_line("look at @at_probe");
+        ui.picked = Some(0);
+        ui.key(&mut lane, key(KeyCode::Tab), false);
+        assert_eq!(ui.editor.text(), "look at @at_probe.rs ");
+    }
+
+    // The @ walk follows the checkout in front: a lane on another worktree
+    // completes its own files, not the first lane's.
+    #[test]
+    fn an_at_token_completes_against_the_lane_in_front() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let key = |code: KeyCode| super::TermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
+        let was = tempfile::tempdir().unwrap();
+        let now = tempfile::tempdir().unwrap();
+        std::fs::write(now.path().join("marker.rs"), "").unwrap();
+        let mut tui = surface(was.path());
+        switch_to(&mut tui, running_lane(now.path()));
+
+        assert_eq!(tui.ui.at_root, now.path());
+        tui.ui.editor.set_line("see @mar");
+        tui.ui
+            .key(&mut tui.core.lane_mut(), key(KeyCode::Tab), false);
+        assert_eq!(tui.ui.editor.text(), "see @marker.rs ");
     }
 
     // The sequence is read where unbound characters are typed, and its first

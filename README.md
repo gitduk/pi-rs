@@ -139,6 +139,8 @@ could still become; `↑` `↓` pick, `Tab` accepts, `Esc` dismisses it until th
 next keystroke. `/model`, `/resume` and `/worktree` complete their arguments
 too: the model name is the tedious part the config already knows, a saved
 session is named by its first question, and a checkout by its branch.
+Typing `@` completes workspace files the same way: `@src/ma` lands as
+`@src/main.rs`, a directory lands with its `/` left open for the next step.
 
 `/new` starts a fresh session, keeping this one on disk; `ctrl+l` twice does
 the same (once clears the screen). `/resume` lists the sessions saved for this
