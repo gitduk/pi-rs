@@ -17,7 +17,7 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::time::Instant;
 
-use agent::session::{Entry as LogEntry, EntryId, Node, Session};
+use agent::session::{Entry as LogEntry, EntryId, Session};
 use agent::{AgentError, Event, Totals};
 use anyhow::Result;
 use brain::message::{AssistantContent, ReasoningContent};
@@ -884,8 +884,7 @@ enum MenuEntry {
         path: String,
         dir: bool,
     },
-    // `help` says who a row belongs to: two rows of prose read alike, and
-    // which one it is decides whether picking it unsends or continues from.
+    // `help` says what picking the row does: two rows of prose read alike.
     Message {
         id: EntryId,
         show: String,
@@ -3287,8 +3286,8 @@ impl Tui {
         }
     }
 
-    // Open the rewind selector on every point the conversation can go back
-    // to: what the user asked, and what the model answered.
+    // Open the rewind selector on what the user said: a rewind takes a prompt
+    // back, and an answer is a place the conversation carries on from.
     fn open_rewind(&mut self) {
         let rows: Vec<MenuEntry> = self
             .core
@@ -3301,10 +3300,7 @@ impl Tui {
             .map(|node| MenuEntry::Message {
                 id: node.id(),
                 show: render::clip(node.show(), 60),
-                help: match node {
-                    Node::Ask { .. } => "you — unsends it",
-                    Node::Reply { .. } => "model — carries on from here",
-                },
+                help: "you — unsends it",
             })
             .collect();
         if rows.is_empty() {

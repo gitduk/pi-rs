@@ -617,10 +617,9 @@ impl Session {
     /// with a different answer, and the resume listing asks that one against
     /// the archive without loading it.
     ///
-    /// Assistant turns are here too, but only the ones that said something. A
-    /// turn holding nothing but tool calls is a step of the work rather than a
-    /// place in the conversation, and a menu listing every one of them is a
-    /// menu nobody can find anything in.
+    /// What the user said, and nothing the model answered: a rewind takes back
+    /// something said, and an answer is a place the conversation carries on
+    /// from, not one it goes back to.
     ///
     /// Reads `history`, not `view`: a prompt compaction dropped is still one
     /// the user asked, so the rewind menu can reach it — and rewinding past a
@@ -628,7 +627,11 @@ impl Session {
     /// brings the content back. It also keeps the session's name from changing
     /// the first time its opening turn is compacted away.
     pub fn rewind_nodes(&self) -> Vec<Node> {
-        self.entries.iter().filter_map(node_of).collect()
+        self.entries
+            .iter()
+            .filter_map(node_of)
+            .filter(|node| matches!(node, Node::Ask { .. }))
+            .collect()
     }
 
     /// Where the transcript ends now, which is what a rewind's notice names.
@@ -1060,13 +1063,14 @@ mod tests {
             "the message and the answer to it"
         );
         assert!(!s.history().any(|e| e.id() == second));
-        assert_eq!(s.rewind_nodes().len(), 2, "the first turn, both halves");
+        assert_eq!(s.rewind_nodes().len(), 1, "the first turn, the ask alone");
     }
 
-    // A turn that only called tools is a step of the work; the menu offering
-    // one row per `read` is a menu nothing can be found in.
+    // The menu lists what was said, never what came back: an answer is a place
+    // the conversation carries on from, and a turn that only called tools is a
+    // step of the work rather than a place in it.
     #[test]
-    fn only_answers_reach_the_rewind_menu() {
+    fn only_asks_reach_the_rewind_menu() {
         let mut s = Session::new();
         let ask = s.prompt("read it");
         s.push_assistant(vec![AssistantContent::ToolCall(ToolCall {
@@ -1080,10 +1084,9 @@ mod tests {
         })]);
 
         let nodes = s.rewind_nodes();
-        assert_eq!(nodes.len(), 2, "the question and the answer, not the call");
+        assert_eq!(nodes.len(), 1, "the question, and no answer beside it");
         assert_eq!(nodes[0].id(), ask);
-        assert!(matches!(nodes[1], Node::Reply { .. }));
-        assert_eq!(nodes[1].show(), "it says a");
+        assert!(matches!(nodes[0], Node::Ask { .. }));
     }
 
     // The caller records why the last run died; the next prompt carries the
@@ -1264,7 +1267,7 @@ mod tests {
         s.push_assistant(vec![AssistantContent::Text(MsgText {
             text: "here".into(),
         })]);
-        let reply = s.rewind_nodes().pop().map(|n| n.id()).expect("an answer");
+        let reply = s.last_node().map(|n| n.id()).expect("an answer");
         s.prompt("and then");
 
         assert_eq!(s.rollback_to(reply), 1);
