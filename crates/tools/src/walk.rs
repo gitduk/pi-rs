@@ -1,8 +1,12 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use crate::{Tier, ToolError, Workspace};
+
+// One sweep per target, so the count itself is a resource to bound.
+const MAX_TARGETS: usize = 64;
 
 /// Compile a comma-free list of globs. A bare name like `*.rs` should match at
 /// any depth, which `**/` prefixing is what makes true.
@@ -82,12 +86,20 @@ pub fn root_of(ws: &Workspace, path: &Option<String>, tier: Tier) -> Result<Path
 }
 
 /// Resolve one-or-more targets to distinct walk roots; none at all is the
-/// workspace root. Duplicates collapse, so overlaps never search one file twice.
+/// workspace root. Duplicates collapse, so overlaps never search one file
+/// twice. More than [`MAX_TARGETS`] is refused.
 pub fn roots_of(ws: &Workspace, targets: &[&str], tier: Tier) -> Result<Vec<PathBuf>, ToolError> {
+    if targets.len() > MAX_TARGETS {
+        return Err(ToolError::Invalid(format!(
+            "{} paths is over the {MAX_TARGETS}-path limit",
+            targets.len()
+        )));
+    }
     let mut roots: Vec<PathBuf> = Vec::new();
+    let mut seen = HashSet::new();
     for t in targets {
         let r = ws.resolve(t, tier)?;
-        if !roots.contains(&r) {
+        if seen.insert(r.clone()) {
             roots.push(r);
         }
     }

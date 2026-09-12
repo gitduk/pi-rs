@@ -52,12 +52,18 @@ fn numbered_throughout(text: &str) -> bool {
 // Drop the `N:` from every line, once every line is known to carry one.
 fn strip_numbers(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    for line in text.lines() {
-        match line.split_once(':') {
+    // split_inclusive keeps the line's own `\r` and its trailing newline —
+    // what lines() strips and a blanket push('\n') would rewrite CRLF away.
+    for line in text.split_inclusive('\n') {
+        let (body, newline) = match line.strip_suffix('\n') {
+            Some(body) => (body, "\n"),
+            None => (line, ""),
+        };
+        match body.split_once(':') {
             Some((_, rest)) => out.push_str(rest),
-            None => out.push_str(line),
+            None => out.push_str(body),
         }
-        out.push('\n');
+        out.push_str(newline);
     }
     out
 }
@@ -188,5 +194,26 @@ impl Tool for Write {
             "[{rel}] wrote {lines} {unit}, {} bytes{note}",
             content.len()
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_numbers;
+
+    #[test]
+    fn numbers_are_stripped_and_crlf_survives() {
+        assert_eq!(strip_numbers("1:foo\r\n2:bar\r\n"), "foo\r\nbar\r\n");
+    }
+
+    #[test]
+    fn a_missing_final_newline_stays_missing() {
+        assert_eq!(strip_numbers("1:foo"), "foo");
+        assert_eq!(strip_numbers("1:foo\n2:bar"), "foo\nbar");
+    }
+
+    #[test]
+    fn a_line_without_a_number_passes_through() {
+        assert_eq!(strip_numbers("plain\r\n"), "plain\r\n");
     }
 }

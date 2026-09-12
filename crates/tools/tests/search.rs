@@ -40,6 +40,26 @@ async fn glob_matches_at_any_depth_without_a_slash() {
 }
 
 #[tokio::test]
+async fn grep_stops_at_its_size_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace::new(dir.path()).unwrap();
+    let c = Ctx::new(ws);
+    let line = format!("needle{}\n", "x".repeat(2048));
+    // 60 files x 50 kept lines of ~2 KB: the per-file cap holds, and the
+    // sweep-wide budget is what has to end the walk.
+    for n in 0..60 {
+        std::fs::write(dir.path().join(format!("f{n}.txt")), line.repeat(60)).unwrap();
+    }
+    let out = run(
+        &tools::grep::Grep,
+        json!({ "pattern": "needle", "limit": 50 }),
+        &c,
+    )
+    .await;
+    assert!(out.contains("size budget"), "{out}");
+}
+
+#[tokio::test]
 async fn glob_and_grep_both_honor_gitignore() {
     let (_d, c) = tree();
     let globbed = run(&tools::glob::Glob, json!({ "pattern": "*.rs" }), &c).await;

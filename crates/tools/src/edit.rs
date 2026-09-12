@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
+use crate::read::{MAX_BYTES, over_limit};
 use crate::{Ctx, PatchError, Tier, Tool, ToolError, ToolOutput};
 
 // How many bytes of landed rows to echo back per file before showing each
@@ -352,7 +353,8 @@ fn hunk_help(path: &str, before: &str, after: &str, landed: &[Landed]) -> String
 // Clamped to whatever `lines` actually holds: a range that reaches past the
 // end, or starts at zero, shows what there is rather than panicking.
 fn hunk_rows<'a, 'b>(lines: &'a [&'b str], l: &Landed) -> &'a [&'b str] {
-    &lines[l.start.saturating_sub(1).min(lines.len())..l.end.min(lines.len())]
+    let start = l.start.saturating_sub(1).min(lines.len());
+    &lines[start..l.end.min(lines.len()).max(start)]
 }
 fn brace_net(s: &str) -> isize {
     s.chars().fold(0, |n, c| match c {
@@ -661,6 +663,13 @@ impl Tool for Edit {
         for path in patch.paths() {
             let real = ctx.workspace.resolve(path, self.tier())?;
             reals.insert(path.to_string(), real.clone());
+            // read refuses these at the same ceiling: below, the whole file is
+            // held three times over — content, plan and syntax tree.
+            if let Ok(meta) = tokio::fs::metadata(&real).await
+                && meta.len() > MAX_BYTES
+            {
+                return Err(ToolError::Invalid(over_limit(path, meta.len())));
+            }
             guards.push(ctx.lock_file(&real).await);
             let content = tokio::fs::read_to_string(&real).await.map_err(|e| {
                 ToolError::Invalid(format!(
@@ -744,6 +753,9 @@ impl Tool for Edit {
         };
 
         let mut report = String::new();
+        // Every change path was resolved and locked above; a miss means
+        // hashline broke that contract — fail loudly, never re-resolve.
+        let locked = |p: &String| -> std::path::PathBuf { reals[p].clone() };
         for change in &plan.changes {
             match change {
                 Change::Write {
@@ -761,13 +773,13 @@ impl Tool for Edit {
                         ));
                         continue;
                     }
-                    tokio::fs::write(ctx.workspace.resolve(path, self.tier())?, content).await?;
+                    tokio::fs::write(locked(path), content).await?;
                     track(change, &[], &[path]);
                     let before = loaded.get(path).map_or("", String::as_str);
                     report.push_str(&echo(path, before, content, landed));
                 }
                 Change::Remove { path } => {
-                    tokio::fs::remove_file(ctx.workspace.resolve(path, self.tier())?).await?;
+                    tokio::fs::remove_file(locked(path)).await?;
                     track(change, &[path], &[]);
                     report.push_str(&format!("removed {path}\n"));
                 }
@@ -782,7 +794,7 @@ impl Tool for Edit {
                         tokio::fs::create_dir_all(parent).await?;
                     }
                     tokio::fs::write(&dest, content).await?;
-                    tokio::fs::remove_file(ctx.workspace.resolve(from, self.tier())?).await?;
+                    tokio::fs::remove_file(locked(from)).await?;
                     track(change, &[from], &[to]);
                     report.push_str(&format!("{from} → "));
                     let before = loaded.get(from).map_or("", String::as_str);

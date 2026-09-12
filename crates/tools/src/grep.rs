@@ -6,12 +6,13 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
+use crate::read::MAX_BYTES;
 use crate::walk::{excludes, globs, looks_binary, roots_of, walker};
-use crate::{Ctx, Tier, Tool, ToolError, ToolOutput, spill};
+use crate::{Ctx, Tier, Tool, ToolError, ToolOutput, output, spill};
 
 const DEFAULT_LIMIT: usize = 200;
 const PER_FILE_LIMIT: usize = 50;
-const MAX_BYTES: u64 = 10 << 20;
+const BUDGET_NOTE: &str = "the sweep stopped at its size budget; narrow the pattern";
 
 /// One search target or several: a directory is walked, a file is searched alone.
 #[derive(Deserialize)]
@@ -81,7 +82,7 @@ impl Tool for Grep {
                 "path": {
                     "type": ["string", "array"],
                     "items": { "type": "string" },
-                    "description": "One target or several — directories or files; an absolute path may leave the workspace. Default the workspace root.",
+                    "description": "One target or several, up to 64 — directories or files; an absolute path may leave the workspace. Default the workspace root.",
                 },
                 "glob": {
                     "type": "array",
@@ -114,6 +115,7 @@ impl Tool for Grep {
         let skip = excludes(&args.exclude)?;
         let limit = args.limit.unwrap_or(DEFAULT_LIMIT).max(1);
         let ws = ctx.workspace.clone();
+        let budget = output::Budget::new();
 
         let matcher = RegexMatcherBuilder::new()
             .case_insensitive(args.insensitive)
@@ -123,7 +125,7 @@ impl Tool for Grep {
 
         // Reading and searching are blocking; the parallel walker needs its own
         // threads either way, so the whole sweep goes off the async runtime.
-        let (mut hits, skipped) = tokio::task::spawn_blocking(move || {
+        let (mut hits, skipped, clipped) = tokio::task::spawn_blocking(move || {
             let (tx, rx) = std::sync::mpsc::channel::<Result<Hit, PathBuf>>();
             for root in &roots {
                 walker(&ws, root, skip.clone()).build_parallel().run(|| {
@@ -131,7 +133,12 @@ impl Tool for Grep {
                     let matcher = matcher.clone();
                     let set = set.clone();
                     let ws = ws.clone();
+                    let budget = budget.clone();
                     Box::new(move |entry| {
+                        // Quit rather than search files the budget would throw away.
+                        if budget.spent() {
+                            return ignore::WalkState::Quit;
+                        }
                         let Ok(entry) = entry else {
                             return ignore::WalkState::Continue;
                         };
@@ -168,7 +175,14 @@ impl Tool for Grep {
                                     truncated = true;
                                     return Ok(false);
                                 }
-                                lines.push((n, line.trim_end_matches('\n').to_string()));
+                                let line = line.trim_end_matches('\n');
+                                // The budget ends mid-file, not mid-line: the line
+                                // that crosses it is dropped whole.
+                                if !budget.admits(line.len()) {
+                                    truncated = true;
+                                    return Ok(false);
+                                }
+                                lines.push((n, line.to_string()));
                                 Ok(true)
                             }),
                         );
@@ -197,11 +211,11 @@ impl Tool for Grep {
                     Ok(h) => hits.push(h),
                     Err(p) => skipped.push(p),
                 }
-                // One file can sit over the limit under two covering roots; count it once.
-                skipped.sort_unstable();
-                skipped.dedup();
             }
-            (hits, skipped.len())
+            // One file can sit over the limit under two covering roots; count it once.
+            skipped.sort_unstable();
+            skipped.dedup();
+            (hits, skipped.len(), budget.spent())
         })
         .await
         .map_err(|e| ToolError::Invalid(format!("search failed: {e}")))?;
@@ -213,11 +227,15 @@ impl Tool for Grep {
         hits.dedup_by(|a, b| a.path == b.path);
 
         if hits.is_empty() {
-            let note = if skipped > 0 {
-                format!(" ({skipped} files over the size limit were skipped)")
-            } else {
-                String::new()
-            };
+            let mut note = String::new();
+            if clipped {
+                note.push_str(&format!(" ({BUDGET_NOTE})"));
+            }
+            if skipped > 0 {
+                note.push_str(&format!(
+                    " ({skipped} files over the size limit were skipped)"
+                ));
+            }
             return Ok(ToolOutput::useless(format!(
                 "no match for `{}`{note}",
                 args.pattern
@@ -242,6 +260,9 @@ impl Tool for Grep {
                     "… {skipped} files over the size limit were not searched\n"
                 ));
             }
+            if clipped {
+                note.push_str(&format!("… {BUDGET_NOTE}\n"));
+            }
             note
         };
 
@@ -249,7 +270,10 @@ impl Tool for Grep {
             let rows: Vec<String> = hits
                 .iter()
                 .take(limit)
-                .map(|h| format!("{} ({} matches)\n", h.path, h.lines.len()))
+                .map(|h| {
+                    let plus = if h.truncated { "+" } else { "" };
+                    format!("{} ({}{plus} matches)\n", h.path, h.lines.len())
+                })
                 .collect();
             let notice = over(hits.len() - rows.len(), "files");
             return Ok(
@@ -278,9 +302,7 @@ impl Tool for Grep {
                 shown += 1;
             }
             if h.truncated {
-                section.push_str(&format!(
-                    "… more than {PER_FILE_LIMIT} matches in this file\n"
-                ));
+                section.push_str("… more matches in this file\n");
             }
             sections.push(section);
         }

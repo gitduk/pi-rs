@@ -147,6 +147,19 @@ async fn bash_marks_whitespace_only_output_useless() {
 }
 
 #[tokio::test]
+async fn read_huge_limit_stays_inside_the_file() {
+    let (_d, c) = ctx();
+    std::fs::write(c.workspace.root().join("a.txt"), "one\ntwo\nthree\n").unwrap();
+    let out = run(
+        &tools::read::Read,
+        json!({ "path": "a.txt", "offset": 2, "limit": u64::MAX }),
+        &c,
+    )
+    .await;
+    assert!(out.contains("2:two\n3:three"), "{out}");
+}
+
+#[tokio::test]
 async fn bash_spills_a_runaway_output_instead_of_holding_it() {
     let dir = tempfile::tempdir().unwrap();
     let ws = Workspace::new(dir.path()).unwrap();

@@ -862,41 +862,36 @@ impl Agent {
             }
         }
 
-        // Building one future per call and awaiting them positionally is what
-        // keeps results aligned; completion order never reaches the transcript.
         let exclusive = actions
             .iter()
             .any(|a| matches!(a, Action::Run(t) if t.concurrency() == Concurrency::Exclusive));
 
-        let mut outputs: Vec<Option<Result<ToolOutput, ToolError>>> =
-            Vec::with_capacity(calls.len());
-        if exclusive {
-            for (call, action) in calls.iter().zip(&actions) {
-                outputs.push(match action {
-                    Action::Reject(_) => None,
-                    Action::Run(t) => Some(
-                        t.execute(call.args.clone(), ctx)
-                            .instrument(ran(call))
-                            .await,
-                    ),
-                });
-            }
-        } else {
-            let futures: Vec<_> = calls
-                .iter()
-                .zip(&actions)
-                .map(|(call, action)| {
-                    async move {
-                        match action {
-                            Action::Reject(_) => None,
-                            Action::Run(t) => Some(t.execute(call.args.clone(), ctx).await),
+        // One future per call, awaited positionally: results stay aligned with
+        // the calls; an Exclusive batch runs in turn, a Shared batch joins.
+        let futures: Vec<_> = calls
+            .iter()
+            .zip(&actions)
+            .map(|(call, action)| {
+                async move {
+                    match action {
+                        Action::Reject(_) => None,
+                        Action::Run(t) => {
+                            Some(tools::output::gated(t.as_ref(), call.args.clone(), ctx).await)
                         }
                     }
-                    .instrument(ran(call))
-                })
-                .collect();
-            outputs = futures::future::join_all(futures).await;
-        }
+                }
+                .instrument(ran(call))
+            })
+            .collect();
+        let outputs: Vec<Option<Result<ToolOutput, ToolError>>> = if exclusive {
+            let mut outputs = Vec::with_capacity(futures.len());
+            for f in futures {
+                outputs.push(f.await);
+            }
+            outputs
+        } else {
+            futures::future::join_all(futures).await
+        };
 
         let mut results = Vec::with_capacity(calls.len());
         for ((call, action), output) in calls.iter().zip(&actions).zip(outputs) {

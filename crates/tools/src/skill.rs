@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::read::{MAX_BYTES, over_limit};
 use crate::skills::{Skill, body};
 use crate::{Ctx, Tier, Tool, ToolError, ToolOutput};
 
@@ -151,7 +152,18 @@ impl Tool for SkillTool {
         let skill = self.find(&args.name)?;
 
         let Some(rel) = args.file else {
-            let text = tokio::fs::read_to_string(skill.dir.join("SKILL.md"))
+            // The instructions go to the transcript whole; a multi-megabyte
+            // SKILL.md is refused, not read.
+            let path = skill.dir.join("SKILL.md");
+            if let Ok(meta) = tokio::fs::metadata(&path).await
+                && meta.len() > MAX_BYTES
+            {
+                return Ok(ToolOutput::useless(over_limit(
+                    &format!("{}: SKILL.md", args.name),
+                    meta.len(),
+                )));
+            }
+            let text = tokio::fs::read_to_string(path)
                 .await
                 .map_err(|e| ToolError::Invalid(format!("{}: {e}", args.name)))?;
             let out = instructions(skill, &text);
@@ -172,6 +184,15 @@ impl Tool for SkillTool {
             return Err(ToolError::Escape(format!("{}/{rel}", args.name)));
         }
 
+        // Same ceiling as SKILL.md: a referenced file rides the transcript too.
+        if let Ok(meta) = tokio::fs::metadata(&real).await
+            && meta.len() > MAX_BYTES
+        {
+            return Ok(ToolOutput::useless(over_limit(
+                &format!("{}/{rel}", args.name),
+                meta.len(),
+            )));
+        }
         let text = tokio::fs::read_to_string(&real).await?;
         Ok(ToolOutput::text(text).with_preview(format!("{}/{rel}", skill.name)))
     }

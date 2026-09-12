@@ -34,6 +34,7 @@ mod parses;
 pub mod read;
 pub mod registry;
 mod rows;
+pub mod script;
 pub mod skill;
 pub mod skills;
 pub mod spill;

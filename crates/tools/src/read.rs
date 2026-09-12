@@ -4,12 +4,17 @@ use serde_json::{Value, json};
 
 use hashline::tag;
 
-use crate::{Ctx, Tier, Tool, ToolError, ToolOutput, spill};
+use crate::{Ctx, Tier, Tool, ToolError, ToolOutput, output, spill};
 
 const DEFAULT_LIMIT: usize = 2_000;
-const MAX_LINE: usize = 2_000;
+pub(crate) const MAX_LINE: usize = 2_000;
 const BINARY_SNIFF: usize = 8_000;
-const MAX_BYTES: u64 = 10 << 20;
+pub(crate) const MAX_BYTES: u64 = 10 << 20;
+
+/// The one refusal every over-limit file shares, whatever tool meets it.
+pub(crate) fn over_limit(name: &str, len: u64) -> String {
+    format!("{name} is {len} bytes, over the {MAX_BYTES}-byte read limit; use bash to slice it")
+}
 const OUTLINE_OVER: usize = 300;
 
 #[derive(Deserialize)]
@@ -215,19 +220,36 @@ impl Tool for Read {
         if meta.is_dir() {
             let mut entries = tokio::fs::read_dir(&path).await?;
             let mut names = Vec::new();
+            let mut over = 0usize;
+            let budget = output::Budget::new();
             while let Some(e) = entries.next_entry().await? {
                 let suffix = if e.file_type().await.is_ok_and(|t| t.is_dir()) {
                     "/"
                 } else {
                     ""
                 };
-                names.push(format!("{}{suffix}", e.file_name().to_string_lossy()));
+                let name = format!("{}{suffix}", e.file_name().to_string_lossy());
+                // Count past the budget rather than hold: what costs is the
+                // transcript the list would become, not the iteration.
+                if !budget.admits(name.len()) {
+                    over += 1;
+                    continue;
+                }
+                names.push(name);
             }
             names.sort();
             if names.is_empty() {
                 return Ok(ToolOutput::useless(format!("{rel}/ is empty")));
             }
-            return Ok(ToolOutput::text(format!("{rel}/\n{}", names.join("\n"))));
+            let rows: Vec<String> = names.iter().map(|n| format!("{n}\n")).collect();
+            let notice = if over > 0 {
+                format!("… {over} more entries not shown\n")
+            } else {
+                String::new()
+            };
+            // The listing rides the same spill path as every other body.
+            let listed = spill::fit(ctx, &rows, "entries", &notice)?;
+            return Ok(ToolOutput::text(format!("{rel}/\n{listed}")));
         }
 
         // Sniffing needs the whole file in memory, so the guard precedes the
@@ -235,10 +257,7 @@ impl Tool for Read {
         // model asked for it by locator, and the retrieval hint promised read
         // would serve it — so the cap does not apply there.
         if meta.len() > MAX_BYTES && !is_spill {
-            return Ok(ToolOutput::useless(format!(
-                "{rel} is {} bytes, over the {MAX_BYTES}-byte read limit; use bash to slice it",
-                meta.len()
-            )));
+            return Ok(ToolOutput::useless(over_limit(&rel, meta.len())));
         }
         let bytes = tokio::fs::read(&path).await?;
         if looks_binary(&bytes) {
@@ -327,7 +346,7 @@ impl Tool for Read {
             )));
         }
 
-        let end = (start + limit).min(all.len());
+        let end = start.saturating_add(limit).min(all.len());
         // A construct opening inside the window often closes outside it, and a
         // row that says where it ends is the difference between one read and
         // two.

@@ -1,15 +1,21 @@
 //! Bounded capture for the streams a tool pulls in — a child's stdout, a
 //! response body. Memory stays capped whatever the producer does: what
 //! overflows the window streams to disk, where `read` can get it back.
+//! Sweeps that assemble output as items share [`Budget`]; what reaches the
+//! transcript is what [`bound`] lets through.
 
 use std::io::Write as _;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use brain::message::ToolResultContent;
 use brain::slice::{head_bytes, tail_bytes};
+use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::spill::{self, SpillRef};
-use crate::{Ctx, ToolError};
+use crate::{Ctx, Tool, ToolError, ToolOutput};
 
 /// How much of a spilled stream the view keeps of each end — the same two
 /// halves [`spill::prune`] shows of a body it holds whole.
@@ -147,6 +153,73 @@ fn open_spill(path: &Path) -> std::io::Result<std::fs::File> {
     opts.open(path)
 }
 
+/// Kept bytes one sweep of output assembly may hold — a grep's matches, a
+/// glob's paths, a directory's entries. The budget is what ends the sweep;
+/// [`bound`] is what bounds the view.
+pub const SWEEP_BUDGET: usize = 4 << 20;
+
+/// Accounts kept bytes for one sweep. Cheap to clone, so one budget can
+/// cover a parallel walk's threads.
+#[derive(Clone)]
+pub struct Budget(Arc<AtomicUsize>);
+
+impl Budget {
+    pub fn new() -> Self {
+        Self(Arc::new(AtomicUsize::new(0)))
+    }
+
+    /// Account `bytes` as kept; `false` means the budget is spent and the
+    /// item should be dropped, counted by the caller.
+    pub fn admits(&self, bytes: usize) -> bool {
+        self.0.fetch_add(bytes, Ordering::Relaxed) < SWEEP_BUDGET
+    }
+
+    /// Whether the budget is spent.
+    pub fn spent(&self) -> bool {
+        self.0.load(Ordering::Relaxed) >= SWEEP_BUDGET
+    }
+}
+
+impl Default for Budget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The interface's own gate: whatever a tool returns, over-window text is
+/// spilled whole and shown as head plus locator. A tool that bounds itself
+/// tightly never notices it; a tool that forgets cannot flood the
+/// transcript.
+pub fn bound(mut out: ToolOutput, ctx: &Ctx) -> ToolOutput {
+    for piece in &mut out.content {
+        let ToolResultContent::Text(t) = piece else {
+            continue;
+        };
+        match spill::write(ctx, &t.text) {
+            Ok(None) => continue,
+            Ok(Some(spilled)) => {
+                let head = head_bytes(&t.text, VIEW);
+                let left = t.text.len() - head.len();
+                t.text = format!("{head}\n… {left} more bytes; {}\n", spilled.note());
+            }
+            // Spilling failed and the gate still must not flood: say plainly
+            // that the tail is gone instead of a clean-looking prefix.
+            Err(_) => {
+                let head = head_bytes(&t.text, VIEW);
+                t.text = format!(
+                    "{head}\n… {} more bytes truncated — spill failed\n",
+                    t.text.len() - head.len()
+                );
+            }
+        }
+    }
+    out
+}
+
+/// The one way agent code runs a tool: through the gate.
+pub async fn gated(tool: &dyn Tool, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
+    Ok(bound(tool.execute(args, ctx).await?, ctx))
+}
 #[cfg(test)]
 mod tests {
     use crate::{Ctx, Workspace};
@@ -203,5 +276,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(got.text, "a\u{fffd}b");
+    }
+
+    #[test]
+    fn a_budget_admits_until_spent_then_says_drop() {
+        let b = super::Budget::new();
+        assert!(b.admits(super::SWEEP_BUDGET));
+        assert!(b.spent());
+        assert!(!b.admits(1));
+    }
+
+    #[tokio::test]
+    async fn bound_spills_what_overflows_and_leaves_the_locator() {
+        let dir = tempfile::tempdir().unwrap();
+        let huge = "x".repeat(super::spill::MAX_OUTPUT + 1_000);
+        let got = super::bound(super::ToolOutput::text(huge), &ctx(dir.path()));
+        let text = got.flatten();
+        assert!(text.contains("more bytes"), "{text}");
+        assert!(text.contains("full output:"), "{text}");
+        assert!(text.len() < 40_000, "{}", text.len());
+
+        let small = super::bound(super::ToolOutput::text("tiny"), &ctx(dir.path()));
+        assert_eq!(small.flatten(), "tiny");
     }
 }

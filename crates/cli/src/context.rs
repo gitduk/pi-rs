@@ -16,7 +16,7 @@ pub struct Loaded {
     pub files: Vec<PathBuf>,
 }
 
-fn home() -> Option<PathBuf> {
+pub fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 

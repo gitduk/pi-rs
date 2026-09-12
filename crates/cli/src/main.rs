@@ -368,6 +368,27 @@ pub fn resolve(
         registry = registry.with(tool);
     }
 
+    let (scripts, skipped) = context::home()
+        .map(|home| tools::script::discover_in(&home.join(".pi/tools")))
+        .unwrap_or_default();
+    notes.extend(skipped.iter().map(|p| format!("tool skipped — {p}")));
+    let mut user_tools: Vec<String> = Vec::new();
+    for script in scripts {
+        let name = tools::Tool::name(&script);
+        if user_tools.contains(&name.to_string()) {
+            notes.push(format!(
+                "tool skipped — {name} is provided by another user tool"
+            ));
+            continue;
+        }
+        user_tools.push(name.to_string());
+        if registry.get(name).is_some() {
+            notes.push(format!("tool skipped — {name} shadows a built-in tool"));
+            continue;
+        }
+        registry = registry.with(script);
+    }
+
     let settled = config.settle(
         &project.clone(),
         config::Flags {

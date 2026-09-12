@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use std::time::SystemTime;
 
 use crate::walk::{globs, root_of, walker};
-use crate::{Ctx, Tier, Tool, ToolError, ToolOutput, spill};
+use crate::{Ctx, Tier, Tool, ToolError, ToolOutput, output, spill};
 
 const DEFAULT_LIMIT: usize = 200;
 
@@ -56,12 +56,21 @@ impl Tool for Glob {
             .ok_or_else(|| ToolError::Invalid("empty pattern".into()))?;
         let limit = args.limit.unwrap_or(DEFAULT_LIMIT).max(1);
         let ws = ctx.workspace.clone();
+        let cancel = ctx.cancel.clone();
+        let budget = output::Budget::new();
 
         // The walk is blocking IO; running it on the async runtime would stall
         // every other tool in the same turn.
-        let found = tokio::task::spawn_blocking(move || {
+        let (found, clipped, cancelled) = tokio::task::spawn_blocking(move || {
             let mut hits: Vec<(SystemTime, String)> = Vec::new();
-            for entry in walker(&ws, &root, None).build().flatten() {
+            let (mut clipped, mut cancelled) = (false, false);
+            for (seen, entry) in walker(&ws, &root, None).build().flatten().enumerate() {
+                // A blocking task cannot be aborted from outside; checking here
+                // is what makes Esc land during the walk at all.
+                if seen % 512 == 0 && cancel.is_cancelled() {
+                    cancelled = true;
+                    break;
+                }
                 if !entry.file_type().is_some_and(|t| t.is_file()) {
                     continue;
                 }
@@ -72,15 +81,25 @@ impl Tool for Glob {
                     .metadata()
                     .and_then(|m| m.modified().map_err(Into::into))
                     .unwrap_or(SystemTime::UNIX_EPOCH);
-                hits.push((mtime, ws.display(entry.path())));
+                let path = ws.display(entry.path());
+                // The budget ends the sweep, not a count: one tree of huge
+                // paths and one of many are bounded by the same line.
+                if !budget.admits(path.len()) {
+                    clipped = true;
+                    break;
+                }
+                hits.push((mtime, path));
             }
             // Newest first: an agent hunting the file it just touched wants the
             // recent end, and the tail is what a limit should drop.
             hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-            hits
+            (hits, clipped, cancelled)
         })
         .await
         .map_err(|e| ToolError::Invalid(format!("walk failed: {e}")))?;
+        if cancelled {
+            return Err(ToolError::Cancelled);
+        }
 
         if found.is_empty() {
             return Ok(ToolOutput::useless(format!(
@@ -95,7 +114,9 @@ impl Tool for Glob {
             .take(limit)
             .map(|(_, path)| format!("{path}\n"))
             .collect();
-        let notice = if total > rows.len() {
+        let notice = if clipped {
+            format!("… stopped at {total} paths; narrow the pattern\n")
+        } else if total > rows.len() {
             format!(
                 "… {} more; narrow the pattern or raise limit\n",
                 total - rows.len()

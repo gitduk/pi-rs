@@ -1,5 +1,11 @@
+use crate::read::MAX_BYTES;
+use brain::slice::head_bytes;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
+
+// One line in the tool catalog: past this, the description costs more than
+// the decision it buys.
+const DESCRIPTION_LIMIT: usize = 1_000;
 
 /// A directory holding `SKILL.md` and whatever files it references.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,7 +113,16 @@ enum Read {
 }
 
 fn read_one(dir: &Path) -> Read {
-    let Ok(text) = std::fs::read_to_string(dir.join("SKILL.md")) else {
+    // Discovery runs before the first turn; a giant SKILL.md is a problem to
+    // report, not a file to hold.
+    let path = dir.join("SKILL.md");
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_BYTES) {
+        return Read::Problem(format!(
+            "{}: SKILL.md is over the read limit",
+            dir.display()
+        ));
+    }
+    let Ok(text) = std::fs::read_to_string(path) else {
         return Read::None;
     };
     let (declared, description) = match frontmatter(&text) {
@@ -123,7 +138,22 @@ fn read_one(dir: &Path) -> Read {
     };
 
     // One skill per line in the tool catalog and the help list.
-    let description = description.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Capped: the catalog rides every request, so one poisoned description
+    // must not tax every turn until the skill is deleted.
+    let mut folded = String::new();
+    for word in description.split_whitespace() {
+        if !folded.is_empty() {
+            if folded.len() + 1 + word.len() > DESCRIPTION_LIMIT {
+                break;
+            }
+            folded.push(' ');
+        } else if word.len() > DESCRIPTION_LIMIT {
+            folded.push_str(head_bytes(word, DESCRIPTION_LIMIT));
+            break;
+        }
+        folded.push_str(word);
+    }
+    let description = folded;
 
     let fallback = dir.file_name().and_then(|n| n.to_str()).unwrap_or_default();
     let name = declared.unwrap_or_else(|| fallback.to_string());
@@ -225,6 +255,49 @@ mod tests {
         assert_eq!(name.as_deref(), Some("thinking"));
         assert_eq!(description.as_deref(), Some("Five models, one router."));
         assert_eq!(body(SKILL), "# Thinking\n\nBody here.\n");
+    }
+
+    #[test]
+    fn a_long_description_is_capped_for_the_catalog() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("big");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!(
+                "---\nname: big\ndescription: {}\n---\nx\n",
+                "w".repeat(5_000)
+            ),
+        )
+        .unwrap();
+        match read_one(&dir) {
+            Read::Skill(skill) => {
+                assert!(skill.description.len() <= DESCRIPTION_LIMIT);
+                assert!(skill.description.starts_with("www"));
+            }
+            Read::Problem(why) => panic!("problem: {why}"),
+            Read::None => panic!("not found"),
+        }
+    }
+
+    #[test]
+    fn the_space_between_words_counts_toward_the_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("edge");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!(
+                "---\nname: edge\ndescription: {} x\n---\nx\n",
+                "w".repeat(999)
+            ),
+        )
+        .unwrap();
+        match read_one(&dir) {
+            Read::Skill(skill) => assert_eq!(skill.description.len(), 999),
+            Read::Problem(why) => panic!("problem: {why}"),
+            Read::None => panic!("not found"),
+        }
     }
 
     #[test]
