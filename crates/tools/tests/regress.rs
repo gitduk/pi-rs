@@ -487,6 +487,7 @@ async fn the_renumber_refusal_is_budgeted_like_every_other_view() {
 
     assert!(err.contains("renumbered from line 2 on"), "{err}");
     assert!(err.contains("Rebuild the hunks"), "{err}");
+    assert!(err.contains("again unchanged"), "{err}");
     assert!(err.len() < 4_000, "unbudgeted, {} bytes:\n{err}", err.len());
     assert!(err.contains('…'), "and it says where it stopped:\n{err}");
 }

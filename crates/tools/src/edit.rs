@@ -573,7 +573,11 @@ fn renumbered(
         if keep < rendered.len() {
             out.push_str(crate::rows::GAP);
         }
-        out.push_str("Rebuild the hunks against these numbers and send it again.");
+        out.push_str(
+            "Rebuild the hunks against these numbers, or — if the numbers you sent \
+             already match this content — send the patch again unchanged: the \
+             refusal does not fire twice.",
+        );
     }
     (!out.is_empty()).then_some(out)
 }
