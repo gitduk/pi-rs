@@ -86,41 +86,35 @@ enum Op {
 // earlier with no error to show for it.
 pub fn apply(patch: &Patch, files: &Files<'_>, blocks: &dyn Blocks) -> Result<Plan, Error> {
     let mut plan = Plan::default();
-    // The content each path has reached so far, and where its Write sits in
-    // the plan.
-    let mut working: HashMap<String, String> = HashMap::new();
+    // Where each path's Write sits in the plan.
     let mut slot: HashMap<String, usize> = HashMap::new();
     for section in &patch.sections {
-        let content = match working.get(&section.path) {
-            Some(current) => current.as_str(),
-            None => *files
+        let at = *slot
+            .entry(section.path.clone())
+            .or_insert(plan.changes.len());
+        let content = match plan.changes.get(at) {
+            Some(Change::Write { content, .. }) => content.as_str(),
+            _ => *files
                 .get(section.path.as_str())
                 .ok_or_else(|| Error::Missing {
                     path: section.path.clone(),
                 })?,
         };
         let ops = resolve(section, content, blocks)?;
-        let Change::Write {
-            content, landed, ..
-        } = build(&section.path, &ops, content, blocks)?;
-        working.insert(section.path.clone(), content.clone());
-        let at = *slot
-            .entry(section.path.clone())
-            .or_insert(plan.changes.len());
-        match plan.changes.get_mut(at) {
-            Some(Change::Write {
+        let change = build(&section.path, &ops, content, blocks)?;
+        if at < plan.changes.len() {
+            let Change::Write {
+                content, landed, ..
+            } = change;
+            let Change::Write {
                 content: kept,
                 landed: kept_landed,
                 ..
-            }) => {
-                *kept = content;
-                kept_landed.extend(landed);
-            }
-            _ => plan.changes.push(Change::Write {
-                path: section.path.clone(),
-                content,
-                landed,
-            }),
+            } = &mut plan.changes[at];
+            *kept = content;
+            kept_landed.extend(landed);
+        } else {
+            plan.changes.push(change);
         }
     }
     Ok(plan)

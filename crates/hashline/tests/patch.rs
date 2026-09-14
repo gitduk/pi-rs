@@ -352,22 +352,17 @@ fn landed_records_are_handed_back_for_the_report() {
 }
 
 // Two sections for one file stack: the second anchors on what the first
-// wrote, and one Write carries both — each landing separately would let the
-// later overwrite the earlier on disk.
+// wrote — each landing separately would let the later overwrite the earlier
+// on disk. `run` itself asserts a single Write.
 #[test]
 fn two_sections_for_one_file_stack_into_one_write() {
-    let patch = parse("[a.txt]\n=one\n+ONE\n\n[a.txt]\n=three\n+THREE").unwrap();
-    let files: HashMap<&str, &str> = HashMap::from([("a.txt", "one\ntwo\nthree\n")]);
-    let plan = apply(&patch, &files, &blocks(&[])).unwrap();
-    match &plan.changes[..] {
-        [
-            Change::Write {
-                content, landed, ..
-            },
-        ] => {
-            assert_eq!(content, "one\nONE\ntwo\nthree\nTHREE\n");
-            assert_eq!(landed.len(), 2);
-        }
-        other => unreachable!("{other:?}"),
-    }
+    assert_eq!(
+        run(
+            "one\ntwo\nthree\n",
+            "[a.txt]\n=one\n+ONE\n\n[a.txt]\n=three\n+THREE",
+            &[],
+        )
+        .unwrap(),
+        "one\nONE\ntwo\nthree\nTHREE\n"
+    );
 }
