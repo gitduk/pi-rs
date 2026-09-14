@@ -53,7 +53,7 @@ struct Args {
 
 struct Hit {
     path: String,
-    tag: String,
+    hash: String,
     lines: Vec<(u64, String)>,
     truncated: bool,
 }
@@ -69,7 +69,7 @@ impl Tool for Grep {
     fn description(&self) -> &str {
         "Search file contents by regular expression. Respects .gitignore and skips \
          binaries. `path` takes one target or many — directories or files. Results \
-         come back as `[path#TAG]` sections with numbered lines, the same shape read \
+         come back as `[path]` sections with numbered lines, the same shape read \
          returns — so a match can be edited without reading the file first. Reach \
          for this before running rg or find in bash: it already knows what to ignore."
     }
@@ -188,12 +188,12 @@ impl Tool for Grep {
                         );
 
                         if !lines.is_empty() {
-                            // The tag comes from the same bytes that were searched,
+                            // The view hash comes from the same bytes that were searched,
                             // so an edit anchored on it cannot be racing this read.
-                            let tag = hashline::tag(&text);
+                            let hash = hashline::view_hash(&text);
                             let _ = tx.send(Ok(Hit {
                                 path: ws.display(entry.path()),
-                                tag,
+                                hash,
                                 lines,
                                 truncated,
                             }));
@@ -289,7 +289,8 @@ impl Tool for Grep {
             if shown >= limit {
                 break;
             }
-            let mut section = format!("{}\n", hashline::header(&h.path, &h.tag));
+            ctx.note_view(&ctx.workspace.root().join(&h.path), &h.hash);
+            let mut section = format!("{}\n", hashline::header(&h.path));
             // The one view that prints addresses without spans: a match is
             // rarely a construct's opening row, and a parse per hit file would
             // cost more than a view that only points is worth.

@@ -51,8 +51,8 @@ impl Tool for Bash {
         "Run a shell command in the workspace. Each call is a fresh shell: cd and \
          environment changes do not carry over — pass cwd rather than prefixing \
          cd. Prefer read, edit and write over cat, heredocs and sed -i: they \
-         report failures you can act on, and only they hand back a TAG to edit \
-         against."
+        report failures you can act on. File moves and deletions belong \
+        here too (mv, rm); content edits belong to edit."
     }
 
     fn schema(&self) -> Value {

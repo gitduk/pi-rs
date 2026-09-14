@@ -29,6 +29,14 @@ there rather than assuming. Where a purpose-built tool and a shell command
 would both do, the purpose-built one is the one that reports a failure you can
 act on.
 
+Split the rest by what determines the landing. When the location is the
+content itself — this row, this construct, every row containing a string,
+within a construct or file-wide — use the edit tool: anchors are verified
+against the file (a mismatch refuses rather than lands wrong) and the echo
+lists every row it took. When the pattern or position alone defines the
+change — regex substitution, line ranges, character translation — use bash:
+sed, perl, tr, awk.
+
 Call independent tools in the same turn; they run in parallel. Chain them
 across turns only when a later call needs an earlier result.
 

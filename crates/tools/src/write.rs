@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 
 use crate::{Ctx, Tier, Tool, ToolError, ToolOutput};
 
-/// Drop a `[path#TAG]` header if the content opens with one.
+/// Drop a `[path]` header if the content opens with one.
 pub fn undecorate(content: &str) -> &str {
     let mut rest = content;
     if let Some((first, tail)) = rest.split_once('\n')
@@ -21,10 +21,12 @@ fn is_header(line: &str) -> bool {
         return false;
     };
     match inner.rsplit_once('#') {
+        // A tag a view used to print, still stripped for old sessions.
         Some((path, tag)) => {
             !path.is_empty() && tag.len() == 4 && tag.chars().all(|c| c.is_ascii_hexdigit())
         }
-        None => false,
+        // The header hashline prints now: just the path.
+        None => !inner.is_empty(),
     }
 }
 
@@ -34,14 +36,17 @@ fn numbered_throughout(text: &str) -> bool {
         if line.is_empty() {
             continue;
         }
-        // Through hashline, because what a prefix looks like is that crate's
-        // grammar and this is the third place in the tree that has to agree
-        // with it. A local "all digits" test was right until addresses grew a
-        // range, and then it silently stopped recognising read's own output.
+        // read's own output: every row is `N:` or `N-M:` with digits. This is
+        // the third place in the tree that has to agree with that shape.
         let Some((n, _)) = line.split_once(':') else {
             return false;
         };
-        if hashline::Target::read(n).is_none() {
+        let digits = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
+        let numbered = match n.split_once('-') {
+            Some((a, b)) => digits(a) && digits(b),
+            None => digits(n),
+        };
+        if !numbered {
             return false;
         }
         any = true;
@@ -156,14 +161,6 @@ impl Tool for Write {
         ));
         tokio::fs::write(&tmp, &content).await?;
         tokio::fs::rename(&tmp, &path).await?;
-        // A file written whole is one the model knows the numbering of: it sent
-        // every line. Unless cleaning dropped one — a pasted-back `[path#TAG]`
-        // header goes here, and every row below it is one off what was sent.
-        if content.lines().count() == args.content.lines().count() {
-            ctx.forget_shift(&path);
-        } else {
-            ctx.note_shift(&path, 1);
-        }
         ctx.note_write(&path);
 
         let mut note = "";
@@ -180,14 +177,15 @@ impl Tool for Write {
 
         let lines = content.lines().count();
         let unit = if lines == 1 { "line" } else { "lines" };
-        let tag = hashline::tag(&content);
+        let hash = hashline::view_hash(&content);
+        ctx.note_view(&path, &hash);
         // Same split as read: the model's line names the version a patch
         // anchors to, the display and the log do not need it in front of a
         // person, and the log keeps it anyway for when an edit goes wrong.
-        tracing::info!(target: "pi::write", path = %rel, tag = %tag, "wrote");
+        tracing::info!(target: "pi::write", path = %rel, hash = %hash, "wrote");
         Ok(ToolOutput::text(format!(
             "{} wrote {lines} {unit}, {} bytes{note}",
-            hashline::header(&rel, &tag),
+            hashline::header(&rel),
             content.len()
         ))
         .with_preview(format!(

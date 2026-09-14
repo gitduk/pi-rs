@@ -19,90 +19,52 @@ const SKETCH_LIMIT: usize = 24;
 // What a call that omits the argument is told, so it resends `patch`
 // instead of staring at a bare serde error for a field it never named.
 const ARGS_HINT: &str = "`edit` takes a single argument, `patch`: a string of \
-    one or more `[path#TAG]` sections, each a header line followed by op lines \
-    like `PUT 3:`. Send the whole call again with `patch`.";
+    one or more `[path]` sections, each a header line followed by marked rows \
+    like `-old` / `+new`. Send the whole call again with `patch`.";
 
 #[derive(Deserialize)]
 struct Args {
     patch: String,
 }
 
-const SHAPE: &str = r#"Line-anchored patch. Sections name a file and the TAG from your last read of it:
+const SHAPE: &str = r#"Content-anchored patch: the landing is decided by the content itself, and
+anchors are verified against the file — a mismatch refuses rather than lands
+wrong. Reach for bash (sed, perl, tr, awk) when a pattern or position alone
+defines the change: regex substitution, line ranges, character translation.
+Rows are marked: `-` matches and deletes, `=` matches and keeps, `+` adds new
+content. One operation is a run of marked rows whose `-`/`=` rows match the
+file exactly once — the content is the anchor, so nothing here needs a line
+number and nothing drifts. Sections name a file:
 
-[path/to/file.rs#A1B2]
-PUT 2-4:
-+replacement line one
-+replacement line two
+[path/to/file.rs]
 
-Addresses. `N` is a single line, `N-M` two or more, `N*` a construct, and
-every number is the ORIGINAL one from that read: earlier hunks in the same
-patch never shift later ones. `N-N` is not an address — a single line is `N`.
-{addresses}
+-replace_me();
++replaced();
 
-Direction belongs to PUT, not to an address: `PUT 4:UP` inserts above line 4,
-`PUT 4:DOWN` below it, `PUT 3-5:DOWN` below the range, `PUT 2*:DOWN` past where
-the construct closes.
+=    let mut out = String::new();
++    out.reserve(4096);
 
-Ops. Every op line starts with a verb — PUT, CUT, MV or RM. A header ending in
-`:` takes `+` body rows; CUT, MV, RM and the register pastes take none.
-  PUT <addr>:                  put the body there; the address alone replaces
-  PUT <addr>:UP / <addr>:DOWN  insert the body above / below it
-  PUT <addr>:UP @name / <addr>:DOWN @name / <addr> @name   paste a captured register
-  CUT N-M                      delete those lines, capturing them; `@name` labels it
-  CUT N*                       the same, for a whole construct
-  MV dest                      rename; edits in this section land first, then the file moves
-  RM                           delete the file; may not share a section with other ops
+@fn trimmed()
+-stale_body();
 
-  (`@` alone is the anonymous register, filled by whatever unlabeled CUT ran
-  before it.)
+Forms: `-` rows then `+` rows replace; `=` then `+` inserts after the anchor;
+`+` then `=` inserts before it. `@opening-line` scopes the rows under it to
+that construct; a `@` scope followed by one bare `-` deletes the whole
+construct, and followed by a single `-text` sweeps every row in it containing
+`text` — with no scope the sweep runs file-wide, and the echo lists every row
+it took. A `*` row names a construct as a point anchor: `+` rows above it
+insert before the construct, `+` rows below it insert after. Blank lines separate
+operations. Prefixes are exactly one character and the content is verbatim —
+a row that starts with a marker character needs no escape (`--x` is `-`
+marking `-x`).
 
-Cheapest first: insert with `:UP` / `:DOWN` — `1:UP` is the file head, the last
-line's `:DOWN` the file tail — delete with CUT, address only the lines that
-change, and leave unchanged lines out of the body. PUT N* is for a
-mostly-rewritten construct, not a one-line change.
-
-Every hunk in one patch names the numbers your last read showed, so six places
-changing is one call with six hunks. A second call is not wrong, but its
-addresses must come from what the first one printed back, not from that read:
-the lines below an edit that changed a line count have all moved.
-
-Body rows start with `+` and are copied verbatim, so `+` alone is a blank line
-and leading whitespace is preserved. Never write `-old` or bare context lines:
-the address says what goes, the body says what arrives. To delete lines and put
-nothing back, use CUT — not a PUT with `-` rows. A literal line of your own that
-begins with `-` or `+` takes the prefix like any other: `- item` is written
-`+- item`. A body may be any length regardless of how many lines the address
-names.
-
-Rejected outright: a stale TAG, an address a previous edit renumbered, two hunks
-touching the same original line, an address past the end of the file, and a
-patch that would leave the file unparseable when it parsed before. Nothing is
-written unless every section applies."#;
-
-// One table row, wrapped under its own label rather than running off the side.
-//
-// The description is read by a model on every request; a paragraph that used
-// to wrap and now does not is a real cost of generating prose instead of
-// writing it.
-fn wrapped(label: &str, width: usize, text: &str) -> String {
-    const RIGHT: usize = 78;
-    let pad = 2 + width + 2;
-    let mut out = format!("  {label:<width$}  ");
-    let mut col = pad;
-    for (i, word) in text.split_whitespace().enumerate() {
-        if i > 0 && col + 1 + word.len() > RIGHT {
-            out.push('\n');
-            out.push_str(&" ".repeat(pad));
-            col = pad;
-        } else if i > 0 {
-            out.push(' ');
-            col += 1;
-        }
-        out.push_str(word);
-        col += word.len();
-    }
-    out
-}
+Matching is all-or-nothing: an anchor matching nowhere is refused with the
+closest real line; a mixed operation matching more than once is refused with
+every candidate — widen the `=` context or add an `@` scope until it names
+one place. The whole patch must still parse when applied, or everything is
+refused. Nothing is written unless every section applies. File moves and
+deletions belong to bash (mv, rm), not here.
+"#;
 
 // The description the model reads, with the address forms filled in from the
 // table that defines them.
@@ -111,28 +73,46 @@ fn wrapped(label: &str, width: usize, text: &str) -> String {
 // hypothetical — it happened inside the commit that moved the grammar, and the
 // stale line sat two functions away from the rewrite.
 fn format() -> &'static str {
-    static TEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    TEXT.get_or_init(|| {
-        let width = hashline::FORMS
-            .iter()
-            .map(|f| f.suffix.len())
-            .max()
-            .unwrap_or(0)
-            + 1;
-        let addresses: Vec<String> = hashline::FORMS
-            .iter()
-            .map(|f| wrapped(&format!("N{}", f.suffix), width, f.means))
-            .collect();
-        SHAPE.replace("{addresses}", &addresses.join("\n"))
-    })
+    SHAPE
 }
 
+// The constructs a view of the file opens with, keyed by first line.
+fn construct_extents(path: &str, source: &str) -> HashMap<usize, (usize, usize)> {
+    syntax::Lang::of(path).map_or_else(HashMap::new, |l| syntax::extents(l, source))
+}
 fn echo(path: &str, before: &str, content: &str, landed: &[Landed]) -> String {
-    let mut out = hashline::header(path, &hashline::tag(content));
+    let mut out = hashline::header(path);
+    // A number that opened the wrong construct still lands and parses — the
+    // echo names what it covered, making the miss visible.
+    let old: Vec<&str> = before.lines().collect();
+    let extents = construct_extents(path, before);
+    let resolved: Vec<Option<String>> = landed
+        .iter()
+        .map(|l| {
+            let (cs, ce) = *extents.get(&l.took_at)?;
+            let covered = old.get(cs - 1..ce)?;
+            (ce > cs
+                && l.took.len() == covered.len()
+                && l.took.iter().zip(covered).all(|(took, was)| took == was))
+            .then(|| {
+                format!(
+                    "  covered the construct at lines {cs}-{ce}: `{}`\n",
+                    crop(covered[0], 60)
+                )
+            })
+        })
+        .collect();
     if landed.iter().all(|l| l.gave() == 0) {
-        // A patch of pure CUTs lands nothing, and saying so describes what did
+        // A patch of pure deletions lands nothing, and saying so describes what did
         // not happen. What did is the deletion, which is the whole point of the
         // patch and reads as failure when reported by its absence.
+        let named: Vec<&String> = resolved.iter().flatten().collect();
+        if !named.is_empty() {
+            out.push('\n');
+        }
+        for what in named {
+            out.push_str(what);
+        }
         let gone = before
             .lines()
             .count()
@@ -142,6 +122,20 @@ fn echo(path: &str, before: &str, content: &str, landed: &[Landed]) -> String {
             1 => " removed 1 line\n".to_string(),
             n => format!(" removed {n} lines\n"),
         });
+        // The rows themselves, numbered as they were: a sweep that took more
+        // than the model meant shows up row by row, not as a bare count.
+        let total: usize = landed.iter().map(|l| l.took.len()).sum();
+        let mut shown = 0usize;
+        for l in landed {
+            for (i, row) in l.took.iter().enumerate() {
+                if shown == 40 {
+                    out.push_str(&format!("  … and {} more rows\n", total - shown));
+                    return out;
+                }
+                out.push_str(&format!("{:>4} - {}\n", l.took_at + i, crop(row, 80)));
+                shown += 1;
+            }
+        }
         return out;
     }
     let lines: Vec<&str> = content.lines().collect();
@@ -169,12 +163,21 @@ fn echo(path: &str, before: &str, content: &str, landed: &[Landed]) -> String {
                 .collect()
         })
         .collect();
-    let total: usize = rendered.iter().flatten().map(String::len).sum();
+    let total: usize = rendered.iter().flatten().map(String::len).sum::<usize>()
+        + resolved.iter().flatten().map(String::len).sum::<usize>();
     if total <= ECHO_LIMIT {
-        rendered.iter().flatten().for_each(|r| out.push_str(r));
+        for (rows, star) in rendered.iter().zip(&resolved) {
+            if let Some(what) = star {
+                out.push_str(what);
+            }
+            rows.iter().for_each(|r| out.push_str(r));
+        }
         return out;
     }
-    for rows in &rendered {
+    for (rows, star) in rendered.iter().zip(&resolved) {
+        if let Some(what) = star {
+            out.push_str(what);
+        }
         // Whole anyway, where eliding would not actually save rows.
         if rows.len() <= ECHO_ENDS * 2 + 1 {
             rows.iter().for_each(|r| out.push_str(r));
@@ -209,16 +212,7 @@ fn broke_syntax(plan: &hashline::Plan, loaded: &HashMap<String, String>) -> Opti
                 path,
                 content,
                 landed,
-                ..
             } => (path, loaded.get(path), content, Some(landed)),
-            Change::Rename {
-                from,
-                to,
-                content,
-                landed,
-                ..
-            } => (to, loaded.get(from), content, Some(landed)),
-            Change::Remove { .. } => continue,
         };
         let before = before.map_or("", String::as_str);
         let rows = crate::parses::broke_rows(path, Some(before), after);
@@ -264,31 +258,18 @@ fn nearest_row(rows: &[usize], landed: Option<&Vec<Landed>>) -> Option<usize> {
         .copied()
 }
 
-// `N*` spelt out, but only where it resolves to more than the row itself.
-// Advice is followed, and `N*` on a one-row construct is `N` under another
-// name — a whole turn spent restating the failure.
-fn star(extents: &HashMap<usize, (usize, usize)>, line: usize) -> String {
-    match extents.get(&line) {
-        Some((start, end)) if end > start => format!(" or use `{line}*`"),
-        _ => String::new(),
-    }
-}
-
 // What the patch's own hunks point at, for a break that a bare "line N is
 // `}`" leaves the model to hunt down by itself. Each hunk shows the lines it
 // displaces (`took` — the file as it stands, since nothing has been written)
 // and any whose body nets a different brace count from what it displaces —
 // the shape an off-by-one range leaves behind.
-fn hunk_help(path: &str, before: &str, after: &str, landed: &[Landed]) -> String {
+fn hunk_help(_path: &str, before: &str, after: &str, landed: &[Landed]) -> String {
     // Hunks spelt out before the rest are summarised.
     const SHOWN: usize = 6;
     let new: Vec<&str> = after.lines().collect();
     let old: Vec<&str> = before.lines().collect();
     let mut out = String::from("The hunks, against the file as it stands:");
     let mut off = String::new();
-    // One parse for the whole message: the advice checks itself against what
-    // `N*` would actually resolve to, once per hunk.
-    let extents = syntax::Lang::of(path).map_or_else(HashMap::new, |l| syntax::extents(l, before));
     for l in landed.iter().take(SHOWN) {
         // The model's own numbering: nothing was written, so `took_at` is where
         // it addressed, where `start` is where the hunk would have landed.
@@ -297,11 +278,12 @@ fn hunk_help(path: &str, before: &str, after: &str, landed: &[Landed]) -> String
         // grammar writes it — a single line as `N`, a span as `N-M` — so the
         // shapes the model sees in the help are the ones its parser takes.
         let at = l.took_at;
-        let addr = hashline::Target::Range {
-            start: at,
-            end: at + l.took.len().saturating_sub(1),
-        }
-        .to_string();
+        let took_len = l.took.len().saturating_sub(1);
+        let addr = if took_len == 0 {
+            format!("{at}")
+        } else {
+            format!("{at}-{}", at + took_len)
+        };
         if l.took.is_empty() {
             out.push_str(&format!("\n  {addr}(insertion)"));
         } else {
@@ -323,18 +305,15 @@ fn hunk_help(path: &str, before: &str, after: &str, landed: &[Landed]) -> String
             // stated instead of left to re-derive.
             if let Some(e) = balanced_end(&old, at) {
                 if e > at {
-                    let star = star(&extents, at);
                     line.push_str(&format!(
-                        "; it opens at {at} and balances at line {e} — cover to {e}{star}"
+                        "; it opens at {at} and balances at line {e} — cover to {e}"
                     ));
                 } else {
                     // The displaced lines never opened a brace the body fails
                     // to close: the hunk itself is the problem, and naming
                     // the line as both open and close would read as a
-                    // contradiction.
-                    let star = star(&extents, e);
                     line.push_str(&format!(
-                        "; the imbalance sits at line {e} — replace or cut it{star}"
+                        "; the imbalance sits at line {e} — replace or cut it"
                     ));
                 }
             }
@@ -412,20 +391,6 @@ fn sketch(changes: &[Change], loaded: &HashMap<String, String>) -> String {
                 }
                 (path, content, landed)
             }
-            Change::Rename {
-                to,
-                content,
-                landed,
-                ..
-            } => (to, content, landed),
-            Change::Remove { path } => {
-                // Counted, not listed: deleting a file removes every line in
-                // it, and `+0 -0` would read as nothing having happened. What
-                // those lines said is not what a reader needs here.
-                minus += loaded.get(path).map_or(0, |c| c.lines().count());
-                files.push((path.as_str(), Vec::new()));
-                continue;
-            }
         };
         let lines: Vec<&str> = content.lines().collect();
         let mut row_lines: Vec<(char, usize, &str)> = Vec::new();
@@ -489,132 +454,6 @@ fn sketch(changes: &[Change], loaded: &HashMap<String, String>) -> String {
         .join("\n")
 }
 
-// Refuse addresses this session's own earlier edits moved, and show the rows
-// they now sit on.
-//
-// An edit hands back the new tag, so the tag check passes while the numbers
-// behind it point one row off. Rejecting alone would cost a read turn every
-// time, and a second edit with no read between is a capability worth keeping —
-// so the refusal carries the numbering itself and clears the mark, leaving the
-// model to resend against what it has just been shown.
-fn renumbered(
-    patch: &hashline::Patch,
-    reals: &HashMap<String, std::path::PathBuf>,
-    loaded: &HashMap<String, String>,
-    ctx: &Ctx,
-) -> Option<String> {
-    const AROUND: usize = 3;
-    let mut out = String::new();
-    for section in &patch.sections {
-        let Some(real) = reals.get(&section.path) else {
-            continue;
-        };
-        let Some(from) = ctx.shifted_from(real) else {
-            continue;
-        };
-        let content = loaded.get(&section.path).map_or("", String::as_str);
-        // A tag that no longer matches is a bigger problem than numbering, and
-        // saying so is `apply`'s job; nothing here should pre-empt it.
-        if section.tag != hashline::tag(content) {
-            continue;
-        }
-        // The highest line any op reaches, not the lowest: one hunk below the
-        // shift does not make the ones above it safe, and a range is unsafe as
-        // soon as either end is.
-        let Some(highest) = section.ops.iter().filter_map(op_span).map(|(_, e)| e).max() else {
-            continue;
-        };
-        if highest < from {
-            continue;
-        }
-        ctx.forget_shift(real);
-        let lines: Vec<&str> = content.lines().collect();
-        let spans = crate::rows::spans(&section.path, content);
-        out.push_str(&format!(
-            "{} was renumbered from line {from} on by your own last edit — the TAG is \
-             current, the line numbers are not. Around the lines this patch names:\n",
-            section.path
-        ));
-        let mut shown: Vec<usize> = section
-            .ops
-            .iter()
-            .filter_map(op_span)
-            // Both ends clamped into the file: an edit that shortened it is
-            // exactly when an address runs past the end, and the tail is what
-            // the model needs to see there — not an empty window.
-            .flat_map(|(s, e)| {
-                let (s, e) = (s.min(lines.len()), e.min(lines.len()));
-                s.saturating_sub(AROUND).max(1)..=(e + AROUND).min(lines.len())
-            })
-            .collect();
-        shown.sort_unstable();
-        shown.dedup();
-        // Rendered before it is spent, so the budget is the bytes this actually
-        // costs rather than a guess at them. A patch whose hunks span most of a
-        // file asks for most of the file back, and this message exists to save
-        // a read turn, not to be one.
-        let rendered: Vec<(usize, String)> = shown
-            .into_iter()
-            .map(|n| {
-                let mut row = String::new();
-                crate::rows::line(&mut row, n, &spans, lines[n - 1]);
-                (n, row)
-            })
-            .collect();
-        let keep = crate::rows::fits(rendered.iter(), |(_, r)| r.len(), ECHO_LIMIT);
-        let mut last = 0;
-        for (n, row) in rendered.iter().take(keep) {
-            if *n > last + 1 {
-                out.push_str(crate::rows::GAP);
-            }
-            out.push_str(row);
-            last = *n;
-        }
-        if keep < rendered.len() {
-            out.push_str(crate::rows::GAP);
-        }
-        out.push_str(
-            "Rebuild the hunks against these numbers, or — if the numbers you sent \
-             already match this content — send the patch again unchanged: the \
-             refusal does not fire twice.",
-        );
-    }
-    (!out.is_empty()).then_some(out)
-}
-
-// The original lines an op names, or None for one that names none.
-//
-// A `N*` is counted at N alone: where its construct closes is the resolver's
-// answer and this runs before the resolver. Under-reaching there costs a
-// refusal that did not fire, never one that fired wrongly.
-fn op_span(op: &hashline::Op) -> Option<(usize, usize)> {
-    use hashline::{LinePos, Op, Target};
-    let of = |t: &Target| match *t {
-        Target::Range { start, end } => (start, end),
-        Target::Block { line } => (line, line),
-    };
-    match op {
-        Op::Replace { target, .. } | Op::Cut { target, .. } => Some(of(target)),
-        // `1:UP` is the file head however the numbering moved.
-        Op::InsertBefore { line: 1, .. } => None,
-        Op::InsertBefore { line, .. } => Some((*line, *line)),
-        Op::InsertAfter { at, .. } => Some(match at {
-            LinePos::At(n) | LinePos::AfterBlock(n) => (*n, *n),
-        }),
-        Op::Remove | Op::Move { .. } => None,
-    }
-}
-
-// What each file's tag is right now, for a refusal that turned on one.
-fn tags(loaded: &HashMap<String, String>) -> String {
-    let mut out: Vec<String> = loaded
-        .iter()
-        .map(|(p, c)| hashline::header(p, &hashline::tag(c)))
-        .collect();
-    out.sort();
-    out.join(" ")
-}
-
 pub struct Edit;
 
 #[async_trait]
@@ -631,7 +470,7 @@ impl Tool for Edit {
         json!({
             "type": "object",
             "properties": {
-                "patch": { "type": "string", "description": "One or more [path#TAG] sections." },
+                "patch": { "type": "string", "description": "One or more [path] sections." },
             },
             "required": ["patch"],
             "additionalProperties": false,
@@ -664,6 +503,7 @@ impl Tool for Edit {
         let mut guards = Vec::new();
         let mut loaded: HashMap<String, String> = HashMap::new();
         let mut reals: HashMap<String, std::path::PathBuf> = HashMap::new();
+        let mut stale: Vec<String> = Vec::new();
         for path in patch.paths() {
             let real = ctx.workspace.resolve(path, self.tier())?;
             reals.insert(path.to_string(), real.clone());
@@ -680,18 +520,18 @@ impl Tool for Edit {
                     "{path}: {e}. edit changes existing files; use write to create one"
                 ))
             })?;
+            // Read-before-edit, and the staleness note: both read off the
+            // last view of this file, recorded by read/grep/write/edit.
+            let viewed = ctx.viewed_hash(&real);
+            let Some(viewed) = viewed else {
+                return Err(ToolError::Invalid(format!(
+                    "{path}: read it before editing it"
+                )));
+            };
+            if viewed != hashline::view_hash(&content) {
+                stale.push(path.to_string());
+            }
             loaded.insert(path.to_string(), content);
-        }
-
-        if let Some(why) = renumbered(&patch, &reals, &loaded, ctx) {
-            tracing::warn!(
-                target: "pi::edit",
-                stage = "shift",
-                error = %why,
-                patch = %args.patch,
-                "patch rejected"
-            );
-            return Err(ToolError::Patch(PatchError::Renumbered, why));
         }
 
         let view: HashMap<&str, &str> = loaded
@@ -706,7 +546,6 @@ impl Tool for Edit {
                 target: "pi::edit",
                 stage = "apply",
                 error = %e,
-                tags = %tags(&loaded),
                 patch = %args.patch,
                 "patch rejected"
             );
@@ -723,38 +562,6 @@ impl Tool for Edit {
             );
             return Err(ToolError::Patch(PatchError::Unbalanced, why));
         }
-
-        // After the guards, since a rejected patch wrote nothing and moved no
-        // line. The report below hands back a fresh tag; this is what stops
-        // that tag from vouching for numbering it does not cover.
-        // Bookkeeping runs beside each write, never ahead of the batch: a
-        // failure partway through would otherwise leave the tracker describing
-        // a file that was never written.
-        //
-        // Both ends of a rename, since the model's numbers for the old path are
-        // the only ones it has for the new one. A path that no longer holds the
-        // file it was noted for is forgotten instead, or the note outlives the
-        // content and refuses edits to whatever is written there next.
-        let track = |change: &Change, gone: &[&String], moved: &[&String]| {
-            let resolve = |path: &&String| match reals.get(*path) {
-                // Every path but a rename's destination is already resolved.
-                Some(real) => Some(real.clone()),
-                None => ctx.workspace.resolve(path, self.tier()).ok(),
-            };
-            // Every path the change reached, whichever side it came in on:
-            // a rename touches both ends, a removal touches the file it took.
-            for real in gone.iter().chain(moved.iter()).filter_map(resolve) {
-                ctx.note_write(&real);
-            }
-            for real in gone.iter().filter_map(resolve) {
-                ctx.forget_shift(&real);
-            }
-            if let Some(from) = hashline::first_shifted_line(std::slice::from_ref(change)) {
-                for real in moved.iter().filter_map(resolve) {
-                    ctx.note_shift(&real, from);
-                }
-            }
-        };
 
         let mut report = String::new();
         // Every change path was resolved and locked above; a miss means
@@ -773,39 +580,26 @@ impl Tool for Edit {
                     if loaded.get(path).is_some_and(|before| before == content) {
                         report.push_str(&format!(
                             "{} unchanged — the patch matches what is already there\n",
-                            hashline::header(path, &hashline::tag(content))
+                            hashline::header(path)
                         ));
                         continue;
                     }
+                    ctx.note_write(&reals[path]);
                     tokio::fs::write(locked(path), content).await?;
-                    track(change, &[], &[path]);
+                    // The model just saw this change; the note is for outside drift.
+                    ctx.note_view(&reals[path], &hashline::view_hash(content));
                     let before = loaded.get(path).map_or("", String::as_str);
                     report.push_str(&echo(path, before, content, landed));
                 }
-                Change::Remove { path } => {
-                    tokio::fs::remove_file(locked(path)).await?;
-                    track(change, &[path], &[]);
-                    report.push_str(&format!("removed {path}\n"));
-                }
-                Change::Rename {
-                    from,
-                    to,
-                    content,
-                    landed,
-                } => {
-                    let dest = ctx.workspace.resolve(to, self.tier())?;
-                    if let Some(parent) = dest.parent() {
-                        tokio::fs::create_dir_all(parent).await?;
-                    }
-                    tokio::fs::write(&dest, content).await?;
-                    tokio::fs::remove_file(locked(from)).await?;
-                    track(change, &[from], &[to]);
-                    report.push_str(&format!("{from} → "));
-                    let before = loaded.get(from).map_or("", String::as_str);
-                    report.push_str(&echo(to, before, content, landed));
-                }
             }
         }
+        if !stale.is_empty() {
+            report.push_str(&format!(
+                "\nfile changed since your last view: {}",
+                stale.join(", ")
+            ));
+        }
+
         Ok(ToolOutput::text(report).with_preview(sketch(&plan.changes, &loaded)))
     }
 }
@@ -887,8 +681,6 @@ mod tests {
         let help = hunk_help("a.rs", src, src, &landed);
         assert!(help.contains("opens at 5"), "{help}");
         assert!(help.contains("balances at line 7"), "{help}");
-        // Here `5*` does resolve, so it is worth offering.
-        assert!(help.contains("use `5*`"), "{help}");
     }
 
     #[test]

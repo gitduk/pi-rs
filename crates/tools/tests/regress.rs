@@ -23,35 +23,24 @@ async fn edit(c: &Ctx, patch: String) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
-// From ~/.pi/logs/1787817702-887066: `PUT 136*:` was suggested by the failure
-// message, followed, and failed again — line 136 was a one-line `let`.
 #[tokio::test]
-async fn a_one_row_construct_is_never_offered_as_a_star() {
+async fn an_unbalanced_replacement_says_where_the_imbalance_sits() {
     let (_d, c) = ctx();
-    let src = "\
-fn f() -> bool {
-    let enabled = count();
-    if enabled {
-        true
-    } else {
-        false
-    }
-}
-";
+    let src = "fn f() -> bool {\n    let enabled = count();\n    if enabled {\n        true\n    } else {\n        false\n    }\n}\n";
     std::fs::write(c.workspace.root().join("a.rs"), src).unwrap();
-    // The hunk opens on a one-row `let` and its body drops a brace, which is
-    // where the message reaches for `N*` — and where `N*` cannot help.
+    // The replacement deletes the rows that close the fn: the produced file
+    // is unterminated, which the parser always flags - unlike a stray
+    // top-level `}`, which its error recovery absorbs.
+    run_read(&c, "a.rs").await;
     let err = edit(
         &c,
-        format!(
-            "[a.rs#{}]\nPUT 2-6:\n+    let enabled = count();\n+    enabled\n",
-            hashline::tag(src)
-        ),
+        "[a.rs]\n-    let enabled = count();\n-    if enabled {\n-        true\n-    } else {\n-        false\n-    }\n-}\n".into(),
     )
     .await
     .unwrap_err();
-    assert!(err.contains("the imbalance sits at line 2"), "{err}");
-    assert!(!err.contains('*'), "no unfollowable `N*` advice:\n{err}");
+    assert!(err.contains("would not parse"), "{err}");
+    assert!(err.contains("Brace balance"), "{err}");
+    assert!(err.contains("Nothing was written"), "{err}");
 }
 
 // From ~/.pi/logs/1788141625-3348974: every failing range ended one line off a
@@ -75,7 +64,7 @@ pub fn pick(word: &str) -> Vec<u8> {
     assert!(out.contains("\n3-4:"), "{out}");
 }
 
-// From ~/.pi/logs/1787817380-856220 turn 20: a 43-line body that carried the
+// From ~/.pi/logs/1788141625-3348974 turn 20: a 43-line body that carried the
 // struct it was replacing twice. The echo said only how many rows arrived, so
 // nothing showed that the body had doubled a block — and the file still parsed.
 //
@@ -87,49 +76,57 @@ async fn the_echo_budget_is_spent_in_bytes_not_rows() {
     let (_d, c) = ctx();
     let path = c.workspace.root().join("a.rs");
     let src = format!("fn f() {{\n{}}}\n", "    let x = 1;\n".repeat(60));
-
-    // Fifty narrow rows: over the row count that used to elide, nowhere near
-    // the bytes that do.
     std::fs::write(&path, &src).unwrap();
+    run_read(&c, "a.rs").await;
+
+    // Fifty narrow rows replacing sixty: over the row count that used to
+    // elide, nowhere near the bytes that do.
     let body: String = (1..=50)
         .map(|i| format!("+    let y{i} = {i};\n"))
         .collect();
-    let out = edit(
-        &c,
-        format!("[a.rs#{}]\nPUT 2-61:\n{body}", hashline::tag(&src)),
-    )
-    .await
-    .unwrap();
+    let patch = format!(
+        "[a.rs]\n=fn f() {{\n{}=}}\n{body}",
+        "-    let x = 1;\n".repeat(60)
+    );
+    let out = edit(&c, patch).await.unwrap();
     assert!(
         !out.contains("… "),
         "narrow rows are cheap; echo them:\n{out}"
     );
-    assert!(out.contains("51:    let y50 = 50;"), "{out}");
+    assert!(out.contains("52:    let y50 = 50;"), "{out}");
 
-    // Forty wide ones: fewer rows than above, three times the bytes. A second file, because the
-    // first one's numbering has moved and the guard is right to say so.
+    // Forty wide ones: fewer rows than above, three times the bytes. A second
+    // file, because the first one's content has moved and the anchor is right
+    // to say so.
     std::fs::write(c.workspace.root().join("b.rs"), &src).unwrap();
+    run_read(&c, "b.rs").await;
     let wide: String = (1..=40)
         .map(|i| format!("+    let y{i} = compute(&state, {i}, \"a rather long argument\");\n"))
         .collect();
-    let out = edit(
-        &c,
-        format!("[b.rs#{}]\nPUT 2-61:\n{wide}", hashline::tag(&src)),
-    )
-    .await
-    .unwrap();
+    let patch = format!(
+        "[b.rs]\n=fn f() {{\n{}=}}\n{wide}",
+        "-    let x = 1;\n".repeat(60)
+    );
+    let out = edit(&c, patch).await.unwrap();
     assert!(
-        out.contains("2:    let y1 = compute"),
+        out.contains("3:    let y1 = compute"),
         "head of the hunk:\n{out}"
     );
     assert!(
-        out.contains("41:    let y40 = compute"),
+        out.contains("42:    let y40 = compute"),
         "tail of the hunk:\n{out}"
     );
     assert!(
-        out.contains("… 34 lines"),
+        out.contains("… 36 lines"),
         "and what it stood in for:\n{out}"
     );
+}
+
+async fn run_read(c: &Ctx, path: &str) {
+    tools::read::Read
+        .execute(json!({"path": path}), c)
+        .await
+        .unwrap();
 }
 
 // From ~/.pi/logs/1788141625-3348974 turn 103: the break was reported at line 1
@@ -142,15 +139,11 @@ async fn the_break_reported_is_the_one_near_the_hunk() {
         .collect();
     let src = format!("//! Header.\n{filler}");
     std::fs::write(c.workspace.root().join("a.rs"), &src).unwrap();
-    // Replace `fn f30() {` … `30;` and drop the opening brace's partner.
-    let at = 2 + 30 * 3;
+    run_read(&c, "a.rs").await;
+    // Replace `fn f30()`'s body and drop the opening brace's partner.
     let err = edit(
         &c,
-        format!(
-            "[a.rs#{}]\nPUT {at}-{}:\n+fn f30() {{\n+    30;\n+}}\n+extra();\n",
-            hashline::tag(&src),
-            at + 1
-        ),
+        "[a.rs]\n=fn f30() {\n-    30\n+    30;\n+extra();\n".into(),
     )
     .await
     .unwrap_err();
@@ -160,37 +153,34 @@ async fn the_break_reported_is_the_one_near_the_hunk() {
     );
 }
 
-// From ~/.pi/logs/1788141625-3348974 turn 4→5: the bare `}` was called invalid,
-// the model deleted it, and the next patch failed on the brace it had dropped.
+// The general form of a refusal that teaches: a keep row that matches nothing
+// is named as the thing to widen.
 #[tokio::test]
-async fn a_kept_line_written_as_context_is_told_to_widen() {
+async fn a_context_that_matches_nothing_is_told_to_widen() {
     let (_d, c) = ctx();
     let src = "fn f() {\n    a();\n}\n";
     std::fs::write(c.workspace.root().join("a.rs"), src).unwrap();
-    let err = edit(
-        &c,
-        format!("[a.rs#{}]\nPUT 2:\n+    b();\n}}\n", hashline::tag(src)),
-    )
-    .await
-    .unwrap_err();
-    assert!(err.contains("widen the address"), "{err}");
+    run_read(&c, "a.rs").await;
+    let err = edit(&c, "[a.rs]\n=a();\n=nothing\n-a();\n".into())
+        .await
+        .unwrap_err();
+    assert!(err.contains("Widen the `=` context"), "{err}");
 }
 
-// `PUT N*:` named at the construct's own row left the doc comment and the
-// attribute above it in place, so a body carrying its own wrote both twice —
-// and the result parsed, so nothing caught it.
+// The `*` row names the opening line; the extent the parser returns includes
+// the doc comment and attribute above it, so a body carrying its own does not
+// write them twice — and the result still parses.
 #[tokio::test]
 async fn a_star_named_below_the_annotations_still_replaces_them() {
     let (_d, c) = ctx();
     let src = "use std::fmt;\n\n/// Old doc.\n#[inline]\npub fn foo() -> u8 {\n    1\n}\n";
     let path = c.workspace.root().join("a.rs");
     std::fs::write(&path, src).unwrap();
-    edit(
+
+    run_read(&c, "a.rs").await;
+    let _out = edit(
         &c,
-        format!(
-            "[a.rs#{}]\nPUT 5*:\n+/// New doc.\n+#[inline]\n+pub fn foo() -> u8 {{\n+    2\n+}}\n",
-            hashline::tag(src)
-        ),
+        "[a.rs]\n@/// Old doc.\n-/// Old doc.\n-#[inline]\n-pub fn foo() -> u8 {\n-    1\n-}\n+/// New doc.\n+#[inline]\n+pub fn foo() -> u8 {\n+    2\n+}\n".into(),
     )
     .await
     .unwrap();
@@ -201,156 +191,23 @@ async fn a_star_named_below_the_annotations_still_replaces_them() {
 }
 
 // The read view names the extent on the row it starts, so the number it prints
-// and the number `N*` resolves are the same one.
+// and the row the `@` scope matches are the same one.
 #[tokio::test]
-async fn the_view_and_the_star_name_the_same_rows() {
+async fn the_view_and_the_scope_name_the_same_rows() {
     let (_d, c) = ctx();
     let src = "/// Doc.\n#[inline]\npub fn foo() {}\n";
     let path = c.workspace.root().join("a.rs");
     std::fs::write(&path, src).unwrap();
     assert!(show(&c, "a.rs").await.contains("\n1-3:/// Doc."), "{src}");
-    edit(&c, format!("[a.rs#{}]\nCUT 1*\n", hashline::tag(src)))
-        .await
-        .unwrap();
+    edit(
+        &c,
+        "[a.rs]\n@/// Doc.\n-/// Doc.\n-#[inline]\n-pub fn foo() {}\n".into(),
+    )
+    .await
+    .unwrap();
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
 }
 
-// A file written whole leaves the model knowing its numbering — it sent every
-// line. A body that still carries read's header does not: cleaning drops that
-// row, and everything below it is one off what was sent.
-#[tokio::test]
-async fn a_write_re_establishes_numbering_unless_cleaning_moved_it() {
-    let (_d, c) = ctx();
-    std::fs::write(c.workspace.root().join("a.rs"), "one\ntwo\nthree\n").unwrap();
-    let write = |body: &'static str| {
-        tools::write::Write.execute(json!({"path": "a.rs", "content": body}), &c)
-    };
-    let tag_of = |out: &str| {
-        out.split('#')
-            .nth(1)
-            .unwrap()
-            .split(']')
-            .next()
-            .unwrap()
-            .to_string()
-    };
-
-    // An earlier edit left a shift note; writing the file whole answers it.
-    edit(
-        &c,
-        format!(
-            "[a.rs#{}]\nPUT 1:\n+A\n+B\n",
-            hashline::tag("one\ntwo\nthree\n")
-        ),
-    )
-    .await
-    .unwrap();
-    let tag = tag_of(&write("one\ntwo\nTHREE\n").await.unwrap().flatten());
-    edit(&c, format!("[a.rs#{tag}]\nPUT 3:\n+DONE\n"))
-        .await
-        .unwrap();
-    assert_eq!(
-        std::fs::read_to_string(c.workspace.root().join("a.rs")).unwrap(),
-        "one\ntwo\nDONE\n"
-    );
-
-    // A body with read's own header pasted back: cleaning drops that row, so
-    // the rows the model counted are one off the rows on disk.
-    let tag = tag_of(&write("[a.rs#0000]\nx\ny\n").await.unwrap().flatten());
-    let err = edit(&c, format!("[a.rs#{tag}]\nPUT 2:\n+Y\n"))
-        .await
-        .unwrap_err();
-    assert!(err.contains("renumbered from line 1 on"), "{err}");
-}
-
-// A shift note may not outlive the content it was about: the next file at that
-// path is one the model wrote itself, and every line of it is its own.
-#[tokio::test]
-async fn a_removed_file_takes_its_shift_note_with_it() {
-    let (_d, c) = ctx();
-    let src = "one\ntwo\nthree\nfour\n";
-    std::fs::write(c.workspace.root().join("a.rs"), src).unwrap();
-    edit(
-        &c,
-        format!("[a.rs#{}]\nPUT 1:\n+A\n+B\n", hashline::tag(src)),
-    )
-    .await
-    .unwrap();
-
-    let now = std::fs::read_to_string(c.workspace.root().join("a.rs")).unwrap();
-    edit(&c, format!("[a.rs#{}]\nRM\n", hashline::tag(&now)))
-        .await
-        .unwrap();
-    let fresh = "1\n2\n3\n";
-    tools::write::Write
-        .execute(json!({"path": "a.rs", "content": fresh}), &c)
-        .await
-        .unwrap();
-    // Nothing about this file has ever shifted.
-    edit(
-        &c,
-        format!("[a.rs#{}]\nPUT 3:\n+THREE\n", hashline::tag(fresh)),
-    )
-    .await
-    .unwrap();
-}
-
-// One hunk below the shift does not vouch for the ones above it.
-#[tokio::test]
-async fn a_patch_is_refused_when_any_hunk_reaches_into_moved_numbering() {
-    let (_d, c) = ctx();
-    let src = "one\ntwo\nthree\nfour\nfive\n";
-    let path = c.workspace.root().join("a.rs");
-    std::fs::write(&path, src).unwrap();
-    let out = edit(
-        &c,
-        format!("[a.rs#{}]\nPUT 2:\n+TWO\n+TWO-B\n", hashline::tag(src)),
-    )
-    .await
-    .unwrap();
-    let after = std::fs::read_to_string(&path).unwrap();
-    let tag = out.split('#').nth(1).unwrap().split(']').next().unwrap();
-
-    // Starts at 1 — below the shift — but its far end is well inside it.
-    let err = edit(&c, format!("[a.rs#{tag}]\nPUT 1-4:\n+A\n+B\n+C\n+D\n"))
-        .await
-        .unwrap_err();
-    assert!(err.contains("renumbered from line 2 on"), "{err}");
-    assert_eq!(
-        std::fs::read_to_string(&path).unwrap(),
-        after,
-        "nothing written"
-    );
-}
-
-// The refusal is only worth a turn if it carries the numbering. An edit that
-// shortened the file is where an address runs past the end — and where an
-// unclamped window would have printed a heading with nothing under it.
-#[tokio::test]
-async fn the_refusal_shows_rows_even_when_the_address_is_past_the_end() {
-    let (_d, c) = ctx();
-    let src = "one\ntwo\nthree\nfour\nfive\nsix\n";
-    std::fs::write(c.workspace.root().join("a.rs"), src).unwrap();
-    let out = edit(&c, format!("[a.rs#{}]\nCUT 1-3\n", hashline::tag(src)))
-        .await
-        .unwrap();
-    let tag = out.split('#').nth(1).unwrap().split(']').next().unwrap();
-
-    // The file is three lines now; line 6 came from the read before the cut.
-    let err = edit(&c, format!("[a.rs#{tag}]\nPUT 6:\n+SIX\n"))
-        .await
-        .unwrap_err();
-    assert!(err.contains("renumbered from line 1 on"), "{err}");
-    assert!(
-        err.contains("3:six"),
-        "the tail, not an empty window:\n{err}"
-    );
-}
-
-// The display and the body are two projections of one decision, so a row named
-// by the first is a row present in the second — whatever the budget dropped in
-// between. Naming what the caller *meant* to send is how it came to advertise
-// `1-2000` for a body holding 1-361 and 1661-2000.
 #[tokio::test]
 async fn the_display_names_exactly_the_rows_the_body_holds() {
     let (_d, c) = ctx();
@@ -462,32 +319,69 @@ async fn nothing_is_elided_without_somewhere_to_recover_it_from() {
     );
 }
 
-// The refusal exists to save a read turn, not to be one: a patch whose hunks
-// span most of a file was asking for most of the file back.
+// A refusal is only worth a turn if it stays inside the view budget every
+// other refusal obeys, and names the closest real row so the retry costs no
+// read.
 #[tokio::test]
-async fn the_renumber_refusal_is_budgeted_like_every_other_view() {
+async fn the_no_match_refusal_is_budgeted_like_every_other_view() {
     let (_d, c) = ctx();
     let path = c.workspace.root().join("a.txt");
     let src: String = (1..=400)
         .map(|i| format!("row {i} of the file\n"))
         .collect();
     std::fs::write(&path, &src).unwrap();
+    run_read(&c, "a.txt").await;
 
+    let err = edit(
+        &c,
+        "[a.txt]\n=row 400 of the file\n-row 401 of the file\n-x\n".into(),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("no match"), "{err}");
+    assert!(err.contains("closest real line"), "{err}");
+    assert!(err.len() < 4_000, "unbudgeted, {} bytes:\n{err}", err.len());
+}
+
+// A `*` scope whose operation covers the construct says so: the echo names it,
+// so opening the wrong one is visible instead of a clean apply.
+#[tokio::test]
+async fn the_echo_names_the_construct_a_scope_covered() {
+    let (_d, c) = ctx();
+    let path = c.workspace.root().join("a.rs");
+    let src = "fn first() {\n    1\n}\n\nfn second() {\n    2\n}\n";
+    std::fs::write(&path, src).unwrap();
+
+    run_read(&c, "a.rs").await;
     let out = edit(
         &c,
-        format!("[a.txt#{}]\nPUT 2:\n+A\n+B\n", hashline::tag(&src)),
+        "[a.rs]\n@fn second()\n=fn second() {\n-    2\n-}\n+    22\n+}\n".into(),
     )
     .await
     .unwrap();
-    let tag = out.split('#').nth(1).unwrap().split(']').next().unwrap();
-    // One hunk over nearly the whole file, addressed on the moved numbering.
-    let err = edit(&c, format!("[a.txt#{tag}]\nPUT 3-390:\n+x\n"))
-        .await
-        .unwrap_err();
 
-    assert!(err.contains("renumbered from line 2 on"), "{err}");
-    assert!(err.contains("Rebuild the hunks"), "{err}");
-    assert!(err.contains("again unchanged"), "{err}");
-    assert!(err.len() < 4_000, "unbudgeted, {} bytes:\n{err}", err.len());
-    assert!(err.contains('…'), "and it says where it stopped:\n{err}");
+    assert!(out.contains("covered the construct at lines 5-7"), "{out}");
+    assert!(out.contains("lines 5-7: `fn second() {`"), "{out}");
+}
+
+// The same visibility for a deletion: an operation that takes a whole
+// construct names it, since a wrong-target delete is as silent as a
+// wrong-target rewrite.
+#[tokio::test]
+async fn the_echo_names_the_construct_a_pure_delete_covered() {
+    let (_d, c) = ctx();
+    let path = c.workspace.root().join("a.rs");
+    let src = "fn first() {\n    1\n}\n\nfn second() {\n    2\n}\n";
+    std::fs::write(&path, src).unwrap();
+    run_read(&c, "a.rs").await;
+
+    let out = edit(
+        &c,
+        "[a.rs]\n@fn second()\n-fn second() {\n-    2\n-}\n".into(),
+    )
+    .await
+    .unwrap();
+
+    assert!(out.contains("covered the construct at lines 5-7"), "{out}");
+    assert!(out.contains("removed 3 lines"), "{out}");
 }

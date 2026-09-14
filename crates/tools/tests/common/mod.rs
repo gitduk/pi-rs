@@ -37,25 +37,25 @@ pub fn spilled_body(c: &Ctx, out: &str) -> String {
 /// Every address a view printed, handed back to the parser that must read it.
 ///
 /// Three guards in one, because each has already failed here. The addresses are
-/// found by shape rather than by spelling — the first version looked for `.=`,
-/// and when the grammar moved to `-` it matched nothing and passed silently.
+/// Every numbered row grep prints must be a verbatim row of the file: the
+/// marker grammar names anchors by their text, so a printed row that is not
+/// in the file is an anchor that can never match.
+///
 /// The count is asserted, because a view whose rows all happen to be one kind
-/// proves nothing about the other: that version passed while every non-spanning
-/// row printed a bare number the parser rejects. And it is shared, because the
-/// view it was not applied to is the one that stayed broken.
-pub fn every_address_parses(out: &str, path: &str, body: &str, least: usize) {
+/// proves nothing about the other. And it is shared, because the view it was
+/// not applied to is the one that stayed broken.
+pub fn every_row_anchors_in_the_body(out: &str, path: &str, body: &str, least: usize) {
     let mut checked = 0;
     for row in out.lines() {
-        let Some((addr, _)) = row.split_once(':') else {
+        let Some((addr, text)) = row.split_once(':') else {
             continue;
         };
         if !addr.starts_with(|c: char| c.is_ascii_digit()) {
             continue;
         }
-        let patch = format!("[{path}#{}]\nCUT {addr}\n", hashline::tag(body));
         assert!(
-            hashline::parse(&patch).is_ok(),
-            "`{addr}` is printed but not parsed:\n{out}"
+            body.lines().any(|l| l.trim_start() == text.trim_start()),
+            "grep printed `{addr}:{text}` but no row of {path} matches it:\n{out}"
         );
         checked += 1;
     }

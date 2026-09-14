@@ -20,7 +20,7 @@ fn long_rust() -> String {
 }
 
 mod common;
-use common::every_address_parses;
+use common::every_row_anchors_in_the_body;
 
 #[tokio::test]
 async fn a_long_file_comes_back_as_a_skeleton() {
@@ -29,17 +29,11 @@ async fn a_long_file_comes_back_as_a_skeleton() {
     std::fs::write(c.workspace.root().join("big.rs"), &body).unwrap();
 
     let out = run(&tools::read::Read, json!({ "path": "big.rs" }), &c).await;
-    assert!(
-        out.starts_with(&format!(
-            "[big.rs#{}] 329 lines · outline",
-            hashline::tag(&body)
-        )),
-        "{out}"
-    );
+    assert!(out.starts_with("[big.rs] 329 lines · outline"), "{out}");
     // The span, so the model can replace one whole without a second read, and
     // the indent, so a method does not read like a top-level item.
     assert!(out.contains("321-323:pub struct Point {"), "{out}");
-    every_address_parses(&out, "big.rs", &body, 3);
+    every_row_anchors_in_the_body(&out, "big.rs", &body, 3);
     assert!(out.contains("325-329:impl Point {"), "{out}");
     assert!(out.contains("326-328:  pub fn new() -> Self {"), "{out}");
     // 329 lines of source must not come back as 329 lines of output.
@@ -61,12 +55,12 @@ async fn a_range_request_is_answered_with_lines_not_a_skeleton() {
     )
     .await;
     // A declaration's row says where it ends; an ordinary row says only itself.
-    // Both are addresses the model can paste: a prefix it cannot is the tool
-    // teaching a form its own parser refuses.
+    // Both are anchors the model can quote verbatim: a form it cannot quote is
+    // the tool teaching a grammar its own parser refuses.
     assert!(out.contains("321-323:pub struct Point {"), "{out}");
     assert!(out.contains("\n322:    x: i32,"), "{out}");
     assert!(!out.contains("outline"), "{out}");
-    every_address_parses(&out, "big.rs", &body, 3);
+    every_row_anchors_in_the_body(&out, "big.rs", &body, 3);
 }
 
 #[tokio::test]
@@ -90,9 +84,9 @@ async fn a_construct_that_closes_past_the_window_still_says_where() {
         "the window must still end at 327: {out}"
     );
 
-    // And what it says parses as the address it looks like.
-    // Ordinary rows too: those are the ones a bare number used to be printed for.
-    every_address_parses(&out, "big.rs", &body, 3);
+    // And what it says anchors in the file. Ordinary rows too: those are the
+    // ones a bare number used to be printed for.
+    every_row_anchors_in_the_body(&out, "big.rs", &body, 3);
 }
 
 #[tokio::test]
@@ -130,17 +124,17 @@ async fn a_long_file_in_an_unparsed_language_still_reads_as_lines() {
 }
 
 #[tokio::test]
-async fn a_block_op_replaces_a_whole_function_without_counting_lines() {
+async fn a_scope_row_replaces_a_whole_function_without_counting_lines() {
     let (_d, c) = ctx();
     let src = "pub fn keep() {}\n\npub fn replace_me(a: i32) -> i32 {\n    a * 2\n}\n\npub fn also_keep() {}\n";
     std::fs::write(c.workspace.root().join("a.rs"), src).unwrap();
 
-    let patch = format!(
-        "[a.rs#{}]\nPUT 3*:\n+pub fn replaced() {{}}\n",
-        hashline::tag(src)
-    );
+    run(&tools::read::Read, json!({ "path": "a.rs" }), &c).await;
     let report = tools::edit::Edit
-        .execute(json!({ "patch": patch }), &c)
+        .execute(
+            json!({ "patch": "[a.rs]\n@pub fn replace_me(a: i32) -> i32\n-pub fn replace_me(a: i32) -> i32 {\n-    a * 2\n-}\n+pub fn replaced() {}\n" }),
+            &c,
+        )
         .await
         .unwrap()
         .flatten();
@@ -153,17 +147,17 @@ async fn a_block_op_replaces_a_whole_function_without_counting_lines() {
 }
 
 #[tokio::test]
-async fn a_block_op_takes_the_attribute_above_when_pointed_at_it() {
+async fn a_scope_row_takes_the_attribute_above_when_named_by_it() {
     let (_d, c) = ctx();
     let src = "#[inline]\npub fn f() {\n    1\n}\n\npub fn g() {}\n";
     std::fs::write(c.workspace.root().join("a.rs"), src).unwrap();
 
-    let patch = format!(
-        "[a.rs#{}]\nPUT 1*:\n+pub fn f() {{ 2 }}\n",
-        hashline::tag(src)
-    );
+    run(&tools::read::Read, json!({ "path": "a.rs" }), &c).await;
     tools::edit::Edit
-        .execute(json!({ "patch": patch }), &c)
+        .execute(
+            json!({ "patch": "[a.rs]\n@#[inline]\n-#[inline]\n-pub fn f() {\n-    1\n-}\n+pub fn f() { 2 }\n" }),
+            &c,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -173,18 +167,18 @@ async fn a_block_op_takes_the_attribute_above_when_pointed_at_it() {
 }
 
 #[tokio::test]
-async fn a_block_op_on_a_closing_brace_is_refused() {
+async fn a_scope_row_on_a_closing_brace_refuses() {
     let (_d, c) = ctx();
     let src = "pub fn f() {\n    1\n}\n";
     std::fs::write(c.workspace.root().join("a.rs"), src).unwrap();
 
-    let patch = format!("[a.rs#{}]\nPUT 3*:\n+x\n", hashline::tag(src));
+    run(&tools::read::Read, json!({ "path": "a.rs" }), &c).await;
     let err = tools::edit::Edit
-        .execute(json!({ "patch": patch }), &c)
+        .execute(json!({ "patch": "[a.rs]\n*}\n+x\n" }), &c)
         .await
         .unwrap_err();
     assert!(matches!(err, ToolError::Patch(_, _)), "{err:?}");
-    assert!(err.to_string().contains("opens no construct"), "{err}");
+    assert!(err.to_string().contains("no construct opens"), "{err}");
     assert_eq!(
         std::fs::read_to_string(c.workspace.root().join("a.rs")).unwrap(),
         src
@@ -192,40 +186,32 @@ async fn a_block_op_on_a_closing_brace_is_refused() {
 }
 
 #[tokio::test]
-async fn a_block_op_in_an_unparsed_language_says_so() {
+async fn a_scope_row_in_an_unparsed_language_says_so() {
     let (_d, c) = ctx();
     std::fs::write(c.workspace.root().join("a.txt"), "one\ntwo\n").unwrap();
-    let patch = format!("[a.txt#{}]\nPUT 1*:\n+x\n", hashline::tag("one\ntwo\n"));
+    run(&tools::read::Read, json!({ "path": "a.txt" }), &c).await;
     let err = tools::edit::Edit
-        .execute(json!({ "patch": patch }), &c)
+        .execute(json!({ "patch": "[a.txt]\n*one\n+x\n" }), &c)
         .await
         .unwrap_err();
-    assert!(
-        err.to_string().contains("Name the lines with `N-M`"),
-        "{err}"
-    );
+    assert!(err.to_string().contains("no construct opens"), "{err}");
 }
 
 #[tokio::test]
-async fn an_outline_line_number_feeds_straight_into_a_block_edit() {
+async fn the_outline_names_the_construct_and_feeds_an_edit_without_a_read() {
     let (_d, c) = ctx();
     let body = long_rust();
     std::fs::write(c.workspace.root().join("big.rs"), &body).unwrap();
 
     let outline = run(&tools::read::Read, json!({ "path": "big.rs" }), &c).await;
-    let tag = outline
-        .split('#')
-        .nth(1)
-        .unwrap()
-        .split(']')
-        .next()
-        .unwrap()
-        .to_string();
-    // The skeleton gave line 326 for `pub fn new`; nothing else was read.
-    let patch =
-        format!("[big.rs#{tag}]\nPUT 326*:\n+    pub fn new() -> Self {{ Self {{ x: 1 }} }}\n");
+    assert!(outline.contains("326-328:  pub fn new() -> Self {"));
+    // The skeleton shows row 326 as `326-328:  pub fn new() -> Self {`: the
+    // text is the scope, the span is the extent — nothing else was read.
     tools::edit::Edit
-        .execute(json!({ "patch": patch }), &c)
+        .execute(
+            json!({ "patch": "[big.rs]\n@  pub fn new() -> Self {\n-  pub fn new() -> Self {\n-        Self { x: 0 }\n-    }\n+    pub fn new() -> Self { Self { x: 1 } }\n" }),
+            &c,
+        )
         .await
         .unwrap();
 

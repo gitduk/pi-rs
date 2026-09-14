@@ -193,8 +193,6 @@ pub enum Concurrency {
 pub enum PatchError {
     // The patch does not follow the edit format (bad op, `-` rows, ...).
     Malformed,
-    // The file's own last edit moved the line numbers the patch addresses.
-    Renumbered,
     // The file as patched would not parse / compile.
     Unbalanced,
 }
@@ -252,7 +250,6 @@ impl ToolError {
         match self {
             ToolError::Patch(kind, _) => Some(match kind {
                 PatchError::Malformed => "EDIT_MALFORMED",
-                PatchError::Renumbered => "EDIT_RENUMBERED",
                 PatchError::Unbalanced => "EDIT_UNBALANCED",
             }),
             _ => self.code(),
@@ -339,9 +336,9 @@ pub struct Ctx {
     /// writers to one path otherwise read the same bytes, both succeed, and
     /// one change vanishes without anyone being told.
     pub file_locks: FileLocks,
-    /// The lowest line each file's own edits renumbered since it was last read.
-    /// The tag says the model knows the bytes; this, whether it knows where.
-    pub file_shifts: FileShifts,
+    /// The content hash each file's last view was built on. Feeds the
+    /// staleness note and the read-before-edit rule.
+    pub viewed: Viewed,
     // Every path a tool in this run has reported changing. Split from a
     // cloned parent's rather
     // than shared, unlike the locks and the shifts: those describe the tree,
@@ -368,8 +365,8 @@ struct Written {
     paths: std::collections::BTreeSet<std::path::PathBuf>,
 }
 
-pub type FileShifts =
-    std::sync::Arc<std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, usize>>>;
+pub type Viewed =
+    std::sync::Arc<std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, String>>>;
 
 impl Ctx {
     pub fn new(workspace: Workspace) -> Self {
@@ -377,7 +374,7 @@ impl Ctx {
             workspace,
             cancel: tokio_util::sync::CancellationToken::new(),
             file_locks: Default::default(),
-            file_shifts: Default::default(),
+            viewed: Default::default(),
             writes: Default::default(),
             session: None,
             spill_root: spill::temp(),
@@ -431,25 +428,22 @@ impl Ctx {
 
     /// Record that an edit renumbered `path` from `from` on. Kept at the lowest
     /// line reported, since the model's addresses all date from one read.
-    pub fn note_shift(&self, path: &std::path::Path, from: usize) {
-        let mut map = self.file_shifts.lock().expect("file shifts poisoned");
-        let slot = map.entry(path.to_path_buf()).or_insert(from);
-        *slot = (*slot).min(from);
-    }
-
-    /// The lowest line of `path` that an edit has renumbered since the last
-    /// read of it. Addresses below it are still the ones the model was shown.
-    pub fn shifted_from(&self, path: &std::path::Path) -> Option<usize> {
-        let map = self.file_shifts.lock().expect("file shifts poisoned");
-        map.get(path).copied()
-    }
-
-    /// A read re-establishes the numbering, so nothing is stale any more.
-    pub fn forget_shift(&self, path: &std::path::Path) {
-        self.file_shifts
+    /// Record the content hash a view of `path` was built on. Feeds the
+    /// staleness note beside an edit's report and the read-before-edit rule.
+    pub fn note_view(&self, path: &std::path::Path, hash: &str) {
+        self.viewed
             .lock()
-            .expect("file shifts poisoned")
-            .remove(path);
+            .expect("viewed poisoned")
+            .insert(path.to_path_buf(), hash.to_string());
+    }
+
+    /// The content hash of the last view of `path`, when there was one.
+    pub fn viewed_hash(&self, path: &std::path::Path) -> Option<String> {
+        self.viewed
+            .lock()
+            .expect("viewed poisoned")
+            .get(path)
+            .cloned()
     }
 
     /// Record that this run wrote `path`. Called by the tools that change the

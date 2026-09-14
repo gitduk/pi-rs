@@ -35,13 +35,15 @@ pub(crate) fn of(items: &[syntax::Item]) -> HashMap<usize, usize> {
 
 /// A row's address and its colon, ready for the text of the row to follow.
 ///
-/// Rendered by `hashline`, which is the crate that parses it back: two
-/// `format!`s pointing opposite ways is how a view starts printing an address
-/// its own parser rejects. A row that spans itself prints as the bare number,
-/// since that is the address `PUT N:` takes.
+/// A row that spans itself prints as a range: the address says where the
+/// construct ends, which is what a `*` scope row needs to name.
 pub(crate) fn addr(n: usize, spans: &HashMap<usize, usize>) -> String {
     let end = spans.get(&n).copied().unwrap_or(n);
-    format!("{}:", hashline::Target::Range { start: n, end })
+    if end == n {
+        format!("{n}:")
+    } else {
+        format!("{n}-{end}:")
+    }
 }
 
 /// What stands where a view's dropped rows were. Here rather than at each

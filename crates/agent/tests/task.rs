@@ -15,7 +15,7 @@ use common::spec;
 use agent::session::Session;
 use agent::task::{Home, Task};
 use agent::{Agent, Totals};
-use tools::{Ctx, FileLocks, FileShifts, Registry, Tier, Tool, ToolError, ToolOutput, Workspace};
+use tools::{Ctx, FileLocks, Registry, Tier, Tool, ToolError, ToolOutput, Viewed, Workspace};
 
 struct Scripted {
     turns: Vec<Vec<StreamEvent>>,
@@ -93,7 +93,7 @@ fn call_turn(id: &str, name: &str, args: &str) -> Vec<StreamEvent> {
 #[derive(Default)]
 struct Seen {
     locks: std::sync::Mutex<Option<FileLocks>>,
-    shifts: std::sync::Mutex<Option<FileShifts>>,
+    viewed: std::sync::Mutex<Option<Viewed>>,
     root: std::sync::Mutex<Option<std::path::PathBuf>>,
     namespace: std::sync::Mutex<Option<String>>,
 }
@@ -121,7 +121,7 @@ impl Tool for Probe {
     }
     async fn execute(&self, _args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
         *self.seen.locks.lock().unwrap() = Some(ctx.file_locks.clone());
-        *self.seen.shifts.lock().unwrap() = Some(ctx.file_shifts.clone());
+        *self.seen.viewed.lock().unwrap() = Some(ctx.viewed.clone());
         *self.seen.root.lock().unwrap() = Some(ctx.workspace.root().to_path_buf());
         *self.seen.namespace.lock().unwrap() = Some(ctx.spill_namespace().to_string());
         if let Some(trip) = &self.trip {
@@ -367,8 +367,8 @@ async fn the_child_shares_the_tree_and_its_bookkeeping() {
         &ctx.file_locks
     ));
     assert!(Arc::ptr_eq(
-        seen.shifts.lock().unwrap().as_ref().unwrap(),
-        &ctx.file_shifts
+        seen.viewed.lock().unwrap().as_ref().unwrap(),
+        &ctx.viewed
     ));
 }
 

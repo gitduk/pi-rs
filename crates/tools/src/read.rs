@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use hashline::tag;
+use hashline::view_hash;
 
 use crate::{Ctx, Tier, Tool, ToolError, ToolOutput, output, spill};
 
@@ -43,7 +43,7 @@ fn looks_binary(bytes: &[u8]) -> bool {
 // Naming it from what the caller *meant* to send is how it came to name rows
 // the model was never shown.
 struct View {
-    // The `[path#TAG]` line the model anchors a patch to.
+    // The `[path]` line naming the file this view came from.
     head: String,
     // Each row as it prints — newline and all — beside the file line it holds.
     rows: Vec<(usize, String)>,
@@ -124,11 +124,16 @@ impl View {
             None => vec![(at(0), at(last))],
             Some((h, t)) => vec![(at(0), at(h - 1)), (at(self.rows.len() - t), at(last))],
         };
-        // Through `hashline`, which is the crate that reads addresses back: a
-        // single row is `N`, and `N-N` is a shape its own parser refuses.
+        // Both ends of an elided window, named `N` or `N-M`.
         let named: Vec<String> = spans
             .iter()
-            .map(|(a, b)| hashline::Target::Range { start: *a, end: *b }.to_string())
+            .map(|(a, b)| {
+                if a == b {
+                    format!("{a}")
+                } else {
+                    format!("{a}-{b}")
+                }
+            })
             .collect();
         format!("{rel}:{}", named.join(crate::rows::GAP.trim_end()))
     }
@@ -167,7 +172,7 @@ impl Tool for Read {
 
     fn description(&self) -> &str {
         "Read a file as numbered lines, or list a directory. Output is headed by \
-         [path#TAG]; the TAG is required by later edits and goes stale when the \
+         [path]; later edits anchor on the content itself, so re-read after the \
          file changes. A long file comes back as a skeleton of its declarations \
          instead — read a range with offset and limit, or replace one whole \
          construct with edit's `PUT N*:`."
@@ -279,15 +284,12 @@ impl Tool for Read {
                 )));
             }
         };
-        let tag = tag(content);
-        // Not in the view any more, so recorded here: which version of a file
-        // the model was looking at is the whole story when an edit built on
-        // this read turns out to have addressed the wrong lines.
-        tracing::info!(target: "pi::read", path = %rel, tag = %tag, "read");
+        let hash = view_hash(content);
+        tracing::info!(target: "pi::read", path = %rel, hash = %hash, "read");
         // The numbering about to be shown is the current one. A window read
         // clears the whole file rather than its own rows: the case worth
         // catching is an edit built with no read between it and the last one.
-        ctx.forget_shift(&path);
+        ctx.note_view(&path, &hash);
 
         let all: Vec<&str> = content.lines().collect();
 
@@ -320,11 +322,7 @@ impl Tool for Read {
                     ctx,
                     &rel,
                     View {
-                        head: format!(
-                            "{} {} lines · outline",
-                            hashline::header(&rel, &tag),
-                            all.len()
-                        ),
+                        head: format!("{} {} lines · outline", hashline::header(&rel), all.len()),
                         rows,
                         note: "… declarations only, each with the range that replaces it \
                                whole. Read a range with offset and limit.\n"
@@ -378,7 +376,7 @@ impl Tool for Read {
             ctx,
             &rel,
             View {
-                head: hashline::header(&rel, &tag),
+                head: hashline::header(&rel),
                 rows,
                 note,
                 // Both ends of the file reached. Whether a range was asked for

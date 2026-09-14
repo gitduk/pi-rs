@@ -136,7 +136,7 @@ pub fn prune(body: &str) -> String {
 /// budget with the whole of it spilled for recall.
 ///
 /// Whole items rather than bytes, which is what separates this from `prune`: a
-/// grep section cut loose from its `[path#TAG]` header carries no tag, and a
+/// grep section cut loose from its `[path]` header carries no path, and a
 /// row cut mid-line still parses as an address an edit would then patch. Items
 /// go from the tail, since a view whose items are independent has no end worth
 /// keeping the way a file's has.
