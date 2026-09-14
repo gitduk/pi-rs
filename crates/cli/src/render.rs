@@ -341,6 +341,80 @@ fn push_sep(out: &mut String) {
     }
 }
 
+/// The style the SGR parameters `codes` writes add up to —
+/// `"1;3;38;2;88;166;255"` read back as ratatui sees it.
+///
+/// Invalid parameters reset the style to default (SGR 0) rather than being
+/// ignored, matching the resilience the terminal itself provides.
+pub fn parse_sgr(params: &str, mut style: ratatui::style::Style) -> ratatui::style::Style {
+    use ratatui::style::{Color as RColor, Modifier as RModifier, Style as RStyle};
+    // SGR 30-37 and 90-97 name these eight each, in order.
+    const NAMED: [RColor; 8] = [
+        RColor::Black,
+        RColor::Red,
+        RColor::Green,
+        RColor::Yellow,
+        RColor::Blue,
+        RColor::Magenta,
+        RColor::Cyan,
+        RColor::Gray,
+    ];
+    const BRIGHT: [RColor; 8] = [
+        RColor::DarkGray,
+        RColor::LightRed,
+        RColor::LightGreen,
+        RColor::LightYellow,
+        RColor::LightBlue,
+        RColor::LightMagenta,
+        RColor::LightCyan,
+        RColor::White,
+    ];
+    let mut it = params
+        .split(';')
+        .map(|p| p.parse::<u8>().unwrap_or(0))
+        .peekable();
+    while let Some(p) = it.next() {
+        match p {
+            0 => style = RStyle::default(),
+            1 => style = style.add_modifier(RModifier::BOLD),
+            2 => style = style.add_modifier(RModifier::DIM),
+            3 => style = style.add_modifier(RModifier::ITALIC),
+            4 => style = style.add_modifier(RModifier::UNDERLINED),
+            5 => style = style.add_modifier(RModifier::SLOW_BLINK),
+            6 => style = style.add_modifier(RModifier::RAPID_BLINK),
+            7 => style = style.add_modifier(RModifier::REVERSED),
+            8 => style = style.add_modifier(RModifier::HIDDEN),
+            9 => style = style.add_modifier(RModifier::CROSSED_OUT),
+            30..=37 => style = style.fg(NAMED[(p - 30) as usize]),
+            39 => style = style.fg(RColor::Reset),
+            40..=47 => style = style.bg(NAMED[(p - 40) as usize]),
+            49 => style = style.bg(RColor::Reset),
+            90..=97 => style = style.fg(BRIGHT[(p - 90) as usize]),
+            100..=107 => style = style.bg(BRIGHT[(p - 100) as usize]),
+            38 | 48 => {
+                let fg = p == 38;
+                match it.next() {
+                    Some(5) => {
+                        let n = it.next().unwrap_or(0);
+                        let color = RColor::Indexed(n);
+                        style = if fg { style.fg(color) } else { style.bg(color) };
+                    }
+                    Some(2) => {
+                        let r = it.next().unwrap_or(0);
+                        let g = it.next().unwrap_or(0);
+                        let b = it.next().unwrap_or(0);
+                        let color = RColor::Rgb(r, g, b);
+                        style = if fg { style.fg(color) } else { style.bg(color) };
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    style
+}
+
 impl<'de> Deserialize<'de> for Style {
     fn deserialize<D: Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
         struct V;
@@ -622,13 +696,14 @@ impl Paint {
 ///
 /// Forward-only, because a line the terminal has printed cannot be restyled:
 /// what a row looks like is settled when it ends, out of what came before it.
-/// That rules out anything needing the whole document — a table's column
-/// widths, a reflowed code block — and leaves what a coding agent actually
-/// emits.
-#[derive(Debug, Default, Clone, Copy)]
+/// Prose is styled here a line at a time; a line of code is handed to
+/// `render_markdown` with the fence's language, so the whole document is not
+/// needed — only the ``` line that opened it.
+#[derive(Debug, Default, Clone)]
 pub struct Markdown {
-    // Inside a ``` block, where nothing is markup and everything is code.
-    fenced: bool,
+    // The language written on the ``` line that opened the block this line is
+    // in, if it is in one.
+    fenced: Option<String>,
 }
 
 impl Markdown {
@@ -644,10 +719,8 @@ impl Markdown {
         if fence(text) {
             return p.on(&p.theme.muted, text);
         }
-        if self.fenced {
-            // A code line keeps its own marks: `**` and backticks are code,
-            // not markup, so it prints as written.
-            return text.to_string();
+        if let Some(lang) = &self.fenced {
+            return highlight_code_line(lang, text, p);
         }
         let body = text.trim_start();
         let pad = &text[..text.len() - body.len()];
@@ -678,13 +751,18 @@ impl Markdown {
     /// line after it means.
     pub fn advance(&mut self, text: &str) {
         if fence(text) {
-            self.fenced = !self.fenced;
+            self.fenced = if self.fenced.is_some() {
+                None
+            } else {
+                let tag = text.trim_start().trim_start_matches('`').trim();
+                Some(tag.to_string())
+            };
         }
     }
 
     /// A new run starts outside any block, whatever the last one left open.
     pub fn reset(&mut self) {
-        self.fenced = false;
+        self.fenced = None;
     }
 }
 
@@ -831,6 +909,168 @@ pub fn spent(usage: &brain::stream::Usage, cost: f64) -> String {
         parts.push(format!("${cost:.4}"));
     }
     parts.join(icons::PART_SEP)
+}
+
+/// Render a ratatui Line into an ANSI-escaped string.
+pub fn line_to_ansi(line: &ratatui::text::Line<'_>) -> String {
+    let mut out = String::new();
+    let mut params = String::new();
+    let base_style = line.style;
+    for span in &line.spans {
+        let style = base_style.patch(span.style);
+        params.clear();
+        append_style_params(&mut params, style);
+        if params.is_empty() {
+            out.push_str(&span.content);
+        } else {
+            out.push_str("\x1b[");
+            out.push_str(&params);
+            out.push('m');
+            out.push_str(&span.content);
+            out.push_str(RESET);
+        }
+    }
+    out
+}
+
+fn write_sgr(out: &mut String, code: u8) {
+    push_sep(out);
+    let _ = write!(out, "{code}");
+}
+
+fn append_color(out: &mut String, color: ratatui::style::Color, bg: bool) {
+    use ratatui::style::Color as RColor;
+    let base = if bg { 40 } else { 30 };
+    let bright = if bg { 100 } else { 90 };
+    match color {
+        RColor::Reset => write_sgr(out, if bg { 49 } else { 39 }),
+        RColor::Black => write_sgr(out, base),
+        RColor::Red => write_sgr(out, base + 1),
+        RColor::Green => write_sgr(out, base + 2),
+        RColor::Yellow => write_sgr(out, base + 3),
+        RColor::Blue => write_sgr(out, base + 4),
+        RColor::Magenta => write_sgr(out, base + 5),
+        RColor::Cyan => write_sgr(out, base + 6),
+        // Gray is the eighth named colour, DarkGray the bright black; keeping
+        // them apart is what makes SGR 37 survive a row and a block alike.
+        RColor::Gray => write_sgr(out, base + 7),
+        RColor::DarkGray => write_sgr(out, bright),
+        RColor::LightRed => write_sgr(out, bright + 1),
+        RColor::LightGreen => write_sgr(out, bright + 2),
+        RColor::LightYellow => write_sgr(out, bright + 3),
+        RColor::LightBlue => write_sgr(out, bright + 4),
+        RColor::LightMagenta => write_sgr(out, bright + 5),
+        RColor::LightCyan => write_sgr(out, bright + 6),
+        RColor::White => write_sgr(out, bright + 7),
+        RColor::Indexed(n) => {
+            push_sep(out);
+            let prefix = if bg { "48;5;" } else { "38;5;" };
+            out.push_str(prefix);
+            let _ = write!(out, "{n}");
+        }
+        RColor::Rgb(r, g, b) => {
+            push_sep(out);
+            let prefix = if bg { "48;2;" } else { "38;2;" };
+            out.push_str(prefix);
+            let _ = write!(out, "{r};{g};{b}");
+        }
+    }
+}
+
+fn append_style_params(out: &mut String, style: ratatui::style::Style) {
+    use ratatui::style::Modifier as RModifier;
+    // Every attribute code `parse_sgr` reads: both ends speak one list.
+    for (modifier, code) in [
+        (RModifier::BOLD, 1),
+        (RModifier::DIM, 2),
+        (RModifier::ITALIC, 3),
+        (RModifier::UNDERLINED, 4),
+        (RModifier::SLOW_BLINK, 5),
+        (RModifier::RAPID_BLINK, 6),
+        (RModifier::REVERSED, 7),
+        (RModifier::HIDDEN, 8),
+        (RModifier::CROSSED_OUT, 9),
+    ] {
+        if style.add_modifier.contains(modifier) {
+            write_sgr(out, code);
+        }
+    }
+    if let Some(fg) = style.fg {
+        append_color(out, fg, false);
+    }
+    if let Some(bg) = style.bg {
+        append_color(out, bg, true);
+    }
+}
+
+/// A theme style as ratatui sees it. Through the SGR list, so a bare code —
+/// `muted = "2"` — stays the attribute it names rather than becoming a palette
+/// entry, and every style renders the same here as in a painted row.
+pub fn style_to_ratatui(s: &Style) -> ratatui::style::Style {
+    parse_sgr(s.codes(), ratatui::style::Style::default())
+}
+
+#[derive(Debug, Clone)]
+struct PiStyleSheet {
+    heading: ratatui::style::Style,
+    code: ratatui::style::Style,
+    muted: ratatui::style::Style,
+}
+
+impl tui_markdown::StyleSheet for PiStyleSheet {
+    fn heading(&self, _level: u8) -> ratatui::style::Style {
+        self.heading
+    }
+
+    fn code(&self) -> ratatui::style::Style {
+        self.code
+    }
+
+    fn blockquote(&self) -> ratatui::style::Style {
+        self.muted
+    }
+
+    fn heading_meta(&self) -> ratatui::style::Style {
+        self.muted
+    }
+
+    fn table_border(&self) -> ratatui::style::Style {
+        self.muted
+    }
+
+    fn image_alt(&self) -> ratatui::style::Style {
+        self.muted
+    }
+}
+
+fn highlight_code_line(lang: &str, line: &str, paint: &Paint) -> String {
+    if !paint.color {
+        return line.to_string();
+    }
+    // The language rides on the fence, so a one-line block is the smallest
+    // document that highlights the line.
+    let snippet = format!("```{lang}\n{line}\n```");
+    let lines = render_markdown(&snippet, paint);
+    if lines.len() >= 3 {
+        lines[1].clone()
+    } else {
+        line.to_string()
+    }
+}
+
+/// Parse and render markdown into ANSI-styled lines using `tui-markdown` and theme.
+pub fn render_markdown(text: &str, paint: &Paint) -> Vec<String> {
+    if !paint.color {
+        return text.lines().map(str::to_string).collect();
+    }
+    let sheet = PiStyleSheet {
+        heading: style_to_ratatui(&paint.theme.heading),
+        code: style_to_ratatui(&paint.theme.code),
+        muted: style_to_ratatui(&paint.theme.muted),
+    };
+    let options = tui_markdown::Options::new(sheet);
+    let parsed = tui_markdown::from_str_with_options(text, &options);
+    parsed.lines.iter().map(line_to_ansi).collect()
 }
 
 /// The wording for every event that occupies a whole line.
@@ -1206,6 +1446,87 @@ mod tests {
         assert_eq!(super::visible_width("ab\u{1b}["), 2);
     }
 
+    #[test]
+    fn render_markdown_handles_code_and_formatting() {
+        let md = "# Title\n\n```rust\nlet x = 1;\n```\n- [x] done\n";
+        let lines = super::render_markdown(md, &super::Paint::new(true));
+        assert!(!lines.is_empty());
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("\x1b[") && l.contains("let"))
+        );
+    }
+
+    #[test]
+    fn render_markdown_respects_theme() {
+        let md = "# Title";
+        let theme = super::Theme {
+            heading: super::Style::attrs(&[super::Attr::Underline]),
+            ..super::Theme::default()
+        };
+        let paint = super::Paint::with_theme(true, std::sync::Arc::new(theme));
+        let lines = super::render_markdown(md, &paint);
+        assert!(lines.iter().any(|l| l.contains("\x1b[4m")));
+    }
+
+    #[test]
+    fn sgr_parameters_become_style() {
+        use ratatui::style::{Color as RColor, Modifier as RModifier, Style as RStyle};
+        let plain = RStyle::default();
+        assert_eq!(
+            super::parse_sgr("2", plain),
+            plain.add_modifier(RModifier::DIM)
+        );
+        assert_eq!(
+            super::parse_sgr("38;2;88;166;255", plain),
+            plain.fg(RColor::Rgb(88, 166, 255))
+        );
+        assert_eq!(
+            super::parse_sgr("7", plain),
+            plain.add_modifier(RModifier::REVERSED)
+        );
+        // A combined list applies each in turn.
+        assert_eq!(
+            super::parse_sgr("1;3;8;38;2;255;136;0", plain).add_modifier,
+            RModifier::BOLD | RModifier::ITALIC | RModifier::HIDDEN
+        );
+        assert_eq!(
+            super::parse_sgr("1;3;8;38;2;255;136;0", plain).fg,
+            Some(RColor::Rgb(255, 136, 0))
+        );
+        // The basic codes name a colour on either layer, which is what a theme
+        // written in bare numbers and the stylesheet's own links both need.
+        assert_eq!(super::parse_sgr("31", plain).fg, Some(RColor::Red));
+        assert_eq!(super::parse_sgr("37", plain).fg, Some(RColor::Gray));
+        assert_eq!(super::parse_sgr("93", plain).fg, Some(RColor::LightYellow));
+        assert_eq!(super::parse_sgr("44", plain).bg, Some(RColor::Blue));
+        assert_eq!(super::parse_sgr("103", plain).bg, Some(RColor::LightYellow));
+        assert_eq!(
+            super::parse_sgr("5", plain).add_modifier,
+            RModifier::SLOW_BLINK
+        );
+    }
+
+    #[test]
+    fn a_bare_colour_code_stays_what_it_names() {
+        let theme = super::Theme {
+            muted: super::Style::color(super::Color::Basic(2)),
+            code: super::Style::color(super::Color::Basic(37)),
+            ..super::Theme::default()
+        };
+        let paint = super::Paint::with_theme(true, std::sync::Arc::new(theme));
+        // `2` is dim and `37` is gray, not the palette entries with those
+        // numbers: a whole block says so exactly as a painted line does.
+        assert!(
+            super::Markdown::default()
+                .line("```", &paint)
+                .starts_with("\x1b[2m")
+        );
+        assert!(super::render_markdown("> q", &paint)[0].starts_with("\x1b[2m"));
+        assert!(super::render_markdown("`x`", &paint)[0].starts_with("\x1b[37m"));
+    }
+
     // `clip` measures columns. An escape prints nothing, so counting its
     // bytes cut a painted row to a fraction of the width asked for — the
     // lane bar lost most of its lanes to a cyan prompt colour.
@@ -1471,11 +1792,11 @@ mod tests {
         let p = Paint::new(true);
         assert!(!m.line("fn f() {}", &p).contains('\x1b'), "prose is prose");
         m.advance("```rust");
-        // Inside, nothing is markup: the text as written.
-        assert_eq!(
-            m.line("let a = *b;", &p).replace('\x1b', "^"),
-            "let a = *b;"
-        );
+        // A code line is highlighted, not read as markup.
+        let code_line = m.line("let a = *b;", &p);
+        assert!(code_line.contains('\x1b'));
+        assert!(!code_line.contains("\x1b[3m"), "* is not italic markup");
+        assert_eq!(m.line("let a = *b;", &Paint::new(false)), "let a = *b;");
         m.advance("let a = *b;");
         m.advance("```");
         assert_eq!(

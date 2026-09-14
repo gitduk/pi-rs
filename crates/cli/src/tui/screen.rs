@@ -19,9 +19,11 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use ratatui::widgets::Widget;
 use unicode_width::UnicodeWidthChar;
+
+use crate::render::parse_sgr;
 
 const RESET: &str = "\x1b[0m";
 
@@ -193,48 +195,6 @@ pub fn wrap(border: Option<&str>, line: &str, width: usize) -> Vec<String> {
         .into_iter()
         .map(|piece| format!("{border}{piece}"))
         .collect()
-}
-
-/// The SGR parameters between `\x1b[` and `m`, applied to a style. Invalid
-/// parameters silently reset the style to default (SGR 0) rather than being
-/// ignored, matching the resilience the terminal itself provides.
-pub fn parse_sgr(params: &str, mut style: Style) -> Style {
-    let mut it = params
-        .split(';')
-        .map(|p| p.parse::<u8>().unwrap_or(0))
-        .peekable();
-    while let Some(p) = it.next() {
-        match p {
-            0 => style = Style::default(),
-            1 => style = style.add_modifier(Modifier::BOLD),
-            2 => style = style.add_modifier(Modifier::DIM),
-            3 => style = style.add_modifier(Modifier::ITALIC),
-            4 => style = style.add_modifier(Modifier::UNDERLINED),
-            7 => style = style.add_modifier(Modifier::REVERSED),
-            8 => style = style.add_modifier(Modifier::HIDDEN),
-            9 => style = style.add_modifier(Modifier::CROSSED_OUT),
-            38 | 48 => {
-                let fg = p == 38;
-                match it.next() {
-                    Some(5) => {
-                        let n = it.next().unwrap_or(0);
-                        let color = Color::Indexed(n);
-                        style = if fg { style.fg(color) } else { style.bg(color) };
-                    }
-                    Some(2) => {
-                        let r = it.next().unwrap_or(0);
-                        let g = it.next().unwrap_or(0);
-                        let b = it.next().unwrap_or(0);
-                        let color = Color::Rgb(r, g, b);
-                        style = if fg { style.fg(color) } else { style.bg(color) };
-                    }
-                    _ => {}
-                }
-            }
-            _ => {}
-        }
-    }
-    style
 }
 
 // Write one fitted row into the buffer: style from the SGR escapes, one
@@ -494,11 +454,11 @@ impl Drop for Screen {
 
 #[cfg(test)]
 mod tests {
-    use super::{Rows, parse_sgr};
+    use super::Rows;
     use super::{fit, window, wrap};
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
-    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::style::Modifier;
     use ratatui::widgets::Widget;
     use std::borrow::Cow;
 
@@ -599,29 +559,6 @@ mod tests {
     #[test]
     fn an_empty_line_is_still_one_row() {
         assert_eq!(fit("", 10), vec![""]);
-    }
-
-    #[test]
-    fn sgr_parameters_become_style() {
-        let plain = Style::default();
-        assert_eq!(parse_sgr("2", plain), plain.add_modifier(Modifier::DIM));
-        assert_eq!(
-            parse_sgr("38;2;88;166;255", plain),
-            plain.fg(Color::Rgb(88, 166, 255))
-        );
-        assert_eq!(
-            parse_sgr("7", plain),
-            plain.add_modifier(Modifier::REVERSED)
-        );
-        // A combined list applies each in turn.
-        assert_eq!(
-            parse_sgr("1;3;8;38;2;255;136;0", plain).add_modifier,
-            Modifier::BOLD | Modifier::ITALIC | Modifier::HIDDEN
-        );
-        assert_eq!(
-            parse_sgr("1;3;8;38;2;255;136;0", plain).fg,
-            Some(Color::Rgb(255, 136, 0))
-        );
     }
 
     #[test]

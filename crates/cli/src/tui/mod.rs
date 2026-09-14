@@ -489,11 +489,7 @@ fn scrollback_from(
                 for b in blocks {
                     match b {
                         AssistantContent::Text(t) => {
-                            // A fresh instance per block; where a block ends is
-                            // the caller's to say, and `Row::answer` states the
-                            // rest once for both callers.
-                            let mut md = Markdown::default();
-                            out.extend(Row::answer(&t.text, &mut md, paint));
+                            out.extend(Row::answer(&t.text, paint));
                         }
                         AssistantContent::ToolCall(c) => {
                             if answered.contains(&c.id) {
@@ -1420,7 +1416,7 @@ impl Ui {
 
     // A theme style, as ratatui sees it.
     fn rat_style(&self, s: &ThemeStyle) -> RStyle {
-        screen::parse_sgr(s.codes(), RStyle::default())
+        render::style_to_ratatui(s)
     }
 
     // The rows above the input line: running tools, the open stream, and

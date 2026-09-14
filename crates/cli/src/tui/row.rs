@@ -105,9 +105,9 @@ impl Row {
     /// One finished line of the answer, painted as markdown.
     ///
     /// `md` is the caller's because its state spans the block and only the
-    /// caller knows where a block ends: the live stream resets at each close,
-    /// a rebuild hands in a fresh one per block. The rest is stated here once
-    /// instead of twice with a comment claiming the two match.
+    /// caller knows where a block ends: the live stream resets at each close.
+    /// A whole block that is rebuilt at once goes through `Row::answer`
+    /// instead.
     ///
     /// Returns the string, not a row: the live stream paints a line before it
     /// knows where the line goes.
@@ -124,9 +124,10 @@ impl Row {
     }
 
     /// A whole assistant text block, for a caller that has one.
-    pub fn answer(text: &str, md: &mut Markdown, paint: &Paint) -> Vec<Self> {
-        text.lines()
-            .map(|line| Self::notice(Self::answer_line(line, md, paint)))
+    pub fn answer(text: &str, paint: &Paint) -> Vec<Self> {
+        render::render_markdown(text, paint)
+            .into_iter()
+            .map(Self::notice)
             .collect()
     }
 
