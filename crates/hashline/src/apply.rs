@@ -79,17 +79,49 @@ enum Op {
 // Validate every section, then build the whole plan. Nothing reaches the
 // caller unless all of it succeeds: a half-applied patch is worse than a
 // rejected one.
+//
+// Sections for one path stack: each resolves against what the earlier ones
+// left, and the plan carries a single Write per path. Sections built off the
+// same original would each land alone on disk, the later overwriting the
+// earlier with no error to show for it.
 pub fn apply(patch: &Patch, files: &Files<'_>, blocks: &dyn Blocks) -> Result<Plan, Error> {
     let mut plan = Plan::default();
+    // The content each path has reached so far, and where its Write sits in
+    // the plan.
+    let mut working: HashMap<String, String> = HashMap::new();
+    let mut slot: HashMap<String, usize> = HashMap::new();
     for section in &patch.sections {
-        let content = *files
-            .get(section.path.as_str())
-            .ok_or_else(|| Error::Missing {
-                path: section.path.clone(),
-            })?;
+        let content = match working.get(&section.path) {
+            Some(current) => current.as_str(),
+            None => *files
+                .get(section.path.as_str())
+                .ok_or_else(|| Error::Missing {
+                    path: section.path.clone(),
+                })?,
+        };
         let ops = resolve(section, content, blocks)?;
-        plan.changes
-            .push(build(&section.path, &ops, content, blocks)?);
+        let Change::Write {
+            content, landed, ..
+        } = build(&section.path, &ops, content, blocks)?;
+        working.insert(section.path.clone(), content.clone());
+        let at = *slot
+            .entry(section.path.clone())
+            .or_insert(plan.changes.len());
+        match plan.changes.get_mut(at) {
+            Some(Change::Write {
+                content: kept,
+                landed: kept_landed,
+                ..
+            }) => {
+                *kept = content;
+                kept_landed.extend(landed);
+            }
+            _ => plan.changes.push(Change::Write {
+                path: section.path.clone(),
+                content,
+                landed,
+            }),
+        }
     }
     Ok(plan)
 }

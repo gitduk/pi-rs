@@ -146,6 +146,30 @@ async fn a_scope_row_replaces_a_whole_function_without_counting_lines() {
     assert!(report.contains("3:pub fn replaced() {}"), "{report}");
 }
 
+// Three sections for one file stack: every section resolves against what the
+// earlier ones left, so all three land. Each built off the same original
+// would leave only the last one on disk.
+#[tokio::test]
+async fn three_sections_for_one_file_all_land() {
+    let (_d, c) = ctx();
+    let src = "one\ntwo\nthree\n";
+    std::fs::write(c.workspace.root().join("a.txt"), src).unwrap();
+
+    run(&tools::read::Read, json!({ "path": "a.txt" }), &c).await;
+    tools::edit::Edit
+        .execute(
+            json!({ "patch": "[a.txt]\n=one\n+ONE\n\n[a.txt]\n=two\n+TWO\n\n[a.txt]\n=three\n+THREE" }),
+            &c,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(c.workspace.root().join("a.txt")).unwrap(),
+        "one\nONE\ntwo\nTWO\nthree\nTHREE\n"
+    );
+}
+
 #[tokio::test]
 async fn a_scope_row_takes_the_attribute_above_when_named_by_it() {
     let (_d, c) = ctx();
