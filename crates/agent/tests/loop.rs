@@ -118,23 +118,21 @@ fn wired(turns: Vec<Vec<StreamEvent>>) -> (tempfile::TempDir, Agent, Ctx, Arc<Sc
     (dir, agent, Ctx::new(ws), wire)
 }
 
-// The window rides a note, not the transcript: it is true of the request it
-// went out on and of no other, so the next turn replaces it instead of
-// leaving a stale reading behind to be read back as fact.
+// The window rides no note: pi compacts on its own as the budget fills, so a
+// reading would tell the model nothing it can act on. A run with no shelf has
+// nothing else to say, and the wire shows it.
 #[tokio::test]
-async fn the_turn_ships_its_window_as_a_note() {
-    let (_dir, agent, ctx, wire) = wired(vec![text_turn("done")]);
+async fn a_run_with_no_shelf_says_nothing_beside_the_transcript() {
+    let (_dir, agent, ctx, wire) = wired(vec![
+        call_turn(&[("t1", "nosuchtool", "{}")]),
+        text_turn("done"),
+    ]);
     let (_session, out, _events) = drive(&agent, &ctx, "go").await;
     out.unwrap();
 
     let sent = wire.notes.lock().unwrap();
-    assert_eq!(sent.len(), 1);
-    assert_eq!(sent[0].len(), 1, "one reading, not an accumulating list");
-    let note = &sent[0][0];
-    assert!(note.starts_with("<context used=\""), "{note}");
-    assert!(note.contains("budget=\""), "{note}");
-    // Nothing was compacted, so the turn says nothing about compaction.
-    assert!(!note.contains("compacted"), "{note}");
+    assert_eq!(sent.len(), 2);
+    assert!(sent.iter().all(Vec::is_empty), "{sent:?}");
 }
 
 async fn drive(

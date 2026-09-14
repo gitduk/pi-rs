@@ -135,26 +135,13 @@ pub struct Agent {
 // different error starts a new count.
 type Failures = HashMap<(String, String), usize>;
 
-// The window, as the turn that ships it sees it. Shaped as a tag rather than
-// a sentence because a note is read in the user's voice: a reading is a fact
-// about the run, where a sentence would be someone talking.
-fn context_note(used: usize, budget: usize, trimmed: bool) -> String {
-    // Says only that the transcript shrank, never how: a summary that replaced
-    // part of it is in the transcript to be read, where the taking is not. The
-    // cheaper reclaims run before any drop and leave no summary behind.
-    let trimmed = if trimmed { " trimmed=\"true\"" } else { "" };
-    format!("<context used=\"{used}\" budget=\"{budget}\"{trimmed}/>")
-}
-
-// Everything the turn says about itself, in the order it is read: what the
-// window is doing now, then what outlived the transcripts before it.
-//
-// The shelf is reread each turn rather than held: compaction writes to it
-// mid-run, and that change is what the next turn should see.
-fn turn_notes(used: usize, budget: usize, trimmed: bool, shelf: Option<String>) -> Vec<String> {
-    let mut out = vec![context_note(used, budget, trimmed)];
-    out.extend(shelf.filter(|m| !m.trim().is_empty()));
-    out
+// Everything the turn says about itself: what outlived the transcripts before
+// it. The window rides no note — pi compacts on its own as the budget fills,
+// so a reading would ask for no action — and the shelf is reread each turn
+// rather than held: compaction writes to it mid-run, and that change is what
+// the next turn should see.
+fn turn_notes(shelf: Option<String>) -> Vec<String> {
+    shelf.filter(|m| !m.trim().is_empty()).into_iter().collect()
 }
 
 // What a streamed call resolves to before anything runs. Deciding first keeps
@@ -279,9 +266,6 @@ impl Agent {
                 session = %ctx.spill_namespace(),
             );
             let mut squeezes = 0usize;
-            // Turn-scoped, not per-attempt: a squeeze retries the send, and the
-            // attempt that lands still carries the shrunken transcript.
-            let mut trimmed = false;
             // Kept past the retry loop: the fallback below prices what was
             // actually sent, which a squeeze or a compaction may have changed.
             let mut sent;
@@ -299,7 +283,6 @@ impl Agent {
                 sent = messages;
                 if shrunk {
                     compactions += 1;
-                    trimmed = true;
                 }
                 used = brain::estimate::tokens(&sent, &self.spec);
                 say(tx, Event::Context { used, budget });
@@ -326,7 +309,7 @@ impl Agent {
                 let req = Request {
                     system: Some(self.system.clone()),
                     messages: sent,
-                    notes: turn_notes(used, budget, trimmed, shown),
+                    notes: turn_notes(shown),
                     tools: self.registry.defs(),
                     max_output_tokens: None,
                     temperature: None,
@@ -1106,47 +1089,17 @@ mod tests {
     use super::*;
     use brain::message::ToolCall;
 
-    // A reclaim is an event, not a running total: what the model has to act on
-    // is that its transcript just shrank, and that is true of one turn only. A
-    // count would be read as a standing fact on every later one.
-    //
-    // It claims a taking and never a summary. `plan` spends its cheaper
-    // measures before it drops anything, and a summary is written only for a
-    // drop — so on the common path there is nothing to promise.
-    // The window first, the shelf after: what the turn is doing now, then
-    // what outlived the transcripts before it. An empty shelf says nothing at
-    // all rather than an empty tag for the model to interpret.
+    // The window rides no note: pi compacts on its own as the budget fills,
+    // so a reading would tell the model nothing it can act on. What a turn
+    // can still say is what outlived the transcripts before it — and an
+    // empty shelf says nothing at all rather than an empty tag to interpret.
     #[test]
-    fn the_shelf_rides_the_turn_behind_the_window_reading() {
-        let window = context_note(10, 100, false);
-        assert_eq!(turn_notes(10, 100, false, None), vec![window.clone()]);
+    fn the_turn_says_what_outlived_the_transcripts_or_nothing() {
+        assert_eq!(turn_notes(None), Vec::<String>::new());
+        assert_eq!(turn_notes(Some("   ".into())), Vec::<String>::new());
         assert_eq!(
-            turn_notes(10, 100, false, Some("   ".into())),
-            vec![window.clone()]
-        );
-        assert_eq!(
-            turn_notes(
-                10,
-                100,
-                false,
-                Some("<memory>\n2026-09-07 prefers xh\n</memory>".into())
-            ),
-            vec![
-                window,
-                "<memory>\n2026-09-07 prefers xh\n</memory>".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn a_reclaim_is_stated_on_the_turn_it_happened_and_claims_no_summary() {
-        assert_eq!(
-            context_note(118_000, 200_000, false),
-            r#"<context used="118000" budget="200000"/>"#
-        );
-        assert_eq!(
-            context_note(118_000, 200_000, true),
-            r#"<context used="118000" budget="200000" trimmed="true"/>"#
+            turn_notes(Some("<memory>\n2026-09-07 prefers xh\n</memory>".into())),
+            vec!["<memory>\n2026-09-07 prefers xh\n</memory>".to_string()]
         );
     }
 
