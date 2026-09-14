@@ -210,9 +210,47 @@ fn a_no_match_refusal_names_the_closest_row() {
 fn an_ambiguous_match_refuses_with_every_candidate() {
     let r = run("x\nz\nx\nz\nx\n", "[a.txt]\n=z\n-x\n", &[]);
     match refused(&r) {
-        Error::Ambiguous { n, spans, .. } => {
+        Error::Ambiguous { n, detail, .. } => {
             assert_eq!(*n, 2);
-            assert!(spans.contains("2-3") && spans.contains("4-5"), "{spans}");
+            assert!(detail.contains("2-3") && detail.contains("4-5"), "{detail}");
+        }
+        other => unreachable!("{other:?}"),
+    }
+}
+
+#[test]
+fn an_ambiguous_match_grows_context_until_it_tells_candidates_apart() {
+    let src = "fn f() {\n    b();\n    a();\n    b();\n    a();\n    b();\n}\n";
+    let r = run(src, "[a.txt]\n=    a();\n-    b();\n", &[(1, 1, 7)]);
+    match refused(&r) {
+        Error::Ambiguous { detail, .. } => {
+            assert!(detail.contains("in `fn f() {`"), "{detail}");
+            assert!(
+                detail.matches("preceded by `    b();`").count() == 2,
+                "{detail}"
+            );
+            assert!(detail.contains("before that `fn f() {`"), "{detail}");
+            assert!(detail.contains("before that `    a();`"), "{detail}");
+        }
+        other => unreachable!("{other:?}"),
+    }
+}
+
+#[test]
+fn an_ambiguous_match_names_the_construct_of_each_candidate() {
+    let src =
+        "fn a() {\n    one\n    same\n    other\n}\n\nfn b() {\n    two\n    same\n    other\n}\n";
+    let r = run(
+        src,
+        "[a.txt]\n=    same\n-    other\n",
+        &[(1, 1, 5), (7, 7, 11)],
+    );
+    match refused(&r) {
+        Error::Ambiguous { detail, .. } => {
+            assert!(detail.contains("in `fn a() {`"), "{detail}");
+            assert!(detail.contains("in `fn b() {`"), "{detail}");
+            assert!(detail.contains("preceded by `    one`"), "{detail}");
+            assert!(detail.contains("preceded by `    two`"), "{detail}");
         }
         other => unreachable!("{other:?}"),
     }

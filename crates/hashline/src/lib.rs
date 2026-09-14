@@ -115,21 +115,21 @@ pub enum Error {
     },
 
     #[error(
-        "the marked rows match {n} places in {path} (lines {spans}). Add `=` context \
+        "the marked rows match {n} places in {path}:\n{detail}. Add `=` context \
          rows or an `@` scope to narrow it to one."
     )]
     Ambiguous {
         path: String,
         n: usize,
-        spans: String,
+        detail: String,
     },
 
     #[error("in {path}, {what}")]
     NoConstruct { path: String, what: String },
 
     #[error(
-        "in {path}, {a_start}-{a_end} and {b_start}-{b_end} overlap. Two operations \
-         may never claim the same lines."
+        "in {path}, {a_start}-{a_end}{a_in} and {b_start}-{b_end}{b_in} overlap at line \
+         {overlap}. Two operations may never claim the same lines."
     )]
     Overlap {
         path: String,
@@ -138,6 +138,8 @@ pub enum Error {
         b_start: usize,
         b_end: usize,
         overlap: usize,
+        a_in: String,
+        b_in: String,
     },
 
     #[error("the patch is empty")]

@@ -88,7 +88,8 @@ pub fn apply(patch: &Patch, files: &Files<'_>, blocks: &dyn Blocks) -> Result<Pl
                 path: section.path.clone(),
             })?;
         let ops = resolve(section, content, blocks)?;
-        plan.changes.push(build(&section.path, &ops, content)?);
+        plan.changes
+            .push(build(&section.path, &ops, content, blocks)?);
     }
     Ok(plan)
 }
@@ -273,15 +274,40 @@ fn resolve(section: &Section, content: &str, blocks: &dyn Blocks) -> Result<Vec<
             }
             1 => {}
             n => {
-                let spans = starts
+                // Preceding rows join in until they tell the candidates apart:
+                // identical neighbours are exactly when `@` and one `=` row
+                // both fail.
+                let above = |s: usize, d: usize| (s > d).then(|| lines[s - d - 1]);
+                let mut depth = 1;
+                while depth < 3
+                    && starts
+                        .iter()
+                        .all(|s| above(*s, depth) == above(starts[0], depth))
+                {
+                    depth += 1;
+                }
+                let detail = starts
                     .iter()
-                    .map(|s| format!("{}-{}", s, s + k - 1))
+                    .map(|s| {
+                        let in_construct = match covering(&section.path, *s, content, blocks) {
+                            Some(row) => format!(" in `{}`", crop(&row, 60)),
+                            None => String::new(),
+                        };
+                        let mut before = String::new();
+                        for d in 1..=depth {
+                            if let Some(row) = above(*s, d) {
+                                let label = if d == 1 { "preceded by" } else { "before that" };
+                                before.push_str(&format!(", {label} `{}`", crop(row, 60)));
+                            }
+                        }
+                        format!("  lines {}-{}{in_construct}{before}", s, s + k - 1)
+                    })
                     .collect::<Vec<_>>()
-                    .join(", ");
+                    .join("\n");
                 return Err(Error::Ambiguous {
                     path: section.path.clone(),
                     n,
-                    spans,
+                    detail,
                 });
             }
         }
@@ -335,10 +361,14 @@ fn construct(
     lines: &[&str],
     blocks: &dyn Blocks,
 ) -> Result<(usize, usize), Error> {
-    let cands: Vec<usize> = blocks
+    let in_window: Vec<usize> = blocks
         .openings(&section.path, content)
         .into_iter()
         .filter(|n| *n >= lo && *n <= hi)
+        .collect();
+    let cands: Vec<usize> = in_window
+        .iter()
+        .copied()
         .filter(|n| {
             lines
                 .get(n - 1)
@@ -346,10 +376,32 @@ fn construct(
         })
         .collect();
     match cands.len() {
-        0 => Err(Error::NoConstruct {
-            path: section.path.clone(),
-            what: format!("no construct opens with `{star}` in lines {lo}-{hi}"),
-        }),
+        0 => {
+            // The fix is copying one of these into the `@` row, so the
+            // refusal hands over the window's actual openings.
+            let mut available: Vec<&str> = in_window
+                .iter()
+                .map(|n| lines.get(n - 1).copied().unwrap_or("").trim())
+                .collect();
+            available.dedup();
+            let mut names: Vec<String> = available
+                .iter()
+                .take(5)
+                .map(|r| format!("`{}`", crop(r, 60)))
+                .collect();
+            if available.len() > 5 {
+                names.push(format!("… +{}", available.len() - 5));
+            }
+            let hint = if names.is_empty() {
+                String::new()
+            } else {
+                format!(" — the window opens: {}", names.join(", "))
+            };
+            Err(Error::NoConstruct {
+                path: section.path.clone(),
+                what: format!("no construct opens with `{star}` in lines {lo}-{hi}{hint}"),
+            })
+        }
         1 => blocks
             .extent_of(&section.path, content, cands[0])
             .ok_or_else(|| Error::NoConstruct {
@@ -367,6 +419,18 @@ fn construct(
             ),
         }),
     }
+}
+
+// The construct a candidate span sits in, innermost wins: the annotated
+// opening row is exactly what the model's `@` fix copies.
+fn covering(path: &str, at: usize, content: &str, blocks: &dyn Blocks) -> Option<String> {
+    blocks
+        .openings(path, content)
+        .into_iter()
+        .filter_map(|o| blocks.extent_of(path, content, o))
+        .filter(|(s, e)| *s <= at && at <= *e)
+        .min_by_key(|(s, e)| e - s)
+        .map(|(s, _)| content.lines().nth(s - 1).unwrap_or("").trim().to_string())
 }
 
 // The closest real row to the marked rows, so a refusal can point at it
@@ -419,12 +483,16 @@ fn crop(s: &str, max: usize) -> String {
 
 // The spans lowered into a whole file: sorted, overlap-checked, then swept
 // into the new content with the anchored insertions filed around them.
-fn build(path: &str, ops: &[Op], content: &str) -> Result<Change, Error> {
+fn build(path: &str, ops: &[Op], content: &str, blocks: &dyn Blocks) -> Result<Change, Error> {
     let (lines, trailing, crlf) = split(content);
     let len = lines.len();
 
     let mut spans: Vec<(usize, usize, Vec<String>)> = Vec::new();
     let mut before: HashMap<usize, Vec<String>> = HashMap::new();
+    let name = |at: usize| {
+        covering(path, at, content, blocks)
+            .map_or_else(String::new, |row| format!(" (in `{}`)", crop(&row, 60)))
+    };
 
     for op in ops {
         match op {
@@ -446,6 +514,8 @@ fn build(path: &str, ops: &[Op], content: &str) -> Result<Change, Error> {
                 b_start: b.0,
                 b_end: b.1,
                 overlap: b.0,
+                a_in: name(a.0),
+                b_in: name(b.0),
             });
         }
     }
@@ -462,6 +532,8 @@ fn build(path: &str, ops: &[Op], content: &str) -> Result<Change, Error> {
                 b_start: *k,
                 b_end: *k,
                 overlap: *k,
+                a_in: name(*start),
+                b_in: name(*k),
             });
         }
     }
