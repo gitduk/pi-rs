@@ -1,4 +1,4 @@
-use crate::read::MAX_BYTES;
+use crate::read::{MAX_BYTES, over_limit};
 use brain::slice::head_bytes;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -116,11 +116,10 @@ fn read_one(dir: &Path) -> Read {
     // Discovery runs before the first turn; a giant SKILL.md is a problem to
     // report, not a file to hold.
     let path = dir.join("SKILL.md");
-    if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_BYTES) {
-        return Read::Problem(format!(
-            "{}: SKILL.md is over the read limit",
-            dir.display()
-        ));
+    if let Ok(meta) = std::fs::metadata(&path)
+        && meta.len() > MAX_BYTES
+    {
+        return Read::Problem(over_limit(&path.display().to_string(), meta.len()));
     }
     let Ok(text) = std::fs::read_to_string(path) else {
         return Read::None;
