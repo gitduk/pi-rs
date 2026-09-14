@@ -561,14 +561,32 @@ impl Repl {
         self.rebuilt().unwrap_or_else(|why| vec![why])
     }
 
-    // The same, saying why when nothing could be adopted.
-    fn rebuilt(&mut self) -> Result<Vec<String>, String> {
+    // The file tree with the claimed overrides on top — what the config is
+    // computed from and what `/settings get` answers from.
+    fn effective(&self) -> Result<toml::Value, anyhow::Error> {
         let mut tree = self.file.clone();
         for (path, value) in &self.claimed {
-            if let Err(e) = crate::settings::put(&mut tree, path, value.clone()) {
-                return Err(refused("settings", e));
-            }
+            crate::settings::put(&mut tree, path, value.clone())?;
         }
+        Ok(tree)
+    }
+
+    // The effective tree as flat rows for the panel and its completion list.
+    // A reload-refused tree (its refusal already said) falls back to the file.
+    pub fn setting_leaves(&self) -> Vec<(String, String)> {
+        match self.effective() {
+            Ok(tree) => crate::settings::leaves(&tree),
+            Err(_) => crate::settings::leaves(&self.file),
+        }
+    }
+
+    pub fn setting_paths(&self) -> Vec<String> {
+        self.setting_leaves().into_iter().map(|(p, _)| p).collect()
+    }
+
+    // The same, saying why when nothing could be adopted.
+    fn rebuilt(&mut self) -> Result<Vec<String>, String> {
+        let tree = self.effective().map_err(|e| refused("settings", e))?;
         let config = match crate::config::Config::deserialize(tree) {
             Ok(c) => c,
             Err(e) => return Err(refused("settings", anyhow::anyhow!(e))),
@@ -580,7 +598,10 @@ impl Repl {
     /// touches nothing, then record it as a claim and rebuild.
     pub fn edit(&mut self, path: &str, raw: &str) -> Vec<String> {
         let raw = typed(path, raw);
-        let mut scratch = self.file.clone();
+        let mut scratch = match self.effective() {
+            Ok(t) => t,
+            Err(e) => return vec![refused("settings", e)],
+        };
         let old = crate::settings::get(&scratch, path).ok().cloned();
         if let Err(e) = crate::settings::set(&mut scratch, path, &raw) {
             return vec![refused("settings", e)];
@@ -621,7 +642,10 @@ impl Repl {
     /// fails.
     pub fn commit_file(&mut self, path: &str, raw: &str) -> Result<Vec<String>, String> {
         let raw = typed(path, raw);
-        let mut scratch = self.file.clone();
+        let mut scratch = match self.effective() {
+            Ok(t) => t,
+            Err(e) => return Err(format!("{e:#}")),
+        };
         crate::settings::set(&mut scratch, path, &raw).map_err(|e| format!("{e:#}"))?;
         let new = crate::settings::get(&scratch, path).unwrap().clone();
         crate::config::Config::deserialize(scratch).map_err(|e| format!("{e:#}"))?;
@@ -1557,20 +1581,12 @@ impl Repl {
                 if path.is_empty() {
                     return Step::Flash("usage: /settings get <path>".into());
                 }
-                let tree = self.file.clone();
+                let tree = match self.effective() {
+                    Ok(t) => t,
+                    Err(e) => return lines(refused("settings", e)),
+                };
                 match crate::settings::get(&tree, path) {
-                    Ok(v) => {
-                        let shown = if journal::secret(journal::leaf(path)) {
-                            match v.as_str() {
-                                Some("") => "<unset>".to_string(),
-                                Some(_) => "<set>".to_string(),
-                                None => "<set>".to_string(),
-                            }
-                        } else {
-                            v.to_string()
-                        };
-                        lines(format!("{path} = {shown}"))
-                    }
+                    Ok(v) => lines(format!("{path} = {}", mask_secret(path, v))),
                     Err(e) => lines(refused("settings", e)),
                 }
             }
@@ -1594,7 +1610,11 @@ impl Repl {
         // The TUI intercepts bare `/settings` before it reaches here; the
         // line surface can only list.
         let mut out = Vec::new();
-        for (path, value) in crate::settings::leaves(&self.file) {
+        let tree = match self.effective() {
+            Ok(t) => t,
+            Err(e) => return lines(refused("settings", e)),
+        };
+        for (path, value) in crate::settings::leaves(&tree) {
             let shown = if journal::secret(journal::leaf(&path)) {
                 if value.is_empty() {
                     "<unset>".to_string()
@@ -2088,6 +2108,55 @@ mod tests {
                 c.word
             );
         }
+    }
+
+    // A Repl whose file tree is the given TOML, enough for the `/settings`
+    // surface to answer.
+    fn core_with_file(file: &str) -> crate::repl::Repl {
+        crate::repl::Repl {
+            store: crate::session::Store::new(std::env::temp_dir().join("pi-settings-get-test")),
+            keys: std::sync::Arc::new(crate::keys::Keys::default()),
+            config: std::sync::Arc::new(crate::config::Config::default()),
+            args: std::sync::Arc::new(<crate::Args as clap::Parser>::parse_from(["pi"])),
+            commands: std::sync::Arc::new(Vec::new()),
+            file: toml::from_str(file).unwrap(),
+            claimed: Default::default(),
+            lanes: vec![billed_lane("s", 0, 0, 0.0)],
+            current: 0,
+        }
+    }
+
+    fn claimed_base_url() -> crate::repl::Repl {
+        let mut core = core_with_file(r#"base_url = "http://127.0.0.1:7896""#);
+        core.claimed.insert(
+            "base_url".to_string(),
+            toml::Value::String("http://127.0.0.1:7897".to_string()),
+        );
+        core
+    }
+
+    // `/settings get` answers from file plus claims, so a claim reads back
+    // as the value in force rather than the file's stale line.
+    #[test]
+    fn get_answers_from_the_claim_not_the_file() {
+        let mut core = claimed_base_url();
+        let said = match core.settings("get base_url") {
+            Step::Handled(said) => said,
+            _ => panic!("expected a handled step"),
+        };
+        assert!(said[0].contains("7897"), "{said:?}");
+        assert!(!said[0].contains("7896"), "{said:?}");
+    }
+
+    // The panel's rows read the same effective tree, so a claimed value is
+    // what the panel shows and offers to edit.
+    #[test]
+    fn panel_rows_read_the_claim_over_the_file() {
+        let core = claimed_base_url();
+        assert!(
+            core.setting_leaves()
+                .contains(&("base_url".to_string(), "http://127.0.0.1:7897".to_string(),))
+        );
     }
 
     fn choices() -> Vec<Choice> {

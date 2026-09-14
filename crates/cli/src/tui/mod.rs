@@ -800,7 +800,7 @@ struct Ui {
     lists: Lists,
     // The same copy, of the same list `/help` prints.
     commands: Arc<Vec<Command>>,
-    // The config paths `/settings` can reach, from `settings::leaves`.
+    // The config paths `/settings` can reach, from `Repl::setting_paths`.
     // Rebuilt whenever the config tree is replaced.
     setting_paths: Vec<String>,
     // The open panel, or None — one at a time, which is what one field
@@ -2166,10 +2166,7 @@ fn land_handled(ui: &mut Ui, core: &Repl, view: &mut View, lines: Vec<String>) {
     ui.set_vim(&core.config.vim);
     // The config tree changed under a reload; the `/settings` completion list
     // follows it.
-    ui.setting_paths = crate::settings::leaves(&core.file)
-        .into_iter()
-        .map(|(p, _)| p)
-        .collect();
+    ui.setting_paths = core.setting_paths();
 }
 
 // A line submitted while the lane in front is working. What it may do is
@@ -2459,10 +2456,7 @@ impl Tui {
             paint,
         );
         ui.at_root = core.lane().ctx.workspace.root().to_path_buf();
-        ui.setting_paths = crate::settings::leaves(&core.file)
-            .into_iter()
-            .map(|(p, _)| p)
-            .collect();
+        ui.setting_paths = core.setting_paths();
         ui.live = core.config.status.live.clone();
         ui.done = core.config.status.done.clone();
         ui.set_vim(&core.config.vim);
@@ -2856,10 +2850,7 @@ impl Tui {
                     .extend(said.into_iter().map(Row::notice));
                 // The completion list views the same tree, and outlives the
                 // panel — so it is rebuilt here rather than with the rows.
-                self.ui.setting_paths = crate::settings::leaves(&self.core.file)
-                    .into_iter()
-                    .map(|(p, _)| p)
-                    .collect();
+                self.ui.setting_paths = self.core.setting_paths();
                 self.reload_panel();
             }
             Err(why) => {
@@ -2890,7 +2881,7 @@ impl Tui {
     // that has to know where a panel's rows come from.
     fn reload_panel(&mut self) {
         let body = match self.ui.panel.as_ref().map(Panel::body) {
-            Some(Body::Settings(_)) => Body::Settings(crate::settings::leaves(&self.core.file)),
+            Some(Body::Settings(_)) => Body::Settings(self.core.setting_leaves()),
             Some(Body::Shelf(_)) => Body::Shelf(self.core.shelf_rows()),
             None => return,
         };
@@ -3121,7 +3112,7 @@ impl Tui {
                 continue;
             }
             if matches!(intent, Intent::Settings(ref rest) if rest.trim().is_empty()) {
-                let rows = crate::settings::leaves(&self.core.file);
+                let rows = self.core.setting_leaves();
                 self.ui.panel = Some(Panel::new(Body::Settings(rows)));
                 continue;
             }
