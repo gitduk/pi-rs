@@ -8,7 +8,8 @@ pub struct Landed {
     pub end: usize,
     /// The original lines it displaced, in order. Empty for an insertion.
     pub took: Vec<String>,
-    /// The 1-based line this hunk acted on in the *original* file.
+    /// The 1-based line this hunk acted on, in the content its section
+    /// resolved against — the file as prior sections left it.
     pub took_at: usize,
 }
 
@@ -78,12 +79,9 @@ enum Op {
 
 // Validate every section, then build the whole plan. Nothing reaches the
 // caller unless all of it succeeds: a half-applied patch is worse than a
-// rejected one.
-//
-// Sections for one path stack: each resolves against what the earlier ones
-// left, and the plan carries a single Write per path. Sections built off the
-// same original would each land alone on disk, the later overwriting the
-// earlier with no error to show for it.
+// rejected one. Sections for one path stack — each resolves against what
+// the earlier ones left, and the plan ends with a single Write per path,
+// or sections built off one original would overwrite each other on disk.
 pub fn apply(patch: &Patch, files: &Files<'_>, blocks: &dyn Blocks) -> Result<Plan, Error> {
     let mut plan = Plan::default();
     // Where each path's Write sits in the plan.
@@ -111,6 +109,17 @@ pub fn apply(patch: &Patch, files: &Files<'_>, blocks: &dyn Blocks) -> Result<Pl
                 landed: kept_landed,
                 ..
             } = &mut plan.changes[at];
+            // Later sections move the lines earlier ones reported: shift
+            // each old hunk by the net lines this section added before it.
+            for old in kept_landed.iter_mut() {
+                let drift: isize = landed
+                    .iter()
+                    .filter(|h| h.took_at as isize <= old.start as isize + 1)
+                    .map(|h| h.gave() as isize - h.took.len() as isize)
+                    .sum();
+                old.start = (old.start as isize + drift).max(0) as usize;
+                old.end = (old.end as isize + drift).max(0) as usize;
+            }
             *kept = content;
             kept_landed.extend(landed);
         } else {

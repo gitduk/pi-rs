@@ -146,9 +146,8 @@ async fn a_scope_row_replaces_a_whole_function_without_counting_lines() {
     assert!(report.contains("3:pub fn replaced() {}"), "{report}");
 }
 
-// Three sections for one file stack: every section resolves against what the
-// earlier ones left, so all three land. Each built off the same original
-// would leave only the last one on disk.
+// Three sections for one file stack: each lands against what the earlier
+// ones left — built off one original, only the last would survive on disk.
 #[tokio::test]
 async fn three_sections_for_one_file_all_land() {
     let (_d, c) = ctx();
