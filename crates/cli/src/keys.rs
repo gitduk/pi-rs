@@ -94,6 +94,9 @@ pub enum Action {
     DeleteWordBack,
     DeleteToLineEnd,
     DeleteToLineStart,
+    // The line, whole. Vim spells it `dd` — a doubled key the tui resolves
+    // beside its escape pair, so no single press and no binding reaches it.
+    DeleteLine,
     MoveCharLeft,
     MoveCharRight,
     MoveWordLeft,
@@ -103,6 +106,11 @@ pub enum Action {
     MoveWordNext,
     MoveLineStart,
     MoveLineEnd,
+    MoveLineFirstNonBlank,
+    // The buffer's ends, not one line's. `G` is a press; the top has no
+    // single press — vim spells it `gg`, another doubled key.
+    MoveBufferStart,
+    MoveBufferEnd,
     HistoryOlder,
     HistoryNewer,
     LineSubmit,
@@ -135,6 +143,12 @@ pub enum Action {
     // no operator here, so the two ranges worth having are bound directly.
     ChangeChar,
     ChangeToLineEnd,
+    // The line, rewritten from empty: `S` the single press, `cc` the
+    // doubled one.
+    ChangeLine,
+    // A fresh line beside the caret's, then Insert: vim's `o` and `O`.
+    OpenLineBelow,
+    OpenLineAbove,
     // The line, in `$EDITOR`. The one action that leaves the process.
     EditExternally,
 }
@@ -401,7 +415,7 @@ pub const BINDINGS: &[Binding] = &[
     // addition.
     //
     // The ids carry a `normal.` prefix only where one is needed:
-    // `lane.next` is already taken, `mode.insert` cannot be, since the
+    // `move.char.left` is already taken, `mode.insert` cannot be, since the
     // Insert layer is empty and nothing else can ask to leave a mode.
     Binding {
         id: "normal.lane.prev",
@@ -431,6 +445,20 @@ pub const BINDINGS: &[Binding] = &[
         when: W::Mode(Mode::Normal),
         keys: &["J"],
         note: "half a window on, as ctrl+f does",
+    },
+    Binding {
+        id: "normal.move.char.left",
+        action: A::MoveCharLeft,
+        when: W::Mode(Mode::Normal),
+        keys: &["h"],
+        note: "",
+    },
+    Binding {
+        id: "normal.move.char.right",
+        action: A::MoveCharRight,
+        when: W::Mode(Mode::Normal),
+        keys: &["l"],
+        note: "",
     },
     Binding {
         id: "normal.move.word.next",
@@ -465,6 +493,20 @@ pub const BINDINGS: &[Binding] = &[
         action: A::MoveLineEnd,
         when: W::Mode(Mode::Normal),
         keys: &["$"],
+        note: "",
+    },
+    Binding {
+        id: "normal.move.line.first-non-blank",
+        action: A::MoveLineFirstNonBlank,
+        when: W::Mode(Mode::Normal),
+        keys: &["^"],
+        note: "",
+    },
+    Binding {
+        id: "normal.move.buffer.end",
+        action: A::MoveBufferEnd,
+        when: W::Mode(Mode::Normal),
+        keys: &["G"],
         note: "",
     },
     Binding {
@@ -515,6 +557,27 @@ pub const BINDINGS: &[Binding] = &[
         when: W::Mode(Mode::Normal),
         keys: &["C"],
         note: "to the end of the line, then Insert",
+    },
+    Binding {
+        id: "normal.change.line",
+        action: A::ChangeLine,
+        when: W::Mode(Mode::Normal),
+        keys: &["S"],
+        note: "the whole line, then Insert",
+    },
+    Binding {
+        id: "normal.open.below",
+        action: A::OpenLineBelow,
+        when: W::Mode(Mode::Normal),
+        keys: &["o"],
+        note: "a new line under the caret's, then Insert",
+    },
+    Binding {
+        id: "normal.open.above",
+        action: A::OpenLineAbove,
+        when: W::Mode(Mode::Normal),
+        keys: &["O"],
+        note: "a new line over it, then Insert",
     },
     Binding {
         id: "normal.edit.external",
@@ -1080,6 +1143,36 @@ mod tests {
         assert_eq!(
             k.action(press("I"), normal),
             Some(Action::ModeInsertLineStart)
+        );
+    }
+
+    #[test]
+    fn h_and_l_move_the_caret_in_normal_mode() {
+        // Unbound in Normal is a dead key — it commands nothing and types
+        // nothing — so the pair has to be in the table, not merely unclaimed.
+        let k = Keys::default();
+        let normal = Layers {
+            mode: Some(Mode::Normal),
+            ..Layers::default()
+        };
+        assert_eq!(k.action(press("h"), normal), Some(Action::MoveCharLeft));
+        assert_eq!(k.action(press("l"), normal), Some(Action::MoveCharRight));
+    }
+
+    #[test]
+    fn opening_lines_and_buffer_jumps_reach_the_table() {
+        let k = Keys::default();
+        let normal = Layers {
+            mode: Some(Mode::Normal),
+            ..Layers::default()
+        };
+        assert_eq!(k.action(press("o"), normal), Some(Action::OpenLineBelow));
+        assert_eq!(k.action(press("O"), normal), Some(Action::OpenLineAbove));
+        assert_eq!(k.action(press("S"), normal), Some(Action::ChangeLine));
+        assert_eq!(k.action(press("G"), normal), Some(Action::MoveBufferEnd));
+        assert_eq!(
+            k.action(press("^"), normal),
+            Some(Action::MoveLineFirstNonBlank)
         );
     }
 

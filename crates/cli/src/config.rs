@@ -127,6 +127,8 @@ pub struct Vim {
     /// the jobs it already has rather than becoming a mode key.
     #[serde(default = "default_escape")]
     pub escape: String,
+    /// How long the first half of a two-press sequence waits for its second —
+    /// the escape pair in Insert, and the doubled keys in Normal.
     #[serde(default = "default_escape_ms")]
     pub escape_timeout_ms: u64,
 }

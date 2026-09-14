@@ -188,28 +188,90 @@ impl Editor {
         self.cursor = start;
     }
 
+    // The caret line's edges: the byte after its newline (or 0), and the
+    // index of its newline (or the buffer's end).
+    fn line_start(&self) -> usize {
+        self.text[..self.cursor].rfind('\n').map_or(0, |i| i + 1)
+    }
+
+    fn line_end(&self) -> usize {
+        self.text[self.cursor..]
+            .find('\n')
+            .map_or(self.text.len(), |i| self.cursor + i)
+    }
+
     /// To the start of the current visual line, not of the whole buffer: a
     /// multi-line prompt otherwise has no way to reach a line's own start.
     pub fn home(&mut self) {
-        self.cursor = self.text[..self.cursor].rfind('\n').map_or(0, |i| i + 1);
+        self.cursor = self.line_start();
     }
 
     pub fn end(&mut self) {
-        self.cursor = self.text[self.cursor..]
-            .find('\n')
-            .map_or(self.text.len(), |i| self.cursor + i);
+        self.cursor = self.line_end();
+    }
+
+    /// The line's first non-blank character, vim's `^`.
+    pub fn first_non_blank(&mut self) {
+        self.home();
+        let line = &self.text[self.cursor..self.line_end()];
+        self.cursor += line.len() - line.trim_start().len();
+    }
+
+    /// The whole buffer's ends, not one line's.
+    pub fn buffer_start(&mut self) {
+        self.cursor = 0;
+    }
+
+    pub fn buffer_end(&mut self) {
+        self.cursor = self.text.len();
     }
 
     pub fn kill_to_end(&mut self) {
-        let end = self.text[self.cursor..]
-            .find('\n')
-            .map_or(self.text.len(), |i| self.cursor + i);
+        let end = self.line_end();
         self.text.replace_range(self.cursor..end, "");
     }
 
     pub fn kill_to_start(&mut self) {
-        let start = self.text[..self.cursor].rfind('\n').map_or(0, |i| i + 1);
+        let start = self.line_start();
         self.text.replace_range(start..self.cursor, "");
+        self.cursor = start;
+    }
+
+    /// The caret's line, whole, plus the newline that would join its
+    /// neighbours — the rows above and below always close up.
+    pub fn delete_line(&mut self) {
+        let (start, end) = (self.line_start(), self.line_end());
+        self.cursor = start;
+        if end < self.text.len() {
+            self.text.replace_range(start..end + 1, "");
+        } else if start > 0 {
+            self.text.replace_range(start - 1..end, "");
+            self.cursor = self.text.len();
+            self.home();
+        } else {
+            self.text.clear();
+            self.cursor = 0;
+        }
+    }
+
+    /// Empty the caret's line: vim's `S` and `cc`.
+    pub fn clear_line(&mut self) {
+        let (start, end) = (self.line_start(), self.line_end());
+        self.text.replace_range(start..end, "");
+        self.cursor = start;
+    }
+
+    /// A fresh empty line beside the caret's, the caret on it: vim's `o`
+    /// and `O`. Landing in Insert is the caller's business.
+    pub fn open_below(&mut self) {
+        let end = self.line_end();
+        self.text.insert(end, '\n');
+        self.cursor = end + 1;
+    }
+
+    pub fn open_above(&mut self) {
+        let start = self.line_start();
+        self.text.insert(start, '\n');
         self.cursor = start;
     }
 
@@ -245,7 +307,7 @@ impl Editor {
     }
 
     fn caret_up(&mut self) {
-        let start = self.text[..self.cursor].rfind('\n').map_or(0, |i| i + 1);
+        let start = self.line_start();
         if start == 0 {
             return;
         }
@@ -255,7 +317,7 @@ impl Editor {
     }
 
     fn caret_down(&mut self) {
-        let start = self.text[..self.cursor].rfind('\n').map_or(0, |i| i + 1);
+        let start = self.line_start();
         let col = self.cursor - start;
         let Some(nl) = self.text[self.cursor..].find('\n').map(|i| self.cursor + i) else {
             return;
@@ -443,6 +505,71 @@ mod tests {
         // Still the same buffer: Up moved within it instead of recalling.
         assert_eq!(m.text, "one\ntwo");
         assert!(m.cursor < 4);
+    }
+
+    #[test]
+    fn delete_line_takes_the_row_and_joins_the_neighbours() {
+        let mut e = typed("ab\ncd\nef");
+        e.cursor = 4;
+        e.delete_line();
+        assert_eq!(e.text, "ab\nef");
+        assert_eq!(e.cursor, 3, "the caret waits where the row began");
+
+        e.cursor = 4;
+        e.delete_line();
+        assert_eq!(e.text, "ab", "the last row takes the newline before it");
+        assert_eq!(e.cursor, 0, "the caret lands on the row above");
+
+        e.delete_line();
+        assert_eq!(e.text, "", "a lone row empties the buffer");
+
+        let mut f = typed("ab\ncd");
+        f.cursor = 1;
+        f.delete_line();
+        assert_eq!(f.text, "cd");
+    }
+
+    #[test]
+    fn clear_line_empties_the_row_without_joining_neighbours() {
+        let mut e = typed("ab\ncd\nef");
+        e.cursor = 4;
+        e.clear_line();
+        assert_eq!(e.text, "ab\n\nef");
+        assert_eq!(e.cursor, 3);
+
+        let mut f = typed("ab\ncd");
+        f.cursor = 4;
+        f.clear_line();
+        assert_eq!(f.text, "ab\n");
+        assert_eq!(f.cursor, 3);
+    }
+
+    #[test]
+    fn open_line_puts_the_caret_on_the_fresh_row() {
+        let mut e = typed("ab\ncd");
+        e.cursor = 4;
+        e.open_above();
+        assert_eq!(e.text, "ab\n\ncd");
+        e.insert('Z');
+        assert_eq!(e.text, "ab\nZ\ncd", "O typed on the line it opened");
+
+        e.open_below();
+        assert_eq!(e.text, "ab\nZ\n\ncd");
+        e.insert('Y');
+        assert_eq!(e.text, "ab\nZ\nY\ncd", "o typed under the line above");
+    }
+
+    #[test]
+    fn first_non_blank_skips_the_indent_without_leaving_the_line() {
+        let mut e = typed("  ab\ncd");
+        e.cursor = 3;
+        e.first_non_blank();
+        assert_eq!(e.cursor, 2);
+
+        let mut blank = typed("   \nab");
+        blank.cursor = 1;
+        blank.first_non_blank();
+        assert_eq!(blank.cursor, 3, "a blank line lands on its end, as $ does");
     }
     #[test]
     fn taking_the_line_mid_browse_returns_the_composition_not_the_recall() {
