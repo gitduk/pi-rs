@@ -705,6 +705,9 @@ enum Typed {
     // Normal mode. An unbound character commands nothing and types nothing —
     // without this the mode would be a costume, every key still typing.
     Ignore,
+    // Normal mode finished a doubled key (`dd`, `gg`, `cc`): the action it
+    // names, for the caller to answer.
+    Command(Action),
 }
 
 // The modal keys' whole state: the mode that is up, the sequence that leaves
@@ -753,19 +756,42 @@ impl Vim {
         self.window = std::time::Duration::from_millis(cfg.escape_timeout_ms);
     }
 
+    // The doubled keys — `dd`, `gg`, `cc` — are the escape pair's
+    // Normal-mode cousins: the same character twice inside the same window.
+    fn doubled(c: char) -> Option<Action> {
+        match c {
+            'd' => Some(Action::DeleteLine),
+            'g' => Some(Action::MoveBufferStart),
+            'c' => Some(Action::ChangeLine),
+            _ => None,
+        }
+    }
+
+    // Was `prev` the character typed just now? The take spends the stored
+    // half either way.
+    fn armed(&mut self, prev: char, now: Instant) -> bool {
+        self.last
+            .take()
+            .is_some_and(|(p, at)| p == prev && now.duration_since(at) < self.window)
+    }
+
     // What `c` does, and the mode change if it makes one.
     fn typed(&mut self, c: char, now: Instant) -> Typed {
         if self.mode == Mode::Normal {
+            if let Some(action) = Self::doubled(c) {
+                if self.armed(c, now) {
+                    return Typed::Command(action);
+                }
+                self.last = Some((c, now));
+            } else {
+                self.last = None;
+            }
             return Typed::Ignore;
         }
         let Some((first, second)) = self.escape else {
             return Typed::Insert;
         };
-        let armed = self
-            .last
-            .take()
-            .is_some_and(|(p, at)| p == first && now.duration_since(at) < self.window);
-        if armed && c == second {
+        if self.armed(first, now) && c == second {
             self.mode = Mode::Normal;
             return Typed::Escape;
         }
@@ -1923,8 +1949,19 @@ impl Ui {
                 self.editor.kill_to_end();
                 self.leave_normal();
             }
+            Some(Action::ChangeLine) => self.change_line(),
+            Some(Action::OpenLineBelow) => {
+                self.editor.open_below();
+                self.leave_normal();
+            }
+            Some(Action::OpenLineAbove) => {
+                self.editor.open_above();
+                self.leave_normal();
+            }
             Some(Action::MoveLineStart) => self.editor.home(),
             Some(Action::MoveLineEnd) => self.editor.end(),
+            Some(Action::MoveLineFirstNonBlank) => self.editor.first_non_blank(),
+            Some(Action::MoveBufferEnd) => self.editor.buffer_end(),
             Some(Action::HistoryOlder) => self.editor.up(),
             Some(Action::HistoryNewer) => self.editor.down(),
             Some(Action::ScrollPageUp) => {
@@ -2027,6 +2064,12 @@ impl Ui {
                             self.editor.backspace();
                             self.show_mode();
                         }
+                        Some(Typed::Command(action)) => match action {
+                            Action::DeleteLine => self.editor.delete_line(),
+                            Action::ChangeLine => self.change_line(),
+                            Action::MoveBufferStart => self.editor.buffer_start(),
+                            _ => unreachable!("a doubled key names one of the three"),
+                        },
                         Some(Typed::Insert) | None => self.editor.insert(c),
                     }
                 }
@@ -2039,6 +2082,11 @@ impl Ui {
                 | Action::Rewind
                 | Action::AppClearScreen,
             ) => unreachable!("handled scrollback"),
+            // No binding reaches for these: `dd` and `gg` are doubled keys
+            // the `None` arm answers, so the table never sends them here.
+            Some(Action::DeleteLine | Action::MoveBufferStart) => {
+                unreachable!("doubled keys are answered where they are typed")
+            }
         }
         Intent::None
     }
@@ -2070,6 +2118,13 @@ impl Ui {
             v.last = None;
         }
         self.show_mode();
+    }
+
+    // The line, rewritten from nothing: `S`, or `cc` by its doubled spelling.
+    // Both leave, because what follows is typing.
+    fn change_line(&mut self) {
+        self.editor.clear_line();
+        self.leave_normal();
     }
 
     // Put the mode where it can be seen: the shape of the caret, and the
@@ -5865,6 +5920,110 @@ mod tests {
         assert_eq!(mode(&ui), Some(Mode::Insert));
         ui.key(&mut lane, typed('Y'), false);
         assert_eq!(ui.editor.text(), "ZY", "C leaves the caret where it cut");
+    }
+
+    // `S` and `cc` clear the line and land in Insert.
+    #[test]
+    fn s_and_cc_change_the_line_without_removing_it() {
+        let mut ui = vim_ui();
+        let (_dir, mut lane) = a_running_lane();
+        ui.editor.set_line("ab\ncd\nef");
+        ui.vim.as_mut().unwrap().mode = Mode::Normal;
+
+        ui.editor.buffer_start();
+        ui.editor.down();
+        ui.key(&mut lane, typed('S'), false);
+        assert_eq!(mode(&ui), Some(Mode::Insert));
+        assert_eq!(ui.editor.text(), "ab\n\nef");
+        ui.key(&mut lane, typed('Z'), false);
+        assert_eq!(ui.editor.text(), "ab\nZ\nef");
+
+        ui.vim.as_mut().unwrap().mode = Mode::Normal;
+        ui.editor.down();
+        ui.key(&mut lane, typed('c'), false);
+        ui.key(&mut lane, typed('c'), false);
+        assert_eq!(mode(&ui), Some(Mode::Insert));
+        assert_eq!(ui.editor.text(), "ab\nZ\n");
+        ui.key(&mut lane, typed('Y'), false);
+        assert_eq!(ui.editor.text(), "ab\nZ\nY");
+    }
+
+    // `o` and `O` open a line on either side of the caret's and land in
+    // Insert, which is where the typing goes.
+    #[test]
+    fn o_and_o_open_a_line_and_land_in_insert() {
+        let mut ui = vim_ui();
+        let (_dir, mut lane) = a_running_lane();
+        ui.editor.set_line("ab\ncd");
+        ui.vim.as_mut().unwrap().mode = Mode::Normal;
+
+        ui.key(&mut lane, typed('O'), false);
+        assert_eq!(mode(&ui), Some(Mode::Insert));
+        ui.key(&mut lane, typed('Z'), false);
+        assert_eq!(
+            ui.editor.text(),
+            "ab\nZ\ncd",
+            "O typed on the line it opened"
+        );
+
+        ui.editor.set_line("ab\ncd");
+        ui.vim.as_mut().unwrap().mode = Mode::Normal;
+        ui.key(&mut lane, typed('o'), false);
+        ui.key(&mut lane, typed('Z'), false);
+        assert_eq!(
+            ui.editor.text(),
+            "ab\ncd\nZ",
+            "o typed under the caret's line"
+        );
+    }
+
+    // `dd` takes the line and stays. The first `d` waits, the second fires.
+    #[test]
+    fn dd_takes_the_whole_line_and_stays_in_normal() {
+        let mut ui = vim_ui();
+        let (_dir, mut lane) = a_running_lane();
+        ui.editor.set_line("ab\ncd\nef");
+        ui.vim.as_mut().unwrap().mode = Mode::Normal;
+
+        ui.key(&mut lane, typed('d'), false);
+        assert_eq!(ui.editor.text(), "ab\ncd\nef", "the first d waits");
+
+        ui.key(&mut lane, typed('d'), false);
+        assert_eq!(ui.editor.text(), "ab\ncd");
+        assert_eq!(mode(&ui), Some(Mode::Normal));
+
+        ui.key(&mut lane, typed('d'), false);
+        ui.key(&mut lane, typed('d'), false);
+        assert_eq!(ui.editor.text(), "ab");
+
+        ui.key(&mut lane, typed('d'), false);
+        ui.key(&mut lane, typed('z'), false);
+        ui.key(&mut lane, typed('d'), false);
+        assert_eq!(
+            ui.editor.text(),
+            "ab",
+            "an intervening key cancels the sequence"
+        );
+    }
+
+    // `gg` and `G` run to the buffer's ends, and `^` to the first non-blank.
+    #[test]
+    fn gg_g_and_caret_walk_the_lines() {
+        let mut ui = vim_ui();
+        let (_dir, mut lane) = a_running_lane();
+        ui.editor.set_line("  ab\ncd");
+        ui.vim.as_mut().unwrap().mode = Mode::Normal;
+
+        ui.key(&mut lane, typed('g'), false);
+        ui.key(&mut lane, typed('g'), false);
+        assert_eq!(ui.editor.cursor(), 0);
+        assert_eq!(mode(&ui), Some(Mode::Normal));
+
+        ui.key(&mut lane, typed('^'), false);
+        assert_eq!(ui.editor.cursor(), 2, "past the indent");
+
+        ui.key(&mut lane, typed('G'), false);
+        assert_eq!(ui.editor.cursor(), ui.editor.text().len());
     }
 
     // Turning the keys off is the one thing that moves the mode without a
