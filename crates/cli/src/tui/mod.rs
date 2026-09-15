@@ -2150,6 +2150,39 @@ impl Ui {
         self.show_mode();
     }
 
+    // Every copy of the config the surface keeps, brought up to date — the one
+    // landing `/reload`, `/settings set`, and a panel write all share.
+    fn adopt_config(&mut self, core: &Repl, view: &mut View) {
+        // The key map lives in two places; a reload has to reach both or the
+        // screen keeps answering to the old bindings.
+        if !Arc::ptr_eq(&self.keys, &core.keys) {
+            self.keys = core.keys.clone();
+        }
+        // Likewise the completion list: /reload is allowed to define models —
+        // and skills — the last one did not.
+        self.choices = core.choices();
+        // The theme is the one that is not a copy — the opening block is
+        // painted in it — so it takes the view it was painted into.
+        if self.paint.theme.as_ref() != &core.config.theme {
+            self.set_theme(
+                view,
+                &core.lane().context,
+                Arc::new(core.config.theme.clone()),
+            );
+        }
+        if !Arc::ptr_eq(&self.commands, &core.commands) {
+            self.commands = core.commands.clone();
+        }
+        self.set_vim(&core.config.vim);
+        // The config tree changed under a reload; the `/settings` completion
+        // list follows it, and it outlives the panel that edited it.
+        self.setting_paths = core.setting_paths();
+        // And the segment lists, copied in at startup: a run's finished rows
+        // are re-spelled from whichever list stands when they are drawn.
+        self.live = core.config.status.live.clone();
+        self.done = core.config.status.done.clone();
+    }
+
     // One key, three meanings, and the escalation travels with the binding
     // rather than with Ctrl-C: stop the run, clear the line, or — pressed
     // twice inside the window — leave.
@@ -2184,28 +2217,7 @@ fn land_handled(ui: &mut Ui, core: &Repl, view: &mut View, lines: Vec<String>) {
     view.surface
         .scrollback
         .extend(lines.into_iter().map(Row::notice));
-    // The key map lives in two places; a reload has to reach both or the
-    // screen keeps answering to the old bindings.
-    if !Arc::ptr_eq(&ui.keys, &core.keys) {
-        ui.keys = core.keys.clone();
-    }
-    // Likewise the completion list: /reload is allowed to define models — and
-    // skills — the last one did not.
-    ui.choices = core.choices();
-    if ui.paint.theme.as_ref() != &core.config.theme {
-        ui.set_theme(
-            view,
-            &core.lane().context,
-            Arc::new(core.config.theme.clone()),
-        );
-    }
-    if !Arc::ptr_eq(&ui.commands, &core.commands) {
-        ui.commands = core.commands.clone();
-    }
-    ui.set_vim(&core.config.vim);
-    // The config tree changed under a reload; the `/settings` completion list
-    // follows it.
-    ui.setting_paths = core.setting_paths();
+    ui.adopt_config(core, view);
 }
 
 // A line submitted while the lane in front is working. What it may do is
@@ -2880,16 +2892,10 @@ impl Tui {
     // it; there is nowhere else for it to be read.
     fn commit_setting(&mut self, path: &str, value: &str) {
         match self.core.commit_file(path, value) {
+            // A panel write is `/settings set` with the rows spelled for it,
+            // so it lands where that line lands.
             Ok(said) => {
-                self.core
-                    .lane_mut()
-                    .view
-                    .surface
-                    .scrollback
-                    .extend(said.into_iter().map(Row::notice));
-                // The completion list views the same tree, and outlives the
-                // panel — so it is rebuilt here rather than with the rows.
-                self.ui.setting_paths = self.core.setting_paths();
+                self.land_lines(said);
                 self.reload_panel();
             }
             Err(why) => {
@@ -5624,6 +5630,31 @@ mod tests {
         // this, which is the whole of what changed.
         let narrowed = spelled(&lane.view.surface.scrollback, &ui.paint, &[Segment::Cost]);
         assert_eq!(narrowed.last().map(String::as_str), Some("$0.0012"));
+    }
+
+    // The surface reads the segment lists once, at startup: whichever door the
+    // config comes in by — a `/settings set` line, or a write from the panel —
+    // it has to land, or the line never moves.
+    #[tokio::test]
+    async fn a_settings_change_to_the_status_segments_reaches_the_surface() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut tui = surface(dir.path());
+        assert!(!tui.ui.live.contains(&Segment::Model));
+
+        let lines = tui.core.edit("status.live", r#"["model"]"#);
+        tui.land_lines(lines);
+        assert_eq!(tui.ui.live, vec![Segment::Model]);
+
+        // The panel's door: it writes the file the config is read from, so the
+        // surface's own `--config` is pointed at a temp one. The list it edits
+        // is another, to tell the two refreshes apart.
+        let file = dir.path().join("settings.toml");
+        std::fs::write(&file, "").expect("an empty settings file");
+        let mut args = <crate::Args as clap::Parser>::parse_from(["pi"]);
+        args.config = Some(file.display().to_string());
+        tui.core.args = std::sync::Arc::new(args);
+        tui.commit_setting("status.done", r#"["cost"]"#);
+        assert_eq!(tui.ui.done, vec![Segment::Cost]);
     }
 
     // A run that begins no turn — a `!` command — spends no tokens, and a row
