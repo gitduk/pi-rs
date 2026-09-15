@@ -459,7 +459,9 @@ fn scrollback_from(
     let answered: HashSet<String> = session
         .history()
         .filter_map(|e| match e {
-            LogEntry::Tool { result: r, .. } => Some(r.call.clone()),
+            LogEntry::Tool { result: r, .. } if !agent::session::is_stopped_call(r) => {
+                Some(r.call.clone())
+            }
             _ => None,
         })
         .collect();
@@ -556,7 +558,8 @@ fn f_entry(entry: &LogEntry, paint: &Paint, bang_prompt: &str) -> Option<Vec<Row
         ),
         LogEntry::Tool {
             result: r, preview, ..
-        } => Some(vec![Row::stored_result(r, preview.as_deref())]),
+        } => (!agent::session::is_stopped_call(r))
+            .then(|| vec![Row::stored_result(r, preview.as_deref())]),
         _ => None,
     }
 }
@@ -4968,11 +4971,9 @@ mod tests {
         }
     }
 
-    // A `!` the user stopped is not a cancelled request. Telling the model
-    // otherwise sends it a note about a task it never had, and the note says
-    // to treat that phantom request as cancelled.
+    // A stopped command or turn does not inject a cancelled note to the model.
     #[tokio::test]
-    async fn a_stopped_bash_does_not_tell_the_model_a_request_was_cancelled() {
+    async fn a_stopped_run_does_not_tell_the_model_a_request_was_cancelled() {
         let dir = tempfile::tempdir().expect("a temp dir");
         let stopped = |kind: super::Kind| {
             let dir = dir.path().to_path_buf();
@@ -5002,15 +5003,44 @@ mod tests {
         .await;
         assert!(
             !after_bash.contains("stopped the previous run"),
-            "a stopped `!` is the user's own command, not a request the model owes: {after_bash}"
+            "a stopped `!` adds no note: {after_bash}"
         );
 
-        // The turn it was borrowed from still says so, or the fix went too far.
         let after_turn = stopped(super::Kind::Turn).await;
         assert!(
-            after_turn.contains("stopped the previous run"),
-            "a stopped turn still has to be named: {after_turn}"
+            !after_turn.contains("stopped the previous run"),
+            "a stopped turn adds no note: {after_turn}"
         );
+    }
+
+    #[test]
+    fn a_stopped_tool_call_is_silenced_in_tui() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let tui = surface(dir.path());
+        let mut session = agent::session::Session::new();
+        session.prompt("run check");
+        session.push_assistant(vec![brain::message::AssistantContent::ToolCall(
+            brain::message::ToolCall {
+                id: "c1".into(),
+                name: "bash".into(),
+                args: serde_json::json!({ "command": "cargo check" }),
+            },
+        )]);
+        session.send_prompt("do something else", None::<String>, None);
+
+        // f_entry silences the repaired stopped tool entry
+        let stopped_entry = &session.entries()[2];
+        assert!(super::f_entry(stopped_entry, &tui.ui.paint, "> ").is_none());
+
+        let mut folds = Folds::default();
+        let rows = scrollback_from(&session, &tui.ui.paint, "> ", &mut folds);
+        for r in &rows {
+            let (line, _) = r.line(0, &tui.ui.paint, &[], 80);
+            assert!(
+                !line.contains("The user stopped this call"),
+                "stopped call notice should not appear: {line}"
+            );
+        }
     }
 
     // An interrupted turn never states its own word, so the spend the view

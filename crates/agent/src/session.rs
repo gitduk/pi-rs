@@ -361,14 +361,23 @@ pub struct Session {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum StopCause {
     // The user asked the run to stop: Esc, `/stop`, an interrupt.
+    #[allow(dead_code)]
     User,
     // It died on its own — an error or a crash — and no more is known.
     Other,
 }
 
-// What the model is told after a run the user stopped.
-const STOPPED_BY_USER: &str = "The user stopped the previous run before it finished. Treat the \
-     request it was working on as cancelled; the message below is what to act on.";
+/// What an unanswered call is closed with when stopped by the user.
+pub const STOPPED_CALL: &str = "The user stopped this call before it returned.";
+
+/// Whether a tool result was synthesized to close an interrupted call.
+pub fn is_stopped_call(r: &ToolResult) -> bool {
+    r.content.iter().any(|c| match c {
+        ToolResultContent::Text(t) => t.text.starts_with("The user stopped this call"),
+        _ => false,
+    })
+}
+
 // What the model is told after a run that died for an unknown reason.
 const STOPPED_UNKNOWN: &str = "The previous run ended before it finished, for an unknown \
      reason. Treat the request it was working on as unresolved; the message below is what to act on.";
@@ -533,8 +542,7 @@ impl Session {
     /// name; one that answered records nothing.
     pub fn note_outcome(&mut self, outcome: &Result<Totals, AgentError>) {
         match outcome {
-            Ok(_) => {}
-            Err(AgentError::Cancelled) => self.interrupted = Some(StopCause::User),
+            Ok(_) | Err(AgentError::Cancelled) => {}
             Err(_) => self.interrupted = Some(StopCause::Other),
         }
     }
@@ -548,12 +556,9 @@ impl Session {
     /// Continue with a new prompt, repairing a turn that may have died
     /// mid-call. An assistant turn whose tool calls were never answered would
     /// make the next request invalid (a `tool_use` with no `tool_result`);
-    /// each is closed with a result naming the interruption instead — the model
-    /// is told a person stopped it rather than that the call failed, which are
-    /// different things to answer. A run that ended unanswered is named too,
-    /// but only when the caller says why: the transcript cannot tell a user
-    /// stop from a crash, and the note must not guess. The prompt is appended
-    /// as its own entry.
+    /// each is closed with a result naming the interruption instead. An unknown
+    /// failure that ended a run unanswered is named with a note, while a user stop
+    /// leaves direction to the new prompt. The prompt is appended as its own entry.
     /// `shown` is what the user typed, when that differs from what the model
     /// is sent — a `!cmd` line becomes the command *and its output*, and the
     /// screen has to show the line, not the transcript of running it.
@@ -584,23 +589,12 @@ impl Session {
             .cloned()
             .collect();
         for c in unanswered {
-            self.push_previewed(vec![(
-                ToolResult::error(
-                    c.id,
-                    c.name,
-                    "The user stopped this call before it returned; nothing about the call itself failed.",
-                ),
-                None,
-            )]);
+            self.push_previewed(vec![(ToolResult::text(c.id, c.name, STOPPED_CALL), None)]);
         }
-        // The run that just ended may have died unanswered; the caller said
-        // why, and the model is told rather than left to read the shape.
-        if let Some(cause) = self.interrupted.take() {
-            let text = match cause {
-                StopCause::User => STOPPED_BY_USER,
-                StopCause::Other => STOPPED_UNKNOWN,
-            };
-            self.push_note(text);
+        // A run that died of an unknown failure tells the model so; a user
+        // stop leaves direction to the next prompt.
+        if matches!(self.interrupted.take(), Some(StopCause::Other)) {
+            self.push_note(STOPPED_UNKNOWN);
         }
         let ask = Prompt {
             text: prompt.into(),
@@ -1089,10 +1083,9 @@ mod tests {
         assert!(matches!(nodes[0], Node::Ask { .. }));
     }
 
-    // The caller records why the last run died; the next prompt carries the
-    // cause on to the model instead of leaving it to read the shape.
+    // A user stop records no note: the model reads the new prompt directly.
     #[test]
-    fn a_user_stop_is_named_before_the_next_prompt() {
+    fn a_user_stop_adds_no_note_before_the_next_prompt() {
         let mut s = Session::new();
         s.prompt("version up");
         s.mark_stopped(StopCause::User);
@@ -1100,19 +1093,13 @@ mod tests {
         s.send_prompt("delete the branch", None, None);
 
         let entries = s.entries();
-        assert_eq!(entries.len(), 3, "prompt, the note, the new prompt");
-        assert_eq!(
-            match &entries[1] {
-                Entry::Note { note, .. } => note.as_str(),
-                other => panic!("expected the stop note, got {other:?}"),
-            },
-            STOPPED_BY_USER
-        );
-        assert!(matches!(&entries[2], Entry::Ask { .. }));
+        assert_eq!(entries.len(), 2, "prompt and the new prompt, no note");
+        assert!(matches!(&entries[0], Entry::Ask { .. }));
+        assert!(matches!(&entries[1], Entry::Ask { .. }));
 
-        // One note per dead run: the send that followed consumed the marker.
+        // One note per dead run: subsequent sends stay clean.
         s.send_prompt("and now this", None, None);
-        assert_eq!(s.entries().len(), 4, "no second note");
+        assert_eq!(s.entries().len(), 3, "no second note");
     }
 
     // The note is the session's words, not the user's: it stays out of the
@@ -1122,7 +1109,7 @@ mod tests {
     fn a_stop_note_is_model_only_and_not_rewindable() {
         let mut s = Session::new();
         s.prompt("version up");
-        s.mark_stopped(StopCause::User);
+        s.mark_stopped(StopCause::Other);
         s.send_prompt("delete the branch", None, None);
 
         let entries = s.entries();
@@ -1141,7 +1128,7 @@ mod tests {
             matches!(
                 m,
                 Message::User { content } if content.iter().any(|b| {
-                    matches!(b, UserContent::Text(t) if t.text.contains(STOPPED_BY_USER))
+                    matches!(b, UserContent::Text(t) if t.text.contains(STOPPED_UNKNOWN))
                 })
             )
         });
@@ -1233,8 +1220,8 @@ mod tests {
         assert!(matches!(&entries[0], Entry::Ask { .. }));
     }
 
-    // The mapping the callers rely on: an answer records nothing, a stop the
-    // user asked for records itself.
+    // The mapping the callers rely on: an answer and a user stop record nothing,
+    // only an unknown stop records a note.
     #[test]
     fn note_outcome_tells_an_answer_from_a_user_stop() {
         let mut answered = Session::new();
@@ -1247,19 +1234,53 @@ mod tests {
         stopped.prompt("go");
         stopped.note_outcome(&Err(crate::AgentError::Cancelled));
         stopped.send_prompt("and now this", None, None);
-        let entries = stopped.entries();
+        assert_eq!(stopped.entries().len(), 2, "no note after a user stop");
+
+        let mut other = Session::new();
+        other.prompt("go");
+        other.note_outcome(&Err(crate::AgentError::Brain(brain::BrainError::Stream(
+            "died".into(),
+        ))));
+        other.send_prompt("and now this", None, None);
+        let entries = other.entries();
         assert_eq!(entries.len(), 3, "prompt, the note, the new prompt");
         assert_eq!(
             match &entries[1] {
                 Entry::Note { note, .. } => note.as_str(),
                 other => panic!("expected the note aside, got {other:?}"),
             },
-            STOPPED_BY_USER
+            STOPPED_UNKNOWN
         );
     }
 
     // Rewinding to an answer is the opposite call: the answer stays, and the
     // conversation continues from it.
+    // An unanswered tool call is repaired with a non-error stopped result.
+    #[test]
+    fn an_unanswered_tool_call_is_repaired_without_error() {
+        let mut s = Session::new();
+        s.prompt("run something");
+        s.push_assistant(vec![AssistantContent::ToolCall(ToolCall {
+            id: "c1".into(),
+            name: "bash".into(),
+            args: serde_json::json!({ "command": "cargo check" }),
+        })]);
+        s.send_prompt("actually do this", None, None);
+
+        let entries = s.entries();
+        assert_eq!(
+            entries.len(),
+            4,
+            "prompt, assistant call, repaired tool, new prompt"
+        );
+        let result = match &entries[2] {
+            Entry::Tool { result, .. } => result,
+            other => panic!("expected tool result, got {other:?}"),
+        };
+        assert!(!result.is_error, "a stopped call is not an error");
+        assert!(is_stopped_call(result));
+    }
+
     #[test]
     fn rewinding_to_an_answer_keeps_it() {
         let mut s = Session::new();
