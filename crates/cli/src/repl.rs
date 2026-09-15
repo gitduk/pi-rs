@@ -2015,8 +2015,11 @@ pub async fn run_bash(ctx: &tools::Ctx, command: &str) -> Bashed {
     };
     let body = out.flatten();
     Bashed {
+        // The command that ran, which rtk may have rewritten: the head the
+        // model reads back is about what happened, not what was typed.
         text: format!(
-            "Ran `{command}`\n{}",
+            "Ran `{}`\n{}",
+            out.preview(),
             if body.is_empty() {
                 "(no output)"
             } else {

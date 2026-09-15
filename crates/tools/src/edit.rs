@@ -434,12 +434,14 @@ fn took_rows(landed: &[Landed], out: &mut String) {
 // The note a deletion earns when it emptied a line and left the row standing.
 fn blank_note(edits: &[usize]) -> String {
     let named: Vec<String> = edits.iter().map(|i| format!("edits[{i}]")).collect();
-    format!(
-        "\n{} emptied {} line(s) but left the line break, so a blank row stands where \
-         they were. Include the trailing newline in the anchor to take the row with it.\n",
-        named.join(", "),
-        if edits.len() == 1 { "a" } else { "the" },
-    )
+    let said = if edits.len() == 1 {
+        "emptied a line but left the line break, so a blank row stands where it was. \
+         Include the trailing newline in the anchor to take the row with it."
+    } else {
+        "emptied the lines but left the line breaks, so blank rows stand where they \
+         were. Include the trailing newline in the anchor to take the rows with them."
+    };
+    format!("\n{} {said}\n", named.join(", "))
 }
 
 // What a person watching sees: the lines that went, and the lines that came.

@@ -1216,6 +1216,25 @@ async fn a_command_that_printed_nothing_still_reports_how_it_ended() {
 }
 
 #[tokio::test]
+async fn a_command_rtk_knows_runs_through_rtk() {
+    let (_d, c) = ctx();
+    // Asked of rtk through the same call pi makes, from the same directory, so
+    // what to expect is rtk's answer rather than a literal here. No rtk on this
+    // machine, or one told to stand down, leaves nothing to check and this
+    // returns.
+    let Some(rewritten) = tools::rtk::rewrite("git status", c.workspace.root()).await else {
+        return;
+    };
+    let out = tools::bash::Bash
+        .execute(json!({ "command": "git status" }), &c)
+        .await
+        .unwrap();
+    // The workspace is not a repository, so the rewritten command fails; what
+    // this checks is the row naming the command that ran.
+    assert_eq!(out.preview(), rewritten);
+}
+
+#[tokio::test]
 async fn an_anchor_wrapped_in_a_string_or_a_lone_object_is_still_taken() {
     // The shapes models send: `edits` stringified, and a lone entry where a
     // list of one belongs. Both are accepted rather than costing a turn.
@@ -1278,4 +1297,27 @@ async fn emptying_a_line_without_its_break_is_said_out_loud() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\n\nthree\n");
     assert!(out.contains("left the line break"), "{out}");
     assert!(out.contains("edits[0]"), "{out}");
+}
+
+#[tokio::test]
+async fn two_emptied_lines_are_said_in_the_plural() {
+    let (_d, c) = ctx();
+    let path = c.workspace.root().join("a.rs");
+    std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
+    view(&c, "a.rs").await;
+
+    let out = tools::edit::Edit
+        .execute(
+            json!({ "path": "a.rs", "edits": [
+                { "old_string": "one", "new_string": "" },
+                { "old_string": "three", "new_string": "" },
+            ]}),
+            &c,
+        )
+        .await
+        .unwrap()
+        .flatten();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "\ntwo\n\n");
+    assert!(out.contains("emptied the lines"), "{out}");
+    assert!(out.contains("edits[0], edits[1]"), "{out}");
 }

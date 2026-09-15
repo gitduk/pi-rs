@@ -85,7 +85,17 @@ impl Tool for Bash {
                 .unwrap_or(DEFAULT_TIMEOUT_MS),
         );
 
-        let ran = run(&args.command, &cwd, timeout, ctx).await?;
+        // rtk, when it is installed, answers with this command in its own
+        // vocabulary and filters what it prints; what it answers with is what
+        // runs, so the row names that. It is asked from `cwd`, where a
+        // project's filters live, and races the token rather than delaying Esc.
+        let rewritten = tokio::select! {
+            r = crate::rtk::rewrite(&args.command, &cwd) => r,
+            _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+        };
+        let command = rewritten.unwrap_or(args.command);
+
+        let ran = run(&command, &cwd, timeout, ctx).await?;
         let mut body = ran.body;
         if ran.code != 0 {
             body.push_str(&format!("exit {}\n", ran.code));
@@ -93,7 +103,7 @@ impl Tool for Bash {
         // A progress line says what ran and is one line: the diff-row
         // renderer and the journal treat every newline after the first as
         // structure, not text.
-        let preview = args.command.split('\n').next().unwrap_or_default();
+        let preview = command.split('\n').next().unwrap_or_default();
         if body.is_empty() {
             // Named here too. Without it the row falls back to the body, and a
             // command that printed nothing is the one whose row is read to

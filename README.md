@@ -312,7 +312,11 @@ still a request: nothing filters the address, so `fetch` reaches a host on your
 own network as readily as one on the internet. Every path is resolved
 against the workspace root through the deepest existing ancestor, so a symlink
 cannot walk out. `bash` gets its own process group and a SIGTERM-then-SIGKILL
-timeout; `fetch` speaks http and https only, and answers with text.
+timeout; `fetch` speaks http and https only, and answers with text. With
+[rtk](https://github.com/rtk-ai/rtk) on `PATH`, `bash` asks it for the command's
+equivalent first — `git status` runs as `rtk git status` — so what reaches the
+transcript is rtk's compact output; no rtk, one too old for `rtk rewrite`, or
+`RTK_DISABLED=1` runs the command as it was written.
 
 **Edits** name the text to find rather than a line number: an anchor is matched
 literally against the file as it stands, so every entry in a call lands against
