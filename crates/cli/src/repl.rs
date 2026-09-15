@@ -587,10 +587,11 @@ impl Repl {
     // The same, saying why when nothing could be adopted.
     fn rebuilt(&mut self) -> Result<Vec<String>, String> {
         let tree = self.effective().map_err(|e| refused("settings", e))?;
-        let config = match crate::config::Config::deserialize(tree) {
+        let mut config = match crate::config::Config::deserialize(tree) {
             Ok(c) => c,
             Err(e) => return Err(refused("settings", anyhow::anyhow!(e))),
         };
+        config.apply_env_unclaimed(&self.claimed);
         self.adopt(config)
     }
 

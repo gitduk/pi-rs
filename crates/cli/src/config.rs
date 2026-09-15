@@ -440,6 +440,38 @@ impl Config {
         }
     }
 
+    pub fn apply_env(&mut self) {
+        self.apply_env_unclaimed(&BTreeMap::new());
+    }
+
+    pub fn apply_env_unclaimed(&mut self, claimed: &BTreeMap<String, toml::Value>) {
+        self.apply_env_with(|k| std::env::var(k).ok(), claimed);
+    }
+
+    pub fn apply_env_with<F>(&mut self, mut lookup: F, claimed: &BTreeMap<String, toml::Value>)
+    where
+        F: FnMut(&str) -> Option<String>,
+    {
+        let (url, format, cache) =
+            if let Some(url) = lookup("ANTHROPIC_BASE_URL").filter(|s| !s.trim().is_empty()) {
+                (url, FormatArg::Anthropic, None)
+            } else if let Some(url) = lookup("OPENAI_BASE_URL").filter(|s| !s.trim().is_empty()) {
+                (url, FormatArg::Openai, Some(CacheControl::Off))
+            } else {
+                return;
+            };
+
+        if !claimed.contains_key("base_url") {
+            self.base_url = Some(expand_base_url(url.trim()));
+        }
+        if !claimed.contains_key("format") {
+            self.format = Some(format);
+            if let Some(c) = cache {
+                self.cache_control = c;
+            }
+        }
+    }
+
     /// `/settings` > flag > project > this file > the built-in default.
     ///
     /// A key named in `claimed` was set by `/settings` this session, so it
@@ -564,18 +596,24 @@ pub fn project_path(start: &Path, home: Option<&Path>) -> Option<PathBuf> {
 /// A file named explicitly and missing is an error — the user asked for it. The
 /// default location missing is the ordinary case and says nothing.
 pub fn load(explicit: Option<&str>) -> Result<Config> {
-    let (path, required) = match explicit {
-        Some(p) => (PathBuf::from(p), true),
-        None => match global_path() {
-            Some(p) => (p, false),
-            None => return Ok(Config::default()),
-        },
+    let target = match explicit {
+        Some(p) => Some((PathBuf::from(p), true)),
+        None => global_path().map(|p| (p, false)),
     };
-    match std::fs::read_to_string(&path) {
-        Ok(body) => parse(&body).with_context(|| format!("{}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !required => Ok(Config::default()),
-        Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
+    let mut config = match target {
+        Some((path, required)) => match std::fs::read_to_string(&path) {
+            Ok(body) => parse(&body).with_context(|| format!("{}", path.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !required => Config::default(),
+            Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
+        },
+        None => Config::default(),
+    };
+    config.apply_env();
+    for (model, entry) in &config.models {
+        config.spec(model, entry)?;
+        config.check_thinking(model, entry)?;
     }
+    Ok(config)
 }
 
 /// The file's tree, for `/settings` to walk and `/reload` to re-read.
@@ -615,7 +653,9 @@ fn parse(body: &str) -> Result<Config> {
     for (model, entry) in &config.models {
         // Rejected here rather than at use: a typo in a model you are not
         // running today is still a typo, and this is when it is cheap to see.
-        config.spec(model, entry)?;
+        if config.base_url.is_some() && config.format.is_some() {
+            config.spec(model, entry)?;
+        }
         config.check_thinking(model, entry)?;
     }
     config.key_map()?;
@@ -1011,6 +1051,136 @@ output_per_mtok = 0
         // one, and the endpoint's response is what says so.
         let missing = parse(&one("openai", "api_key = \"$PI_NOT_SET_ANYWHERE\"\n")).unwrap();
         assert!(missing.key().is_none());
+    }
+
+    #[test]
+    fn base_url_and_format_from_environment() {
+        let mut c = Config::default();
+        c.apply_env_with(
+            |k| match k {
+                "ANTHROPIC_BASE_URL" => Some("https://anthropic.example.com".into()),
+                _ => None,
+            },
+            &BTreeMap::new(),
+        );
+        assert_eq!(c.base_url.as_deref(), Some("https://anthropic.example.com"));
+        assert_eq!(c.format, Some(FormatArg::Anthropic));
+
+        let mut c = Config::default();
+        c.apply_env_with(
+            |k| match k {
+                "OPENAI_BASE_URL" => Some("https://openai.example.com/v1".into()),
+                _ => None,
+            },
+            &BTreeMap::new(),
+        );
+        assert_eq!(c.base_url.as_deref(), Some("https://openai.example.com/v1"));
+        assert_eq!(c.format, Some(FormatArg::Openai));
+
+        let mut c = Config::default();
+        c.apply_env_with(
+            |k| match k {
+                "ANTHROPIC_BASE_URL" => Some("https://anthropic.example.com".into()),
+                "OPENAI_BASE_URL" => Some("https://openai.example.com/v1".into()),
+                _ => None,
+            },
+            &BTreeMap::new(),
+        );
+        assert_eq!(c.base_url.as_deref(), Some("https://anthropic.example.com"));
+        assert_eq!(c.format, Some(FormatArg::Anthropic));
+
+        let mut c = Config::default();
+        c.apply_env_with(
+            |k| match k {
+                "ANTHROPIC_BASE_URL" => Some(":7896".into()),
+                _ => None,
+            },
+            &BTreeMap::new(),
+        );
+        assert_eq!(c.base_url.as_deref(), Some("http://127.0.0.1:7896"));
+        assert_eq!(c.format, Some(FormatArg::Anthropic));
+
+        let mut c = Config::default();
+        c.apply_env_with(
+            |k| match k {
+                "ANTHROPIC_BASE_URL" => Some("   ".into()),
+                "OPENAI_BASE_URL" => Some("https://openai.example.com/v1".into()),
+                _ => None,
+            },
+            &BTreeMap::new(),
+        );
+        assert_eq!(c.base_url.as_deref(), Some("https://openai.example.com/v1"));
+        assert_eq!(c.format, Some(FormatArg::Openai));
+
+        let mut c = Config::default();
+        let mut claimed = BTreeMap::new();
+        claimed.insert(
+            "base_url".into(),
+            toml::Value::String("http://claimed".into()),
+        );
+        c.apply_env_with(
+            |k| match k {
+                "ANTHROPIC_BASE_URL" => Some("https://anthropic.example.com".into()),
+                _ => None,
+            },
+            &claimed,
+        );
+        assert_eq!(c.base_url, None);
+        assert_eq!(c.format, Some(FormatArg::Anthropic));
+    }
+
+    #[test]
+    fn model_spec_with_env_base_url() {
+        let mut c = Config::default();
+        c.apply_env_with(
+            |k| match k {
+                "ANTHROPIC_BASE_URL" => Some("https://api.anthropic.com".into()),
+                _ => None,
+            },
+            &BTreeMap::new(),
+        );
+        let spec = c.find("claude-sonnet-5").unwrap();
+        assert_eq!(spec.base_url, "https://api.anthropic.com");
+        assert!(matches!(spec.format, Format::Anthropic { .. }));
+
+        let mut c = Config::default();
+        c.apply_env_with(
+            |k| match k {
+                "OPENAI_BASE_URL" => Some("https://api.openai.com/v1".into()),
+                _ => None,
+            },
+            &BTreeMap::new(),
+        );
+        let spec = c.find("gpt-4o").unwrap();
+        assert_eq!(spec.base_url, "https://api.openai.com/v1");
+        assert!(matches!(spec.format, Format::OpenAi));
+    }
+
+    #[test]
+    fn thinking_controls_validated_against_env_format() {
+        let mut c: Config = toml::from_str("[models.m]\nthinking = \"effort\"\n").unwrap();
+        c.apply_env_with(
+            |k| match k {
+                "ANTHROPIC_BASE_URL" => Some("https://api.anthropic.com".into()),
+                _ => None,
+            },
+            &BTreeMap::new(),
+        );
+        for (model, entry) in &c.models {
+            assert!(c.check_thinking(model, entry).is_err());
+        }
+
+        let mut c: Config = toml::from_str("[models.m]\nthinking = \"adaptive\"\n").unwrap();
+        c.apply_env_with(
+            |k| match k {
+                "OPENAI_BASE_URL" => Some("https://api.openai.com/v1".into()),
+                _ => None,
+            },
+            &BTreeMap::new(),
+        );
+        for (model, entry) in &c.models {
+            assert!(c.check_thinking(model, entry).is_err());
+        }
     }
 
     #[test]
