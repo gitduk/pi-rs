@@ -341,19 +341,24 @@ pub fn remove(dir: &Path, name: &str) -> Result<Removed> {
 }
 
 #[cfg(test)]
+pub(crate) fn test_repo() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let at = dir.path();
+    checked(at, &["init", "-q", "--initial-branch=main", "."]).unwrap();
+    checked(at, &["config", "user.email", "t@example.com"]).unwrap();
+    checked(at, &["config", "user.name", "t"]).unwrap();
+    std::fs::write(at.join("a.txt"), "hi").unwrap();
+    checked(at, &["add", "-A"]).unwrap();
+    checked(at, &["commit", "-qm", "init"]).unwrap();
+    dir
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     fn repo() -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
-        let at = dir.path();
-        checked(at, &["init", "-q", "--initial-branch=main", "."]).unwrap();
-        checked(at, &["config", "user.email", "t@example.com"]).unwrap();
-        checked(at, &["config", "user.name", "t"]).unwrap();
-        std::fs::write(at.join("a.txt"), "hi").unwrap();
-        checked(at, &["add", "-A"]).unwrap();
-        checked(at, &["commit", "-qm", "init"]).unwrap();
-        dir
+        test_repo()
     }
 
     #[test]
