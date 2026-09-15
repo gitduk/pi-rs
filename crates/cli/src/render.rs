@@ -691,211 +691,6 @@ impl Paint {
     }
 }
 
-/// Terminal styling for the markdown a model writes, decided one line at a
-/// time.
-///
-/// Forward-only, because a line the terminal has printed cannot be restyled:
-/// what a row looks like is settled when it ends, out of what came before it.
-/// Prose is styled here a line at a time; a line of code is handed to
-/// `render_markdown` with the fence's language, so the whole document is not
-/// needed — only the ``` line that opened it.
-#[derive(Debug, Default, Clone)]
-pub struct Markdown {
-    // The language written on the ``` line that opened the block this line is
-    // in, if it is in one.
-    fenced: Option<String>,
-}
-
-impl Markdown {
-    /// The line as the terminal should show it.
-    ///
-    /// Takes `&self`, not `&mut`: the row still being written is styled again
-    /// on every frame, and only a line that has ended may decide what the one
-    /// after it means.
-    pub fn line(&self, text: &str, p: &Paint) -> String {
-        if !p.color {
-            return text.to_string();
-        }
-        if fence(text) {
-            return p.on(&p.theme.muted, text);
-        }
-        if let Some(lang) = &self.fenced {
-            return highlight_code_line(lang, text, p);
-        }
-        let body = text.trim_start();
-        let pad = &text[..text.len() - body.len()];
-        if body.starts_with("> ") {
-            // Whole-line, no spans inside: a quote is an aside, and dimming it
-            // is the whole of what it needs said.
-            return p.on(&p.theme.muted, text);
-        }
-        if let Some(at) = heading(body) {
-            let marker = p.on(&p.theme.muted, &body[..at]);
-            let codes = p.theme.heading.codes();
-            return format!(
-                "{pad}{marker}\x1b[{codes}m{}{RESET}",
-                spans(&body[at..], codes, 0, &p.theme)
-            );
-        }
-        match bullet(body) {
-            Some(at) => format!(
-                "{pad}{}{}",
-                p.on(&p.theme.muted, &body[..at]),
-                spans(&body[at..], "", 0, &p.theme)
-            ),
-            None => format!("{pad}{}", spans(body, "", 0, &p.theme)),
-        }
-    }
-
-    /// A line has ended. A fence is the only thing in it that changes what the
-    /// line after it means.
-    pub fn advance(&mut self, text: &str) {
-        if fence(text) {
-            self.fenced = if self.fenced.is_some() {
-                None
-            } else {
-                let tag = text.trim_start().trim_start_matches('`').trim();
-                Some(tag.to_string())
-            };
-        }
-    }
-
-    /// A new run starts outside any block, whatever the last one left open.
-    pub fn reset(&mut self) {
-        self.fenced = None;
-    }
-}
-
-fn fence(line: &str) -> bool {
-    line.trim_start().starts_with("```")
-}
-
-// Where a heading's `#`s and their space end, if the line is one.
-//
-// The space is what makes it a heading rather than a line that merely opens
-// with a hash — which, in a tree full of attributes and shell comments, is
-// most of them.
-fn heading(body: &str) -> Option<usize> {
-    let hashes = body.len() - body.trim_start_matches('#').len();
-    ((1..=6).contains(&hashes) && body[hashes..].starts_with(' ')).then_some(hashes + 1)
-}
-
-// Where a list item's marker ends, if the line opens with one.
-fn bullet(body: &str) -> Option<usize> {
-    if body.starts_with("- ") || body.starts_with("* ") || body.starts_with("+ ") {
-        return Some(2);
-    }
-    let digits = body.len() - body.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-    (digits > 0 && body[digits..].starts_with(". ")).then_some(digits + 2)
-}
-
-// How deep emphasis may hold more emphasis.
-//
-// Real markdown nests one level, at most two. The bound is not about taste: a
-// span recurses on its own body, so a long enough line of `**`*` would put the
-// stack in the hands of whatever the model wrote.
-const NESTING: u8 = 3;
-
-// The inline spans of one line: code, bold, italic.
-// `under` is whatever styling is already open around `text`. A span closes
-// with a reset — there is no escape for "bold off" that leaves the rest
-// standing — so it has to re-open what it interrupted, or a code span inside
-// bold ends the bold at the backtick and the sentence after it goes plain.
-//
-// Whether a body is literal is a property of the mark, not of how the mark
-// happens to be styled: a configured `emphasis` that matches `code` must not
-// start swallowing the spans inside it.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SpanKind {
-    // Literal all the way down, no markup inside.
-    Code,
-    // Emphasis — may hold deeper spans.
-    Markup,
-}
-
-fn spans(text: &str, under: &str, depth: u8, theme: &Theme) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while !rest.is_empty() {
-        let Some(at) = rest.find(['`', '*']) else {
-            out.push_str(rest);
-            break;
-        };
-        let (before, from) = rest.split_at(at);
-        out.push_str(before);
-        match span(from, theme) {
-            Some((kind, style, body, tail)) => {
-                let code = style.codes();
-                let inner = if kind == SpanKind::Code || depth == NESTING {
-                    // Code span body is embedded raw into the ANSI output.
-                    // Escape any literal ESC bytes so they don't inject
-                    // spurious SGR sequences into the styled stream.
-                    if body.contains('\x1b') {
-                        body.replace('\x1b', "[ESC]")
-                    } else {
-                        body.to_string()
-                    }
-                } else {
-                    let joined = if under.is_empty() {
-                        code.to_string()
-                    } else {
-                        format!("{under};{code}")
-                    };
-                    spans(body, &joined, depth + 1, theme)
-                };
-                let reopen = if under.is_empty() {
-                    String::new()
-                } else {
-                    format!("\x1b[{under}m")
-                };
-                out.push_str(&format!("\x1b[{code}m{inner}{RESET}{reopen}"));
-                rest = tail;
-            }
-            // An opener with no closer is text: the line is still arriving, or
-            // the character meant itself.
-            None => {
-                let mut chars = from.chars();
-                out.push(chars.next().unwrap_or_default());
-                rest = chars.as_str();
-            }
-        }
-    }
-    out
-}
-
-// One span at the head of `from`: its code, its text, and what follows it.
-//
-// `_` is not a delimiter here. It is the word separator of every identifier in
-// the tree, and a rule that italicises the middle of `saturating_sub` is worse
-// than no italics at all.
-fn span<'a, 'b>(
-    from: &'a str,
-    theme: &'b Theme,
-) -> Option<(SpanKind, &'b Style, &'a str, &'a str)> {
-    for (mark, kind, style) in [
-        ("**", SpanKind::Markup, &theme.heading),
-        ("`", SpanKind::Code, &theme.code),
-        ("*", SpanKind::Markup, &theme.emphasis),
-    ] {
-        let Some(rest) = from.strip_prefix(mark) else {
-            continue;
-        };
-        let Some(end) = rest.find(mark) else {
-            continue;
-        };
-        let body = &rest[..end];
-        // Flanking, for the emphasis marks only: without it `2 * 3 * 4` reads
-        // as an italic 3. A backtick means code wherever it lands.
-        let loose = mark != "`"
-            && (body.starts_with(char::is_whitespace) || body.ends_with(char::is_whitespace));
-        if body.is_empty() || loose {
-            continue;
-        }
-        return Some((kind, style, body, &rest[end + mark.len()..]));
-    }
-    None
-}
-
 /// What a run has cost, in the one wording every place that says it uses.
 ///
 /// The cost is shown only when the model is priced — an unpriced model reports
@@ -1010,6 +805,17 @@ pub fn style_to_ratatui(s: &Style) -> ratatui::style::Style {
     parse_sgr(s.codes(), ratatui::style::Style::default())
 }
 
+fn trim_partial_fences(text: &str) -> &str {
+    for suffix in ["\n`", "\n``"] {
+        if let Some(rest) = text.strip_suffix(suffix)
+            && !rest.ends_with('`')
+        {
+            return rest;
+        }
+    }
+    text
+}
+
 #[derive(Debug, Clone)]
 struct PiStyleSheet {
     heading: ratatui::style::Style,
@@ -1026,12 +832,20 @@ impl tui_markdown::StyleSheet for PiStyleSheet {
         self.code
     }
 
+    fn link(&self) -> ratatui::style::Style {
+        self.code
+    }
+
     fn blockquote(&self) -> ratatui::style::Style {
         self.muted
     }
 
     fn heading_meta(&self) -> ratatui::style::Style {
         self.muted
+    }
+
+    fn table_header(&self) -> ratatui::style::Style {
+        self.heading
     }
 
     fn table_border(&self) -> ratatui::style::Style {
@@ -1043,33 +857,22 @@ impl tui_markdown::StyleSheet for PiStyleSheet {
     }
 }
 
-fn highlight_code_line(lang: &str, line: &str, paint: &Paint) -> String {
-    if !paint.color {
-        return line.to_string();
-    }
-    // The language rides on the fence, so a one-line block is the smallest
-    // document that highlights the line.
-    let snippet = format!("```{lang}\n{line}\n```");
-    let lines = render_markdown(&snippet, paint);
-    if lines.len() >= 3 {
-        lines[1].clone()
-    } else {
-        line.to_string()
-    }
-}
-
 /// Parse and render markdown into ANSI-styled lines using `tui-markdown` and theme.
 pub fn render_markdown(text: &str, paint: &Paint) -> Vec<String> {
+    if text.is_empty() {
+        return Vec::new();
+    }
     if !paint.color {
         return text.lines().map(str::to_string).collect();
     }
+    let trimmed = trim_partial_fences(text);
     let sheet = PiStyleSheet {
         heading: style_to_ratatui(&paint.theme.heading),
         code: style_to_ratatui(&paint.theme.code),
         muted: style_to_ratatui(&paint.theme.muted),
     };
     let options = tui_markdown::Options::new(sheet);
-    let parsed = tui_markdown::from_str_with_options(text, &options);
+    let parsed = tui_markdown::from_str_with_options(trimmed, &options);
     parsed.lines.iter().map(line_to_ansi).collect()
 }
 
@@ -1445,6 +1248,16 @@ mod tests {
     }
 
     #[test]
+    fn trim_partial_fences_strips_trailing_unclosed_markers() {
+        assert_eq!(super::trim_partial_fences("```rust\nx\n`"), "```rust\nx");
+        assert_eq!(super::trim_partial_fences("```rust\nx\n``"), "```rust\nx");
+        assert_eq!(
+            super::trim_partial_fences("```rust\nx\n```"),
+            "```rust\nx\n```"
+        );
+    }
+
+    #[test]
     fn render_markdown_respects_theme() {
         let md = "# Title";
         let theme = super::Theme {
@@ -1504,11 +1317,6 @@ mod tests {
         let paint = super::Paint::with_theme(true, std::sync::Arc::new(theme));
         // `2` is dim and `37` is gray, not the palette entries with those
         // numbers: a whole block says so exactly as a painted line does.
-        assert!(
-            super::Markdown::default()
-                .line("```", &paint)
-                .starts_with("\x1b[2m")
-        );
         assert!(super::render_markdown("> q", &paint)[0].starts_with("\x1b[2m"));
         assert!(super::render_markdown("`x`", &paint)[0].starts_with("\x1b[37m"));
     }
@@ -1550,7 +1358,7 @@ mod tests {
         );
     }
 
-    use super::{Attr, Color, Markdown, Paint, Style, spent, summarize};
+    use super::{Attr, Color, Paint, Style, spent, summarize};
     use brain::stream::Usage;
     use serde_json::json;
     use std::sync::OnceLock;
@@ -1700,102 +1508,10 @@ mod tests {
         assert!(super::compaction_line(&r).ends_with("still over budget"));
     }
 
-    // The styling, with the escapes spelled out so a test reads as what the
-    // terminal receives.
-    fn md(text: &str) -> String {
-        Markdown::default()
-            .line(text, &Paint::new(true))
-            .replace('\x1b', "^")
-    }
-
-    #[test]
-    fn emphasis_and_code_are_marked_and_the_delimiters_go() {
-        assert_eq!(md("a **b** c"), "a ^[1mb^[0m c");
-        assert_eq!(md("a `b` c"), "a ^[38;2;88;166;255mb^[0m c");
-        assert_eq!(md("a *b* c"), "a ^[3mb^[0m c");
-    }
-
-    #[test]
-    fn an_identifier_is_not_emphasis() {
-        // `_` is the word separator of every identifier in the tree; a rule
-        // that italicises the middle of one is worse than no italics at all.
-        assert_eq!(md("call saturating_sub twice"), "call saturating_sub twice");
-        // And a lone `*` between spaces is arithmetic, not an opener.
-        assert_eq!(md("2 * 3 * 4"), "2 * 3 * 4");
-    }
-
-    #[test]
-    fn an_opener_with_no_closer_is_text() {
-        // The line is still arriving, or the character meant itself.
-        assert_eq!(md("what **half a"), "what **half a");
-        assert_eq!(md("a `b"), "a `b");
-    }
-
-    #[test]
-    fn a_heading_needs_its_space() {
-        assert_eq!(md("## Why"), "^[2m## ^[0m^[1mWhy^[0m");
-        // Otherwise every `#[derive]` and every shell comment is a heading.
-        assert_eq!(md("#[derive(Debug)]"), "#[derive(Debug)]");
-    }
-
-    #[test]
-    fn a_span_inside_emphasis_re_opens_what_it_interrupted() {
-        // The model writes this constantly. Without the re-open the bold ends
-        // at the backtick and everything after it goes plain.
-        assert_eq!(
-            md("- **`unwrap()`**：取出"),
-            "^[2m- ^[0m^[1m^[38;2;88;166;255munwrap()^[0m^[1m^[0m：取出"
-        );
-    }
-
-    #[test]
-    fn a_deeper_span_joins_the_open_styles_with_semicolons() {
-        // Bold holds italic holds code: the reopen after the code span must
-        // carry both open attributes, as one `;`-joined parameter list.
-        assert_eq!(
-            md("**a *b `c`* d**"),
-            "^[1ma ^[3mb ^[38;2;88;166;255mc^[0m^[1;3m^[0m^[1m d^[0m"
-        );
-    }
-
-    #[test]
-    fn a_bullet_keeps_its_marker_and_styles_the_rest() {
-        assert_eq!(md("- a **b**"), "^[2m- ^[0ma ^[1mb^[0m");
-        assert_eq!(md("  1. a"), "  ^[2m1. ^[0ma");
-    }
-
-    #[test]
-    fn nesting_stops_before_the_stack_does() {
-        // A span recurses on its own body; without a bound a long enough line
-        // of `**`*` would put the stack in the hands of whatever was written.
-        let line = "**".to_string() + &"*a*".repeat(4000) + "**";
-        assert!(Markdown::default().line(&line, &Paint::new(true)).len() > line.len());
-    }
-
-    #[test]
-    fn a_fence_holds_until_the_next_one() {
-        let mut m = Markdown::default();
-        let p = Paint::new(true);
-        assert!(!m.line("fn f() {}", &p).contains('\x1b'), "prose is prose");
-        m.advance("```rust");
-        // A code line is highlighted, not read as markup.
-        let code_line = m.line("let a = *b;", &p);
-        assert!(code_line.contains('\x1b'));
-        assert!(!code_line.contains("\x1b[3m"), "* is not italic markup");
-        assert_eq!(m.line("let a = *b;", &Paint::new(false)), "let a = *b;");
-        m.advance("let a = *b;");
-        m.advance("```");
-        assert_eq!(
-            m.line("done **now**", &p).replace('\x1b', "^"),
-            "done ^[1mnow^[0m"
-        );
-    }
-
     #[test]
     fn a_plain_surface_is_left_alone() {
-        // Piped output is read by something that does not want escapes.
-        let out = Markdown::default().line("a **b** `c`", &Paint::new(false));
-        assert_eq!(out, "a **b** `c`");
+        let out = super::render_markdown("a **b** `c`", &Paint::new(false));
+        assert_eq!(out, vec!["a **b** `c`"]);
     }
 
     #[test]

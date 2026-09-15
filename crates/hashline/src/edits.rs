@@ -570,7 +570,11 @@ fn breaks(s: &str) -> usize {
 
 /// The 1-based line a byte offset sits on.
 fn line_of(body: &str, at: usize) -> usize {
-    breaks(&body[..at.min(body.len())]) + 1
+    body.as_bytes()[..at.min(body.len())]
+        .iter()
+        .filter(|&&b| b == b'\n')
+        .count()
+        + 1
 }
 
 // Why the anchor was refused, in the words the model needs: where each
@@ -1009,5 +1013,11 @@ mod tests {
         let out = ok("a;\r\nb;\r\n", &[replace("b;", "")]);
         assert_eq!(out.content, "a;\r\n\r\n");
         assert_eq!(out.left_blank, vec![0]);
+    }
+    #[test]
+    fn replacing_non_ascii_anchor_does_not_panic() {
+        let out = ok("hello 小可爱\n", &[replace("小可爱", "猫")]);
+        assert_eq!(out.content, "hello 猫\n");
+        assert_eq!(out.landed[0].took, vec!["hello 小可爱".to_string()]);
     }
 }

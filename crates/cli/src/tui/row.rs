@@ -18,7 +18,7 @@ use std::cell::RefCell;
 use brain::message::{ToolResult, ToolResultContent};
 
 use crate::icons;
-use crate::render::{self, Markdown, Paint};
+use crate::render::{self, Paint};
 use crate::status::{self, Segment, Snapshot};
 
 pub struct Row(Kind);
@@ -100,21 +100,6 @@ impl Row {
             }
             _ => false,
         }
-    }
-
-    /// One finished line of the answer, painted as markdown.
-    ///
-    /// `md` is the caller's because its state spans the block and only the
-    /// caller knows where a block ends: the live stream resets at each close.
-    /// A whole block that is rebuilt at once goes through `Row::answer`
-    /// instead.
-    ///
-    /// Returns the string, not a row: the live stream paints a line before it
-    /// knows where the line goes.
-    pub fn answer_line(line: &str, md: &mut Markdown, paint: &Paint) -> String {
-        let painted = md.line(line, paint);
-        md.advance(line);
-        painted
     }
 
     /// One reasoning line. Also a string — a reasoning line lives inside a

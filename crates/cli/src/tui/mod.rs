@@ -31,7 +31,7 @@ use crate::journal;
 use crate::keys::{Action, Keys, Layers, Menu, Mode, Press};
 use crate::lane::{Lane, Round, Turn};
 use crate::render::Style as ThemeStyle;
-use crate::render::{self, Markdown, Paint};
+use crate::render::{self, Paint};
 use crate::repl::{self, Candidate, Choice, Command, Fate, Intent, Repl, Rewound, Step};
 use crate::session::{ResumeChoice, Store};
 use crate::status::{self, Segment, Snapshot, Tally};
@@ -387,7 +387,6 @@ impl<'a> DoubleEndedIterator for ScrollbackRows<'a> {
 fn body(
     folds: &Folds,
     scrollback: &[Row],
-    md: &Markdown,
     reasoning: bool,
     partial: &str,
     space: (usize, usize),
@@ -409,14 +408,15 @@ fn body(
     if partial.is_empty() {
         return Vec::new();
     }
-    let painted = if reasoning {
-        paint.on(&paint.theme.muted, partial)
+    let mut rows: Vec<String> = if reasoning {
+        let painted = paint.on(&paint.theme.muted, partial);
+        screen::fit(&painted, width)
     } else {
-        md.line(partial, paint)
+        render::render_markdown(partial, paint)
+            .into_iter()
+            .flat_map(|line| screen::fit(&line, width))
+            .collect()
     };
-    let mut rows = screen::fit(&painted, width);
-    // A paragraph can outgrow the screen; the tail is the part still being
-    // written, and the rest reaches scrollback when it closes.
     if rows.len() > room {
         rows.drain(..rows.len() - room);
     }
@@ -602,9 +602,6 @@ pub struct Surface {
     scrollback: Vec<Row>,
     // The stream still writing the next row, and which kind it is.
     stream: Stream,
-    // Where the answer's markdown stands: what a row means depends on the
-    // rows before it, and only a fence carries that far.
-    md: Markdown,
     // The reasoning folds ledger.
     folds: Folds,
     // How many rows the opening block occupies. A theme change replaces
@@ -1115,32 +1112,23 @@ impl Ui {
             .find(|r| r.block() == Some(id))
     }
 
-    // End the open paragraph and send it up into scrollback.
-    // A finished row, styled for what it is: reasoning, or the answer's
-    // markdown. The one place either decision is made.
-    fn paint_row(&mut self, view: &mut View, line: &str, reasoning: bool) -> String {
-        if reasoning {
-            return Row::reasoning_line(line, &self.paint);
-        }
-        Row::answer_line(line, &mut view.surface.md, &self.paint)
-    }
-
     fn close(&mut self, view: &mut View) {
         let reasoning = view.surface.stream.kind == StreamKind::Reasoning;
         if !view.surface.stream.text.is_empty() {
             let text = std::mem::take(&mut view.surface.stream.text);
-            let painted = self.paint_row(view, &text, reasoning);
-            self.land(view, painted, reasoning);
+            if reasoning {
+                let painted = Row::reasoning_line(&text, &self.paint);
+                self.land(view, painted, reasoning);
+            } else {
+                view.surface
+                    .scrollback
+                    .extend(Row::answer(&text, &self.paint));
+            }
         }
         if reasoning {
             // The block is over: it stops taking lines; its entry is already
             // in the scrollback, folded or not.
             view.surface.folds.close_block();
-        } else {
-            // A fence the answer left open stays open only within the answer.
-            // A tool call ends the block, and the block is as far as markdown
-            // state can honestly reach.
-            view.surface.md.reset();
         }
         view.surface.stream.kind = StreamKind::Answer;
     }
@@ -1163,14 +1151,15 @@ impl Ui {
         }
 
         view.surface.stream.text.push_str(delta);
-        // A finished line is no longer changing, so it belongs in the
-        // scrollback rather than in the region we repaint: reasoning into
-        // the streaming block's foldable entry, answer text as a plain row.
-        while let Some(i) = view.surface.stream.text.find('\n') {
-            let line: String = view.surface.stream.text.drain(..=i).collect();
-            let line = line.trim_end_matches('\n').to_string();
-            let painted = self.paint_row(view, &line, reasoning);
-            self.land(view, painted, reasoning);
+        if reasoning {
+            // A finished reasoning line belongs in the streaming block's
+            // foldable entry as soon as it ends.
+            while let Some(i) = view.surface.stream.text.find('\n') {
+                let line: String = view.surface.stream.text.drain(..=i).collect();
+                let line = line.trim_end_matches('\n').to_string();
+                let painted = Row::reasoning_line(&line, &self.paint);
+                self.land(view, painted, reasoning);
+            }
         }
     }
 
@@ -1436,7 +1425,6 @@ impl Ui {
         rows.extend(body(
             &lane.view.surface.folds,
             &lane.view.surface.scrollback,
-            &lane.view.surface.md,
             lane.view.surface.stream.kind == StreamKind::Reasoning,
             &lane.view.surface.stream.text,
             (width, room),
@@ -3852,7 +3840,7 @@ mod tests {
     use crate::icons;
     use crate::keys::{Action, Keys, Mode};
     use crate::lane::{Lane, Round, Turn};
-    use crate::render::{self, Markdown, Paint};
+    use crate::render::{self, Paint};
     use crate::repl::{self, Choice, Command, Repl, Source};
     use crate::session::Store;
     use crate::status::{self, Segment};
@@ -4009,15 +3997,7 @@ mod tests {
 
     // What the screen shows for a run in the middle of reasoning.
     fn shown(t: &Folds, partial: &str) -> Vec<String> {
-        body(
-            t,
-            &[],
-            &Markdown::default(),
-            true,
-            partial,
-            (80, 9),
-            &Paint::new(false),
-        )
+        body(t, &[], true, partial, (80, 9), &Paint::new(false))
     }
 
     #[test]
@@ -4301,7 +4281,6 @@ mod tests {
         let rows = body(
             &t,
             &scrollback,
-            &Markdown::default(),
             true,
             "half a sentence",
             (80, 9),
@@ -4462,15 +4441,7 @@ mod tests {
     fn the_answer_is_never_folded() {
         let t = Folds::default();
         assert!(!t.holds(false, &[]));
-        let rows = body(
-            &t,
-            &[],
-            &Markdown::default(),
-            false,
-            "hello",
-            (80, 9),
-            &Paint::new(false),
-        );
+        let rows = body(&t, &[], false, "hello", (80, 9), &Paint::new(false));
         assert_eq!(rows, vec!["hello"]);
     }
 
@@ -4480,13 +4451,22 @@ mod tests {
         let rows = body(
             &t,
             &[],
-            &Markdown::default(),
             false,
             &"x".repeat(500),
             (80, 3),
             &Paint::new(false),
         );
         assert_eq!(rows.len(), 3);
+    }
+
+    #[test]
+    fn streaming_answer_renders_as_markdown() {
+        let t = Folds::default();
+        let md_text = "# Header\n\n```rust\nlet x = 1;\n```";
+        let rows = body(&t, &[], false, md_text, (80, 10), &Paint::new(true));
+        let stripped: Vec<String> = rows.iter().map(|r| render::strip_ansi(r)).collect();
+        assert!(stripped.iter().any(|r| r.contains("Header")));
+        assert!(stripped.iter().any(|r| r.contains("let x = 1;")));
     }
 
     #[test]
