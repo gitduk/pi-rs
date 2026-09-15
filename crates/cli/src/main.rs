@@ -605,6 +605,7 @@ async fn main() -> Result<()> {
             claimed: BTreeMap::new(),
             current: 0,
             lanes: vec![lane::Lane {
+                token: lane::next_token(),
                 agent: std::sync::Arc::new(ag),
                 session: Some(carried),
                 id,

@@ -2282,7 +2282,7 @@ enum Kind {
 // one channel serves every lane and nothing has to poll a growing list of
 // them. `ran` is None only when the job panicked and took its copy down.
 struct Done {
-    lane: usize,
+    token: u64,
     kind: Kind,
     // The transcript back, and how the job went. None when it panicked and
     // took its copy down with it — one field, because those two are never
@@ -2776,10 +2776,7 @@ impl Tui {
         ));
         // Already highest first, so earlier indices stay put while they go.
         for (at, _) in gone {
-            self.core.lanes.remove(at);
-            if at < self.core.current {
-                self.core.current -= 1;
-            }
+            self.core.remove_lane(at);
         }
         // The ring's list is cached; a vanished checkout must not stay in it
         // for a later step to offer — and re-create — by its stale name.
@@ -3398,14 +3395,14 @@ impl Tui {
 
         let agent = self.core.lane_mut().agent.clone();
         let sent = self.core.lane_mut().events.clone();
-        let lane = self.core.current;
+        let token = self.core.lane().token;
         let done = done.clone();
         // The run's own handle on the mailbox; the lane keeps the other.
         let heard = steer.clone();
         tokio::spawn(async move {
             let out = guard(agent.steered(&mut carried, &ctx, &sent, &heard)).await;
             let _ = done.send(Done {
-                lane,
+                token,
                 kind: Kind::Turn,
                 ran: out.map(|out| (carried, out)),
             });
@@ -3520,7 +3517,7 @@ impl Tui {
         // `Turn::Running.unsend`, which a `!` has no prompt to honour.
         self.arm_view(true);
 
-        let lane = self.core.current;
+        let token = self.core.lane().token;
         let done = done.clone();
         tokio::spawn(async move {
             let out = guard(async move {
@@ -3551,7 +3548,7 @@ impl Tui {
                     None,
                 ),
             };
-            let _ = done.send(Done { lane, kind, ran });
+            let _ = done.send(Done { token, kind, ran });
         });
         self.core.lane_mut().turn = Turn::Running {
             cancel,
@@ -3575,7 +3572,7 @@ impl Tui {
         self.arm_view(true);
 
         let agent = self.core.lane_mut().agent.clone();
-        let lane = self.core.current;
+        let token = self.core.lane().token;
         let done = done.clone();
         let stop = cancel.clone();
         tokio::spawn(async move {
@@ -3598,7 +3595,7 @@ impl Tui {
                 Some((carried, Err(e))) => (Kind::Compact(None), Some((carried, Err(e)))),
                 None => (Kind::Compact(None), None),
             };
-            let _ = done.send(Done { lane, kind, ran });
+            let _ = done.send(Done { token, kind, ran });
         });
         self.core.lane_mut().turn = Turn::Running {
             cancel,
@@ -3617,25 +3614,19 @@ impl Tui {
         // waiting before closing anything, or a tool row still open is frozen
         // as abandoned and the elapsed figure is read off a cleared clock.
         self.serve_lanes().await;
-        // Here rather than in the arms below, so a kind added later cannot
-        // forget it and leave the lane queueing prompts it will never run.
-        let unsend = match self.core.lanes.get_mut(done.lane) {
-            Some(lane) => {
-                let back = lane.finish();
-                // Said after the run's last look at the mailbox, so it was
-                // never heard. Back through the door as an ordinary line: the
-                // lane is idle now, so it runs at once rather than waiting on
-                // nothing.
-                lane.view
-                    .queued
-                    .extend(back.unheard.into_iter().map(Intent::Prompt));
-                back.unsend
-            }
-            None => false,
+        let Some(lane) = self.core.lanes.iter().position(|l| l.token == done.token) else {
+            return;
         };
+        let back = self.core.lanes[lane].finish();
+        self.core.lanes[lane]
+            .view
+            .queued
+            .extend(back.unheard.into_iter().map(Intent::Prompt));
+        let unsend = back.unsend;
+
         match done.kind {
-            Kind::Turn | Kind::Bash { .. } => self.settle_run(done, unsend).await,
-            Kind::Compact(_) => self.settle_compact(done).await,
+            Kind::Turn | Kind::Bash { .. } => self.settle_run(lane, done, unsend).await,
+            Kind::Compact(_) => self.settle_compact(lane, done).await,
         }
     }
 
@@ -3645,8 +3636,8 @@ impl Tui {
     //
     // The saving cannot wait — a lane the user never returns to still has to
     // have its work on disk — but nothing about drawing it does.
-    async fn settle_run(&mut self, done: Done, unsend: bool) {
-        let Done { lane, ran, kind } = done;
+    async fn settle_run(&mut self, lane: usize, done: Done, unsend: bool) {
+        let Done { ran, kind, .. } = done;
         // Only a turn is a request the model was working on, and only a turn's
         // ending is worth telling it about.
         let was_turn = matches!(kind, Kind::Turn);
@@ -3769,8 +3760,8 @@ impl Tui {
 
     // A `/compact` has finished: put the transcript back, and show what the
     // pass did — or say there was nothing to shrink.
-    async fn settle_compact(&mut self, done: Done) {
-        let Done { lane, ran, kind } = done;
+    async fn settle_compact(&mut self, lane: usize, done: Done) {
+        let Done { ran, kind, .. } = done;
         let Kind::Compact(report) = kind else {
             unreachable!("only a compact settles here")
         };
@@ -4632,6 +4623,7 @@ mod tests {
         let (events, inbox) = Lane::channel();
         Lane {
             agent: std::sync::Arc::new(agent::Agent::new(std::sync::Arc::new(Mute), spec)),
+            token: 1,
             session: None,
             id: "s1".into(),
             created: 0,
@@ -4942,7 +4934,7 @@ mod tests {
         for (what, kind) in kinds() {
             let mut tui = surface(dir.path());
             tui.settle(super::Done {
-                lane: 0,
+                token: tui.core.lanes[0].token,
                 kind,
                 ran: Some((
                     agent::session::Session::default(),
@@ -4959,7 +4951,7 @@ mod tests {
         for (what, kind) in kinds() {
             let mut tui = surface(dir.path());
             tui.settle(super::Done {
-                lane: 0,
+                token: tui.core.lanes[0].token,
                 kind,
                 ran: None,
             })
@@ -4982,7 +4974,7 @@ mod tests {
                 let mut session = agent::session::Session::new();
                 session.prompt("the task the user actually asked for");
                 tui.settle(super::Done {
-                    lane: 0,
+                    token: tui.core.lanes[0].token,
                     kind,
                     ran: Some((session, Err(agent::AgentError::Cancelled))),
                 })
@@ -5069,7 +5061,7 @@ mod tests {
             }));
 
         tui.settle(super::Done {
-            lane: 0,
+            token: tui.core.lanes[0].token,
             kind: super::Kind::Turn,
             ran: Some((session, Err(agent::AgentError::Cancelled))),
         })

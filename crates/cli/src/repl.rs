@@ -410,9 +410,17 @@ impl Repl {
     }
 
     /// The checkout in front. Indexing is safe by construction: `lanes` is
-    /// never empty and nothing removes from it, so `current` always names one.
+    /// never empty, so `current` always names one.
     pub fn lane(&self) -> &Lane {
         &self.lanes[self.current]
+    }
+
+    pub fn remove_lane(&mut self, at: usize) -> Lane {
+        let lane = self.lanes.remove(at);
+        if at < self.current || self.current >= self.lanes.len() {
+            self.current = self.current.saturating_sub(1);
+        }
+        lane
     }
 
     // Where a subagent started in this lane files what it did. Root and model
@@ -1361,6 +1369,7 @@ pub enum Rewound {
     Unsent(String),
 }
 
+#[derive(Debug)]
 pub enum Step {
     // One line whose whole content is "nothing happened": a verb that is not
     // one, a command refused, a checkout you are already in. No state moved
@@ -1764,24 +1773,33 @@ impl Repl {
     // passed on rather than forced past.
     fn remove_worktree(&mut self, name: &str) -> Result<Step, String> {
         let from = self.lane().ctx.workspace.root().to_path_buf();
-        // No other lane of this run may hold the checkout: its transcript
-        // would be dropped out from under a session that still has it, and a
-        // lane cannot be closed while runs route back by index. Refusing is
-        // how git answers a branch another worktree is using.
         if let Some(target) = crate::worktree::list(&from)
             .ok()
             .and_then(|trees| trees.into_iter().find(|t| !t.main && t.name == name))
         {
-            let held = self.lanes.iter().enumerate().any(|(i, lane)| {
-                i != self.current && lane.ctx.workspace.root().starts_with(&target.path)
+            let running = self.lanes.iter().enumerate().any(|(i, lane)| {
+                i != self.current
+                    && lane.ctx.workspace.root().starts_with(&target.path)
+                    && (lane.is_running() || lane.looping.is_some())
             });
-            if held {
+            if running {
                 return Err(format!(
-                    "`{name}` is open in another lane of this run — /worktree rm wants a checkout nothing here is in"
+                    "`{name}` is running in another lane of this run — stop it first"
                 ));
             }
         }
         let removed = crate::worktree::remove(&from, name).map_err(|e| refused("worktree", e))?;
+        for i in (0..self.lanes.len()).rev() {
+            if i != self.current
+                && self.lanes[i]
+                    .ctx
+                    .workspace
+                    .root()
+                    .starts_with(&removed.path)
+            {
+                self.remove_lane(i);
+            }
+        }
         let dropped = self.store.drop_under(&removed.path);
         let mut said = vec![
             format!("removed {name}"),
@@ -1832,6 +1850,7 @@ impl Repl {
         // Built, not cloned from the lane being left: a `Ctx`'s tables key on
         // absolute paths in one tree, and none of that lane's describe this.
         self.lanes.push(Lane {
+            token: crate::lane::next_token(),
             agent: std::sync::Arc::new(ag),
             session: Some(Session::default()),
             id: String::new(),
@@ -2847,6 +2866,7 @@ mod tests {
             cost,
         );
         crate::lane::Lane {
+            token: crate::lane::next_token(),
             agent: std::sync::Arc::new(agent::Agent::new(
                 std::sync::Arc::new(Recording::default()),
                 test_spec("m"),
@@ -3041,6 +3061,7 @@ mod tests {
         let commands = std::sync::Arc::new(Vec::<crate::repl::Command>::new());
         let (events, inbox) = crate::lane::Lane::channel();
         let lane = crate::lane::Lane {
+            token: crate::lane::next_token(),
             agent: std::sync::Arc::new(agent),
             session: Some(agent::session::Session::default()),
             id: "s1".into(),
@@ -3145,5 +3166,67 @@ mod tests {
             old_saw.lock().unwrap().is_empty(),
             "the old endpoint is gone"
         );
+    }
+
+    #[test]
+    fn remove_worktree_closes_idle_lane_in_same_run() {
+        let dir = crate::worktree::test_repo();
+        let transport = std::sync::Arc::new(Recording::default());
+        let mut core = a_repl(dir.path(), transport, "model-a");
+
+        core.enter_worktree("fix-tools").unwrap();
+        assert_eq!(core.lanes.len(), 2);
+        assert_eq!(core.current, 1);
+
+        core.current = 0;
+        core.in_force();
+
+        let res = core.remove_worktree("fix-tools");
+        assert!(res.is_ok(), "remove_worktree failed: {res:?}");
+        assert_eq!(core.lanes.len(), 1);
+        assert_eq!(core.current, 0);
+        assert!(!dir.path().join(".worktrees/fix-tools").exists());
+    }
+
+    #[test]
+    fn remove_worktree_updates_current_index_when_earlier_lane_is_closed() {
+        let dir = crate::worktree::test_repo();
+        let transport = std::sync::Arc::new(Recording::default());
+        let mut core = a_repl(dir.path(), transport, "model-a");
+
+        core.enter_worktree("feat-one").unwrap();
+        core.enter_worktree("feat-two").unwrap();
+        assert_eq!(core.lanes.len(), 3);
+        assert_eq!(core.current, 2);
+
+        let res = core.remove_worktree("feat-one");
+        assert!(res.is_ok(), "remove_worktree failed: {res:?}");
+        assert_eq!(core.lanes.len(), 2);
+        assert_eq!(core.current, 1);
+        assert_eq!(core.lane().worktree.as_deref(), Some("feat-two"));
+    }
+
+    #[test]
+    fn remove_worktree_refuses_when_another_lane_is_running() {
+        let dir = crate::worktree::test_repo();
+        let transport = std::sync::Arc::new(Recording::default());
+        let mut core = a_repl(dir.path(), transport, "model-a");
+
+        core.enter_worktree("fix-tools").unwrap();
+        assert_eq!(core.lanes.len(), 2);
+
+        core.lanes[1].turn = crate::lane::Turn::Running {
+            cancel: tokio_util::sync::CancellationToken::new(),
+            steer: None,
+            unsend: false,
+        };
+
+        core.current = 0;
+        core.in_force();
+
+        let err = core.remove_worktree("fix-tools").unwrap_err();
+        assert!(err.contains("running in another lane"), "{err}");
+        assert_eq!(core.lanes.len(), 2);
+        assert!(dir.path().join(".worktrees/fix-tools").exists());
     }
 }

@@ -1,5 +1,13 @@
 //! One checkout being worked in, and everything the workspace root decides.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
+
+pub fn next_token() -> u64 {
+    NEXT_TOKEN.fetch_add(1, Ordering::Relaxed)
+}
+
 use agent::session::Session;
 use agent::{Agent, Event, Steer, Totals};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -203,6 +211,7 @@ pub struct Handback {
 }
 
 pub struct Lane {
+    pub token: u64,
     /// Shared so a run can take it with it: `Agent::run` needs only `&self`,
     /// and a turn outlives the borrow the surface could lend it. `/model` and
     /// `/reload` write through `Arc::make_mut`, so a run in flight keeps the
