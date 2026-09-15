@@ -236,7 +236,7 @@ in charge, so the whole of a session reads as one file across the runs that
 touched it.
 message, tool call and result, so the journal holds what never reaches a
 message — which config was read, what went on the wire and what came back, how
-long each turn and each tool took, why a patch was refused, what the loop
+long each turn and each tool took, why an edit was refused, what the loop
 decided when it compacted or retried or gave up. A bug is read back from the
 two together rather than reproduced.
 
@@ -246,15 +246,15 @@ One JSON object per line, so `jq` is the reader:
 J=~/.pi/sessions/<project>/<session>/journal.jsonl    # /status prints it
 jq -c 'select(.lvl=="WARN" or .lvl=="ERROR")' $J      # only what went wrong
 jq -c 'select(.ev=="pi::span")|{msg,name,dur_ms}' $J  # what took the time
-jq -r 'select(.ev=="pi::edit")|.patch' $J             # what the model actually wrote
+jq -c 'select(.ev=="pi::edit")|{stage,path,edits}' $J # how each edit call ended
 ```
 
 `ms` is milliseconds since the run began, `in` is the span a record sits under
 (`turn>tool`), and `ev` says which part spoke: `pi::session` `pi::loop`
 `pi::wire` `pi::tool` `pi::edit` `pi::bash` `pi::compact` `pi::keys`, plus
 `pi::span` for the record that closes a span and carries its `dur_ms`.
-`PI_LOG=debug` widens the fields, so patches and tool arguments arrive whole
-rather than clipped to a kilobyte. `PI_LOG=trace` adds the request bodies
+`PI_LOG=debug` widens the fields, so the arguments each call carried arrive
+whole rather than clipped to a kilobyte. `PI_LOG=trace` adds the request bodies
 themselves — hundreds of kilobytes a turn, which is why they sit a level below
 everything else — and the dependencies' own accounts, which is a lot of hyper.
 `PI_LOG=off` writes nothing.
@@ -314,10 +314,13 @@ against the workspace root through the deepest existing ancestor, so a symlink
 cannot walk out. `bash` gets its own process group and a SIGTERM-then-SIGKILL
 timeout; `fetch` speaks http and https only, and answers with text.
 
-**Edits** are line-anchored patches with content-hash anchors, applied against
-original line numbers so an earlier hunk never shifts a later one. A stale
-anchor is refused rather than applied to the wrong place. Concurrent edits to
-one file serialize per path — otherwise both pass their tag check and one
+**Edits** name the text to find rather than a line number: an anchor is matched
+literally against the file as it stands, so every entry in a call lands against
+the same content and an earlier one never shifts a later one. `insert_after` and
+`insert_before` add rows without repeating them, and `whole_block` takes a
+construct named by its first line. An anchor that matches nothing, or more than
+once, is refused against a content hash taken at the last read. Concurrent edits
+to one file serialize per path — otherwise both pass their tag check and one
 change disappears silently.
 
 **Compaction** is a ladder, cheapest rung first: supersede a read that a later
@@ -364,7 +367,7 @@ numbers amount to.
 | `agent` | 3.9k | the turn loop, compaction, the session |
 | `tools` | 3.8k | the tool set and the tiered workspace gate |
 | `pi` | 6.2k | terminal, config, sessions, the journal |
-| `hashline` | 1.2k | the patch format — pure, no IO |
+| `hashline` | 1.0k | byte-anchored edits — pure, no IO |
 | `syntax` | 0.4k | tree-sitter outlines for eight languages |
 
 ~18k lines, 339 tests. `cargo test` runs everything; `cargo clippy

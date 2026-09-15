@@ -189,12 +189,12 @@ pub enum Concurrency {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-/// Why a patch was refused, for the loop to group repeat failures by.
-pub enum PatchError {
-    // The patch does not follow the edit format (bad op, `-` rows, ...).
+/// Why an edit was refused, for the loop to group repeat failures by.
+pub enum EditError {
+    // The call itself is spelt wrong: no anchor, an empty one, nothing to do.
     Malformed,
-    // The file as patched would not parse / compile.
-    Unbalanced,
+    // The edit does not fit the file as it stands, or would break it.
+    Refused,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -204,9 +204,9 @@ pub enum ToolError {
     #[error("{0}")]
     Invalid(String),
 
-    // A refusal tagged with its `PatchError`, for the same purpose.
+    // A refusal tagged with its `EditError`, for the same purpose.
     #[error("{1}")]
-    Patch(PatchError, String),
+    Edit(EditError, String),
 
     // The one failure the loop must not hand back to the model.
     #[error("cancelled")]
@@ -248,9 +248,9 @@ impl ToolError {
     /// keeps changing. A `None` here falls back to grouping by tool name.
     pub fn category(&self) -> Option<&'static str> {
         match self {
-            ToolError::Patch(kind, _) => Some(match kind {
-                PatchError::Malformed => "EDIT_MALFORMED",
-                PatchError::Unbalanced => "EDIT_UNBALANCED",
+            ToolError::Edit(kind, _) => Some(match kind {
+                EditError::Malformed => "EDIT_MALFORMED",
+                EditError::Refused => "EDIT_REFUSED",
             }),
             _ => self.code(),
         }

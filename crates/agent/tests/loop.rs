@@ -1140,9 +1140,18 @@ async fn a_call_that_keeps_failing_the_same_way_is_named_sooner() {
     std::fs::write(dir.path().join("a.txt"), "steady\n").unwrap();
     let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
 
-    let same = || call_turn(&[("t", "edit", r#"{"patch":"match code {"}"#)]);
+    // An anchor that is not in the file: the same refusal, twice.
+    let same = || {
+        call_turn(&[(
+            "t",
+            "edit",
+            r#"{"path":"a.txt","edits":[{"old_string":"match code {","new_string":"x"}]}"#,
+        )])
+    };
+    // Read first, or the refusal is the read gate and the anchor never runs.
+    let read = call_turn(&[("t", "read", r#"{"path":"a.txt"}"#)]);
     let a = Agent::new(
-        Scripted::new(vec![same(), same(), same(), text_turn("gave up")]),
+        Scripted::new(vec![read, same(), same(), same(), text_turn("gave up")]),
         spec(),
     );
 
@@ -1164,20 +1173,32 @@ async fn a_call_that_keeps_failing_the_same_way_is_named_sooner() {
         })
         .collect();
 
+    let refusals: Vec<&String> = bodies
+        .iter()
+        .filter(|b| b.starts_with("no match in a.txt"))
+        .collect();
+    assert_eq!(
+        refusals.len(),
+        3,
+        "every call is refused the same way: {bodies:?}"
+    );
     // No leeway for a refusal the way there is for a re-read: the second
     // identical failure is already the whole story.
-    assert!(!bodies[0].contains("same `edit` call"), "{:?}", bodies[0]);
     assert!(
-        bodies[1].contains("same `edit` call has now failed the same way 2 times"),
+        !refusals[0].contains("same `edit` call"),
         "{:?}",
-        bodies[1]
+        refusals[0]
     );
     // And the notice rides inside the error the model reads, not beside it.
-    assert!(bodies[1].starts_with("patch line 1"), "{:?}", bodies[1]);
+    assert!(
+        refusals[1].contains("same `edit` call has now failed the same way 2 times"),
+        "{:?}",
+        refusals[1]
+    );
 }
 
-// The failure mode a long session actually dies in: the patch keeps changing,
-// so the args-keyed echo never matches — but the refusal is the same one.
+// The failure mode a long session actually dies in: the args keep changing, so
+// the args-keyed echo never matches — but the refusal is the same one.
 // The loop-breaker must key on the refusal, or it stays silent forever.
 #[tokio::test]
 async fn a_failure_repeated_with_different_args_is_still_named() {
@@ -1185,21 +1206,28 @@ async fn a_failure_repeated_with_different_args_is_still_named() {
     std::fs::write(dir.path().join("a.txt"), "steady\n").unwrap();
     let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
 
-    // Same refusal, four different patch bodies — a model rewriting the patch
-    // and getting the same error back every time. The patch body varies so
-    // the args-keyed echo never matches; the refusal's first line is stable,
-    // which is the shape a real session takes.
+    // Same refusal, three different anchors — a model rewriting the call and
+    // getting the same error back every time. The args vary so the args-keyed
+    // echo never matches; the refusal's first line is stable, which is the
+    // shape a real session takes.
     let turns: Vec<Vec<StreamEvent>> = (0..3)
         .map(|i| {
             call_turn(&[(
                 "t",
                 "edit",
-                &format!(r#"{{"patch":"PUT 1:\n+variant {i}"}}"#),
+                &format!(
+                    r#"{{"path":"a.txt","edits":[{{"old_string":"variant {i}","new_string":"x"}}]}}"#
+                ),
             )])
         })
         .chain([text_turn("gave up")])
         .collect();
-    let a = Agent::new(Scripted::new(turns), spec());
+    // Read first, or the refusal is the read gate and the anchors never run.
+    let read = call_turn(&[("t", "read", r#"{"path":"a.txt"}"#)]);
+    let a = Agent::new(
+        Scripted::new(std::iter::once(read).chain(turns).collect()),
+        spec(),
+    );
 
     let (session, out, _) = drive(&a, &ctx, "edit it forever").await;
     out.unwrap();
@@ -1219,12 +1247,15 @@ async fn a_failure_repeated_with_different_args_is_still_named() {
         })
         .collect();
 
-    assert!(bodies.len() >= 3, "bodies={:?}", bodies);
-    // The second refusal is already the whole story, whatever the patch said.
+    let refusals: Vec<&String> = bodies
+        .iter()
+        .filter(|b| b.starts_with("no match in a.txt"))
+        .collect();
+    assert_eq!(refusals.len(), 3, "bodies={bodies:?}");
+    // The second refusal is already the whole story, whatever the args said.
     assert!(
-        bodies[1].contains("same `edit` call has now failed the same way 2 times"),
-        "bodies={:?}",
-        bodies[1]
+        refusals[1].contains("same `edit` call has now failed the same way 2 times"),
+        "bodies={bodies:?}"
     );
 }
 

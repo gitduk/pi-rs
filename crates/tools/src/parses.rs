@@ -1,9 +1,9 @@
 //! The check that stops a tool writing a file it just broke.
 //!
-//! Two tools can leave a file unparseable — a patch whose range covers one line
-//! too few, a whole-file write whose content ran short — and one reading of
-//! "broke it" answers both. Two copies of it is how the second tool drifts into
-//! refusing what the first allows, over a difference nobody chose.
+//! Two tools can leave a file unparseable — an edit whose anchor covers one
+//! line too few, a whole-file write whose content ran short — and one reading
+//! of "broke it" answers both. Two copies of it is how the second tool drifts
+//! into refusing what the first allows, over a difference nobody chose.
 
 /// Every row a change breaks, ascending, and empty when it breaks nothing.
 ///

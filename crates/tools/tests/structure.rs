@@ -1,15 +1,5 @@
 use serde_json::json;
-use tools::{Ctx, Tool, ToolError, Workspace};
-
-fn ctx() -> (tempfile::TempDir, Ctx) {
-    let dir = tempfile::tempdir().unwrap();
-    let ws = Workspace::new(dir.path()).unwrap();
-    (dir, Ctx::new(ws))
-}
-
-async fn run(tool: &dyn Tool, args: serde_json::Value, ctx: &Ctx) -> String {
-    tool.execute(args, ctx).await.unwrap().flatten()
-}
+use tools::{Tool, ToolError};
 
 // A file long enough to trigger the skeleton, with two real declarations in it.
 fn long_rust() -> String {
@@ -20,7 +10,7 @@ fn long_rust() -> String {
 }
 
 mod common;
-use common::every_row_anchors_in_the_body;
+use common::{ctx, every_row_anchors_in_the_body, run, view};
 
 #[tokio::test]
 async fn a_long_file_comes_back_as_a_skeleton() {
@@ -28,7 +18,7 @@ async fn a_long_file_comes_back_as_a_skeleton() {
     let body = long_rust();
     std::fs::write(c.workspace.root().join("big.rs"), &body).unwrap();
 
-    let out = run(&tools::read::Read, json!({ "path": "big.rs" }), &c).await;
+    let out = view(&c, "big.rs").await;
     assert!(out.starts_with("[big.rs] 329 lines · outline"), "{out}");
     // The span, so the model can replace one whole without a second read, and
     // the indent, so a method does not read like a top-level item.
@@ -98,7 +88,7 @@ async fn a_short_file_is_still_read_whole_and_outline_can_be_forced() {
     )
     .unwrap();
 
-    let whole = run(&tools::read::Read, json!({ "path": "a.rs" }), &c).await;
+    let whole = view(&c, "a.rs").await;
     assert!(whole.contains("1:pub fn one() {}"), "{whole}");
     assert!(!whole.contains("outline"), "{whole}");
 
@@ -118,21 +108,25 @@ async fn a_long_file_in_an_unparsed_language_still_reads_as_lines() {
     let body: String = (0..320).map(|i| format!("line {i}\n")).collect();
     std::fs::write(c.workspace.root().join("notes.txt"), &body).unwrap();
 
-    let out = run(&tools::read::Read, json!({ "path": "notes.txt" }), &c).await;
+    let out = view(&c, "notes.txt").await;
     assert!(!out.contains("outline"), "{out}");
     assert!(out.contains("1:line 0"), "{out}");
 }
 
 #[tokio::test]
-async fn a_scope_row_replaces_a_whole_function_without_counting_lines() {
+async fn a_whole_block_replaces_a_function_without_quoting_it() {
     let (_d, c) = ctx();
     let src = "pub fn keep() {}\n\npub fn replace_me(a: i32) -> i32 {\n    a * 2\n}\n\npub fn also_keep() {}\n";
     std::fs::write(c.workspace.root().join("a.rs"), src).unwrap();
 
-    run(&tools::read::Read, json!({ "path": "a.rs" }), &c).await;
+    view(&c, "a.rs").await;
     let report = tools::edit::Edit
         .execute(
-            json!({ "patch": "[a.rs]\n@pub fn replace_me(a: i32) -> i32\n-pub fn replace_me(a: i32) -> i32 {\n-    a * 2\n-}\n+pub fn replaced() {}\n" }),
+            json!({ "path": "a.rs", "edits": [{
+                "old_string": "pub fn replace_me(a: i32) -> i32",
+                "new_string": "pub fn replaced() {}\n",
+                "whole_block": true,
+            }]}),
             &c,
         )
         .await
@@ -146,18 +140,22 @@ async fn a_scope_row_replaces_a_whole_function_without_counting_lines() {
     assert!(report.contains("3:pub fn replaced() {}"), "{report}");
 }
 
-// Three sections for one file stack: each lands against what the earlier
-// ones left — built off one original, only the last would survive on disk.
+// Three edits in one call all land: each is matched against the file as it
+// was, and the one write carries all three.
 #[tokio::test]
-async fn three_sections_for_one_file_all_land() {
+async fn three_edits_for_one_file_all_land() {
     let (_d, c) = ctx();
     let src = "one\ntwo\nthree\n";
     std::fs::write(c.workspace.root().join("a.txt"), src).unwrap();
 
-    run(&tools::read::Read, json!({ "path": "a.txt" }), &c).await;
+    view(&c, "a.txt").await;
     tools::edit::Edit
         .execute(
-            json!({ "patch": "[a.txt]\n=one\n+ONE\n\n[a.txt]\n=two\n+TWO\n\n[a.txt]\n=three\n+THREE" }),
+            json!({ "path": "a.txt", "edits": [
+                { "insert_after": "one\n", "new_string": "ONE\n" },
+                { "insert_after": "two\n", "new_string": "TWO\n" },
+                { "insert_after": "three\n", "new_string": "THREE\n" },
+            ]}),
             &c,
         )
         .await
@@ -170,15 +168,19 @@ async fn three_sections_for_one_file_all_land() {
 }
 
 #[tokio::test]
-async fn a_scope_row_takes_the_attribute_above_when_named_by_it() {
+async fn a_whole_block_takes_the_attribute_above_when_named_by_the_item() {
     let (_d, c) = ctx();
     let src = "#[inline]\npub fn f() {\n    1\n}\n\npub fn g() {}\n";
     std::fs::write(c.workspace.root().join("a.rs"), src).unwrap();
 
-    run(&tools::read::Read, json!({ "path": "a.rs" }), &c).await;
+    view(&c, "a.rs").await;
     tools::edit::Edit
         .execute(
-            json!({ "patch": "[a.rs]\n@#[inline]\n-#[inline]\n-pub fn f() {\n-    1\n-}\n+pub fn f() { 2 }\n" }),
+            json!({ "path": "a.rs", "edits": [{
+                "old_string": "pub fn f() {",
+                "new_string": "pub fn f() { 2 }\n",
+                "whole_block": true,
+            }]}),
             &c,
         )
         .await
@@ -190,18 +192,25 @@ async fn a_scope_row_takes_the_attribute_above_when_named_by_it() {
 }
 
 #[tokio::test]
-async fn a_scope_row_on_a_closing_brace_refuses() {
+async fn a_whole_block_that_names_nothing_refuses() {
     let (_d, c) = ctx();
     let src = "pub fn f() {\n    1\n}\n";
     std::fs::write(c.workspace.root().join("a.rs"), src).unwrap();
 
-    run(&tools::read::Read, json!({ "path": "a.rs" }), &c).await;
+    view(&c, "a.rs").await;
     let err = tools::edit::Edit
-        .execute(json!({ "patch": "[a.rs]\n*}\n+x\n" }), &c)
+        .execute(
+            json!({ "path": "a.rs", "edits": [{
+                "old_string": "}",
+                "new_string": "x",
+                "whole_block": true,
+            }]}),
+            &c,
+        )
         .await
         .unwrap_err();
-    assert!(matches!(err, ToolError::Patch(_, _)), "{err:?}");
-    assert!(err.to_string().contains("no construct opens"), "{err}");
+    assert!(matches!(err, ToolError::Edit(_, _)), "{err:?}");
+    assert!(err.to_string().contains("no block opens"), "{err}");
     assert_eq!(
         std::fs::read_to_string(c.workspace.root().join("a.rs")).unwrap(),
         src
@@ -209,15 +218,22 @@ async fn a_scope_row_on_a_closing_brace_refuses() {
 }
 
 #[tokio::test]
-async fn a_scope_row_in_an_unparsed_language_says_so() {
+async fn a_whole_block_in_an_unparsed_language_says_so() {
     let (_d, c) = ctx();
     std::fs::write(c.workspace.root().join("a.txt"), "one\ntwo\n").unwrap();
-    run(&tools::read::Read, json!({ "path": "a.txt" }), &c).await;
+    view(&c, "a.txt").await;
     let err = tools::edit::Edit
-        .execute(json!({ "patch": "[a.txt]\n*one\n+x\n" }), &c)
+        .execute(
+            json!({ "path": "a.txt", "edits": [{
+                "old_string": "one",
+                "new_string": "x",
+                "whole_block": true,
+            }]}),
+            &c,
+        )
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("no construct opens"), "{err}");
+    assert!(err.to_string().contains("has none"), "{err}");
 }
 
 #[tokio::test]
@@ -226,13 +242,18 @@ async fn the_outline_names_the_construct_and_feeds_an_edit_without_a_read() {
     let body = long_rust();
     std::fs::write(c.workspace.root().join("big.rs"), &body).unwrap();
 
-    let outline = run(&tools::read::Read, json!({ "path": "big.rs" }), &c).await;
+    let outline = view(&c, "big.rs").await;
     assert!(outline.contains("326-328:  pub fn new() -> Self {"));
     // The skeleton shows row 326 as `326-328:  pub fn new() -> Self {`: the
-    // text is the scope, the span is the extent — nothing else was read.
+    // address names the extent, the text names the block — nothing else was
+    // read, and the address is copied back with the line.
     tools::edit::Edit
         .execute(
-            json!({ "patch": "[big.rs]\n@  pub fn new() -> Self {\n-  pub fn new() -> Self {\n-        Self { x: 0 }\n-    }\n+    pub fn new() -> Self { Self { x: 1 } }\n" }),
+            json!({ "path": "big.rs", "edits": [{
+                "old_string": "326-328:  pub fn new() -> Self {",
+                "new_string": "    pub fn new() -> Self { Self { x: 1 } }\n",
+                "whole_block": true,
+            }]}),
             &c,
         )
         .await

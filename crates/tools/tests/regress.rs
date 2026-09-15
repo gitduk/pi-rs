@@ -1,23 +1,12 @@
+mod common;
+
+use common::{ctx, view};
 use serde_json::json;
-use tools::{Ctx, Tool, Workspace};
+use tools::{Ctx, Tool};
 
-fn ctx() -> (tempfile::TempDir, Ctx) {
-    let dir = tempfile::tempdir().unwrap();
-    let ws = Workspace::new(dir.path()).unwrap();
-    (dir, Ctx::new(ws))
-}
-
-async fn show(c: &Ctx, path: &str) -> String {
-    tools::read::Read
-        .execute(json!({"path": path}), c)
-        .await
-        .unwrap()
-        .flatten()
-}
-
-async fn edit(c: &Ctx, patch: String) -> Result<String, String> {
+async fn edit(c: &Ctx, path: &str, edits: serde_json::Value) -> Result<String, String> {
     tools::edit::Edit
-        .execute(json!({"patch": patch}), c)
+        .execute(json!({"path": path, "edits": edits}), c)
         .await
         .map(|o| o.flatten())
         .map_err(|e| e.to_string())
@@ -29,12 +18,16 @@ async fn an_unbalanced_replacement_says_where_the_imbalance_sits() {
     let src = "fn f() -> bool {\n    let enabled = count();\n    if enabled {\n        true\n    } else {\n        false\n    }\n}\n";
     std::fs::write(c.workspace.root().join("a.rs"), src).unwrap();
     // The replacement deletes the rows that close the fn: the produced file
-    // is unterminated, which the parser always flags - unlike a stray
+    // is unterminated, which the parser always flags — unlike a stray
     // top-level `}`, which its error recovery absorbs.
-    run_read(&c, "a.rs").await;
+    view(&c, "a.rs").await;
     let err = edit(
         &c,
-        "[a.rs]\n-    let enabled = count();\n-    if enabled {\n-        true\n-    } else {\n-        false\n-    }\n-}\n".into(),
+        "a.rs",
+        json!([{
+            "old_string": "    let enabled = count();\n    if enabled {\n        true\n    } else {\n        false\n    }\n}\n",
+            "new_string": "",
+        }]),
     )
     .await
     .unwrap_err();
@@ -59,7 +52,7 @@ pub fn pick(word: &str) -> Vec<u8> {
 }
 ";
     std::fs::write(c.workspace.root().join("a.rs"), src).unwrap();
-    let out = show(&c, "a.rs").await;
+    let out = view(&c, "a.rs").await;
     assert!(out.contains("\n2-6:    match word {"), "{out}");
     assert!(out.contains("\n3-4:"), "{out}");
 }
@@ -77,56 +70,53 @@ async fn the_echo_budget_is_spent_in_bytes_not_rows() {
     let path = c.workspace.root().join("a.rs");
     let src = format!("fn f() {{\n{}}}\n", "    let x = 1;\n".repeat(60));
     std::fs::write(&path, &src).unwrap();
-    run_read(&c, "a.rs").await;
+    view(&c, "a.rs").await;
 
     // Fifty narrow rows replacing sixty: over the row count that used to
     // elide, nowhere near the bytes that do.
-    let body: String = (1..=50)
-        .map(|i| format!("+    let y{i} = {i};\n"))
-        .collect();
-    let patch = format!(
-        "[a.rs]\n=fn f() {{\n{}=}}\n{body}",
-        "-    let x = 1;\n".repeat(60)
-    );
-    let out = edit(&c, patch).await.unwrap();
+    let body: String = (1..=50).map(|i| format!("    let y{i} = {i};\n")).collect();
+    let old = "    let x = 1;\n".repeat(60);
+    let out = edit(
+        &c,
+        "a.rs",
+        json!([{ "old_string": old, "new_string": body }]),
+    )
+    .await
+    .unwrap();
     assert!(
         !out.contains("… "),
         "narrow rows are cheap; echo them:\n{out}"
     );
-    assert!(out.contains("52:    let y50 = 50;"), "{out}");
+    assert!(out.contains("51:    let y50 = 50;"), "{out}");
 
     // Forty wide ones: fewer rows than above, three times the bytes. A second
     // file, because the first one's content has moved and the anchor is right
     // to say so.
     std::fs::write(c.workspace.root().join("b.rs"), &src).unwrap();
-    run_read(&c, "b.rs").await;
+    view(&c, "b.rs").await;
     let wide: String = (1..=40)
-        .map(|i| format!("+    let y{i} = compute(&state, {i}, \"a rather long argument\");\n"))
+        .map(|i| format!("    let y{i} = compute(&state, {i}, \"a rather long argument\");\n"))
         .collect();
-    let patch = format!(
-        "[b.rs]\n=fn f() {{\n{}=}}\n{wide}",
-        "-    let x = 1;\n".repeat(60)
-    );
-    let out = edit(&c, patch).await.unwrap();
+    let old = "    let x = 1;\n".repeat(60);
+    let out = edit(
+        &c,
+        "b.rs",
+        json!([{ "old_string": old, "new_string": wide }]),
+    )
+    .await
+    .unwrap();
     assert!(
-        out.contains("3:    let y1 = compute"),
+        out.contains("2:    let y1 = compute"),
         "head of the hunk:\n{out}"
     );
     assert!(
-        out.contains("42:    let y40 = compute"),
+        out.contains("41:    let y40 = compute"),
         "tail of the hunk:\n{out}"
     );
     assert!(
-        out.contains("… 36 lines"),
+        out.contains("… 34 lines"),
         "and what it stood in for:\n{out}"
     );
-}
-
-async fn run_read(c: &Ctx, path: &str) {
-    tools::read::Read
-        .execute(json!({"path": path}), c)
-        .await
-        .unwrap();
 }
 
 // From ~/.pi/logs/1788141625-3348974 turn 103: the break was reported at line 1
@@ -139,48 +129,63 @@ async fn the_break_reported_is_the_one_near_the_hunk() {
         .collect();
     let src = format!("//! Header.\n{filler}");
     std::fs::write(c.workspace.root().join("a.rs"), &src).unwrap();
-    run_read(&c, "a.rs").await;
-    // Replace `fn f30()`'s body and drop the opening brace's partner.
+    view(&c, "a.rs").await;
+    // Close `fn f30()` twice: the stray brace is the break, and it sits in
+    // the middle of the file rather than at the head of it.
     let err = edit(
         &c,
-        "[a.rs]\n=fn f30() {\n-    30\n+    30;\n+extra();\n".into(),
+        "a.rs",
+        json!([{ "old_string": "    30;\n", "new_string": "    30;\n}\n" }]),
     )
     .await
     .unwrap_err();
+    // `would not parse` first: an anchor that misses the file is refused
+    // before the parse gate, and the assertion below would hold anyway.
+    assert!(err.contains("would not parse"), "{err}");
     assert!(
         !err.contains("//! Header."),
         "must not point at the file head:\n{err}"
     );
 }
 
-// The general form of a refusal that teaches: a keep row that matches nothing
-// is named as the thing to widen.
+// The general form of a refusal that teaches: an anchor naming several rows
+// says how many, and says what to widen.
 #[tokio::test]
-async fn a_context_that_matches_nothing_is_told_to_widen() {
+async fn a_repeated_anchor_is_told_to_widen() {
     let (_d, c) = ctx();
-    let src = "fn f() {\n    a();\n}\n";
+    let src = "fn f() {\n    a();\n    a();\n}\n";
     std::fs::write(c.workspace.root().join("a.rs"), src).unwrap();
-    run_read(&c, "a.rs").await;
-    let err = edit(&c, "[a.rs]\n=a();\n=nothing\n-a();\n".into())
-        .await
-        .unwrap_err();
-    assert!(err.contains("Widen the `=` context"), "{err}");
+    view(&c, "a.rs").await;
+    let err = edit(
+        &c,
+        "a.rs",
+        json!([{ "old_string": "    a();\n", "new_string": "    b();\n" }]),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("matches 2 places"), "{err}");
+    assert!(err.contains("Give more of the anchor"), "{err}");
 }
 
-// The `*` row names the opening line; the extent the parser returns includes
-// the doc comment and attribute above it, so a body carrying its own does not
-// write them twice — and the result still parses.
+// The anchor names the opening line; the extent the parser returns includes
+// the doc comment and attribute above it, so a new body carrying its own does
+// not write them twice — and the result still parses.
 #[tokio::test]
-async fn a_star_named_below_the_annotations_still_replaces_them() {
+async fn a_whole_block_takes_the_annotations_above_it() {
     let (_d, c) = ctx();
     let src = "use std::fmt;\n\n/// Old doc.\n#[inline]\npub fn foo() -> u8 {\n    1\n}\n";
     let path = c.workspace.root().join("a.rs");
     std::fs::write(&path, src).unwrap();
 
-    run_read(&c, "a.rs").await;
+    view(&c, "a.rs").await;
     let _out = edit(
         &c,
-        "[a.rs]\n@/// Old doc.\n-/// Old doc.\n-#[inline]\n-pub fn foo() -> u8 {\n-    1\n-}\n+/// New doc.\n+#[inline]\n+pub fn foo() -> u8 {\n+    2\n+}\n".into(),
+        "a.rs",
+        json!([{
+            "old_string": "pub fn foo() -> u8 {",
+            "new_string": "/// New doc.\n#[inline]\npub fn foo() -> u8 {\n    2\n}\n",
+            "whole_block": true,
+        }]),
     )
     .await
     .unwrap();
@@ -190,18 +195,23 @@ async fn a_star_named_below_the_annotations_still_replaces_them() {
     );
 }
 
-// The read view names the extent on the row it starts, so the number it prints
-// and the row the `@` scope matches are the same one.
+// The read view names the extent on the row it starts, so the rows it prints
+// and the rows a whole-block anchor takes are the same ones.
 #[tokio::test]
-async fn the_view_and_the_scope_name_the_same_rows() {
+async fn the_view_and_the_whole_block_name_the_same_rows() {
     let (_d, c) = ctx();
     let src = "/// Doc.\n#[inline]\npub fn foo() {}\n";
     let path = c.workspace.root().join("a.rs");
     std::fs::write(&path, src).unwrap();
-    assert!(show(&c, "a.rs").await.contains("\n1-3:/// Doc."), "{src}");
+    assert!(view(&c, "a.rs").await.contains("\n1-3:/// Doc."), "{src}");
     edit(
         &c,
-        "[a.rs]\n@/// Doc.\n-/// Doc.\n-#[inline]\n-pub fn foo() {}\n".into(),
+        "a.rs",
+        json!([{
+            "old_string": "pub fn foo() {}",
+            "new_string": "",
+            "whole_block": true,
+        }]),
     )
     .await
     .unwrap();
@@ -330,11 +340,12 @@ async fn the_no_match_refusal_is_budgeted_like_every_other_view() {
         .map(|i| format!("row {i} of the file\n"))
         .collect();
     std::fs::write(&path, &src).unwrap();
-    run_read(&c, "a.txt").await;
+    view(&c, "a.txt").await;
 
     let err = edit(
         &c,
-        "[a.txt]\n=row 400 of the file\n-row 401 of the file\n-x\n".into(),
+        "a.txt",
+        json!([{ "old_string": "row 401 of the file\n", "new_string": "x\n" }]),
     )
     .await
     .unwrap_err();
@@ -343,45 +354,50 @@ async fn the_no_match_refusal_is_budgeted_like_every_other_view() {
     assert!(err.len() < 4_000, "unbudgeted, {} bytes:\n{err}", err.len());
 }
 
-// A `*` scope whose operation covers the construct says so: the echo names it,
-// so opening the wrong one is visible instead of a clean apply.
+// An edit that covers a whole block says so: the echo names it, so taking the
+// wrong one is visible instead of a clean apply.
 #[tokio::test]
-async fn the_echo_names_the_construct_a_scope_covered() {
+async fn the_echo_names_the_block_covered() {
     let (_d, c) = ctx();
     let path = c.workspace.root().join("a.rs");
     let src = "fn first() {\n    1\n}\n\nfn second() {\n    2\n}\n";
     std::fs::write(&path, src).unwrap();
 
-    run_read(&c, "a.rs").await;
+    view(&c, "a.rs").await;
     let out = edit(
         &c,
-        "[a.rs]\n@fn second()\n=fn second() {\n-    2\n-}\n+    22\n+}\n".into(),
+        "a.rs",
+        json!([{
+            "old_string": "fn second() {\n    2\n}\n",
+            "new_string": "fn second() {\n    22\n}\n",
+        }]),
     )
     .await
     .unwrap();
 
-    assert!(out.contains("covered the construct at lines 5-7"), "{out}");
+    assert!(out.contains("covered the block at lines 5-7"), "{out}");
     assert!(out.contains("lines 5-7: `fn second() {`"), "{out}");
 }
 
-// The same visibility for a deletion: an operation that takes a whole
-// construct names it, since a wrong-target delete is as silent as a
+// The same visibility for a deletion: an edit that takes a whole block names
+// it, since a wrong-target delete is as silent as a
 // wrong-target rewrite.
 #[tokio::test]
-async fn the_echo_names_the_construct_a_pure_delete_covered() {
+async fn the_echo_names_the_block_a_pure_delete_covered() {
     let (_d, c) = ctx();
     let path = c.workspace.root().join("a.rs");
     let src = "fn first() {\n    1\n}\n\nfn second() {\n    2\n}\n";
     std::fs::write(&path, src).unwrap();
-    run_read(&c, "a.rs").await;
+    view(&c, "a.rs").await;
 
     let out = edit(
         &c,
-        "[a.rs]\n@fn second()\n-fn second() {\n-    2\n-}\n".into(),
+        "a.rs",
+        json!([{ "old_string": "fn second() {\n    2\n}\n", "new_string": "" }]),
     )
     .await
     .unwrap();
 
-    assert!(out.contains("covered the construct at lines 5-7"), "{out}");
+    assert!(out.contains("covered the block at lines 5-7"), "{out}");
     assert!(out.contains("removed 3 lines"), "{out}");
 }

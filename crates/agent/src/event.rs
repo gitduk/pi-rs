@@ -102,7 +102,7 @@ fn note(event: &Event) {
         Event::ToolStart { id, name, args } => {
             tracing::info!(target: "pi::tool", call = %id, tool = %name, "call");
             // One level down, and in its own record: the arguments are a whole
-            // patch or a whole file, the transcript already holds them, and a
+            // file's worth of rows, the transcript already holds them, and a
             // field on the record above would serialize all of it on every call
             // only for the length cap to throw it away.
             tracing::debug!(target: "pi::tool", call = %id, args = %args, "arguments");

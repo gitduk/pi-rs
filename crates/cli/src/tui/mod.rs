@@ -3932,7 +3932,7 @@ mod tests {
 
         let mut ui = test_ui(80, 24);
         let (_dir, mut lane) = a_running_lane();
-        let body = "patch refused:\nline one\nline two";
+        let body = "edit refused:\nline one\nline two";
 
         ui.on_event(
             &mut lane,

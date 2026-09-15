@@ -4,7 +4,26 @@
 //! binary does not call is not dead — it is another binary's.
 #![allow(dead_code)]
 
-use tools::{Ctx, Workspace};
+use tools::read::Read;
+use tools::{Ctx, Tool, Workspace};
+
+/// A file as a model would read it, which is also what lets a later edit run.
+/// A caller that wants only that second half drops the result.
+pub async fn view(c: &Ctx, path: &str) -> String {
+    run(&Read, serde_json::json!({ "path": path }), c).await
+}
+
+/// A workspace of its own, for a test that asserts on a tool's own behaviour.
+pub fn ctx() -> (tempfile::TempDir, Ctx) {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace::new(dir.path()).unwrap();
+    (dir, Ctx::new(ws))
+}
+
+/// One call, unwrapped, for a test that expects it to land.
+pub async fn run(tool: &dyn Tool, args: serde_json::Value, ctx: &Ctx) -> String {
+    tool.execute(args, ctx).await.unwrap().flatten()
+}
 
 /// A workspace whose spills land inside it, so a test that overflows a view
 /// never writes into the state directory of whoever is running it.
@@ -34,16 +53,13 @@ pub fn spilled_body(c: &Ctx, out: &str) -> String {
     std::fs::read_to_string(c.spill_path(locator_in(out)).unwrap()).unwrap()
 }
 
-/// Every address a view printed, handed back to the parser that must read it.
+/// Every numbered row a view printed must be a verbatim row of the file.
 ///
-/// Three guards in one, because each has already failed here. The addresses are
-/// Every numbered row grep prints must be a verbatim row of the file: the
-/// marker grammar names anchors by their text, so a printed row that is not
-/// in the file is an anchor that can never match.
-///
-/// The count is asserted, because a view whose rows all happen to be one kind
-/// proves nothing about the other. And it is shared, because the view it was
-/// not applied to is the one that stayed broken.
+/// An anchor is matched by its text, so a printed row that is not in the file
+/// is an anchor that can never match. Two guards in one, because each has
+/// already failed here: the rows, and the count — a view whose rows all happen
+/// to be one kind proves nothing about the other. Shared, because the view it
+/// was not applied to is the one that stayed broken.
 pub fn every_row_anchors_in_the_body(out: &str, path: &str, body: &str, least: usize) {
     let mut checked = 0;
     for row in out.lines() {

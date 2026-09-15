@@ -1,5 +1,6 @@
 mod common;
 
+use common::run;
 use serde_json::json;
 use tools::{Ctx, Tool, Workspace};
 
@@ -25,10 +26,6 @@ fn tree() -> (tempfile::TempDir, Ctx) {
     std::fs::write(r.join("blob.bin"), [0u8, b'T', b'O', b'D', b'O', 0]).unwrap();
     let ws = Workspace::new(r).unwrap();
     (dir, Ctx::new(ws))
-}
-
-async fn run(tool: &dyn Tool, args: serde_json::Value, ctx: &Ctx) -> String {
-    tool.execute(args, ctx).await.unwrap().flatten()
 }
 
 #[tokio::test]
@@ -156,10 +153,12 @@ async fn grep_returns_sections_an_edit_can_anchor_on() {
     common::every_row_anchors_in_the_body(&out, "src/deep/util.rs", &body, 1);
 
     // The whole point: the rows grep prints are verbatim anchors — the edit
-    // takes them with no read in between.
+    // takes one, address and all, with no read in between.
     tools::edit::Edit
         .execute(
-            json!({ "patch": "[src/deep/util.rs]\n-// TODO: rename\n+// renamed\n" }),
+            json!({ "path": "src/deep/util.rs", "edits": [
+                { "old_string": "2:// TODO: rename\n", "new_string": "// renamed\n" }
+            ]}),
             &c,
         )
         .await

@@ -130,7 +130,7 @@ pub struct Agent {
 }
 
 // Per-tool failure streaks across one run, so a loop can be named. Keyed by
-// tool and the stable code its error carries: a patch that keeps coming back
+// tool and the stable code its error carries: an edit that keeps coming back
 // "would not parse" is one loop whatever the prose says, while a genuinely
 // different error starts a new count.
 type Failures = HashMap<(String, String), usize>;
@@ -942,8 +942,8 @@ impl Agent {
 // A success resets the failure streak for this tool — the loop-breaker only
 // names an unbroken run of failures — except for edit, whose every success is
 // a different file: landing one edit does not mean the next will land, and a
-// malformed-patch loop must keep being counted until the model actually
-// changes approach.
+// call that keeps coming back malformed must keep being counted until the model
+// actually changes approach.
 fn note_success(call: &ToolCall, failures: &mut Failures) {
     if call.name != "edit" {
         failures.retain(|(name, _), _| name != &call.name);
@@ -1003,8 +1003,8 @@ fn failed(
 
 // Name a tool whose failures are piling up. The count is per tool and per
 // stable error code, so the wording of the refusal — which a loop keeps
-// changing — never matters: a patch that keeps coming back refused the same
-// way is a loop, whatever the prose says, while a genuinely different error
+// changing — never matters: a call that keeps coming back refused the same way
+// is a loop, whatever the prose says, while a genuinely different error
 // starts a new count. Two failures is already the whole story; the second
 // tells the model nothing the first did not, so there is no leeway the way
 // there is for a re-read. Naming resets the count, so a mistake made long
@@ -1114,8 +1114,8 @@ mod tests {
     #[test]
     fn two_same_code_failures_are_named() {
         let mut f = Failures::new();
-        assert!(too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f, None).is_none());
-        let n = too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f, None);
+        assert!(too_many_failures(&call("edit"), Some("EDIT_REFUSED"), &mut f, None).is_none());
+        let n = too_many_failures(&call("edit"), Some("EDIT_REFUSED"), &mut f, None);
         assert!(n.is_some(), "second same-code failure is named");
         assert!(n.unwrap().contains("edit"));
     }
@@ -1127,19 +1127,9 @@ mod tests {
     fn the_notice_points_at_the_journal_it_cannot_otherwise_reach() {
         let journal = std::path::Path::new("/fixture/sessions/-w/s1/journal.jsonl");
         let mut f = Failures::new();
-        too_many_failures(
-            &call("edit"),
-            Some("EDIT_UNBALANCED"),
-            &mut f,
-            Some(journal),
-        );
-        let notice = too_many_failures(
-            &call("edit"),
-            Some("EDIT_UNBALANCED"),
-            &mut f,
-            Some(journal),
-        )
-        .expect("the second same-code failure is named");
+        too_many_failures(&call("edit"), Some("EDIT_REFUSED"), &mut f, Some(journal));
+        let notice = too_many_failures(&call("edit"), Some("EDIT_REFUSED"), &mut f, Some(journal))
+            .expect("the second same-code failure is named");
 
         assert!(
             notice.contains("/fixture/sessions/-w/s1/journal.jsonl"),
@@ -1151,8 +1141,8 @@ mod tests {
 
         // A machine with nowhere to keep a journal still gets the loop named.
         let mut f = Failures::new();
-        too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f, None);
-        let bare = too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f, None)
+        too_many_failures(&call("edit"), Some("EDIT_REFUSED"), &mut f, None);
+        let bare = too_many_failures(&call("edit"), Some("EDIT_REFUSED"), &mut f, None)
             .expect("naming the loop does not depend on having a journal");
         assert!(bare.contains("failed the same way"), "{bare}");
         assert!(!bare.contains("grep"), "{bare}");
@@ -1161,7 +1151,7 @@ mod tests {
     #[test]
     fn a_different_code_starts_a_fresh_count() {
         let mut f = Failures::new();
-        too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f, None);
+        too_many_failures(&call("edit"), Some("EDIT_REFUSED"), &mut f, None);
         // A genuinely different error is a new situation, not a loop.
         assert!(
             too_many_failures(&call("edit"), Some("EDIT_RENUMBERED"), &mut f, None).is_none(),
@@ -1172,11 +1162,11 @@ mod tests {
     #[test]
     fn an_edit_success_does_not_clear_its_failure_streak() {
         let mut f = Failures::new();
-        too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f, None);
+        too_many_failures(&call("edit"), Some("EDIT_REFUSED"), &mut f, None);
         note_success(&call("edit"), &mut f);
         // Landing one edit does not mean the next will land, so its streak
         // stays until the model changes approach.
-        assert!(f.contains_key(&("edit".into(), "EDIT_UNBALANCED".into())));
+        assert!(f.contains_key(&("edit".into(), "EDIT_REFUSED".into())));
     }
 
     #[test]
@@ -1190,15 +1180,15 @@ mod tests {
     #[test]
     fn a_failure_after_naming_starts_a_fresh_count() {
         let mut f = Failures::new();
-        too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f, None);
+        too_many_failures(&call("edit"), Some("EDIT_REFUSED"), &mut f, None);
         assert!(
-            too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f, None).is_some(),
+            too_many_failures(&call("edit"), Some("EDIT_REFUSED"), &mut f, None).is_some(),
             "two in a row are named"
         );
         // The naming reset the count: one isolated mistake after the loop was
         // broken is a new situation, not the Nth repeat of the old one.
         assert!(
-            too_many_failures(&call("edit"), Some("EDIT_UNBALANCED"), &mut f, None).is_none(),
+            too_many_failures(&call("edit"), Some("EDIT_REFUSED"), &mut f, None).is_none(),
             "a single failure after naming must not be called a repeat"
         );
     }

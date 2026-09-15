@@ -1,24 +1,15 @@
 mod common;
 
+use common::{ctx, run, view};
 use serde_json::json;
 use tools::{Ctx, Registry, Tier, Tool, ToolError, Workspace};
-
-fn ctx() -> (tempfile::TempDir, Ctx) {
-    let dir = tempfile::tempdir().unwrap();
-    let ws = Workspace::new(dir.path()).unwrap();
-    (dir, Ctx::new(ws))
-}
-
-async fn run(tool: &dyn Tool, args: serde_json::Value, ctx: &Ctx) -> String {
-    tool.execute(args, ctx).await.unwrap().flatten()
-}
 
 #[tokio::test]
 async fn read_heads_the_view_with_the_file_path() {
     let (_d, c) = ctx();
     std::fs::write(c.workspace.root().join("a.rs"), "one\ntwo\nthree\n").unwrap();
 
-    let out = run(&tools::read::Read, json!({ "path": "a.rs" }), &c).await;
+    let out = view(&c, "a.rs").await;
     assert_eq!(out.lines().next().unwrap(), "[a.rs]");
     assert!(out.contains("\n1:one\n2:two\n3:three\n"), "{out}");
 }
@@ -71,7 +62,7 @@ async fn read_refuses_binary_and_lists_directories() {
 
     std::fs::create_dir(c.workspace.root().join("sub")).unwrap();
     std::fs::write(c.workspace.root().join("sub/x.rs"), "").unwrap();
-    let out = run(&tools::read::Read, json!({ "path": "sub" }), &c).await;
+    let out = view(&c, "sub").await;
     assert!(out.contains("x.rs"), "{out}");
 }
 
@@ -86,7 +77,7 @@ async fn write_creates_parents_and_round_trips_through_read() {
     .await;
     assert!(out.contains("wrote 1 line,"), "{out}");
 
-    let back = run(&tools::read::Read, json!({ "path": "a/b/c.rs" }), &c).await;
+    let back = view(&c, "a/b/c.rs").await;
     assert!(back.contains("1:fn main() {}"), "{back}");
     // write and read must agree on the view hash, or the staleness note fires
     // on the very first edit.
@@ -272,24 +263,26 @@ async fn multibyte_output_respects_the_byte_budget_and_stays_valid_utf8() {
     assert!(out.len() < 40_000, "clamped output was {} bytes", out.len());
 }
 
-// Read a file the way the model would, then edit it. Read-before-edit is
-// tracked by the session, so no tag is passed any more.
-async fn read_then_edit(c: &Ctx, path: &str, ops: &str) -> Result<String, ToolError> {
-    run(&tools::read::Read, json!({ "path": path }), c).await;
-    let patch = format!("[{path}]\n{ops}");
+// Read a file the way the model would, then replace `old` with `new` in it.
+// Read-before-edit is tracked by the session, so nothing is passed for it.
+async fn read_then_edit(c: &Ctx, path: &str, old: &str, new: &str) -> Result<String, ToolError> {
+    view(c, path).await;
     tools::edit::Edit
-        .execute(json!({ "patch": patch }), c)
+        .execute(
+            json!({ "path": path, "edits": [{ "old_string": old, "new_string": new }] }),
+            c,
+        )
         .await
         .map(|o| o.flatten())
 }
 
 #[tokio::test]
-async fn edit_applies_a_patch_built_from_the_last_view() {
+async fn edit_replaces_the_text_its_anchor_names() {
     let (_d, c) = ctx();
     let path = c.workspace.root().join("a.rs");
     std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
 
-    let report = read_then_edit(&c, "a.rs", "-two\n+TWO\n").await.unwrap();
+    let report = read_then_edit(&c, "a.rs", "two\n", "TWO\n").await.unwrap();
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\nTWO\nthree\n");
     // The report echoes the rows it landed, numbered in the new file.
     assert!(report.starts_with("[a.rs]"), "{report}");
@@ -297,12 +290,30 @@ async fn edit_applies_a_patch_built_from_the_last_view() {
 }
 
 #[tokio::test]
+async fn an_anchor_written_with_lf_lands_in_a_crlf_file() {
+    // The model writes `\n`; the file spells its breaks `\r\n`. The anchor is
+    // retried in the file's own spelling rather than normalizing the file.
+    let (_d, c) = ctx();
+    std::fs::write(c.workspace.root().join("a.rs"), "one\r\ntwo\r\nthree\r\n").unwrap();
+
+    let report = read_then_edit(&c, "a.rs", "two\n", "TWO\n").await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(c.workspace.root().join("a.rs")).unwrap(),
+        "one\r\nTWO\r\nthree\r\n"
+    );
+    assert!(report.contains("2:TWO"), "{report}");
+}
+
+#[tokio::test]
 async fn edit_writes_new_rows_with_the_files_line_ending() {
     let (_d, c) = ctx();
     std::fs::write(c.workspace.root().join("a.rs"), "one\r\ntwo\r\nthree\r\n").unwrap();
-    run(&tools::read::Read, json!({ "path": "a.rs" }), &c).await;
+    view(&c, "a.rs").await;
     let out = tools::edit::Edit
-        .execute(json!({ "patch": "[a.rs]\n-two\n+TWO\n" }), &c)
+        .execute(
+            json!({ "path": "a.rs", "edits": [{ "old_string": "two\r\n", "new_string": "TWO\r\n" }] }),
+            &c,
+        )
         .await
         .unwrap();
     let written = std::fs::read_to_string(c.workspace.root().join("a.rs")).unwrap();
@@ -322,25 +333,18 @@ pub fn target() -> i32 {
 
 #[tokio::test]
 async fn a_replacement_that_breaks_the_parse_is_refused_rather_than_applied() {
-    // The anchor matches and the patch is well formed; only the parse gate
-    // can tell that the file as patched would not compile.
+    // The anchor matches and the call is well formed; only the parse gate can
+    // tell that the file as edited would not compile.
     let (_d, c) = ctx();
     let path = c.workspace.root().join("a.rs");
     std::fs::write(&path, THREE_FNS).unwrap();
 
-    let err = read_then_edit(
-        &c,
-        "a.rs",
-        "=pub fn target() -> i32 {\n-    2\n-}\n+}\n+}\n",
-    )
-    .await
-    .unwrap_err();
+    let err = read_then_edit(&c, "a.rs", "    2\n}\n", "}\n}\n")
+        .await
+        .unwrap_err();
     let said = err.to_string();
     // The row's own text: a bare line number invites a story about the parser.
-    assert!(
-        said.contains("line 7 of what this one produces is `}`"),
-        "{said}"
-    );
+    assert!(said.contains("of what this one produces is `}`"), "{said}");
     assert!(said.contains("Nothing was written"), "{said}");
 
     // Refused means refused: the file on disk is untouched.
@@ -348,17 +352,19 @@ async fn a_replacement_that_breaks_the_parse_is_refused_rather_than_applied() {
 }
 
 #[tokio::test]
-async fn the_same_edit_anchored_by_content_still_applies() {
+async fn a_multi_row_anchor_lands_as_written() {
     let (_d, c) = ctx();
-    std::fs::write(c.workspace.root().join("a.rs"), THREE_FNS).unwrap();
+    let path = c.workspace.root().join("a.rs");
+    std::fs::write(&path, THREE_FNS).unwrap();
 
-    let out = read_then_edit(
-        &c,
-        "a.rs",
-        "=pub fn target() -> i32 {\n-    2\n-}\n+    99\n+}\n",
-    )
-    .await
-    .unwrap();
+    let out = read_then_edit(&c, "a.rs", "    2\n}\n", "    99\n}\n")
+        .await
+        .unwrap();
+    assert!(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("    99\n}\n")
+    );
     assert!(out.contains("99"), "{out}");
 }
 
@@ -371,7 +377,7 @@ async fn a_file_that_was_already_broken_stays_editable() {
     let broken = "pub fn a() -> i32 {\n    1\n";
     std::fs::write(c.workspace.root().join("a.rs"), broken).unwrap();
 
-    let out = read_then_edit(&c, "a.rs", "-    1\n+    2\n")
+    let out = read_then_edit(&c, "a.rs", "    1\n", "    2\n")
         .await
         .unwrap();
     assert!(out.contains("2"), "{out}");
@@ -382,7 +388,7 @@ async fn a_language_the_parser_does_not_know_is_not_gated() {
     let (_d, c) = ctx();
     std::fs::write(c.workspace.root().join("a.toml"), "[a]\nb = 1\n").unwrap();
 
-    let out = read_then_edit(&c, "a.toml", "=b = 1\n+b = 2\n")
+    let out = read_then_edit(&c, "a.toml", "b = 1\n", "b = 2\n")
         .await
         .unwrap();
     assert!(out.contains("b = 2"), "{out}");
@@ -395,11 +401,14 @@ async fn an_edit_shows_what_went_and_what_came() {
     // one has a reader.
     let (_d, c) = ctx();
     std::fs::write(c.workspace.root().join("a.rs"), THREE_FNS).unwrap();
-    run(&tools::read::Read, json!({ "path": "a.rs" }), &c).await;
+    view(&c, "a.rs").await;
 
     let out = tools::edit::Edit
         .execute(
-            json!({ "patch": "[a.rs]\n=pub fn target() -> i32 {\n-    2\n-}\n+    99\n+}\n" }),
+            json!({ "path": "a.rs", "edits": [
+                { "old_string": "pub fn target() -> i32 {\n    2\n}\n",
+                  "new_string": "pub fn target() -> i32 {\n    99\n}\n" },
+            ]}),
             &c,
         )
         .await
@@ -427,16 +436,21 @@ async fn an_edit_shows_what_went_and_what_came() {
 
 #[tokio::test]
 async fn each_side_of_a_hunk_is_numbered_in_the_file_it_belongs_to() {
-    // The first hunk swaps one line for two, so the removed `b` was line 2
-    // before the patch but sits at line 3 after it. Removed rows must show
-    // the old number, added rows the new one.
+    // The two lines matched are replaced by three, so the removed `b` was
+    // line 2 before the edit but sits at line 3 after it. Removed rows must
+    // show the old number, added rows the new one.
     let (_d, c) = ctx();
     let src = "a\nb\nc\nd\ne\n";
     std::fs::write(c.workspace.root().join("a.rs"), src).unwrap();
-    run(&tools::read::Read, json!({ "path": "a.rs" }), &c).await;
+    view(&c, "a.rs").await;
 
     let out = tools::edit::Edit
-        .execute(json!({ "patch": "[a.rs]\n=a\n+AA\n+BB\n-b\n" }), &c)
+        .execute(
+            json!({ "path": "a.rs", "edits": [
+                { "old_string": "a\nb\n", "new_string": "a\nAA\nBB\n" },
+            ]}),
+            &c,
+        )
         .await
         .unwrap();
     let sketch = out.preview.unwrap();
@@ -450,11 +464,13 @@ async fn a_delete_reports_the_lines_it_took() {
     // exactly the one a reader most wants shown.
     let (_d, c) = ctx();
     std::fs::write(c.workspace.root().join("a.rs"), THREE_FNS).unwrap();
-    run(&tools::read::Read, json!({ "path": "a.rs" }), &c).await;
+    view(&c, "a.rs").await;
 
     let out = tools::edit::Edit
         .execute(
-            json!({ "patch": "[a.rs]\n-pub fn target() -> i32 {\n-    2\n-}\n" }),
+            json!({ "path": "a.rs", "edits": [
+                { "old_string": "pub fn target() -> i32 {\n    2\n}\n", "new_string": "" },
+            ]}),
             &c,
         )
         .await
@@ -473,53 +489,51 @@ async fn a_delete_reports_the_lines_it_took() {
 }
 
 #[tokio::test]
-async fn a_file_the_patch_did_not_change_is_not_counted_as_one_that_did() {
-    // The report says "unchanged" and nothing is written; a head reading
-    // "2 files" tells whoever only sees the display the opposite.
+async fn two_edits_in_one_call_land_together() {
+    // One call, one file, both edits matched against the file as it was: the
+    // display carries both landings under the one head.
     let (_d, c) = ctx();
-    let root = c.workspace.root();
-    std::fs::write(root.join("a.rs"), THREE_FNS).unwrap();
-    std::fs::write(root.join("b.rs"), "fn b() {}\n").unwrap();
-    run(&tools::read::Read, json!({ "path": "a.rs" }), &c).await;
-    run(&tools::read::Read, json!({ "path": "b.rs" }), &c).await;
+    std::fs::write(c.workspace.root().join("a.rs"), THREE_FNS).unwrap();
+    view(&c, "a.rs").await;
 
-    let patch = "[a.rs]\n=pub fn target() -> i32 {\n-    2\n-}\n+    99\n+}\n\n[b.rs]\n-fn b() {}\n+fn b() {}\n";
     let out = tools::edit::Edit
-        .execute(json!({ "patch": patch }), &c)
+        .execute(
+            json!({ "path": "a.rs", "edits": [
+                { "old_string": "pub fn target() -> i32 {\n    2\n}\n",
+                  "new_string": "pub fn target() -> i32 {\n    99\n}\n" },
+                { "insert_after": "pub fn keep() -> i32 {\n", "new_string": "    // kept\n" },
+            ]}),
+            &c,
+        )
         .await
         .unwrap();
 
     let sketch = out.preview.unwrap();
-    assert!(sketch.starts_with("a.rs +3 -3"), "{sketch}");
-    assert!(!sketch.contains("b.rs"), "{sketch}");
-    // One file left standing, so nothing has to be told apart by name.
+    assert!(sketch.starts_with("a.rs +4 -3"), "{sketch}");
+    // Both landings are in the one file, so no name row tells them apart.
     assert!(!sketch.lines().any(|l| l == "a.rs"), "{sketch}");
+    assert_eq!(sketch.lines().skip(1).count(), 7, "{sketch}");
 }
 
 #[tokio::test]
-async fn two_files_each_say_which_hunks_are_theirs() {
+async fn a_no_op_replacement_is_refused() {
+    // Nothing moves, so reporting a successful edit would teach the model
+    // that a fix landed. The file is left alone and the refusal says why.
     let (_d, c) = ctx();
-    let root = c.workspace.root();
-    std::fs::write(root.join("a.rs"), THREE_FNS).unwrap();
-    std::fs::write(root.join("b.rs"), "fn b() {}\n").unwrap();
-    run(&tools::read::Read, json!({ "path": "a.rs" }), &c).await;
-    run(&tools::read::Read, json!({ "path": "b.rs" }), &c).await;
+    let path = c.workspace.root().join("a.rs");
+    std::fs::write(&path, "one\n").unwrap();
+    view(&c, "a.rs").await;
 
-    let patch = "[a.rs]\n=pub fn keep() -> i32 {\n-    1\n+    11\n\n[b.rs]\n-fn b() {}\n+fn b() -> i32 { 2 }\n";
-    let out = tools::edit::Edit
-        .execute(json!({ "patch": patch }), &c)
+    let err = tools::edit::Edit
+        .execute(
+            json!({ "path": "a.rs", "edits": [{ "old_string": "one\n", "new_string": "one\n" }] }),
+            &c,
+        )
         .await
-        .unwrap();
-
-    let sketch = out.preview.unwrap();
-    assert!(sketch.starts_with("2 files +3 -3"), "{sketch}");
-    // Diff rows lead with their row number, so a name row is anything whose
-    // second word is not the `+`/`-` mark.
-    let named: Vec<&str> = sketch
-        .lines()
-        .filter(|l| !matches!(l.split_whitespace().nth(1), Some("+") | Some("-")))
-        .collect();
-    assert_eq!(named, vec!["2 files +3 -3", "a.rs", "b.rs"], "{sketch}");
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("nothing changed"), "{err}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\n");
 }
 
 #[tokio::test]
@@ -618,14 +632,20 @@ async fn a_second_edit_right_after_the_first_applies_without_a_reread() {
     let (_d, c) = ctx();
     let path = c.workspace.root().join("a.rs");
     std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
-    run(&tools::read::Read, json!({ "path": "a.rs" }), &c).await;
+    view(&c, "a.rs").await;
 
     tools::edit::Edit
-        .execute(json!({ "patch": "[a.rs]\n=one\n+one!\n" }), &c)
+        .execute(
+            json!({ "path": "a.rs", "edits": [{ "insert_after": "one\n", "new_string": "one!\n" }] }),
+            &c,
+        )
         .await
         .unwrap();
     tools::edit::Edit
-        .execute(json!({ "patch": "[a.rs]\n=three\n+three!\n" }), &c)
+        .execute(
+            json!({ "path": "a.rs", "edits": [{ "insert_after": "three\n", "new_string": "three!\n" }] }),
+            &c,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -639,13 +659,16 @@ async fn an_edit_whose_anchor_is_gone_leaves_the_file_untouched() {
     let (_d, c) = ctx();
     let path = c.workspace.root().join("a.rs");
     std::fs::write(&path, "one\ntwo\n").unwrap();
-    run(&tools::read::Read, json!({ "path": "a.rs" }), &c).await;
-    // The file changed after the view: the anchor the patch carries is no
+    view(&c, "a.rs").await;
+    // The file changed after the view: the anchor the model copied is no
     // longer there, and nothing may be written.
     std::fs::write(&path, "something else\n").unwrap();
 
     let err = tools::edit::Edit
-        .execute(json!({ "patch": "[a.rs]\n-two\n" }), &c)
+        .execute(
+            json!({ "path": "a.rs", "edits": [{ "old_string": "two\n", "new_string": "" }] }),
+            &c,
+        )
         .await
         .unwrap_err()
         .to_string();
@@ -658,25 +681,27 @@ async fn an_edit_whose_anchor_is_gone_leaves_the_file_untouched() {
 }
 
 #[tokio::test]
-async fn a_multi_file_patch_is_all_or_nothing_on_disk() {
+async fn an_edit_that_misses_leaves_its_sibling_unapplied() {
     let (_d, c) = ctx();
-    std::fs::write(c.workspace.root().join("a.rs"), "a\n").unwrap();
-    std::fs::write(c.workspace.root().join("b.rs"), "b\n").unwrap();
-    run(&tools::read::Read, json!({ "path": "a.rs" }), &c).await;
-    run(&tools::read::Read, json!({ "path": "b.rs" }), &c).await;
+    std::fs::write(c.workspace.root().join("a.rs"), "a\nb\n").unwrap();
+    view(&c, "a.rs").await;
 
-    // b.rs carries an anchor that matches nothing: the whole patch refuses.
-    let patch = "[a.rs]\n=a\n+A\n[b.rs]\n=zzz\n+B\n";
-    assert!(
-        tools::edit::Edit
-            .execute(json!({ "patch": patch }), &c)
-            .await
-            .is_err()
-    );
-    // a.rs was valid, but a half-applied patch is worse than a rejected one.
+    // The second edit's anchor matches nothing: the whole call refuses.
+    let out = tools::edit::Edit
+        .execute(
+            json!({ "path": "a.rs", "edits": [
+                { "insert_after": "a\n", "new_string": "A\n" },
+                { "old_string": "zzz\n", "new_string": "B\n" },
+            ]}),
+            &c,
+        )
+        .await;
+    assert!(out.is_err(), "a missed anchor must refuse the call");
+    // The first edit was sound, but a half-applied call is worse than a
+    // rejected one.
     assert_eq!(
         std::fs::read_to_string(c.workspace.root().join("a.rs")).unwrap(),
-        "a\n"
+        "a\nb\n"
     );
 }
 
@@ -684,7 +709,10 @@ async fn a_multi_file_patch_is_all_or_nothing_on_disk() {
 async fn edit_refuses_a_file_it_cannot_read_and_says_to_use_write() {
     let (_d, c) = ctx();
     let err = tools::edit::Edit
-        .execute(json!({ "patch": "[new.rs]\n-x\n" }), &c)
+        .execute(
+            json!({ "path": "new.rs", "edits": [{ "old_string": "x", "new_string": "y" }] }),
+            &c,
+        )
         .await
         .unwrap_err()
         .to_string();
@@ -695,7 +723,10 @@ async fn edit_refuses_a_file_it_cannot_read_and_says_to_use_write() {
 async fn edit_cannot_reach_outside_the_workspace() {
     let (_d, c) = ctx();
     let r = tools::edit::Edit
-        .execute(json!({ "patch": "[../escape.rs]\n-x\n" }), &c)
+        .execute(
+            json!({ "path": "../escape.rs", "edits": [{ "old_string": "x", "new_string": "y" }] }),
+            &c,
+        )
         .await;
     assert!(matches!(r, Err(ToolError::Escape(_))), "{r:?}");
 }
@@ -789,7 +820,12 @@ async fn a_view_carries_no_tag_but_still_feeds_the_staleness_note() {
     // staleness note beside its report.
     std::fs::write(c.workspace.root().join("a.rs"), "changed\n").unwrap();
     let out = tools::edit::Edit
-        .execute(json!({ "patch": "[a.rs]\n=changed\n+changed twice\n" }), &c)
+        .execute(
+            json!({ "path": "a.rs", "edits": [
+                { "insert_after": "changed\n", "new_string": "changed twice\n" }
+            ]}),
+            &c,
+        )
         .await
         .unwrap()
         .flatten();
@@ -801,12 +837,18 @@ async fn two_edits_to_one_file_in_the_same_turn_do_not_clobber_each_other() {
     let (_d, c) = ctx();
     let path = c.workspace.root().join("a.rs");
     std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
-    run(&tools::read::Read, json!({ "path": "a.rs" }), &c).await;
+    view(&c, "a.rs").await;
 
     // Both anchors are content, and the per-file lock only orders them: each
-    // operation applies where its own anchor matches.
-    let first = tools::edit::Edit.execute(json!({ "patch": "[a.rs]\n=one\n+ONE\n" }), &c);
-    let second = tools::edit::Edit.execute(json!({ "patch": "[a.rs]\n=three\n+THREE\n" }), &c);
+    // edit applies where its own anchor matches.
+    let first = tools::edit::Edit.execute(
+        json!({ "path": "a.rs", "edits": [{ "insert_after": "one\n", "new_string": "ONE\n" }] }),
+        &c,
+    );
+    let second = tools::edit::Edit.execute(
+        json!({ "path": "a.rs", "edits": [{ "insert_after": "three\n", "new_string": "THREE\n" }] }),
+        &c,
+    );
     let (a, b) = tokio::join!(first, second);
     assert!(a.is_ok() && b.is_ok(), "{a:?} / {b:?}");
 
@@ -823,12 +865,12 @@ async fn write_strips_display_prefixes_the_model_copied_from_read() {
         "fn main() {}\nlet x = 1;\n",
     )
     .unwrap();
-    let view = run(&tools::read::Read, json!({ "path": "a.rs" }), &c).await;
+    let shown = view(&c, "a.rs").await;
 
     // The whole read output, pasted straight back — a habit the numbered format
     // invites and one nothing else catches.
     tools::write::Write
-        .execute(json!({ "path": "b.rs", "content": view }), &c)
+        .execute(json!({ "path": "b.rs", "content": shown }), &c)
         .await
         .unwrap();
 
@@ -929,33 +971,15 @@ async fn a_short_output_leaves_no_file_behind() {
 }
 
 #[tokio::test]
-async fn an_edit_that_changes_nothing_says_so() {
-    let (_d, c) = ctx();
-    let src = "one\ntwo\n";
-    std::fs::write(c.workspace.root().join("a.rs"), src).unwrap();
-    run(&tools::read::Read, json!({ "path": "a.rs" }), &c).await;
-
-    // A patch whose body already matches. It "succeeds", and the model has no
-    // way to tell its fix did not land.
-    let patch = "[a.rs]\n-one\n+one\n";
-    let out = tools::edit::Edit
-        .execute(json!({ "patch": patch }), &c)
-        .await
-        .unwrap()
-        .flatten();
-    assert!(out.contains("unchanged"), "{out}");
-}
-
-#[tokio::test]
 async fn a_deletion_is_reported_by_what_it_deleted() {
     let (_d, c) = ctx();
     let before = "one\ntwo\nthree\nfour\n";
     std::fs::write(c.workspace.root().join("a.rs"), before).unwrap();
-    run(&tools::read::Read, json!({ "path": "a.rs" }), &c).await;
+    view(&c, "a.rs").await;
 
     let out = run(
         &tools::edit::Edit,
-        json!({ "patch": "[a.rs]\n-two\n-three\n" }),
+        json!({ "path": "a.rs", "edits": [{ "old_string": "two\nthree\n", "new_string": "" }] }),
         &c,
     )
     .await;
@@ -971,29 +995,68 @@ async fn a_deletion_is_reported_by_what_it_deleted() {
 }
 
 #[tokio::test]
-async fn every_marker_the_description_names_is_one_the_parser_takes() {
-    // The FORMAT string is prose sent to the model on every request, and the
-    // parser is what reads back what the model writes from it. A marker the
-    // description names but the parser rejects is exactly what a grammar
-    // change costs, so each one is exercised here.
+async fn a_call_that_adds_and_removes_reports_both() {
+    // The rows a deletion took have no row in the new file to be named by,
+    // so a call that also added something still has to say they went.
+    let (_d, c) = ctx();
+    let path = c.workspace.root().join("a.rs");
+    std::fs::write(&path, "a\nb\ntail\n").unwrap();
+    view(&c, "a.rs").await;
+
+    let out = tools::edit::Edit
+        .execute(
+            json!({ "path": "a.rs", "edits": [
+                { "old_string": "a\nb\n", "new_string": "" },
+                { "insert_after": "tail\n", "new_string": "z\n" },
+            ]}),
+            &c,
+        )
+        .await
+        .unwrap()
+        .flatten();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "tail\nz\n");
+    assert!(out.contains("removed 2 lines"), "{out}");
+    assert!(out.contains("   1 - a"), "{out}");
+}
+
+#[tokio::test]
+async fn every_field_the_description_names_is_one_the_schema_takes() {
+    // The description is prose sent on every request and the schema is what
+    // the call is parsed against. A name the prose teaches but the schema
+    // refuses is exactly what a change to either one costs, so both are read
+    // here against the same list.
     let described = tools::edit::Edit.description();
-    for marker in ["`-`", "`=`", "`+`", "`*`", "`@`"] {
-        assert!(described.contains(marker), "the description omits {marker}");
+    let schema = tools::edit::Edit.schema();
+    let fields = schema["properties"]["edits"]["items"]["properties"]
+        .as_object()
+        .expect("the schema names the entry's fields")
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        fields,
+        vec![
+            "insert_after",
+            "insert_before",
+            "new_string",
+            "old_string",
+            "replace_all",
+            "whole_block",
+        ]
+    );
+    for field in &fields {
+        assert!(
+            described.contains(field.as_str()),
+            "the description omits `{field}`"
+        );
     }
-    for body in [
-        "-a\n+b",
-        "-a",
-        "=a\n+b",
-        "+b\n=a",
-        "*a\n+b",
-        "+b\n*a",
-        "@a\n+b",
-        "@a\n-b",
-        "@a\n-",
-        "-a\n=b\n+c",
-    ] {
-        let patch = format!("[a.txt]\n{body}\n");
-        hashline::parse(&patch).expect("a described form the parser rejects");
+    // The shape the entries are given in, named in both places.
+    for name in ["`path`", "`edits`"] {
+        assert!(described.contains(name), "the description omits {name}");
+        assert!(
+            schema["properties"].get(name.trim_matches('`')).is_some(),
+            "the schema omits {name}"
+        );
     }
 }
 
@@ -1035,16 +1098,22 @@ async fn write_still_recognises_the_header_hashline_prints() {
 }
 
 #[tokio::test]
-async fn an_edit_without_patch_says_what_the_one_argument_is() {
+async fn an_edit_without_its_arguments_says_what_they_are() {
     let (_d, c) = ctx();
     let err = tools::edit::Edit
         .execute(json!({}), &c)
         .await
         .unwrap_err()
         .to_string();
-    assert!(err.contains("missing field `patch`"), "{err}");
-    assert!(err.contains("takes a single argument"), "{err}");
-    assert!(err.contains("[path]"), "{err}");
+    assert!(err.contains("missing field `path`"), "{err}");
+    assert!(err.contains("takes `path` and `edits`"), "{err}");
+
+    let err = tools::edit::Edit
+        .execute(json!({ "path": "a.rs" }), &c)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("missing field `edits`"), "{err}");
 }
 
 // What a run wrote is taken as it writes, never from anything it says
@@ -1063,15 +1132,15 @@ async fn what_a_run_wrote_is_recorded_as_it_writes() {
         &c,
     )
     .await;
-    run(&tools::read::Read, json!({ "path": "a.rs" }), &c).await;
+    view(&c, "a.rs").await;
     run(
         &tools::edit::Edit,
-        json!({ "patch": "[a.rs]\n-    1\n+    2\n" }),
+        json!({ "path": "a.rs", "edits": [{ "old_string": "    1\n", "new_string": "    2\n" }] }),
         &c,
     )
     .await;
     // A read changes nothing, so it leaves no mark.
-    run(&tools::read::Read, json!({ "path": "a.rs" }), &c).await;
+    view(&c, "a.rs").await;
 
     let wrote: Vec<String> = c.writes().iter().map(|p| c.workspace.display(p)).collect();
     assert_eq!(
@@ -1144,4 +1213,69 @@ async fn a_command_that_printed_nothing_still_reports_how_it_ended() {
         "a silent failure is not a silent success"
     );
     assert!(!failed.useless, "which is exactly what a later turn needs");
+}
+
+#[tokio::test]
+async fn an_anchor_wrapped_in_a_string_or_a_lone_object_is_still_taken() {
+    // The shapes models send: `edits` stringified, and a lone entry where a
+    // list of one belongs. Both are accepted rather than costing a turn.
+    let (_d, c) = ctx();
+    let path = c.workspace.root().join("a.rs");
+    std::fs::write(&path, "one\ntwo\n").unwrap();
+    view(&c, "a.rs").await;
+
+    let edits = serde_json::to_string(&json!([{ "old_string": "one\n", "new_string": "ONE\n" }]))
+        .expect("json");
+    tools::edit::Edit
+        .execute(json!({ "path": "a.rs", "edits": edits }), &c)
+        .await
+        .expect("a stringified list is taken");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "ONE\ntwo\n");
+
+    tools::edit::Edit
+        .execute(
+            json!({ "path": "a.rs", "edits": { "old_string": "two\n", "new_string": "TWO\n" } }),
+            &c,
+        )
+        .await
+        .expect("a lone entry is taken");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "ONE\nTWO\n");
+}
+
+#[tokio::test]
+async fn a_byte_order_mark_is_stripped_from_the_view_and_kept_on_disk() {
+    let (_d, c) = ctx();
+    let path = c.workspace.root().join("a.rs");
+    std::fs::write(&path, "\u{FEFF}fn f() {}\n").unwrap();
+
+    let out = view(&c, "a.rs").await;
+    assert!(out.contains("1:fn f() {}"), "{out}");
+    assert!(
+        !out.contains('\u{FEFF}'),
+        "the mark is not part of the line"
+    );
+
+    // So an anchor copied from the view matches, and the mark survives.
+    read_then_edit(&c, "a.rs", "fn f() {}", "fn g() {}")
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "\u{FEFF}fn g() {}\n"
+    );
+}
+
+#[tokio::test]
+async fn emptying_a_line_without_its_break_is_said_out_loud() {
+    // `new_string: ""` on an anchor that stops at the end of a line leaves a
+    // blank row. The edit still lands, and the report says what it left.
+    let (_d, c) = ctx();
+    let path = c.workspace.root().join("a.rs");
+    std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
+    view(&c, "a.rs").await;
+
+    let out = read_then_edit(&c, "a.rs", "two", "").await.unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\n\nthree\n");
+    assert!(out.contains("left the line break"), "{out}");
+    assert!(out.contains("edits[0]"), "{out}");
 }

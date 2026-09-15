@@ -148,9 +148,17 @@ fn reads_of_different_files_never_supersede_each_other() {
 fn an_edit_result_is_never_superseded_by_a_later_edit() {
     let mut m = vec![
         Message::user("go"),
-        call("c1", "edit", json!({ "patch": "one" })),
+        call(
+            "c1",
+            "edit",
+            json!({ "path": "a.rs", "edits": [{ "old_string": "one", "new_string": "two" }] }),
+        ),
         result("c1", "edit", &big(9_000)),
-        call("c2", "edit", json!({ "patch": "two" })),
+        call(
+            "c2",
+            "edit",
+            json!({ "path": "a.rs", "edits": [{ "old_string": "three", "new_string": "four" }] }),
+        ),
         result("c2", "edit", &big(9_000)),
     ];
     // An edit records something that happened; later edits do not unmake it.

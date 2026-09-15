@@ -325,8 +325,8 @@ pub fn plan(
         }
     }
 
-    // Oversized tool arguments: the file a `write` wrote, the patch an `edit`
-    // applied. The call has run and its result records what happened, so what
+    // Oversized tool arguments: the file a `write` wrote, the bodies an `edit`
+    // carried. The call has run and its result records what happened, so what
     // is left is the model's own carbon copy of the work, not context it still
     // needs — and it is the one weight on the assistant side worth taking.
     // Thinking blocks are deliberately not touched: the API filters prior ones

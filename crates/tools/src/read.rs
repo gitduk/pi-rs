@@ -144,8 +144,7 @@ impl View {
 //
 // Both halves from here, because they used to be spelt at each return and a
 // read has several: the tag belongs to one of them and kept turning up in the
-// other. What the model reads carries it — a patch names it and has nowhere
-// else to get it — and what a person reads never does.
+// other. What the model reads carries it, and what a person reads never does.
 fn deliver(ctx: &Ctx, rel: &str, view: View) -> Result<ToolOutput, ToolError> {
     // One length check decides both halves. Two — the transcript's budget and
     // the spill threshold, each read off a differently assembled string — can
@@ -174,8 +173,8 @@ impl Tool for Read {
         "Read a file as numbered lines, or list a directory. Output is headed by \
          [path]; later edits anchor on the content itself, so re-read after the \
          file changes. A long file comes back as a skeleton of its declarations \
-         instead — read a range with offset and limit, or replace one whole \
-         construct with edit's `PUT N*:`."
+         instead — read a range with offset and limit, or hand one whole block \
+         to edit as `old_string` with `whole_block: true`."
     }
 
     fn schema(&self) -> Value {
@@ -291,7 +290,11 @@ impl Tool for Read {
         // catching is an edit built with no read between it and the last one.
         ctx.note_view(&path, &hash);
 
-        let all: Vec<&str> = content.lines().collect();
+        // A byte-order mark is invisible in a terminal but is a character at
+        // the head of line 1: what the model copies back has to be what the
+        // edit matches, so it is stripped from the view and kept on disk.
+        let shown = content.strip_prefix('\u{FEFF}').unwrap_or(content);
+        let all: Vec<&str> = shown.lines().collect();
 
         // A range request is an explicit ask for lines; only an unqualified read
         // of a long file is worth answering with a skeleton.

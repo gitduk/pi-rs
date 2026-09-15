@@ -35,8 +35,8 @@ use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
 
 // How much of one string field survives. Raising the level raises this too:
-// at `info` the journal is a timeline and a truncated patch still identifies
-// itself, while `debug` is what you turn on to read the patch.
+// at `info` the journal is a timeline and a truncated field still identifies
+// itself, while `debug` is what you turn on to read one whole.
 const FIELD_CAP_INFO: usize = 1_024;
 const FIELD_CAP_DEBUG: usize = 64 * 1_024;
 
@@ -213,7 +213,7 @@ fn open_file(path: &Path) -> std::io::Result<File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        // Prompts, paths and patches, the same as the transcript.
+        // Prompts, paths and what the model wrote, the same as the transcript.
         let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
     }
     Ok(file)

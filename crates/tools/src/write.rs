@@ -179,9 +179,9 @@ impl Tool for Write {
         let unit = if lines == 1 { "line" } else { "lines" };
         let hash = hashline::view_hash(&content);
         ctx.note_view(&path, &hash);
-        // Same split as read: the model's line names the version a patch
-        // anchors to, the display and the log do not need it in front of a
-        // person, and the log keeps it anyway for when an edit goes wrong.
+        // Same split as read: the model's line names the version an edit
+        // matches against, the display and the log do not need it in front of
+        // a person, and the log keeps it anyway for when an edit goes wrong.
         tracing::info!(target: "pi::write", path = %rel, hash = %hash, "wrote");
         Ok(ToolOutput::text(format!(
             "{} wrote {lines} {unit}, {} bytes{note}",

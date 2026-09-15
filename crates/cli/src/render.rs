@@ -1375,20 +1375,6 @@ pub fn pad(s: &str, width: usize) -> String {
 
 /// The one argument worth showing in a progress line.
 pub fn summarize(args: &serde_json::Value) -> String {
-    // A patch is many lines; the files it touches are the useful part.
-    if let Some(patch) = args.get("patch").and_then(|v| v.as_str()) {
-        let files: Vec<&str> = patch
-            .lines()
-            .filter_map(|l| {
-                l.trim()
-                    .strip_prefix('[')?
-                    .strip_suffix(']')?
-                    .rsplit_once('#')
-            })
-            .map(|(path, _)| path)
-            .collect();
-        return clip(&files.join(" "), 80);
-    }
     // Order is priority: `pattern` beats `path` because a grep carries both,
     // and `description`, written for this line, beats the prompt it names.
     for key in [
@@ -1612,9 +1598,9 @@ mod tests {
         assert_eq!(toml_round_trip(&table), table);
     }
     #[test]
-    fn a_patch_summarizes_to_the_files_it_touches() {
-        let patch = "[a.rs#A1B2]\nPUT 1.=1:\n+x\n[b.rs#C3D4]\nRM\n";
-        assert_eq!(summarize(&json!({ "patch": patch })), "a.rs b.rs");
+    fn an_edit_summarizes_to_the_file_it_touches() {
+        let args = json!({ "path": "a.rs", "edits": [{ "old_string": "x", "new_string": "y" }] });
+        assert_eq!(summarize(&args), "a.rs");
     }
 
     #[test]

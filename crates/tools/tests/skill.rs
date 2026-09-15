@@ -1,6 +1,9 @@
+mod common;
+
+use common::ctx;
 use serde_json::json;
 use tools::skills::{Skill, discover_from};
-use tools::{Ctx, Tool, ToolError, Workspace};
+use tools::{Tool, ToolError};
 
 fn tree() -> (tempfile::TempDir, Vec<Skill>) {
     let dir = tempfile::tempdir().unwrap();
@@ -29,12 +32,6 @@ fn tree() -> (tempfile::TempDir, Vec<Skill>) {
 
     let found = discover_from(&[root]);
     (dir, found.skills)
-}
-
-fn ctx() -> (tempfile::TempDir, Ctx) {
-    let dir = tempfile::tempdir().unwrap();
-    let ws = Workspace::new(dir.path()).unwrap();
-    (dir, Ctx::new(ws))
 }
 
 #[test]
