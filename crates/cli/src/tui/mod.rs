@@ -513,6 +513,9 @@ fn scrollback_from(
                                 .flat_map(str::lines)
                                 .map(|l| Row::reasoning_line(l, paint))
                                 .collect();
+                            if lines.is_empty() {
+                                continue;
+                            }
                             // From the same counter the live stream draws
                             // from, because there is only one rule for what a
                             // block id is. Handing every rebuilt block `0`
@@ -3893,6 +3896,27 @@ mod tests {
         assert!(!ids.contains(&folds.take_id()), "{ids:?}");
     }
 
+    #[test]
+    fn rebuilt_empty_reasoning_blocks_are_ignored() {
+        use agent::session::Session;
+        use brain::message::{AssistantContent, Reasoning, ReasoningContent};
+
+        let mut s = Session::new();
+        s.prompt("go");
+        s.push_assistant(vec![AssistantContent::Reasoning(Reasoning {
+            id: None,
+            content: vec![ReasoningContent::Text {
+                text: "".into(),
+                signature: None,
+            }],
+            by: None,
+        })]);
+
+        let mut folds = Folds::default();
+        let rows = scrollback_from(&s, &Paint::new(false), "! ", &mut folds);
+        let ids: Vec<u64> = rows.iter().filter_map(Row::block).collect();
+        assert_eq!(ids.len(), 0);
+    }
     // The rebuilt screen shows a `!` run's output, derived from the entry's
     // text by the same function the live path draws with — the ruling that
     // retired `out.said`.

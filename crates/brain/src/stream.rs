@@ -288,14 +288,16 @@ impl Accumulator {
                     content.push(AssistantContent::ToolCall(ToolCall { id, name, args }));
                 }
                 Some(BlockKind::Reasoning) => {
-                    content.push(AssistantContent::Reasoning(Reasoning {
-                        id: None,
-                        content: vec![ReasoningContent::Text {
-                            text: b.text,
-                            signature: b.signature,
-                        }],
-                        by: Some(self.by.clone()),
-                    }));
+                    if !b.text.is_empty() || b.signature.is_some() {
+                        content.push(AssistantContent::Reasoning(Reasoning {
+                            id: None,
+                            content: vec![ReasoningContent::Text {
+                                text: b.text,
+                                signature: b.signature,
+                            }],
+                            by: Some(self.by.clone()),
+                        }));
+                    }
                 }
                 _ => {
                     if !b.text.is_empty() {
@@ -524,6 +526,28 @@ mod tests {
         assert!(matches!(&content[1], AssistantContent::Text(t) if t.text == "answer"));
     }
 
+    #[test]
+    fn empty_reasoning_block_is_omitted() {
+        let mut a = acc();
+        a.push(StreamEvent::BlockStart {
+            index: 0,
+            kind: BlockKind::Reasoning,
+        });
+        a.push(StreamEvent::TextDelta {
+            index: 1,
+            delta: "answer".into(),
+        });
+        a.push(StreamEvent::Done {
+            stop: StopReason::EndTurn,
+            usage: Usage::default(),
+        });
+
+        let Message::Assistant { content, .. } = a.finish().message else {
+            panic!()
+        };
+        assert_eq!(content.len(), 1);
+        assert!(matches!(&content[0], AssistantContent::Text(t) if t.text == "answer"));
+    }
     #[test]
     fn a_missing_finish_reason_still_ends_the_turn_as_tool_use() {
         let mut a = acc();
