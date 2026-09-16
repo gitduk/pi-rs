@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "1.19.10"
+version = "1.19.11"
 edition = "2024"
 license = "MIT"
 
