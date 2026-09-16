@@ -1721,6 +1721,7 @@ dependencies = [
  "futures",
  "ignore",
  "libc",
+ "pulldown-cmark",
  "ratatui",
  "serde",
  "serde_json",
