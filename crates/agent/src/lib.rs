@@ -323,7 +323,7 @@ impl Agent {
                     .await
                 {
                     Ok(done) => break done,
-                    Err(AgentError::Brain(e))
+                    Err((AgentError::Brain(e), _))
                         if brain::classify(&e) == brain::Fault::Overflow
                             && squeezes < MAX_SQUEEZE =>
                     {
@@ -361,7 +361,16 @@ impl Agent {
                             }
                         }
                     }
-                    Err(e) => return Err(e),
+                    Err((AgentError::Cancelled, Some(partial))) => {
+                        let Message::Assistant { content, .. } = partial.message else {
+                            unreachable!("the accumulator only ever builds an assistant message")
+                        };
+                        if !content.is_empty() {
+                            session.push_assistant(content);
+                        }
+                        return Err(AgentError::Cancelled);
+                    }
+                    Err((err, _)) => return Err(err),
                 }
             };
 
@@ -664,28 +673,34 @@ impl Agent {
         req: &Request,
         ctx: &Ctx,
         tx: &UnboundedSender<Event>,
-    ) -> Result<brain::stream::Completion, AgentError> {
+    ) -> Result<brain::stream::Completion, (AgentError, Option<brain::stream::Completion>)> {
         let mut attempt = 0usize;
         loop {
-            let err = match self.attempt(req, ctx, tx).await {
+            let (err, partial) = match self.attempt(req, ctx, tx).await {
                 Ok(done) => return Ok(done),
-                Err(AgentError::Brain(e)) => e,
-                Err(other) => return Err(other),
+                Err(err) => err,
+            };
+            if matches!(err, AgentError::Cancelled) {
+                return Err((err, partial));
+            }
+            let e = match err {
+                AgentError::Brain(e) => e,
+                other => return Err((other, partial)),
             };
 
             // A spent quota arrives as a 429 like any throttle; retrying that
             // one only costs money.
-            if attempt >= self.retry.attempts || brain::classify(&err) != brain::Fault::Transient {
+            if attempt >= self.retry.attempts || brain::classify(&e) != brain::Fault::Transient {
                 // The classification, not just the error: "why was this not
                 // retried" is answerable from the fault and from nothing else.
                 tracing::error!(
                     target: "pi::wire",
                     attempts = attempt,
-                    fault = ?brain::classify(&err),
-                    error = %err,
+                    fault = ?brain::classify(&e),
+                    error = %e,
                     "giving up"
                 );
-                return Err(AgentError::Brain(err));
+                return Err((AgentError::Brain(e), partial));
             }
 
             attempt += 1;
@@ -695,12 +710,12 @@ impl Agent {
                 Event::Retrying {
                     attempt,
                     delay_ms: delay.as_millis() as u64,
-                    reason: err.to_string(),
+                    reason: e.to_string(),
                 },
             );
             tokio::select! {
                 _ = tokio::time::sleep(delay) => {}
-                _ = ctx.cancel.cancelled() => return Err(AgentError::Cancelled),
+                _ = ctx.cancel.cancelled() => return Err((AgentError::Cancelled, None)),
             }
         }
     }
@@ -712,7 +727,7 @@ impl Agent {
         req: &Request,
         ctx: &Ctx,
         tx: &UnboundedSender<Event>,
-    ) -> Result<brain::stream::Completion, AgentError> {
+    ) -> Result<brain::stream::Completion, (AgentError, Option<brain::stream::Completion>)> {
         // A fresh accumulator per attempt: half a stream must not bleed into
         // the message the retry produces.
         let mut acc = Accumulator::new(self.spec.model.clone());
@@ -720,10 +735,10 @@ impl Agent {
 
         let mut stream = tokio::select! {
             r = tokio::time::timeout(idle, self.transport.stream(&self.spec, req)) => match r {
-                Ok(r) => r?,
-                Err(_) => return Err(wedged(idle)),
+                Ok(r) => r.map_err(|e| (AgentError::from(e), None))?,
+                Err(_) => return Err((wedged(idle), None)),
             },
-            _ = ctx.cancel.cancelled() => return Err(AgentError::Cancelled),
+            _ = ctx.cancel.cancelled() => return Err((AgentError::Cancelled, None)),
         };
 
         loop {
@@ -732,12 +747,17 @@ impl Agent {
                     Ok(n) => n,
                     // A provider that stops sending mid-stream would otherwise
                     // hold the turn open until the user gives up.
-                    Err(_) => return Err(wedged(idle)),
+                    Err(_) => return Err((wedged(idle), None)),
                 },
-                _ = ctx.cancel.cancelled() => return Err(AgentError::Cancelled),
+                _ = ctx.cancel.cancelled() => {
+                    return Err((AgentError::Cancelled, Some(acc.finish())));
+                }
             };
             let Some(ev) = next else { break };
-            let ev = ev?;
+            let ev = match ev {
+                Ok(ev) => ev,
+                Err(e) => return Err((AgentError::from(e), None)),
+            };
             match &ev {
                 StreamEvent::TextDelta { delta, .. } => {
                     say(tx, Event::TextDelta(delta.clone()));

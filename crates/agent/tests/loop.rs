@@ -473,6 +473,81 @@ async fn cancellation_stops_the_run() {
 }
 
 #[tokio::test]
+async fn cancellation_during_stream_saves_partial_assistant_response() {
+    struct PartialStream {
+        cancel: tokio_util::sync::CancellationToken,
+    }
+
+    #[async_trait]
+    impl Transport for PartialStream {
+        async fn stream(
+            &self,
+            _spec: &ModelSpec,
+            _req: &Request,
+        ) -> brain::Result<BoxStream<'static, brain::Result<StreamEvent>>> {
+            let cancel = self.cancel.clone();
+            let stream = futures::stream::unfold((0usize, cancel), |(step, cancel)| async move {
+                match step {
+                    0 => Some((
+                        Ok(StreamEvent::BlockStart {
+                            index: 0,
+                            kind: BlockKind::Text,
+                        }),
+                        (1, cancel),
+                    )),
+                    1 => Some((
+                        Ok(StreamEvent::TextDelta {
+                            index: 0,
+                            delta: "partial output".into(),
+                        }),
+                        (2, cancel),
+                    )),
+                    _ => {
+                        cancel.cancel();
+                        futures::future::pending::<()>().await;
+                        None
+                    }
+                }
+            });
+            Ok(stream.boxed())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace::new(dir.path()).unwrap();
+    let ctx = Ctx::new(ws);
+    let wire = Arc::new(PartialStream {
+        cancel: ctx.cancel.clone(),
+    });
+    let agent = Agent::new(wire, spec());
+
+    let (mut session, out, _) = drive(&agent, &ctx, "first prompt").await;
+    assert!(matches!(out, Err(AgentError::Cancelled)), "{out:?}");
+
+    // The partial stream was saved as an assistant answer
+    let entries = session.entries();
+    assert_eq!(entries.len(), 2, "must have ask and partial answer");
+    assert!(matches!(&entries[0], agent::session::Entry::Ask { .. }));
+    let answer = match &entries[1] {
+        agent::session::Entry::Answer { blocks, .. } => blocks,
+        other => panic!("expected answer entry, got {other:?}"),
+    };
+    assert_eq!(answer.len(), 1);
+    match &answer[0] {
+        brain::message::AssistantContent::Text(t) => assert_eq!(t.text, "partial output"),
+        other => panic!("expected text block, got {other:?}"),
+    }
+
+    // A subsequent prompt does not produce consecutive ask entries
+    session.send_prompt("second prompt", None, None);
+    let msgs = session.context();
+    assert_eq!(msgs.len(), 3, "user -> assistant -> user");
+    assert!(matches!(msgs[0], brain::message::Message::User { .. }));
+    assert!(matches!(msgs[1], brain::message::Message::Assistant { .. }));
+    assert!(matches!(msgs[2], brain::message::Message::User { .. }));
+}
+
+#[tokio::test]
 async fn reasoning_deltas_reach_the_renderer_separately_from_text() {
     let (_d, a, ctx) = harness(vec![vec![
         StreamEvent::BlockStart {
