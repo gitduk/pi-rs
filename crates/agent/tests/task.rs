@@ -457,6 +457,79 @@ async fn running_out_of_time_is_an_answer_not_a_failure() {
 }
 
 #[tokio::test]
+async fn subagent_max_turns_can_be_configured_by_argument() {
+    let (_dir, agent, ctx, _seen, _kept) = rigged(
+        vec![
+            call_turn(
+                "c1",
+                "task",
+                r#"{"description":"cap at 1","prompt":"go","max_turns":1}"#,
+            ),
+            call_turn(
+                "c2",
+                "write",
+                r#"{"path":"child.txt","content":"first turn"}"#,
+            ),
+            call_turn("c3", "sleeper", "{}"),
+            text_turn("caller wraps up"),
+        ],
+        50,
+        std::time::Duration::from_secs(600),
+        false,
+    );
+    let (session, out) = drive(&agent, &ctx, "go").await;
+    assert!(out.is_ok());
+    let transcript = format!("{:?}", session.entries());
+    assert!(transcript.contains("unfinished"), "{transcript}");
+    assert!(
+        transcript.contains("stopped at turn 2 of 1"),
+        "{transcript}"
+    );
+}
+
+#[test]
+fn task_defaults_to_fifty_turns() {
+    let parent = Agent::new(
+        Arc::new(Scripted {
+            turns: vec![],
+            next: AtomicUsize::new(0),
+            saw: Arc::default(),
+        }),
+        spec(),
+    );
+    let task = Task::new(&parent, Arc::new(Kept::default()), STANDING);
+    let schema = task.schema();
+    assert!(
+        schema["properties"]["max_turns"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("Default 50")
+    );
+}
+
+#[test]
+fn agent_hang_uses_configured_task_max_turns() {
+    let mut parent = Agent::new(
+        Arc::new(Scripted {
+            turns: vec![],
+            next: AtomicUsize::new(0),
+            saw: Arc::default(),
+        }),
+        spec(),
+    );
+    parent.task_max_turns = Some(30);
+    parent.hang(Arc::new(Kept::default()), STANDING);
+    let tool = parent.registry.get("task").unwrap();
+    let schema = tool.schema();
+    assert!(
+        schema["properties"]["max_turns"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("Default 30")
+    );
+}
+
+#[tokio::test]
 async fn esc_reaches_through_the_child_and_ends_the_callers_turn() {
     let (_dir, agent, ctx, _seen, _kept) = rigged(
         vec![

@@ -99,6 +99,14 @@ pub struct Config {
     )]
     pub loop_max_turns: Option<usize>,
 
+    /// Cap the run at this many turns; None is unlimited.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<usize>,
+
+    /// Default maximum turns for subagent tasks. Unset reads as 50.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_max_turns: Option<usize>,
+
     /// How many times to retry a request the provider could not serve. Unset
     /// is 4, which is `Retry::default()` — the number lives there, not here, so
     /// that an unset field and a missing config agree by construction.
@@ -215,6 +223,10 @@ pub struct Project {
     /// A ceiling, applied downward only: a checkout may declare itself
     /// read-only, never hand itself the shell.
     pub max_tier: Option<TierArg>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_max_turns: Option<usize>,
 }
 
 fn default_context() -> u32 {
@@ -391,12 +403,15 @@ impl Origin {
 pub struct Flags {
     pub effort: Option<EffortArg>,
     pub tier: Option<TierArg>,
+    pub max_turns: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct Settled {
     pub effort: EffortArg,
     pub tier: TierArg,
+    pub max_turns: Option<usize>,
+    pub task_max_turns: Option<usize>,
 }
 
 impl Config {
@@ -497,7 +512,22 @@ impl Config {
         }
         .unwrap_or(TierArg::Exec)
         .capped_by(project.max_tier.unwrap_or(TierArg::Exec));
-        Settled { effort, tier }
+        let max_turns = if claimed.contains_key("max_turns") {
+            self.max_turns
+        } else {
+            flags.max_turns.or(project.max_turns).or(self.max_turns)
+        };
+        let task_max_turns = if claimed.contains_key("task_max_turns") {
+            self.task_max_turns
+        } else {
+            project.task_max_turns.or(self.task_max_turns)
+        };
+        Settled {
+            effort,
+            tier,
+            max_turns,
+            task_max_turns,
+        }
     }
 
     /// A resumed run stays on the model that produced the transcript, so `prior`
@@ -646,7 +676,6 @@ pub fn load_project(workspace: &Path) -> Result<Project> {
 
 fn parse(body: &str) -> Result<Config> {
     migrated(body)?;
-    retired(body)?;
     let de = toml::de::Deserializer::parse(body)?;
     let config: Config = serde_path_to_error::deserialize(de)?;
     config.check_key()?;
@@ -660,23 +689,6 @@ fn parse(body: &str) -> Result<Config> {
     }
     config.key_map()?;
     Ok(config)
-}
-
-// A key that was removed rather than renamed. `deny_unknown_fields` refuses it
-// already, but only by name — this says why, which is the part a file that
-// worked yesterday actually needs.
-fn retired(body: &str) -> Result<()> {
-    if body
-        .lines()
-        .any(|l| l.trim_start().starts_with("max_turns"))
-    {
-        bail!(
-            "`max_turns` is gone, and with it the turn cap. A run now ends when \
-             the model stops, when you interrupt it, or when the transport gives \
-             up — a repeated call is named rather than counted. Delete the line."
-        );
-    }
-    Ok(())
 }
 
 // The two shapes that came before this one. `deny_unknown_fields` would refuse
@@ -747,10 +759,9 @@ want, or keep two files and pass --config."
 }
 
 fn parse_project(body: &str) -> Result<Project> {
-    retired(body)?;
     toml::from_str(body).context(
-        "a project .pi.toml may set only `model`, `effort` and `max_tier` — a \
-         checkout does not get to name a server, a key, or a system prompt",
+        "a project .pi.toml may set only `model`, `effort`, `max_tier`, `max_turns` and \
+         `task_max_turns` — a checkout does not get to name a server, a key, or a system prompt",
     )
 }
 
@@ -1215,17 +1226,14 @@ output_per_mtok = 0
     }
 
     #[test]
-    fn a_config_still_capping_turns_is_told_the_cap_is_gone() {
-        // `deny_unknown_fields` would refuse it either way; what is asserted
-        // here is that the message says what happened to the key.
-        for body in ["max_turns = 100\n", "model = \"flash\"\nmax_turns = 100\n"] {
-            for e in [
-                parse(body).unwrap_err().to_string(),
-                parse_project(body).unwrap_err().to_string(),
-            ] {
-                assert!(e.contains("`max_turns` is gone"), "{e}");
-            }
-        }
+    fn max_turns_and_task_max_turns_can_be_configured() {
+        let body = "max_turns = 100\ntask_max_turns = 30\n";
+        let c = parse(body).unwrap();
+        assert_eq!(c.max_turns, Some(100));
+        assert_eq!(c.task_max_turns, Some(30));
+        let p = parse_project(body).unwrap();
+        assert_eq!(p.max_turns, Some(100));
+        assert_eq!(p.task_max_turns, Some(30));
     }
 
     #[test]
@@ -1294,6 +1302,7 @@ output_per_mtok = 0
         let flags = Flags {
             effort: Some(EffortArg::High),
             tier: Some(TierArg::Exec),
+            max_turns: None,
         };
         let s = c.settle(&p, flags, &BTreeMap::new());
         assert!(matches!(s.effort, EffortArg::High));
@@ -1309,6 +1318,7 @@ output_per_mtok = 0
         let flags = Flags {
             effort: Some(EffortArg::High),
             tier: Some(TierArg::Exec),
+            max_turns: None,
         };
         // `/settings set` claims the key this session: the tree already
         // carries it, so the flag and the project must both stand down.

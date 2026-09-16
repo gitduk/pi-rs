@@ -100,6 +100,9 @@ pub enum AgentError {
 
     #[error("cancelled")]
     Cancelled,
+
+    #[error("stopped at the {0}-turn limit")]
+    TurnLimit(usize),
 }
 
 #[derive(Clone)]
@@ -127,6 +130,10 @@ pub struct Agent {
     /// prompt is the cached prefix, and changing its tail re-bills every
     /// message behind it.
     pub shelf: Option<Arc<dyn remember::Shelf>>,
+    /// None runs without a turn limit; Some caps the run at that many turns.
+    pub max_turns: Option<usize>,
+    /// Default maximum turns for subagent tasks. None defaults to 50.
+    pub task_max_turns: Option<usize>,
 }
 
 // Per-tool failure streaks across one run, so a loop can be named. Keyed by
@@ -160,6 +167,8 @@ pub struct Setup<'a> {
     pub shelf: Arc<dyn Shelf>,
     pub home: Arc<dyn task::Home>,
     pub standing: &'a str,
+    pub max_turns: Option<usize>,
+    pub task_max_turns: Option<usize>,
 }
 
 impl Agent {
@@ -175,6 +184,8 @@ impl Agent {
             summarizer: None,
             shelf: None,
             retry: Retry::default(),
+            max_turns: None,
+            task_max_turns: None,
         }
     }
 
@@ -196,6 +207,8 @@ impl Agent {
         self.system = setup.system;
         self.effort = setup.effort;
         self.shelf = Some(setup.shelf);
+        self.max_turns = setup.max_turns;
+        self.task_max_turns = setup.task_max_turns;
         self.hang(setup.home, setup.standing);
     }
 
@@ -206,7 +219,10 @@ impl Agent {
     /// transport — has to build a new one, or the child goes on talking to the
     /// old endpoint with the old key.
     pub fn hang(&mut self, home: Arc<dyn task::Home>, standing: &str) {
-        let task = task::Task::new(self, home, standing);
+        let mut task = task::Task::new(self, home, standing);
+        if let Some(turns) = self.task_max_turns {
+            task = task.with_max_turns(turns);
+        }
         self.registry = std::mem::take(&mut self.registry).with(task);
     }
 
@@ -248,6 +264,12 @@ impl Agent {
         let mut seen_shelf: Option<String> = None;
 
         for turn in 1.. {
+            if let Some(max) = self.max_turns
+                && turn > max
+            {
+                tracing::error!(target: "pi::loop", turns = max, "turn limit");
+                return Err(AgentError::TurnLimit(max));
+            }
             // What was said while the run worked. Here and nowhere else: a
             // `tool_use` must be answered by its results before anything else
             // may speak, and this is the first point where all of them are.

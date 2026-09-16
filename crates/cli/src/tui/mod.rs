@@ -1880,14 +1880,11 @@ impl Ui {
                 };
             }
             Some(Action::AppClearScreen) => {
-                // One press clears the screen; a second, inside the window,
-                // starts a fresh session and rebuilds the screen empty.
                 let now = Instant::now();
                 if double_tap(&mut self.last_l, now) {
                     self.last_l = None;
                     return Intent::New;
                 }
-                self.screen.clear();
                 return Intent::None;
             }
             Some(Action::AppExit) => {

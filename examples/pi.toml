@@ -50,6 +50,12 @@ tier   = "exec"                  # read | write | exec
 # changing files forever. Esc is always the brake.
 loop_max_turns = 10
 
+# Cap the run at this many turns. Unset is unlimited.
+# max_turns = 50
+
+# Default maximum turns for subagent tasks. Unset is 50.
+# task_max_turns = 50
+
 # How many times to retry a request the provider could not serve, and how many
 # seconds of silence before a stream counts as wedged. The second is generous
 # on purpose: a reasoning model can legitimately think for minutes before its
