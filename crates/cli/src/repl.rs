@@ -1711,38 +1711,15 @@ impl Repl {
     // said in that tree, not an empty page.
     fn enter_worktree(&mut self, name: &str) -> Result<Step, String> {
         let from = self.lane_mut().ctx.workspace.root().to_path_buf();
-        let (tree, how) = match crate::worktree::enter(&from, name) {
-            Ok(found) => found,
-            Err(e) => return Err(refused("worktree", e)),
-        };
+        let tree = crate::worktree::enter(&from, name).map_err(|e| refused("worktree", e))?;
         // Built before the comparison: both sides are then canonical, and a
         // path git and the workspace spell differently is still one directory.
-        let ws = match tools::Workspace::new(&tree.path)
+        let ws = tools::Workspace::new(&tree.path)
             .and_then(|ws| ws.with_write_roots(&self.config.write_roots))
-        {
-            Ok(ws) => ws,
-            Err(e) => {
-                let what = format!("{}: {e}", tree.path.display());
-                return Err(refused("worktree", anyhow::anyhow!(what)));
-            }
-        };
+            .map_err(|e| refused("worktree", anyhow::anyhow!("{}: {e}", tree.path.display())))?;
         if ws.root() == from {
             return Ok(Step::Flash(format!("already in {}", tree.name)));
         }
-        let on = tree.branch.as_deref().unwrap_or("a detached HEAD");
-        let mut said = vec![
-            match how {
-                crate::worktree::Entered::Created => {
-                    format!("{} — new, on new branch {on}", tree.name)
-                }
-                crate::worktree::Entered::Checkout => {
-                    format!("{} — new, on existing branch {on}", tree.name)
-                }
-                crate::worktree::Entered::Existing => format!("{} — on {on}", tree.name),
-            },
-            tree.path.display().to_string(),
-        ];
-
         // Against the root it belongs to, so before the move, not after. An
         // empty session — nothing said yet — has nothing to keep, and one a run
         // has is saved by the run.
@@ -1751,7 +1728,6 @@ impl Repl {
         {
             tracing::warn!(target: "pi::session", error = %e, "the leaving session was not saved");
         }
-
         // Already open: the lane that holds it comes back whole. Nothing is
         // said — the screen changing, bar included, says where you are.
         if let Some(i) = self
@@ -1763,8 +1739,7 @@ impl Repl {
             self.in_force();
             return Ok(Step::Handled(Vec::new()));
         }
-
-        said.extend(self.open_lane(ws, (!tree.main).then(|| tree.name.clone()))?);
+        let said = self.open_lane(ws, (!tree.main).then(|| tree.name.clone()))?;
         Ok(Step::Swap(said))
     }
     // `/worktree rm <name>`: remove the checkout `name` refers to — its

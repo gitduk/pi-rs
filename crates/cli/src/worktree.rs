@@ -204,25 +204,14 @@ pub fn home(dir: &Path) -> Option<PathBuf> {
     }
 }
 
-/// What entering a name did, so the caller can say it.
-#[derive(Debug)]
-pub enum Entered {
-    // It was already there.
-    Existing,
-    // The branch existed and now has a checkout.
-    Checkout,
-    // Both the branch and the checkout are new.
-    Created,
-}
-
 /// The checkout `name` refers to, creating the worktree and the branch if they
 /// are not there yet. Idempotent: running it twice means "go there".
-pub fn enter(dir: &Path, name: &str) -> Result<(Tree, Entered)> {
+pub fn enter(dir: &Path, name: &str) -> Result<Tree> {
     let name = vetted(name)?;
     let mut trees = list(dir)?;
 
     if let Some(i) = trees.iter().position(|t| t.name == name) {
-        return Ok((trees.swap_remove(i), Entered::Existing));
+        return Ok(trees.swap_remove(i));
     }
 
     // `.worktrees` hangs off the repository, not off whichever checkout asked,
@@ -236,17 +225,13 @@ pub fn enter(dir: &Path, name: &str) -> Result<(Tree, Entered)> {
         bail!("{} exists but is not a registered worktree", path.display());
     }
 
+    let target = path.to_string_lossy().into_owned();
     // An existing branch is checked out rather than re-created: `-b` on one
     // that exists fails, and asking twice means the same feature both times.
-    let known = branch_exists(dir, name)?;
-    let target = path.to_string_lossy().into_owned();
-    let added = if known {
-        git(dir, &["worktree", "add", &target, name])?
+    if branch_exists(dir, name)? {
+        checked(dir, &["worktree", "add", &target, name])?;
     } else {
-        git(dir, &["worktree", "add", "-b", name, &target])?
-    };
-    if !added.status.success() {
-        bail!("{}", stderr_of(&added));
+        checked(dir, &["worktree", "add", "-b", name, &target])?;
     }
     // Read back rather than assembled here: one place decides what a checkout
     // is called and which branch it is on, and git canonicalizes the path.
@@ -261,12 +246,7 @@ pub fn enter(dir: &Path, name: &str) -> Result<(Tree, Entered)> {
                 path.display()
             )
         })?;
-    let how = if known {
-        Entered::Checkout
-    } else {
-        Entered::Created
-    };
-    Ok((found, how))
+    Ok(found)
 }
 /// What removing a checkout took, for the caller's receipt.
 #[derive(Debug)]
@@ -364,8 +344,7 @@ mod tests {
     #[test]
     fn a_new_name_gets_a_branch_and_a_checkout() {
         let dir = repo();
-        let (tree, how) = enter(dir.path(), "feature-one").unwrap();
-        assert!(matches!(how, Entered::Created));
+        let tree = enter(dir.path(), "feature-one").unwrap();
         assert_eq!(tree.branch.as_deref(), Some("feature-one"));
         assert!(!tree.main);
         assert!(tree.path.join("a.txt").is_file());
@@ -375,10 +354,9 @@ mod tests {
     #[test]
     fn entering_the_same_name_twice_goes_back_to_it() {
         let dir = repo();
-        let (first, _) = enter(dir.path(), "feature-one").unwrap();
-        let (again, how) = enter(dir.path(), "feature-one").unwrap();
+        let first = enter(dir.path(), "feature-one").unwrap();
+        let again = enter(dir.path(), "feature-one").unwrap();
         assert_eq!(first.path, again.path);
-        assert!(matches!(how, Entered::Existing));
         assert_eq!(again.branch.as_deref(), Some("feature-one"));
     }
 
@@ -386,8 +364,8 @@ mod tests {
     fn an_existing_branch_is_checked_out_rather_than_recreated() {
         let dir = repo();
         checked(dir.path(), &["branch", "already"]).unwrap();
-        let (_, how) = enter(dir.path(), "already").unwrap();
-        assert!(matches!(how, Entered::Checkout));
+        let tree = enter(dir.path(), "already").unwrap();
+        assert_eq!(tree.branch.as_deref(), Some("already"));
     }
 
     #[test]
@@ -408,7 +386,7 @@ mod tests {
     #[test]
     fn a_nested_name_keeps_both_halves() {
         let dir = repo();
-        let (tree, _) = enter(dir.path(), "feat/one").unwrap();
+        let tree = enter(dir.path(), "feat/one").unwrap();
         assert!(tree.path.ends_with(".worktrees/feat/one"));
         assert_eq!(tree.branch.as_deref(), Some("feat/one"));
         let trees = list(dir.path()).unwrap();
@@ -418,7 +396,7 @@ mod tests {
     #[test]
     fn a_worktree_reaches_the_main_checkout_and_its_siblings() {
         let dir = repo();
-        let (inside, _) = enter(dir.path(), "feature-one").unwrap();
+        let inside = enter(dir.path(), "feature-one").unwrap();
         // From within a worktree the main checkout is still the first listed,
         // which is what lets `/worktree <repo>` get back out.
         let trees = list(&inside.path).unwrap();
@@ -430,7 +408,7 @@ mod tests {
     #[test]
     fn home_is_the_main_checkout_every_worktree_shares() {
         let dir = repo();
-        let (worktree, _) = enter(dir.path(), "feature-one").unwrap();
+        let worktree = enter(dir.path(), "feature-one").unwrap();
         let expected = dir.path().canonicalize().unwrap();
         assert_eq!(home(dir.path()), Some(expected.clone()));
         assert_eq!(home(&worktree.path), Some(expected));
@@ -446,7 +424,7 @@ mod tests {
     fn a_checkout_deleted_behind_gits_back_stops_being_listed() {
         let dir = repo();
         enter(dir.path(), "fix-1").unwrap();
-        let (gone, _) = enter(dir.path(), "fix-2").unwrap();
+        let gone = enter(dir.path(), "fix-2").unwrap();
         assert_eq!(list(dir.path()).unwrap().len(), 3);
 
         std::fs::remove_dir_all(&gone.path).expect("the directory goes");
@@ -468,8 +446,8 @@ mod tests {
         // Not nested under the one it was asked from: `.worktrees` hangs off
         // the repository, and asking from anywhere in it means the same place.
         let dir = repo();
-        let (first, _) = enter(dir.path(), "one").unwrap();
-        let (second, _) = enter(&first.path, "two").unwrap();
+        let first = enter(dir.path(), "one").unwrap();
+        let second = enter(&first.path, "two").unwrap();
         assert_eq!(second.path.parent(), first.path.parent());
         assert_eq!(list(dir.path()).unwrap().len(), 3);
     }
@@ -491,7 +469,7 @@ mod tests {
     #[test]
     fn a_subdirectory_is_held_by_the_checkout_it_is_in() {
         let dir = repo();
-        let (tree, _) = enter(dir.path(), "one").unwrap();
+        let tree = enter(dir.path(), "one").unwrap();
         let deep = tree.path.join("crates/cli");
         std::fs::create_dir_all(&deep).unwrap();
         let trees = list(dir.path()).unwrap();
@@ -523,7 +501,7 @@ mod tests {
     #[test]
     fn remove_deletes_the_checkout_and_the_branch_it_was_on() {
         let dir = repo();
-        let (tree, _) = enter(dir.path(), "one").unwrap();
+        let tree = enter(dir.path(), "one").unwrap();
         assert!(tree.path.is_dir());
         assert!(branch_exists(dir.path(), "one").unwrap());
 
@@ -554,7 +532,7 @@ mod tests {
     #[test]
     fn a_checkout_with_changes_is_left_alone_with_gits_reason() {
         let dir = repo();
-        let (tree, _) = enter(dir.path(), "one").unwrap();
+        let tree = enter(dir.path(), "one").unwrap();
         std::fs::write(tree.path.join("dirty.txt"), "uncommitted").unwrap();
         let err = remove(dir.path(), "one").unwrap_err().to_string();
         assert!(err.contains("modified or untracked files"), "{err}");
@@ -577,7 +555,7 @@ mod tests {
         let err = remove(dir.path(), &main).unwrap_err().to_string();
         assert!(err.contains("main checkout"), "{err}");
 
-        let (inside, _) = enter(dir.path(), "one").unwrap();
+        let inside = enter(dir.path(), "one").unwrap();
         let err = remove(&inside.path, "one").unwrap_err().to_string();
         assert!(err.contains("where this session is"), "{err}");
         assert!(inside.path.is_dir());
@@ -598,8 +576,7 @@ mod tests {
         assert_eq!(removed.branch, None);
         assert!(!removed.path.exists());
         // Removing it frees the name for a fresh worktree.
-        let (reborn, how) = enter(dir.path(), "det").unwrap();
-        assert!(matches!(how, Entered::Created));
+        let reborn = enter(dir.path(), "det").unwrap();
         assert_eq!(reborn.branch.as_deref(), Some("det"));
     }
 
