@@ -1568,7 +1568,7 @@ impl Ui {
         // One space, one panel: they all draw over the menu, and the surface
         // can hold only one of them at a time.
         let panel = self.panel.as_ref().map(|p| p.view(&self.paint, width));
-        let panel_h = panel.as_ref().map(|v| v.len()).unwrap_or(0);
+        let panel_h = panel.as_ref().map_or(0, |(r, _)| r.len());
         // Both branches leave the bar its row: a menu tall enough to take it
         // would drop whatever that row is saying.
         let room = (self.screen.height as usize).saturating_sub(editor_h + bar_h + 1);
@@ -1649,7 +1649,7 @@ impl Ui {
             let (main, menu_area, bar_area, editor_area) =
                 (chunks[0], chunks[1], chunks[2], chunks[3]);
             frame.render_widget(Rows(&rows), main);
-            if let Some(panel) = &panel {
+            if let Some((panel, _)) = &panel {
                 frame.render_widget(Rows(panel), menu_area);
             } else if !items.is_empty() {
                 let mut state = ListState::default();
@@ -1664,8 +1664,14 @@ impl Ui {
                 frame.render_widget(Rows(std::slice::from_ref(bar)), bar_area);
             }
             frame.render_widget(Rows(&input_view), editor_area);
-            let caret_row = editor_area.y + caret_in_view as u16;
-            frame.set_cursor_position((caret.1, caret_row));
+            if let Some((_, Some((row, col)))) = panel {
+                if (row as usize) < menu_h {
+                    frame.set_cursor_position((menu_area.x + col, menu_area.y + row));
+                }
+            } else if self.panel.is_none() {
+                let caret_row = editor_area.y + caret_in_view as u16;
+                frame.set_cursor_position((caret.1, caret_row));
+            }
         });
     }
 
@@ -1771,9 +1777,6 @@ impl Ui {
                     self.panel = None;
                     return Intent::None;
                 }
-                // Browsing, and not a key it knows: the editor underneath
-                // goes on taking it.
-                Took::Nothing => {}
             }
         }
 
@@ -4776,6 +4779,21 @@ mod tests {
             panic!("the panel asked for something other than a drop");
         };
         assert_eq!(id, first, "the cursor followed the row that went");
+    }
+
+    #[tokio::test]
+    async fn browsing_panel_does_not_leak_keys_to_the_editor() {
+        let dir = tempfile::tempdir().expect("a checkout");
+        let mut tui = surface(dir.path());
+        let rows = vec![crate::memory::note(1, "test")];
+        tui.ui.panel = Some(Panel::new(Body::Shelf(rows)));
+        let lane = tui.core.lane_mut();
+        let intent = tui.ui.key(lane, typed('z'), false);
+        assert!(matches!(intent, Intent::None));
+        assert!(
+            tui.ui.editor.is_empty(),
+            "the editor did not take the keystroke"
+        );
     }
 
     // The shelf belongs to a checkout. Open across a switch it would show one

@@ -156,8 +156,6 @@ pub struct Panel {
 
 /// What the panel made of a press.
 pub enum Took {
-    // Not the panel's key: the editor underneath it gets it.
-    Nothing,
     // Handled, and this is what it asks the loop for.
     Intent(Intent),
     // Handled, and the panel is done: the caller drops it.
@@ -268,27 +266,36 @@ impl Panel {
             }
             // An edit in progress goes first: the panel closes only once there
             // is nothing left inside it to cancel.
-            Some(Action::MenuDismiss) => match self.editing.take() {
+            Some(Action::MenuDismiss | Action::LineClear) => match self.editing.take() {
                 Some(_) => Took::Intent(Intent::None),
                 None => Took::Close,
             },
-            // Printable keys go into the edit line. While browsing the panel
-            // has no answer, and the key falls through to the editor.
-            _ if self.editing.is_some() => {
+            _ => {
                 if let Some(e) = &mut self.editing {
-                    if let KeyCode::Char(c) = key.code
-                        && !key
-                            .modifiers
-                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                    {
-                        e.insert(c);
-                    } else if matches!(bound, Some(Action::DeleteCharBack)) {
-                        e.backspace();
+                    match bound {
+                        Some(Action::DeleteCharBack) => e.backspace(),
+                        Some(Action::DeleteCharForward) => e.delete(),
+                        Some(Action::DeleteWordBack) => e.kill_word_back(),
+                        Some(Action::DeleteToLineEnd) => e.kill_to_end(),
+                        Some(Action::DeleteToLineStart) => e.kill_to_start(),
+                        Some(Action::MoveCharLeft) => e.left(),
+                        Some(Action::MoveCharRight) => e.right(),
+                        Some(Action::MoveWordLeft) => e.word_left(),
+                        Some(Action::MoveWordRight) => e.word_right(),
+                        Some(Action::MoveLineStart) => e.home(),
+                        Some(Action::MoveLineEnd) => e.end(),
+                        _ if let KeyCode::Char(c) = key.code
+                            && !key
+                                .modifiers
+                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                        {
+                            e.insert(c);
+                        }
+                        _ => {}
                     }
                 }
                 Took::Intent(Intent::None)
             }
-            _ => Took::Nothing,
         }
     }
 
@@ -297,11 +304,11 @@ impl Panel {
     ///
     /// Wrapped here rather than left to `Rows`: the panel is sized by counting
     /// rows, and a row `Rows` wrapped on its own is a row the count misses.
-    pub fn view(&self, paint: &Paint, width: usize) -> Vec<String> {
+    pub fn view(&self, paint: &Paint, width: usize) -> (Vec<String>, Option<(u16, u16)>) {
         if self.body.len() == 0
             && let Some(empty) = self.body.empty()
         {
-            return screen::fit(empty, width);
+            return (screen::fit(empty, width), None);
         }
         let mut out = Vec::new();
         for i in 0..self.body.len() {
@@ -315,14 +322,18 @@ impl Panel {
             };
             out.extend(screen::fit(&styled, width));
         }
-        if let Some(editor) = &self.editing {
-            let (line, _) = editor.view(paint, width);
+        let caret = if let Some(editor) = &self.editing {
+            let row_offset = out.len() as u16;
+            let (line, (row, col)) = editor.view(paint, width);
             out.extend(line);
-        }
+            Some((row_offset + row, col))
+        } else {
+            None
+        };
         if let Some(why) = &self.refused {
             out.extend(screen::fit(&format!("  {} {why}", icons::FAIL_MARK), width));
         }
-        out
+        (out, caret)
     }
 }
 
@@ -350,7 +361,6 @@ mod tests {
     fn intent(took: Took) -> Intent {
         match took {
             Took::Intent(i) => i,
-            Took::Nothing => panic!("the panel let the press through"),
             Took::Close => panic!("the panel closed"),
         }
     }
@@ -482,31 +492,32 @@ mod tests {
         assert!(matches!(act(&mut p, Action::MenuDismiss), Took::Close));
     }
 
-    // A key the panel does not know goes on to the editor underneath, the
-    // way it did when each panel had its own copy of this dispatch.
     #[test]
-    fn a_browsing_panel_leaves_a_key_it_does_not_know_alone() {
+    fn a_browsing_panel_swallows_a_key_it_does_not_know() {
         let mut p = Panel::new(shelf(1));
         let press = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
-        assert!(matches!(p.press(None, press), Took::Nothing));
+        assert!(matches!(p.press(None, press), Took::Intent(Intent::None)));
     }
     #[test]
     fn only_the_focused_row_is_highlighted() {
         let mut p = Panel::new(shelf(3));
         let paint = Paint::new(true);
-        let rows = p.view(&paint, 80);
+        let (rows, caret) = p.view(&paint, 80);
+        assert!(caret.is_none());
         assert!(rows[0].contains("\x1b[7m"));
         assert!(!rows[1].contains("\x1b[7m"));
         assert!(!rows[2].contains("\x1b[7m"));
 
         act(&mut p, Action::MenuNext);
-        let rows = p.view(&paint, 80);
+        let (rows, caret) = p.view(&paint, 80);
+        assert!(caret.is_none());
         assert!(!rows[0].contains("\x1b[7m"));
         assert!(rows[1].contains("\x1b[7m"));
         assert!(!rows[2].contains("\x1b[7m"));
 
         act(&mut p, Action::MenuAccept);
-        let rows = p.view(&paint, 80);
+        let (rows, caret) = p.view(&paint, 80);
+        assert!(caret.is_some());
         assert!(!rows[1].contains("\x1b[7m"));
     }
 }
