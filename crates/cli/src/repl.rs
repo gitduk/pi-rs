@@ -1175,8 +1175,8 @@ impl Intent {
             // the surface to itself.
             Intent::Settings(rest) if !rest.trim().is_empty() => Fate::Now,
             Intent::Settings(_) => Fate::Queued,
-            // A skill is a prompt, and the bridge wants the surface.
-            Intent::Wechat(_) | Intent::Other { .. } => Fate::Queued,
+            Intent::Wechat(_) => Fate::Now,
+            Intent::Other { .. } => Fate::Queued,
             // Arms the lane and submits its first round like a typed line;
             // both want the lane free.
             Intent::Loop(_) | Intent::LoopRound { .. } => Fate::Queued,
@@ -2671,6 +2671,7 @@ mod tests {
             Intent::Interrupt,
             Intent::Unsend,
             Intent::CommitSetting("a.b".into(), "1".into()),
+            Intent::Wechat("on".into()),
         ] {
             assert!(
                 matches!(intent.fate(), Fate::Now),
@@ -2684,7 +2685,6 @@ mod tests {
         for intent in [
             Intent::Bash("ls".into()),
             Intent::Settings(String::new()),
-            Intent::Wechat("on".into()),
             Intent::Other {
                 word: "/commit".into(),
                 args: String::new(),
