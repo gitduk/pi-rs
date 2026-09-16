@@ -308,10 +308,12 @@ impl Panel {
             let caret = if i == self.at { icons::MENU_SIGIL } else { " " };
             let hidden = self.editing.is_some() && i == self.at;
             let line = format!("{caret} {}", self.body.row(i, hidden));
-            out.extend(screen::fit(
-                &paint.on(&paint.theme.menu.selected, &line),
-                width,
-            ));
+            let styled = if i == self.at && self.editing.is_none() {
+                paint.on(&paint.theme.menu.selected, &line)
+            } else {
+                line
+            };
+            out.extend(screen::fit(&styled, width));
         }
         if let Some(editor) = &self.editing {
             let (line, _) = editor.view(paint, width);
@@ -326,7 +328,7 @@ impl Panel {
 
 #[cfg(test)]
 mod tests {
-    use super::{Body, Panel, Took};
+    use super::{Body, Paint, Panel, Took};
     use crate::keys::Action;
     use crate::memory;
     use crate::repl::Intent;
@@ -487,5 +489,24 @@ mod tests {
         let mut p = Panel::new(shelf(1));
         let press = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
         assert!(matches!(p.press(None, press), Took::Nothing));
+    }
+    #[test]
+    fn only_the_focused_row_is_highlighted() {
+        let mut p = Panel::new(shelf(3));
+        let paint = Paint::new(true);
+        let rows = p.view(&paint, 80);
+        assert!(rows[0].contains("\x1b[7m"));
+        assert!(!rows[1].contains("\x1b[7m"));
+        assert!(!rows[2].contains("\x1b[7m"));
+
+        act(&mut p, Action::MenuNext);
+        let rows = p.view(&paint, 80);
+        assert!(!rows[0].contains("\x1b[7m"));
+        assert!(rows[1].contains("\x1b[7m"));
+        assert!(!rows[2].contains("\x1b[7m"));
+
+        act(&mut p, Action::MenuAccept);
+        let rows = p.view(&paint, 80);
+        assert!(!rows[1].contains("\x1b[7m"));
     }
 }
