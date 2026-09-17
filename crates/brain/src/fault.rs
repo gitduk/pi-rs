@@ -21,14 +21,10 @@ pub fn classify(err: &BrainError) -> Fault {
         // 408 is a timeout, 409 a collision, 425 an early hint; 429 a
         // throttle; 5xx (and 522/524/529 from CDNs) load. All are worth
         // another attempt.
-        BrainError::Api { status, .. }
-            if matches!(
-                status,
-                408 | 409 | 425 | 429 | 500 | 502 | 503 | 504 | 522 | 524 | 529
-            ) =>
-        {
-            Fault::Transient
-        }
+        BrainError::Api {
+            status: 408 | 409 | 425 | 429 | 500 | 502 | 503 | 504 | 522 | 524 | 529,
+            ..
+        } => Fault::Transient,
         // 413 is a size refusal, whatever the body says about it.
         BrainError::Api { status: 413, .. } => Fault::Overflow,
         BrainError::Api { .. } => Fault::Permanent,
