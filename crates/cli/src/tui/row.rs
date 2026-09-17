@@ -43,6 +43,40 @@ impl FoldedTool {
     }
 }
 
+/// The tools folded into one summary row. The tool that opened the row is
+/// always in it, so an empty bundle has no representation and neither the
+/// head nor the unfolded body has an empty case to answer.
+pub struct FoldedTools(Vec<FoldedTool>);
+
+impl FoldedTools {
+    pub fn new(first: FoldedTool) -> Self {
+        Self(vec![first])
+    }
+
+    /// The tool the head describes: the newest one folded in.
+    pub fn last(&self) -> &FoldedTool {
+        self.0.last().expect("a bundle holds a tool")
+    }
+
+    /// Whether one tool is the whole row. A batch reads as a count instead.
+    pub fn is_single(&self) -> bool {
+        self.0.len() == 1
+    }
+
+    pub fn count(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Every tool, oldest first.
+    pub fn iter(&self) -> impl Iterator<Item = &FoldedTool> {
+        self.0.iter()
+    }
+
+    pub fn push(&mut self, tool: FoldedTool) {
+        self.0.push(tool);
+    }
+}
+
 pub struct Row(Kind);
 
 // The rendered rows of a tools summary, keyed by what they were painted at:
@@ -109,7 +143,7 @@ enum Kind {
     },
     // A bundle of read-only tool results folded together into a summary row.
     ToolsSummary {
-        tools: Vec<FoldedTool>,
+        tools: FoldedTools,
         folded: bool,
         running: bool,
         hovered: bool,
@@ -164,7 +198,7 @@ impl Row {
     }
 
     /// A bundle of read-only tool results folded together into a summary row.
-    pub fn tools_summary(tools: Vec<FoldedTool>) -> Self {
+    pub fn tools_summary(tools: FoldedTools) -> Self {
         Row(Kind::ToolsSummary {
             tools,
             folded: true,
@@ -194,7 +228,9 @@ impl Row {
     /// Whether this row is an expandable row.
     pub fn is_expandable(&self) -> bool {
         match &self.0 {
-            Kind::ToolsSummary { .. } => true,
+            // One tool is its own summary line, so unfolding would only
+            // repeat it.
+            Kind::ToolsSummary { tools, .. } => !tools.is_single(),
             Kind::Result { preview_lines, .. } => *preview_lines > render::SKETCHED_ROWS,
             _ => false,
         }
@@ -202,6 +238,9 @@ impl Row {
 
     /// Toggle expand state, returning true if toggled.
     pub fn toggle_expand(&mut self) -> bool {
+        if !self.is_expandable() {
+            return false;
+        }
         match &mut self.0 {
             Kind::ToolsSummary {
                 folded, painted, ..
@@ -211,11 +250,8 @@ impl Row {
                 true
             }
             Kind::Result {
-                preview_lines,
-                expanded,
-                painted,
-                ..
-            } if *preview_lines > render::SKETCHED_ROWS => {
+                expanded, painted, ..
+            } => {
                 *expanded = !*expanded;
                 *painted.borrow_mut() = None;
                 true
@@ -399,7 +435,7 @@ impl Row {
                 if *folded {
                     1
                 } else {
-                    1 + tools.len()
+                    1 + tools.count()
                 }
             }
         }
@@ -580,7 +616,7 @@ fn clip_to(s: &str, max_cols: usize) -> &str {
 }
 
 pub fn tools_summary_header(
-    tools: &[FoldedTool],
+    tools: &FoldedTools,
     running: bool,
     hovered: bool,
     spinner: usize,
@@ -592,32 +628,26 @@ pub fn tools_summary_header(
     // rather than the colour swapped), and the body's reset cannot cut the
     // dim mid-line. One tool is its own full line; a batch keeps only the
     // latest tool's description.
-    let body = match tools {
-        [] => " 0 tools".to_string(),
-        [single] => {
-            let room = width.saturating_sub(2).max(10);
-            format!(" {}", clip_to(&single.desc(), room))
-        }
-        _ => {
-            let count = tools.len();
-            let count_suffix = format!("{count} tools");
-            let desc = tools[count - 1].desc();
-            let count_w = UnicodeWidthStr::width(count_suffix.as_str());
-            // The ellipsis is glued to the count — `…12 tools` — with a
-            // space before it and a column of air before the terminal
-            // edge. One leading space after the check.
-            let sep_w = 1 + UnicodeWidthStr::width(icons::ELLIPSIS) + 1;
-            let fixed_w = 1 + count_w + sep_w;
-            let room = width.saturating_sub(fixed_w);
-            let budget = room.clamp(8, 50);
-            let desc_w = UnicodeWidthStr::width(desc.as_str());
-            let shown = if desc_w > budget {
-                clip_to(&desc, budget)
-            } else {
-                &desc
-            };
-            format!(" {shown} {}{count_suffix}", icons::ELLIPSIS)
-        }
+    let body = if tools.is_single() {
+        let room = width.saturating_sub(2).max(10);
+        format!(" {}", clip_to(&tools.last().desc(), room))
+    } else {
+        let digits = tools.count().to_string();
+        let desc = tools.last().desc();
+        // The ellipsis is glued to the count — `…12` — with a space before
+        // it and a column of air before the terminal edge. One leading
+        // space after the check.
+        let sep_w = 1 + UnicodeWidthStr::width(icons::ELLIPSIS) + 1;
+        let fixed_w = 1 + digits.len() + sep_w;
+        let room = width.saturating_sub(fixed_w);
+        let budget = room.clamp(8, 50);
+        let desc_w = UnicodeWidthStr::width(desc.as_str());
+        let shown = if desc_w > budget {
+            clip_to(&desc, budget)
+        } else {
+            &desc
+        };
+        format!(" {shown} {}{digits}", icons::ELLIPSIS)
     };
     let mark = if running {
         icons::SPINNER_FRAMES[spinner % icons::SPINNER_FRAMES.len()].to_string()
@@ -631,7 +661,7 @@ pub fn tools_summary_header(
 }
 
 pub fn tools_summary_rows(
-    tools: &[FoldedTool],
+    tools: &FoldedTools,
     folded: bool,
     running: bool,
     hovered: bool,
@@ -643,11 +673,11 @@ pub fn tools_summary_rows(
     if folded {
         return vec![header];
     }
-    let mut rows = Vec::with_capacity(1 + tools.len());
+    let mut rows = Vec::with_capacity(1 + tools.count());
     rows.push(header);
     let mark = paint.on(&paint.theme.status.ok, icons::DONE_MARK);
     let room = width.saturating_sub(4).max(10);
-    for tool in tools {
+    for tool in tools.iter() {
         let desc = tool.desc();
         let clipped = clip_to(&desc, room);
         rows.push(format!(
@@ -658,9 +688,9 @@ pub fn tools_summary_rows(
     rows
 }
 
-/// Format a folded tool summary line, e.g. "✓ read a.rs …12 tools".
+/// Format a folded tool summary line, e.g. "✓ read a.rs …12".
 #[cfg(test)]
-pub fn tools_summary_line(tools: &[FoldedTool], paint: &Paint, width: usize) -> String {
+pub fn tools_summary_line(tools: &FoldedTools, paint: &Paint, width: usize) -> String {
     tools_summary_header(tools, false, false, 0, paint, width)
 }
 
@@ -731,10 +761,20 @@ mod tools_summary_tests {
         }
     }
 
+    fn bundle(tools: Vec<FoldedTool>) -> FoldedTools {
+        let mut it = tools.into_iter();
+        let first = it.next().expect("a bundle holds at least one tool");
+        let mut bundle = FoldedTools::new(first);
+        for tool in it {
+            bundle.push(tool);
+        }
+        bundle
+    }
+
     #[test]
     fn single_tool_summary() {
         let paint = Paint::new(false);
-        let tools = vec![tool("read", "crates/agent/src/session.rs")];
+        let tools = bundle(vec![tool("read", "crates/agent/src/session.rs")]);
         let line = tools_summary_line(&tools, &paint, 80);
         assert_eq!(
             line,
@@ -745,15 +785,17 @@ mod tools_summary_tests {
     #[test]
     fn multiple_tools_shows_latest() {
         let paint = Paint::new(false);
-        let mut tools: Vec<FoldedTool> = (0..11)
-            .map(|i| tool("read", &format!("file_{i}.rs")))
-            .collect();
+        let mut tools = bundle(
+            (0..11)
+                .map(|i| tool("read", &format!("file_{i}.rs")))
+                .collect(),
+        );
         tools.push(tool("read", "crates/agent/src/session.rs"));
         let line = tools_summary_line(&tools, &paint, 80);
         assert_eq!(
             line,
             format!(
-                "{} read crates/agent/src/session.rs {}12 tools",
+                "{} read crates/agent/src/session.rs {}12",
                 icons::DONE_MARK,
                 icons::ELLIPSIS
             )
@@ -764,7 +806,7 @@ mod tools_summary_tests {
         assert_eq!(
             line,
             format!(
-                "{} read /path/to/other.rs {}13 tools",
+                "{} read /path/to/other.rs {}13",
                 icons::DONE_MARK,
                 icons::ELLIPSIS
             )
@@ -774,9 +816,11 @@ mod tools_summary_tests {
     #[test]
     fn long_tool_call_is_truncated() {
         let paint = Paint::new(false);
-        let mut tools: Vec<FoldedTool> = (0..13)
-            .map(|i| tool("read", &format!("file_{i}.rs")))
-            .collect();
+        let mut tools = bundle(
+            (0..13)
+                .map(|i| tool("read", &format!("file_{i}.rs")))
+                .collect(),
+        );
         tools.push(tool(
             "bash",
             "curl https://xxxx.xxxx.com/a/long/url/and/much/more/parameters/and/data",
@@ -790,7 +834,7 @@ mod tools_summary_tests {
             "got: {line}"
         );
         assert!(
-            line.ends_with(&format!("{}14 tools", icons::ELLIPSIS)),
+            line.ends_with(&format!("{}14", icons::ELLIPSIS)),
             "got: {line}"
         );
     }
@@ -798,25 +842,18 @@ mod tools_summary_tests {
     #[test]
     fn empty_preview_falls_back_to_tool_name() {
         let paint = Paint::new(false);
-        let tools = vec![tool("bash", "")];
+        let tools = bundle(vec![tool("bash", "")]);
         let line = tools_summary_line(&tools, &paint, 80);
         assert_eq!(line, format!("{} bash", icons::DONE_MARK));
     }
 
     #[test]
-    fn an_empty_bundle_reads_as_zero_tools() {
-        let paint = Paint::new(false);
-        let line = tools_summary_line(&[], &paint, 80);
-        assert_eq!(line, format!("{} 0 tools", icons::DONE_MARK));
-    }
-
-    #[test]
     fn multiline_preview_uses_first_line() {
         let paint = Paint::new(false);
-        let tools = vec![tool(
+        let tools = bundle(vec![tool(
             "bash",
             "git status\nnothing to commit\nworking tree clean",
-        )];
+        )]);
         let line = tools_summary_line(&tools, &paint, 80);
         assert_eq!(line, format!("{} bash git status", icons::DONE_MARK));
     }
@@ -824,7 +861,7 @@ mod tools_summary_tests {
     #[test]
     fn running_tool_shows_spinner_animation() {
         let paint = Paint::new(false);
-        let tools = vec![tool("read", "a.rs")];
+        let tools = bundle(vec![tool("read", "a.rs")]);
         let frame0 = tools_summary_header(&tools, true, false, 0, &paint, 80);
         assert!(frame0.starts_with(&format!("{} read a.rs", icons::SPINNER_FRAMES[0])));
         let frame1 = tools_summary_header(&tools, true, false, 1, &paint, 80);
@@ -837,7 +874,7 @@ mod tools_summary_tests {
     #[test]
     fn a_running_summary_row_advances_through_the_paint_cache() {
         let paint = Paint::new(true);
-        let mut row = Row::tools_summary(vec![tool("read", "a.rs")]);
+        let mut row = Row::tools_summary(bundle(vec![tool("read", "a.rs")]));
 
         row.update_hover_state(true, false, 0);
         let f0 = crate::render::strip_ansi(&row.line(0, &paint, &[], 80).0);
@@ -858,7 +895,7 @@ mod tools_summary_tests {
     #[test]
     fn hovered_tool_stays_on_the_same_check() {
         let paint = Paint::new(true);
-        let tools = vec![tool("read", "a.rs")];
+        let tools = bundle(vec![tool("read", "a.rs")]);
         let h0 = tools_summary_header(&tools, false, true, 0, &paint, 80);
         let h1 = tools_summary_header(&tools, false, true, 1, &paint, 80);
         assert_eq!(h0, h1, "hover must not animate the mark");
@@ -871,10 +908,10 @@ mod tools_summary_tests {
     #[test]
     fn unfolded_tools_summary_shows_all_tools() {
         let paint = Paint::new(false);
-        let tools = vec![
+        let tools = bundle(vec![
             tool("read", "crates/agent/src/session.rs"),
             tool("grep", "match 1"),
-        ];
+        ]);
         let mut row = Row::tools_summary(tools);
         assert_eq!(row.len(), 1);
 
@@ -883,7 +920,7 @@ mod tools_summary_tests {
 
         let (head, _) = row.line(0, &paint, &[], 80);
         assert!(head.starts_with(&format!("{} grep", icons::DONE_MARK)));
-        assert!(head.contains("…2 tools"));
+        assert!(head.contains("…2"));
 
         let (t0, _) = row.line(1, &paint, &[], 80);
         assert!(t0.contains(&format!(
@@ -900,6 +937,13 @@ mod tools_summary_tests {
         assert!(folded_head.starts_with(&format!("{} grep", icons::DONE_MARK)));
     }
 
+    #[test]
+    fn a_single_tool_summary_never_unfolds() {
+        let mut row = Row::tools_summary(bundle(vec![tool("read", "a.rs")]));
+        assert!(!row.is_expandable());
+        assert!(!row.toggle_expand());
+        assert_eq!(row.len(), 1);
+    }
     #[test]
     fn result_with_many_diff_lines_expands_and_collapses() {
         let paint = Paint::new(false);

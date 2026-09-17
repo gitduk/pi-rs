@@ -498,10 +498,10 @@ fn push_tool_row(scrollback: &mut Vec<Row>, row: Row) {
         {
             return;
         }
-        scrollback.push(Row::tools_summary(vec![row::FoldedTool {
+        scrollback.push(Row::tools_summary(row::FoldedTools::new(row::FoldedTool {
             name: name.to_string(),
             preview,
-        }]));
+        })));
         return;
     }
     scrollback.push(row);
@@ -4241,7 +4241,7 @@ mod tests {
             .line(0, &ui.paint, &[], 80)
             .0;
         assert!(
-            row_text.contains(&format!("read file content {}2 tools", icons::ELLIPSIS)),
+            row_text.contains(&format!("read file content {}2", icons::ELLIPSIS)),
             "got: {row_text}"
         );
 
