@@ -126,6 +126,13 @@ impl Workspace {
         path.starts_with(&self.root) || self.write_roots.iter().any(|root| path.starts_with(root))
     }
 
+    /// The configured write roots beyond the workspace root, absolute and
+    /// link-resolved. A symlinked root is already stored reduced to what it
+    /// points at, so what is returned is what `resolve` actually admits.
+    pub fn write_roots(&self) -> &[PathBuf] {
+        &self.write_roots
+    }
+
     /// Workspace-relative form for display. Absolute paths would let the model
     /// echo them back and pin the transcript to one machine.
     pub fn display(&self, path: &Path) -> String {

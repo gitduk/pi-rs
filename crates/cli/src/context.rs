@@ -50,6 +50,33 @@ pub fn workspace(root: &Path) -> String {
     format!("\n\n<workspace path=\"{}\"/>", root.display())
 }
 
+/// What the model may change, and where — the workspace root plus every
+/// configured write root, as far as this run's ceiling reaches. The write and
+/// exec tools enforce exactly this set; the model needs it spelled out before
+/// it picks a tool for a path outside the workspace, so the escape refusal is
+/// not the first it hears of the boundary.
+pub fn boundary(ws: &tools::Workspace, tier: tools::Tier) -> String {
+    let extras = ws.write_roots();
+    // Nothing to say when the run may not write at all, or when the workspace
+    // is the whole boundary — the `<workspace>` tag already names that.
+    if !tools::Tier::Write.under(tier) || extras.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("\n\n<write_paths root=\"{}\">", ws.root().display());
+    for root in extras {
+        out.push_str(&format!("\n  {}", root.display()));
+    }
+    out.push_str(
+        "\n</write_paths>\n\nPaths inside these directories are writable; elsewhere write and \
+edit refuse.",
+    );
+    if tools::Tier::Exec.under(tier) {
+        // Said only where it holds: a run capped below `exec` may not run `sh`.
+        out.push_str(" bash can still write anywhere its redirections name.");
+    }
+    out
+}
+
 /// What this run is, as against what it is working on.
 ///
 /// Everything here holds still for the whole run, because it rides the system
@@ -138,12 +165,43 @@ fn from(workspace: &Path, home: Option<&Path>, root: Option<&Path>) -> Loaded {
 
 #[cfg(test)]
 mod tests {
-    use super::{env, from, paths, workspace};
+    use super::{boundary, env, from, paths, workspace};
     use std::path::Path;
 
     fn write(path: &Path, body: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, body).unwrap();
+    }
+
+    // The block is advice the model acts on, so it may claim only what the
+    // ceiling makes true: a run that cannot write hears nothing about
+    // writable paths, and one that cannot run a shell is not told a shell is
+    // the way around the boundary.
+    #[test]
+    fn the_write_block_claims_only_what_the_ceiling_allows() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let ws = tools::Workspace::new(dir.path())
+            .unwrap()
+            .with_write_roots(&[outside.path()])
+            .unwrap();
+
+        assert!(boundary(&ws, tools::Tier::Read).is_empty());
+        assert!(boundary(&ws, tools::Tier::Net).is_empty());
+
+        // Printed as `resolve` admits it, which an existing tempdir may spell
+        // differently once its links are gone.
+        let shown = outside.path().canonicalize().unwrap();
+        let shown = shown.to_str().unwrap();
+        let write = boundary(&ws, tools::Tier::Write);
+        assert!(write.contains(shown), "{write}");
+        assert!(!write.contains("bash"), "{write}");
+        assert!(boundary(&ws, tools::Tier::Exec).contains("bash"));
+
+        // No write root beyond the workspace: `<workspace>` already names the
+        // whole boundary, so there is nothing to add.
+        let bare = tools::Workspace::new(dir.path()).unwrap();
+        assert!(boundary(&bare, tools::Tier::Exec).is_empty());
     }
 
     // Every field has to hold still for a whole run — the block rides the

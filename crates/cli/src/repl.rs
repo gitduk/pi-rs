@@ -485,8 +485,13 @@ impl Repl {
             Ok(p) => p,
             Err(e) => return failed(e),
         };
-        let mut resolved = match crate::resolve(&self.args, &root, &config, &project, &self.claimed)
-        {
+        let mut resolved = match crate::resolve(
+            &self.args,
+            &self.lane().ctx.workspace,
+            &config,
+            &project,
+            &self.claimed,
+        ) {
             Ok(r) => r,
             Err(e) => return failed(e),
         };
@@ -1806,7 +1811,7 @@ impl Repl {
         let root = ws.root().to_path_buf();
         let failed = |e| format!("nothing opened — {}", refused("worktree", e));
         let project = crate::config::load_project(&root).map_err(failed)?;
-        let mut resolved = crate::resolve(&self.args, &root, &self.config, &project, &self.claimed)
+        let mut resolved = crate::resolve(&self.args, &ws, &self.config, &project, &self.claimed)
             .map_err(failed)?;
 
         let (events, inbox) = Lane::channel();

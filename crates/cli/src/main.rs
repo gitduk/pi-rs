@@ -344,11 +344,12 @@ pub struct Resolved {
 /// which is why `/reload` computes all of this before touching anything.
 pub fn resolve(
     args: &Args,
-    root: &std::path::Path,
+    workspace: &tools::Workspace,
     config: &config::Config,
     project: &config::Project,
     claimed: &BTreeMap<String, toml::Value>,
 ) -> Result<Resolved> {
+    let root = workspace.root();
     let mut notes = Vec::new();
 
     let mut registry = tools::Registry::builtin();
@@ -419,6 +420,7 @@ pub fn resolve(
     };
     // The system prompt's "relative to it" needs the workspace named.
     let mut standing = context::workspace(root);
+    standing.push_str(&context::boundary(workspace, tier));
     standing.push_str(&context::env(tier));
     // Appended rather than sent as a message: these are standing instructions,
     // they do not change within a run, and the system prompt is the part of the
@@ -528,7 +530,7 @@ async fn main() -> Result<()> {
     };
     let dialled = dial(&args, &config, &named, named_by)?;
 
-    let mut resolved = resolve(&args, workspace.root(), &config, &project, &BTreeMap::new())?;
+    let mut resolved = resolve(&args, &workspace, &config, &project, &BTreeMap::new())?;
     // Ahead of the quiet check on purpose: see `Dialled::warning`.
     if let Some(warning) = &dialled.warning {
         eprintln!("\x1b[{}m{warning}\x1b[0m", config.theme.muted.codes());
