@@ -18,7 +18,7 @@ pub const DONE_MARK: &str = "✓"; // a tool or lane that finished well
 pub const FAIL_MARK: &str = "✗"; // a failure, a denial, a refused edit
 pub const WARN_MARK: &str = "!"; // a warning line
 pub const COMPACT_RULE: &str = "───"; // the dashes a compaction banner wears
-pub const FOLD_MARK: &str = "▶"; // folded summary row
+pub const UNFOLD_MARK: &str = "▼"; // an expanded summary row
 
 // Menus and lists.
 pub const MENU_SIGIL: &str = "›"; // the menu's selected row

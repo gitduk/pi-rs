@@ -45,6 +45,12 @@ impl FoldedTool {
 
 pub struct Row(Kind);
 
+// The rendered rows of a tools summary, keyed by what they were painted at:
+// width, and the running/spinner frame that decides the leading mark.
+// Running rows must replace their frame as the spinner advances, which is
+// why the key is more than the width alone.
+type PaintedRows = Option<((usize, bool, usize), Vec<String>)>;
+
 enum Kind {
     // One logical line of a prompt the user said: the border and the body
     // kept apart, so wrapping can repeat the border on every screen row the
@@ -108,7 +114,7 @@ enum Kind {
         running: bool,
         hovered: bool,
         spinner: usize,
-        painted: RefCell<Option<(usize, Vec<String>)>>,
+        painted: RefCell<PaintedRows>,
     },
 }
 
@@ -228,11 +234,17 @@ impl Row {
                 painted,
                 ..
             } => {
-                if *r != running || *h != hovered || (*r || *h) && *s != spin {
+                // The rendered rows are keyed by (width, running, spinner),
+                // so running frames replace themselves; hovered is the only
+                // change that needs the cache dropped by hand.
+                let hover_changed = *h != hovered;
+                if *r != running || *h != hovered || *r && *s != spin {
                     *r = running;
                     *h = hovered;
                     *s = spin;
-                    *painted.borrow_mut() = None;
+                    if hover_changed {
+                        *painted.borrow_mut() = None;
+                    }
                 }
             }
             Kind::Result {
@@ -460,12 +472,12 @@ impl Row {
             } => {
                 let mut painted = painted.borrow_mut();
                 let rows = match &mut *painted {
-                    Some((w, rows)) if *w == width => rows,
+                    Some((key, rows)) if *key == (width, *running, *spinner) => rows,
                     slot => {
                         let rows = tools_summary_rows(
                             tools, *folded, *running, *hovered, *spinner, paint, width,
                         );
-                        &mut slot.insert((width, rows)).1
+                        &mut slot.insert(((width, *running, *spinner), rows)).1
                     }
                 };
                 let text = rows.get(i).cloned().unwrap_or_default();
@@ -567,9 +579,6 @@ fn clip_to(s: &str, max_cols: usize) -> &str {
     s.trim_end()
 }
 
-pub const UNFOLD_MARK: &str = "▼";
-pub const HOVER_FRAMES: &[&str] = &["▶", "▸", "▹", "▸"];
-
 pub fn tools_summary_header(
     tools: &[FoldedTool],
     folded: bool,
@@ -579,14 +588,14 @@ pub fn tools_summary_header(
     paint: &Paint,
     width: usize,
 ) -> String {
+    // A finished batch wears a green check, an in-flight one spins, and an
+    // unfolded row shows its expand mark — hover never animates the mark.
     let mark = if !folded {
-        UNFOLD_MARK
+        icons::UNFOLD_MARK.to_string()
     } else if running {
-        icons::SPINNER_FRAMES[spinner % icons::SPINNER_FRAMES.len()]
-    } else if hovered {
-        HOVER_FRAMES[spinner % HOVER_FRAMES.len()]
+        icons::SPINNER_FRAMES[spinner % icons::SPINNER_FRAMES.len()].to_string()
     } else {
-        icons::FOLD_MARK
+        paint.on(&paint.theme.status.ok, icons::DONE_MARK)
     };
 
     let prefix = format!("{mark} Ran ");
@@ -727,7 +736,7 @@ mod tools_summary_tests {
             line,
             format!(
                 "{} Ran read crates/agent/src/session.rs {} 1 tool",
-                icons::FOLD_MARK,
+                icons::DONE_MARK,
                 icons::ELLIPSIS
             )
         );
@@ -745,7 +754,7 @@ mod tools_summary_tests {
             line,
             format!(
                 "{} Ran read crates/agent/src/session.rs {} 12 tools",
-                icons::FOLD_MARK,
+                icons::DONE_MARK,
                 icons::ELLIPSIS
             )
         );
@@ -756,7 +765,7 @@ mod tools_summary_tests {
             line,
             format!(
                 "{} Ran read /path/to/other.rs {} 13 tools",
-                icons::FOLD_MARK,
+                icons::DONE_MARK,
                 icons::ELLIPSIS
             )
         );
@@ -776,7 +785,7 @@ mod tools_summary_tests {
         assert!(
             line.contains(&format!(
                 "{} Ran bash curl https://xxxx.xxxx.com/a/long/url",
-                icons::FOLD_MARK
+                icons::DONE_MARK
             )),
             "got: {line}"
         );
@@ -793,7 +802,7 @@ mod tools_summary_tests {
         let line = tools_summary_line(&tools, &paint, 80);
         assert_eq!(
             line,
-            format!("{} Ran bash {} 1 tool", icons::FOLD_MARK, icons::ELLIPSIS)
+            format!("{} Ran bash {} 1 tool", icons::DONE_MARK, icons::ELLIPSIS)
         );
     }
 
@@ -809,7 +818,7 @@ mod tools_summary_tests {
             line,
             format!(
                 "{} Ran bash git status {} 1 tool",
-                icons::FOLD_MARK,
+                icons::DONE_MARK,
                 icons::ELLIPSIS
             )
         );
@@ -825,14 +834,41 @@ mod tools_summary_tests {
         assert!(frame1.starts_with(&format!("{} Ran", icons::SPINNER_FRAMES[1])));
     }
 
+    // The rendered rows are cached by (width, running, spinner), so a running
+    // summary row must replace its frame as the spinner advances — a cache
+    // keyed by width alone would freeze the row on its first frame.
     #[test]
-    fn hovered_tool_shows_hover_animation() {
-        let paint = Paint::new(false);
+    fn a_running_summary_row_advances_through_the_paint_cache() {
+        let paint = Paint::new(true);
+        let mut row = Row::tools_summary(vec![tool("read", "a.rs")]);
+
+        row.update_hover_state(true, false, 0);
+        let f0 = crate::render::strip_ansi(&row.line(0, &paint, &[], 80).0);
+        row.update_hover_state(true, false, 1);
+        let f1 = crate::render::strip_ansi(&row.line(0, &paint, &[], 80).0);
+
+        assert!(
+            f0.starts_with(&format!("{} Ran", icons::SPINNER_FRAMES[0])),
+            "got: {f0}"
+        );
+        assert!(
+            f1.starts_with(&format!("{} Ran", icons::SPINNER_FRAMES[1])),
+            "got: {f1}"
+        );
+        assert_ne!(f0, f1, "the running frame must advance, not freeze");
+    }
+
+    #[test]
+    fn hovered_tool_stays_on_the_green_check() {
+        let paint = Paint::new(true);
         let tools = vec![tool("read", "a.rs")];
         let h0 = tools_summary_header(&tools, true, false, true, 0, &paint, 80);
-        assert!(h0.starts_with(&format!("{} Ran", HOVER_FRAMES[0])));
         let h1 = tools_summary_header(&tools, true, false, true, 1, &paint, 80);
-        assert!(h1.starts_with(&format!("{} Ran", HOVER_FRAMES[1])));
+        assert_eq!(h0, h1, "hover must not animate the mark");
+        assert!(
+            crate::render::strip_ansi(&h0).starts_with(&format!("{} Ran", icons::DONE_MARK)),
+            "got: {h0}"
+        );
     }
 
     #[test]
@@ -849,7 +885,7 @@ mod tools_summary_tests {
         assert_eq!(row.len(), 3);
 
         let (head, _) = row.line(0, &paint, &[], 80);
-        assert!(head.starts_with(&format!("{UNFOLD_MARK} Ran")));
+        assert!(head.starts_with(&format!("{} Ran", icons::UNFOLD_MARK)));
         assert!(head.contains("2 tools"));
 
         let (t0, _) = row.line(1, &paint, &[], 80);
@@ -864,7 +900,7 @@ mod tools_summary_tests {
         assert!(row.toggle_expand());
         assert_eq!(row.len(), 1);
         let (folded_head, _) = row.line(0, &paint, &[], 80);
-        assert!(folded_head.starts_with(&format!("{} Ran", icons::FOLD_MARK)));
+        assert!(folded_head.starts_with(&format!("{} Ran", icons::DONE_MARK)));
     }
 
     #[test]

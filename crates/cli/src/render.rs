@@ -295,10 +295,10 @@ impl PartialEq for Style {
 }
 
 impl Eq for Style {}
-/// A row the mouse is over: bold underlined, so it reads as a thing to press.
+/// A row the mouse is over: bold, so it reads as a thing to press.
 pub static HOVER: LazyLock<Style> = LazyLock::new(|| Style {
     color: None,
-    sgr: vec![Attr::Bold, Attr::Underline],
+    sgr: vec![Attr::Bold],
     rendered: OnceLock::new(),
 });
 

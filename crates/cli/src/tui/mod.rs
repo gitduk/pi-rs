@@ -1514,12 +1514,19 @@ impl Ui {
         let mut rows = Vec::new();
 
         if let Some(t) = lane.view.state.tools.last() {
+            // A non-modifying call folds into a ✓ summary row on landing, so
+            // the live row wears the same check; a modifying one never folds.
+            let name = if is_modifying_tool(&t.name) {
+                t.name.clone()
+            } else {
+                format!("{} {}", icons::DONE_MARK, t.name)
+            };
             let extra = if lane.view.state.tools.len() > 1 {
                 format!(" (+{})", lane.view.state.tools.len() - 1)
             } else {
                 String::new()
             };
-            let line = format!("{}{extra}", tool_row(self.spinner, &t.name, &t.summary));
+            let line = format!("{}{extra}", tool_row(self.spinner, &name, &t.summary));
             rows.extend(screen::fit(
                 &self.paint.on(&self.paint.theme.muted, &line),
                 width,
@@ -1722,10 +1729,20 @@ impl Ui {
             .iter()
             .rposition(|r| r.is_tools_summary());
         let lane_running = lane.is_running();
+        // A summary row spins only while one of its tools is still in flight:
+        // a finished batch is history, and only the last row can still grow.
+        let summary_live = lane_running
+            && lane
+                .view
+                .state
+                .tools
+                .iter()
+                .any(|t| t.done.is_none() && !is_modifying_tool(&t.name))
+            && last_tools_idx.is_some_and(|i| i + 1 == lane.view.surface.scrollback.len());
 
         for (idx, row) in lane.view.surface.scrollback.iter_mut().enumerate() {
             let is_hovered = self.hovered_scrollback == Some(idx);
-            let is_running = lane_running && Some(idx) == last_tools_idx;
+            let is_running = summary_live && Some(idx) == last_tools_idx;
             row.update_hover_state(is_running, is_hovered, self.spinner);
         }
 
@@ -2224,34 +2241,29 @@ impl Ui {
         self.hovered_scrollback = None;
     }
 
-    pub fn has_hover(&self) -> bool {
-        self.hovered_scrollback.is_some()
-    }
-
-    /// The scrollback row the mouse is over, if it is an expandable one.
-    fn hovered_row(&self, lane: &Lane, row: u16) -> Option<usize> {
-        if row < self.main_top {
-            return None;
-        }
+    /// The scrollback row the mouse is over, if the cursor is on its text.
+    fn hovered_row(&self, lane: &Lane, col: u16, row: u16) -> Option<usize> {
         let idx = self
             .row_targets
-            .get((row - self.main_top) as usize)
+            .get(row.checked_sub(self.main_top)? as usize)
             .copied()
             .flatten()?;
-        lane.view
-            .surface
-            .scrollback
-            .get(idx)
-            .filter(|r| r.is_expandable())
-            .map(|_| idx)
+        let row = lane.view.surface.scrollback.get(idx)?;
+        if !row.is_expandable() {
+            return None;
+        }
+        // The mouse must cover the row's own text, not the empty rest of the
+        // row: the click that expands it lands on the head line only.
+        let first = row.line(0, &self.paint, &[], self.screen.usable()).0;
+        ((col as usize) < render::visible_width(&first)).then_some(idx)
     }
 
-    fn on_mouse_move(&mut self, lane: &mut Lane, _col: u16, row: u16) {
-        self.hovered_scrollback = self.hovered_row(lane, row);
+    fn on_mouse_move(&mut self, lane: &mut Lane, col: u16, row: u16) {
+        self.hovered_scrollback = self.hovered_row(lane, col, row);
     }
 
-    fn on_mouse_click(&mut self, lane: &mut Lane, _col: u16, row: u16) {
-        if let Some(idx) = self.hovered_row(lane, row)
+    fn on_mouse_click(&mut self, lane: &mut Lane, col: u16, row: u16) {
+        if let Some(idx) = self.hovered_row(lane, col, row)
             && lane
                 .view
                 .surface
@@ -3158,9 +3170,9 @@ impl Tui {
                 // `recv()` and `tick()` are; a blocking read gets its own thread.
                 tokio::select! {
                     Some(done) = done_rx.recv() => Wake::Turn(done),
-                    // Only while something runs, or a flash is up: an idle loop
-                    // waking ten times a second is a spinner with nothing to spin.
-                    _ = tick.tick(), if anywhere || self.ui.flash.is_some() || self.ui.has_hover() => {
+                    // Only while something runs, or a flash is up — an idle
+                    // loop waking ten times a second has nothing to spin.
+                    _ = tick.tick(), if anywhere || self.ui.flash.is_some() => {
                         self.ui.spinner += 1;
                         Wake::Nothing
                     }
@@ -4023,6 +4035,46 @@ mod tests {
     use crate::tui::screen;
     use crossterm::event::KeyCode;
 
+    // One completed tool call, as the loop reports it: start, end, then the
+    // entry the commit folds in. Shared by the tool-row tests.
+    fn run_tool(
+        ui: &mut super::Ui,
+        lane: &mut crate::lane::Lane,
+        id: &str,
+        name: &str,
+        preview: &str,
+        entry_id: u64,
+    ) {
+        ui.on_event(
+            lane,
+            agent::Event::ToolStart {
+                id: id.into(),
+                name: name.into(),
+                args: serde_json::json!({}),
+            },
+        );
+        ui.on_event(
+            lane,
+            agent::Event::ToolEnd {
+                id: id.into(),
+                name: name.into(),
+                is_error: false,
+                preview: preview.into(),
+            },
+        );
+        ui.on_event(
+            lane,
+            agent::Event::Committed {
+                entries: vec![agent::session::Entry::Tool {
+                    id: agent::session::EntryId(entry_id),
+                    at: 0,
+                    result: brain::message::ToolResult::text(id, name, preview),
+                    preview: Some(preview.into()),
+                }],
+            },
+        );
+    }
+
     #[test]
     fn a_secret_settings_set_is_detected_by_its_path() {
         assert!(secret_settings_set("/settings set api_key x"));
@@ -4158,8 +4210,6 @@ mod tests {
 
     #[test]
     fn read_only_tools_are_folded_into_summary_while_modifications_are_kept() {
-        use agent::session::{Entry, EntryId};
-
         let mut ui = test_ui(80, 24);
         let (_dir, mut lane) = a_running_lane();
 
@@ -4173,44 +4223,6 @@ mod tests {
                 row,
                 modifiers: crossterm::event::KeyModifiers::NONE,
             })
-        }
-
-        fn run_tool(
-            ui: &mut super::Ui,
-            lane: &mut crate::lane::Lane,
-            id: &str,
-            name: &str,
-            preview: &str,
-            entry_id: u64,
-        ) {
-            ui.on_event(
-                lane,
-                agent::Event::ToolStart {
-                    id: id.into(),
-                    name: name.into(),
-                    args: serde_json::json!({}),
-                },
-            );
-            ui.on_event(
-                lane,
-                agent::Event::ToolEnd {
-                    id: id.into(),
-                    name: name.into(),
-                    is_error: false,
-                    preview: preview.into(),
-                },
-            );
-            ui.on_event(
-                lane,
-                agent::Event::Committed {
-                    entries: vec![Entry::Tool {
-                        id: EntryId(entry_id),
-                        at: 0,
-                        result: brain::message::ToolResult::text(id, name, preview),
-                        preview: Some(preview.into()),
-                    }],
-                },
-            );
         }
 
         run_tool(&mut ui, &mut lane, "c1", "grep", "match 1", 1);
@@ -4258,7 +4270,7 @@ mod tests {
             mouse_event(crossterm::event::MouseEventKind::Moved, 0),
             false,
         );
-        assert!(ui.has_hover());
+        assert_eq!(ui.hovered_scrollback, Some(0));
 
         // Mouse click again folds it back
         ui.key(
@@ -4272,7 +4284,50 @@ mod tests {
         assert_eq!(lane.view.surface.scrollback[0].len(), 1);
     }
 
-    // The screen opens with what this run is standing on. It used to be said
+    // A folded summary row spins only while one of its tools is still in
+    // flight: a finished batch is history, so a spinner on it reads as a call
+    // that never finished.
+    #[test]
+    fn a_folded_summary_stops_spinning_once_its_tools_land() {
+        let mut ui = test_ui(80, 24);
+        let (_dir, mut lane) = a_running_lane();
+
+        // Two read calls land and adopt; the lane still runs (the model is
+        // writing its next call). The summary row stops spinning.
+        run_tool(&mut ui, &mut lane, "c1", "read", "content", 1);
+        run_tool(&mut ui, &mut lane, "c2", "read", "content", 2);
+        ui.flush(&mut lane);
+
+        let summary = &lane.view.surface.scrollback[0];
+        let (line, _) = summary.line(0, &ui.paint, &[], 80);
+        let line = crate::render::strip_ansi(&line);
+        assert!(
+            line.starts_with(&format!("{} Ran", icons::DONE_MARK)),
+            "the folded row wears the green check once its tools land: {line}"
+        );
+        assert!(
+            !icons::SPINNER_FRAMES.iter().any(|f| line.starts_with(f)),
+            "no spinner on a finished batch: {line}"
+        );
+
+        // A new call in flight spins it again.
+        ui.on_event(
+            &mut lane,
+            agent::Event::ToolStart {
+                id: "c3".into(),
+                name: "read".into(),
+                args: serde_json::json!({}),
+            },
+        );
+        ui.flush(&mut lane);
+        let (line, _) = lane.view.surface.scrollback[0].line(0, &ui.paint, &[], 80);
+        let line = crate::render::strip_ansi(&line);
+        assert!(
+            icons::SPINNER_FRAMES.iter().any(|f| line.starts_with(f)),
+            "the summary spins again while its next tool runs: {line}"
+        );
+    }
+
     // as a startup note, which scrolled away; here it stays at the top, which
     // is where "what is my agent obeying" belongs.
     #[test]
