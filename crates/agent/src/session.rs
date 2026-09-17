@@ -358,13 +358,25 @@ pub struct Session {
 // Why the most recent run ended before its prompt was answered, if it did.
 // The transcript alone cannot say whether the stop was the user's or the
 // run's own, so the caller records it here and the next prompt carries it on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum StopCause {
     // The user asked the run to stop: Esc, `/stop`, an interrupt.
     #[allow(dead_code)]
     User,
     // It died on its own — an error or a crash — and no more is known.
     Other,
+    // It died with a specific error.
+    Error(String),
+}
+
+impl StopCause {
+    fn note(&self) -> Option<String> {
+        match self {
+            Self::User => None,
+            Self::Other => Some(stopped_note(None)),
+            Self::Error(e) => Some(stopped_note(Some(e))),
+        }
+    }
 }
 
 /// What an unanswered call is closed with when stopped by the user.
@@ -381,6 +393,16 @@ pub fn is_stopped_call(r: &ToolResult) -> bool {
 // What the model is told after a run that died for an unknown reason.
 const STOPPED_UNKNOWN: &str = "The previous run ended before it finished, for an unknown \
      reason. Treat the request it was working on as unresolved; the message below is what to act on.";
+fn stopped_note(err: Option<&str>) -> String {
+    let why = match err.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(e) => format!("with an error: {e}"),
+        None => "for an unknown reason".to_string(),
+    };
+    format!(
+        "The previous run ended before it finished, {why}. \
+         Treat the request it was working on as unresolved; the message below is what to act on."
+    )
+}
 
 impl Session {
     pub fn new() -> Self {
@@ -543,7 +565,7 @@ impl Session {
     pub fn note_outcome(&mut self, outcome: &Result<Totals, AgentError>) {
         match outcome {
             Ok(_) | Err(AgentError::Cancelled) => {}
-            Err(_) => self.interrupted = Some(StopCause::Other),
+            Err(e) => self.interrupted = Some(StopCause::Error(e.to_string())),
         }
     }
 
@@ -593,8 +615,8 @@ impl Session {
         }
         // A run that died of an unknown failure tells the model so; a user
         // stop leaves direction to the next prompt.
-        if matches!(self.interrupted.take(), Some(StopCause::Other)) {
-            self.push_note(STOPPED_UNKNOWN);
+        if let Some(note) = self.interrupted.take().and_then(|c| c.note()) {
+            self.push_note(note);
         }
         let ask = Prompt {
             text: prompt.into(),
@@ -1220,8 +1242,7 @@ mod tests {
         assert!(matches!(&entries[0], Entry::Ask { .. }));
     }
 
-    // The mapping the callers rely on: an answer and a user stop record nothing,
-    // only an unknown stop records a note.
+    // An answer and a user stop record nothing; an error records a note naming it.
     #[test]
     fn note_outcome_tells_an_answer_from_a_user_stop() {
         let mut answered = Session::new();
@@ -1249,8 +1270,25 @@ mod tests {
                 Entry::Note { note, .. } => note.as_str(),
                 other => panic!("expected the note aside, got {other:?}"),
             },
-            STOPPED_UNKNOWN
+            &stopped_note(Some("stream: died"))
         );
+    }
+
+    #[test]
+    fn note_outcome_includes_api_error_detail() {
+        let mut s = Session::new();
+        s.prompt("go");
+        s.note_outcome(&Err(crate::AgentError::Brain(brain::BrainError::Api {
+            format: "anthropic",
+            status: 429,
+            body: "quota exceeded".into(),
+        })));
+        s.send_prompt("retry", None, None);
+        let note = match &s.entries()[1] {
+            Entry::Note { note, .. } => note.as_str(),
+            other => panic!("expected note, got {other:?}"),
+        };
+        assert!(note.contains("anthropic 429: quota exceeded"));
     }
 
     // Rewinding to an answer is the opposite call: the answer stays, and the
