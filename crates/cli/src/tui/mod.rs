@@ -441,6 +441,25 @@ fn tool_row(frame: usize, name: &str, summary: &str) -> String {
     format!("{frame} {}", row::named(name, summary))
 }
 
+fn is_modifying_tool(name: &str) -> bool {
+    matches!(name, "edit" | "write")
+}
+
+fn push_tool_row(scrollback: &mut Vec<Row>, row: Row) {
+    if let Some(name) = row.tool_name().filter(|&n| !is_modifying_tool(n))
+        && row.ok() == Some(true)
+    {
+        if let Some(last) = scrollback.last_mut() {
+            if last.push_tool(name.to_string()) {
+                return;
+            }
+        }
+        scrollback.push(Row::tools_summary(vec![name.to_string()]));
+        return;
+    }
+    scrollback.push(row);
+}
+
 // The transcript as rows, exactly as the live stream would have drawn them:
 // prompts with their sigil, answers as markdown, tool calls as their result
 // lines, reasoning as a foldable block. A rewind rebuilds the screen from
@@ -533,7 +552,13 @@ fn scrollback_from(
             // adoption draw from one place.
             other => {
                 if let Some(rows) = f_entry(other, paint, bang_prompt) {
-                    out.extend(rows);
+                    if matches!(other, LogEntry::Tool { .. }) {
+                        for r in rows {
+                            push_tool_row(&mut out, r);
+                        }
+                    } else {
+                        out.extend(rows);
+                    }
                 }
             }
         }
@@ -1135,6 +1160,14 @@ impl Ui {
             // The block is over: it stops taking lines; its entry is already
             // in the scrollback, folded or not.
             view.surface.folds.close_block();
+            if view
+                .surface
+                .scrollback
+                .last()
+                .is_some_and(Row::is_empty_reasoning)
+            {
+                view.surface.scrollback.pop();
+            }
         }
         view.surface.stream.kind = StreamKind::Answer;
     }
@@ -1277,8 +1310,12 @@ impl Ui {
             if let Some(rows) = f_entry(entry, &self.paint, &self.bang_prompt) {
                 if let LogEntry::Tool { result: r, .. } = entry {
                     self.check_pending(lane, &r.call, rows.last(), width);
+                    for r in rows {
+                        push_tool_row(&mut lane.view.surface.scrollback, r);
+                    }
+                } else {
+                    lane.view.surface.scrollback.extend(rows);
                 }
-                lane.view.surface.scrollback.extend(rows);
             }
             lane.view.surface.tail = Some(entry.id());
         }
@@ -1420,8 +1457,13 @@ impl Ui {
         let width = self.screen.usable();
         let mut rows = Vec::new();
 
-        for t in &lane.view.state.tools {
-            let line = tool_row(self.spinner, &t.name, &t.summary);
+        if let Some(t) = lane.view.state.tools.last() {
+            let extra = if lane.view.state.tools.len() > 1 {
+                format!(" (+{})", lane.view.state.tools.len() - 1)
+            } else {
+                String::new()
+            };
+            let line = format!("{}{extra}", tool_row(self.spinner, &t.name, &t.summary));
             rows.extend(screen::fit(
                 &self.paint.on(&self.paint.theme.muted, &line),
                 width,
@@ -3981,6 +4023,75 @@ mod tests {
         assert!(lane.view.state.tools.is_empty());
         let after = lane.view.surface.scrollback.len();
         assert_eq!(after, 1, "one adopted row, got {after}");
+    }
+
+    #[test]
+    fn read_only_tools_are_folded_into_summary_while_modifications_are_kept() {
+        use agent::session::{Entry, EntryId};
+
+        let mut ui = test_ui(80, 24);
+        let (_dir, mut lane) = a_running_lane();
+
+        fn run_tool(
+            ui: &mut super::Ui,
+            lane: &mut crate::lane::Lane,
+            id: &str,
+            name: &str,
+            preview: &str,
+            entry_id: u64,
+        ) {
+            ui.on_event(
+                lane,
+                agent::Event::ToolStart {
+                    id: id.into(),
+                    name: name.into(),
+                    args: serde_json::json!({}),
+                },
+            );
+            ui.on_event(
+                lane,
+                agent::Event::ToolEnd {
+                    id: id.into(),
+                    name: name.into(),
+                    is_error: false,
+                    preview: preview.into(),
+                },
+            );
+            ui.on_event(
+                lane,
+                agent::Event::Committed {
+                    entries: vec![Entry::Tool {
+                        id: EntryId(entry_id),
+                        at: 0,
+                        result: brain::message::ToolResult::text(id, name, preview),
+                        preview: Some(preview.into()),
+                    }],
+                },
+            );
+        }
+
+        run_tool(&mut ui, &mut lane, "c1", "grep", "match 1", 1);
+        run_tool(&mut ui, &mut lane, "c2", "read", "file content", 2);
+
+        // grep and read fold into a single ToolsSummary row
+        assert_eq!(lane.view.surface.scrollback.len(), 1);
+        let row_text = lane.view.surface.scrollback[0]
+            .line(0, &ui.paint, &[], 80)
+            .0;
+        assert!(
+            row_text.contains("Ran 2 tools (grep, read)"),
+            "got: {row_text}"
+        );
+
+        // edit (modifying tool) stays unbundled
+        let edit_preview = "src/main.rs +1 -1\n  1 - old\n  1 + new";
+        run_tool(&mut ui, &mut lane, "c3", "edit", edit_preview, 3);
+
+        assert_eq!(lane.view.surface.scrollback.len(), 2);
+        let edit_head = lane.view.surface.scrollback[1]
+            .line(0, &ui.paint, &[], 80)
+            .0;
+        assert!(edit_head.contains("edit"), "got: {edit_head}");
     }
 
     // The screen opens with what this run is standing on. It used to be said

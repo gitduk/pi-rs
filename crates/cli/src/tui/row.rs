@@ -74,6 +74,11 @@ enum Kind {
         lines: Vec<String>,
         folded: bool,
     },
+    // A bundle of read-only tool results folded together into a summary row.
+    ToolsSummary {
+        tools: Vec<String>,
+        painted: RefCell<Option<String>>,
+    },
 }
 
 impl Row {
@@ -121,6 +126,25 @@ impl Row {
         Row(Kind::Tally(snap))
     }
 
+    /// A bundle of read-only tool results folded together into a summary row.
+    pub fn tools_summary(tools: Vec<String>) -> Self {
+        Row(Kind::ToolsSummary {
+            tools,
+            painted: RefCell::new(None),
+        })
+    }
+
+    /// Add a tool name to a tools summary row, if it is one.
+    pub fn push_tool(&mut self, name: String) -> bool {
+        if let Kind::ToolsSummary { tools, painted } = &mut self.0 {
+            tools.push(name);
+            *painted.borrow_mut() = None;
+            true
+        } else {
+            false
+        }
+    }
+
     /// A reasoning block's first row. Later lines go in through `push_line`.
     pub fn reasoning(block: u64, lines: Vec<String>, folded: bool) -> Self {
         Row(Kind::Reasoning {
@@ -161,6 +185,22 @@ impl Row {
             }
         });
         Self::result(!r.is_error, r.name.clone(), preview)
+    }
+
+    /// The tool's name if this row is a tool result.
+    pub fn tool_name(&self) -> Option<&str> {
+        match &self.0 {
+            Kind::Result { name, .. } => Some(name),
+            _ => None,
+        }
+    }
+
+    /// Whether this tool result succeeded.
+    pub fn ok(&self) -> Option<bool> {
+        match &self.0 {
+            Kind::Result { ok, .. } => Some(*ok),
+            _ => None,
+        }
     }
 
     /// A tool's start line: what an unanswered call keeps in the view.
@@ -206,7 +246,10 @@ impl Row {
     /// How many screen rows this renders to.
     pub fn len(&self) -> usize {
         match &self.0 {
-            Kind::Notice { .. } | Kind::Said { .. } | Kind::Tally(_) => 1,
+            Kind::Notice { .. }
+            | Kind::Said { .. }
+            | Kind::Tally(_)
+            | Kind::ToolsSummary { .. } => 1,
             Kind::Result { preview, .. } => preview.lines().count().max(1),
             Kind::Reasoning { lines, folded, .. } => {
                 if *folded {
@@ -272,6 +315,13 @@ impl Row {
                 };
                 (text, None)
             }
+            Kind::ToolsSummary { tools, painted } => {
+                let mut painted = painted.borrow_mut();
+                if painted.is_none() {
+                    *painted = Some(tools_summary_line(tools, paint));
+                }
+                (Cow::Owned(painted.as_ref().unwrap().clone()), None)
+            }
         }
     }
 
@@ -294,6 +344,14 @@ impl Row {
     pub fn set_folded(&mut self, to: bool) {
         if let Kind::Reasoning { folded, .. } = &mut self.0 {
             *folded = to;
+        }
+    }
+
+    /// Whether this row is an empty reasoning block.
+    pub fn is_empty_reasoning(&self) -> bool {
+        match &self.0 {
+            Kind::Reasoning { lines, .. } => lines.is_empty(),
+            _ => false,
         }
     }
 
@@ -346,6 +404,27 @@ fn tool_start_line(name: &str, summary: &str) -> String {
 fn thinking_summary(n: usize) -> String {
     let s = if n == 1 { "" } else { "s" };
     format!("thinking{}{n} line{s}", icons::PART_SEP)
+}
+
+/// Format a folded tool summary line, e.g. "▶ Ran 18 tools (grep, read)".
+pub fn tools_summary_line(tools: &[String], paint: &Paint) -> String {
+    let count = tools.len();
+    let s = if count == 1 { "" } else { "s" };
+    let mut distinct = Vec::new();
+    for t in tools {
+        if !distinct.contains(&t.as_str()) {
+            distinct.push(t.as_str());
+        }
+    }
+    let detail = if distinct.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", distinct.join(", "))
+    };
+    paint.on(
+        &paint.theme.muted,
+        &format!("{} Ran {count} tool{s}{detail}", icons::FOLD_MARK),
+    )
 }
 
 #[cfg(test)]
