@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent"
-version = "1.21.5"
+version = "1.21.6"
 dependencies = [
  "async-trait",
  "brain",
@@ -209,7 +209,7 @@ dependencies = [
 
 [[package]]
 name = "brain"
-version = "1.21.5"
+version = "1.21.6"
 dependencies = [
  "async-trait",
  "eventsource-stream",
@@ -956,7 +956,7 @@ dependencies = [
 
 [[package]]
 name = "hashline"
-version = "1.21.5"
+version = "1.21.6"
 dependencies = [
  "thiserror 2.0.20",
 ]
@@ -1710,7 +1710,7 @@ dependencies = [
 
 [[package]]
 name = "pi"
-version = "1.21.5"
+version = "1.21.6"
 dependencies = [
  "agent",
  "anyhow",
@@ -2606,7 +2606,7 @@ dependencies = [
 
 [[package]]
 name = "syntax"
-version = "1.21.5"
+version = "1.21.6"
 dependencies = [
  "tree-sitter",
  "tree-sitter-go",
@@ -2961,7 +2961,7 @@ checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "tools"
-version = "1.21.5"
+version = "1.21.6"
 dependencies = [
  "async-trait",
  "brain",
@@ -3428,7 +3428,7 @@ dependencies = [
 
 [[package]]
 name = "wechat"
-version = "1.21.5"
+version = "1.21.6"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
