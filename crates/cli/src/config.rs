@@ -108,8 +108,8 @@ pub struct Config {
     pub task_max_turns: Option<usize>,
 
     /// How many times to retry a request the provider could not serve. Unset
-    /// is 4, which is `Retry::default()` — the number lives there, not here, so
-    /// that an unset field and a missing config agree by construction.
+    /// is `Retry::default()` — the number lives there, not here, so that an
+    /// unset field and a missing config agree by construction.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retries: Option<usize>,
 

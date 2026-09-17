@@ -339,10 +339,11 @@ reading survives. What the model is sent and what a person reads are different
 projections of the same list: compaction is the model losing sight of the
 conversation, not you.
 
-**Failures** are classified before they are retried. A spent quota and a
-throttle both arrive as HTTP 429 and only the message text separates them —
-retrying the first burns money. An overflow refusal usually names the real
-window, so the correction is read out of it rather than guessed.
+**Failures** are classified by HTTP status alone, never by message
+wording: a spent quota and a throttle both arrive as HTTP 429, and pi
+cannot tell them apart, so it retries every 429 the same way. An overflow
+refusal usually names the real window, so the correction is read out of it
+rather than guessed.
 
 **A stuck model is named, because nothing else stops it.** There is no turn
 cap: a run ends when the model stops, when you interrupt it, or when the

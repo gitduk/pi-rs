@@ -68,7 +68,7 @@ pub struct Retry {
 impl Default for Retry {
     fn default() -> Self {
         Self {
-            attempts: 4,
+            attempts: 9,
             base: std::time::Duration::from_millis(800),
             max: std::time::Duration::from_secs(30),
             idle: std::time::Duration::from_secs(300),
@@ -710,8 +710,6 @@ impl Agent {
                 other => return Err((other, partial)),
             };
 
-            // A spent quota arrives as a 429 like any throttle; retrying that
-            // one only costs money.
             if attempt >= self.retry.attempts || brain::classify(&e) != brain::Fault::Transient {
                 // The classification, not just the error: "why was this not
                 // retried" is answerable from the fault and from nothing else.

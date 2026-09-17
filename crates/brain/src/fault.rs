@@ -8,105 +8,30 @@ pub enum Fault {
     // The request did not fit the model's window. Retrying it unchanged will
     // fail identically; it has to get smaller first.
     Overflow,
-    // Retrying changes nothing, and for a spent quota it also costs money.
+    // Retrying changes nothing.
     Permanent,
 }
 
-// Account limits that arrive wearing a throttle's clothes. Checked first: a
-// spent quota is usually an HTTP 429, and treating it as one burns money on
-// retries that cannot succeed.
-const SPENT: &[&str] = &[
-    "gousagelimiterror",
-    "freeusagelimiterror",
-    "monthly usage limit reached",
-    "available balance",
-    "insufficient_quota",
-    "out of budget",
-    "quota exceeded",
-    "quota exhausted",
-    "billing",
-    "credit balance is too low",
-];
-
-// The window was exceeded. Wording differs per provider and none of it is
-// derivable, so the list is empirical — borrowed from pi-mono's `overflow.ts`.
-const OVERFLOW: &[&str] = &[
-    "prompt is too long",
-    "request_too_large",
-    "input is too long for requested model",
-    "exceeds the context window",
-    "maximum context length",
-    "context length exceeded",
-    "context_length_exceeded",
-    "maximum prompt length",
-    "exceeds the maximum number of tokens",
-    "reduce the length of the messages",
-    "input length",
-    "prompt token count",
-    "exceeded model token limit",
-    "context window exceeds limit",
-    "exceeds the available context size",
-    "too large for model with",
-    "prompt too long",
-];
-
-const TRANSIENT: &[&str] = &[
-    "overloaded",
-    "rate limit",
-    "rate_limit",
-    "ratelimit",
-    "too many requests",
-    "service unavailable",
-    "service_unavailable",
-    "server error",
-    "internal error",
-    "internal_server_error",
-    "provider returned error",
-    "network error",
-    "connection error",
-    "connection refused",
-    "connection reset",
-    "connection closed",
-    "other side closed",
-    "fetch failed",
-    "getaddrinfo",
-    "timed out",
-    "timeout",
-    "eof while parsing",
-    "stream ended",
-];
-
-const TRANSIENT_STATUS: &[u16] = &[408, 409, 425, 429, 500, 502, 503, 504, 522, 524, 529];
-
-fn hit(haystack: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|n| haystack.contains(n))
-}
-
-/// Classify a failed request.
+/// Classify a failed request by its HTTP status, never by message wording.
 ///
-/// Order is load-bearing: a spent quota and a throttle both arrive as 429, and
-/// only the message text tells them apart.
+/// Message text is not consulted: providers disagree about what a quota error
+/// is called, and retry policy should not depend on an empirical word list.
 pub fn classify(err: &BrainError) -> Fault {
-    let text = err.to_string().to_lowercase();
-
-    if hit(&text, SPENT) {
-        return Fault::Permanent;
-    }
-    if hit(&text, OVERFLOW) {
-        return Fault::Overflow;
-    }
-
     match err {
-        BrainError::Api { status, .. } if TRANSIENT_STATUS.contains(status) => Fault::Transient,
+        // 408 is a timeout, 409 a collision, 425 an early hint; 429 a
+        // throttle; 5xx (and 522/524/529 from CDNs) load. All are worth
+        // another attempt.
+        BrainError::Api { status, .. }
+            if matches!(
+                status,
+                408 | 409 | 425 | 429 | 500 | 502 | 503 | 504 | 522 | 524 | 529
+            ) =>
+        {
+            Fault::Transient
+        }
         // 413 is a size refusal, whatever the body says about it.
         BrainError::Api { status: 413, .. } => Fault::Overflow,
-        BrainError::Api { .. } => {
-            if hit(&text, TRANSIENT) {
-                Fault::Transient
-            } else {
-                Fault::Permanent
-            }
-        }
+        BrainError::Api { .. } => Fault::Permanent,
         // A dropped socket or a truncated stream is worth another attempt.
         BrainError::Http(_) | BrainError::Stream(_) => Fault::Transient,
         BrainError::Json(_) | BrainError::Config(_) => Fault::Permanent,
@@ -146,41 +71,41 @@ mod tests {
     }
 
     #[test]
-    fn a_plain_throttle_is_worth_retrying() {
+    fn a_throttle_status_is_retried_whatever_the_body_says() {
         assert_eq!(classify(&api(429, "rate limit exceeded")), Fault::Transient);
         assert_eq!(classify(&api(529, "overloaded_error")), Fault::Transient);
         assert_eq!(classify(&api(503, "")), Fault::Transient);
-    }
-
-    #[test]
-    fn a_spent_quota_wearing_a_429_is_not() {
-        // The status is identical to a throttle; only the body separates them,
-        // and retrying this one just spends money.
+        // The message is not consulted: a spent quota wearing a 429 is still
+        // retried, because only the status is reliable across providers.
         assert_eq!(
-            classify(&api(429, r#"{"code":"insufficient_quota"}"#)),
-            Fault::Permanent
+            classify(&api(429, r#"{"error":{"code":"insufficient_quota"}}"#)),
+            Fault::Transient
         );
         assert_eq!(
             classify(&api(429, "Monthly usage limit reached")),
-            Fault::Permanent
+            Fault::Transient
         );
+        assert_eq!(
+            classify(&api(429, "Your credit balance is too low")),
+            Fault::Transient
+        );
+    }
+
+    #[test]
+    fn a_status_outside_the_retry_set_is_not_retried() {
         assert_eq!(
             classify(&api(400, "Your credit balance is too low")),
             Fault::Permanent
         );
-        // Seen from a routing proxy, typed `rate_limit_error` and coded
-        // `rate_limit_exceeded`, and four retries over 34s changed nothing.
-        assert_eq!(
-            classify(&api(
-                429,
-                r#"{"error":{"message":"AI Chat quota exhausted","type":"rate_limit_error","code":"rate_limit_exceeded"}}"#
-            )),
-            Fault::Permanent
-        );
     }
 
     #[test]
-    fn overflow_is_recognized_across_provider_wordings() {
+    fn a_429_is_retried_even_when_the_body_says_overflow() {
+        assert_eq!(classify(&api(429, "prompt is too long")), Fault::Transient);
+    }
+
+    #[test]
+    fn an_overflow_body_without_the_413_status_is_not_retried() {
         for body in [
             "prompt is too long: 213462 tokens > 200000 maximum",
             "Your input exceeds the context window of this model",
@@ -189,16 +114,13 @@ mod tests {
             "Please reduce the length of the messages or completion",
             "invalid params, context window exceeds limit",
         ] {
-            assert_eq!(classify(&api(400, body)), Fault::Overflow, "{body}");
+            assert_eq!(classify(&api(400, body)), Fault::Permanent, "{body}");
         }
-        assert_eq!(classify(&api(413, "no body")), Fault::Overflow);
     }
 
     #[test]
-    fn overflow_outranks_the_status_it_arrives_with() {
-        // Anthropic sends 413 for a byte-size refusal and 400 for a token one;
-        // neither is a throttle, however the transport reports it.
-        assert_eq!(classify(&api(429, "prompt is too long")), Fault::Overflow);
+    fn overflow_is_recognized_by_status_alone() {
+        assert_eq!(classify(&api(413, "no body")), Fault::Overflow);
     }
 
     #[test]

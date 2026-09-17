@@ -15,7 +15,7 @@ mod common;
 use common::spec;
 
 use agent::session::Session;
-use agent::{Agent, AgentError, Ceiling, Event, Steer};
+use agent::{Agent, AgentError, Ceiling, Event, Retry, Steer};
 use tools::{Concurrency, Ctx, Registry, Tier, Tool, ToolError, ToolOutput, Workspace};
 
 // Replays one scripted event list per turn, so the loop is exercised without
@@ -871,7 +871,7 @@ async fn a_throttled_request_is_retried_until_it_lands() {
 }
 
 #[tokio::test]
-async fn a_spent_quota_is_not_retried_however_much_it_looks_like_a_throttle() {
+async fn a_429_is_retried_until_the_attempt_budget_runs_out() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
     let mut a = Agent::new(
@@ -885,11 +885,14 @@ async fn a_spent_quota_is_not_retried_however_much_it_looks_like_a_throttle() {
     fast_retry(&mut a);
 
     let (_s, out, events) = drive(&a, &ctx, "go").await;
-    // The status is a throttle's; retrying it just spends money.
+    // Any 429 is retried until the attempt budget runs out.
     assert!(out.is_err(), "{out:?}");
-    assert!(
-        !events.iter().any(|e| matches!(e, Event::Retrying { .. })),
-        "{events:?}"
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, Event::Retrying { .. }))
+            .count(),
+        Retry::default().attempts
     );
 }
 
@@ -984,9 +987,10 @@ impl Transport for Picky {
         let size = brain::estimate::tokens(&req.messages, spec);
         if size > self.fits {
             self.refusals.fetch_add(1, Ordering::SeqCst);
+            // 413, not 400: only transient statuses are retried after a squeeze.
             return Err(brain::BrainError::Api {
                 format: "anthropic",
-                status: 400,
+                status: 413,
                 body: format!("prompt is too long: {size} tokens > {} maximum", self.fits),
             });
         }
@@ -1069,9 +1073,10 @@ impl Transport for Mixed {
         };
         match self.calls.fetch_add(1, Ordering::SeqCst) {
             0 => Err(unnamed()),
+            // 413, not 400: only transient statuses are retried after a squeeze.
             1 => Err(brain::BrainError::Api {
                 format: "anthropic",
-                status: 400,
+                status: 413,
                 body: format!("prompt is too long: 99999 tokens > {} maximum", self.limit),
             }),
             2 => Err(unnamed()),
