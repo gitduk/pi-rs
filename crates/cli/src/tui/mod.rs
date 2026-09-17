@@ -1078,14 +1078,19 @@ impl Ui {
         format!("{} ", paint.on(&paint.theme.prompt.color, icon))
     }
     fn say(&mut self, view: &mut View, line: impl Into<String>) {
-        let line = line.into();
-        // A backstop: what repeats most is a refusal, and those go to `flash`.
-        if let Some(last) = view.surface.scrollback.last_mut()
-            && last.repeated(&line)
-        {
+        let text = line.into();
+        if text.is_empty() {
+            view.surface.scrollback.push(Row::notice(String::new()));
             return;
         }
-        view.surface.scrollback.push(Row::notice(line));
+        for line in text.lines() {
+            if let Some(last) = view.surface.scrollback.last_mut()
+                && last.repeated(line)
+            {
+                continue;
+            }
+            view.surface.scrollback.push(Row::notice(line.to_string()));
+        }
     }
 
     // Answer one keypress on the bar row and leave nothing behind.
@@ -5388,6 +5393,24 @@ mod tests {
         ui.say(&mut lane.view, "nothing to rewind to");
         assert_eq!(lane.view.surface.scrollback.len(), 3);
         assert_eq!(shown(&ui, &lane, 2), "nothing to rewind to");
+    }
+    #[test]
+    fn say_splits_multiline_text_into_separate_rows() {
+        let mut ui = test_ui(80, 24);
+        let (_dir, mut lane) = a_running_lane();
+        lane.view.surface.scrollback.clear();
+
+        ui.say(
+            &mut lane.view,
+            "error anthropic 429\nevent: error\ndata: quota exceeded",
+        );
+        assert_eq!(lane.view.surface.scrollback.len(), 3);
+        let (r0, _) = lane.view.surface.scrollback[0].line(0, &ui.paint, &[], 80);
+        let (r1, _) = lane.view.surface.scrollback[1].line(0, &ui.paint, &[], 80);
+        let (r2, _) = lane.view.surface.scrollback[2].line(0, &ui.paint, &[], 80);
+        assert_eq!(r0, "error anthropic 429");
+        assert_eq!(r1, "event: error");
+        assert_eq!(r2, "data: quota exceeded");
     }
 
     // The Normal `L` walks the checkouts in a ring forward; `H` walks it

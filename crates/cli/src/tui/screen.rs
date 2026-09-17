@@ -81,8 +81,11 @@ pub fn fit(line: &str, width: usize) -> Vec<String> {
             }
             continue;
         }
+        if c == '\r' {
+            continue;
+        }
         let w = c.width().unwrap_or(0);
-        if used + w > width && used > 0 {
+        if c == '\n' || (used + w > width && used > 0) {
             out.push(std::mem::take(&mut piece) + RESET);
             if !sgr.is_empty() {
                 piece.push('\x1b');
@@ -91,6 +94,9 @@ pub fn fit(line: &str, width: usize) -> Vec<String> {
                 piece.push('m');
             }
             used = 0;
+            if c == '\n' {
+                continue;
+            }
         }
         piece.push(c);
         used += w;
@@ -214,6 +220,9 @@ fn write_piece(piece: &str, x: u16, y: u16, buf: &mut Buffer) {
         }
         let w = c.width().unwrap_or(0) as u16;
         if w == 0 {
+            if c.is_control() {
+                continue;
+            }
             // A combining mark decorates the cell before it — skipping the
             // blank second cell a wide character leaves behind.
             let mut prev = col;
@@ -478,6 +487,11 @@ mod tests {
     fn a_short_line_is_one_row() {
         assert_eq!(fit("hello", 20), vec!["hello"]);
     }
+    #[test]
+    fn a_line_with_newlines_breaks_into_rows() {
+        assert_eq!(fit("hello\nworld", 20), vec!["hello\x1b[0m", "world"]);
+        assert_eq!(fit("hello\r\nworld", 20), vec!["hello\x1b[0m", "world"]);
+    }
 
     #[test]
     fn a_long_line_breaks_at_the_width() {
@@ -595,6 +609,13 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 10, 1));
         Rows(&["中\u{301}".into()]).render(Rect::new(0, 0, 10, 1), &mut buf);
         assert_eq!(buf[(0, 0)].symbol(), "中\u{301}");
+    }
+    #[test]
+    fn control_characters_do_not_attach_as_combining_marks() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 10, 2));
+        Rows(&["hello\nworld".into()]).render(Rect::new(0, 0, 10, 2), &mut buf);
+        assert_eq!(buf[(4, 0)].symbol(), "o");
+        assert_eq!(buf[(0, 1)].symbol(), "w");
     }
 
     // The window's rows, plain, for a history of `lines` at width `width`.
