@@ -307,12 +307,36 @@ struct ScrollbackRows<'a> {
     front: (usize, usize),
     // Next entry to read from the back, and the row offset inside it.
     back: (usize, usize),
+    // Each row's rendered length at this width, indexed to match `rows`.
+    // Rendered with the same iterator as the walk that follows, so the
+    // per-frame scrollback pass that needs the total pays only the line
+    // cache cost, not a second render.
+    lens: Vec<usize>,
+}
+
+type ScrollbackItem<'a> = (Cow<'a, str>, Option<&'a str>);
+
+struct IndexedScrollbackRows<'a>(ScrollbackRows<'a>);
+
+impl<'a> Iterator for IndexedScrollbackRows<'a> {
+    type Item = (ScrollbackItem<'a>, usize);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next_indexed()
+    }
+}
+
+impl<'a> DoubleEndedIterator for IndexedScrollbackRows<'a> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.0.next_back_indexed()
+    }
 }
 
 impl<'a> ScrollbackRows<'a> {
     fn new(rows: &'a [Row], paint: &'a Paint, done: &'a [Segment], width: usize) -> Self {
         let back = rows.len().saturating_sub(1);
         let back_row = if rows.is_empty() { 0 } else { rows[back].len() };
+        let lens = rows.iter().map(|r| r.len()).collect();
         Self {
             rows,
             width,
@@ -320,61 +344,80 @@ impl<'a> ScrollbackRows<'a> {
             done,
             front: (0, 0),
             back: (back, back_row),
+            lens,
         }
     }
-}
 
-impl<'a> Iterator for ScrollbackRows<'a> {
-    type Item = (Cow<'a, str>, Option<&'a str>);
+    fn indexed(self) -> IndexedScrollbackRows<'a> {
+        IndexedScrollbackRows(self)
+    }
 
-    fn next(&mut self) -> Option<Self::Item> {
-        // Both walks index before they compare their pointers, and on an empty
-        // scrollback `rows[0]` is already out of bounds.
+    fn next_indexed(&mut self) -> Option<(ScrollbackItem<'a>, usize)> {
         if self.rows.is_empty() {
             return None;
         }
         while self.front.0 <= self.back.0 {
-            let entry = &self.rows[self.front.0];
+            let idx = self.front.0;
+            let entry = &self.rows[idx];
             if self.front.0 == self.back.0 {
                 if self.front.1 >= self.back.1 {
                     return None;
                 }
                 let item = entry.line(self.front.1, self.paint, self.done, self.width);
                 self.front.1 += 1;
-                return Some(item);
+                return Some((item, idx));
             }
-            if self.front.1 < entry.len() {
+            if self.front.1 < self.lens[idx] {
                 let item = entry.line(self.front.1, self.paint, self.done, self.width);
                 self.front.1 += 1;
-                return Some(item);
+                return Some((item, idx));
             }
             self.front = (self.front.0 + 1, 0);
         }
         None
     }
-}
 
-impl<'a> DoubleEndedIterator for ScrollbackRows<'a> {
-    fn next_back(&mut self) -> Option<Self::Item> {
+    fn next_back_indexed(&mut self) -> Option<(ScrollbackItem<'a>, usize)> {
         if self.rows.is_empty() {
             return None;
         }
         while self.front.0 <= self.back.0 {
-            let entry = &self.rows[self.back.0];
+            let idx = self.back.0;
+            let entry = &self.rows[idx];
             if self.front.0 == self.back.0 {
                 if self.front.1 >= self.back.1 {
                     return None;
                 }
                 self.back.1 -= 1;
-                return Some(entry.line(self.back.1, self.paint, self.done, self.width));
+                return Some((
+                    entry.line(self.back.1, self.paint, self.done, self.width),
+                    idx,
+                ));
             }
             if self.back.1 > 0 {
                 self.back.1 -= 1;
-                return Some(entry.line(self.back.1, self.paint, self.done, self.width));
+                return Some((
+                    entry.line(self.back.1, self.paint, self.done, self.width),
+                    idx,
+                ));
             }
-            self.back = (self.back.0 - 1, self.rows[self.back.0 - 1].len());
+            self.back = (self.back.0 - 1, self.lens[self.back.0 - 1]);
         }
         None
+    }
+}
+
+impl<'a> Iterator for ScrollbackRows<'a> {
+    type Item = ScrollbackItem<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_indexed().map(|(item, _)| item)
+    }
+}
+
+impl<'a> DoubleEndedIterator for ScrollbackRows<'a> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.next_back_indexed().map(|(item, _)| item)
     }
 }
 
@@ -449,12 +492,16 @@ fn push_tool_row(scrollback: &mut Vec<Row>, row: Row) {
     if let Some(name) = row.tool_name().filter(|&n| !is_modifying_tool(n))
         && row.ok() == Some(true)
     {
-        if let Some(last) = scrollback.last_mut() {
-            if last.push_tool(name.to_string()) {
-                return;
-            }
+        let preview = row.tool_preview().unwrap_or_default().to_string();
+        if let Some(last) = scrollback.last_mut()
+            && last.push_tool(name.to_string(), preview.clone())
+        {
+            return;
         }
-        scrollback.push(Row::tools_summary(vec![name.to_string()]));
+        scrollback.push(Row::tools_summary(vec![row::FoldedTool {
+            name: name.to_string(),
+            preview,
+        }]));
         return;
     }
     scrollback.push(row);
@@ -462,8 +509,6 @@ fn push_tool_row(scrollback: &mut Vec<Row>, row: Row) {
 
 // The transcript as rows, exactly as the live stream would have drawn them:
 // prompts with their sigil, answers as markdown, tool calls as their result
-// lines, reasoning as a foldable block. A rewind rebuilds the screen from
-// this, so the view returns to the point the conversation did.
 // lines, reasoning as a foldable block. A rewind rebuilds the screen from
 // this, so the view returns to the point the conversation did.
 fn scrollback_from(
@@ -883,6 +928,9 @@ struct Ui {
     // A note answering the last keypress, painted, and when it landed. It
     // takes the bar's row for `FLASH` and then goes — see `flash`.
     flash: Option<(String, Instant)>,
+    hovered_scrollback: Option<usize>,
+    row_targets: Vec<Option<usize>>,
+    main_top: u16,
 }
 
 // What to call a checkout. The root answers to its directory name, as
@@ -1050,6 +1098,9 @@ impl Ui {
             done: status::default_done(),
             tabs: Vec::new(),
             flash: None,
+            hovered_scrollback: None,
+            row_targets: Vec::new(),
+            main_top: 0,
         }
     }
 
@@ -1664,18 +1715,43 @@ impl Ui {
         // into several, and counting lines here would put more rows in the
         // area than fit — pushing the newest ones off the bottom, underneath
         // the input, where nothing shows them.
+        let last_tools_idx = lane
+            .view
+            .surface
+            .scrollback
+            .iter()
+            .rposition(|r| r.is_tools_summary());
+        let lane_running = lane.is_running();
+
+        for (idx, row) in lane.view.surface.scrollback.iter_mut().enumerate() {
+            let is_hovered = self.hovered_scrollback == Some(idx);
+            let is_running = lane_running && Some(idx) == last_tools_idx;
+            row.update_hover_state(is_running, is_hovered, self.spinner);
+        }
+
         let scrollback = ScrollbackRows::new(
             &lane.view.surface.scrollback,
             &self.paint,
             &self.done,
             width,
-        );
-        let (rows, scroll) = screen::window(
-            scrollback.chain(live.iter().map(|s| (Cow::Borrowed(s.as_str()), None))),
+        )
+        .indexed()
+        .map(|(item, idx)| (item, Some(idx)));
+
+        let live_stream = live
+            .iter()
+            .map(|s| ((Cow::Borrowed(s.as_str()), None), None));
+
+        let (tagged_rows, scroll) = screen::window_tagged(
+            scrollback.chain(live_stream),
             width,
             hist_view,
             lane.view.surface.scroll,
         );
+
+        let (rows, row_targets): (Vec<String>, Vec<Option<usize>>) =
+            tagged_rows.into_iter().unzip();
+        self.row_targets = row_targets;
 
         lane.view.surface.scroll = scroll;
         let items = self.menu_items(&menu);
@@ -1698,6 +1774,7 @@ impl Ui {
             .split(area);
             let (main, menu_area, bar_area, editor_area) =
                 (chunks[0], chunks[1], chunks[2], chunks[3]);
+            self.main_top = main.y;
             frame.render_widget(Rows(&rows), main);
             if let Some((panel, _)) = &panel {
                 frame.render_widget(Rows(panel), menu_area);
@@ -1728,7 +1805,8 @@ impl Ui {
     // Rows the scrollback renders to at this width, wraps included.
     fn scrollback_rows(&self, view: &View, width: usize) -> usize {
         ScrollbackRows::new(&view.surface.scrollback, &self.paint, &self.done, width)
-            .map(|(text, border)| screen::wrap(border, &text, width).len())
+            .lens
+            .iter()
             .sum()
     }
 
@@ -1772,6 +1850,12 @@ impl Ui {
                 match mouse.kind {
                     MouseEventKind::ScrollUp => self.scroll_view(&mut lane.view, true, 1),
                     MouseEventKind::ScrollDown => self.scroll_view(&mut lane.view, false, 1),
+                    MouseEventKind::Moved | MouseEventKind::Drag(_) => {
+                        self.on_mouse_move(lane, mouse.column, mouse.row);
+                    }
+                    MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                        self.on_mouse_click(lane, mouse.column, mouse.row);
+                    }
                     _ => {}
                 }
                 return Intent::None;
@@ -2135,6 +2219,48 @@ impl Ui {
         } else {
             view.surface.scroll.saturating_sub(step)
         };
+        // The row under the mouse changed: the old hover index no longer
+        // names the screen position, so drop it until the next move.
+        self.hovered_scrollback = None;
+    }
+
+    pub fn has_hover(&self) -> bool {
+        self.hovered_scrollback.is_some()
+    }
+
+    /// The scrollback row the mouse is over, if it is an expandable one.
+    fn hovered_row(&self, lane: &Lane, row: u16) -> Option<usize> {
+        if row < self.main_top {
+            return None;
+        }
+        let idx = self
+            .row_targets
+            .get((row - self.main_top) as usize)
+            .copied()
+            .flatten()?;
+        lane.view
+            .surface
+            .scrollback
+            .get(idx)
+            .filter(|r| r.is_expandable())
+            .map(|_| idx)
+    }
+
+    fn on_mouse_move(&mut self, lane: &mut Lane, _col: u16, row: u16) {
+        self.hovered_scrollback = self.hovered_row(lane, row);
+    }
+
+    fn on_mouse_click(&mut self, lane: &mut Lane, _col: u16, row: u16) {
+        if let Some(idx) = self.hovered_row(lane, row)
+            && lane
+                .view
+                .surface
+                .scrollback
+                .get_mut(idx)
+                .is_some_and(|r| r.toggle_expand())
+        {
+            lane.view.surface.counted = None;
+        }
     }
 
     // A page keeps 4 rows of context at the edge, the way the upstream pi
@@ -3034,7 +3160,7 @@ impl Tui {
                     Some(done) = done_rx.recv() => Wake::Turn(done),
                     // Only while something runs, or a flash is up: an idle loop
                     // waking ten times a second is a spinner with nothing to spin.
-                    _ = tick.tick(), if anywhere || self.ui.flash.is_some() => {
+                    _ = tick.tick(), if anywhere || self.ui.flash.is_some() || self.ui.has_hover() => {
                         self.ui.spinner += 1;
                         Wake::Nothing
                     }
@@ -4037,6 +4163,18 @@ mod tests {
         let mut ui = test_ui(80, 24);
         let (_dir, mut lane) = a_running_lane();
 
+        fn mouse_event(
+            kind: crossterm::event::MouseEventKind,
+            row: u16,
+        ) -> crossterm::event::Event {
+            crossterm::event::Event::Mouse(crossterm::event::MouseEvent {
+                kind,
+                column: 5,
+                row,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            })
+        }
+
         fn run_tool(
             ui: &mut super::Ui,
             lane: &mut crate::lane::Lane,
@@ -4084,7 +4222,10 @@ mod tests {
             .line(0, &ui.paint, &[], 80)
             .0;
         assert!(
-            row_text.contains("Ran 2 tools (grep, read)"),
+            row_text.contains(&format!(
+                "Ran read file content {} 2 tools",
+                icons::ELLIPSIS
+            )),
             "got: {row_text}"
         );
 
@@ -4097,6 +4238,38 @@ mod tests {
             .line(0, &ui.paint, &[], 80)
             .0;
         assert!(edit_head.contains("edit"), "got: {edit_head}");
+
+        // Mouse click on tools summary expands it
+        ui.flush(&mut lane);
+        assert_eq!(lane.view.surface.scrollback[0].len(), 1);
+        ui.key(
+            &mut lane,
+            mouse_event(
+                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                0,
+            ),
+            false,
+        );
+        assert_eq!(lane.view.surface.scrollback[0].len(), 3);
+
+        // Hover test
+        ui.key(
+            &mut lane,
+            mouse_event(crossterm::event::MouseEventKind::Moved, 0),
+            false,
+        );
+        assert!(ui.has_hover());
+
+        // Mouse click again folds it back
+        ui.key(
+            &mut lane,
+            mouse_event(
+                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                0,
+            ),
+            false,
+        );
+        assert_eq!(lane.view.surface.scrollback[0].len(), 1);
     }
 
     // The screen opens with what this run is standing on. It used to be said

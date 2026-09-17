@@ -11,8 +11,6 @@ use crate::{Ctx, EditError, Tier, Tool, ToolError, ToolOutput};
 const ECHO_LIMIT: usize = 2_000;
 // Rows kept at each end of a hunk once an echo is past ECHO_LIMIT.
 const ECHO_ENDS: usize = 3;
-// Diff rows the display carries for one edit.
-const SKETCH_LIMIT: usize = 24;
 // Rows a deletion lists before the rest are counted instead.
 const DELETED_ROWS: usize = 40;
 
@@ -477,15 +475,10 @@ fn sketch(path: &str, applied: &Applied) -> String {
         .map(|(_, n, _)| *n)
         .max()
         .map_or(1, |n| n.to_string().len());
-    let mut rows: Vec<String> = row_lines
+    let rows: Vec<String> = row_lines
         .iter()
         .map(|(sign, n, text)| format!("{n:>width$} {sign} {text}"))
         .collect();
-    if rows.len() > SKETCH_LIMIT {
-        let more = rows.len() - SKETCH_LIMIT;
-        rows.truncate(SKETCH_LIMIT);
-        rows.push(format!("… {more} more"));
-    }
     std::iter::once(format!("{path} +{plus} -{minus}"))
         .chain(rows)
         .collect::<Vec<_>>()

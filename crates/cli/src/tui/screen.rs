@@ -9,6 +9,7 @@
 
 use std::borrow::Cow;
 use std::io::Stdout;
+use std::io::Write;
 use std::str::Chars;
 
 use crossterm::event::{
@@ -156,28 +157,37 @@ pub fn usable(width: u16) -> usize {
 /// Each line carries the border its wraps repeat, if it has one: a said
 /// line's rule must run down every row it wraps to, or the bar is cut at the
 /// first one. See `wrap`.
+pub fn window_tagged<'a, T: Clone>(
+    lines: impl DoubleEndedIterator<Item = ((Cow<'a, str>, Option<&'a str>), T)>,
+    width: usize,
+    room: usize,
+    scroll: usize,
+) -> (Vec<(String, T)>, usize) {
+    let want = room + scroll;
+    let mut back: Vec<(String, T)> = Vec::new();
+    for ((line, border), tag) in lines.rev() {
+        if back.len() >= want {
+            break;
+        }
+        for piece in wrap(border, &line, width).into_iter().rev() {
+            back.push((piece, tag.clone()));
+        }
+    }
+    let scroll = scroll.min(back.len().saturating_sub(room));
+    let mut rows: Vec<(String, T)> = back.into_iter().skip(scroll).take(room).collect();
+    rows.reverse();
+    (rows, scroll)
+}
+
+#[cfg(test)]
 pub fn window<'a>(
     lines: impl DoubleEndedIterator<Item = (Cow<'a, str>, Option<&'a str>)>,
     width: usize,
     room: usize,
     scroll: usize,
 ) -> (Vec<String>, usize) {
-    let want = room + scroll;
-    // Newest row first, so the walk can stop without knowing the total.
-    let mut back: Vec<String> = Vec::new();
-    for (line, border) in lines.rev() {
-        if back.len() >= want {
-            break;
-        }
-        back.extend(wrap(border, &line, width).into_iter().rev());
-    }
-    // Clamp so the window never starts before the first row; when the walk
-    // reached the top (back has fewer rows than want), this is the only place
-    // the scroll can be corrected.
-    let scroll = scroll.min(back.len().saturating_sub(room));
-    let mut rows: Vec<String> = back.into_iter().skip(scroll).take(room).collect();
-    rows.reverse();
-    (rows, scroll)
+    let (rows, scroll) = window_tagged(lines.map(|l| (l, ())), width, room, scroll);
+    (rows.into_iter().map(|(r, ())| r).collect(), scroll)
 }
 
 /// Break a line into pieces that each occupy exactly one terminal row — a
@@ -290,7 +300,18 @@ fn enter(stdout: &mut Stdout) -> std::io::Result<()> {
         EnterAlternateScreen,
         EnableBracketedPaste,
         EnableMouseCapture
-    )
+    )?;
+    stdout.write_all(b"\x1b[?1003h")?;
+    stdout.flush()
+}
+
+// All-motion mouse reports every move, which is what hover needs; the
+// normal capture mode only reports press and release. Off again whenever
+// the surface is given back, in the panic hook and in `leave`.
+fn disable_all_motion() {
+    let mut out = std::io::stdout();
+    let _ = out.write_all(b"\x1b[?1003l");
+    let _ = out.flush();
 }
 
 impl Screen {
@@ -309,6 +330,7 @@ impl Screen {
                 DisableBracketedPaste,
                 DisableMouseCapture
             );
+            disable_all_motion();
             prior(info);
         }));
         let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
@@ -428,6 +450,7 @@ impl Screen {
             DisableBracketedPaste,
             DisableMouseCapture
         );
+        disable_all_motion();
         let _ = crossterm::terminal::disable_raw_mode();
     }
 

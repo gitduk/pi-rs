@@ -1,6 +1,6 @@
 use std::fmt::Write as _;
 use std::io::{IsTerminal, Write};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 
 use agent::Event;
 use anyhow::{Result, bail};
@@ -295,6 +295,12 @@ impl PartialEq for Style {
 }
 
 impl Eq for Style {}
+/// A row the mouse is over: bold underlined, so it reads as a thing to press.
+pub static HOVER: LazyLock<Style> = LazyLock::new(|| Style {
+    color: None,
+    sgr: vec![Attr::Bold, Attr::Underline],
+    rendered: OnceLock::new(),
+});
 
 impl Style {
     fn color(c: Color) -> Self {
@@ -689,6 +695,15 @@ impl Paint {
             format!("\x1b[{codes}m{body}{RESET}")
         }
     }
+
+    /// The style a hovered row wears, and the muted one a static row does.
+    pub fn hover_style(&self, hovered: bool) -> &Style {
+        if hovered && self.color {
+            &HOVER
+        } else {
+            &self.theme.muted
+        }
+    }
 }
 
 /// What a run has cost, in the one wording every place that says it uses.
@@ -887,16 +902,18 @@ pub fn render_markdown(text: &str, paint: &Paint) -> Vec<String> {
 ///
 /// Newline-separated, because the caller decides what a row is: the interactive
 /// surface repaints a region and has to hand them over one at a time.
+pub const SKETCH_LIMIT: usize = 24;
+/// The preview rows a folded result shows: the head plus the sketch limit.
+pub const SKETCHED_ROWS: usize = 1 + SKETCH_LIMIT;
+
 /// The rows a finished tool result takes on screen: its head, clipped to fit,
 /// and under it whatever a tool sketched — an edit's diff rows.
-///
-/// One function, called from both the live stream and the rebuild from the
-/// transcript. They used to render this differently, which is what a second
-/// producer buys you.
 pub fn result_rows(
     is_error: bool,
     name: &str,
     preview: &str,
+    expanded: bool,
+    hovered: bool,
     p: &Paint,
     width: usize,
 ) -> Vec<String> {
@@ -911,7 +928,8 @@ pub fn result_rows(
         "{mark} {name} {}",
         p.on(&p.theme.muted, &clip(head, room))
     )];
-    out.extend(rest.lines().map(|row| {
+    let diff_lines: Vec<&str> = rest.lines().collect();
+    let diff_style = |row: &str| {
         // The row number leads each diff row, so the mark is the second word;
         // colour beats reading the diff text.
         let style = match row.split_whitespace().nth(1) {
@@ -920,7 +938,21 @@ pub fn result_rows(
             _ => &p.theme.muted,
         };
         p.on(style, &format!("  {}", clip(row, room)))
-    }));
+    };
+    let footer = |text: &str| p.on(p.hover_style(hovered), text);
+    if diff_lines.len() > SKETCH_LIMIT && !expanded {
+        out.extend(diff_lines[..SKETCH_LIMIT].iter().copied().map(&diff_style));
+        out.push(footer(&format!(
+            "  {} {} more",
+            icons::ELLIPSIS,
+            diff_lines.len() - SKETCH_LIMIT
+        )));
+    } else {
+        out.extend(diff_lines.iter().copied().map(&diff_style));
+        if diff_lines.len() > SKETCH_LIMIT {
+            out.push(footer("  ▴ collapse"));
+        }
+    }
     out
 }
 
@@ -939,7 +971,7 @@ pub fn describe(event: &Event, p: &Paint, width: usize) -> Option<String> {
             is_error,
             preview,
             ..
-        } => result_rows(*is_error, name, preview, p, width).join("\n"),
+        } => result_rows(*is_error, name, preview, false, false, p, width).join("\n"),
         Event::ToolDenied { name, reason, .. } => {
             format!(
                 "{} {name} {}",

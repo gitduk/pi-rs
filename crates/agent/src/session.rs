@@ -394,12 +394,11 @@ pub fn is_stopped_call(r: &ToolResult) -> bool {
 const STOPPED_UNKNOWN: &str = "The previous run ended before it finished, for an unknown \
      reason. Treat the request it was working on as unresolved; the message below is what to act on.";
 fn stopped_note(err: Option<&str>) -> String {
-    let why = match err.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(e) => format!("with an error: {e}"),
-        None => "for an unknown reason".to_string(),
+    let Some(e) = err.map(str::trim).filter(|s| !s.is_empty()) else {
+        return STOPPED_UNKNOWN.to_string();
     };
     format!(
-        "The previous run ended before it finished, {why}. \
+        "The previous run ended before it finished, with an error: {e}. \
          Treat the request it was working on as unresolved; the message below is what to act on."
     )
 }

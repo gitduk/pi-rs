@@ -16,10 +16,32 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 
 use brain::message::{ToolResult, ToolResultContent};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::icons;
 use crate::render::{self, Paint};
 use crate::status::{self, Segment, Snapshot};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FoldedTool {
+    pub name: String,
+    pub preview: String,
+}
+
+impl FoldedTool {
+    pub fn desc(&self) -> String {
+        let head = self.preview.lines().next().unwrap_or("").trim();
+        if head.is_empty() {
+            self.name.clone()
+        } else if head.starts_with(&self.name)
+            && head[self.name.len()..].starts_with(char::is_whitespace)
+        {
+            head.to_string()
+        } else {
+            format!("{} {head}", self.name)
+        }
+    }
+}
 
 pub struct Row(Kind);
 
@@ -59,6 +81,11 @@ enum Kind {
         ok: bool,
         name: String,
         preview: String,
+        // The row count, so expandability and toggle don't re-walk the
+        // preview string on every mouse move.
+        preview_lines: usize,
+        expanded: bool,
+        hovered: bool,
         painted: RefCell<Option<(usize, Vec<String>)>>,
     },
     // What a finished run left behind, kept as its numbers rather than as the
@@ -76,8 +103,12 @@ enum Kind {
     },
     // A bundle of read-only tool results folded together into a summary row.
     ToolsSummary {
-        tools: Vec<String>,
-        painted: RefCell<Option<String>>,
+        tools: Vec<FoldedTool>,
+        folded: bool,
+        running: bool,
+        hovered: bool,
+        spinner: usize,
+        painted: RefCell<Option<(usize, Vec<String>)>>,
     },
 }
 
@@ -127,21 +158,93 @@ impl Row {
     }
 
     /// A bundle of read-only tool results folded together into a summary row.
-    pub fn tools_summary(tools: Vec<String>) -> Self {
+    pub fn tools_summary(tools: Vec<FoldedTool>) -> Self {
         Row(Kind::ToolsSummary {
             tools,
+            folded: true,
+            running: false,
+            hovered: false,
+            spinner: 0,
             painted: RefCell::new(None),
         })
     }
 
-    /// Add a tool name to a tools summary row, if it is one.
-    pub fn push_tool(&mut self, name: String) -> bool {
-        if let Kind::ToolsSummary { tools, painted } = &mut self.0 {
-            tools.push(name);
+    /// Add a tool to a tools summary row, if it is one.
+    pub fn push_tool(&mut self, name: String, preview: String) -> bool {
+        if let Kind::ToolsSummary { tools, painted, .. } = &mut self.0 {
+            tools.push(FoldedTool { name, preview });
             *painted.borrow_mut() = None;
             true
         } else {
             false
+        }
+    }
+
+    /// Whether this row is a folded tools summary row.
+    pub fn is_tools_summary(&self) -> bool {
+        matches!(&self.0, Kind::ToolsSummary { .. })
+    }
+
+    /// Whether this row is an expandable row.
+    pub fn is_expandable(&self) -> bool {
+        match &self.0 {
+            Kind::ToolsSummary { .. } => true,
+            Kind::Result { preview_lines, .. } => *preview_lines > render::SKETCHED_ROWS,
+            _ => false,
+        }
+    }
+
+    /// Toggle expand state, returning true if toggled.
+    pub fn toggle_expand(&mut self) -> bool {
+        match &mut self.0 {
+            Kind::ToolsSummary {
+                folded, painted, ..
+            } => {
+                *folded = !*folded;
+                *painted.borrow_mut() = None;
+                true
+            }
+            Kind::Result {
+                preview_lines,
+                expanded,
+                painted,
+                ..
+            } if *preview_lines > render::SKETCHED_ROWS => {
+                *expanded = !*expanded;
+                *painted.borrow_mut() = None;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Update running, hovered, and spinner state for expandable rows.
+    pub fn update_hover_state(&mut self, running: bool, hovered: bool, spin: usize) {
+        match &mut self.0 {
+            Kind::ToolsSummary {
+                running: r,
+                hovered: h,
+                spinner: s,
+                painted,
+                ..
+            } => {
+                if *r != running || *h != hovered || (*r || *h) && *s != spin {
+                    *r = running;
+                    *h = hovered;
+                    *s = spin;
+                    *painted.borrow_mut() = None;
+                }
+            }
+            Kind::Result {
+                hovered: h,
+                preview_lines,
+                painted,
+                ..
+            } if *preview_lines > render::SKETCHED_ROWS && *h != hovered => {
+                *h = hovered;
+                *painted.borrow_mut() = None;
+            }
+            _ => {}
         }
     }
 
@@ -157,10 +260,15 @@ impl Row {
     /// A tool result the screen already has in parts — the live path, which
     /// never holds a `ToolResult`.
     pub fn result(ok: bool, name: impl Into<String>, preview: impl Into<String>) -> Self {
+        let preview = preview.into();
+        let preview_lines = preview.lines().count();
         Row(Kind::Result {
             ok,
             name: name.into(),
-            preview: preview.into(),
+            preview,
+            preview_lines,
+            expanded: false,
+            hovered: false,
             painted: RefCell::new(None),
         })
     }
@@ -191,6 +299,14 @@ impl Row {
     pub fn tool_name(&self) -> Option<&str> {
         match &self.0 {
             Kind::Result { name, .. } => Some(name),
+            _ => None,
+        }
+    }
+
+    /// The tool's preview if this row is a tool result.
+    pub fn tool_preview(&self) -> Option<&str> {
+        match &self.0 {
+            Kind::Result { preview, .. } => Some(preview),
             _ => None,
         }
     }
@@ -246,16 +362,32 @@ impl Row {
     /// How many screen rows this renders to.
     pub fn len(&self) -> usize {
         match &self.0 {
-            Kind::Notice { .. }
-            | Kind::Said { .. }
-            | Kind::Tally(_)
-            | Kind::ToolsSummary { .. } => 1,
-            Kind::Result { preview, .. } => preview.lines().count().max(1),
+            Kind::Notice { .. } | Kind::Said { .. } | Kind::Tally(_) => 1,
+            Kind::Result {
+                preview_lines,
+                expanded,
+                ..
+            } => {
+                if *preview_lines <= render::SKETCHED_ROWS {
+                    (*preview_lines).max(1)
+                } else if *expanded {
+                    *preview_lines + 1
+                } else {
+                    render::SKETCHED_ROWS + 1
+                }
+            }
             Kind::Reasoning { lines, folded, .. } => {
                 if *folded {
                     1
                 } else {
                     lines.len()
+                }
+            }
+            Kind::ToolsSummary { tools, folded, .. } => {
+                if *folded {
+                    1
+                } else {
+                    1 + tools.len()
                 }
             }
         }
@@ -290,20 +422,23 @@ impl Row {
                 ok,
                 name,
                 preview,
+                expanded,
+                hovered,
                 painted,
+                ..
             } => {
                 let mut painted = painted.borrow_mut();
                 let rows = match &mut *painted {
                     Some((w, rows)) if *w == width => rows,
                     slot => {
-                        let rows = render::result_rows(!*ok, name, preview, paint, width);
+                        let rows = render::result_rows(
+                            !*ok, name, preview, *expanded, *hovered, paint, width,
+                        );
                         &mut slot.insert((width, rows)).1
                     }
                 };
-                // A `RefCell` cannot lend its contents out past the guard, and
-                // one row is a line of text: cloning it is the cheap half of
-                // what repainting the whole result would cost.
-                (Cow::Owned(rows[i].clone()), None)
+                let text = rows.get(i).cloned().unwrap_or_default();
+                (Cow::Owned(text), None)
             }
             Kind::Reasoning { lines, folded, .. } => {
                 let text = if *folded {
@@ -315,12 +450,26 @@ impl Row {
                 };
                 (text, None)
             }
-            Kind::ToolsSummary { tools, painted } => {
+            Kind::ToolsSummary {
+                tools,
+                folded,
+                running,
+                hovered,
+                spinner,
+                painted,
+            } => {
                 let mut painted = painted.borrow_mut();
-                if painted.is_none() {
-                    *painted = Some(tools_summary_line(tools, paint));
-                }
-                (Cow::Owned(painted.as_ref().unwrap().clone()), None)
+                let rows = match &mut *painted {
+                    Some((w, rows)) if *w == width => rows,
+                    slot => {
+                        let rows = tools_summary_rows(
+                            tools, *folded, *running, *hovered, *spinner, paint, width,
+                        );
+                        &mut slot.insert((width, rows)).1
+                    }
+                };
+                let text = rows.get(i).cloned().unwrap_or_default();
+                (Cow::Owned(text), None)
             }
         }
     }
@@ -406,25 +555,100 @@ fn thinking_summary(n: usize) -> String {
     format!("thinking{}{n} line{s}", icons::PART_SEP)
 }
 
-/// Format a folded tool summary line, e.g. "▶ Ran 18 tools (grep, read)".
-pub fn tools_summary_line(tools: &[String], paint: &Paint) -> String {
+fn clip_to(s: &str, max_cols: usize) -> &str {
+    let mut used = 0;
+    for (i, c) in s.char_indices() {
+        let w = UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + w > max_cols {
+            return s[..i].trim_end();
+        }
+        used += w;
+    }
+    s.trim_end()
+}
+
+pub const UNFOLD_MARK: &str = "▼";
+pub const HOVER_FRAMES: &[&str] = &["▶", "▸", "▹", "▸"];
+
+pub fn tools_summary_header(
+    tools: &[FoldedTool],
+    folded: bool,
+    running: bool,
+    hovered: bool,
+    spinner: usize,
+    paint: &Paint,
+    width: usize,
+) -> String {
+    let mark = if !folded {
+        UNFOLD_MARK
+    } else if running {
+        icons::SPINNER_FRAMES[spinner % icons::SPINNER_FRAMES.len()]
+    } else if hovered {
+        HOVER_FRAMES[spinner % HOVER_FRAMES.len()]
+    } else {
+        icons::FOLD_MARK
+    };
+
+    let prefix = format!("{mark} Ran ");
+    if tools.is_empty() {
+        let text = format!("{prefix}0 tools");
+        return paint.on(paint.hover_style(hovered), &text);
+    }
+
     let count = tools.len();
     let s = if count == 1 { "" } else { "s" };
-    let mut distinct = Vec::new();
-    for t in tools {
-        if !distinct.contains(&t.as_str()) {
-            distinct.push(t.as_str());
-        }
-    }
-    let detail = if distinct.is_empty() {
-        String::new()
+    let count_suffix = format!("{count} tool{s}");
+    let desc = tools[count - 1].desc();
+    let prefix_w = UnicodeWidthStr::width(prefix.as_str());
+    let count_w = UnicodeWidthStr::width(count_suffix.as_str());
+    // The ellipsis with a space each side, plus a column of air before the
+    // terminal edge clips the line.
+    let sep_w = 1 + UnicodeWidthStr::width(icons::ELLIPSIS) + 1 + 1;
+    let fixed_w = prefix_w + count_w + sep_w;
+    let room = width.saturating_sub(fixed_w);
+    let budget = room.clamp(8, 50);
+    let desc_w = UnicodeWidthStr::width(desc.as_str());
+    let text = if desc_w > budget {
+        let cut = clip_to(&desc, budget);
+        format!("{prefix}{cut} {} {count_suffix}", icons::ELLIPSIS)
     } else {
-        format!(" ({})", distinct.join(", "))
+        format!("{prefix}{desc} {} {count_suffix}", icons::ELLIPSIS)
     };
-    paint.on(
-        &paint.theme.muted,
-        &format!("{} Ran {count} tool{s}{detail}", icons::FOLD_MARK),
-    )
+    paint.on(paint.hover_style(hovered), &text)
+}
+
+pub fn tools_summary_rows(
+    tools: &[FoldedTool],
+    folded: bool,
+    running: bool,
+    hovered: bool,
+    spinner: usize,
+    paint: &Paint,
+    width: usize,
+) -> Vec<String> {
+    let header = tools_summary_header(tools, folded, running, hovered, spinner, paint, width);
+    if folded {
+        return vec![header];
+    }
+    let mut rows = Vec::with_capacity(1 + tools.len());
+    rows.push(header);
+    let mark = paint.on(&paint.theme.status.ok, icons::DONE_MARK);
+    let room = width.saturating_sub(4).max(10);
+    for tool in tools {
+        let desc = tool.desc();
+        let clipped = clip_to(&desc, room);
+        rows.push(format!(
+            "  {mark} {}",
+            paint.on(&paint.theme.muted, clipped)
+        ));
+    }
+    rows
+}
+
+/// Format a folded tool summary line, e.g. "▶ Ran read a.rs ... 18 tools".
+#[cfg(test)]
+pub fn tools_summary_line(tools: &[FoldedTool], paint: &Paint, width: usize) -> String {
+    tools_summary_header(tools, true, false, false, 0, paint, width)
 }
 
 #[cfg(test)]
@@ -480,5 +704,187 @@ mod said_tests {
             unicode_width::UnicodeWidthStr::width(icons::SAID_RULE),
             unicode_width::UnicodeWidthStr::width(icon.as_str()),
         );
+    }
+}
+
+#[cfg(test)]
+mod tools_summary_tests {
+    use super::*;
+
+    fn tool(name: &str, preview: &str) -> FoldedTool {
+        FoldedTool {
+            name: name.to_string(),
+            preview: preview.to_string(),
+        }
+    }
+
+    #[test]
+    fn single_tool_summary() {
+        let paint = Paint::new(false);
+        let tools = vec![tool("read", "crates/agent/src/session.rs")];
+        let line = tools_summary_line(&tools, &paint, 80);
+        assert_eq!(
+            line,
+            format!(
+                "{} Ran read crates/agent/src/session.rs {} 1 tool",
+                icons::FOLD_MARK,
+                icons::ELLIPSIS
+            )
+        );
+    }
+
+    #[test]
+    fn multiple_tools_shows_latest() {
+        let paint = Paint::new(false);
+        let mut tools: Vec<FoldedTool> = (0..11)
+            .map(|i| tool("read", &format!("file_{i}.rs")))
+            .collect();
+        tools.push(tool("read", "crates/agent/src/session.rs"));
+        let line = tools_summary_line(&tools, &paint, 80);
+        assert_eq!(
+            line,
+            format!(
+                "{} Ran read crates/agent/src/session.rs {} 12 tools",
+                icons::FOLD_MARK,
+                icons::ELLIPSIS
+            )
+        );
+
+        tools.push(tool("read", "/path/to/other.rs"));
+        let line = tools_summary_line(&tools, &paint, 80);
+        assert_eq!(
+            line,
+            format!(
+                "{} Ran read /path/to/other.rs {} 13 tools",
+                icons::FOLD_MARK,
+                icons::ELLIPSIS
+            )
+        );
+    }
+
+    #[test]
+    fn long_tool_call_is_truncated() {
+        let paint = Paint::new(false);
+        let mut tools: Vec<FoldedTool> = (0..13)
+            .map(|i| tool("read", &format!("file_{i}.rs")))
+            .collect();
+        tools.push(tool(
+            "bash",
+            "curl https://xxxx.xxxx.com/a/long/url/and/much/more/parameters/and/data",
+        ));
+        let line = tools_summary_line(&tools, &paint, 80);
+        assert!(
+            line.contains(&format!(
+                "{} Ran bash curl https://xxxx.xxxx.com/a/long/url",
+                icons::FOLD_MARK
+            )),
+            "got: {line}"
+        );
+        assert!(
+            line.ends_with(&format!("{} 14 tools", icons::ELLIPSIS)),
+            "got: {line}"
+        );
+    }
+
+    #[test]
+    fn empty_preview_falls_back_to_tool_name() {
+        let paint = Paint::new(false);
+        let tools = vec![tool("bash", "")];
+        let line = tools_summary_line(&tools, &paint, 80);
+        assert_eq!(
+            line,
+            format!("{} Ran bash {} 1 tool", icons::FOLD_MARK, icons::ELLIPSIS)
+        );
+    }
+
+    #[test]
+    fn multiline_preview_uses_first_line() {
+        let paint = Paint::new(false);
+        let tools = vec![tool(
+            "bash",
+            "git status\nnothing to commit\nworking tree clean",
+        )];
+        let line = tools_summary_line(&tools, &paint, 80);
+        assert_eq!(
+            line,
+            format!(
+                "{} Ran bash git status {} 1 tool",
+                icons::FOLD_MARK,
+                icons::ELLIPSIS
+            )
+        );
+    }
+
+    #[test]
+    fn running_tool_shows_spinner_animation() {
+        let paint = Paint::new(false);
+        let tools = vec![tool("read", "a.rs")];
+        let frame0 = tools_summary_header(&tools, true, true, false, 0, &paint, 80);
+        assert!(frame0.starts_with(&format!("{} Ran", icons::SPINNER_FRAMES[0])));
+        let frame1 = tools_summary_header(&tools, true, true, false, 1, &paint, 80);
+        assert!(frame1.starts_with(&format!("{} Ran", icons::SPINNER_FRAMES[1])));
+    }
+
+    #[test]
+    fn hovered_tool_shows_hover_animation() {
+        let paint = Paint::new(false);
+        let tools = vec![tool("read", "a.rs")];
+        let h0 = tools_summary_header(&tools, true, false, true, 0, &paint, 80);
+        assert!(h0.starts_with(&format!("{} Ran", HOVER_FRAMES[0])));
+        let h1 = tools_summary_header(&tools, true, false, true, 1, &paint, 80);
+        assert!(h1.starts_with(&format!("{} Ran", HOVER_FRAMES[1])));
+    }
+
+    #[test]
+    fn unfolded_tools_summary_shows_all_tools() {
+        let paint = Paint::new(false);
+        let tools = vec![
+            tool("read", "crates/agent/src/session.rs"),
+            tool("grep", "match 1"),
+        ];
+        let mut row = Row::tools_summary(tools);
+        assert_eq!(row.len(), 1);
+
+        assert!(row.toggle_expand());
+        assert_eq!(row.len(), 3);
+
+        let (head, _) = row.line(0, &paint, &[], 80);
+        assert!(head.starts_with(&format!("{UNFOLD_MARK} Ran")));
+        assert!(head.contains("2 tools"));
+
+        let (t0, _) = row.line(1, &paint, &[], 80);
+        assert!(t0.contains(&format!(
+            "{} read crates/agent/src/session.rs",
+            icons::DONE_MARK
+        )));
+
+        let (t1, _) = row.line(2, &paint, &[], 80);
+        assert!(t1.contains(&format!("{} grep match 1", icons::DONE_MARK)));
+
+        assert!(row.toggle_expand());
+        assert_eq!(row.len(), 1);
+        let (folded_head, _) = row.line(0, &paint, &[], 80);
+        assert!(folded_head.starts_with(&format!("{} Ran", icons::FOLD_MARK)));
+    }
+
+    #[test]
+    fn result_with_many_diff_lines_expands_and_collapses() {
+        let paint = Paint::new(false);
+        let mut preview = "crates/foo.rs +30 -0".to_string();
+        for i in 1..=30 {
+            preview.push_str(&format!("\n  {i} + line {i}"));
+        }
+        let mut row = Row::result(true, "edit", preview);
+        assert_eq!(row.len(), 26);
+        let (last_folded, _) = row.line(25, &paint, &[], 80);
+        assert!(last_folded.contains(&format!("{} 6 more", icons::ELLIPSIS)));
+
+        assert!(row.toggle_expand());
+        assert_eq!(row.len(), 32);
+        let (last_expanded, _) = row.line(31, &paint, &[], 80);
+        assert!(last_expanded.contains("collapse"));
+
+        assert!(row.toggle_expand());
+        assert_eq!(row.len(), 26);
     }
 }
