@@ -1514,10 +1514,17 @@ impl Ui {
         let mut rows = Vec::new();
 
         if let Some(t) = lane.view.state.tools.last() {
-            // A non-modifying call folds into a ✓ summary row on landing, so
-            // the live row wears the same check; a modifying one never folds.
+            // The in-flight call wears a spinner; the summary row that
+            // replaces it on landing wears the check, so the live row
+            // matches the shape it will fold into.
             let name = if is_modifying_tool(&t.name) {
                 t.name.clone()
+            } else if t.done.is_none() {
+                format!(
+                    "{} {}",
+                    icons::SPINNER_FRAMES[self.spinner % icons::SPINNER_FRAMES.len()],
+                    t.name
+                )
             } else {
                 format!("{} {}", icons::DONE_MARK, t.name)
             };
@@ -4234,10 +4241,7 @@ mod tests {
             .line(0, &ui.paint, &[], 80)
             .0;
         assert!(
-            row_text.contains(&format!(
-                "Ran read file content {} 2 tools",
-                icons::ELLIPSIS
-            )),
+            row_text.contains(&format!("read file content {}2 tools", icons::ELLIPSIS)),
             "got: {row_text}"
         );
 
@@ -4302,7 +4306,7 @@ mod tests {
         let (line, _) = summary.line(0, &ui.paint, &[], 80);
         let line = crate::render::strip_ansi(&line);
         assert!(
-            line.starts_with(&format!("{} Ran", icons::DONE_MARK)),
+            line.starts_with(&format!("{} read", icons::DONE_MARK)),
             "the folded row wears the green check once its tools land: {line}"
         );
         assert!(

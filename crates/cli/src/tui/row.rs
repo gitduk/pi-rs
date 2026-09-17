@@ -581,49 +581,53 @@ fn clip_to(s: &str, max_cols: usize) -> &str {
 
 pub fn tools_summary_header(
     tools: &[FoldedTool],
-    folded: bool,
     running: bool,
     hovered: bool,
     spinner: usize,
     paint: &Paint,
     width: usize,
 ) -> String {
-    // A finished batch wears a green check, an in-flight one spins, and an
-    // unfolded row shows its expand mark — hover never animates the mark.
-    let mark = if !folded {
-        icons::UNFOLD_MARK.to_string()
-    } else if running {
+    // A finished batch wears a green check, an in-flight one spins. Each
+    // wears its own span: the check keeps its green under hover (bold added
+    // rather than the colour swapped), and the body's reset cannot cut the
+    // dim mid-line. One tool is its own full line; a batch keeps only the
+    // latest tool's description.
+    let body = match tools {
+        [] => " 0 tools".to_string(),
+        [single] => {
+            let room = width.saturating_sub(2).max(10);
+            format!(" {}", clip_to(&single.desc(), room))
+        }
+        _ => {
+            let count = tools.len();
+            let count_suffix = format!("{count} tools");
+            let desc = tools[count - 1].desc();
+            let count_w = UnicodeWidthStr::width(count_suffix.as_str());
+            // The ellipsis is glued to the count — `…12 tools` — with a
+            // space before it and a column of air before the terminal
+            // edge. One leading space after the check.
+            let sep_w = 1 + UnicodeWidthStr::width(icons::ELLIPSIS) + 1;
+            let fixed_w = 1 + count_w + sep_w;
+            let room = width.saturating_sub(fixed_w);
+            let budget = room.clamp(8, 50);
+            let desc_w = UnicodeWidthStr::width(desc.as_str());
+            let shown = if desc_w > budget {
+                clip_to(&desc, budget)
+            } else {
+                &desc
+            };
+            format!(" {shown} {}{count_suffix}", icons::ELLIPSIS)
+        }
+    };
+    let mark = if running {
         icons::SPINNER_FRAMES[spinner % icons::SPINNER_FRAMES.len()].to_string()
     } else {
-        paint.on(&paint.theme.status.ok, icons::DONE_MARK)
+        paint.on_hovered(hovered, &paint.theme.status.ok, icons::DONE_MARK)
     };
-
-    let prefix = format!("{mark} Ran ");
-    if tools.is_empty() {
-        let text = format!("{prefix}0 tools");
-        return paint.on(paint.hover_style(hovered), &text);
-    }
-
-    let count = tools.len();
-    let s = if count == 1 { "" } else { "s" };
-    let count_suffix = format!("{count} tool{s}");
-    let desc = tools[count - 1].desc();
-    let prefix_w = UnicodeWidthStr::width(prefix.as_str());
-    let count_w = UnicodeWidthStr::width(count_suffix.as_str());
-    // The ellipsis with a space each side, plus a column of air before the
-    // terminal edge clips the line.
-    let sep_w = 1 + UnicodeWidthStr::width(icons::ELLIPSIS) + 1 + 1;
-    let fixed_w = prefix_w + count_w + sep_w;
-    let room = width.saturating_sub(fixed_w);
-    let budget = room.clamp(8, 50);
-    let desc_w = UnicodeWidthStr::width(desc.as_str());
-    let text = if desc_w > budget {
-        let cut = clip_to(&desc, budget);
-        format!("{prefix}{cut} {} {count_suffix}", icons::ELLIPSIS)
-    } else {
-        format!("{prefix}{desc} {} {count_suffix}", icons::ELLIPSIS)
-    };
-    paint.on(paint.hover_style(hovered), &text)
+    format!(
+        "{mark}{}",
+        paint.on_hovered(hovered, &paint.theme.muted, &body)
+    )
 }
 
 pub fn tools_summary_rows(
@@ -635,7 +639,7 @@ pub fn tools_summary_rows(
     paint: &Paint,
     width: usize,
 ) -> Vec<String> {
-    let header = tools_summary_header(tools, folded, running, hovered, spinner, paint, width);
+    let header = tools_summary_header(tools, running, hovered, spinner, paint, width);
     if folded {
         return vec![header];
     }
@@ -654,10 +658,10 @@ pub fn tools_summary_rows(
     rows
 }
 
-/// Format a folded tool summary line, e.g. "▶ Ran read a.rs ... 18 tools".
+/// Format a folded tool summary line, e.g. "✓ read a.rs …12 tools".
 #[cfg(test)]
 pub fn tools_summary_line(tools: &[FoldedTool], paint: &Paint, width: usize) -> String {
-    tools_summary_header(tools, true, false, false, 0, paint, width)
+    tools_summary_header(tools, false, false, 0, paint, width)
 }
 
 #[cfg(test)]
@@ -734,11 +738,7 @@ mod tools_summary_tests {
         let line = tools_summary_line(&tools, &paint, 80);
         assert_eq!(
             line,
-            format!(
-                "{} Ran read crates/agent/src/session.rs {} 1 tool",
-                icons::DONE_MARK,
-                icons::ELLIPSIS
-            )
+            format!("{} read crates/agent/src/session.rs", icons::DONE_MARK)
         );
     }
 
@@ -753,7 +753,7 @@ mod tools_summary_tests {
         assert_eq!(
             line,
             format!(
-                "{} Ran read crates/agent/src/session.rs {} 12 tools",
+                "{} read crates/agent/src/session.rs {}12 tools",
                 icons::DONE_MARK,
                 icons::ELLIPSIS
             )
@@ -764,7 +764,7 @@ mod tools_summary_tests {
         assert_eq!(
             line,
             format!(
-                "{} Ran read /path/to/other.rs {} 13 tools",
+                "{} read /path/to/other.rs {}13 tools",
                 icons::DONE_MARK,
                 icons::ELLIPSIS
             )
@@ -784,13 +784,13 @@ mod tools_summary_tests {
         let line = tools_summary_line(&tools, &paint, 80);
         assert!(
             line.contains(&format!(
-                "{} Ran bash curl https://xxxx.xxxx.com/a/long/url",
+                "{} bash curl https://xxxx.xxxx.com/a/long/url",
                 icons::DONE_MARK
             )),
             "got: {line}"
         );
         assert!(
-            line.ends_with(&format!("{} 14 tools", icons::ELLIPSIS)),
+            line.ends_with(&format!("{}14 tools", icons::ELLIPSIS)),
             "got: {line}"
         );
     }
@@ -800,10 +800,14 @@ mod tools_summary_tests {
         let paint = Paint::new(false);
         let tools = vec![tool("bash", "")];
         let line = tools_summary_line(&tools, &paint, 80);
-        assert_eq!(
-            line,
-            format!("{} Ran bash {} 1 tool", icons::DONE_MARK, icons::ELLIPSIS)
-        );
+        assert_eq!(line, format!("{} bash", icons::DONE_MARK));
+    }
+
+    #[test]
+    fn an_empty_bundle_reads_as_zero_tools() {
+        let paint = Paint::new(false);
+        let line = tools_summary_line(&[], &paint, 80);
+        assert_eq!(line, format!("{} 0 tools", icons::DONE_MARK));
     }
 
     #[test]
@@ -814,24 +818,17 @@ mod tools_summary_tests {
             "git status\nnothing to commit\nworking tree clean",
         )];
         let line = tools_summary_line(&tools, &paint, 80);
-        assert_eq!(
-            line,
-            format!(
-                "{} Ran bash git status {} 1 tool",
-                icons::DONE_MARK,
-                icons::ELLIPSIS
-            )
-        );
+        assert_eq!(line, format!("{} bash git status", icons::DONE_MARK));
     }
 
     #[test]
     fn running_tool_shows_spinner_animation() {
         let paint = Paint::new(false);
         let tools = vec![tool("read", "a.rs")];
-        let frame0 = tools_summary_header(&tools, true, true, false, 0, &paint, 80);
-        assert!(frame0.starts_with(&format!("{} Ran", icons::SPINNER_FRAMES[0])));
-        let frame1 = tools_summary_header(&tools, true, true, false, 1, &paint, 80);
-        assert!(frame1.starts_with(&format!("{} Ran", icons::SPINNER_FRAMES[1])));
+        let frame0 = tools_summary_header(&tools, true, false, 0, &paint, 80);
+        assert!(frame0.starts_with(&format!("{} read a.rs", icons::SPINNER_FRAMES[0])));
+        let frame1 = tools_summary_header(&tools, true, false, 1, &paint, 80);
+        assert!(frame1.starts_with(&format!("{} read a.rs", icons::SPINNER_FRAMES[1])));
     }
 
     // The rendered rows are cached by (width, running, spinner), so a running
@@ -848,25 +845,25 @@ mod tools_summary_tests {
         let f1 = crate::render::strip_ansi(&row.line(0, &paint, &[], 80).0);
 
         assert!(
-            f0.starts_with(&format!("{} Ran", icons::SPINNER_FRAMES[0])),
+            f0.starts_with(&format!("{} read a.rs", icons::SPINNER_FRAMES[0])),
             "got: {f0}"
         );
         assert!(
-            f1.starts_with(&format!("{} Ran", icons::SPINNER_FRAMES[1])),
+            f1.starts_with(&format!("{} read a.rs", icons::SPINNER_FRAMES[1])),
             "got: {f1}"
         );
         assert_ne!(f0, f1, "the running frame must advance, not freeze");
     }
 
     #[test]
-    fn hovered_tool_stays_on_the_green_check() {
+    fn hovered_tool_stays_on_the_same_check() {
         let paint = Paint::new(true);
         let tools = vec![tool("read", "a.rs")];
-        let h0 = tools_summary_header(&tools, true, false, true, 0, &paint, 80);
-        let h1 = tools_summary_header(&tools, true, false, true, 1, &paint, 80);
+        let h0 = tools_summary_header(&tools, false, true, 0, &paint, 80);
+        let h1 = tools_summary_header(&tools, false, true, 1, &paint, 80);
         assert_eq!(h0, h1, "hover must not animate the mark");
         assert!(
-            crate::render::strip_ansi(&h0).starts_with(&format!("{} Ran", icons::DONE_MARK)),
+            crate::render::strip_ansi(&h0).starts_with(&format!("{} read a.rs", icons::DONE_MARK)),
             "got: {h0}"
         );
     }
@@ -885,8 +882,8 @@ mod tools_summary_tests {
         assert_eq!(row.len(), 3);
 
         let (head, _) = row.line(0, &paint, &[], 80);
-        assert!(head.starts_with(&format!("{} Ran", icons::UNFOLD_MARK)));
-        assert!(head.contains("2 tools"));
+        assert!(head.starts_with(&format!("{} grep", icons::DONE_MARK)));
+        assert!(head.contains("…2 tools"));
 
         let (t0, _) = row.line(1, &paint, &[], 80);
         assert!(t0.contains(&format!(
@@ -900,7 +897,7 @@ mod tools_summary_tests {
         assert!(row.toggle_expand());
         assert_eq!(row.len(), 1);
         let (folded_head, _) = row.line(0, &paint, &[], 80);
-        assert!(folded_head.starts_with(&format!("{} Ran", icons::DONE_MARK)));
+        assert!(folded_head.starts_with(&format!("{} grep", icons::DONE_MARK)));
     }
 
     #[test]

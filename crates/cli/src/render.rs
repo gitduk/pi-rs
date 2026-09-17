@@ -1,6 +1,6 @@
 use std::fmt::Write as _;
 use std::io::{IsTerminal, Write};
-use std::sync::{Arc, LazyLock, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 use agent::Event;
 use anyhow::{Result, bail};
@@ -295,12 +295,6 @@ impl PartialEq for Style {
 }
 
 impl Eq for Style {}
-/// A row the mouse is over: bold, so it reads as a thing to press.
-pub static HOVER: LazyLock<Style> = LazyLock::new(|| Style {
-    color: None,
-    sgr: vec![Attr::Bold],
-    rendered: OnceLock::new(),
-});
 
 impl Style {
     fn color(c: Color) -> Self {
@@ -696,13 +690,19 @@ impl Paint {
         }
     }
 
-    /// The style a hovered row wears, and the muted one a static row does.
-    pub fn hover_style(&self, hovered: bool) -> &Style {
-        if hovered && self.color {
-            &HOVER
-        } else {
-            &self.theme.muted
+    /// `body` in `style`, with bold added while hovered — hover strengthens the
+    /// row without changing its colour, so a green check stays green and a grey
+    /// body stays grey under the cursor.
+    pub fn on_hovered(&self, hovered: bool, style: &Style, body: &str) -> String {
+        if !hovered || !self.color {
+            return self.on(style, body);
         }
+        let bold = Style {
+            color: style.color.clone(),
+            sgr: style.sgr.iter().cloned().chain([Attr::Bold]).collect(),
+            rendered: OnceLock::new(),
+        };
+        self.on(&bold, body)
     }
 }
 
@@ -939,7 +939,7 @@ pub fn result_rows(
         };
         p.on(style, &format!("  {}", clip(row, room)))
     };
-    let footer = |text: &str| p.on(p.hover_style(hovered), text);
+    let footer = |text: &str| p.on_hovered(hovered, &p.theme.muted, text);
     if diff_lines.len() > SKETCH_LIMIT && !expanded {
         out.extend(diff_lines[..SKETCH_LIMIT].iter().copied().map(&diff_style));
         out.push(footer(&format!(
