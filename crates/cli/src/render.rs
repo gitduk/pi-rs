@@ -955,6 +955,13 @@ pub fn result_rows(
     }
     out
 }
+fn fmt_delay(ms: u64) -> String {
+    if ms >= 1000 {
+        format!("{:.2}s", ms as f64 / 1000.0)
+    } else {
+        format!("{ms}ms")
+    }
+}
 
 pub fn describe(event: &Event, p: &Paint, width: usize) -> Option<String> {
     let room = width.saturating_sub(2).max(20);
@@ -987,7 +994,8 @@ pub fn describe(event: &Event, p: &Paint, width: usize) -> Option<String> {
         } => p.on(
             &p.theme.muted,
             &format!(
-                "retry {attempt} in {delay_ms}ms{}{}",
+                "retry {attempt} in {}{}{}",
+                fmt_delay(*delay_ms),
                 icons::PART_SEP,
                 clip(reason, room)
             ),
