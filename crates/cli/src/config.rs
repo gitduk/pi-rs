@@ -824,10 +824,9 @@ pub fn write(path: &Path, dotted: &str, value: toml::Value) -> Result<()> {
             .ok_or_else(|| anyhow::anyhow!("`{seg}` is not a table"))?;
     }
     table.insert(&last, toml_edit::Item::Value(to_edit_value(&value)));
-    // Atomic: write a sibling temp file, then rename over the real one.
-    let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, doc.to_string())?;
-    std::fs::rename(&tmp, path)?;
+    // Keys live here; `write_private` is the shared atomic write, pid-suffixed
+    // temp and all, so two writers cannot clobber each other's temp file.
+    tools::state::write_private(path, doc.to_string().as_bytes())?;
     Ok(())
 }
 

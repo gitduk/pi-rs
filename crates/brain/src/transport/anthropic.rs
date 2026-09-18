@@ -249,7 +249,7 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
     // Thinking pins temperature to 1; any other value is rejected.
     if !thinking_on
         && spec.accepts_temperature
-        && let Some(t) = req.temperature
+        && let Some(t) = req.finite_temperature()
     {
         body["temperature"] = json!(t);
     }
@@ -286,8 +286,9 @@ fn decode_frame(
     usage: &mut Usage,
     gaps: &mut Gaps,
 ) -> Option<StreamEvent> {
-    let index = data["index"].as_u64().unwrap_or(0) as usize;
     let event = gaps.owed(data, "frame", "type")?;
+    // The block index rides only the content_block frames: message_start and
+    // friends never carry one, and reading it there reports a gap every stream.
     match event {
         "message_start" => {
             let u = &data["message"]["usage"];
@@ -300,6 +301,7 @@ fn decode_frame(
             Some(StreamEvent::MessageStart { usage: *usage })
         }
         "content_block_start" => {
+            let index = gaps.owed_index(data, "frame", "index");
             let block = &data["content_block"];
             let kind = match gaps.owed(block, event, "type")? {
                 "text" => BlockKind::Text,
@@ -319,6 +321,7 @@ fn decode_frame(
             Some(StreamEvent::BlockStart { index, kind })
         }
         "content_block_delta" => {
+            let index = gaps.owed_index(data, "frame", "index");
             let delta = &data["delta"];
             match gaps.owed(delta, event, "type")? {
                 "text_delta" => Some(StreamEvent::TextDelta {
@@ -347,7 +350,10 @@ fn decode_frame(
                 }
             }
         }
-        "content_block_stop" => Some(StreamEvent::BlockEnd { index }),
+        "content_block_stop" => {
+            let index = gaps.owed_index(data, "frame", "index");
+            Some(StreamEvent::BlockEnd { index })
+        }
         "message_delta" => {
             if let Some(r) = data["delta"]["stop_reason"].as_str() {
                 *stop = stop_reason(r);

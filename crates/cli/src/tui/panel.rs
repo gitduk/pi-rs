@@ -742,7 +742,7 @@ mod tests {
         // a wrapped value may land the caret anywhere, but never past the
         // text actually on its row.
         assert_eq!(
-            crate::render::visible_width(&rows[r as usize]) as usize,
+            crate::render::visible_width(&rows[r as usize]),
             col as usize,
             "the caret is at the end of its own row"
         );

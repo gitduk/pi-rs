@@ -1,3 +1,7 @@
+// The grandchild check reads /proc, which only Linux has; the process-group
+// kill itself is portable, the proof here is not.
+#![cfg(target_os = "linux")]
+
 use serde_json::json;
 use tools::{Ctx, Tool, Workspace};
 

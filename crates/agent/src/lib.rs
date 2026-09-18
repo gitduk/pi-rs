@@ -91,6 +91,10 @@ impl Retry {
     }
 }
 
+/// How long a run has to wind down after its stop token is tripped before it
+/// is dropped where it stands.
+pub(crate) const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
     #[error(transparent)]
@@ -101,6 +105,9 @@ pub enum AgentError {
 
     #[error("stopped at the {0}-turn limit")]
     TurnLimit(usize),
+
+    #[error("still running {}s after cancel", STOP_GRACE.as_secs())]
+    Unstopped,
 }
 
 #[derive(Clone)]
@@ -572,7 +579,7 @@ impl Agent {
         let history =
             summarize::render(&session.summaries(), &session.entries_for(&record.dropped));
 
-        let usage = match summarize::run(transport, spec, history, focus).await {
+        let usage = match summarize::run(transport, spec, history, focus, self.retry.idle).await {
             Ok((text, used)) => {
                 record.summary = Some(text);
                 // The new summary covers what the old one did, so the entry
@@ -677,20 +684,20 @@ impl Agent {
         let idle = self.retry.idle;
 
         let mut stream = tokio::select! {
-            r = tokio::time::timeout(idle, self.transport.stream(&self.spec, req)) => match r {
+            r = leashed(idle, self.transport.stream(&self.spec, req)) => match r {
                 Ok(r) => r.map_err(|e| (AgentError::from(e), None))?,
-                Err(_) => return Err((wedged(idle), None)),
+                Err(e) => return Err((AgentError::Brain(e), None)),
             },
             _ = ctx.cancel.cancelled() => return Err((AgentError::Cancelled, None)),
         };
 
         loop {
             let next = tokio::select! {
-                n = tokio::time::timeout(idle, stream.next()) => match n {
+                n = leashed(idle, stream.next()) => match n {
                     Ok(n) => n,
                     // A provider that stops sending mid-stream would otherwise
                     // hold the turn open until the user gives up.
-                    Err(_) => return Err((wedged(idle), None)),
+                    Err(e) => return Err((AgentError::Brain(e), None)),
                 },
                 _ = ctx.cancel.cancelled() => {
                     return Err((AgentError::Cancelled, Some(acc.finish())));
@@ -1016,11 +1023,19 @@ fn too_many_failures(
     Some(notice)
 }
 
-fn wedged(idle: std::time::Duration) -> AgentError {
-    AgentError::Brain(brain::BrainError::Stream(format!(
-        "the stream sent nothing for {}s",
-        idle.as_secs()
-    )))
+fn wedged(idle: std::time::Duration) -> brain::BrainError {
+    brain::BrainError::Stream(format!("the stream sent nothing for {}s", idle.as_secs()))
+}
+
+// The leash every provider call here keeps: silence past `idle` reads as a
+// wedged stream, whether the call drives a turn or a compaction.
+async fn leashed<T>(
+    idle: std::time::Duration,
+    fut: impl std::future::Future<Output = T>,
+) -> brain::Result<T> {
+    tokio::time::timeout(idle, fut)
+        .await
+        .map_err(|_| wedged(idle))
 }
 
 // Conventional exit code for a process killed by SIGINT.

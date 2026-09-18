@@ -198,17 +198,22 @@ pub fn enter(dir: &Path, name: &str) -> Result<Tree> {
         None => bail!("not a git repository"),
     };
     let path = root.join(DIR).join(name);
-    if path.exists() {
-        bail!("{} exists but is not a registered worktree", path.display());
-    }
-
     let target = path.to_string_lossy().into_owned();
     // An existing branch is checked out rather than re-created: `-b` on one
     // that exists fails, and asking twice means the same feature both times.
-    if branch_exists(dir, name)? {
-        checked(dir, &["worktree", "add", &target, name])?;
+    let added = if branch_exists(dir, name)? {
+        checked(dir, &["worktree", "add", &target, name])
     } else {
-        checked(dir, &["worktree", "add", "-b", name, &target])?;
+        checked(dir, &["worktree", "add", "-b", name, &target])
+    };
+    if let Err(e) = added {
+        // Git speaks for the path when it owns it; a directory sitting there
+        // that git never registered is the one case worth naming ourselves —
+        // including when a third party dropped it in mid-add.
+        if path.exists() {
+            bail!("{} exists but is not a registered worktree", path.display());
+        }
+        return Err(e);
     }
     // Read back rather than assembled here: one place decides what a checkout
     // is called and which branch it is on, and git canonicalizes the path.
@@ -460,6 +465,9 @@ mod tests {
         let dir = repo();
         let squatting = dir.path().join(DIR).join("taken");
         std::fs::create_dir_all(&squatting).unwrap();
+        // Something git would have to displace: an empty directory it would
+        // simply take over, and the friendly error would never fire.
+        std::fs::write(squatting.join("keep"), b"").unwrap();
         let err = enter(dir.path(), "taken").unwrap_err().to_string();
         assert!(err.contains("not a registered worktree"), "{err}");
     }

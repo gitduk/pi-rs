@@ -29,15 +29,16 @@ pub fn session_dir(workspace: &Path, id: &str) -> Option<PathBuf> {
 /// permissions: a crash between the write and the chmod would leave the
 /// contents world-readable at the name everything else reads.
 pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let pid = std::process::id();
     let tmp = path.with_extension(match path.extension().and_then(|e| e.to_str()) {
-        Some(had) => format!("{had}.tmp"),
-        None => "tmp".into(),
+        Some(had) => format!("{had}.{pid}.tmp"),
+        None => format!("{pid}.tmp"),
     });
     std::fs::write(&tmp, bytes)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
     }
     std::fs::rename(&tmp, path)
 }
@@ -65,20 +66,21 @@ pub fn file_stem(id: &str) -> String {
 
 /// A path as a single directory name, for grouping a machine's state by
 /// workspace. The same shape Claude Code uses for its project buckets:
-/// `/` and every other character a directory name may not take become `-`,
-/// so `/home/u/pi-rs` is `-home-u-pi-rs`. Distinct from `file_stem` (which
+/// `%` and `/` are percent-encoded (`%25`, `%2F`) so two paths cannot
+/// collide by differing only in slashes, and every other character a
+/// directory name may not take becomes `-`, so `/home/u/pi-rs` is
+/// `%2Fhome%2Fu%2Fpi-rs`. Distinct from `file_stem` (which
 /// mints `_` for the same characters) because the two name different things:
 /// a file a session owns, and the bucket that groups them.
 pub fn key_of(path: &Path) -> String {
     path.display()
         .to_string()
         .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' {
-                c
-            } else {
-                '-'
-            }
+        .map(|c| match c {
+            '%' => "%25".to_string(),
+            '/' => "%2F".to_string(),
+            _ if c.is_ascii_alphanumeric() || c == '-' => c.to_string(),
+            _ => "-".to_string(),
         })
         .collect()
 }
@@ -90,9 +92,18 @@ mod tests {
 
     #[test]
     fn a_workspace_key_is_its_slash_path_with_separators_dashed() {
-        assert_eq!(key_of(Path::new("/home/dev/pi-rs")), "-home-dev-pi-rs");
-        assert_eq!(key_of(Path::new("/")), "-");
+        assert_eq!(
+            key_of(Path::new("/home/dev/pi-rs")),
+            "%2Fhome%2Fdev%2Fpi-rs"
+        );
+        assert_eq!(key_of(Path::new("/")), "%2F");
         assert_eq!(key_of(Path::new(".")), "-");
+        // The whole point of encoding the slash: paths that differ only in
+        // where their separators sit must not land in one bucket.
+        assert_ne!(
+            key_of(Path::new("/home/u/pi-rs")),
+            key_of(Path::new("/home/u/pi/rs"))
+        );
     }
 
     #[test]

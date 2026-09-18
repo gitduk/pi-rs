@@ -635,7 +635,7 @@ impl Tool for Edit {
         }
 
         ctx.note_write(&real);
-        tokio::fs::write(&real, &applied.content).await?;
+        crate::write::atomic_write(&real, applied.content.as_bytes()).await?;
         // The model just saw this change; the note is for outside drift.
         ctx.note_view(&real, &hashline::view_hash(&applied.content));
         // What the tool is being asked to do, by shape: the one number that

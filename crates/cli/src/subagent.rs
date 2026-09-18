@@ -80,6 +80,9 @@ impl Home for Filed {
                 );
             }
         });
-        pending().lock().unwrap().push(handle);
+        let mut pending = pending().lock().unwrap();
+        // Finished handles are zombies otherwise; the vec only ever grew.
+        pending.retain(|h| !h.is_finished());
+        pending.push(handle);
     }
 }

@@ -2988,14 +2988,12 @@ mod tests {
         let old_saw = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let old_transport = std::sync::Arc::new(Recording {
             saw: old_saw.clone(),
-            ..Default::default()
         });
         let mut core = a_repl(dir.path(), old_transport, "model-a");
 
         let new_saw = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let new_transport = std::sync::Arc::new(Recording {
             saw: new_saw.clone(),
-            ..Default::default()
         });
         core.retarget(new_transport, test_spec("model-b"));
         run_the_child(&core).await;

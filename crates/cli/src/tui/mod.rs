@@ -5434,7 +5434,7 @@ mod tests {
         for r in &rows {
             let (line, _) = r.line(0, &tui.ui.paint, &[], 80);
             assert!(
-                !line.contains("The user stopped this call"),
+                !line.contains(agent::session::STOPPED_CALL),
                 "stopped call notice should not appear: {line}"
             );
         }

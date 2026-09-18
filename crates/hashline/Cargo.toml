@@ -3,6 +3,8 @@ name = "hashline"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+description = "Line- and block-addressed file editing format"
 
 [dependencies]
 thiserror.workspace = true

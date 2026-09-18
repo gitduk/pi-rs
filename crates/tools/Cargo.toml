@@ -3,6 +3,8 @@ name = "tools"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+description = "The tool surface a run can act through"
 
 [dependencies]
 brain.workspace = true
@@ -14,7 +16,7 @@ serde_json.workspace = true
 serde_path_to_error.workspace = true
 serde_yaml_ng.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs", "process", "io-util", "time", "rt", "sync"] }
+tokio = { workspace = true, features = ["fs", "net", "process", "io-util"] }
 tokio-util.workspace = true
 tracing.workspace = true
 ignore.workspace = true
@@ -28,6 +30,6 @@ reqwest.workspace = true
 libc = "0.2"
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util"] }
+tokio.workspace = true
 tempfile = "3"
 filetime = "0.2"

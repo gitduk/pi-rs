@@ -61,10 +61,20 @@ impl Tool for Glob {
 
         // The walk is blocking IO; running it on the async runtime would stall
         // every other tool in the same turn.
-        let (found, clipped, cancelled) = tokio::task::spawn_blocking(move || {
+        let (found, clipped, cancelled, unreadable) = tokio::task::spawn_blocking(move || {
             let mut hits: Vec<(SystemTime, String)> = Vec::new();
             let (mut clipped, mut cancelled) = (false, false);
-            for (seen, entry) in walker(&ws, &root, None).build().flatten().enumerate() {
+            let mut unreadable: Vec<String> = Vec::new();
+            for (seen, entry) in walker(&ws, &root, None).build().enumerate() {
+                // A walk error is not a non-match: an unreadable directory is
+                // kept and named, so silence never reads as "no such file".
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(e) => {
+                        unreadable.push(e.to_string());
+                        continue;
+                    }
+                };
                 // A blocking task cannot be aborted from outside; checking here
                 // is what makes Esc land during the walk at all.
                 if seen % 512 == 0 && cancel.is_cancelled() {
@@ -93,7 +103,7 @@ impl Tool for Glob {
             // Newest first: an agent hunting the file it just touched wants the
             // recent end, and the tail is what a limit should drop.
             hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-            (hits, clipped, cancelled)
+            (hits, clipped, cancelled, unreadable)
         })
         .await
         .map_err(|e| ToolError::Invalid(format!("walk failed: {e}")))?;
@@ -102,10 +112,16 @@ impl Tool for Glob {
         }
 
         if found.is_empty() {
-            return Ok(ToolOutput::useless(format!(
-                "no file matches `{}`",
-                args.pattern
-            )));
+            return Ok(ToolOutput::useless(if unreadable.is_empty() {
+                format!("no file matches `{}`", args.pattern)
+            } else {
+                format!(
+                    "no file matches `{}`; {} entries could not be read, first: {}",
+                    args.pattern,
+                    unreadable.len(),
+                    unreadable[0]
+                )
+            }));
         }
 
         let total = found.len();
@@ -114,7 +130,7 @@ impl Tool for Glob {
             .take(limit)
             .map(|(_, path)| format!("{path}\n"))
             .collect();
-        let notice = if clipped {
+        let mut notice = if clipped {
             format!("… stopped at {total} paths; narrow the pattern\n")
         } else if total > rows.len() {
             format!(
@@ -124,6 +140,13 @@ impl Tool for Glob {
         } else {
             String::new()
         };
+        if !unreadable.is_empty() {
+            notice.push_str(&format!(
+                "… {} entries could not be read, first: {}\n",
+                unreadable.len(),
+                unreadable[0]
+            ));
+        }
         // The pattern leads, the count is ranked under it: a row saying only
         // how many files came back names nothing the caller can recognise.
         Ok(ToolOutput::text(spill::fit(ctx, &rows, "paths", &notice)?)

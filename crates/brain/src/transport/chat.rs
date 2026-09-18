@@ -203,7 +203,7 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
     }
 
     if spec.accepts_temperature
-        && let Some(t) = req.temperature
+        && let Some(t) = req.finite_temperature()
     {
         body["temperature"] = json!(t);
     }
@@ -250,6 +250,7 @@ fn stop_of(finish: &str) -> StopReason {
 // counter — reasoning reaches the wire before text, so it keeps that position
 // after the fold — and a block reuses its index for every later delta.
 struct Decoder {
+    gaps: Shared,
     text_index: Option<usize>,
     reasoning_index: Option<usize>,
     // Wire tool index → accumulator index, assigned on first sight.
@@ -262,8 +263,9 @@ struct Decoder {
 }
 
 impl Decoder {
-    fn new() -> Self {
+    fn new(gaps: Shared) -> Self {
         Self {
+            gaps,
             text_index: None,
             reasoning_index: None,
             tools: std::collections::BTreeMap::new(),
@@ -327,7 +329,7 @@ impl Decoder {
         // the block is started once, so a later delta can only add arguments.
         if let Some(calls) = delta["tool_calls"].as_array() {
             for call in calls {
-                let wire = call["index"].as_u64().unwrap_or(0) as usize;
+                let wire = self.gaps.frame().owed_index(call, "tool_call", "index");
                 let index = match self.tools.get(&wire) {
                     Some(&i) => i,
                     None => {
@@ -341,8 +343,10 @@ impl Decoder {
                         index,
                         kind: BlockKind::ToolCall {
                             id: call["id"].as_str().map(str::to_string),
-                            name: call["function"]["name"]
-                                .as_str()
+                            name: self
+                                .gaps
+                                .frame()
+                                .owed(&call["function"], "tool_call", "name")
                                 .unwrap_or_default()
                                 .to_string(),
                         },
@@ -394,7 +398,7 @@ impl Transport for ChatCompletions {
         let call = call.json(&body);
         let resp = super::exchange("chat", url, spec, req, &body, call).await?;
 
-        let mut dec = Decoder::new();
+        let mut dec = Decoder::new(self.gaps.clone());
 
         let stream = resp
             .bytes_stream()
@@ -537,7 +541,7 @@ mod tests {
     #[test]
     fn the_terminal_chunk_carries_the_usage_and_the_turn_folds() {
         let mut acc = Accumulator::new("test-model".into());
-        let mut dec = Decoder::new();
+        let mut dec = Decoder::new(Shared::new("chat"));
 
         // Content and reasoning arrive on their own deltas.
         for d in [
@@ -625,7 +629,7 @@ mod tests {
         // out in arrival order, so the fold must put reasoning ahead of text —
         // the same shape the sibling transports persist.
         let mut acc = Accumulator::new("test-model".into());
-        let mut dec = Decoder::new();
+        let mut dec = Decoder::new(Shared::new("chat"));
         for e in dec.frame(&json!({
             "choices": [{ "delta": { "reasoning_content": "think" } }]
         })) {
@@ -650,7 +654,7 @@ mod tests {
         // started once, so the resent fields must not overwrite the id and
         // name the first delta carried.
         let mut acc = Accumulator::new("test-model".into());
-        let mut dec = Decoder::new();
+        let mut dec = Decoder::new(Shared::new("chat"));
         for d in [
             json!({ "choices": [{ "delta": { "tool_calls": [{
                 "index": 0, "id": "call_1", "type": "function",

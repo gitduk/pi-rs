@@ -172,6 +172,9 @@ struct Sink {
     out: BufWriter<File>,
     written: u64,
     capped: bool,
+    // A failed flush means the file can no longer be trusted to hold what we
+    // send it; the sink stops writing and says so once on stderr.
+    failed: bool,
     // Which file `out` is writing to right now; `retarget` moves it when the
     // run switches sessions. Kept here, under the sink's own lock, so [`path`]
     // reads it back rather than from a second copy that could drift.
@@ -197,6 +200,7 @@ fn sink_for(file: File, path: &Path) -> Sink {
         out: BufWriter::new(file),
         written,
         capped: false,
+        failed: false,
         path: path.to_path_buf(),
     }
 }
@@ -242,14 +246,14 @@ impl Journal {
         Ok(())
     }
 
-    // One record. Every failure here is swallowed: a run must not die of its
-    // own logging, and a poisoned lock would otherwise take the process with
-    // it on the next record.
+    // One record. Every failure here is swallowed except a failed flush, which
+    // stops the writing for good: a run must not die of its own logging, and a
+    // poisoned lock would otherwise take the process with it on the next record.
     fn write(&self, record: Map<String, Value>) {
         let Ok(mut sink) = self.sink.lock() else {
             return;
         };
-        if sink.capped {
+        if sink.capped || sink.failed {
             return;
         }
         let Ok(mut line) = serde_json::to_vec(&Value::Object(record)) else {
@@ -267,7 +271,12 @@ impl Journal {
         }
         // Flushed per record on purpose: the records worth having are the ones
         // written just before the thing that killed the process.
-        let _ = sink.out.flush();
+        // A flush that fails is a file that cannot be trusted with the rest;
+        // the process is still alive, so stderr is where the warning goes.
+        if let Err(e) = sink.out.flush() {
+            sink.failed = true;
+            eprintln!("warning: journal write failed ({e}); recording stops and stays stopped");
+        }
     }
 }
 
@@ -298,6 +307,14 @@ impl Fields<'_> {
         self.into.insert(format!("{name}_"), value);
     }
 
+    fn value(&mut self, field: &Field, value: Value) {
+        if secret(field.name()) {
+            self.put(field, Value::String(fingerprint(&value.to_string())));
+        } else {
+            self.put(field, value);
+        }
+    }
+
     fn text(&mut self, field: &Field, s: &str) {
         let value = if secret(field.name()) {
             Value::String(fingerprint(s))
@@ -318,19 +335,19 @@ impl Visit for Fields<'_> {
     }
 
     fn record_i64(&mut self, field: &Field, value: i64) {
-        self.put(field, Value::from(value));
+        self.value(field, Value::from(value));
     }
 
     fn record_u64(&mut self, field: &Field, value: u64) {
-        self.put(field, Value::from(value));
+        self.value(field, Value::from(value));
     }
 
     fn record_f64(&mut self, field: &Field, value: f64) {
-        self.put(field, Value::from(value));
+        self.value(field, Value::from(value));
     }
 
     fn record_bool(&mut self, field: &Field, value: bool) {
-        self.put(field, Value::Bool(value));
+        self.value(field, Value::Bool(value));
     }
 
     // The whole chain, not the outermost link. An error's own line is
@@ -571,14 +588,11 @@ pub fn prune(sessions: &Path) {
     }
 }
 
-/// Open the journal for this session and make it the process's `tracing` sink.
+/// The `LogLevel` the `PI_LOG` environment variable names.
 ///
-/// Not recording is not worth failing a run over — the level is off, there is
-/// no state directory, or the file would not open — so the error is reported
-/// and dropped rather than returned.
-/// The level `PI_LOG` names, `Info` when it is unset or unreadable. A typo
-/// falls back rather than failing: not recording is not worth failing a run
-/// over, and neither is misspelling how much to record.
+/// `Info` when it is unset or unreadable. A typo falls back rather than
+/// failing: not recording is not worth failing a run over, and neither is
+/// misspelling how much to record.
 pub fn level_from_env() -> LogLevel {
     let Ok(name) = std::env::var("PI_LOG") else {
         return LogLevel::Info;

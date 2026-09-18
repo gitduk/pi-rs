@@ -29,7 +29,10 @@ pub fn head_chars(s: &str, max: usize) -> &str {
 /// Mirror of [`head_chars`] from the end. Fewer than `max` chars means the
 /// whole string is the tail, matching [`tail_bytes`].
 pub fn tail_chars(s: &str, max: usize) -> &str {
-    let Some((i, _)) = s.char_indices().nth_back(max) else {
+    if max == 0 {
+        return "";
+    }
+    let Some((i, _)) = s.char_indices().nth_back(max - 1) else {
         return s;
     };
     &s[i..]

@@ -44,10 +44,20 @@ pub fn short(path: &Path, root: &Path) -> String {
     }
     path.display().to_string()
 }
+// An XML reader ends a node where a quote or a `<` says it does, so a path
+// riding inside one loses those to the references first.
+fn escaped(path: impl std::fmt::Display) -> String {
+    path.to_string()
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 /// The anchor for "every path is relative to it": the model needs to know
 /// which directory that is before the rest of the system prompt makes sense.
 pub fn workspace(root: &Path) -> String {
-    format!("\n\n<workspace path=\"{}\"/>", root.display())
+    format!("\n\n<workspace path=\"{}\"/>", escaped(root.display()))
 }
 
 /// What the model may change, and where — the workspace root plus every
@@ -62,9 +72,12 @@ pub fn boundary(ws: &tools::Workspace, tier: tools::Tier) -> String {
     if !tools::Tier::Write.under(tier) || extras.is_empty() {
         return String::new();
     }
-    let mut out = format!("\n\n<write_paths root=\"{}\">", ws.root().display());
+    let mut out = format!(
+        "\n\n<write_paths root=\"{}\">",
+        escaped(ws.root().display())
+    );
     for root in extras {
-        out.push_str(&format!("\n  {}", root.display()));
+        out.push_str(&format!("\n  {}", escaped(root.display())));
     }
     out.push_str(
         "\n</write_paths>\n\nPaths inside these directories are writable; elsewhere write and \
@@ -155,7 +168,7 @@ fn from(workspace: &Path, home: Option<&Path>, root: Option<&Path>) -> Loaded {
         // headings of its own, so a `#` delimiter would not delimit anything.
         loaded.text.push_str(&format!(
             "\n\n<instructions path=\"{}\">\n{}\n</instructions>",
-            path.display(),
+            escaped(path.display()),
             body.trim_end()
         ));
         loaded.files.push(path);

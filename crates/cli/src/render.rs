@@ -1152,6 +1152,10 @@ fn compaction_line(r: &agent::compact::Report) -> String {
     if r.args_taken > 0 {
         parts.push(format!("{} arguments taken", r.args_taken));
     }
+
+    if r.notices_pruned > 0 {
+        parts.push(format!("{} notices pruned", r.notices_pruned));
+    }
     if r.dropped > 0 {
         let how = if r.summarized {
             "summarized"
@@ -1514,6 +1518,7 @@ mod tests {
             uneventful: 1,
             aged_out: 6,
             args_taken: 2,
+            notices_pruned: 4,
             dropped: 0,
             summarized: false,
             still_over: false,
@@ -1521,7 +1526,7 @@ mod tests {
         assert_eq!(
             super::compaction_line(&r),
             "compacted 130000 → 48000 tokens · 3 superseded, 1 uneventful, 6 aged out, \
-             2 arguments taken"
+             2 arguments taken, 4 notices pruned"
         );
     }
 

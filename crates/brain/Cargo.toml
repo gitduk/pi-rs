@@ -3,6 +3,8 @@ name = "brain"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+description = "Model transport and wire types for the LLM providers"
 
 [dependencies]
 async-trait.workspace = true
@@ -15,4 +17,3 @@ eventsource-stream.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true

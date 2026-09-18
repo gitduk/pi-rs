@@ -403,7 +403,7 @@ async fn parallel_results_follow_call_order_not_completion_order() {
         })
         .with(Sleeper {
             name: "fast",
-            delay_ms: 0,
+            delay_ms: 120,
             exclusive: false,
         });
 
@@ -419,8 +419,11 @@ async fn parallel_results_follow_call_order_not_completion_order() {
         "the slow call was issued first"
     );
     assert_eq!(results[1].flatten_text(), "fast");
+    // Two 120ms calls that overlap land near 120ms; run back to back they
+    // take 240ms. The headroom keeps a loaded CI from flaking while the bound
+    // still fails if the calls ever stop overlapping.
     assert!(
-        started.elapsed().as_millis() < 240,
+        started.elapsed().as_millis() < 190,
         "shared calls must overlap"
     );
 }

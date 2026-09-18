@@ -19,6 +19,9 @@ pub(crate) async fn ask(
     system: &str,
     body: String,
     max_tokens: u32,
+    // The same leash `attempt` keeps: a provider that stops sending holds a
+    // compaction open exactly as it would hold a turn.
+    idle: std::time::Duration,
 ) -> brain::Result<(String, Usage)> {
     let req = Request {
         system: Some(system.to_string()),
@@ -32,8 +35,11 @@ pub(crate) async fn ask(
     };
 
     let mut acc = Accumulator::new(spec.model.clone());
-    let mut stream = transport.stream(spec, &req).await?;
-    while let Some(ev) = stream.next().await {
+    let mut stream = crate::leashed(idle, transport.stream(spec, &req)).await??;
+    loop {
+        let Some(ev) = crate::leashed(idle, stream.next()).await? else {
+            break;
+        };
         acc.push(ev?);
     }
     let done = acc.finish();

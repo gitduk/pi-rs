@@ -88,11 +88,22 @@ pub(crate) fn allocate(ctx: &Ctx) -> Result<(PathBuf, String), ToolError> {
     let path = dir.join(format!("{name}.log"));
     std::fs::create_dir_all(&dir)
         .map_err(|e| ToolError::Spill(format!("{}: {e}", dir.display())))?;
+    // Spill paths are predictable, so the directory carries user-only rights:
+    // set unconditionally, converging a pre-existing too-wide directory too.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| ToolError::Spill(format!("{}: {e}", dir.display())))?;
+    }
     Ok((path, format!("spill:{}/{}", ctx.spill_namespace(), name)))
 }
 
 /// Write `body` to a fresh spill file. Storage failure is a loud error, never
 /// a silent fallback: a locator the model cannot read back is worse than none.
+/// One deliberate exception: the output gate in `output` folds a spill
+/// failure into a truncation notice instead of failing the result, because
+/// the gate must not flood.
 pub(crate) fn persist(ctx: &Ctx, body: &[u8]) -> Result<SpillRef, ToolError> {
     let (path, locator) = allocate(ctx)?;
     state::write_private(&path, body)

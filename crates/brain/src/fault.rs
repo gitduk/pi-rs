@@ -30,7 +30,7 @@ pub fn classify(err: &BrainError) -> Fault {
         BrainError::Api { .. } => Fault::Permanent,
         // A dropped socket or a truncated stream is worth another attempt.
         BrainError::Http(_) | BrainError::Stream(_) => Fault::Transient,
-        BrainError::Json(_) | BrainError::Config(_) => Fault::Permanent,
+        BrainError::Json(_) | BrainError::Config(_) | BrainError::Summarizer(_) => Fault::Permanent,
     }
 }
 

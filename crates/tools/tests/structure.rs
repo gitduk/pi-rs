@@ -1,6 +1,13 @@
 use serde_json::json;
 use tools::{Tool, ToolError};
 
+// Failure messages quote a slice of the output; byte slicing would panic
+// mid-UTF-8 and hide the real failure, so take characters instead.
+fn tail(s: &str, n: usize) -> String {
+    let skip = s.chars().count().saturating_sub(n);
+    s.chars().skip(skip).collect()
+}
+
 // A file long enough to trigger the skeleton, with two real declarations in it.
 fn long_rust() -> String {
     let filler: String = (0..320).map(|i| format!("// filler {i}\n")).collect();
@@ -260,10 +267,6 @@ async fn the_outline_names_the_construct_and_feeds_an_edit_without_a_read() {
         .unwrap();
 
     let after = std::fs::read_to_string(c.workspace.root().join("big.rs")).unwrap();
-    assert!(
-        after.contains("Self { x: 1 }"),
-        "{}",
-        &after[after.len() - 200..]
-    );
+    assert!(after.contains("Self { x: 1 }"), "{}", tail(&after, 200));
     assert!(!after.contains("Self { x: 0 }"));
 }

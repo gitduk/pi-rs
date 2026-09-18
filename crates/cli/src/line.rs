@@ -14,7 +14,6 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::repl::{Repl, Step};
 
 pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
-    let stdin = std::io::stdin();
     let mut totals = Totals::default();
     let mut buffer = String::new();
 
@@ -28,7 +27,19 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
             let _ = std::io::stderr().flush();
         }
         buffer.clear();
-        if stdin.lock().read_line(&mut buffer)? == 0 {
+        // Off the worker: `read_line` parks in the kernel for as long as the
+        // pipe is quiet, and a worker parked there is one no turn can run on.
+        let read = tokio::task::spawn_blocking({
+            let mut buffer = std::mem::take(&mut buffer);
+            move || {
+                let n = std::io::stdin().lock().read_line(&mut buffer);
+                (buffer, n)
+            }
+        })
+        .await;
+        let (read, eof) = read.map_err(|e| anyhow::anyhow!("the stdin reader stopped: {e}"))?;
+        buffer = read;
+        if eof? == 0 {
             break;
         }
         let line = buffer.trim();

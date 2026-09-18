@@ -63,6 +63,8 @@ pub struct Report {
     pub aged_out: usize,
     /// Tool calls whose oversized arguments went.
     pub args_taken: usize,
+    /// Notices cut back to their first line by the last rung.
+    pub notices_pruned: usize,
     pub dropped: usize,
     /// The dropped span left a summary behind.
     pub summarized: bool,
@@ -72,7 +74,13 @@ pub struct Report {
 
 impl Report {
     pub fn touched(&self) -> bool {
-        self.superseded + self.uneventful + self.aged_out + self.args_taken + self.dropped > 0
+        self.superseded
+            + self.uneventful
+            + self.aged_out
+            + self.args_taken
+            + self.notices_pruned
+            + self.dropped
+            > 0
     }
 }
 
@@ -384,6 +392,7 @@ pub fn plan(
                 continue;
             }
             items[n].omit(head.to_string());
+            report.notices_pruned += 1;
         }
     }
 

@@ -3,6 +3,8 @@ name = "agent"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+description = "The agent loop: turns, tools, subagents, compaction"
 
 [dependencies]
 async-trait.workspace = true

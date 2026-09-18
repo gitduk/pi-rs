@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::path::{Path, PathBuf};
 
 use crate::{Ctx, Tier, Tool, ToolError, ToolOutput};
 
@@ -96,6 +97,32 @@ pub fn clean(content: &str) -> String {
 
 pub struct Write;
 
+/// Write `content` to `path` through a sibling `.pi-tmp`, then rename: a
+/// write interrupted halfway would otherwise leave a truncated file where a
+/// whole one used to be. A failed step removes the temp file before
+/// returning, so no `.pi-tmp` is left behind.
+pub(crate) async fn atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    // Appended to the whole file name, extension or none: `Makefile` becomes
+    // `Makefile.pi-tmp`, not `Makefile..pi-tmp`.
+    let mut tmp = path.as_os_str().to_os_string();
+    tmp.push(".pi-tmp");
+    let tmp = PathBuf::from(tmp);
+    if let Err(e) = tokio::fs::write(&tmp, content).await {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    // A rename swaps the inode, so the original's mode does not carry over:
+    // copy it, or an edited script comes back without its execute bit.
+    if let Ok(mode) = std::fs::metadata(path).map(|m| m.permissions()) {
+        let _ = std::fs::set_permissions(&tmp, mode);
+    }
+    if let Err(e) = tokio::fs::rename(&tmp, path).await {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl Tool for Write {
     fn name(&self) -> &str {
@@ -153,14 +180,7 @@ impl Tool for Write {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        // Temp then rename: a write interrupted halfway would otherwise leave a
-        // truncated file where a whole one used to be.
-        let tmp = path.with_extension(format!(
-            "{}.pi-tmp",
-            path.extension().and_then(|e| e.to_str()).unwrap_or("")
-        ));
-        tokio::fs::write(&tmp, &content).await?;
-        tokio::fs::rename(&tmp, &path).await?;
+        atomic_write(&path, content.as_bytes()).await?;
         ctx.note_write(&path);
 
         let mut note = "";

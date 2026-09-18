@@ -214,7 +214,7 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
 
     // Gated, as on the other wire: the OpenAI reasoning models are half of why
     // this field exists, and they refuse every value but the default.
-    if let Some(t) = req.temperature
+    if let Some(t) = req.finite_temperature()
         && spec.accepts_temperature
     {
         body["temperature"] = json!(t);
@@ -347,9 +347,10 @@ fn read_output(
                 }
             }
             Some("function_call") => {
-                let id = item["call_id"].as_str().unwrap_or_default().to_string();
-                let name = item["name"].as_str().unwrap_or_default().to_string();
-                let raw = item["arguments"].as_str().unwrap_or_default();
+                let mut owed = |field| gaps.owed(item, "function_call", field).unwrap_or_default();
+                let id = owed("call_id").to_string();
+                let name = owed("name").to_string();
+                let raw = owed("arguments");
                 let args = match serde_json::from_str::<Value>(raw.trim()) {
                     Ok(v) => v,
                     Err(_) if raw.trim().is_empty() => json!({}),
@@ -399,13 +400,16 @@ impl Decoder {
     }
 
     fn frame(&mut self, data: &Value) -> Vec<StreamEvent> {
-        let index = data["output_index"].as_u64().unwrap_or(0) as usize;
         let mut gaps = self.gaps.frame();
         let Some(event) = gaps.owed(data, "frame", "type") else {
             return Vec::new();
         };
+        // The output index rides only the per-item frames: response.created
+        // and friends never carry one, and reading it there reports a gap
+        // every stream.
         match event {
             "response.output_item.added" => {
+                let index = gaps.owed_index(data, "frame", "output_index");
                 let item = &data["item"];
                 let kind = match item["type"].as_str() {
                     Some("reasoning") => BlockKind::Reasoning,
@@ -424,14 +428,18 @@ impl Decoder {
                 };
                 vec![StreamEvent::BlockStart { index, kind }]
             }
-            "response.output_text.delta" => match gaps.owed(data, event, "delta") {
-                Some(delta) => vec![StreamEvent::TextDelta {
-                    index,
-                    delta: delta.to_string(),
-                }],
-                None => Vec::new(),
-            },
+            "response.output_text.delta" => {
+                let index = gaps.owed_index(data, "frame", "output_index");
+                match gaps.owed(data, event, "delta") {
+                    Some(delta) => vec![StreamEvent::TextDelta {
+                        index,
+                        delta: delta.to_string(),
+                    }],
+                    None => Vec::new(),
+                }
+            }
             "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
+                let index = gaps.owed_index(data, "frame", "output_index");
                 let body = data["type"] == "response.reasoning_text.delta";
                 match self.reasoning_stream.entry(index) {
                     std::collections::btree_map::Entry::Vacant(slot) => {
@@ -450,14 +458,20 @@ impl Decoder {
                     None => Vec::new(),
                 }
             }
-            "response.function_call_arguments.delta" => match gaps.owed(data, event, "delta") {
-                Some(delta) => vec![StreamEvent::ToolArgsDelta {
-                    index,
-                    delta: delta.to_string(),
-                }],
-                None => Vec::new(),
-            },
-            "response.output_item.done" => vec![StreamEvent::BlockEnd { index }],
+            "response.function_call_arguments.delta" => {
+                let index = gaps.owed_index(data, "frame", "output_index");
+                match gaps.owed(data, event, "delta") {
+                    Some(delta) => vec![StreamEvent::ToolArgsDelta {
+                        index,
+                        delta: delta.to_string(),
+                    }],
+                    None => Vec::new(),
+                }
+            }
+            "response.output_item.done" => {
+                let index = gaps.owed_index(data, "frame", "output_index");
+                vec![StreamEvent::BlockEnd { index }]
+            }
             "response.completed" | "response.incomplete" => {
                 let response = &data["response"];
                 let mut events = Vec::new();

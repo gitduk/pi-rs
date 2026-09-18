@@ -37,6 +37,7 @@ async fn a_page_arrives_as_prose_under_a_tag_that_names_its_source() {
     .await;
     let (_d, c) = ctx();
     let out = Fetch::default()
+        .allow_private_dial()
         .execute(json!({ "url": url }), &c)
         .await
         .unwrap();
@@ -62,6 +63,7 @@ async fn json_comes_back_as_it_was_served() {
     .await;
     let (_d, c) = ctx();
     let body = Fetch::default()
+        .allow_private_dial()
         .execute(json!({ "url": url }), &c)
         .await
         .unwrap()
@@ -83,6 +85,7 @@ async fn a_failing_status_is_reported_not_raised() {
     .await;
     let (_d, c) = ctx();
     let body = Fetch::default()
+        .allow_private_dial()
         .execute(json!({ "url": url }), &c)
         .await
         .unwrap()
@@ -99,6 +102,7 @@ async fn a_binary_response_is_refused_with_its_type_named() {
     .await;
     let (_d, c) = ctx();
     let err = Fetch::default()
+        .allow_private_dial()
         .execute(json!({ "url": url }), &c)
         .await
         .unwrap_err();
@@ -115,11 +119,51 @@ async fn only_http_and_https_are_spoken() {
     let (_d, c) = ctx();
     for url in ["file:///etc/passwd", "data:text/plain,hi", "ftp://h/x"] {
         let err = Fetch::default()
+            .allow_private_dial()
             .execute(json!({ "url": url }), &c)
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::Invalid(_)), "{url}: {err}");
     }
+}
+
+// The dial gate, end to end: a private literal is refused before any packet,
+// by a name that says which range it belongs to.
+#[tokio::test]
+async fn a_private_literal_is_refused_by_name() {
+    let (_d, c) = ctx();
+    for (url, named) in [
+        ("http://127.0.0.1/", "loopback"),
+        ("http://10.0.0.9/", "private"),
+        ("http://169.254.169.254/latest/meta-data/", "link-local"),
+        ("http://[::1]/", "IPv6 loopback"),
+    ] {
+        let err = Fetch::default()
+            .execute(json!({ "url": url }), &c)
+            .await
+            .unwrap_err();
+        let ToolError::Invalid(why) = err else {
+            panic!("{url}: wrong kind");
+        };
+        assert!(why.contains(named), "{url}: {why}");
+        assert!(why.contains("public web pages only"), "{url}: {why}");
+    }
+}
+
+// A hostname is judged where it resolves, not where it is written: localhost
+// dials no packet and still refuses, which is the resolver's doing.
+#[tokio::test]
+async fn a_name_that_lands_private_is_refused_at_resolution() {
+    let (_d, c) = ctx();
+    let err = Fetch::default()
+        .execute(json!({ "url": "http://localhost:1/" }), &c)
+        .await
+        .unwrap_err();
+    let ToolError::Invalid(why) = err else {
+        panic!("wrong kind");
+    };
+    assert!(why.contains("resolves to"), "{why}");
+    assert!(why.contains("public web pages only"), "{why}");
 }
 
 #[tokio::test]
@@ -131,6 +175,7 @@ async fn an_unreachable_host_says_why_rather_than_that_it_failed() {
     };
     let (_d, c) = ctx();
     let err = Fetch::default()
+        .allow_private_dial()
         .execute(json!({ "url": format!("http://127.0.0.1:{port}/") }), &c)
         .await
         .unwrap_err();
@@ -163,6 +208,7 @@ async fn a_cancelled_run_does_not_wait_for_the_response() {
         token.cancel();
     });
     let err = Fetch::default()
+        .allow_private_dial()
         .execute(json!({ "url": format!("http://{addr}/") }), &c)
         .await
         .unwrap_err();
@@ -181,6 +227,7 @@ async fn a_server_cannot_write_its_own_tags_into_the_transcript() {
     .await;
     let (_d, c) = ctx();
     let body = Fetch::default()
+        .allow_private_dial()
         .execute(json!({ "url": url }), &c)
         .await
         .unwrap()
@@ -201,6 +248,7 @@ async fn a_redirect_cannot_leave_http() {
             .await;
     let (_d, c) = ctx();
     let body = Fetch::default()
+        .allow_private_dial()
         .execute(json!({ "url": url }), &c)
         .await
         .unwrap()
@@ -224,6 +272,7 @@ async fn an_escaped_close_tag_cannot_come_back_as_a_real_one() {
     .await;
     let (_d, c) = ctx();
     let body = Fetch::default()
+        .allow_private_dial()
         .execute(json!({ "url": url }), &c)
         .await
         .unwrap()
@@ -251,6 +300,7 @@ async fn a_json_body_cannot_close_the_tag_either() {
     .await;
     let (_d, c) = ctx();
     let body = Fetch::default()
+        .allow_private_dial()
         .execute(json!({ "url": url }), &c)
         .await
         .unwrap()

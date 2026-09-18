@@ -73,8 +73,23 @@ pub(crate) async fn exchange(
 
     // The refusal text in full where the level allows: providers put the real
     // reason in it, and a status alone never says which of a dozen things
-    // went wrong.
-    let body = resp.text().await.unwrap_or_default();
+    // went wrong. Capped so a giant page cannot flood the journal; the cut
+    // backs off to a digit boundary, so `overflow_limit` never reads a number
+    // halved by the cap itself.
+    let body = resp
+        .text()
+        .await
+        .unwrap_or_else(|e| format!("<body unreadable: {e}>"));
+    const MAX_BODY: usize = 4096;
+    let body = if body.len() > MAX_BODY {
+        let mut cut = MAX_BODY;
+        while cut > 0 && body.as_bytes()[cut - 1].is_ascii_digit() {
+            cut -= 1;
+        }
+        format!("{} (truncated)", crate::slice::head_bytes(&body, cut))
+    } else {
+        body
+    };
     tracing::warn!(target: "pi::wire", format, status, took_ms, detail = %body, "refused");
     Err(crate::BrainError::Api {
         format,
@@ -227,6 +242,17 @@ impl Gaps {
             None => {
                 self.lost(event, field);
                 None
+            }
+        }
+    }
+
+    /// Read a numeric index the frame owes, standing in 0 where the host left it out.
+    pub(crate) fn owed_index(&mut self, frame: &Value, event: &str, field: &str) -> usize {
+        match frame[field].as_u64() {
+            Some(i) => i as usize,
+            None => {
+                self.lost(event, field);
+                0
             }
         }
     }

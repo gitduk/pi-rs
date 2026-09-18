@@ -9,7 +9,7 @@
 pub fn short(n: u64) -> String {
     match n {
         0..=999 => n.to_string(),
-        1_000..=999_999 => format!("{:.1}k", n as f64 / 1_000.0),
+        1_000..=999_949 => format!("{:.1}k", n as f64 / 1_000.0),
         _ => format!("{:.1}m", n as f64 / 1_000_000.0),
     }
 }
@@ -41,6 +41,14 @@ mod tests {
         assert_eq!(short(999), "999");
         assert_eq!(short(8_400), "8.4k");
         assert_eq!(short(2_500_000), "2.5m");
+    }
+
+    // A k-count that rounds to 1000.0k would read as a different unit than
+    // the one the m branch spells.
+    #[test]
+    fn a_k_count_about_to_round_to_1000k_flips_to_m() {
+        assert_eq!(short(999_950), "1.0m");
+        assert_eq!(short(999_999), "1.0m");
     }
 
     #[test]

@@ -931,12 +931,12 @@ fn dropping_leaves_no_question_without_its_answer() {
     assert_eq!(view[0].text(), "the original task", "the task itself stays");
 }
 
-// The drop tier's unit is an assistant turn and the results answering it. A
-// turn that called no tool has no answers, so it must go alone — sweeping
-// forward to the next assistant takes the user's next question with it, and
-// that question is not stale context, it is what they asked.
+// The drop tier's unit is a round — a prompt and everything that answered it
+// (compact.rs's `droppable`). So whatever falls, falls as whole rounds: a
+// question that survives still has an answer after it, and the transcript
+// never ends on a bare question with nothing answering it.
 #[test]
-fn dropping_a_chat_only_turn_does_not_take_the_next_question_with_it() {
+fn a_dropped_history_never_leaves_a_question_without_an_answer() {
     let mut s = Session::new();
     s.prompt("the task");
     for i in 0..8 {
@@ -950,7 +950,14 @@ fn dropping_a_chat_only_turn_does_not_take_the_next_question_with_it() {
     })]);
 
     let budget = estimate::tokens(&s.context(), &spec()) / 3;
-    let (record, _report) = plan(&s, &spec(), budget, &Policy::default());
+    // A tiny tail guard: under the default one nothing here is ever droppable,
+    // and the loop below would hold vacuously — it needs drops to have happened.
+    let policy = Policy {
+        protect_tail: 8,
+        ..Default::default()
+    };
+    let (record, report) = plan(&s, &spec(), budget, &policy);
+    assert!(report.dropped > 0, "the setup must actually drop something");
     s.record(record);
 
     let left: String = s
@@ -961,11 +968,16 @@ fn dropping_a_chat_only_turn_does_not_take_the_next_question_with_it() {
         .join("\n");
     for i in 0..8 {
         let q = format!("question {i}");
-        let a = left.contains(&q);
-        assert!(
-            a || !left.contains(&format!("question {}", i + 1)),
-            "`{q}` was dropped while a later question survived — a question is \
-             not the answer's spare context"
-        );
+        if let Some(at) = left.find(&q) {
+            assert!(
+                !left[at + q.len()..].trim().is_empty(),
+                "`{q}` was left standing with no answer after it — a question \
+                 is not the answer's spare context"
+            );
+        }
     }
+    assert!(
+        left.contains("the task"),
+        "the opening task is round zero's head and stays"
+    );
 }

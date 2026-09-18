@@ -29,31 +29,56 @@ fn normalize(p: &Path) -> PathBuf {
     out
 }
 
-// Canonicalize the deepest existing ancestor and push the rest back on: an
-// existing symlink is resolved away, and what does not exist cannot be one.
-// None when no ancestor resolved at all — nothing was checked for links, so
-// the caller must refuse rather than test a boundary against it.
-fn real_until_missing(p: &Path) -> Option<PathBuf> {
+// Canonicalize the deepest existing ancestor and hand back the missing tail:
+// an existing resolvable symlink is resolved away, and what is merely absent
+// is returned so the caller can check it for links that never resolve (a
+// dangling link exists but canonicalizes to nothing). None when no ancestor
+// resolved at all — nothing was checked for links, so the caller must refuse
+// rather than test a boundary against it.
+fn real_until_missing(p: &Path) -> Option<(PathBuf, Vec<std::ffi::OsString>)> {
     let mut ancestor = p;
-    let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
     loop {
         match ancestor.canonicalize() {
-            Ok(real) => {
-                let mut out = real;
-                for name in tail.iter().rev() {
-                    out.push(name);
-                }
-                return Some(out);
-            }
+            Ok(real) => return Some((real, tail)),
             Err(_) => match (ancestor.file_name(), ancestor.parent()) {
                 (Some(name), Some(parent)) => {
-                    tail.push(name);
+                    tail.push(name.to_os_string());
                     ancestor = parent;
                 }
                 _ => return None,
             },
         }
     }
+}
+
+// The tail is stored deepest-first; walk it outward-in to what the rejoined
+// path will be.
+fn rejoin(real: PathBuf, tail: &[std::ffi::OsString]) -> PathBuf {
+    let mut out = real;
+    for name in tail.iter().rev() {
+        out.push(name);
+    }
+    out
+}
+
+// A tail component that already sits on disk as a symlink would be crossed by
+// whatever the caller creates under the rejoined path, so creating through it
+// is refused. Real directories are fine; once a component is missing nothing
+// below it is on disk and the walk stops there.
+fn tail_crosses_a_link(real: &Path, tail: &[std::ffi::OsString]) -> bool {
+    let mut prefix = real.to_path_buf();
+    // The tail is stored deepest-first; walk it outward-in, so each prefix is
+    // exactly what the rejoined path will have on disk at that depth.
+    for name in tail.iter().rev() {
+        prefix.push(name);
+        match std::fs::symlink_metadata(&prefix) {
+            Ok(md) if md.is_symlink() => return true,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    false
 }
 
 impl Workspace {
@@ -67,8 +92,10 @@ impl Workspace {
     /// Widen the boundary to extra absolute directories, for every tier above
     /// read: `bash` may work in one as well as `write` and `edit`. Entries
     /// must be absolute; one that does not exist yet is fine — the write tool
-    /// creates it on first use. Each is reduced the way `resolve` reduces a
-    /// target, so an existing symlink cannot sneak a narrower root past the
+    /// creates it on first use. A component that sits on disk as a dangling
+    /// symlink is refused here, since nothing below it can ever be created
+    /// through. Each is reduced the way `resolve` reduces a target, so an
+    /// existing resolvable symlink cannot sneak a narrower root past the
     /// check.
     pub fn with_write_roots(mut self, extra: &[impl AsRef<Path>]) -> std::io::Result<Self> {
         for dir in extra {
@@ -79,12 +106,22 @@ impl Workspace {
                     format!("`write_roots` entries must be absolute: {}", dir.display()),
                 ));
             }
-            let reduced = real_until_missing(dir).ok_or_else(|| {
+            let (real, tail) = real_until_missing(dir).ok_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     format!("`write_roots` entry cannot be resolved: {}", dir.display()),
                 )
             })?;
+            if tail_crosses_a_link(&real, &tail) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "`write_roots` entry goes through a symlink that does not resolve: {}",
+                        dir.display()
+                    ),
+                ));
+            }
+            let reduced = rejoin(real, &tail);
             self.write_roots.push(reduced);
         }
         Ok(self)
@@ -99,9 +136,10 @@ impl Workspace {
     /// `Tier::Read` may reach anywhere on the filesystem; write and exec
     /// tools must stay inside the workspace root or a configured write root,
     /// and a path that would escape both is refused. Canonicalizing the
-    /// deepest existing ancestor is what stops a symlink from pointing
-    /// outside the boundary; the remaining components cannot be links because
-    /// they do not exist.
+    /// deepest existing ancestor is what stops a resolvable symlink from
+    /// pointing outside the boundary; the remaining components cannot resolve
+    /// as links, and one that exists as a dangling link is refused outright
+    /// rather than created through.
     pub fn resolve(&self, input: &str, tier: Tier) -> Result<PathBuf, ToolError> {
         if input.is_empty() {
             return Err(ToolError::Invalid("empty path".into()));
@@ -114,8 +152,17 @@ impl Workspace {
         };
         let target = normalize(&joined);
 
-        let resolved =
+        let (real, tail) =
             real_until_missing(&target).ok_or_else(|| ToolError::Escape(input.into()))?;
+        if tail_crosses_a_link(&real, &tail) {
+            let why = if tier.fenced() {
+                "creating through a symlink is not safe"
+            } else {
+                "path goes through a symlink that does not resolve"
+            };
+            return Err(ToolError::Invalid(format!("{why}: `{input}`")));
+        }
+        let resolved = rejoin(real, &tail);
         if tier.fenced() && !self.allows(&resolved) {
             return Err(ToolError::Escape(input.into()));
         }
@@ -270,6 +317,33 @@ mod tests {
             "bash may work there"
         );
         assert!(ws.resolve(&named, Tier::Write).is_ok());
+    }
+
+    // The tail is rejoined after `real_until_missing`, so a dangling link in
+    // it would be crossed by whatever gets created under the resolved path.
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_in_the_tail_is_refused() {
+        let (_d, ws) = ws();
+        std::os::unix::fs::symlink("/nowhere-at-all", ws.root().join("dangle")).unwrap();
+
+        assert!(matches!(
+            ws.resolve("dangle/x.txt", Tier::Write),
+            Err(ToolError::Invalid(_))
+        ));
+        // Reading is refused by the same check: the link exists, and the path
+        // cannot resolve either way.
+        assert!(matches!(
+            ws.resolve("dangle/x.txt", Tier::Read),
+            Err(ToolError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn a_deep_missing_tail_still_resolves() {
+        let (_d, ws) = ws();
+        let p = ws.resolve("a/b/c/d.txt", Tier::Write).unwrap();
+        assert_eq!(ws.display(&p), "a/b/c/d.txt");
     }
 
     // The claim `with_write_roots` makes: a write root is reduced the way a

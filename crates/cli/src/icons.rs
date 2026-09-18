@@ -26,8 +26,8 @@ pub const CHANGED_MARK: &str = "≠"; // a session value the file no longer hold
 
 // The input lines.
 pub const PIPE_SIGIL: &str = ""; // the prompt where there is no tui
-pub const INPUT_SIGIL: &str = "›"; // `theme.prompt.icon` default
-pub const INPUT_SIGIL_NORMAL: &str = "›"; // `theme.prompt.normal` default
+pub const INPUT_SIGIL: &str = MENU_SIGIL; // `theme.prompt.icon` default
+pub const INPUT_SIGIL_NORMAL: &str = MENU_SIGIL; // `theme.prompt.normal` default
 pub const BANG_SIGIL: &str = "!"; // the `!command` input prompt
 
 // Truncation and joins.

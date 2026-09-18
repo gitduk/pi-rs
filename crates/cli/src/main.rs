@@ -56,8 +56,6 @@ impl FormatArg {
     }
 }
 
-/// Ordered, so a project file can lower the ceiling without being able to
-/// raise it.
 /// `tools::Tier` as the command line and the config files spell it. Not
 /// ordered, because the tiers are not: see `tools::Tier`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, serde::Deserialize, serde::Serialize)]
@@ -482,6 +480,9 @@ async fn main() -> Result<()> {
     let project = config::load_project(workspace.root())?;
 
     let store = session::Store::default();
+    // Before anything reads the store: the first run after the bucket-key
+    // change is the one that must still find what it wrote before it.
+    store.migrate_legacy_buckets();
     // Off the startup path, like the journal's own sweep: it stats every
     // bucket and almost never has anything to take. A run that exits first
     // loses nothing — the next one sweeps.

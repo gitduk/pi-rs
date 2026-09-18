@@ -122,7 +122,18 @@ impl View {
         let last = self.rows.len() - 1;
         let spans = match cut {
             None => vec![(at(0), at(last))],
-            Some((h, t)) => vec![(at(0), at(h - 1)), (at(self.rows.len() - t), at(last))],
+            // fits() keeps 0 rows when one row alone exceeds the half-budget,
+            // so either end of the cut can come back empty.
+            Some((h, t)) => {
+                let mut spans = Vec::new();
+                if h > 0 {
+                    spans.push((at(0), at(h - 1)));
+                }
+                if t > 0 {
+                    spans.push((at(self.rows.len() - t), at(last)));
+                }
+                spans
+            }
         };
         // Both ends of an elided window, named `N` or `N-M`.
         let named: Vec<String> = spans
@@ -254,6 +265,14 @@ impl Tool for Read {
             // The listing rides the same spill path as every other body.
             let listed = spill::fit(ctx, &rows, "entries", &notice)?;
             return Ok(ToolOutput::text(format!("{rel}/\n{listed}")));
+        }
+
+        // A FIFO reports st_size 0, so the byte cap below never sees one
+        // coming: opening it to read blocks, and /dev/zero reads forever.
+        if !meta.is_file() {
+            return Err(ToolError::Invalid(format!(
+                "{rel} is not a regular file; read reads regular files only — FIFOs, devices and sockets are not read"
+            )));
         }
 
         // Sniffing needs the whole file in memory, so the guard precedes the

@@ -13,6 +13,10 @@ pub enum BrainError {
     #[error("stream: {0}")]
     Stream(String),
 
+    // Not a wire or stream failure: the model answered, just with nothing.
+    #[error("{0}")]
+    Summarizer(String),
+
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
 

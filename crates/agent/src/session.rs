@@ -385,6 +385,8 @@ pub const STOPPED_CALL: &str = "The user stopped this call before it returned.";
 /// Whether a tool result was synthesized to close an interrupted call.
 pub fn is_stopped_call(r: &ToolResult) -> bool {
     r.content.iter().any(|c| match c {
+        // The bare stem also matches the wording before 05e26ec, which lives
+        // on in transcripts written before then.
         ToolResultContent::Text(t) => t.text.starts_with("The user stopped this call"),
         _ => false,
     })
@@ -1316,6 +1318,16 @@ mod tests {
         };
         assert!(!result.is_error, "a stopped call is not an error");
         assert!(is_stopped_call(result));
+    }
+
+    #[test]
+    fn a_stopped_call_in_the_pre_05e26ec_wording_is_still_recognised() {
+        let result = ToolResult::text(
+            "c1",
+            "bash",
+            "The user stopped this call before it returned; nothing about the call itself failed.",
+        );
+        assert!(is_stopped_call(&result));
     }
 
     #[test]

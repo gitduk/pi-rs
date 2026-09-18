@@ -30,6 +30,7 @@ struct Args {
 #[derive(Default)]
 pub struct Fetch {
     client: std::sync::OnceLock<reqwest::Client>,
+    allow_private: bool,
 }
 
 impl Fetch {
@@ -39,12 +40,130 @@ impl Fetch {
         if let Some(client) = self.client.get() {
             return Ok(client);
         }
-        let built = reqwest::Client::builder()
-            .user_agent(concat!("pi/", env!("CARGO_PKG_VERSION")))
-            .redirect(reqwest::redirect::Policy::limited(10))
+        let built =
+            reqwest::Client::builder().user_agent(concat!("pi/", env!("CARGO_PKG_VERSION")));
+        let built = if self.allow_private {
+            built
+        } else {
+            // The gate must see the dial: an env proxy would take it, and
+            // the proxy would resolve targets — internal names included — itself.
+            built
+                .no_proxy()
+                .dns_resolver(std::sync::Arc::new(PublicDials))
+                .redirect(reqwest::redirect::Policy::custom(redirect_verdict))
+        };
+        let built = built
             .build()
             .map_err(|e| ToolError::Invalid(format!("no http client on this machine: {e}")))?;
         Ok(self.client.get_or_init(|| built))
+    }
+
+    /// For the offline wire-level test harness only: it serves from loopback
+    /// because there is nowhere else to serve from. Everything else keeps the gate on.
+    #[doc(hidden)]
+    pub fn allow_private_dial(mut self) -> Self {
+        self.allow_private = true;
+        self
+    }
+}
+
+// The gate on where a dial may land: `fetch` reads public web pages, and
+// every range here is one the model must not reach through it.
+fn refuse(ip: std::net::IpAddr) -> Option<&'static str> {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            if v4.is_loopback() {
+                Some("a loopback address (127.0.0.0/8)")
+            } else if octets[0] == 0 {
+                // Anything in 0/8 dials this machine, not just 0.0.0.0.
+                Some("a this-host address (0.0.0.0/8)")
+            } else if v4.is_private() {
+                Some("a private address (RFC1918)")
+            } else if v4.is_link_local() {
+                Some("a link-local address (169.254.0.0/16, where cloud credentials live)")
+            } else if octets[0] == 100 && (64..=127).contains(&octets[1]) {
+                Some("a shared-space address (100.64.0.0/10)")
+            } else if v4.is_broadcast() || v4.is_multicast() {
+                Some("a non-unicast address")
+            } else {
+                None
+            }
+        }
+        std::net::IpAddr::V6(v6) => {
+            // An IPv4 address wearing IPv6 clothes is judged as the v4 it is.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return refuse(std::net::IpAddr::V4(v4));
+            }
+            if v6.is_loopback() {
+                Some("the IPv6 loopback (::1)")
+            } else if v6.is_unspecified() {
+                Some("the unspecified address (::)")
+            } else if v6.is_unicast_link_local() {
+                Some("an IPv6 link-local address (fe80::/10)")
+            } else if v6.is_unique_local() {
+                Some("a unique-local address (fc00::/7)")
+            } else if v6.is_multicast() {
+                Some("a multicast address")
+            } else {
+                None
+            }
+        }
+    }
+}
+
+// An IP written into the URL never meets the resolver — the connector dials
+// it directly — so literals are read back out of the host string instead.
+fn literal_of(host: &str) -> Option<std::net::IpAddr> {
+    host.trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse()
+        .ok()
+}
+
+// The resolver is the gate that holds: it runs on every dial, redirects
+// included, and hands reqwest only addresses it vetted — no check-to-dial drift.
+struct PublicDials;
+
+impl reqwest::dns::Resolve for PublicDials {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let answers = tokio::net::lookup_host((host.as_str(), 0))
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+            let mut vetted = Vec::new();
+            for addr in answers {
+                if let Some(why) = refuse(addr.ip()) {
+                    return Err(format!(
+                        "`{host}` resolves to {why}, and fetch reads public web pages only"
+                    )
+                    .into());
+                }
+                vetted.push(addr);
+            }
+            Ok(Box::new(vetted.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+// Every hop passes here: a public page can point anywhere, so a redirect is
+// judged like a fresh request.
+fn redirect_verdict(attempt: reqwest::redirect::Attempt) -> reqwest::redirect::Action {
+    if let Some(why) = attempt
+        .url()
+        .host_str()
+        .and_then(literal_of)
+        .and_then(refuse)
+    {
+        return attempt.error(format!(
+            "redirect lands on {why}, and fetch reads public web pages only"
+        ));
+    }
+    if attempt.previous().len() >= 10 {
+        attempt.stop()
+    } else {
+        attempt.follow()
     }
 }
 
@@ -62,7 +181,9 @@ impl Tool for Fetch {
          issue, a changelog or an API's own answer rather than working from \
          memory of it. It reads what is served at that address and follows \
          redirects; it is not a search engine, so a question needs a page that \
-         answers it. Binary responses are refused with their type named."
+         answers it. Only public addresses are fetched: loopback, LAN and \
+         link-local targets are refused, redirects included. Binary responses \
+         are refused with their type named."
     }
 
     fn schema(&self) -> Value {
@@ -92,6 +213,16 @@ impl Tool for Fetch {
                 "`fetch` speaks http and https; `{}:` is neither. A file on \
                  this machine is `read`'s job.",
                 url.scheme()
+            )));
+        }
+        // An IP literal is dialed without ever meeting the resolver, so it is
+        // judged here, where the refusal can name the address.
+        if !self.allow_private
+            && let Some(why) = url.host_str().and_then(literal_of).and_then(refuse)
+        {
+            return Err(ToolError::Invalid(format!(
+                "`{}` is {why}, and fetch reads public web pages only.",
+                url.host_str().unwrap_or_default()
             )));
         }
         // A zero would otherwise abort the request before it was sent.
@@ -199,11 +330,10 @@ impl Fetch {
             .send()
             .await
             .map_err(|e| {
-                // Past the hop limit the client raises rather than answering,
-                // so the note below never runs — and "could not be reached"
-                // sends the model looking for a network fault that is not one.
+                // Past the hop limit, or into a refused target, the client
+                // raises rather than answering — say that, then the reason.
                 let what = match e.is_redirect() {
-                    true => "redirects more times than this will follow",
+                    true => "stopped following redirects",
                     false => "could not be reached",
                 };
                 ToolError::Invalid(format!("{url} {what}: {}", why(&e)))
@@ -658,7 +788,40 @@ fn tidy(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Kind, breaks, defuse, detag, kind_of, name_of, tidy, unescape};
+    use super::{
+        Kind, breaks, defuse, detag, kind_of, literal_of, name_of, refuse, tidy, unescape,
+    };
+
+    #[test]
+    fn private_and_reserved_addresses_are_refused_by_name() {
+        let refused = [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.9",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "0.0.0.0",
+            "0.1.2.3",
+            "::1",
+            "fe80::1",
+            "fc00::1",
+            "::ffff:10.0.0.7",
+        ];
+        for ip in refused {
+            assert!(refuse(ip.parse().unwrap()).is_some(), "{ip} went through");
+        }
+        for ip in ["8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"] {
+            assert!(refuse(ip.parse().unwrap()).is_none(), "{ip} was refused");
+        }
+    }
+
+    #[test]
+    fn a_bracketed_ipv6_literal_is_read_out_of_the_host() {
+        assert_eq!(literal_of("[::1]"), Some("::1".parse().unwrap()));
+        assert_eq!(literal_of("127.0.0.1"), Some("127.0.0.1".parse().unwrap()));
+        assert_eq!(literal_of("example.com"), None);
+    }
 
     #[test]
     fn a_page_comes_back_as_its_prose() {

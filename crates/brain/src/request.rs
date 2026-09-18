@@ -55,6 +55,12 @@ impl Request {
             })
         })
     }
+
+    /// The temperature as the wires may send it: a non-finite value is a
+    /// caller bug, and serde_json would spell it `null`, which providers reject.
+    pub(crate) fn finite_temperature(&self) -> Option<f64> {
+        self.temperature.filter(|t| t.is_finite())
+    }
 }
 impl Effort {
     /// Fraction of the output budget handed to thinking. Anthropic requires the
@@ -68,8 +74,9 @@ impl Effort {
         }
     }
 
-    /// Kept separate from `as_openai`: the vocabularies have already diverged —
-    /// Anthropic adds `xhigh`/`max`, OpenAI `none`/`minimal`.
+    /// Kept separate from `as_openai`: the two vocabularies coincide today,
+    /// and the split leaves each wire free to diverge without touching the
+    /// other.
     pub fn as_anthropic(self) -> Option<&'static str> {
         match self {
             Effort::Off => None,

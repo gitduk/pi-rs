@@ -4,6 +4,12 @@ use common::{ctx, run, view};
 use serde_json::json;
 use tools::{Ctx, Registry, Tier, Tool, ToolError, Workspace};
 
+// Failure messages quote a slice of the output; byte slicing would panic
+// mid-UTF-8 and hide the real failure, so take characters instead.
+fn head(s: &str, n: usize) -> String {
+    s.chars().take(n).collect()
+}
+
 #[tokio::test]
 async fn read_heads_the_view_with_the_file_path() {
     let (_d, c) = ctx();
@@ -255,11 +261,7 @@ async fn multibyte_output_respects_the_byte_budget_and_stays_valid_utf8() {
         &c,
     )
     .await;
-    assert!(
-        out.contains("bytes omitted"),
-        "{}",
-        &out[..80.min(out.len())]
-    );
+    assert!(out.contains("bytes omitted"), "{}", head(&out, 80));
     assert!(out.len() < 40_000, "clamped output was {} bytes", out.len());
 }
 
@@ -902,11 +904,7 @@ async fn an_over_long_output_is_kept_somewhere_the_model_can_reach() {
     )
     .await;
 
-    assert!(
-        out.contains("bytes omitted"),
-        "{}",
-        &out[..90.min(out.len())]
-    );
+    assert!(out.contains("bytes omitted"), "{}", head(&out, 90));
     let locator = common::locator_in(&out);
     let whole = std::fs::read_to_string(c.spill_path(locator).unwrap()).unwrap();
     assert!(

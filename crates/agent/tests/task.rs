@@ -520,6 +520,9 @@ async fn the_child_gets_no_tool_the_parent_was_denied() {
     // The parent is built with `probe` only. The child is cloned from that,
     // so whatever the parent does not hold cannot be reached by delegating —
     // which would otherwise make `task` a way around the parent's own limits.
+    // `write` is a real builtin: a child that fell back to the default
+    // registry would resolve it (and fail on its missing arguments), which
+    // is exactly what this assertion must never see.
     let dir = tempfile::tempdir().unwrap();
     let ws = Workspace::new(dir.path()).unwrap();
     let seen = Arc::new(Seen::default());
@@ -532,7 +535,7 @@ async fn the_child_gets_no_tool_the_parent_was_denied() {
                     "task",
                     r#"{"description":"try it","prompt":"try it"}"#,
                 ),
-                call_turn("c2", "sleeper", "{}"),
+                call_turn("c2", "write", "{}"),
                 text_turn("could not"),
                 text_turn("nor could I"),
             ],

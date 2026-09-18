@@ -180,6 +180,59 @@ impl Store {
         Self { root: root.into() }
     }
 
+    /// Re-file buckets written while `key_of` folded every separator to `-`.
+    /// That fold was lossy and collide-prone — `/a/b` and `/a-b` shared one
+    /// bucket — and the encoded key cannot be spelled backwards, so each
+    /// legacy bucket is read for the workspace its own transcripts record
+    /// and renamed to that workspace's key now. A child already present
+    /// under the target stays put and keeps its old bucket alive for it;
+    /// nothing is overwritten and nothing is deleted.
+    pub fn migrate_legacy_buckets(&self) {
+        let Ok(dirs) = std::fs::read_dir(&self.root) else {
+            return;
+        };
+        // A `%` in the name can only come from the encoded key: the old fold
+        // emitted `-` for it. Buckets whose name is the same under both keys
+        // re-file as a no-op.
+        let mut legacy: Vec<PathBuf> = dirs
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_dir()
+                    && !p
+                        .file_name()
+                        .is_some_and(|n| n.to_string_lossy().contains('%'))
+            })
+            .collect();
+        legacy.sort();
+        for bucket in legacy {
+            let transcripts = bucket_transcripts(&bucket);
+            let Some(ws) = workspace_of(&transcripts) else {
+                continue;
+            };
+            let target = self.root.join(tools::state::key_of(Path::new(&ws)));
+            if target == bucket {
+                continue;
+            }
+            let Ok(entries) = std::fs::read_dir(&bucket) else {
+                continue;
+            };
+            if std::fs::create_dir_all(&target).is_err() {
+                continue;
+            }
+            let mut collided = false;
+            for entry in entries.flatten() {
+                let dest = target.join(entry.file_name());
+                if dest.exists() || std::fs::rename(entry.path(), &dest).is_err() {
+                    collided = true;
+                }
+            }
+            if !collided {
+                let _ = std::fs::remove_dir(&bucket);
+            }
+        }
+    }
+
     // The directory one workspace's transcripts live in.
     fn dir_of(&self, workspace: &Path) -> PathBuf {
         self.root.join(tools::state::key_of(workspace))
@@ -313,9 +366,9 @@ impl Store {
     }
 
     // Every session recorded for this workspace, newest first, read as
-    // shallowly as the answer allows. The legacy flat files under the root
-    // are read too: a session saved before the bucketed layout would
-    // otherwise vanish from `/resume` on upgrade.
+    // shallowly as the answer allows. Buckets written under the old
+    // separator-folding key are refiled at startup, so they show up here
+    // under their workspace's key as usual.
     fn peek(&self, workspace: &Path) -> Vec<Peek> {
         let want = workspace.display().to_string();
         let mut found: Vec<Peek> = std::fs::read_dir(self.dir_of(workspace))
@@ -404,11 +457,10 @@ impl Store {
     /// sweep's month of grace. Returns how many transcripts went, so the
     /// removal can say what it did.
     ///
-    /// One session at a time rather than whole buckets: bucket names are a
-    /// lossy encoding of the path (`key_of` folds a `/` and a `-` alike), so
-    /// two trees can share one — deleting the bucket would take a live
-    /// sibling tree's records with it. A bucket goes whole only when every
-    /// transcript in it was recorded under `root`.
+    /// One session at a time rather than whole buckets: the transcripts, not
+    /// the bucket name, are the authority on what a bucket holds — so a
+    /// bucket goes whole only when every transcript in it was recorded under
+    /// `root`.
     pub fn drop_under(&self, root: &Path) -> usize {
         let mut dropped = 0;
         for (bucket, transcripts) in self.buckets() {
@@ -583,11 +635,11 @@ mod tests {
         assert!(store.load("in-deep").is_err());
         assert!(store.load("in-sibling").is_ok());
     }
-    // Two trees whose names fold to the same bucket key (`feature-x` and
-    // `feature/x`) share one directory on disk; removing one must leave the
-    // other's sessions alone.
+    // Two trees whose names once folded to the same bucket key (`feature-x`
+    // and `feature/x`) now get distinct buckets, since slashes are encoded;
+    // removing one must leave the other's sessions alone.
     #[test]
-    fn drop_under_spares_a_sibling_that_shares_a_bucket_key() {
+    fn drop_under_spares_a_sibling_whose_key_differs_by_a_slash() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::new(tmp.path().join("store"));
         let home = tempfile::tempdir().unwrap();
@@ -600,7 +652,7 @@ mod tests {
         store
             .save("theirs", &sibling, "test-model", None, 7, &log)
             .unwrap();
-        assert_eq!(tools::state::key_of(&tree), tools::state::key_of(&sibling));
+        assert_ne!(tools::state::key_of(&tree), tools::state::key_of(&sibling));
 
         assert_eq!(store.drop_under(&tree), 1);
         assert!(store.load("mine").is_err());
@@ -768,6 +820,70 @@ mod tests {
     }
 
     #[test]
+    fn a_bucket_from_the_separator_folding_key_is_refiled_at_migration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::new(tmp.path().join("store"));
+        let legacy = store.root.join("-w-t");
+        std::fs::create_dir_all(legacy.join("1787426708-1")).unwrap();
+        std::fs::write(
+            legacy.join("1787426708-1").join("session.json"),
+            r#"{"id":"1787426708-1","workspace":"/w/t","model":"m"}"#,
+        )
+        .unwrap();
+
+        store.migrate_legacy_buckets();
+
+        assert!(
+            store
+                .root
+                .join("%2Fw%2Ft")
+                .join("1787426708-1")
+                .join("session.json")
+                .is_file(),
+            "the transcript moves to the encoded key"
+        );
+        assert!(!legacy.exists(), "an emptied legacy bucket goes away");
+        let found = store.peek(std::path::Path::new("/w/t"));
+        assert_eq!(
+            found.len(),
+            1,
+            "the refiled session lists for its workspace"
+        );
+        assert_eq!(found[0].id, "1787426708-1");
+    }
+
+    #[test]
+    fn refiling_never_overwrites_what_the_target_already_holds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::new(tmp.path().join("store"));
+        let transcript =
+            |body: &str| format!(r#"{{"id":"{body}","workspace":"/w/t","model":"m"}}"#);
+        // The target bucket already holds session `new`; the legacy one holds
+        // `new` and `old`.
+        let target = store.root.join("%2Fw%2Ft");
+        std::fs::create_dir_all(target.join("new")).unwrap();
+        std::fs::write(target.join("new").join("session.json"), transcript("new")).unwrap();
+        let legacy = store.root.join("-w-t");
+        for id in ["new", "old"] {
+            std::fs::create_dir_all(legacy.join(id)).unwrap();
+            std::fs::write(legacy.join(id).join("session.json"), transcript(id)).unwrap();
+        }
+
+        store.migrate_legacy_buckets();
+
+        assert!(target.join("old").join("session.json").is_file());
+        assert_eq!(
+            std::fs::read_to_string(target.join("new").join("session.json")).unwrap(),
+            transcript("new"),
+            "the target's copy is left alone"
+        );
+        assert!(
+            legacy.join("new").join("session.json").is_file(),
+            "a collided child keeps its old bucket alive"
+        );
+    }
+
+    #[test]
     fn choices_show_the_first_question_and_skip_an_empty_session() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::new(tmp.path());
@@ -812,7 +928,7 @@ mod tests {
 
         // A session is a directory in the bucket, holding the transcript and
         // the journal that recorded it.
-        let bucket = tmp.path().join("-w").join("t").join("session.json");
+        let bucket = tmp.path().join("%2Fw").join("t").join("session.json");
         assert!(
             bucket.is_file(),
             "session must be filed under its workspace bucket"

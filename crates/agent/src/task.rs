@@ -103,7 +103,7 @@ impl Task {
             agent: Arc::new(agent),
             home,
             max_turns: DEFAULT_MAX_TURNS,
-            deadline: Duration::from_secs(600),
+            deadline: Duration::from_secs(1800),
         }
     }
 
@@ -252,7 +252,8 @@ impl Tool for Task {
             description = %args.description,
         );
         // Trips the same token as the turn cap rather than dropping the
-        // future, so both endings unwind the run the way Esc does.
+        // future, so both endings unwind the run the way Esc does; one that
+        // ignores the token is dropped once STOP_GRACE is up.
         let ran = {
             let mut run = std::pin::pin!(
                 self.agent
@@ -263,13 +264,29 @@ impl Tool for Task {
                 Ok(ran) => ran,
                 Err(_) => {
                     stop.cancel();
-                    run.await
+                    match tokio::time::timeout(crate::STOP_GRACE, &mut run).await {
+                        Ok(ran) => ran,
+                        // Dropped here, so nothing is left running; that it
+                        // had to be dropped is the caller's to know.
+                        Err(_) => Err(AgentError::Unstopped),
+                    }
                 }
             }
         };
         // The collector ends when the last sender goes, and `run` held one.
         drop(tx);
-        let heard = heard.await.unwrap_or_default();
+        let mut lost = false;
+        let heard = match heard.await {
+            Ok(heard) => heard,
+            // Torn down with the task itself: nothing more was seen because
+            // nothing more was sent.
+            Err(why) if why.is_cancelled() => Heard::default(),
+            Err(why) => {
+                tracing::error!(target: "pi::task", error = %why, "the accounting collector panicked");
+                lost = true;
+                Heard::default()
+            }
+        };
 
         self.home.keep(&id, session);
 
@@ -287,7 +304,20 @@ impl Tool for Task {
             } else {
                 format!("stopped after {}s", self.deadline.as_secs())
             }),
-            Err(why) => return Err(ToolError::Invalid(format!("task: {why}"))),
+            Err(why) => {
+                // The child's spend rode home on the collector, but an error
+                // result carries no `.with_spent`: name what went uncounted.
+                let uncounted = if heard.spent.usage.input + heard.spent.usage.output > 0 {
+                    format!(
+                        " ({} turn(s), {}, ran uncounted)",
+                        heard.turns,
+                        brain::count::slash(heard.spent.usage.input, heard.spent.usage.output)
+                    )
+                } else {
+                    String::new()
+                };
+                return Err(ToolError::Invalid(format!("task: {why}{uncounted}")));
+            }
         };
 
         let changed = child.writes();
@@ -337,7 +367,7 @@ impl Tool for Task {
         // The child's whole spend rides home on the result, where the parent's
         // run counts it — the surface never had a handle to drain.
         Ok(
-            ToolOutput::text(answer(&heard, cut.as_deref(), &wrote, check.as_ref()))
+            ToolOutput::text(answer(&heard, cut.as_deref(), lost, &wrote, check.as_ref()))
                 .with_preview(sketch(&args.description, &heard))
                 .with_spent(heard.spent),
         )
@@ -375,7 +405,13 @@ fn sketch(description: &str, heard: &Heard) -> String {
 // the bookkeeping every write goes through, the status from running the
 // caller's own command afterwards. Never empty: a subagent that said nothing
 // is a fact the caller has to be told, not an empty string to interpret.
-fn answer(heard: &Heard, cut: Option<&str>, wrote: &[String], check: Option<&Checked>) -> String {
+fn answer(
+    heard: &Heard,
+    cut: Option<&str>,
+    lost: bool,
+    wrote: &[String],
+    check: Option<&Checked>,
+) -> String {
     let said = heard.text.trim();
     let body = if said.is_empty() {
         format!(
@@ -388,6 +424,12 @@ fn answer(heard: &Heard, cut: Option<&str>, wrote: &[String], check: Option<&Che
     let mut notes = Vec::new();
     if let Some(why) = cut {
         notes.push(format!("[unfinished — {why}]"));
+    }
+    if lost {
+        notes.push(
+            "[token accounting lost — the collector crashed, this subtask's spend is not counted]"
+                .to_string(),
+        );
     }
     notes.push(wrote_line(wrote));
     if let Some(check) = check {

@@ -7,13 +7,13 @@ use brain::transport::Transport;
 
 pub const PROMPT: &str = include_str!("../prompts/summarize.md");
 
-// Per-block cap in the rendered history. A summarizer needs to know a file was
-// read, not to re-read it.
-const BLOCK_CHARS: usize = 1_500;
+// Per-block cap, in bytes, of the rendered history. A summarizer needs to
+// know a file was read, not to re-read it.
+const BLOCK_BYTES: usize = 1_500;
 
-// Total cap. The history being summarized is over budget by definition, so the
-// request that summarizes it has to be bounded too.
-const TOTAL_CHARS: usize = 60_000;
+// Total cap, in bytes. The history being summarized is over budget by
+// definition, so the request that summarizes it has to be bounded too.
+const TOTAL_BYTES: usize = 60_000;
 
 const MAX_SUMMARY_TOKENS: u32 = 2_000;
 
@@ -39,10 +39,10 @@ pub fn render(earlier: &[&str], entries: &[&Entry]) -> String {
             Entry::Ask { ask, .. } => lines.push(format!(
                 "[user]{} {}",
                 if ask.image.is_some() { " (image)" } else { "" },
-                clip(&ask.text, BLOCK_CHARS)
+                clip(&ask.text, BLOCK_BYTES)
             )),
             Entry::Bash { run, .. } => {
-                lines.push(format!("[user ran] {}", clip(&run.text, BLOCK_CHARS)))
+                lines.push(format!("[user ran] {}", clip(&run.text, BLOCK_BYTES)))
             }
             // A note is a directive for the one turn it opened; by the
             // time a summary carries it, it is stale.
@@ -52,14 +52,14 @@ pub fn render(earlier: &[&str], entries: &[&Entry]) -> String {
                 lines.push(format!(
                     "[{} result{mark}] {}",
                     r.name,
-                    clip(&r.flatten_text(), BLOCK_CHARS)
+                    clip(&r.flatten_text(), BLOCK_BYTES)
                 ));
             }
             Entry::Answer { blocks, .. } => {
                 for b in blocks {
                     match b {
                         AssistantContent::Text(t) => {
-                            lines.push(format!("[assistant] {}", clip(&t.text, BLOCK_CHARS)))
+                            lines.push(format!("[assistant] {}", clip(&t.text, BLOCK_BYTES)))
                         }
                         // Prior reasoning is the agent's scratch work, not a
                         // record of what happened.
@@ -78,10 +78,10 @@ pub fn render(earlier: &[&str], entries: &[&Entry]) -> String {
     }
 
     let mut out = lines.join("\n");
-    if out.len() > TOTAL_CHARS {
+    if out.len() > TOTAL_BYTES {
         // Both ends carry more than the middle: the opening says what the task
         // was, the tail says where it got to.
-        let half = TOTAL_CHARS / 2;
+        let half = TOTAL_BYTES / 2;
         let head = clip(&out, half);
         let start = out.len().saturating_sub(half);
         let tail = match out.char_indices().find(|(i, _)| *i >= start) {
@@ -102,17 +102,18 @@ pub async fn run(
     spec: &ModelSpec,
     history: String,
     focus: Option<&str>,
+    idle: std::time::Duration,
 ) -> brain::Result<(String, Usage)> {
     let body = match focus.map(str::trim).filter(|f| !f.is_empty()) {
         Some(f) => format!("Focus the summary on: {f}\n\n{history}"),
         None => history,
     };
     let (text, usage) =
-        crate::oneshot::ask(transport, spec, PROMPT, body, MAX_SUMMARY_TOKENS).await?;
+        crate::oneshot::ask(transport, spec, PROMPT, body, MAX_SUMMARY_TOKENS, idle).await?;
     // Nothing to say is a failure here: the span goes either way, and it goes
     // unsummarized.
     if text.trim().is_empty() {
-        return Err(brain::BrainError::Stream(
+        return Err(brain::BrainError::Summarizer(
             "the summarizer returned nothing".into(),
         ));
     }
@@ -190,7 +191,7 @@ mod tests {
     fn a_huge_result_is_clipped_rather_than_sent_whole() {
         let r = result("c", "read", "x".repeat(50_000));
         let out = render(&[], &[&r]);
-        assert!(out.len() < BLOCK_CHARS + 200, "{}", out.len());
+        assert!(out.len() < BLOCK_BYTES + 200, "{}", out.len());
         assert!(out.contains("more bytes"), "{out}");
     }
 
@@ -210,7 +211,7 @@ mod tests {
         refs.push(&last);
 
         let out = render(&[], &refs);
-        assert!(out.len() < TOTAL_CHARS + 200, "{}", out.len());
+        assert!(out.len() < TOTAL_BYTES + 200, "{}", out.len());
         assert!(out.contains("the original task"), "the head must survive");
         assert!(out.contains("the final state"), "the tail must survive");
         assert!(out.contains("middle omitted"), "{}", &out[..80]);

@@ -52,7 +52,7 @@ pub(crate) fn render(value: &toml::Value) -> String {
     }
 }
 
-/// The value at a path, or an error naming the nearest known paths.
+/// The value at `path`, or an error when nothing sits there.
 pub fn get<'a>(tree: &'a toml::Value, path: &str) -> Result<&'a toml::Value> {
     let mut at = tree;
     for part in segments(path)? {

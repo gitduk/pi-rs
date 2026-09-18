@@ -295,12 +295,15 @@ pub struct Screen {
 // and `resume` claim exactly what `leave` gives back, rather than nearly.
 fn enter(stdout: &mut Stdout) -> std::io::Result<()> {
     crossterm::terminal::enable_raw_mode()?;
-    crossterm::execute!(
+    if let Err(e) = crossterm::execute!(
         stdout,
         EnterAlternateScreen,
         EnableBracketedPaste,
         EnableMouseCapture
-    )?;
+    ) {
+        let _ = crossterm::terminal::disable_raw_mode();
+        return Err(e);
+    }
     stdout.write_all(b"\x1b[?1003h")?;
     stdout.flush()
 }
@@ -314,25 +317,45 @@ fn disable_all_motion() {
     let _ = out.flush();
 }
 
+// The hook that held the process's panics before `new` replaced it; `leave`
+// puts it back, so the escape cleanup dies with the surface that needed it.
+type PriorHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static>;
+static PRIOR_HOOK: std::sync::Mutex<Option<PriorHook>> = std::sync::Mutex::new(None);
+
+fn prior_hook() -> std::sync::MutexGuard<'static, Option<PriorHook>> {
+    PRIOR_HOOK.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+// The terminal-restoring panic hook: raw mode off, alternate screen left, the
+// process's former hook chained behind. `leave` hands that former hook back,
+// so anything that re-enters the terminal must set this again.
+fn set_escape_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            LeaveAlternateScreen,
+            DisableBracketedPaste,
+            DisableMouseCapture
+        );
+        disable_all_motion();
+        let prior = prior_hook();
+        if let Some(prior) = prior.as_ref() {
+            prior(info);
+        }
+    }));
+}
+
 impl Screen {
     pub fn new() -> std::io::Result<Self> {
         let mut stdout = std::io::stdout();
         enter(&mut stdout)?;
 
         // A panic in raw mode otherwise leaves a terminal the user has to
-        // `reset`, with the panic message itself unreadable.
-        let prior = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            let _ = crossterm::terminal::disable_raw_mode();
-            let _ = crossterm::execute!(
-                std::io::stdout(),
-                LeaveAlternateScreen,
-                DisableBracketedPaste,
-                DisableMouseCapture
-            );
-            disable_all_motion();
-            prior(info);
-        }));
+        // `reset`, with the panic message itself unreadable. The hook that
+        // was there before is kept above for `leave` to put back.
+        *prior_hook() = Some(std::panic::take_hook());
+        set_escape_hook();
         let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
         let size = terminal.size()?;
         Ok(Self {
@@ -452,6 +475,11 @@ impl Screen {
         );
         disable_all_motion();
         let _ = crossterm::terminal::disable_raw_mode();
+        // `take` makes this idempotent: `leave` runs once from a caller and
+        // once more from `Drop`, and the second finds nothing to restore.
+        if let Some(prior) = prior_hook().take() {
+            std::panic::set_hook(prior);
+        }
     }
 
     /// Take the terminal back after `leave` gave it to a child. Errors are
@@ -462,6 +490,9 @@ impl Screen {
         let size = match &self.term {
             Term::Live(t) => {
                 enter(&mut std::io::stdout())?;
+                // `leave` gave the process's hook back; reclaim it, or a
+                // panic after this point lands on a raw alternate screen.
+                set_escape_hook();
                 t.size()?
             }
             // Nothing was taken from a test screen, so there is nothing to
