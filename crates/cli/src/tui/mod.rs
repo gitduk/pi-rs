@@ -484,6 +484,27 @@ fn tool_row(frame: usize, name: &str, summary: &str) -> String {
     format!("{frame} {}", row::named(name, summary))
 }
 
+// The live row one pending call occupies: the spinner while it runs, and
+// once ended the mark it will land with — a modifying call never folds.
+fn pending_line(spinner: usize, t: &RunTool) -> String {
+    let mark = if is_modifying_tool(&t.name) {
+        None
+    } else {
+        t.done.as_ref().and_then(|row| row.ok()).map(|ok| {
+            if ok {
+                icons::DONE_MARK
+            } else {
+                icons::FAIL_MARK
+            }
+        })
+    };
+    let name = match mark {
+        Some(mark) => format!("{mark} {}", t.name),
+        None => t.name.clone(),
+    };
+    tool_row(spinner, &name, &t.summary)
+}
+
 fn is_modifying_tool(name: &str) -> bool {
     matches!(name, "edit" | "write")
 }
@@ -869,6 +890,15 @@ impl Vim {
     }
 }
 
+// What one rendered row of the main area sits on, as a click sees it: a
+// scrollback row by index, the live region's pending-call rows, or nothing.
+#[derive(Clone, Copy, Debug)]
+enum Target {
+    None,
+    Scrollback(usize),
+    PendingTools,
+}
+
 struct Ui {
     screen: Screen,
     keys: Arc<Keys>,
@@ -929,7 +959,10 @@ struct Ui {
     // takes the bar's row for `FLASH` and then goes — see `flash`.
     flash: Option<(String, Instant)>,
     hovered_scrollback: Option<usize>,
-    row_targets: Vec<Option<usize>>,
+    row_targets: Vec<Target>,
+    // Whether the live region lists every pending call or only the newest
+    // with a count. A click on a pending row flips it; it outlives the calls.
+    live_tools_shown: bool,
     main_top: u16,
 }
 
@@ -1100,6 +1133,7 @@ impl Ui {
             flash: None,
             hovered_scrollback: None,
             row_targets: Vec::new(),
+            live_tools_shown: false,
             main_top: 0,
         }
     }
@@ -1509,36 +1543,39 @@ impl Ui {
 
     // The rows above the input line: running tools, the open stream, and
     // the status line. The editor draws separately, pinned to the bottom.
-    fn live(&self, lane: &Lane, room: usize) -> Vec<String> {
+    // With the rows comes the count that leads them: the pending calls',
+    // which a click opens — only the producer knows which rows those are.
+    fn live(&self, lane: &Lane, room: usize) -> (Vec<String>, usize) {
         let width = self.screen.usable();
         let mut rows = Vec::new();
 
-        if let Some(t) = lane.view.state.tools.last() {
-            // The in-flight call wears a spinner; the summary row that
-            // replaces it on landing wears the check, so the live row
-            // matches the shape it will fold into.
-            let name = if is_modifying_tool(&t.name) {
-                t.name.clone()
-            } else if t.done.is_none() {
-                format!(
-                    "{} {}",
-                    icons::SPINNER_FRAMES[self.spinner % icons::SPINNER_FRAMES.len()],
-                    t.name
-                )
-            } else {
-                format!("{} {}", icons::DONE_MARK, t.name)
-            };
+        // Every pending call holds a row: collapsed the newest with a count
+        // for the rest, opened one each, in the shape it will fold into.
+        let mut pending = Vec::new();
+        if self.live_tools_shown {
+            pending.extend(
+                lane.view
+                    .state
+                    .tools
+                    .iter()
+                    .map(|t| pending_line(self.spinner, t)),
+            );
+        } else if let Some(t) = lane.view.state.tools.last() {
             let extra = if lane.view.state.tools.len() > 1 {
                 format!(" (+{})", lane.view.state.tools.len() - 1)
             } else {
                 String::new()
             };
-            let line = format!("{}{extra}", tool_row(self.spinner, &name, &t.summary));
-            rows.extend(screen::fit(
-                &self.paint.on(&self.paint.theme.muted, &line),
-                width,
-            ));
+            pending.push(format!("{}{extra}", pending_line(self.spinner, t)));
         }
+        rows.extend(
+            pending.into_iter().flat_map(|line| {
+                screen::fit(&self.paint.on(&self.paint.theme.muted, &line), width)
+            }),
+        );
+        // The draw tags screen rows by index, and a long summary wraps:
+        // count the rows the block takes, not the lines before they did.
+        let pending_rows = rows.len();
 
         rows.extend(body(
             &lane.view.surface.folds,
@@ -1568,7 +1605,7 @@ impl Ui {
             ));
         }
 
-        rows
+        (rows, pending_rows)
     }
 
     // The bottom bar, or None when there is nothing it could say. One lane is
@@ -1700,7 +1737,7 @@ impl Ui {
         let hist_view = (self.screen.height as usize)
             .saturating_sub(editor_h + menu_h + bar_h)
             .max(1);
-        let live = self.live(lane, hist_view);
+        let (live, pending_rows) = self.live(lane, hist_view);
 
         // While the view is scrolled up, rows the bottom gained since the
         // last measurement fold back into `scroll`, keeping the window put.
@@ -1760,11 +1797,18 @@ impl Ui {
             width,
         )
         .indexed()
-        .map(|(item, idx)| (item, Some(idx)));
+        .map(|(item, idx)| (item, Target::Scrollback(idx)));
 
-        let live_stream = live
-            .iter()
-            .map(|s| ((Cow::Borrowed(s.as_str()), None), None));
+        // The pending-call rows lead the live block; a click on one opens or
+        // closes the batch.
+        let live_stream = live.iter().enumerate().map(move |(i, s)| {
+            let target = if i < pending_rows {
+                Target::PendingTools
+            } else {
+                Target::None
+            };
+            ((Cow::Borrowed(s.as_str()), None), target)
+        });
 
         let (tagged_rows, scroll) = screen::window_tagged(
             scrollback.chain(live_stream),
@@ -1773,8 +1817,7 @@ impl Ui {
             lane.view.surface.scroll,
         );
 
-        let (rows, row_targets): (Vec<String>, Vec<Option<usize>>) =
-            tagged_rows.into_iter().unzip();
+        let (rows, row_targets): (Vec<String>, Vec<Target>) = tagged_rows.into_iter().unzip();
         self.row_targets = row_targets;
 
         lane.view.surface.scroll = scroll;
@@ -2248,13 +2291,18 @@ impl Ui {
         self.hovered_scrollback = None;
     }
 
-    /// The scrollback row the mouse is over, if the cursor is on its text.
-    fn hovered_row(&self, lane: &Lane, col: u16, row: u16) -> Option<usize> {
-        let idx = self
-            .row_targets
+    // What the row at this screen row sits on, as a click sees it.
+    fn target_at(&self, row: u16) -> Option<Target> {
+        self.row_targets
             .get(row.checked_sub(self.main_top)? as usize)
             .copied()
-            .flatten()?;
+    }
+
+    /// The scrollback row the mouse is over, if the cursor is on its text.
+    fn hovered_row(&self, lane: &Lane, col: u16, row: u16) -> Option<usize> {
+        let Target::Scrollback(idx) = self.target_at(row)? else {
+            return None;
+        };
         let row = lane.view.surface.scrollback.get(idx)?;
         if !row.is_expandable() {
             return None;
@@ -2270,15 +2318,22 @@ impl Ui {
     }
 
     fn on_mouse_click(&mut self, lane: &mut Lane, col: u16, row: u16) {
-        if let Some(idx) = self.hovered_row(lane, col, row)
-            && lane
-                .view
-                .surface
-                .scrollback
-                .get_mut(idx)
-                .is_some_and(|r| r.toggle_expand())
-        {
-            lane.view.surface.counted = None;
+        match self.target_at(row) {
+            // The pending batch opens and closes where it stands: the live
+            // rows are rebuilt every frame, so the flip is all it takes.
+            Some(Target::PendingTools) => self.live_tools_shown = !self.live_tools_shown,
+            _ => {
+                if let Some(idx) = self.hovered_row(lane, col, row)
+                    && lane
+                        .view
+                        .surface
+                        .scrollback
+                        .get_mut(idx)
+                        .is_some_and(|r| r.toggle_expand())
+                {
+                    lane.view.surface.counted = None;
+                }
+            }
         }
     }
 
@@ -4029,7 +4084,7 @@ impl Tui {
 #[cfg(test)]
 mod tests {
     use super::{
-        Body, Cow, Folds, Intent, Panel, Row, ScrollbackRows, Took, absorb_growth, body,
+        Body, Cow, Folds, Intent, Panel, Row, ScrollbackRows, Target, Took, absorb_growth, body,
         scrollback_from, secret_settings_set, tool_row,
     };
     use crate::icons;
@@ -4220,18 +4275,6 @@ mod tests {
         let mut ui = test_ui(80, 24);
         let (_dir, mut lane) = a_running_lane();
 
-        fn mouse_event(
-            kind: crossterm::event::MouseEventKind,
-            row: u16,
-        ) -> crossterm::event::Event {
-            crossterm::event::Event::Mouse(crossterm::event::MouseEvent {
-                kind,
-                column: 5,
-                row,
-                modifiers: crossterm::event::KeyModifiers::NONE,
-            })
-        }
-
         run_tool(&mut ui, &mut lane, "c1", "grep", "match 1", 1);
         run_tool(&mut ui, &mut lane, "c2", "read", "file content", 2);
 
@@ -4330,6 +4373,164 @@ mod tests {
             icons::SPINNER_FRAMES.iter().any(|f| line.starts_with(f)),
             "the summary spins again while its next tool runs: {line}"
         );
+    }
+
+    // The pending-call row answers a click: the batch opens to one row per
+    // call and closes again. Collapsed, the other calls' names are unreadable.
+    #[test]
+    fn a_click_on_the_pending_row_opens_the_batch_of_calls() {
+        let mut ui = test_ui(80, 24);
+        let (_dir, mut lane) = a_running_lane();
+
+        // Three calls in flight, none ended.
+        for name in ["read", "grep", "task"] {
+            ui.on_event(
+                &mut lane,
+                agent::Event::ToolStart {
+                    id: format!("c-{name}"),
+                    name: name.into(),
+                    args: serde_json::json!({}),
+                },
+            );
+        }
+        ui.flush(&mut lane);
+
+        let live: Vec<String> = ui
+            .live(&lane, 10)
+            .0
+            .iter()
+            .map(|l| crate::render::strip_ansi(l))
+            .collect();
+        assert!(
+            live[0].ends_with(" task (+2)"),
+            "collapsed names the newest and counts the rest: {}",
+            live[0]
+        );
+
+        ui.key(
+            &mut lane,
+            mouse_event(
+                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                0,
+            ),
+            false,
+        );
+        let live: Vec<String> = ui
+            .live(&lane, 10)
+            .0
+            .iter()
+            .map(|l| crate::render::strip_ansi(l))
+            .collect();
+        assert_eq!(
+            live.len(),
+            4,
+            "three pending rows and the status line: {live:?}"
+        );
+        for (i, name) in ["read", "grep", "task"].iter().enumerate() {
+            assert!(
+                live[i].contains(name),
+                "every call in the batch shows its name: {}",
+                live[i]
+            );
+            assert!(
+                !live[i].contains("(+"),
+                "opened, the count gives way to the calls: {}",
+                live[i]
+            );
+        }
+
+        // A second click closes the batch again.
+        ui.key(
+            &mut lane,
+            mouse_event(
+                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                0,
+            ),
+            false,
+        );
+        assert!(crate::render::strip_ansi(&ui.live(&lane, 10).0[0]).ends_with(" task (+2)"));
+    }
+
+    // A wrapped pending row is tagged on every screen row it takes: the count
+    // is fitted rows, not lines. A long command at 40 columns folds in two.
+    #[test]
+    fn a_wrapped_pending_batch_tags_every_row_it_takes() {
+        let mut ui = test_ui(40, 24);
+        let (_dir, mut lane) = a_running_lane();
+
+        ui.on_event(
+            &mut lane,
+            agent::Event::ToolStart {
+                id: "c-long".into(),
+                name: "bash".into(),
+                args: serde_json::json!({"command":
+                    "cargo build --release --features wasi-x"}),
+            },
+        );
+        ui.on_event(
+            &mut lane,
+            agent::Event::ToolStart {
+                id: "c-read".into(),
+                name: "read".into(),
+                args: serde_json::json!({}),
+            },
+        );
+        ui.flush(&mut lane);
+
+        // Collapsed, the batch is one row; open it so every call holds a
+        // row, then the long one wraps.
+        ui.key(
+            &mut lane,
+            mouse_event(
+                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                0,
+            ),
+            false,
+        );
+        ui.flush(&mut lane);
+
+        let tagged = ui
+            .row_targets
+            .iter()
+            .filter(|t| matches!(t, Target::PendingTools))
+            .count();
+        assert_eq!(
+            tagged, 3,
+            "both rows of the wrapped one, and the row after it: {tagged}"
+        );
+
+        // The tail of the wrapped batch answers — the row the count used to
+        // miss — and the status line after the batch does not.
+        ui.key(
+            &mut lane,
+            mouse_event(
+                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                2,
+            ),
+            false,
+        );
+        assert!(!ui.live_tools_shown, "the wrapped batch's tail answers");
+        ui.flush(&mut lane);
+        ui.key(
+            &mut lane,
+            mouse_event(
+                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                0,
+            ),
+            false,
+        );
+        assert!(ui.live_tools_shown);
+        ui.flush(&mut lane);
+        let last = ui.row_targets.len() - 1;
+        ui.key(
+            &mut lane,
+            mouse_event(
+                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                last as u16,
+            ),
+            false,
+        );
+        assert!(ui.live_tools_shown, "the status line is no click target");
     }
 
     // as a startup note, which scrolled away; here it stays at the top, which
@@ -4960,6 +5161,16 @@ mod tests {
     // resolved to, and the event itself only carries the printable character.
     fn stroke(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
         crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
+    }
+
+    // A mouse event on the given screen row, at a column over any row's text.
+    fn mouse_event(kind: crossterm::event::MouseEventKind, row: u16) -> crossterm::event::Event {
+        crossterm::event::Event::Mouse(crossterm::event::MouseEvent {
+            kind,
+            column: 5,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        })
     }
 
     fn running_lane(dir: &std::path::Path) -> Lane {
@@ -6092,7 +6303,7 @@ mod tests {
         let (_dir, mut lane) = a_running_lane();
         lane.view.state.started = Some(std::time::Instant::now());
 
-        let live = ui.live(&lane, 10).join("\n");
+        let live = ui.live(&lane, 10).0.join("\n");
         let frames = |text: &str| {
             icons::SPINNER_FRAMES
                 .iter()
@@ -6112,6 +6323,7 @@ mod tests {
         lane.view.state.started = Some(std::time::Instant::now());
         assert!(
             ui.live(&lane, 10)
+                .0
                 .iter()
                 .any(|r| icons::SPINNER_FRAMES.iter().any(|f| r.contains(f))),
             "a running lane draws the status line"
@@ -6120,6 +6332,7 @@ mod tests {
         lane.turn = Turn::Idle;
         assert!(
             !ui.live(&lane, 10)
+                .0
                 .iter()
                 .any(|r| icons::SPINNER_FRAMES.iter().any(|f| r.contains(f))),
             "the clock is still set; the turn is what says the run is over"
