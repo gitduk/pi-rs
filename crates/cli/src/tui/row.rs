@@ -617,6 +617,7 @@ fn clip_to(s: &str, max_cols: usize) -> &str {
 
 pub fn tools_summary_header(
     tools: &FoldedTools,
+    folded: bool,
     running: bool,
     hovered: bool,
     spinner: usize,
@@ -626,12 +627,10 @@ pub fn tools_summary_header(
     // A finished batch wears a green check, an in-flight one spins. Each
     // wears its own span: the check keeps its green under hover (bold added
     // rather than the colour swapped), and the body's reset cannot cut the
-    // dim mid-line. One tool is its own full line; a batch keeps only the
-    // latest tool's description.
-    let body = if tools.is_single() {
-        let room = width.saturating_sub(2).max(10);
-        format!(" {}", clip_to(&tools.last().desc(), room))
-    } else {
+    // dim mid-line. One tool is its own full line; a folded batch keeps only
+    // the latest tool's description and its count — the unfolded one shows
+    // every tool below, so the count would only repeat the list.
+    let body = if folded && !tools.is_single() {
         let digits = tools.count().to_string();
         let desc = tools.last().desc();
         // The ellipsis is glued to the count — `…12` — with a space before
@@ -648,6 +647,9 @@ pub fn tools_summary_header(
             &desc
         };
         format!(" {shown} {}{digits}", icons::ELLIPSIS)
+    } else {
+        let room = width.saturating_sub(2).max(10);
+        format!(" {}", clip_to(&tools.last().desc(), room))
     };
     let mark = if running {
         icons::SPINNER_FRAMES[spinner % icons::SPINNER_FRAMES.len()].to_string()
@@ -669,20 +671,19 @@ pub fn tools_summary_rows(
     paint: &Paint,
     width: usize,
 ) -> Vec<String> {
-    let header = tools_summary_header(tools, running, hovered, spinner, paint, width);
+    let header = tools_summary_header(tools, folded, running, hovered, spinner, paint, width);
     if folded {
         return vec![header];
     }
     let mut rows = Vec::with_capacity(1 + tools.count());
     rows.push(header);
-    let mark = paint.on(&paint.theme.status.ok, icons::DONE_MARK);
-    let room = width.saturating_sub(4).max(10);
+    // The header already wears the check; the tools it lists need no
+    // second one, and the indent keeps them under it.
+    let room = width.saturating_sub(2).max(10);
     for tool in tools.iter() {
-        let desc = tool.desc();
-        let clipped = clip_to(&desc, room);
-        rows.push(format!(
-            "  {mark} {}",
-            paint.on(&paint.theme.muted, clipped)
+        rows.push(paint.on(
+            &paint.theme.muted,
+            &format!("  {}", clip_to(&tool.desc(), room)),
         ));
     }
     rows
@@ -691,7 +692,7 @@ pub fn tools_summary_rows(
 /// Format a folded tool summary line, e.g. "✓ read a.rs …12".
 #[cfg(test)]
 pub fn tools_summary_line(tools: &FoldedTools, paint: &Paint, width: usize) -> String {
-    tools_summary_header(tools, false, false, 0, paint, width)
+    tools_summary_header(tools, true, false, false, 0, paint, width)
 }
 
 #[cfg(test)]
@@ -814,6 +815,22 @@ mod tools_summary_tests {
     }
 
     #[test]
+    fn a_folded_batch_keeps_its_count() {
+        let paint = Paint::new(false);
+        let tools = bundle(vec![tool("bash", "git status"), tool("grep", "match")]);
+        let folded = tools_summary_header(&tools, true, false, false, 0, &paint, 80);
+        assert!(
+            folded.contains(&format!("{}2", icons::ELLIPSIS)),
+            "the folded head keeps the batch size: got {folded}"
+        );
+        let unfolded = tools_summary_header(&tools, false, false, false, 0, &paint, 80);
+        assert!(
+            !unfolded.contains(icons::ELLIPSIS),
+            "the unfolded head shows no count: got {unfolded}"
+        );
+    }
+
+    #[test]
     fn long_tool_call_is_truncated() {
         let paint = Paint::new(false);
         let mut tools = bundle(
@@ -862,9 +879,9 @@ mod tools_summary_tests {
     fn running_tool_shows_spinner_animation() {
         let paint = Paint::new(false);
         let tools = bundle(vec![tool("read", "a.rs")]);
-        let frame0 = tools_summary_header(&tools, true, false, 0, &paint, 80);
+        let frame0 = tools_summary_header(&tools, true, true, false, 0, &paint, 80);
         assert!(frame0.starts_with(&format!("{} read a.rs", icons::SPINNER_FRAMES[0])));
-        let frame1 = tools_summary_header(&tools, true, false, 1, &paint, 80);
+        let frame1 = tools_summary_header(&tools, true, true, false, 1, &paint, 80);
         assert!(frame1.starts_with(&format!("{} read a.rs", icons::SPINNER_FRAMES[1])));
     }
 
@@ -896,8 +913,8 @@ mod tools_summary_tests {
     fn hovered_tool_stays_on_the_same_check() {
         let paint = Paint::new(true);
         let tools = bundle(vec![tool("read", "a.rs")]);
-        let h0 = tools_summary_header(&tools, false, true, 0, &paint, 80);
-        let h1 = tools_summary_header(&tools, false, true, 1, &paint, 80);
+        let h0 = tools_summary_header(&tools, true, false, true, 0, &paint, 80);
+        let h1 = tools_summary_header(&tools, true, false, true, 1, &paint, 80);
         assert_eq!(h0, h1, "hover must not animate the mark");
         assert!(
             crate::render::strip_ansi(&h0).starts_with(&format!("{} read a.rs", icons::DONE_MARK)),
@@ -920,16 +937,18 @@ mod tools_summary_tests {
 
         let (head, _) = row.line(0, &paint, &[], 80);
         assert!(head.starts_with(&format!("{} grep", icons::DONE_MARK)));
-        assert!(head.contains("…2"));
+        assert!(
+            !head.contains("…2"),
+            "the unfolded head shows no count: got {head}"
+        );
 
         let (t0, _) = row.line(1, &paint, &[], 80);
-        assert!(t0.contains(&format!(
-            "{} read crates/agent/src/session.rs",
-            icons::DONE_MARK
-        )));
+        assert!(!t0.contains(icons::DONE_MARK), "got: {t0}");
+        assert!(t0.contains("read crates/agent/src/session.rs"), "got: {t0}");
 
         let (t1, _) = row.line(2, &paint, &[], 80);
-        assert!(t1.contains(&format!("{} grep match 1", icons::DONE_MARK)));
+        assert!(!t1.contains(icons::DONE_MARK), "got: {t1}");
+        assert!(t1.contains("grep match 1"), "got: {t1}");
 
         assert!(row.toggle_expand());
         assert_eq!(row.len(), 1);
