@@ -36,18 +36,6 @@ pub enum ToolChoice {
 pub struct Request {
     pub system: Option<String>,
     pub messages: Vec<Message>,
-    /// True this turn only. Rides the tail of the request and never enters the
-    /// session, so a note cannot be read back next turn as a statement of fact
-    /// — which is what a turn counter written into the transcript becomes.
-    ///
-    /// The tail is also the one place it is free: everything before it is
-    /// unchanged from last turn, so the cached prefix still reaches as far as
-    /// it did.
-    ///
-    /// `agent` fills it every turn with the window note and the shelf, and
-    /// every wire reads it in the user's voice — so anything here has to
-    /// survive being read that way, which is what a plan once did not.
-    pub notes: Vec<String>,
     pub tools: Vec<ToolDef>,
     pub max_output_tokens: Option<u32>,
     pub temperature: Option<f64>,

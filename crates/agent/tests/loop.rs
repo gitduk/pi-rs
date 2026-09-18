@@ -23,8 +23,6 @@ use tools::{Concurrency, Ctx, Registry, Tier, Tool, ToolError, ToolOutput, Works
 struct Scripted {
     turns: Vec<Vec<StreamEvent>>,
     next: AtomicUsize,
-    // What each turn put on the wire beside the transcript.
-    notes: std::sync::Mutex<Vec<Vec<String>>>,
     // Where a test that needs the user to speak mid-run leaves the line: said
     // as the turn at this index goes out, which is past that turn's own look
     // at the mailbox and so exercises the seam rather than the start.
@@ -36,7 +34,6 @@ impl Scripted {
         Arc::new(Self {
             turns,
             next: AtomicUsize::new(0),
-            notes: Default::default(),
             interject: Default::default(),
         })
     }
@@ -47,9 +44,8 @@ impl Transport for Scripted {
     async fn stream(
         &self,
         _spec: &ModelSpec,
-        req: &Request,
+        _req: &Request,
     ) -> brain::Result<BoxStream<'static, brain::Result<StreamEvent>>> {
-        self.notes.lock().unwrap().push(req.notes.clone());
         let i = self.next.fetch_add(1, Ordering::SeqCst);
         if let Some((at, steer, text)) = self.interject.lock().unwrap().as_ref()
             && *at == i
@@ -116,23 +112,6 @@ fn wired(turns: Vec<Vec<StreamEvent>>) -> (tempfile::TempDir, Agent, Ctx, Arc<Sc
     let wire = Scripted::new(turns);
     let agent = Agent::new(wire.clone(), spec());
     (dir, agent, Ctx::new(ws), wire)
-}
-
-// The window rides no note: pi compacts on its own as the budget fills, so a
-// reading would tell the model nothing it can act on. A run with no shelf has
-// nothing else to say, and the wire shows it.
-#[tokio::test]
-async fn a_run_with_no_shelf_says_nothing_beside_the_transcript() {
-    let (_dir, agent, ctx, wire) = wired(vec![
-        call_turn(&[("t1", "nosuchtool", "{}")]),
-        text_turn("done"),
-    ]);
-    let (_session, out, _events) = drive(&agent, &ctx, "go").await;
-    out.unwrap();
-
-    let sent = wire.notes.lock().unwrap();
-    assert_eq!(sent.len(), 2);
-    assert!(sent.iter().all(Vec::is_empty), "{sent:?}");
 }
 
 #[tokio::test]

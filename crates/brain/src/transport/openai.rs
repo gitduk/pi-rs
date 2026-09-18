@@ -175,7 +175,7 @@ fn flush_assistant(text: &mut String, out: &mut Vec<Value>) {
 // The `input` item array. Nothing joins: `input` is flat and has no
 // alternation rule, so one entry leaves as one item — the opposite of the
 // Anthropic encoder, and the reason the join is the encoder's job.
-fn encode(msgs: &[Message], spec: &ModelSpec, notes: &[String]) -> Vec<Value> {
+fn encode(msgs: &[Message], spec: &ModelSpec) -> Vec<Value> {
     let mut out = Vec::new();
     for m in msgs {
         match m {
@@ -184,18 +184,6 @@ fn encode(msgs: &[Message], spec: &ModelSpec, notes: &[String]) -> Vec<Value> {
             Message::User { content } => encode_user(content, &mut out),
             Message::Assistant { content, .. } => encode_assistant(content, spec, &mut out),
         }
-    }
-    // Its own trailing item: `input` is flat, so appending one changes nothing
-    // before it and the cached prefix reaches just as far as it did.
-    if !notes.is_empty() {
-        out.push(json!({
-            "type": "message",
-            "role": "user",
-            "content": notes
-                .iter()
-                .map(|n| json!({ "type": "input_text", "text": n }))
-                .collect::<Vec<_>>(),
-        }));
     }
     out
 }
@@ -209,7 +197,7 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
     let mut body = json!({
         "model": spec.model,
         "stream": true,
-        "input": encode(&req.messages, spec, &req.notes),
+        "input": encode(&req.messages, spec),
         "max_output_tokens": max_output_tokens,
         // A transcript on someone else's disk is not pi's to leave behind, and
         // the reference page documents no default for this — so it is said.
@@ -1362,20 +1350,6 @@ mod tests {
             counted(&kept),
             counted(&dropped)
         );
-    }
-
-    #[test]
-    fn a_note_becomes_its_own_trailing_item() {
-        let req = Request {
-            messages: vec![Message::user("go"), Message::assistant_text("done")],
-            notes: vec!["[true only this turn]".into()],
-            ..Default::default()
-        };
-        let input = body(req);
-        let items = input["input"].as_array().unwrap();
-        assert_eq!(items.len(), 3);
-        assert_eq!(items[2]["role"], "user");
-        assert_eq!(items[2]["content"][0]["text"], "[true only this turn]");
     }
 
     // Caching is on by default here, with one implicit breakpoint that moves

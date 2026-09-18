@@ -141,6 +141,18 @@ pub struct Vim {
     pub escape_timeout_ms: u64,
 }
 
+impl Vim {
+    /// The escape sequence as the exactly-two characters it must be, or `None`
+    /// — an empty setting, or any other length, is no sequence at all.
+    pub fn escape_pair(&self) -> Option<(char, char)> {
+        let mut chars = self.escape.chars();
+        match (chars.next(), chars.next(), chars.next()) {
+            (Some(a), Some(b), None) => Some((a, b)),
+            _ => None,
+        }
+    }
+}
+
 fn default_enabled() -> bool {
     true
 }
@@ -1320,7 +1332,7 @@ output_per_mtok = 0
             tier: Some(TierArg::Exec),
             max_turns: None,
         };
-        // `/settings set` claims the key this session: the tree already
+        // The panel claims the key this session: the tree already
         // carries it, so the flag and the project must both stand down.
         let mut claimed = BTreeMap::new();
         claimed.insert("effort".into(), toml::Value::String("low".into()));

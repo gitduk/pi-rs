@@ -3,11 +3,6 @@
 use crate::render::Paint;
 use unicode_width::UnicodeWidthChar;
 
-// Columns the sigil and its space occupy. Continuation rows are indented to
-// match, so a wrapped line stays aligned under the first.
-const SIGIL_W: usize = 2;
-const CONT: &str = "  ";
-
 #[derive(Default)]
 pub struct Editor {
     text: String,
@@ -62,27 +57,30 @@ impl Editor {
         self.at = self.history.len();
     }
 
-    /// Hand over the line, and remember it unless the caller says not to.
-    ///
-    /// `/settings set api_key …` must run without entering the recall list,
-    /// which is written to disk in the clear.
-    pub fn take(&mut self, remember: bool) -> String {
+    /// Hand over the line. What is recalled with Up is the caller's call —
+    /// hand it to [`remember`](Self::remember) to file it.
+    pub fn take(&mut self) -> String {
         let line = std::mem::take(&mut self.text);
         self.cursor = 0;
-        // A line identical to the last is not worth a second history slot.
-        if remember && !line.trim().is_empty() && self.history.last() != Some(&line) {
-            self.history.push(line.clone());
-        }
         self.at = self.history.len();
         self.draft.clear();
         line
+    }
+
+    /// File a handed-over line for recall. A line identical to the last is
+    /// not worth a second history slot.
+    pub fn remember(&mut self, line: &str) {
+        if !line.trim().is_empty() && self.history.last().map(String::as_str) != Some(line) {
+            self.history.push(line.to_string());
+        }
+        self.at = self.history.len();
     }
     /// Hand over the line being composed, and clear to the bottom of recall.
     ///
     /// While Up is browsing history the composed line is parked in `draft`
     /// and `text` shows a recalled one; a lane switch must keep the first,
     /// or the half-typed prompt would still be lost to the switch. Nothing
-    /// is remembered, as with `take(false)`.
+    /// is remembered.
     pub fn take_composing(&mut self) -> String {
         let line = if self.at == self.history.len() {
             std::mem::take(&mut self.text)
@@ -332,7 +330,9 @@ impl Editor {
     ///
     /// Wrapping is done here rather than left to the terminal: the live region
     /// is repainted by counting rows back, and a row the terminal wrapped on
-    /// its own is a row the count does not know about.
+    /// its own is a row the count does not know about. Continuation rows
+    /// indent under the prompt, so a wrapped line stays aligned under the
+    /// first; the prompt's width is measured, never assumed.
     pub fn view(&self, paint: &Paint, width: usize) -> (Vec<String>, (u16, u16)) {
         // A line starting with `!` is a shell command; the bang takes the
         // prompt's place so the line reads `! cmd` rather than `› ! cmd`.
@@ -347,8 +347,16 @@ impl Editor {
         } else {
             self.cursor
         };
+        let prompt = if bang {
+            self.prompt_bang.as_str()
+        } else {
+            self.prompt.as_str()
+        };
+        // The prompt is painted with the body, so its width is measured the
+        // same way the body's is: never assumed, always what is on screen.
+        let prompt_w = crate::render::visible_width(prompt);
 
-        let avail = width.saturating_sub(SIGIL_W).max(1);
+        let avail = width.saturating_sub(prompt_w).max(1);
         let mut rows: Vec<String> = Vec::new();
         let mut row = String::new();
         let mut used = 0usize;
@@ -357,7 +365,7 @@ impl Editor {
         for (i, ch) in body.char_indices() {
             if ch == '\n' {
                 if i == cursor {
-                    caret = Some((rows.len() as u16, (SIGIL_W + used) as u16));
+                    caret = Some((rows.len() as u16, (prompt_w + used) as u16));
                 }
                 rows.push(std::mem::take(&mut row));
                 used = 0;
@@ -371,25 +379,26 @@ impl Editor {
             // After the wrap, so a caret sitting exactly on the break lands at
             // the start of the new row rather than off the end of the old one.
             if i == cursor {
-                caret = Some((rows.len() as u16, (SIGIL_W + used) as u16));
+                caret = Some((rows.len() as u16, (prompt_w + used) as u16));
             }
             row.push(ch);
             used += w;
         }
-        let caret = caret.unwrap_or((rows.len() as u16, (SIGIL_W + used) as u16));
+        let caret = caret.unwrap_or((rows.len() as u16, (prompt_w + used) as u16));
         rows.push(row);
 
-        let prompt = if bang {
-            self.prompt_bang.as_str()
-        } else {
-            self.prompt.as_str()
-        };
         let painted = rows
             .into_iter()
             .enumerate()
             .map(|(i, r)| {
                 let body = paint.on(&paint.theme.input, &r);
-                format!("{}{body}", if i == 0 { prompt } else { CONT })
+                if i == 0 {
+                    format!("{prompt}{body}")
+                } else {
+                    let mut line = " ".repeat(prompt_w);
+                    line.push_str(&body);
+                    line
+                }
             })
             .collect();
         (painted, caret)
@@ -491,7 +500,8 @@ mod tests {
     #[test]
     fn up_browses_history_but_moves_the_caret_when_there_are_lines_to_move_through() {
         let mut e = typed("older");
-        e.take(true);
+        let older = e.take();
+        e.remember(&older);
         let mut e2 = e;
         e2.insert_str("draft");
         e2.up();
@@ -574,7 +584,8 @@ mod tests {
     #[test]
     fn taking_the_line_mid_browse_returns_the_composition_not_the_recall() {
         let mut e = typed("older");
-        e.take(true);
+        let older = e.take();
+        e.remember(&older);
         e.insert_str("draft");
         e.up();
         assert_eq!(e.text, "older");
@@ -601,9 +612,23 @@ mod tests {
     #[test]
     fn history_does_not_keep_a_second_copy_of_a_repeated_line() {
         let mut e = typed("cargo test");
-        e.take(true);
+        let line = e.take();
+        e.remember(&line);
         e.insert_str("cargo test");
-        e.take(true);
+        let line = e.take();
+        e.remember(&line);
+        assert_eq!(e.history.len(), 1);
+    }
+
+    #[test]
+    fn take_hands_the_line_over_and_remember_files_it() {
+        let mut e = typed("hello");
+        let line = e.take();
+        assert!(e.history.is_empty(), "filing is the caller's call");
+        e.remember(&line);
+        assert_eq!(e.history, ["hello"]);
+        // Only whitespace is not a line worth a slot.
+        e.remember("   ");
         assert_eq!(e.history.len(), 1);
     }
 

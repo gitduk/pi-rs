@@ -16,7 +16,6 @@ mod journal;
 mod keys;
 mod lane;
 mod line;
-mod memory;
 mod render;
 mod repl;
 mod session;
@@ -564,17 +563,14 @@ async fn main() -> Result<()> {
     if let Some(secs) = config.idle_timeout {
         ag.retry.idle = std::time::Duration::from_secs(secs.max(1));
     }
-    // Before `Agent::apply`, which is where the child is cloned: a shelf hung
-    // after it would reach this run and none of the subagents it spawns. Here
-    // rather than beside the Repl, so a one-shot `pi "..."` reads the same
-    // shelf an interactive session writes — outliving one transcript is the
-    // whole point. Last, so the child is cloned from an agent that is finished.
+    // Before `Agent::apply`, which is where the child is cloned: anything hung
+    // after it would reach this run and none of the subagents it spawns. Last,
+    // so the child is cloned from an agent that is finished.
     ag.apply(agent::Setup {
         registry: std::mem::take(&mut resolved.registry),
         system: std::mem::take(&mut resolved.system),
         tier: resolved.tier,
         effort: resolved.effort,
-        shelf: memory::shelf(store.memory_path(&root)),
         home: subagent::Filed::armed(store.clone(), root.clone(), model_id.clone()),
         standing: &resolved.standing,
         max_turns: resolved.max_turns,

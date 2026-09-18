@@ -109,8 +109,8 @@ pub async fn run(
     };
     let (text, usage) =
         crate::oneshot::ask(transport, spec, PROMPT, body, MAX_SUMMARY_TOKENS).await?;
-    // Unlike the shelf beside it, nothing to say is a failure here: the span
-    // goes either way, and it goes unsummarized.
+    // Nothing to say is a failure here: the span goes either way, and it goes
+    // unsummarized.
     if text.trim().is_empty() {
         return Err(brain::BrainError::Stream(
             "the summarizer returned nothing".into(),

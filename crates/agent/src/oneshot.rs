@@ -23,7 +23,6 @@ pub(crate) async fn ask(
     let req = Request {
         system: Some(system.to_string()),
         messages: vec![Message::user(body)],
-        notes: Vec::new(),
         tools: Vec::new(),
         max_output_tokens: Some(max_tokens.min(spec.max_output_tokens)),
         temperature: None,

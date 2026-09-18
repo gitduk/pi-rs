@@ -27,7 +27,25 @@ pub fn leaves(tree: &toml::Value) -> Vec<(String, String)> {
     out
 }
 
-fn render(value: &toml::Value) -> String {
+/// One leaf as the panel and the read-only list show it: the value in force
+/// for the session, and whether the file still holds something else — which
+/// is what the panel's write and revert act on.
+pub struct SettingRow {
+    pub path: String,
+    pub value: String,
+    pub changed: bool,
+}
+
+#[cfg(test)]
+pub(crate) fn row(path: &str, value: &str, changed: bool) -> SettingRow {
+    SettingRow {
+        path: path.into(),
+        value: value.into(),
+        changed,
+    }
+}
+
+pub(crate) fn render(value: &toml::Value) -> String {
     match value {
         toml::Value::String(s) => s.clone(),
         other => other.to_string(),
@@ -101,10 +119,10 @@ pub(crate) fn segments(path: &str) -> Result<Vec<String>> {
 }
 
 // The table the path's parent names, creating missing tables along the way:
-// a `/settings set` may add a section the file never had. A name that exists
+// a write may add a section the file never had. A name that exists
 // but is not a table is still refused — the typo that would otherwise be
 // swallowed is caught one level deeper, by the config's `deny_unknown_fields`
-// when the tree is deserialized, which is what both callers do before
+// when the tree is deserialized, which is what the caller does before
 // anything is applied.
 fn table_at<'a>(
     tree: &'a mut toml::Value,

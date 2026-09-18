@@ -87,11 +87,6 @@ const BUILTIN: &[Command] = &[
         "summarize everything but what you are working on now",
     ),
     Command::builtin(
-        "/mem",
-        "[text]",
-        "keep something past this transcript, or open what is kept",
-    ),
-    Command::builtin(
         "/loop",
         "[text]",
         "repeat a line while it keeps changing the tree; bare, stop one",
@@ -113,11 +108,7 @@ const BUILTIN: &[Command] = &[
         "what every key does, and the id to rebind it under",
     ),
     Command::builtin("/help", "", "this list"),
-    Command::builtin(
-        "/settings",
-        "[set <path> <value>]",
-        "open the settings panel, or change one for this session",
-    ),
+    Command::builtin("/settings", "", "open the settings panel"),
     Command::builtin(
         "/wechat",
         "[on|off]",
@@ -254,7 +245,6 @@ pub fn complete(
     commands: &[Command],
     models: &[Choice],
     sessions: &[ResumeChoice],
-    setting_paths: &[String],
     worktrees: &[Choice],
 ) -> Vec<Candidate> {
     if !line.starts_with('/') {
@@ -301,10 +291,7 @@ pub fn complete(
         // settled by the first word — only whitespace after it settles it.
         "/worktree" if typed.contains(char::is_whitespace) => Vec::new(),
         "/worktree" => worktree_candidates(worktrees, "/worktree ", typed),
-        // A session is named by what was asked first, though its id still
-        // matches — someone may remember half of it. Accepting puts the id in
-        // the line, because that is what `/resume` loads by. A first question
-        // is a whole sentence, so the argument may keep several words.
+        // A first question is a whole sentence, so the argument may keep several words.
         "/resume" => sessions
             .iter()
             .filter(|s| {
@@ -317,39 +304,6 @@ pub fn complete(
                 more: false,
             })
             .collect(),
-        // `set`/`get`/`reset` complete the path; the value is up to the user.
-        "/settings" => {
-            let Some((sub, _)) = typed.split_once(char::is_whitespace) else {
-                let verbs = ["set", "get", "reset"];
-                return verbs
-                    .iter()
-                    .filter(|v| v.starts_with(typed))
-                    .map(|v| Candidate {
-                        show: v.to_string(),
-                        line: format!("/settings {v}"),
-                        help: String::new(),
-                        more: true,
-                    })
-                    .collect();
-            };
-            if !matches!(sub, "set" | "get" | "reset") {
-                return Vec::new();
-            }
-            let want = typed
-                .split_once(char::is_whitespace)
-                .map(|(_, p)| p)
-                .unwrap_or("");
-            setting_paths
-                .iter()
-                .filter(|p| p.starts_with(want) && !p.is_empty())
-                .map(|p| Candidate {
-                    show: p.clone(),
-                    line: format!("/settings {sub} {p}"),
-                    help: String::new(),
-                    more: false,
-                })
-                .collect()
-        }
         _ => Vec::new(),
     }
 }
@@ -381,7 +335,7 @@ pub struct Repl {
     /// The config tree as last read from disk. `/settings` edits a copy of
     /// this tree; `/reload` replaces it.
     pub file: toml::Value,
-    /// What `/settings set` has claimed this run, by path. Replayed over
+    /// What the settings panel has claimed this run, by path. Replayed over
     /// every reload so the claimed values keep winning over the file.
     pub claimed: BTreeMap<String, toml::Value>,
     /// Every checkout open in this run, in the order they were opened. The
@@ -396,17 +350,9 @@ impl Repl {
     // belongs to one tree and not another, and so does a rebound key;
     // leaving the last lane's in place had this one answering to another
     // tree's.
-    //
-    // The shelf is not here: `Agent::apply` hands the agent a handle to this
-    // checkout's file, and the handle reads it every turn.
     fn in_force(&mut self) {
         self.keys = self.lane().keys.clone();
         self.commands = self.lane().commands.clone();
-    }
-
-    // Where the lane in front keeps what outlives its transcripts.
-    fn memory_path(&self) -> std::path::PathBuf {
-        self.store.memory_path(self.lane().ctx.workspace.root())
     }
 
     /// The checkout in front. Indexing is safe by construction: `lanes` is
@@ -466,8 +412,7 @@ impl Repl {
                 && old != &self.claimed[path]
             {
                 said.push(format!(
-                    "{}: the file changed it, but /settings set is still shadowing it — /settings reset {path}",
-                    path
+                    "{path}: the file changed it, but this session is still shadowing it — /settings, then r on the row takes the file back"
                 ));
             }
         }
@@ -502,14 +447,12 @@ impl Repl {
         // is where the copy is taken, and taking it four times copies thrice
         // over.
         let home = self.home(root.clone(), self.lane().agent.spec.model.clone());
-        let shelf = crate::memory::shelf(self.store.memory_path(&root));
         let ag = std::sync::Arc::make_mut(&mut self.lane_mut().agent);
         ag.apply(agent::Setup {
             registry: std::mem::take(&mut resolved.registry),
             system: std::mem::take(&mut resolved.system),
             tier: resolved.tier,
             effort: resolved.effort,
-            shelf,
             home,
             standing: &resolved.standing,
             max_turns: resolved.max_turns,
@@ -577,7 +520,7 @@ impl Repl {
     }
 
     // The file tree with the claimed overrides on top — what the config is
-    // computed from and what `/settings get` answers from.
+    // computed from.
     fn effective(&self) -> Result<toml::Value, anyhow::Error> {
         let mut tree = self.file.clone();
         for (path, value) in &self.claimed {
@@ -586,17 +529,28 @@ impl Repl {
         Ok(tree)
     }
 
-    // The effective tree as flat rows for the panel and its completion list.
-    // A reload-refused tree (its refusal already said) falls back to the file.
-    pub fn setting_leaves(&self) -> Vec<(String, String)> {
-        match self.effective() {
-            Ok(tree) => crate::settings::leaves(&tree),
-            Err(_) => crate::settings::leaves(&self.file),
+    // The file's rows with the session's claims on top — what the panel
+    // shows and the read-only list prints. Path by path rather than one
+    // overlaid tree, so a claim the file can no longer address (an ancestor
+    // the file has turned into a non-table) still answers, with the file's
+    // own value beside it for the mark.
+    pub fn setting_rows(&self) -> Vec<crate::settings::SettingRow> {
+        let mut rows: BTreeMap<String, String> =
+            crate::settings::leaves(&self.file).into_iter().collect();
+        for (path, claimed) in &self.claimed {
+            rows.insert(path.clone(), crate::settings::render(claimed));
         }
-    }
-
-    pub fn setting_paths(&self) -> Vec<String> {
-        self.setting_leaves().into_iter().map(|(p, _)| p).collect()
+        rows.into_iter()
+            .map(|(path, value)| {
+                let claimed = self.claimed.get(&path);
+                let file = crate::settings::get(&self.file, &path).ok();
+                crate::settings::SettingRow {
+                    path,
+                    value,
+                    changed: claimed.is_some() && claimed != file,
+                }
+            })
+            .collect()
     }
 
     // The same, saying why when nothing could be adopted.
@@ -610,61 +564,63 @@ impl Repl {
         self.adopt(config)
     }
 
-    /// `/settings set`: try the write on a scratch tree first, so a bad value
-    /// touches nothing, then record it as a claim and rebuild.
-    pub fn edit(&mut self, path: &str, raw: &str) -> Vec<String> {
+    /// Take a value into the session: try the write on a scratch tree first,
+    /// so a bad value touches nothing, then record it as a claim and rebuild.
+    /// The panel's edit line answers through here, so a refusal comes back
+    /// named, to be shown beside the edit that earned it.
+    pub fn edit(&mut self, path: &str, raw: &str) -> Result<Vec<String>, String> {
         let raw = typed(path, raw);
         let mut scratch = match self.effective() {
             Ok(t) => t,
-            Err(e) => return vec![refused("settings", e)],
+            Err(e) => return Err(refused("settings", e)),
         };
         let old = crate::settings::get(&scratch, path).ok().cloned();
         if let Err(e) = crate::settings::set(&mut scratch, path, &raw) {
-            return vec![refused("settings", e)];
+            return Err(refused("settings", e));
         }
         let new = crate::settings::get(&scratch, path).unwrap().clone();
         // Validate by deserializing the scratch tree, so a bad value never
         // reaches the running config.
         if let Err(e) = crate::config::Config::deserialize(scratch) {
-            return vec![refused("settings", anyhow::anyhow!(e))];
+            return Err(refused("settings", anyhow::anyhow!(e)));
         }
         self.claimed.insert(path.to_string(), new);
         let mut said = self.rebuild();
         let old_shown = match &old {
-            Some(v) => mask_secret(path, v),
+            Some(v) => mask_secret(path, &crate::settings::render(v)),
             None => "<unset>".to_string(),
         };
         said.push(format!(
-            "{path}: {old_shown} → {}",
-            mask_secret(path, &self.claimed[path])
+            "{path}: {old_shown} → {} (session only)",
+            mask_secret(path, &crate::settings::render(&self.claimed[path]))
         ));
+        Ok(said)
+    }
+
+    /// The panel's r: the file's value takes the session back. No claim on
+    /// the path means the file is already in force and there is nothing to
+    /// say.
+    pub fn revert(&mut self, path: &str) -> Vec<String> {
+        if self.claimed.remove(path).is_none() {
+            return Vec::new();
+        }
+        let mut said = self.rebuild();
+        said.push(format!("{path}: back to what the file says"));
         said
     }
 
-    /// Drop a claim (`/settings reset path`), or all of them.
-    pub fn unclaim(&mut self, path: Option<&str>) -> Vec<String> {
-        match path {
-            Some(p) => {
-                self.claimed.remove(p);
-            }
-            None => self.claimed.clear(),
+    /// The panel's space: the session value at `path` replaces the file's
+    /// line, the claim goes, and the config adopts what the file now says.
+    /// The value was validated when the session took it, so only the disk
+    /// can refuse.
+    pub fn write_to_file(&mut self, path: &str) -> Result<Vec<String>, String> {
+        if !self.claimed.contains_key(path) {
+            return Ok(vec![format!("{path}: the session and the file agree")]);
         }
-        self.rebuild()
-    }
-
-    /// The settings panel's commit: write to the file, drop any claim on the
-    /// same path so the written value is what wins, and rebuild. Validation
-    /// happens on a scratch tree first; nothing is written or applied when it
-    /// fails.
-    pub fn commit_file(&mut self, path: &str, raw: &str) -> Result<Vec<String>, String> {
-        let raw = typed(path, raw);
-        let mut scratch = match self.effective() {
-            Ok(t) => t,
-            Err(e) => return Err(format!("{e:#}")),
-        };
-        crate::settings::set(&mut scratch, path, &raw).map_err(|e| format!("{e:#}"))?;
-        let new = crate::settings::get(&scratch, path).unwrap().clone();
-        crate::config::Config::deserialize(scratch).map_err(|e| format!("{e:#}"))?;
+        let tree = self.effective().map_err(|e| format!("{e:#}"))?;
+        let value = crate::settings::get(&tree, path)
+            .map_err(|e| format!("{e:#}"))?
+            .clone();
         let file = self
             .args
             .config
@@ -672,12 +628,15 @@ impl Repl {
             .map(std::path::PathBuf::from)
             .or_else(crate::config::global_path)
             .ok_or_else(|| "no settings file to write".to_string())?;
-        crate::config::write(&file, path, new.clone()).map_err(|e| format!("{e:#}"))?;
+        crate::config::write(&file, path, value.clone()).map_err(|e| format!("{e:#}"))?;
         self.claimed.remove(path);
         self.file =
             crate::config::load_tree(self.args.config.as_deref()).map_err(|e| format!("{e:#}"))?;
         let mut said = self.rebuild();
-        said.push(format!("{path} = {} — written to the file", new));
+        said.push(format!(
+            "{path} = {} — written to the file",
+            mask_secret(path, &crate::settings::render(&value))
+        ));
         Ok(said)
     }
 
@@ -775,68 +734,6 @@ impl Repl {
         let ag = std::sync::Arc::make_mut(&mut self.lane_mut().agent);
         ag.retarget(transport, spec);
         ag.hang(home, &standing);
-    }
-
-    // This workspace's shelf, and the file it lives in.
-    fn shelf(&self) -> (crate::memory::Memory, std::path::PathBuf) {
-        let path = self.memory_path();
-        (crate::memory::Memory::load(&path), path)
-    }
-
-    /// What the panel shows: each note, the day it was written, and what to
-    /// call it when the panel acts on it.
-    pub fn shelf_rows(&self) -> Vec<crate::memory::Row> {
-        self.shelf().0.rows()
-    }
-
-    /// Rewrite one note, or take it away when `text` is empty — an emptied
-    /// line is the same intent as deleting it, and refusing it would leave a
-    /// blank row nothing else can reach.
-    pub fn shelf_write(&mut self, id: u64, text: &str) -> Option<String> {
-        let path = self.memory_path();
-        let text = text.trim();
-        crate::memory::Memory::update(&path, |shelf| {
-            if text.is_empty() {
-                shelf.forget(id);
-            } else {
-                shelf.rewrite(id, text);
-            }
-        })
-        .err()
-        .map(|e| e.to_string())
-    }
-
-    pub fn shelf_drop(&mut self, id: u64) -> Option<String> {
-        let path = self.memory_path();
-        crate::memory::Memory::update(&path, |shelf| shelf.forget(id))
-            .err()
-            .map(|e| e.to_string())
-    }
-
-    // Write a note to this workspace's shelf, or say what is on it.
-    //
-    // A note you typed carries no weight and never ages out: the cap falls on
-    // what the model wrote, not on what you did.
-    fn remember(&mut self, text: &str) -> Vec<String> {
-        let path = self.memory_path();
-        let text = text.trim();
-        if text.is_empty() {
-            return match crate::memory::Memory::load(&path).render() {
-                None => vec![
-                    "nothing on the shelf here yet — `/mem <what to keep>` puts something on it"
-                        .into(),
-                ],
-                Some(text) => text.lines().map(str::to_string).collect(),
-            };
-        }
-        let count = crate::memory::Memory::update(&path, |shelf| {
-            shelf.add([crate::memory::Note::yours(text)]);
-            shelf.notes.len()
-        });
-        match count {
-            Ok(n) => vec![format!("remembered — {n} on the shelf")],
-            Err(e) => vec![format!("the shelf would not take it: {e}")],
-        }
     }
 
     // What `/model` on its own shows.
@@ -1059,14 +956,12 @@ pub enum Intent {
     Resume(String),
     // Everything after the word focuses the summary.
     Compact(String),
-    // What to put on this workspace's shelf, or empty to show what is on it.
-    Mem(String),
     // The name to move to, or empty to list what there is.
     Model(String),
     // The name to work in, or empty to list what there is.
     Worktree(String),
-    // A `set <path> <value>`, `get <path>`, `reset [path]`, or empty to open
-    // the panel.
+    // Bare `/settings`. The panel is the whole surface; the line verbs are
+    // gone, and an argument after the word is refused.
     Settings(String),
     // The wechat verb: "" = status, "on" = connect, "off" = disconnect.
     Wechat(String),
@@ -1101,13 +996,13 @@ pub enum Intent {
     // A row chosen from the rewind selector: the conversation rewinds there,
     // and what the row was decides whether it is kept or unsent.
     Rewind(agent::session::EntryId),
-    // The settings panel submitted an edited value.
-    CommitSetting(String, String),
-    // The shelf panel rewrote a note, or took it away. Named rather than
-    // numbered: compaction writes to the same file mid-run, so the row a
-    // note sat on when the panel drew it is not where it sits now.
-    ShelfWrite(u64, String),
-    ShelfDrop(u64),
+    // The settings panel's edit line kept a value: the session takes it, and
+    // the file does not — `SettingWrite` is what moves it to the file.
+    SettingEdit(String, String),
+    // The panel's space: the session value replaces the file's line.
+    SettingWrite(String),
+    // The panel's r: the file's value takes the session back.
+    SettingRevert(String),
     // The line being typed wants `$EDITOR`. The surface's own: the editor
     // takes the terminal, which only the surface knows how to give away.
     EditExternally,
@@ -1158,11 +1053,6 @@ impl Intent {
             Intent::Help | Intent::Keys | Intent::Status | Intent::Cost | Intent::Name(_) => {
                 Fate::Now
             }
-            // The shelf is a file, not the transcript: writing to it needs no
-            // turn and waits for none.
-            Intent::Mem(_) => Fate::Now,
-            // Both write through `Arc::make_mut`, so the run in flight keeps
-            // the agent it started on and the next one picks up the change.
             Intent::Reload | Intent::Model(_) => Fate::Now,
             // Bare, these only list what there is.
             Intent::Resume(name) | Intent::Worktree(name) if name.trim().is_empty() => Fate::Now,
@@ -1178,8 +1068,8 @@ impl Intent {
             Intent::Compact(_) => {
                 Fate::Refused("/compact rewrites the transcript this run is writing — esc first")
             }
-            // `set`/`get`/`reset` are lines; bare opens a panel, which wants
-            // the surface to itself.
+            // An argument is a refusal, and a refusal answers now; bare opens
+            // a panel, which wants the surface to itself.
             Intent::Settings(rest) if !rest.trim().is_empty() => Fate::Now,
             Intent::Settings(_) => Fate::Queued,
             Intent::Wechat(_) => Fate::Now,
@@ -1200,10 +1090,12 @@ impl Intent {
             Intent::OpenRewind | Intent::Rewind(_) => {
                 Fate::Refused("rewinding needs the transcript this run is writing — esc first")
             }
-            // Writes the settings file and rebuilds through `Arc::make_mut`,
-            // like `/settings set`, which is the same act from a panel.
-            Intent::CommitSetting(..) => Fate::Now,
-            Intent::ShelfWrite(..) | Intent::ShelfDrop(_) => Fate::Now,
+            // Claiming a value and writing one to the file both rebuild
+            // through `Arc::make_mut`, so a run in flight keeps the agent it
+            // started on.
+            Intent::SettingEdit(..) | Intent::SettingWrite(_) | Intent::SettingRevert(_) => {
+                Fate::Now
+            }
             // The input line is the surface's, not the transcript's: a run in
             // flight is writing the second and never reads the first.
             Intent::EditExternally => Fate::Now,
@@ -1273,6 +1165,16 @@ fn skill_for<'a>(commands: &'a [Command], word: &str) -> Option<&'a Skill> {
     match &commands.iter().find(|c| c.word.as_ref() == word)?.source {
         Source::Skill(skill) => Some(skill),
         Source::Builtin => None,
+    }
+}
+
+/// Whether `line` comes back with Up: what the user said, and a skill — a
+/// skill command is a prompt wearing a slash. Built-ins are operations
+/// rather than words to re-say, and a word pi does not know is nothing.
+pub(crate) fn recallable(line: &str, commands: &[Command]) -> bool {
+    match line.split_whitespace().next() {
+        Some(word) if word.starts_with('/') => skill_for(commands, word).is_some(),
+        _ => true,
     }
 }
 
@@ -1350,7 +1252,6 @@ pub fn read(line: &str) -> Intent {
         "/wechat" => Intent::Wechat(rest(line)),
         "/loop" => Intent::Loop(rest(line)),
         "/settings" => Intent::Settings(rest(line)),
-        "/mem" => Intent::Mem(rest(line)),
         other => Intent::Other {
             word: other.to_string(),
             args: rest(line),
@@ -1504,9 +1405,9 @@ impl Repl {
             | Intent::Unsend
             | Intent::OpenRewind
             | Intent::Rewind(_)
-            | Intent::CommitSetting(..)
-            | Intent::ShelfWrite(..)
-            | Intent::ShelfDrop(_)
+            | Intent::SettingEdit(..)
+            | Intent::SettingWrite(_)
+            | Intent::SettingRevert(_)
             | Intent::EditExternally => Step::Handled(Vec::new()),
             // The surface's, like `Submit`: arming a lane and re-submitting a
             // line through `read` are both things only it can do, so it takes
@@ -1542,7 +1443,6 @@ impl Repl {
                     lines(said)
                 }
             }
-            Intent::Mem(text) => Step::Handled(self.remember(&text)),
             Intent::Compact(focus) => Step::Compact(Some(focus).filter(|f| !f.is_empty())),
             Intent::Model(name) => Step::Handled(if name.is_empty() {
                 self.listing()
@@ -1578,46 +1478,13 @@ impl Repl {
         }
     }
 
-    // `/settings` surface. An empty argument opens the panel (the TUI takes
-    // over); `set`/`get`/`reset` are line commands.
+    // `/settings`. The panel is the whole surface: bare opens it, and anything
+    // after the word is refused rather than half-remembered as a verb.
     fn settings(&mut self, rest: &str) -> Step {
-        let mut parts = rest.splitn(3, char::is_whitespace);
-        let verb = parts.next().unwrap_or("");
-        match verb {
-            "" => self.open_panel(),
-            "set" => {
-                let path = parts.next().unwrap_or("");
-                let value = parts.next().unwrap_or("");
-                if path.is_empty() || value.is_empty() {
-                    return Step::Flash("usage: /settings set <path> <value>".into());
-                }
-                Step::Handled(self.edit(path, value))
-            }
-            "get" => {
-                let path = parts.next().unwrap_or("");
-                if path.is_empty() {
-                    return Step::Flash("usage: /settings get <path>".into());
-                }
-                let tree = match self.effective() {
-                    Ok(t) => t,
-                    Err(e) => return lines(refused("settings", e)),
-                };
-                match crate::settings::get(&tree, path) {
-                    Ok(v) => lines(format!("{path} = {}", mask_secret(path, v))),
-                    Err(e) => lines(refused("settings", e)),
-                }
-            }
-            "reset" => {
-                let path = parts.next().unwrap_or("");
-                if path.is_empty() {
-                    Step::Handled(self.unclaim(None))
-                } else {
-                    Step::Handled(self.unclaim(Some(path)))
-                }
-            }
-            other => Step::Flash(format!(
-                "unknown /settings verb `{other}` — set, get or reset"
-            )),
+        if rest.trim().is_empty() {
+            self.open_panel()
+        } else {
+            Step::Flash("settings are edited in the panel — bare /settings opens it".into())
         }
     }
 
@@ -1627,21 +1494,16 @@ impl Repl {
         // The TUI intercepts bare `/settings` before it reaches here; the
         // line surface can only list.
         let mut out = Vec::new();
-        let tree = match self.effective() {
-            Ok(t) => t,
-            Err(e) => return lines(refused("settings", e)),
-        };
-        for (path, value) in crate::settings::leaves(&tree) {
-            let shown = if journal::secret(journal::leaf(&path)) {
-                if value.is_empty() {
-                    "<unset>".to_string()
-                } else {
-                    "<set>".to_string()
+        for row in self.setting_rows() {
+            let mut line = format!("{} = {}", row.path, mask_secret(&row.path, &row.value));
+            if row.changed {
+                line.push_str(&format!(" {}", crate::icons::CHANGED_MARK));
+                if let Ok(file) = crate::settings::get(&self.file, &row.path) {
+                    let file = mask_secret(&row.path, &crate::settings::render(file));
+                    line.push_str(&format!(" file: {file}"));
                 }
-            } else {
-                value
-            };
-            out.push(format!("{path} = {shown}"));
+            }
+            out.push(line);
         }
         if out.is_empty() {
             out.push("nothing in ~/.pi/settings.toml yet".into());
@@ -1824,7 +1686,6 @@ impl Repl {
             system: std::mem::take(&mut resolved.system),
             tier: resolved.tier,
             effort: resolved.effort,
-            shelf: crate::memory::shelf(self.store.memory_path(&root)),
             home,
             standing: &resolved.standing,
             max_turns: resolved.max_turns,
@@ -1857,8 +1718,6 @@ impl Repl {
             view: Default::default(),
         });
         self.current = self.lanes.len() - 1;
-        // The agent was cloned from the lane being left, and its shelf with
-        // it; `Agent::apply` put this checkout's own in its place.
         self.in_force();
 
         // Asked with the root the next save will file under, so a tree is found
@@ -2071,11 +1930,11 @@ pub fn record_bash(session: &mut Session, command: &str, text: String) {
 }
 
 // A secret value as a change line shows it: set or unset, never the value.
-fn mask_secret(path: &str, value: &toml::Value) -> String {
+pub(crate) fn mask_secret(path: &str, value: &str) -> String {
     if journal::secret(journal::leaf(path)) {
-        match value.as_str() {
-            Some("") => "<unset>".to_string(),
-            Some(_) | None => "<set>".to_string(),
+        match value {
+            "" => "<unset>".to_string(),
+            _ => "<set>".to_string(),
         }
     } else {
         value.to_string()
@@ -2142,28 +2001,50 @@ mod tests {
         core
     }
 
-    // `/settings get` answers from file plus claims, so a claim reads back
-    // as the value in force rather than the file's stale line.
     #[test]
-    fn get_answers_from_the_claim_not_the_file() {
-        let mut core = claimed_base_url();
-        let said = match core.settings("get base_url") {
-            Step::Handled(said) => said,
-            _ => panic!("expected a handled step"),
-        };
-        assert!(said[0].contains("7897"), "{said:?}");
-        assert!(!said[0].contains("7896"), "{said:?}");
+    fn rows_answer_path_by_path_when_the_file_breaks_under_a_claim() {
+        // `models` is no longer a table, so the claim cannot be overlaid onto
+        // the file — the row is still due, with the mark and its r.
+        let mut core = core_with_file("model = \"flash\"\nmodels = 3");
+        core.claimed
+            .insert("models.flash".to_string(), toml::Value::String("m2".into()));
+        let rows = core.setting_rows();
+        let model = rows
+            .iter()
+            .find(|r| r.path == "model")
+            .expect("the file's own row");
+        assert!(!model.changed);
+        let claimed = rows
+            .iter()
+            .find(|r| r.path == "models.flash")
+            .expect("the claimed row");
+        assert_eq!(claimed.value, "m2");
+        assert!(claimed.changed, "the file has no value there to agree with");
     }
 
-    // The panel's rows read the same effective tree, so a claimed value is
-    // what the panel shows and offers to edit.
     #[test]
-    fn panel_rows_read_the_claim_over_the_file() {
+    fn a_claim_on_a_path_the_file_lacks_is_its_own_row() {
+        let mut core = core_with_file("model = \"flash\"");
+        core.claimed
+            .insert("margins".to_string(), toml::Value::Integer(2));
+        let rows = core.setting_rows();
+        let added = rows.iter().find(|r| r.path == "margins").expect("added");
+        assert_eq!(added.value, "2");
+        assert!(added.changed);
+    }
+
+    // The panel's rows read file plus claims, so a claimed value is what the
+    // panel shows — and the row is marked, the file still holding another.
+    #[test]
+    fn panel_rows_read_the_claim_over_the_file_and_mark_it() {
         let core = claimed_base_url();
-        assert!(
-            core.setting_leaves()
-                .contains(&("base_url".to_string(), "http://127.0.0.1:7897".to_string(),))
-        );
+        let rows = core.setting_rows();
+        let row = rows
+            .iter()
+            .find(|r| r.path == "base_url")
+            .expect("the claimed path is a row");
+        assert_eq!(row.value, "http://127.0.0.1:7897");
+        assert!(row.changed, "the file still says 7896");
     }
 
     fn choices() -> Vec<Choice> {
@@ -2189,7 +2070,7 @@ mod tests {
     }
 
     fn offered_from(line: &str, table: &[Command]) -> Vec<String> {
-        complete(line, table, &choices(), &[], &[], &[])
+        complete(line, table, &choices(), &[], &[])
             .into_iter()
             .map(|c| c.show)
             .collect()
@@ -2230,7 +2111,7 @@ mod tests {
             },
         ];
         let offered = |line: &str| -> Vec<String> {
-            complete(line, &table(), &[], &[], &[], &trees)
+            complete(line, &table(), &[], &[], &trees)
                 .into_iter()
                 .map(|c| c.line)
                 .collect()
@@ -2248,7 +2129,7 @@ mod tests {
         assert!(offered("/worktree feature-one").is_empty());
         assert!(offered("/worktree feature-one and").is_empty());
         // The branch is what tells two checkouts apart when the names do not.
-        let all = complete("/worktree ", &table(), &[], &[], &[], &trees);
+        let all = complete("/worktree ", &table(), &[], &[], &trees);
         assert_eq!(all.len(), 3);
         assert_eq!(
             (all[0].show.as_str(), all[0].help.as_str()),
@@ -2280,7 +2161,7 @@ mod tests {
             },
         ];
         let offered = |line: &str| -> Vec<String> {
-            complete(line, &table(), &[], &[], &[], &trees)
+            complete(line, &table(), &[], &[], &trees)
                 .into_iter()
                 .map(|c| c.line)
                 .collect()
@@ -2321,7 +2202,7 @@ mod tests {
     #[test]
     fn accepting_a_command_that_wants_an_argument_leaves_room_for_one() {
         let of = |line: &str| -> Candidate {
-            complete(line, &table(), &choices(), &[], &[], &[]).swap_remove(0)
+            complete(line, &table(), &choices(), &[], &[]).swap_remove(0)
         };
         let name = of("/nam");
         assert_eq!((name.line.as_str(), name.more), ("/name", true));
@@ -2344,7 +2225,7 @@ mod tests {
         assert!(offered("/model flash and").is_empty());
         // Accepting one replaces the line, not just the word.
         assert_eq!(
-            complete("/model fla", &table(), &choices(), &[], &[], &[])[0].line,
+            complete("/model fla", &table(), &choices(), &[], &[])[0].line,
             "/model flash"
         );
     }
@@ -2353,7 +2234,7 @@ mod tests {
     fn a_config_with_no_models_offers_nothing_rather_than_every_command() {
         // choices() is empty when the file defines no model, and the argument
         // branch must not fall back to completing command words again.
-        assert!(complete("/model fl", &table(), &[], &[], &[], &[]).is_empty());
+        assert!(complete("/model fl", &table(), &[], &[], &[]).is_empty());
     }
 
     fn sessions() -> Vec<ResumeChoice> {
@@ -2375,7 +2256,7 @@ mod tests {
     fn the_sessions_complete_by_first_prompt_and_accept_the_id() {
         let sessions = sessions();
         let of = |line: &str| {
-            complete(line, &table(), &[], &sessions, &[], &[])
+            complete(line, &table(), &[], &sessions, &[])
                 .into_iter()
                 .map(|c| c.show)
                 .collect::<Vec<_>>()
@@ -2399,9 +2280,9 @@ mod tests {
             prompt: String::new(),
             created: 0,
         }];
-        assert!(complete("/resume ", &table(), &[], &quiet, &[], &[]).is_empty());
+        assert!(complete("/resume ", &table(), &[], &quiet, &[]).is_empty());
         // Accepting replaces the line with the id, which is what /resume loads.
-        let got = &complete("/resume lint", &table(), &[], &sessions, &[], &[])[0];
+        let got = &complete("/resume lint", &table(), &[], &sessions, &[])[0];
         assert_eq!(got.line, "/resume 1756240000-200");
         assert!(!got.more);
     }
@@ -2438,6 +2319,17 @@ mod tests {
         // Silently absent is how a user goes looking in the wrong place.
         assert_eq!(notes.len(), 1, "{notes:?}");
         assert!(notes[0].contains("/new"), "{}", notes[0]);
+    }
+
+    #[test]
+    fn recall_keeps_what_the_user_said_and_skills_not_built_ins() {
+        let found = [skill("commit", "Use when ready to commit changes")];
+        let table = commands(&found, &mut Vec::new());
+        assert!(super::recallable("fix the login bug", &table));
+        assert!(super::recallable("/commit fix the login bug", &table));
+        assert!(!super::recallable("/model sonnet", &table));
+        assert!(!super::recallable("/settings set api_key x", &table));
+        assert!(!super::recallable("/nosuch", &table));
     }
 
     #[test]
@@ -2679,7 +2571,9 @@ mod tests {
             Intent::Worktree("tree".into()),
             Intent::Interrupt,
             Intent::Unsend,
-            Intent::CommitSetting("a.b".into(), "1".into()),
+            Intent::SettingEdit("a.b".into(), "1".into()),
+            Intent::SettingWrite("a.b".into()),
+            Intent::SettingRevert("a.b".into()),
             Intent::Wechat("on".into()),
         ] {
             assert!(
@@ -2790,11 +2684,6 @@ mod tests {
         // Bare, they mean clear and unfocused respectively.
         assert_eq!(read("/name"), Intent::Name(String::new()));
         assert_eq!(read("/compact"), Intent::Compact(String::new()));
-        assert_eq!(read("/mem"), Intent::Mem(String::new()));
-        assert_eq!(
-            read("/mem  prefers xh over curl "),
-            Intent::Mem("prefers xh over curl".into())
-        );
     }
 
     #[test]
@@ -2970,12 +2859,11 @@ mod tests {
         assert_eq!(lines.len(), 1, "one billed lane keeps the one-line answer");
     }
 
-    // A transport that records the model each request asks for and the notes
-    // riding it, and answers one empty turn.
+    // A transport that records the model each request asks for, and answers
+    // one empty turn.
     #[derive(Default)]
     struct Recording {
         saw: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-        notes: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     }
 
     #[async_trait::async_trait]
@@ -2983,12 +2871,11 @@ mod tests {
         async fn stream(
             &self,
             spec: &brain::model::ModelSpec,
-            req: &brain::request::Request,
+            _req: &brain::request::Request,
         ) -> brain::Result<
             futures::stream::BoxStream<'static, brain::Result<brain::stream::StreamEvent>>,
         > {
             self.saw.lock().unwrap().push(spec.model.clone());
-            self.notes.lock().unwrap().push(req.notes.join("\n"));
             let done = Ok(brain::stream::StreamEvent::Done {
                 stop: brain::stream::StopReason::EndTurn,
                 usage: brain::stream::Usage::default(),
@@ -3028,10 +2915,6 @@ mod tests {
         let ws = tools::Workspace::new(root).unwrap();
         let mut agent = agent::Agent::new(transport, test_spec(model));
         let store = crate::session::Store::new(root.join("state"));
-        // What `Agent::apply` does before `Agent::hang`, which this stands in
-        // for: the child is cloned by `hang`, and a shelf set afterwards is one
-        // it never sees.
-        agent.shelf = Some(crate::memory::shelf(store.memory_path(root)));
         agent.hang(
             crate::subagent::Filed::armed(
                 crate::session::Store::new(root.join("state")),
@@ -3094,29 +2977,6 @@ mod tests {
         )
         .await
         .unwrap();
-    }
-
-    // `/mem` has to reach the subagent too. `Task` snapshots the agent it was
-    // built from, so what the child holds is a handle rather than the text:
-    // it reads the file each turn, and a note written since is already there.
-    #[tokio::test]
-    async fn a_written_note_reaches_the_child_the_next_time_it_runs() {
-        let dir = tempfile::tempdir().unwrap();
-        let transport = std::sync::Arc::new(Recording::default());
-        let notes = transport.notes.clone();
-        let mut core = a_repl(dir.path(), transport, "model-a");
-
-        run_the_child(&core).await;
-        let before = notes.lock().unwrap().join("|");
-        assert!(
-            !before.contains("<memory>"),
-            "nothing on the shelf yet: {before}"
-        );
-
-        core.remember("prefers xh over curl");
-        run_the_child(&core).await;
-        let after = notes.lock().unwrap().last().unwrap().clone();
-        assert!(after.contains("prefers xh over curl"), "{after}");
     }
 
     // `/model` retargets the lane's agent and rebuilds the subagent behind

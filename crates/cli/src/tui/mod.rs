@@ -27,7 +27,6 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
 use crate::icons;
-use crate::journal;
 use crate::keys::{Action, Keys, Layers, Menu, Mode, Press};
 use crate::lane::{Lane, Round, Turn};
 use crate::render::Style as ThemeStyle;
@@ -36,7 +35,7 @@ use crate::repl::{self, Candidate, Choice, Command, Fate, Intent, Repl, Rewound,
 use crate::session::{ResumeChoice, Store};
 use crate::status::{self, Segment, Snapshot, Tally};
 use editor::Editor;
-use panel::{Body, Panel, Took};
+use panel::{Panel, Took};
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::Style as RStyle;
 use ratatui::text::{Line, Span};
@@ -73,20 +72,6 @@ fn double_tap(last: &mut Option<Instant>, now: Instant) -> bool {
     hit
 }
 
-// A `/settings set <path> <value>` whose path names a secret: the value must
-// not enter the recall history, which is written to disk in the clear.
-fn secret_settings_set(line: &str) -> bool {
-    match repl::read(line) {
-        Intent::Settings(rest) => {
-            let mut parts = rest.splitn(3, char::is_whitespace);
-            matches!(parts.next(), Some("set"))
-                && parts
-                    .next()
-                    .is_some_and(|p| journal::secret(journal::leaf(p)))
-        }
-        _ => false,
-    }
-}
 // What the workspace-dependent completions answer with, each read the first
 // time one is asked for.
 //
@@ -817,11 +802,7 @@ impl Vim {
     // exactly two of them is no sequence — the documented way to leave
     // Normal unreachable while keeping the layer's bindings listed.
     fn configure(&mut self, cfg: &crate::config::Vim) {
-        let mut chars = cfg.escape.chars();
-        self.escape = match (chars.next(), chars.next(), chars.next()) {
-            (Some(a), Some(b), None) => Some((a, b)),
-            _ => None,
-        };
+        self.escape = cfg.escape_pair();
         self.window = std::time::Duration::from_millis(cfg.escape_timeout_ms);
     }
 
@@ -895,9 +876,6 @@ struct Ui {
     lists: Lists,
     // The same copy, of the same list `/help` prints.
     commands: Arc<Vec<Command>>,
-    // The config paths `/settings` can reach, from `Repl::setting_paths`.
-    // Rebuilt whenever the config tree is replaced.
-    setting_paths: Vec<String>,
     // The open panel, or None — one at a time, which is what one field
     // rather than one per panel is for. While it is up it owns the menu rows
     // and intercepts the menu keys before the editor does.
@@ -1047,16 +1025,11 @@ impl Ui {
     // in its lane's view — the editor is the surface's, and a line left
     // standing in it would be filed in whichever checkout came next — and
     // the state built against that lane: a flash, the rewind selector over
-    // its transcript, a lane-scoped panel.
+    // its transcript.
     fn leave_lane(&mut self, lane: &mut Lane) {
         lane.view.draft = self.editor.take_composing();
         self.flash = None;
         self.rewind.clear();
-        // A panel belonging to the checkout goes with it; the config stays.
-        // Each panel answers that itself, so a new one cannot be forgotten.
-        if self.panel.as_ref().is_some_and(|p| p.body().lane_scoped()) {
-            self.panel = None;
-        }
     }
 
     fn new(
@@ -1091,7 +1064,6 @@ impl Ui {
             at_menu: None,
             at_root: std::path::PathBuf::new(),
             vim: None,
-            setting_paths: Vec::new(),
             panel: None,
             spinner: 0,
             live: status::default_live(),
@@ -1448,7 +1420,6 @@ impl Ui {
             &self.commands,
             &self.choices,
             self.lists.sessions(),
-            &self.setting_paths,
             self.lists.worktrees(),
         )
         .into_iter()
@@ -1901,13 +1872,12 @@ impl Ui {
         // `menu()` is empty while it is open, so the layer has to be forced on.
         // The layer is computed before `action`, not inside it: `menu()` mutates
         // the @-completion cache while `keys` stays borrowed.
-        let menu = match self.panel.as_ref().map(Panel::layer) {
-            // Its own verbs, off while a row is being typed so that
-            // `x` and `e` are letters again — `esc` still leaves it.
-            Some(Some(which)) => Menu::Verbs(which),
-            Some(None) => Menu::On,
-            None if self.menu().is_empty() => Menu::Off,
-            None => Menu::On,
+        let menu = if self.panel.is_some() {
+            Menu::On
+        } else if self.menu().is_empty() {
+            Menu::Off
+        } else {
+            Menu::On
         };
         let bound = self.keys.action(
             press,
@@ -1954,9 +1924,6 @@ impl Ui {
         }
 
         match bound {
-            // Only a list with removable rows answers it, and only the shelf
-            // has those; elsewhere the key was never bound in the first place.
-            Some(Action::MenuDelete) => return Intent::None,
             Some(Action::LineClear) => return self.interrupt_or_clear(running),
             Some(Action::LineSubmit) => {
                 // Enter while a menu is open runs what it highlights. The
@@ -1972,7 +1939,10 @@ impl Ui {
                         // The completion's line is what runs; the typed prefix
                         // that produced it goes, so it cannot be re-submitted
                         // as a stray prompt later.
-                        self.editor.take(true);
+                        self.editor.take();
+                        if repl::recallable(&line, &self.commands) {
+                            self.editor.remember(&line);
+                        }
                         return if line.trim().is_empty() {
                             Intent::None
                         } else {
@@ -1992,10 +1962,10 @@ impl Ui {
                         return Intent::None;
                     }
                     None => {
-                        // A secret value must not reach the recall history,
-                        // which is written to disk in the clear.
-                        let remember = !secret_settings_set(self.editor.text());
-                        let typed = self.editor.take(remember);
+                        let typed = self.editor.take();
+                        if repl::recallable(&typed, &self.commands) {
+                            self.editor.remember(&typed);
+                        }
                         return if typed.trim().is_empty() {
                             Intent::None
                         } else {
@@ -2059,9 +2029,6 @@ impl Ui {
         }
 
         match bound {
-            // Only a list with removable rows answers it, and only the shelf
-            // has those; nothing else raises the layer that binds it.
-            Some(Action::MenuDelete) => {}
             Some(Action::InsertNewline) => self.editor.insert('\n'),
             Some(Action::DeleteCharBack) => self.editor.backspace(),
             Some(Action::DeleteCharForward) => self.editor.delete(),
@@ -2349,7 +2316,7 @@ impl Ui {
     }
 
     // Every copy of the config the surface keeps, brought up to date — the one
-    // landing `/reload`, `/settings set`, and a panel write all share.
+    // landing `/reload` and everything the settings panel does share.
     fn adopt_config(&mut self, core: &Repl, view: &mut View) {
         // The key map lives in two places; a reload has to reach both or the
         // screen keeps answering to the old bindings.
@@ -2372,9 +2339,6 @@ impl Ui {
             self.commands = core.commands.clone();
         }
         self.set_vim(&core.config.vim);
-        // The config tree changed under a reload; the `/settings` completion
-        // list follows it, and it outlives the panel that edited it.
-        self.setting_paths = core.setting_paths();
         // And the segment lists, copied in at startup: a run's finished rows
         // are re-spelled from whichever list stands when they are drawn.
         self.live = core.config.status.live.clone();
@@ -2705,7 +2669,6 @@ impl Tui {
             paint,
         );
         ui.at_root = core.lane().ctx.workspace.root().to_path_buf();
-        ui.setting_paths = core.setting_paths();
         ui.live = core.config.status.live.clone();
         ui.done = core.config.status.done.clone();
         ui.set_vim(&core.config.vim);
@@ -3082,15 +3045,13 @@ impl Tui {
         }
     }
 
-    // Write one edited value from the settings panel, and show the panel what
-    // became of it. A refusal stays in the panel, beside the edit that earned
-    // it; there is nowhere else for it to be read.
-    fn commit_setting(&mut self, path: &str, value: &str) {
-        match self.core.commit_file(path, value) {
-            // A panel write is `/settings set` with the rows spelled for it,
-            // so it lands where that line lands.
-            Ok(said) => {
-                self.land_lines(said);
+    // A settings-panel action landed: its lines go to the scrollback and the
+    // panel sees the fresh rows. A refusal stays in the panel, beside the
+    // edit that earned it; there is nowhere else for it to be read.
+    fn land_setting(&mut self, said: Result<Vec<String>, String>) {
+        match said {
+            Ok(lines) => {
+                self.land_lines(lines);
                 self.reload_panel();
             }
             Err(why) => {
@@ -3101,32 +3062,10 @@ impl Tui {
         }
     }
 
-    // Show the panel what became of a write, and say so in the scrollback
-    // when it did not take: the panel is a list of notes, with nowhere in it
-    // for a sentence about the disk.
-    fn after_shelf(&mut self, failed: Option<String>) {
-        if let Some(why) = failed {
-            self.core
-                .lane_mut()
-                .view
-                .surface
-                .scrollback
-                .push(Row::notice(format!("the shelf would not take it: {why}")));
-        }
-        self.reload_panel();
-    }
-
-    // Re-read the open panel's rows from whatever they are a view of, after a
-    // commit changed it underneath them. One match, and it is the only place
-    // that has to know where a panel's rows come from.
+    // Re-read the open panel's rows after a commit changed them underneath.
     fn reload_panel(&mut self) {
-        let body = match self.ui.panel.as_ref().map(Panel::body) {
-            Some(Body::Settings(_)) => Body::Settings(self.core.setting_leaves()),
-            Some(Body::Shelf(_)) => Body::Shelf(self.core.shelf_rows()),
-            None => return,
-        };
         if let Some(panel) = &mut self.ui.panel {
-            panel.refresh(body);
+            panel.refresh(self.core.setting_rows());
         }
     }
 
@@ -3246,18 +3185,20 @@ impl Tui {
                     self.rewind_turn(id);
                     continue;
                 }
-                Intent::CommitSetting(path, value) => {
-                    self.commit_setting(&path, &value);
+                Intent::SettingEdit(path, value) => {
+                    let said = self.core.edit(&path, &value);
+                    self.land_setting(said);
                     continue;
                 }
-                Intent::ShelfWrite(id, text) => {
-                    let failed = self.core.shelf_write(id, &text);
-                    self.after_shelf(failed);
+                Intent::SettingWrite(path) => {
+                    let said = self.core.write_to_file(&path);
+                    self.land_setting(said);
                     continue;
                 }
-                Intent::ShelfDrop(id) => {
-                    let failed = self.core.shelf_drop(id);
-                    self.after_shelf(failed);
+                Intent::SettingRevert(path) => {
+                    let said = self.core.revert(&path);
+                    self.land_lines(said);
+                    self.reload_panel();
                     continue;
                 }
                 Intent::EditExternally => {
@@ -3344,16 +3285,11 @@ impl Tui {
                 });
                 continue;
             }
-            // Bare `/mem` and `/settings` open a panel rather than printing
-            // the read-only list. One field: opening one closes the other.
-            if matches!(intent, Intent::Mem(ref rest) if rest.trim().is_empty()) {
-                let rows = self.core.shelf_rows();
-                self.ui.panel = Some(Panel::new(Body::Shelf(rows)));
-                continue;
-            }
+            // Bare `/settings` opens a panel rather than printing the
+            // read-only list.
             if matches!(intent, Intent::Settings(ref rest) if rest.trim().is_empty()) {
-                let rows = self.core.setting_leaves();
-                self.ui.panel = Some(Panel::new(Body::Settings(rows)));
+                let rows = self.core.setting_rows();
+                self.ui.panel = Some(Panel::new(rows, &self.core.config.vim));
                 continue;
             }
             let was = self.core.current;
@@ -4029,18 +3965,18 @@ impl Tui {
 #[cfg(test)]
 mod tests {
     use super::{
-        Body, Cow, Folds, Intent, Panel, Row, ScrollbackRows, Took, absorb_growth, body,
-        scrollback_from, secret_settings_set, tool_row,
+        Cow, Folds, Intent, Panel, Row, ScrollbackRows, absorb_growth, body, scrollback_from,
+        tool_row,
     };
     use crate::icons;
-    use crate::keys::{Action, Keys, Mode};
+    use crate::keys::{Keys, Mode};
     use crate::lane::{Lane, Round, Turn};
     use crate::render::{self, Paint};
     use crate::repl::{self, Choice, Command, Repl, Source};
     use crate::session::Store;
+    use crate::settings::row;
     use crate::status::{self, Segment};
     use crate::tui::screen;
-    use crossterm::event::KeyCode;
 
     // One completed tool call, as the loop reports it: start, end, then the
     // entry the commit folds in. Shared by the tool-row tests.
@@ -4082,16 +4018,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_secret_settings_set_is_detected_by_its_path() {
-        assert!(secret_settings_set("/settings set api_key x"));
-        assert!(secret_settings_set("/settings set models.flash.api_key x"));
-        assert!(!secret_settings_set(
-            "/settings set models.flash.context_window 1000"
-        ));
-        assert!(!secret_settings_set("/settings get api_key"));
-        assert!(!secret_settings_set("/cost"));
-    }
     // Both scrollback producers draw block ids from one counter. They used
     // not to: a rebuilt block was always `0`, which held only while nothing
     // looked one up — and `streaming_row` and `stream_fold` both do, taking the
@@ -4956,12 +4882,6 @@ mod tests {
         lane
     }
 
-    // A bare press, for the panel tests: they drive `press` by the action it
-    // resolved to, and the event itself only carries the printable character.
-    fn stroke(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
-        crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
-    }
-
     fn running_lane(dir: &std::path::Path) -> Lane {
         struct Mute;
         #[async_trait::async_trait]
@@ -5050,112 +4970,32 @@ mod tests {
     // A panel sized by its line count clips whatever wraps past the bottom;
     // its rows come back one terminal row each, and the height is the len.
     #[tokio::test]
-    async fn a_wrapping_shelf_panel_still_shows_its_last_note() {
+    async fn a_wrapping_panel_still_shows_its_last_row() {
         let dir = tempfile::tempdir().expect("a temp dir");
         let mut tui = surface(dir.path());
         let long = "x".repeat(200);
-        let mut rows: Vec<crate::memory::Row> = (1..=3)
-            .map(|id| crate::memory::note(id, long.clone()))
+        let mut rows: Vec<crate::settings::SettingRow> = (1..=3)
+            .map(|i| row(&format!("path{i}"), &long, false))
             .collect();
-        rows.push(crate::memory::note(4, "the last note"));
-        tui.ui.panel = Some(Panel::new(Body::Shelf(rows)));
+        rows.push(row("last.path", "the last value", false));
+        tui.ui.panel = Some(Panel::new(rows, &crate::config::Vim::default()));
 
         tui.ui.flush(&mut tui.core.lanes[0]);
         let painted = tui.ui.screen.painted();
         assert!(
-            painted.iter().any(|line| line.contains("the last note")),
-            "the panel was sized past its last note: {painted:?}"
+            painted.iter().any(|line| line.contains("the last value")),
+            "the panel was sized past its last row: {painted:?}"
         );
     }
 
-    // The panel is the whole reason a shelf is worth having: what is on it
-    // steers the model, and a shelf you cannot see is a shelf you cannot
-    // correct. Browse it, rewrite a note, take one away.
-    #[tokio::test]
-    async fn the_panel_rewrites_and_removes_what_is_on_the_shelf() {
-        let dir = tempfile::tempdir().expect("a checkout");
-        let mut tui = surface(dir.path());
-        let root = tui.core.lane().ctx.workspace.root().to_path_buf();
-        let path = tui.core.store.memory_path(&root);
-
-        let mut shelf = crate::memory::Memory::default();
-        shelf.add([
-            crate::memory::Note::yours("prefers xh over curl"),
-            crate::memory::Note::yours("the parser lives in syntax/"),
-        ]);
-        shelf.save(&path).expect("written");
-
-        let rows = tui.core.shelf_rows();
-        assert_eq!(rows.len(), 2);
-        let first = rows[0].id;
-        let second = rows[1].id;
-        tui.ui.panel = Some(Panel::new(Body::Shelf(rows)));
-
-        // Driven through the presses rather than the panel's own methods: the
-        // dispatch under them is what every panel now shares, and a test that
-        // called past it would leave the shared part untested.
-        //
-        // Down one, rewrite it. `e` opens the line, and the layer that binds
-        // `e` goes off the moment it does, so the letters land as letters.
-        let panel = tui.ui.panel.as_mut().expect("open");
-        panel.press(Some(Action::MenuNext), stroke(KeyCode::Null));
-        panel.press(Some(Action::MenuAccept), stroke(KeyCode::Null));
-        assert_eq!(panel.editing_value(), "the parser lives in syntax/");
-        for c in " and hashline/".chars() {
-            panel.press(None, stroke(KeyCode::Char(c)));
-        }
-        let Took::Intent(Intent::ShelfWrite(id, text)) =
-            panel.press(Some(Action::MenuAccept), stroke(KeyCode::Null))
-        else {
-            panic!("the panel asked for something other than a write");
-        };
-        assert_eq!(id, second, "the note under the cursor");
-        assert!(tui.core.shelf_write(id, &text).is_none(), "the write took");
-        tui.after_shelf(None);
-
-        let after = crate::memory::Memory::load(&path);
-        assert_eq!(
-            after.notes[1].text,
-            "the parser lives in syntax/ and hashline/"
-        );
-        assert_eq!(
-            after.notes[1].at, shelf.notes[1].at,
-            "the same note, said better"
-        );
-        assert!(
-            !tui.ui.panel.as_ref().expect("open").editing(),
-            "the line closed"
-        );
-
-        // And take it away.
-        let panel = tui.ui.panel.as_mut().expect("open");
-        let Took::Intent(Intent::ShelfDrop(id)) =
-            panel.press(Some(Action::MenuDelete), stroke(KeyCode::Null))
-        else {
-            panic!("the panel asked for something other than a drop");
-        };
-        assert_eq!(id, second, "the cursor stayed on the row it had rewritten");
-        assert!(tui.core.shelf_drop(id).is_none());
-        tui.after_shelf(None);
-        let after = crate::memory::Memory::load(&path);
-        assert_eq!(after.notes.len(), 1);
-        assert_eq!(after.notes[0].text, "prefers xh over curl");
-
-        let panel = tui.ui.panel.as_mut().expect("open");
-        let Took::Intent(Intent::ShelfDrop(id)) =
-            panel.press(Some(Action::MenuDelete), stroke(KeyCode::Null))
-        else {
-            panic!("the panel asked for something other than a drop");
-        };
-        assert_eq!(id, first, "the cursor followed the row that went");
-    }
-
+    // A browsing panel swallows the keys it does not know: a letter typed
+    // over it neither moves a row nor reaches the input line underneath.
     #[tokio::test]
     async fn browsing_panel_does_not_leak_keys_to_the_editor() {
         let dir = tempfile::tempdir().expect("a checkout");
         let mut tui = surface(dir.path());
-        let rows = vec![crate::memory::note(1, "test")];
-        tui.ui.panel = Some(Panel::new(Body::Shelf(rows)));
+        let rows = vec![row("model", "flash", false)];
+        tui.ui.panel = Some(Panel::new(rows, &crate::config::Vim::default()));
         let lane = tui.core.lane_mut();
         let intent = tui.ui.key(lane, typed('z'), false);
         assert!(matches!(intent, Intent::None));
@@ -5163,38 +5003,6 @@ mod tests {
             tui.ui.editor.is_empty(),
             "the editor did not take the keystroke"
         );
-    }
-
-    // The shelf belongs to a checkout. Open across a switch it would show one
-    // tree's notes while `x` took a note off another's.
-    #[tokio::test]
-    async fn switching_checkouts_closes_the_shelf() {
-        let first = tempfile::tempdir().expect("a checkout");
-        let second = tempfile::tempdir().expect("another checkout");
-        let mut tui = surface(first.path());
-        tui.ui.panel = Some(Panel::new(Body::Shelf(Vec::new())));
-
-        switch_to(&mut tui, running_lane(second.path()));
-
-        assert!(tui.ui.panel.is_none(), "still showing the tree behind you");
-    }
-
-    // Emptying the line is the same intent as deleting the row: a blank note
-    // on the shelf is a row nothing else can reach.
-    #[tokio::test]
-    async fn a_note_rewritten_to_nothing_leaves() {
-        let dir = tempfile::tempdir().expect("a checkout");
-        let mut tui = surface(dir.path());
-        let root = tui.core.lane().ctx.workspace.root().to_path_buf();
-        let path = tui.core.store.memory_path(&root);
-
-        let mut shelf = crate::memory::Memory::default();
-        shelf.add([crate::memory::Note::yours("prefers xh")]);
-        shelf.save(&path).expect("written");
-
-        let only = tui.core.shelf_rows()[0].id;
-        assert!(tui.core.shelf_write(only, "   ").is_none());
-        assert!(crate::memory::Memory::load(&path).notes.is_empty());
     }
 
     // Recall belongs to the checkout, like the transcripts and the completion
@@ -5959,9 +5767,9 @@ mod tests {
             "the half-typed word was completed"
         );
 
-        // A panel is modal — `/mem` opens one while a run is in flight — and
-        // `esc` there is about the panel, the way it is about the list.
-        ui.panel = Some(Panel::new(Body::Shelf(Vec::new())));
+        // A panel is modal — `/settings` opens one while a run is in flight —
+        // and `esc` there is about the panel, the way it is about the list.
+        ui.panel = Some(Panel::new(Vec::new(), &crate::config::Vim::default()));
         let intent = ui.key(&mut lane, esc(), true);
         assert!(matches!(intent, Intent::None), "{intent:?}");
         assert!(
@@ -6059,28 +5867,40 @@ mod tests {
         assert_eq!(narrowed.last().map(String::as_str), Some("$0.0012"));
     }
 
-    // The surface reads the segment lists once, at startup: whichever door the
-    // config comes in by — a `/settings set` line, or a write from the panel —
-    // it has to land, or the line never moves.
+    // Whichever door the config comes in by — an edit claimed for the
+    // session, or the session value written to the file — it has to land, or
+    // the line never moves.
     #[tokio::test]
     async fn a_settings_change_to_the_status_segments_reaches_the_surface() {
         let dir = tempfile::tempdir().expect("a temp dir");
         let mut tui = surface(dir.path());
         assert!(!tui.ui.live.contains(&Segment::Model));
 
-        let lines = tui.core.edit("status.live", r#"["model"]"#);
-        tui.land_lines(lines);
+        // The session door: an edit claims the value for this run.
+        let said = tui
+            .core
+            .edit("status.live", r#"["model"]"#)
+            .expect("the edit lands");
+        tui.land_lines(said);
         assert_eq!(tui.ui.live, vec![Segment::Model]);
 
-        // The panel's door: it writes the file the config is read from, so the
-        // surface's own `--config` is pointed at a temp one. The list it edits
-        // is another, to tell the two refreshes apart.
+        // The file door: the session value goes to the file the config is
+        // read from, so the surface's own `--config` is pointed at a temp
+        // one. The list it writes is another, to tell the two apart.
         let file = dir.path().join("settings.toml");
         std::fs::write(&file, "").expect("an empty settings file");
         let mut args = <crate::Args as clap::Parser>::parse_from(["pi"]);
         args.config = Some(file.display().to_string());
         tui.core.args = std::sync::Arc::new(args);
-        tui.commit_setting("status.done", r#"["cost"]"#);
+        tui.core.claimed.insert(
+            "status.done".to_string(),
+            toml::Value::Array(vec![toml::Value::String("cost".into())]),
+        );
+        let said = tui
+            .core
+            .write_to_file("status.done")
+            .expect("the write lands");
+        tui.land_lines(said);
         assert_eq!(tui.ui.done, vec![Segment::Cost]);
     }
 

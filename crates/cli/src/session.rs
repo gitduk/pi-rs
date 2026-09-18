@@ -195,14 +195,6 @@ impl Store {
         self.dir_of(workspace).join("history")
     }
 
-    /// Where one repository's shelf lives, in the bucket its main checkout
-    /// owns, so every checkout of the repository shares the file. Outside
-    /// git the checkout path itself is the bucket.
-    pub fn memory_path(&self, workspace: &Path) -> PathBuf {
-        let repo = crate::worktree::home(workspace).unwrap_or_else(|| workspace.to_path_buf());
-        self.dir_of(&repo).join("memory.json")
-    }
-
     /// Where a session's journal is written. Beside its transcript, so that
     /// dropping the session drops the record of how it went with it — the two
     /// used to live in different trees under different rules, and a swept
@@ -442,7 +434,7 @@ impl Store {
             }
             if shared {
                 // The bucket holds another tree's sessions too, and its
-                // memory and recall cannot be told apart; only ours go.
+                // recall cannot be told apart; only ours go.
                 for session_dir in owed {
                     if std::fs::remove_dir_all(session_dir).is_ok() {
                         dropped += 1;

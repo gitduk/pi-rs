@@ -167,19 +167,6 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
             .unwrap()
             .insert(0, json!({ "role": "system", "content": system }));
     }
-    // Per-turn state, not a statement of fact — see `Request::notes`.
-    if !req.notes.is_empty() {
-        let notes = req
-            .notes
-            .iter()
-            .map(|n| json!({ "type": "text", "text": n }))
-            .collect::<Vec<_>>();
-        body["messages"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({ "role": "user", "content": notes }));
-    }
-
     // The thinking switch. DeepSeek's chat wire takes `thinking: {type}` with
     // `reasoning_effort`; a model that takes no thinking instruction gets no
     // such field.

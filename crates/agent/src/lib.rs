@@ -18,7 +18,6 @@ pub mod approval;
 pub mod compact;
 pub mod event;
 mod oneshot;
-pub mod remember;
 pub mod session;
 pub mod steer;
 pub mod summarize;
@@ -28,7 +27,6 @@ pub use approval::{Approver, Ceiling, Decision};
 pub use compact::Policy;
 use event::say;
 pub use event::{Event, Totals};
-pub use remember::{Kept, Shelf};
 pub use steer::Steer;
 
 pub const DEFAULT_SYSTEM: &str = include_str!("../prompts/system.md");
@@ -121,15 +119,6 @@ pub struct Agent {
     /// the working model's rate.
     pub summarizer: Option<(Arc<dyn Transport>, ModelSpec)>,
     pub retry: Retry,
-    /// Where facts that should outlive this session are kept. None for a
-    /// subagent, a test or an embedder: a run nobody will return to has
-    /// nothing to leave behind.
-    /// Read each turn to see whether it changed, and written when a span goes.
-    ///
-    /// A note rather than part of the system prompt, because it moves: the
-    /// prompt is the cached prefix, and changing its tail re-bills every
-    /// message behind it.
-    pub shelf: Option<Arc<dyn remember::Shelf>>,
     /// None runs without a turn limit; Some caps the run at that many turns.
     pub max_turns: Option<usize>,
     /// Default maximum turns for subagent tasks. None defaults to 50.
@@ -141,15 +130,6 @@ pub struct Agent {
 // "would not parse" is one loop whatever the prose says, while a genuinely
 // different error starts a new count.
 type Failures = HashMap<(String, String), usize>;
-
-// Everything the turn says about itself: what outlived the transcripts before
-// it. The window rides no note — pi compacts on its own as the budget fills,
-// so a reading would ask for no action — and the shelf is reread each turn
-// rather than held: compaction writes to it mid-run, and that change is what
-// the next turn should see.
-fn turn_notes(shelf: Option<String>) -> Vec<String> {
-    shelf.filter(|m| !m.trim().is_empty()).into_iter().collect()
-}
 
 // What a streamed call resolves to before anything runs. Deciding first keeps
 // the result list aligned with the call list even when nothing executes.
@@ -164,7 +144,6 @@ pub struct Setup<'a> {
     pub system: String,
     pub tier: Tier,
     pub effort: Effort,
-    pub shelf: Arc<dyn Shelf>,
     pub home: Arc<dyn task::Home>,
     pub standing: &'a str,
     pub max_turns: Option<usize>,
@@ -182,7 +161,6 @@ impl Agent {
             effort: Effort::Off,
             compaction: Policy::default(),
             summarizer: None,
-            shelf: None,
             retry: Retry::default(),
             max_turns: None,
             task_max_turns: None,
@@ -195,7 +173,7 @@ impl Agent {
         self.spec = spec;
     }
     /// Put everything the config and workspace decide onto this agent — the
-    /// tools, the ceiling, the system prompt, the effort, the shelf — and
+    /// tools, the ceiling, the system prompt, the effort — and
     /// hang the subagent tool off the result.
     ///
     /// **Call it last.** `Task` clones the agent it is handed, so any field set
@@ -206,7 +184,6 @@ impl Agent {
         self.approver = Arc::new(Ceiling(setup.tier));
         self.system = setup.system;
         self.effort = setup.effort;
-        self.shelf = Some(setup.shelf);
         self.max_turns = setup.max_turns;
         self.task_max_turns = setup.task_max_turns;
         self.hang(setup.home, setup.standing);
@@ -259,9 +236,6 @@ impl Agent {
         // Across the whole run, not the turn: a status line that reset this
         // every turn would report "not compacted" for a run that just was.
         let mut compactions = 0usize;
-        // What the last request was shown as the shelf: unchanged, it rides
-        // no further requests; a run that never writes to it ships it once.
-        let mut seen_shelf: Option<String> = None;
 
         for turn in 1.. {
             if let Some(max) = self.max_turns
@@ -320,18 +294,9 @@ impl Agent {
                     effort = ?self.effort,
                     "sending"
                 );
-                // The shelf rides the request only when what the model would
-                // see of it just changed: first turn, or a compaction wrote.
-                let shelf = self.shelf.as_ref().and_then(|s| s.read());
-                let changed = seen_shelf.as_ref() != shelf.as_ref();
-                if changed {
-                    seen_shelf = shelf.clone();
-                }
-                let shown = if changed { shelf } else { None };
                 let req = Request {
                     system: Some(self.system.clone()),
                     messages: sent,
-                    notes: turn_notes(shown),
                     tools: self.registry.defs(),
                     max_output_tokens: None,
                     temperature: None,
@@ -583,20 +548,17 @@ impl Agent {
 
     // Ask what the span being dropped is worth, and to whom.
     //
-    // Two judgements about one span, so one function and one round trip: a
-    // summary that carries this session's work forward, folding in any
-    // summary already in force and retiring it, and a few facts for the shelf
-    // that should outlive the session entirely.
+    // A summary that carries this session's work forward, folding in any
+    // summary already in force and retiring it.
     //
-    // A failure in either is not fatal: the entries still go. Losing the
-    // summary costs context and losing a note costs a fact; failing the turn
-    // costs the whole run.
+    // A failure is not fatal: the entries still go. Losing the summary costs
+    // context; failing the turn costs the whole run.
     //
     // Returns the usage *and what it cost*, because only here is it known
     // which spec priced it. Handing back a bare usage let both callers pick a
     // spec themselves, and both picked the main model's — so a cheaper
-    // summarizer would have been billed at the expensive model's rates, twice
-    // over and without a word.
+    // summarizer would have been billed at the expensive model's rates and
+    // without a word.
     async fn retire_span(
         &self,
         session: &Session,
@@ -610,60 +572,21 @@ impl Agent {
         let history =
             summarize::render(&session.summaries(), &session.entries_for(&record.dropped));
 
-        // Two judgements, one span, and neither is the other: the summary
-        // carries this session's work forward, the shelf carries a few facts
-        // past it. Together rather than in turn — one round trip, not two.
-        let (summarized, kept) = futures::future::join(
-            summarize::run(transport, spec, history.clone(), focus),
-            self.fill_shelf(transport, spec, history, focus),
-        )
-        .await;
-
-        let mut usage = kept;
-        match summarized {
+        let usage = match summarize::run(transport, spec, history, focus).await {
             Ok((text, used)) => {
                 record.summary = Some(text);
                 // The new summary covers what the old one did, so the entry
                 // carrying the old one leaves the view.
                 record.dropped.extend(session.summary_entries());
-                usage.add(&used);
+                used
             }
             Err(e) => {
                 tracing::warn!(target: "pi::compact", error = %e, "summarizing dropped history failed");
-            }
-        }
-        let cost = spec.cost(&usage);
-        (usage, cost)
-    }
-
-    // Ask what should outlive the session and put it on the shelf, when there
-    // is one. Answers with what the asking cost, zero when nothing was asked.
-    //
-    // A failure is swallowed for the same reason the summary's is: losing a
-    // note costs a fact, failing the compaction costs the run.
-    async fn fill_shelf(
-        &self,
-        transport: &dyn Transport,
-        spec: &ModelSpec,
-        history: String,
-        focus: Option<&str>,
-    ) -> brain::stream::Usage {
-        let Some(shelf) = &self.shelf else {
-            return brain::stream::Usage::default();
-        };
-        match remember::run(transport, spec, history, focus, shelf.read()).await {
-            Ok((notes, usage)) => {
-                if !notes.is_empty() {
-                    tracing::info!(target: "pi::compact", kept = notes.len(), "shelved");
-                    shelf.keep(notes);
-                }
-                usage
-            }
-            Err(e) => {
-                tracing::warn!(target: "pi::compact", error = %e, "asking what to keep failed");
                 brain::stream::Usage::default()
             }
-        }
+        };
+        let cost = spec.cost(&usage);
+        (usage, cost)
     }
 
     /// What the transcript may occupy. The reply, the system prompt and the
@@ -1128,20 +1051,6 @@ pub fn cancel_on_interrupt() -> CancellationToken {
 mod tests {
     use super::*;
     use brain::message::ToolCall;
-
-    // The window rides no note: pi compacts on its own as the budget fills,
-    // so a reading would tell the model nothing it can act on. What a turn
-    // can still say is what outlived the transcripts before it — and an
-    // empty shelf says nothing at all rather than an empty tag to interpret.
-    #[test]
-    fn the_turn_says_what_outlived_the_transcripts_or_nothing() {
-        assert_eq!(turn_notes(None), Vec::<String>::new());
-        assert_eq!(turn_notes(Some("   ".into())), Vec::<String>::new());
-        assert_eq!(
-            turn_notes(Some("<memory>\n2026-09-07 prefers xh\n</memory>".into())),
-            vec!["<memory>\n2026-09-07 prefers xh\n</memory>".to_string()]
-        );
-    }
 
     fn call(name: &str) -> ToolCall {
         ToolCall {
