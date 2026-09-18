@@ -153,6 +153,13 @@ fn save_state(path: &PathBuf, state: &State) -> Result<()> {
     }
     let tmp = path.with_extension("json.pi-tmp");
     std::fs::write(&tmp, serde_json::to_vec_pretty(state)?)?;
+    // The state carries the session token; 0644 on a shared machine hands it
+    // to every local user, so the file is tightened before it is renamed in.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    }
     std::fs::rename(&tmp, path)?;
     Ok(())
 }

@@ -102,6 +102,16 @@ pub async fn login(client: &mut Client, view: &mut LoginView) -> Result<Credenti
                 return Err(LoginError::AlreadyBound);
             }
             QrStatus::Redirect { host } if !host.is_empty() => {
+                // The server names where to go from here; anything that is
+                // not a bare hostname would turn it into a URL it never meant.
+                let plausible = reqwest::Url::parse(&format!("https://{host}"))
+                    .is_ok_and(|u| u.host_str() == Some(host.as_str()));
+                if !plausible {
+                    (view.notice)(&format!(
+                        "the server named an implausible redirect host `{host}`; staying put"
+                    ));
+                    continue;
+                }
                 let base = format!("https://{host}");
                 (view.notice)(&format!("redirected to {base}"));
                 *client = Client::new(base);

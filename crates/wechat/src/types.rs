@@ -39,12 +39,25 @@ pub struct QrCode {
 
 /// What a successful login hands back. `base_url` is the confirmed response's
 /// `baseurl` — the reference uses it for every subsequent request.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Credentials {
     pub token: String,
     pub base_url: String,
     pub bot_id: String,
     pub user_id: String,
+}
+
+// Manual rather than derived: a `{:?}` that prints the session token leaks it
+// through any log line that happens to carry the credentials.
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Credentials")
+            .field("token", &"<redacted>")
+            .field("base_url", &self.base_url)
+            .field("bot_id", &self.bot_id)
+            .field("user_id", &self.user_id)
+            .finish()
+    }
 }
 
 /// The result of one `get_qrcode_status` long-poll.

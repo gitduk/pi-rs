@@ -3,6 +3,8 @@ name = "wechat"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+description = "WeChat bot client and login flow"
 
 [dependencies]
 base64 = "0.22"

@@ -81,9 +81,11 @@ impl Client {
     /// Long-poll the QR's scan status. A 35s client timeout means "nothing
     /// yet" and reads as `QrStatus::Wait`, never as an error.
     pub async fn poll_qrcode(&self, qrcode: &str, verify_code: Option<&str>) -> Result<QrStatus> {
-        let mut endpoint = format!("ilink/bot/get_qrcode_status?qrcode={qrcode}");
+        // The query rides a hand-built endpoint, so the values are encoded by
+        // hand: a typed code with `&` or `#` in it would rewrite the request.
+        let mut endpoint = format!("ilink/bot/get_qrcode_status?qrcode={}", urlencode(qrcode));
         if let Some(code) = verify_code {
-            endpoint.push_str(&format!("&verify_code={code}"));
+            endpoint.push_str(&format!("&verify_code={}", urlencode(code)));
         }
         let raw = match self.get(&endpoint, LONG_POLL_TIMEOUT).await {
             Ok(raw) => raw,
@@ -242,6 +244,22 @@ impl Client {
     fn url(&self, endpoint: &str) -> String {
         format!("{}/{}", self.base_url.trim_end_matches('/'), endpoint)
     }
+}
+
+// Percent-encode everything a query value may not carry raw. The unreserved
+// set stays readable; everything else goes hex so `&`, `#` and space cannot
+// change what the server reads.
+fn urlencode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 fn base_info() -> Value {
