@@ -14,14 +14,8 @@
 # title/body based on your changelogs.
 
 name: Release
-# Read at the top level: PR-triggered runs get no write access to the repo.
-# The jobs that publish re-grant write below, and run on tag pushes only.
 permissions:
-  "contents": "read"
-
-concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: false
+  "contents": "write"
 
 # This task will run whenever you push a git tag that looks like a version
 # like "1.0.0", "v0.1.0-prerelease.1", "my-app/0.1.0", "releases/v1.0.0", etc.
@@ -54,7 +48,6 @@ jobs:
   # Run 'dist plan' (or host) to determine what tasks we need to do
   plan:
     runs-on: "ubuntu-22.04"
-    timeout-minutes: 15
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
       tag: ${{ !github.event.pull_request && github.ref_name || '' }}
@@ -83,14 +76,8 @@ jobs:
       # (PRs run on the *source* but secrets are usually on the *target* -- that's *good*
       # but also really annoying to build CI around when it needs secrets to work right.)
       - id: plan
-        env:
-          # Through an env var, not interpolated into the script: a ref name
-          # is data, and must stay out of the shell's parse.
-          PLAN_ARGS: ${{ (!github.event.pull_request && format('host --steps=create --tag={0}', github.ref_name)) || 'plan' }}
         run: |
-          # Unquoted on purpose: the var holds several args, and an env var
-          # cannot inject shell syntax — only split into words, which is wanted.
-          dist $PLAN_ARGS --output-format=json > plan-dist-manifest.json
+          dist ${{ (!github.event.pull_request && format('host --steps=create --tag={0}', github.ref_name)) || 'plan' }} --output-format=json > plan-dist-manifest.json
           echo "dist ran successfully"
           cat plan-dist-manifest.json
           echo "manifest=$(jq -c "." plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
@@ -103,7 +90,6 @@ jobs:
   # Build and packages all the platform-specific things
   build-local-artifacts:
     name: build-local-artifacts (${{ join(matrix.targets, ', ') }})
-    timeout-minutes: 60
     # Let the initial task tell us to not run (currently very blunt)
     needs:
       - plan
@@ -154,12 +140,9 @@ jobs:
         run: |
           ${{ matrix.packages_install }}
       - name: Build artifacts
-        env:
-          TAG_FLAG: ${{ needs.plan.outputs.tag-flag }}
         run: |
           # Actually do builds and make zips and whatnot
-          # shellcheck disable=SC2086 — TAG_FLAG is data, several args wide
-          dist build $TAG_FLAG --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
+          dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
           echo "dist ran successfully"
       - id: cargo-dist
         name: Post-build
@@ -187,7 +170,6 @@ jobs:
     needs:
       - plan
       - build-local-artifacts
-    timeout-minutes: 60
     runs-on: "ubuntu-22.04"
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -212,11 +194,8 @@ jobs:
           merge-multiple: true
       - id: cargo-dist
         shell: bash
-        env:
-          TAG_FLAG: ${{ needs.plan.outputs.tag-flag }}
         run: |
-          # shellcheck disable=SC2086 — TAG_FLAG is data, several args wide
-          dist build $TAG_FLAG --output-format=json "--artifacts=global" > dist-manifest.json
+          dist build ${{ needs.plan.outputs.tag-flag }} --output-format=json "--artifacts=global" > dist-manifest.json
           echo "dist ran successfully"
 
           # Parse out what we just built and upload it to scratch storage
@@ -238,11 +217,6 @@ jobs:
       - plan
       - build-local-artifacts
       - build-global-artifacts
-    timeout-minutes: 15
-    # The one job that publishes; `publishing == 'true'` below already keeps
-    # it off pull requests, and the write grant cannot fire there either.
-    permissions:
-      "contents": "write"
     # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
     env:
@@ -270,11 +244,8 @@ jobs:
           merge-multiple: true
       - id: host
         shell: bash
-        env:
-          TAG_FLAG: ${{ needs.plan.outputs.tag-flag }}
         run: |
-          # shellcheck disable=SC2086 — TAG_FLAG is data, several args wide
-          dist host $TAG_FLAG --steps=upload --steps=release --output-format=json > dist-manifest.json
+          dist host ${{ needs.plan.outputs.tag-flag }} --steps=upload --steps=release --output-format=json > dist-manifest.json
           echo "artifacts uploaded and released successfully"
           cat dist-manifest.json
           echo "manifest=$(jq -c "." dist-manifest.json)" >> "$GITHUB_OUTPUT"
@@ -311,9 +282,6 @@ jobs:
     needs:
       - plan
       - host
-    timeout-minutes: 15
-    permissions:
-      "contents": "write"
     # use "always() && ..." to allow us to wait for all publish jobs while
     # still allowing individual publish jobs to skip themselves (for prereleases).
     # "host" however must run to completion, no skipping allowed!
