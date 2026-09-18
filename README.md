@@ -22,11 +22,12 @@ Nothing to install and nothing to configure at build time. There is no
 
 ## Release
 
-Releases are built and published locally, not on CI. Pushing to `master` runs
-the `post-push` hook: it builds the binary, and if the `[workspace.package]`
-version is not tagged on origin yet, tags it and uploads the binary via
-`gh release create --generate-notes`. An already-tagged version is a no-op, so
-routine pushes skip the build.
+Releases are built and published locally, not on CI. Git has no `post-push`
+hook, so pushing alone publishes nothing: after a push to `master`, run
+`scripts/release-on-push.sh` by hand. It builds the binary, and if the
+`[workspace.package]` version is not tagged on origin yet, tags it and uploads
+the binary via `gh release create --generate-notes`. An already-tagged version
+is a no-op, so a rerun after a routine push skips the build.
 
 A `pre-commit` hook keeps `Cargo.lock` in sync with the manifests: whenever a
 `Cargo.toml` is staged, it rewrites the lock file and stages it, so a version
@@ -38,7 +39,6 @@ The hooks are not version-controlled; install them on a fresh clone with:
 
 ```bash
 install -m 755 scripts/hooks/pre-commit .git/hooks/pre-commit
-install -m 755 scripts/hooks/post-push .git/hooks/post-push
 ```
 
 ## Configure
