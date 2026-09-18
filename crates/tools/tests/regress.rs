@@ -380,8 +380,7 @@ async fn the_echo_names_the_block_covered() {
 }
 
 // The same visibility for a deletion: an edit that takes a whole block names
-// it, since a wrong-target delete is as silent as a
-// wrong-target rewrite.
+// it, since a wrong-target delete is as silent as a wrong-target rewrite.
 #[tokio::test]
 async fn the_echo_names_the_block_a_pure_delete_covered() {
     let (_d, c) = ctx();

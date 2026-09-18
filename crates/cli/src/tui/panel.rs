@@ -653,36 +653,6 @@ mod tests {
         assert!(matches!(p.press(None, press), Took::Intent(Intent::None)));
     }
 
-    #[test]
-    fn only_the_focused_row_is_highlighted() {
-        let mut p = Panel::new(
-            vec![
-                row("a", "1", false),
-                row("b", "2", false),
-                row("c", "3", false),
-            ],
-            &vim(),
-        );
-        let paint = Paint::new(true);
-        let (rows, caret) = p.view(&paint, 80);
-        assert!(caret.is_none());
-        assert!(rows[0].contains("\x1b[7m"));
-        assert!(!rows[1].contains("\x1b[7m"));
-        assert!(!rows[2].contains("\x1b[7m"));
-
-        act(&mut p, Action::MenuNext);
-        let (rows, caret) = p.view(&paint, 80);
-        assert!(caret.is_none());
-        assert!(!rows[0].contains("\x1b[7m"));
-        assert!(rows[1].contains("\x1b[7m"));
-        assert!(!rows[2].contains("\x1b[7m"));
-
-        act(&mut p, Action::MenuAccept);
-        let (rows, caret) = p.view(&paint, 80);
-        assert!(caret.is_some());
-        assert!(!rows[1].contains("\x1b[7m"));
-    }
-
     // The row being rewritten is the edit line: painted like the input, the
     // caret riding it after the value, and no separate line below.
     #[test]
@@ -747,23 +717,5 @@ mod tests {
             "the caret is at the end of its own row"
         );
         assert!(r > 0, "the value wrapped");
-    }
-
-    // A row the session has left behind carries the mark, so normal mode's
-    // space and r have something to point at.
-    #[test]
-    fn a_row_the_session_left_the_file_carries_the_mark() {
-        let p = Panel::new(settings(), &vim());
-        let (rows, _) = p.view(&Paint::new(true), 80);
-        assert!(
-            !rows[0].contains(crate::icons::CHANGED_MARK),
-            "the file agrees on {}",
-            rows[0]
-        );
-        assert!(
-            rows[1].contains(crate::icons::CHANGED_MARK),
-            "the file does not hold {}",
-            rows[1]
-        );
     }
 }

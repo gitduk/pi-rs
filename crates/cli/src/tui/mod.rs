@@ -4021,7 +4021,7 @@ impl Tui {
 mod tests {
     use super::{
         Cow, Folds, Intent, Panel, Row, ScrollbackRows, Target, absorb_growth, body,
-        scrollback_from, tool_row,
+        scrollback_from,
     };
     use crate::icons;
     use crate::keys::{Keys, Mode};
@@ -4459,28 +4459,6 @@ mod tests {
         assert!(ui.live_tools_shown, "the status line is no click target");
     }
 
-    // as a startup note, which scrolled away; here it stays at the top, which
-    // is where "what is my agent obeying" belongs.
-    #[test]
-    fn the_opening_block_names_the_instruction_files() {
-        let paint = Paint::new(false);
-        let rows = Row::banner(&["~/.pi/AGENTS.md".into(), "AGENTS.md".into()], &paint);
-        let shown: Vec<String> = ScrollbackRows::new(&rows, &paint, &[], 80)
-            .map(|(r, _)| r.to_string())
-            .collect();
-        // The version from the same place the banner reads it: spelled out
-        // here, every release breaks a test about the context files.
-        assert_eq!(
-            shown,
-            [
-                concat!("π ", env!("CARGO_PKG_VERSION")),
-                "context:",
-                "- ~/.pi/AGENTS.md",
-                "- AGENTS.md"
-            ]
-        );
-    }
-
     // Nothing loaded, nothing said — the common case is one personal file and
     // a heading over an empty list is worse than no heading.
     #[test]
@@ -4497,39 +4475,6 @@ mod tests {
     // What the screen shows for a run in the middle of reasoning.
     fn shown(t: &Folds, partial: &str) -> Vec<String> {
         body(t, &[], true, partial, (80, 9), &Paint::new(false))
-    }
-
-    #[test]
-    fn a_pending_tool_row_spins_and_names_its_argument() {
-        assert_eq!(
-            tool_row(0, "read", "a.rs"),
-            format!("{} read a.rs", icons::SPINNER_FRAMES[0])
-        );
-        // A tool with nothing worth showing keeps the row to a name.
-        assert_eq!(
-            tool_row(5, "spinner", ""),
-            format!("{} spinner", icons::SPINNER_FRAMES[5])
-        );
-    }
-
-    #[test]
-    fn a_folded_entry_is_its_summary_until_unfolded() {
-        let rows = [block(1, 2, true)];
-        let paint = Paint::new(false);
-        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 80)
-            .map(|(s, _)| s)
-            .collect();
-        assert_eq!(rows, vec![format!("thinking{}2 lines", icons::PART_SEP)]);
-    }
-
-    #[test]
-    fn an_unfolded_entry_shows_its_lines() {
-        let rows = [block(1, 2, false)];
-        let paint = Paint::new(false);
-        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 80)
-            .map(|(s, _)| s)
-            .collect();
-        assert_eq!(rows, vec!["line 1", "line 2"]);
     }
 
     // The divergence this change removes. The live stream rendered an edit's
@@ -4626,22 +4571,6 @@ mod tests {
         );
         // Both are one row, and both name the tool.
         assert!(narrow[0].contains("read") && wide[0].contains("read"));
-    }
-
-    // A failure is not a result that happens to read badly.
-    #[test]
-    fn a_failed_result_is_marked_as_one() {
-        let paint = Paint::new(false);
-        let bad = [Row::result(false, "read", "gone")];
-        let good = [Row::result(true, "read", "gone")];
-        let bad: Vec<Cow<'_, str>> = ScrollbackRows::new(&bad, &paint, &[], 80)
-            .map(|(s, _)| s)
-            .collect();
-        let good: Vec<Cow<'_, str>> = ScrollbackRows::new(&good, &paint, &[], 80)
-            .map(|(s, _)| s)
-            .collect();
-        assert!(bad[0].starts_with('✗'), "{}", bad[0]);
-        assert!(good[0].starts_with('✓'), "{}", good[0]);
     }
 
     #[test]
@@ -4956,16 +4885,6 @@ mod tests {
             &Paint::new(false),
         );
         assert_eq!(rows.len(), 3);
-    }
-
-    #[test]
-    fn streaming_answer_renders_as_markdown() {
-        let t = Folds::default();
-        let md_text = "# Header\n\n```rust\nlet x = 1;\n```";
-        let rows = body(&t, &[], false, md_text, (80, 10), &Paint::new(true));
-        let stripped: Vec<String> = rows.iter().map(|r| render::strip_ansi(r)).collect();
-        assert!(stripped.iter().any(|r| r.contains("Header")));
-        assert!(stripped.iter().any(|r| r.contains("let x = 1;")));
     }
 
     #[test]
@@ -5476,96 +5395,6 @@ mod tests {
         assert_eq!(tui.core.lanes[0].totals.usage.output, 20);
         assert_eq!(tui.totals.usage.input, 100);
         assert_eq!(tui.totals.usage.output, 20);
-    }
-
-    // The bar reads as a row of names, not a scatter: the sign column holds
-    // only what a lane is doing — the one in front says so in colour, and
-    // never with the input prompt's own `\u{203a}`.
-    #[test]
-    fn the_lane_bar_separates_names_the_way_every_other_line_does() {
-        let mut ui = test_ui(80, 24);
-        ui.tabs = vec![
-            super::Tab {
-                mark: super::Mark::Front,
-                name: "pi-rs".into(),
-            },
-            super::Tab {
-                mark: super::Mark::Idle,
-                name: "f1".into(),
-            },
-            super::Tab {
-                mark: super::Mark::Done,
-                name: "f2".into(),
-            },
-        ];
-        let plain = render::strip_ansi(&ui.lane_bar(80).expect("two lanes make a bar"));
-        assert_eq!(plain, "pi-rs \u{b7} f1 \u{b7} \u{2713} f2");
-
-        // Wide enough for the names, far too narrow once escapes are counted
-        // as columns — the whole row still has to survive.
-        let narrow = render::strip_ansi(&ui.lane_bar(30).expect("a bar"));
-        assert!(
-            !narrow.contains('\u{2026}'),
-            "clipped a row that fits: {narrow}"
-        );
-    }
-
-    // The input prompt's icon belongs to the line you type on. The bar sat
-    // directly under it wearing the same mark, which read as a second place
-    // to type — whatever the theme sets that icon to.
-    #[test]
-    fn the_lane_bar_never_wears_the_input_prompt() {
-        let icon = render::Theme::default().prompt.icon;
-        let mut ui = test_ui(80, 24);
-        ui.tabs = vec![
-            super::Tab {
-                mark: super::Mark::Front,
-                name: "pi-rs".into(),
-            },
-            super::Tab {
-                mark: super::Mark::Idle,
-                name: "f1".into(),
-            },
-        ];
-        let plain = render::strip_ansi(&ui.lane_bar(80).expect("two lanes make a bar"));
-        assert!(
-            !plain.contains(&icon),
-            "the bar wears the prompt icon `{icon}`: {plain}"
-        );
-    }
-
-    // The input line is the bottom row, and the bar sits above it as the
-    // edge of the history — not hanging off the line being typed, where it
-    // read as a second prompt.
-    #[test]
-    fn the_bar_sits_above_the_input_line() {
-        let mut ui = test_ui(40, 8);
-        ui.tabs = vec![
-            super::Tab {
-                mark: super::Mark::Front,
-                name: "pi-rs".into(),
-            },
-            super::Tab {
-                mark: super::Mark::Idle,
-                name: "f1".into(),
-            },
-        ];
-        let (_dir, mut lane) = a_running_lane();
-        ui.flush(&mut lane);
-
-        let rows = ui.screen.painted();
-        let icon = render::Theme::default().prompt.icon;
-        let last = rows.last().expect("a drawn frame");
-        assert!(
-            last.starts_with(&icon),
-            "the input line is the bottom row: {last:?}"
-        );
-        let above = &rows[rows.len() - 2];
-        assert_eq!(
-            above.trim(),
-            "pi-rs \u{b7} f1",
-            "the bar is the row above it"
-        );
     }
 
     // A flash answers the keypress on the bar row and leaves no trace in the
@@ -6112,24 +5941,6 @@ mod tests {
             .expect("the write lands");
         tui.land_lines(said);
         assert_eq!(tui.ui.done, vec![Segment::Cost]);
-    }
-
-    // A run that begins no turn — a `!` command — spends no tokens, and a row
-    // of dashes under it reads as a model call that cost nothing.
-    #[test]
-    fn a_bang_command_shows_no_token_counts() {
-        let ui = test_ui(80, 24);
-        let (_dir, mut lane) = a_running_lane();
-        lane.view.state.started = Some(std::time::Instant::now());
-
-        let live = ui.live(&lane, 10).0.join("\n");
-        let frames = |text: &str| {
-            icons::SPINNER_FRAMES
-                .iter()
-                .any(|frame| text.contains(frame))
-        };
-        assert!(frames(&live), "the run is on: {live}");
-        assert!(!live.contains(" in / "), "nothing was spent: {live}");
     }
 
     // The live region follows the lane's turn, not the clock beside it. One

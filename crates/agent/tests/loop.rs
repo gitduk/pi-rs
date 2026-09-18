@@ -114,18 +114,6 @@ fn wired(turns: Vec<Vec<StreamEvent>>) -> (tempfile::TempDir, Agent, Ctx, Arc<Sc
     (dir, agent, Ctx::new(ws), wire)
 }
 
-#[tokio::test]
-async fn the_turn_limit_stops_a_runaway_loop() {
-    let (_d, mut a, ctx) = harness(vec![
-        call_turn(&[("t1", "nosuchtool", "{}")]),
-        call_turn(&[("t2", "nosuchtool", "{}")]),
-        call_turn(&[("t3", "nosuchtool", "{}")]),
-    ]);
-    a.max_turns = Some(2);
-    let (_session, out, _) = drive(&a, &ctx, "loop").await;
-    assert!(matches!(out, Err(agent::AgentError::TurnLimit(2))));
-}
-
 async fn drive(
     agent: &Agent,
     ctx: &Ctx,

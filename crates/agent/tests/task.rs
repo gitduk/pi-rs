@@ -205,7 +205,8 @@ fn rigged(
             seen: seen.clone(),
             trip: esc.then(|| ctx.cancel.clone()),
         });
-    let task = Task::new(&parent, kept.clone(), STANDING).with_limits(max_turns, deadline);
+    parent.task_max_turns = Some(max_turns);
+    let task = Task::new(&parent, kept.clone(), STANDING).with_deadline(deadline);
     parent.registry = parent.registry.clone().with(task);
     (dir, parent, ctx, seen, kept)
 }
@@ -264,41 +265,6 @@ async fn the_child_answers_into_the_parents_transcript() {
         "the child files under its own name: {ns}"
     );
     assert_ne!(ns, ctx.spill_namespace(), "and not the parent's");
-}
-
-// The row a finished call leaves has to say which job ended. Several
-// children run at once, and their bills are indistinguishable.
-#[tokio::test]
-async fn a_finished_call_still_names_the_job() {
-    let (_dir, parent, ctx, _seen, kept) = harness(vec![text_turn("four")]);
-    let task = Task::new(&parent, kept, STANDING);
-    let out = task
-        .execute(
-            json!({ "description": "count the files", "prompt": "count them" }),
-            &ctx,
-        )
-        .await
-        .expect("the child ran");
-
-    let sketch = out.preview();
-    assert_eq!(
-        sketch, "count the files [1 turn · 1.0k/7]",
-        "the job leads and the bill is ranked under it"
-    );
-
-    // A description the model left blank leaves the cost alone rather than a
-    // separator with nothing in front of it.
-    let (_dir, parent, ctx, _seen, kept) = harness(vec![text_turn("four")]);
-    let task = Task::new(&parent, kept, STANDING);
-    let bare = task
-        .execute(json!({ "description": " ", "prompt": "count them" }), &ctx)
-        .await
-        .expect("the child ran")
-        .preview();
-    assert_eq!(
-        bare, "1 turn · 1.0k/7",
-        "no brackets around a bare bill: {bare}"
-    );
 }
 
 #[tokio::test]
@@ -414,14 +380,10 @@ async fn running_out_of_time_is_an_answer_not_a_failure() {
 }
 
 #[tokio::test]
-async fn subagent_max_turns_can_be_configured_by_argument() {
+async fn the_configured_turn_ceiling_stops_the_child() {
     let (_dir, agent, ctx, _seen, _kept) = rigged(
         vec![
-            call_turn(
-                "c1",
-                "task",
-                r#"{"description":"cap at 1","prompt":"go","max_turns":1}"#,
-            ),
+            call_turn("c1", "task", r#"{"description":"capped","prompt":"go"}"#),
             call_turn(
                 "c2",
                 "write",
@@ -430,7 +392,7 @@ async fn subagent_max_turns_can_be_configured_by_argument() {
             call_turn("c3", "sleeper", "{}"),
             text_turn("caller wraps up"),
         ],
-        50,
+        1,
         std::time::Duration::from_secs(600),
         false,
     );
@@ -445,7 +407,7 @@ async fn subagent_max_turns_can_be_configured_by_argument() {
 }
 
 #[test]
-fn task_defaults_to_fifty_turns() {
+fn the_task_schema_no_longer_offers_a_turn_cap() {
     let parent = Agent::new(
         Arc::new(Scripted {
             turns: vec![],
@@ -454,35 +416,14 @@ fn task_defaults_to_fifty_turns() {
         }),
         spec(),
     );
-    let task = Task::new(&parent, Arc::new(Kept::default()), STANDING);
-    let schema = task.schema();
+    let schema = Task::new(&parent, Arc::new(Kept::default()), STANDING).schema();
+    // The ceiling is the user's word: the schema the caller model reads no
+    // longer offers it a cap of its own to set.
     assert!(
-        schema["properties"]["max_turns"]["description"]
-            .as_str()
+        !schema["properties"]
+            .as_object()
             .unwrap()
-            .contains("Default 50")
-    );
-}
-
-#[test]
-fn agent_hang_uses_configured_task_max_turns() {
-    let mut parent = Agent::new(
-        Arc::new(Scripted {
-            turns: vec![],
-            next: AtomicUsize::new(0),
-            saw: Arc::default(),
-        }),
-        spec(),
-    );
-    parent.task_max_turns = Some(30);
-    parent.hang(Arc::new(Kept::default()), STANDING);
-    let tool = parent.registry.get("task").unwrap();
-    let schema = tool.schema();
-    assert!(
-        schema["properties"]["max_turns"]["description"]
-            .as_str()
-            .unwrap()
-            .contains("Default 30")
+            .contains_key("max_turns")
     );
 }
 
@@ -719,7 +660,7 @@ async fn a_child_that_ran_out_of_time_is_still_checked() {
         false,
     );
     let task =
-        Task::new(&parent, kept, STANDING).with_limits(20, std::time::Duration::from_millis(50));
+        Task::new(&parent, kept, STANDING).with_deadline(std::time::Duration::from_millis(50));
     let out = task
         .execute(
             json!({ "description": "go", "prompt": "go", "verify": "true" }),

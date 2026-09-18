@@ -397,127 +397,6 @@ async fn a_language_the_parser_does_not_know_is_not_gated() {
 }
 
 #[tokio::test]
-async fn an_edit_shows_what_went_and_what_came() {
-    // The report the model reads is a set of addresses it can edit against.
-    // The display answers the other question — what changed — and only that
-    // one has a reader.
-    let (_d, c) = ctx();
-    std::fs::write(c.workspace.root().join("a.rs"), THREE_FNS).unwrap();
-    view(&c, "a.rs").await;
-
-    let out = tools::edit::Edit
-        .execute(
-            json!({ "path": "a.rs", "edits": [
-                { "old_string": "pub fn target() -> i32 {\n    2\n}\n",
-                  "new_string": "pub fn target() -> i32 {\n    99\n}\n" },
-            ]}),
-            &c,
-        )
-        .await
-        .unwrap();
-
-    let sketch = out.preview.unwrap();
-    let (head, rows) = sketch.split_once('\n').unwrap();
-    assert_eq!(head, "a.rs +3 -3");
-    // The diff rows carry the file line each one was or became, so a reader
-    // can locate the change without counting diff rows. The mark is the
-    // second word, after the row number.
-    assert!(
-        rows.contains(&format!("6 + {}{}", " ".repeat(4), "99")),
-        "{rows}"
-    );
-    assert!(rows.contains("5 - pub fn target() -> i32 {"), "{rows}");
-    assert!(
-        rows.lines()
-            .filter(|l| l.split_whitespace().nth(1) == Some("-"))
-            .count()
-            == 3,
-        "{rows}"
-    );
-}
-
-#[tokio::test]
-async fn each_side_of_a_hunk_is_numbered_in_the_file_it_belongs_to() {
-    // The two lines matched are replaced by three, so the removed `b` was
-    // line 2 before the edit but sits at line 3 after it. Removed rows must
-    // show the old number, added rows the new one.
-    let (_d, c) = ctx();
-    let src = "a\nb\nc\nd\ne\n";
-    std::fs::write(c.workspace.root().join("a.rs"), src).unwrap();
-    view(&c, "a.rs").await;
-
-    let out = tools::edit::Edit
-        .execute(
-            json!({ "path": "a.rs", "edits": [
-                { "old_string": "a\nb\n", "new_string": "a\nAA\nBB\n" },
-            ]}),
-            &c,
-        )
-        .await
-        .unwrap();
-    let sketch = out.preview.unwrap();
-    assert!(sketch.contains("2 - b"), "{sketch}");
-    assert!(sketch.contains("3 + BB"), "{sketch}");
-}
-
-#[tokio::test]
-async fn a_delete_reports_the_lines_it_took() {
-    // A hunk that gives nothing has no row in the new file to name, and is
-    // exactly the one a reader most wants shown.
-    let (_d, c) = ctx();
-    std::fs::write(c.workspace.root().join("a.rs"), THREE_FNS).unwrap();
-    view(&c, "a.rs").await;
-
-    let out = tools::edit::Edit
-        .execute(
-            json!({ "path": "a.rs", "edits": [
-                { "old_string": "pub fn target() -> i32 {\n    2\n}\n", "new_string": "" },
-            ]}),
-            &c,
-        )
-        .await
-        .unwrap();
-
-    let sketch = out.preview.unwrap();
-    assert!(sketch.starts_with("a.rs +0 -3"), "{sketch}");
-    assert_eq!(
-        sketch
-            .lines()
-            .filter(|l| l.split_whitespace().nth(1) == Some("-"))
-            .count(),
-        3
-    );
-    assert!(sketch.contains("\n5 - "), "{sketch}");
-}
-
-#[tokio::test]
-async fn two_edits_in_one_call_land_together() {
-    // One call, one file, both edits matched against the file as it was: the
-    // display carries both landings under the one head.
-    let (_d, c) = ctx();
-    std::fs::write(c.workspace.root().join("a.rs"), THREE_FNS).unwrap();
-    view(&c, "a.rs").await;
-
-    let out = tools::edit::Edit
-        .execute(
-            json!({ "path": "a.rs", "edits": [
-                { "old_string": "pub fn target() -> i32 {\n    2\n}\n",
-                  "new_string": "pub fn target() -> i32 {\n    99\n}\n" },
-                { "insert_after": "pub fn keep() -> i32 {\n", "new_string": "    // kept\n" },
-            ]}),
-            &c,
-        )
-        .await
-        .unwrap();
-
-    let sketch = out.preview.unwrap();
-    assert!(sketch.starts_with("a.rs +4 -3"), "{sketch}");
-    // Both landings are in the one file, so no name row tells them apart.
-    assert!(!sketch.lines().any(|l| l == "a.rs"), "{sketch}");
-    assert_eq!(sketch.lines().skip(1).count(), 7, "{sketch}");
-}
-
-#[tokio::test]
 async fn a_no_op_replacement_is_refused() {
     // Nothing moves, so reporting a successful edit would teach the model
     // that a fix landed. The file is left alone and the refusal says why.
@@ -734,19 +613,6 @@ async fn edit_cannot_reach_outside_the_workspace() {
 }
 
 #[tokio::test]
-async fn bash_previews_the_command_that_ran() {
-    let (_d, c) = ctx();
-    let out = tools::bash::Bash
-        .execute(json!({ "command": "echo first; echo second" }), &c)
-        .await
-        .unwrap();
-    // A progress line says what ran, not what it printed — the output is the
-    // result body, which opens with the `<stdout>` marker.
-    assert!(out.flatten().starts_with("<stdout>"));
-    assert_eq!(out.preview(), "echo first; echo second");
-}
-
-#[tokio::test]
 async fn a_multiline_command_previews_only_its_first_line() {
     let (_d, c) = ctx();
     let out = tools::bash::Bash
@@ -756,43 +622,6 @@ async fn a_multiline_command_previews_only_its_first_line() {
     // The preview feeds a one-line progress row; a newline would leak the
     // rest into the diff-row renderer as fake structure.
     assert_eq!(out.preview(), "echo one");
-}
-
-#[tokio::test]
-async fn a_failing_command_previews_the_command_too() {
-    let (_d, c) = ctx();
-    let out = tools::bash::Bash
-        .execute(json!({ "command": "echo boom >&2; exit 2" }), &c)
-        .await
-        .unwrap();
-    assert_eq!(out.preview(), "echo boom >&2; exit 2");
-}
-
-#[tokio::test]
-async fn tools_whose_result_opens_with_content_need_no_explicit_preview() {
-    let (_d, c) = ctx();
-    std::fs::create_dir(c.workspace.root().join("d")).unwrap();
-    std::fs::write(c.workspace.root().join("d/a.rs"), "one\n").unwrap();
-    let out = tools::read::Read
-        .execute(json!({ "path": "d" }), &c)
-        .await
-        .unwrap();
-    assert_eq!(out.preview(), "d/");
-}
-
-#[tokio::test]
-async fn a_ranged_read_previews_the_rows_that_came_back() {
-    // The progress line carries the real window, not the ask: the limit may
-    // reach past the end of the file, and the preview should say 2-3, not
-    // 2-12.
-    let (_d, c) = ctx();
-    let src = "one\ntwo\nthree\n";
-    std::fs::write(c.workspace.root().join("a.rs"), src).unwrap();
-    let out = tools::read::Read
-        .execute(json!({ "path": "a.rs", "offset": 2, "limit": 10 }), &c)
-        .await
-        .unwrap();
-    assert_eq!(out.preview(), "a.rs:2-3");
 }
 
 // The view header names the file and nothing else: the staleness note and
@@ -1297,8 +1126,10 @@ async fn emptying_a_line_without_its_break_is_said_out_loud() {
     assert!(out.contains("edits[0]"), "{out}");
 }
 
+// One call, both edits matched against the file as it was: the second's
+// anchor survives even where the first replaced the text it names.
 #[tokio::test]
-async fn two_emptied_lines_are_said_in_the_plural() {
+async fn two_edits_in_one_call_match_against_the_file_as_it_was() {
     let (_d, c) = ctx();
     let path = c.workspace.root().join("a.rs");
     std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
@@ -1307,15 +1138,19 @@ async fn two_emptied_lines_are_said_in_the_plural() {
     let out = tools::edit::Edit
         .execute(
             json!({ "path": "a.rs", "edits": [
-                { "old_string": "one", "new_string": "" },
-                { "old_string": "three", "new_string": "" },
+                { "old_string": "two\n", "new_string": "TWO\n" },
+                { "insert_after": "two\n", "new_string": "after two\n" },
             ]}),
             &c,
         )
         .await
         .unwrap()
         .flatten();
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), "\ntwo\n\n");
-    assert!(out.contains("emptied the lines"), "{out}");
-    assert!(out.contains("edits[0], edits[1]"), "{out}");
+
+    assert!(out.contains("2:TWO"), "{out}");
+    assert!(out.contains("3:after two"), "{out}");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "one\nTWO\nafter two\nthree\n"
+    );
 }

@@ -39,8 +39,6 @@ struct Args {
     // child: a check it knows about is a check it can write itself around.
     #[serde(default)]
     verify: Option<String>,
-    #[serde(default)]
-    max_turns: Option<usize>,
 }
 
 // How many of a child's written paths the result names before it counts the
@@ -90,7 +88,7 @@ impl Task {
     pub const NAME: &'static str = "task";
 
     /// Build the subagent from the one that will call it: same transport, same
-    /// model, same ceiling, its own prompt, and no `task` in its registry.
+    /// model, its own prompt, and no `task` in its registry.
     ///
     /// `standing` is what the checkout says — the workspace anchor and the
     /// instruction files. It travels with the tree, not with the caller, and
@@ -102,19 +100,13 @@ impl Task {
         Self {
             agent: Arc::new(agent),
             home,
-            max_turns: DEFAULT_MAX_TURNS,
+            max_turns: parent.task_max_turns.unwrap_or(DEFAULT_MAX_TURNS),
             deadline: Duration::from_secs(1800),
         }
     }
 
-    pub fn with_limits(mut self, max_turns: usize, deadline: Duration) -> Self {
-        self.max_turns = max_turns;
+    pub fn with_deadline(mut self, deadline: Duration) -> Self {
         self.deadline = deadline;
-        self
-    }
-
-    pub fn with_max_turns(mut self, max_turns: usize) -> Self {
-        self.max_turns = max_turns;
         self
     }
 }
@@ -185,13 +177,6 @@ impl Tool for Task {
                     "type": "string",
                     "description": "Shell command run in the workspace root after the subagent stops — a test suite, a build, a linter. Its exit status comes back with the result. Omit when nothing about the job is checkable.",
                 },
-                "max_turns": {
-                    "type": "integer",
-                    "description": format!(
-                        "Maximum turns before stopping the subagent. Default {}.",
-                        self.max_turns
-                    ),
-                },
             },
             "required": ["description", "prompt"],
             "additionalProperties": false,
@@ -222,7 +207,7 @@ impl Tool for Task {
             .with_own_writes();
 
         let (tx, mut rx) = unbounded_channel();
-        let cap = args.max_turns.unwrap_or(self.max_turns).max(1);
+        let cap = self.max_turns.max(1);
         let watch = stop.clone();
         let heard = tokio::spawn(async move {
             let mut heard = Heard::default();

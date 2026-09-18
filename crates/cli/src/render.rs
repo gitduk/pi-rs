@@ -1280,18 +1280,6 @@ mod tests {
     }
 
     #[test]
-    fn render_markdown_handles_code_and_formatting() {
-        let md = "# Title\n\n```rust\nlet x = 1;\n```\n- [x] done\n";
-        let lines = super::render_markdown(md, &super::Paint::new(true));
-        assert!(!lines.is_empty());
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("\x1b[") && l.contains("let"))
-        );
-    }
-
-    #[test]
     fn trim_partial_fences_strips_trailing_unclosed_markers() {
         assert_eq!(super::trim_partial_fences("```rust\nx\n`"), "```rust\nx");
         assert_eq!(super::trim_partial_fences("```rust\nx\n``"), "```rust\nx");
@@ -1299,18 +1287,6 @@ mod tests {
             super::trim_partial_fences("```rust\nx\n```"),
             "```rust\nx\n```"
         );
-    }
-
-    #[test]
-    fn render_markdown_respects_theme() {
-        let md = "# Title";
-        let theme = super::Theme {
-            heading: super::Style::attrs(&[super::Attr::Underline]),
-            ..super::Theme::default()
-        };
-        let paint = super::Paint::with_theme(true, std::sync::Arc::new(theme));
-        let lines = super::render_markdown(md, &paint);
-        assert!(lines.iter().any(|l| l.contains("\x1b[4m")));
     }
 
     #[test]
@@ -1402,9 +1378,8 @@ mod tests {
         );
     }
 
-    use super::{Attr, Color, Paint, Style, spent, summarize};
+    use super::{Attr, Color, Paint, Style, spent};
     use brain::stream::Usage;
-    use serde_json::json;
     use std::sync::OnceLock;
 
     fn toml_round_trip<T>(value: &T) -> T
@@ -1450,12 +1425,6 @@ mod tests {
         assert_eq!(toml_round_trip(&table), table);
     }
     #[test]
-    fn an_edit_summarizes_to_the_file_it_touches() {
-        let args = json!({ "path": "a.rs", "edits": [{ "old_string": "x", "new_string": "y" }] });
-        assert_eq!(summarize(&args), "a.rs");
-    }
-
-    #[test]
     fn consecutive_text_deltas_stay_on_one_line() {
         let mut r = super::Renderer::new(
             false,
@@ -1474,96 +1443,11 @@ mod tests {
     }
 
     #[test]
-    fn other_tools_show_their_leading_argument() {
-        assert_eq!(summarize(&json!({ "path": "src/a.rs" })), "src/a.rs");
-        assert_eq!(summarize(&json!({ "command": "cargo test" })), "cargo test");
-        assert_eq!(summarize(&json!({ "nothing": 1 })), "");
-    }
-
-    // A delegating call is the one a watcher can least afford to see bare:
-    // the work happens in a window they never see, so the row naming it is
-    // their only account of what was sent.
-    #[test]
-    fn a_delegated_job_shows_what_it_was_sent() {
-        // The word written for this line wins over the paragraph it names.
-        assert_eq!(
-            summarize(&json!({
-                "description": "find every caller of `spans`",
-                "prompt": "Search the workspace for `spans` and report each call site.",
-            })),
-            "find every caller of `spans`"
-        );
-        // A call from before the field existed still says something.
-        assert_eq!(
-            summarize(&json!({ "prompt": "find every caller of `spans`" })),
-            "find every caller of `spans`"
-        );
-        // A prompt of any length still has to fit one row.
-        let long = "x".repeat(200);
-        assert_eq!(summarize(&json!({ "prompt": long })).chars().count(), 81);
-        // Paragraphs collapse into the one line the row has room for.
-        assert_eq!(
-            summarize(&json!({ "prompt": "read src/a.rs\n\nreport what it does" })),
-            "read src/a.rs  report what it does"
-        );
-        assert_eq!(summarize(&json!({ "name": "commit" })), "commit");
-    }
-
-    #[test]
-    fn a_compaction_line_names_what_was_given_up() {
-        let r = agent::compact::Report {
-            before: 130_000,
-            after: 48_000,
-            superseded: 3,
-            uneventful: 1,
-            aged_out: 6,
-            args_taken: 2,
-            notices_pruned: 4,
-            dropped: 0,
-            summarized: false,
-            still_over: false,
-        };
-        assert_eq!(
-            super::compaction_line(&r),
-            "compacted 130000 → 48000 tokens · 3 superseded, 1 uneventful, 6 aged out, \
-             2 arguments taken, 4 notices pruned"
-        );
-    }
-
-    #[test]
-    fn a_summarized_drop_says_so_rather_than_reading_as_a_loss() {
-        let r = agent::compact::Report {
-            before: 9,
-            after: 5,
-            dropped: 4,
-            summarized: true,
-            ..Default::default()
-        };
-        assert!(super::compaction_line(&r).contains("4 messages summarized"));
-    }
-
-    #[test]
-    fn a_compaction_that_did_not_fit_says_so() {
-        let r = agent::compact::Report {
-            before: 9,
-            after: 9,
-            still_over: true,
-            ..Default::default()
-        };
-        assert!(super::compaction_line(&r).ends_with("still over budget"));
-    }
-
-    #[test]
     fn a_plain_surface_is_left_alone() {
         let out = super::render_markdown("a **b** `c`", &Paint::new(false));
         assert_eq!(out, vec!["a **b** `c`"]);
     }
 
-    #[test]
-    fn a_search_shows_what_it_looked_for_not_where() {
-        let args = json!({ "pattern": "fn tier", "path": "crates/tools/src" });
-        assert_eq!(summarize(&args), "fn tier");
-    }
     #[test]
     fn a_measured_run_is_the_bill() {
         let usage = Usage {

@@ -160,7 +160,7 @@ pub struct Args {
     #[arg(long, value_enum)]
     effort: Option<EffortArg>,
 
-    /// Cap the run at this many turns; the default is no limit.
+    /// Cap subagent tasks at this many turns; the default is 50.
     #[arg(long)]
     max_turns: Option<usize>,
 
@@ -323,7 +323,6 @@ pub struct Resolved {
     pub tier: tools::Tier,
     pub effort: Effort,
     pub max_turns: Option<usize>,
-    pub task_max_turns: Option<usize>,
     pub keys: keys::Keys,
     /// The built-ins plus one command per skill. Here rather than in the Repl
     /// because a skill discovered at reload has to reach the prompt the same
@@ -441,7 +440,6 @@ pub fn resolve(
         tier,
         effort,
         max_turns: settled.max_turns,
-        task_max_turns: settled.task_max_turns,
         keys: config.key_map()?,
         commands,
         notes,
@@ -574,8 +572,7 @@ async fn main() -> Result<()> {
         effort: resolved.effort,
         home: subagent::Filed::armed(store.clone(), root.clone(), model_id.clone()),
         standing: &resolved.standing,
-        max_turns: resolved.max_turns,
-        task_max_turns: resolved.task_max_turns,
+        task_max_turns: resolved.max_turns,
     });
     // After `Agent::apply`, which has taken what the agent needs: this takes a
     // field out of what is left.

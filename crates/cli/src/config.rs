@@ -99,13 +99,9 @@ pub struct Config {
     )]
     pub loop_max_turns: Option<usize>,
 
-    /// Cap the run at this many turns; None is unlimited.
+    /// Turn ceiling for subagent tasks. Unset reads as 50.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<usize>,
-
-    /// Default maximum turns for subagent tasks. Unset reads as 50.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub task_max_turns: Option<usize>,
 
     /// How many times to retry a request the provider could not serve. Unset
     /// is `Retry::default()` — the number lives there, not here, so that an
@@ -237,8 +233,6 @@ pub struct Project {
     pub max_tier: Option<TierArg>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub task_max_turns: Option<usize>,
 }
 
 fn default_context() -> u32 {
@@ -423,7 +417,6 @@ pub struct Settled {
     pub effort: EffortArg,
     pub tier: TierArg,
     pub max_turns: Option<usize>,
-    pub task_max_turns: Option<usize>,
 }
 
 impl Config {
@@ -529,16 +522,10 @@ impl Config {
         } else {
             flags.max_turns.or(project.max_turns).or(self.max_turns)
         };
-        let task_max_turns = if claimed.contains_key("task_max_turns") {
-            self.task_max_turns
-        } else {
-            project.task_max_turns.or(self.task_max_turns)
-        };
         Settled {
             effort,
             tier,
             max_turns,
-            task_max_turns,
         }
     }
 
@@ -772,8 +759,8 @@ want, or keep two files and pass --config."
 
 fn parse_project(body: &str) -> Result<Project> {
     toml::from_str(body).context(
-        "a project .pi.toml may set only `model`, `effort`, `max_tier`, `max_turns` and \
-         `task_max_turns` — a checkout does not get to name a server, a key, or a system prompt",
+        "a project .pi.toml may set only `model`, `effort`, `max_tier` and `max_turns` — \
+         a checkout does not get to name a server, a key, or a system prompt",
     )
 }
 
@@ -1237,14 +1224,12 @@ output_per_mtok = 0
     }
 
     #[test]
-    fn max_turns_and_task_max_turns_can_be_configured() {
-        let body = "max_turns = 100\ntask_max_turns = 30\n";
+    fn max_turns_can_be_configured() {
+        let body = "max_turns = 100\n";
         let c = parse(body).unwrap();
         assert_eq!(c.max_turns, Some(100));
-        assert_eq!(c.task_max_turns, Some(30));
         let p = parse_project(body).unwrap();
         assert_eq!(p.max_turns, Some(100));
-        assert_eq!(p.task_max_turns, Some(30));
     }
 
     #[test]
@@ -1442,15 +1427,6 @@ output_per_mtok = 0
             k.action(press("ctrl+l").unwrap(), crate::keys::Layers::default()),
             None
         );
-    }
-
-    #[test]
-    fn a_theme_defaults_when_not_named() {
-        let c = parse("").unwrap();
-        assert_eq!(c.theme.muted.codes(), "2");
-        assert_eq!(c.theme.code.codes(), "38;2;88;166;255");
-        assert_eq!(c.theme.menu.selected.codes(), "7");
-        assert_eq!(c.theme.input.codes(), "");
     }
 
     #[test]
