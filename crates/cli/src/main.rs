@@ -323,6 +323,7 @@ pub struct Resolved {
     pub tier: tools::Tier,
     pub effort: Effort,
     pub max_turns: Option<usize>,
+    pub task_deadline: Option<std::time::Duration>,
     pub keys: keys::Keys,
     /// The built-ins plus one command per skill. Here rather than in the Repl
     /// because a skill discovered at reload has to reach the prompt the same
@@ -440,6 +441,9 @@ pub fn resolve(
         tier,
         effort,
         max_turns: settled.max_turns,
+        task_deadline: config
+            .task_deadline
+            .map(|s| std::time::Duration::from_secs(s.max(1))),
         keys: config.key_map()?,
         commands,
         notes,
@@ -573,6 +577,7 @@ async fn main() -> Result<()> {
         home: subagent::Filed::armed(store.clone(), root.clone(), model_id.clone()),
         standing: &resolved.standing,
         task_max_turns: resolved.max_turns,
+        task_deadline: resolved.task_deadline,
     });
     // After `Agent::apply`, which has taken what the agent needs: this takes a
     // field out of what is left.

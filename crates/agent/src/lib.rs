@@ -125,6 +125,9 @@ pub struct Agent {
     pub retry: Retry,
     /// Turn ceiling for subagent tasks. None defaults to 50.
     pub task_max_turns: Option<usize>,
+    /// How long a subagent task may run silent before it is read as wedged.
+    /// None defaults to 1800 s.
+    pub task_deadline: Option<std::time::Duration>,
 }
 
 // Per-tool failure streaks across one run, so a loop can be named. Keyed by
@@ -149,6 +152,7 @@ pub struct Setup<'a> {
     pub home: Arc<dyn task::Home>,
     pub standing: &'a str,
     pub task_max_turns: Option<usize>,
+    pub task_deadline: Option<std::time::Duration>,
 }
 
 impl Agent {
@@ -164,6 +168,7 @@ impl Agent {
             summarizer: None,
             retry: Retry::default(),
             task_max_turns: None,
+            task_deadline: None,
         }
     }
 
@@ -185,6 +190,7 @@ impl Agent {
         self.system = setup.system;
         self.effort = setup.effort;
         self.task_max_turns = setup.task_max_turns;
+        self.task_deadline = setup.task_deadline;
         self.hang(setup.home, setup.standing);
     }
 

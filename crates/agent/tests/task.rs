@@ -369,6 +369,34 @@ async fn a_child_cut_off_by_a_limit_answers_rather_than_fails() {
     }
 }
 
+// The deadline bounds silence, not the run: a child that keeps the events
+// coming outlives it; the whole-run clock would have cut it off.
+#[tokio::test]
+async fn a_child_that_keeps_talking_outlives_the_deadline() {
+    let mut turns = vec![call_turn(
+        "c1",
+        "task",
+        r#"{"description":"chatty","prompt":"keep going"}"#,
+    )];
+    for n in 0..24 {
+        turns.push(call_turn(
+            &format!("c{}", n + 2),
+            "write",
+            &format!(r#"{{"path":"w{n}.txt","content":"{n}"}}"#),
+        ));
+    }
+    turns.push(text_turn("done"));
+    turns.push(text_turn("wrapped"));
+    let (_dir, agent, ctx, _seen, _kept) =
+        rigged(turns, 40, std::time::Duration::from_millis(3), false);
+    let (session, out) = drive(&agent, &ctx, "go").await;
+
+    assert!(out.is_ok(), "progress kept the child alive: {out:?}");
+    let transcript = format!("{:?}", session.entries());
+    assert!(!transcript.contains("unfinished"), "{transcript}");
+    assert!(transcript.contains("done"), "{transcript}");
+}
+
 #[test]
 fn the_task_schema_no_longer_offers_a_turn_cap() {
     let parent = Agent::new(

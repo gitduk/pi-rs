@@ -455,6 +455,7 @@ impl Repl {
             home,
             standing: &resolved.standing,
             task_max_turns: resolved.max_turns,
+            task_deadline: resolved.task_deadline,
         });
         self.lane_mut().context = resolved.context;
         self.lane_mut().standing = resolved.standing;
@@ -1660,6 +1661,7 @@ impl Repl {
             home,
             standing: &resolved.standing,
             task_max_turns: resolved.max_turns,
+            task_deadline: resolved.task_deadline,
         });
 
         // Built, not cloned from the lane being left: a `Ctx`'s tables key on

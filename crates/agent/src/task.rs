@@ -1,10 +1,10 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use tokio::sync::mpsc::unbounded_channel;
+use tokio::sync::{mpsc::unbounded_channel, watch};
 use tools::{Ctx, Tier, Tool, ToolError, ToolOutput, bash};
 
 use crate::event::{Event, Totals};
@@ -79,7 +79,7 @@ pub struct Task {
     agent: Arc<Agent>,
     home: Arc<dyn Home>,
     // Two limits, because they stop different things: turns stop a loop that
-    // keeps failing, the deadline stops a single call that has wedged.
+    // keeps failing, the deadline stops one gone silent — a wedged call.
     max_turns: usize,
     deadline: Duration,
 }
@@ -101,7 +101,9 @@ impl Task {
             agent: Arc::new(agent),
             home,
             max_turns: parent.task_max_turns.unwrap_or(DEFAULT_MAX_TURNS),
-            deadline: Duration::from_secs(1800),
+            deadline: parent
+                .task_deadline
+                .unwrap_or_else(|| Duration::from_secs(1800)),
         }
     }
 
@@ -209,9 +211,13 @@ impl Tool for Task {
         let (tx, mut rx) = unbounded_channel();
         let cap = self.max_turns.max(1);
         let watch = stop.clone();
+        // Every event resets the silence clock, whatever kind it is: an
+        // event is the child moving, and moving is all the watchdog asks.
+        let (ticked, ticking) = watch::channel(Instant::now());
         let heard = tokio::spawn(async move {
             let mut heard = Heard::default();
             while let Some(event) = rx.recv().await {
+                let _ = ticked.send(Instant::now());
                 match event {
                     Event::TurnStart { turn } => {
                         heard.turns = turn;
@@ -227,6 +233,31 @@ impl Tool for Task {
             }
             heard
         });
+        // The watchdog: silence for a whole deadline is a wedged call — a
+        // hung tool speaks no events. It trips the same token a cap or esc does.
+        let wedged = Arc::new(AtomicBool::new(false));
+        let watchdog_stop = stop.clone();
+        let wedged_flag = wedged.clone();
+        let deadline = self.deadline;
+        let watchdog = tokio::spawn(async move {
+            let mut ticking = ticking;
+            loop {
+                let outlived = tokio::time::Instant::from(*ticking.borrow() + deadline);
+                tokio::select! {
+                    _ = tokio::time::sleep_until(outlived) => {
+                        // A reset may have raced the trip; trust only the
+                        // value read after the sleep came back.
+                        if *ticking.borrow() + deadline <= Instant::now() {
+                            wedged_flag.store(true, Ordering::Relaxed);
+                            watchdog_stop.cancel();
+                            return;
+                        }
+                    }
+                    _ = ticking.changed() => {}
+                    _ = watchdog_stop.cancelled() => return,
+                }
+            }
+        });
         let mut session = Session::with_prompt(args.prompt);
         // One span for the whole child, so the journal can file its records
         // under it rather than lose them among its siblings'.
@@ -236,28 +267,28 @@ impl Tool for Task {
             session = %child.spill_namespace(),
             description = %args.description,
         );
-        // Trips the same token as the turn cap rather than dropping the
-        // future, so both endings unwind the run the way Esc does; one that
-        // ignores the token is dropped once STOP_GRACE is up.
+        // The token ends the run — turn cap, watchdog, or esc — unwinding
+        // like an esc; one ignoring it is dropped after STOP_GRACE.
         let ran = {
             let mut run = std::pin::pin!(
                 self.agent
                     .run(&mut session, &child, &tx)
                     .instrument(child_span)
             );
-            match tokio::time::timeout(self.deadline, &mut run).await {
-                Ok(ran) => ran,
-                Err(_) => {
-                    stop.cancel();
-                    match tokio::time::timeout(crate::STOP_GRACE, &mut run).await {
-                        Ok(ran) => ran,
-                        // Dropped here, so nothing is left running; that it
-                        // had to be dropped is the caller's to know.
-                        Err(_) => Err(AgentError::Unstopped),
-                    }
-                }
+            let grace_stop = stop.clone();
+            let outcome = tokio::select! {
+                ran = &mut run => Some(ran),
+                _ = async {
+                    grace_stop.cancelled().await;
+                    tokio::time::sleep(crate::STOP_GRACE).await;
+                } => None,
+            };
+            match outcome {
+                Some(ran) => ran,
+                None => Err(AgentError::Unstopped),
             }
         };
+        watchdog.abort();
         // The collector ends when the last sender goes, and `run` held one.
         drop(tx);
         let mut lost = false;
@@ -284,7 +315,9 @@ impl Tool for Task {
             Err(AgentError::Cancelled) if ctx.cancel.is_cancelled() => {
                 return Err(ToolError::Cancelled);
             }
-            Err(AgentError::Cancelled) => Some(if heard.turns > cap {
+            Err(AgentError::Cancelled) => Some(if wedged.load(Ordering::Relaxed) {
+                format!("a call ran {}s with no progress", self.deadline.as_secs())
+            } else if heard.turns > cap {
                 format!("stopped at turn {} of {}", heard.turns, cap)
             } else {
                 format!("stopped after {}s", self.deadline.as_secs())

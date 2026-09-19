@@ -103,6 +103,14 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<usize>,
 
+    /// How long a subagent task may run silent, in seconds, before it is
+    /// read as wedged and stopped. Turns and this stop different things —
+    /// turns catch a loop that keeps failing, this catches a call that has
+    /// stopped speaking — and either ending is a stop. Clamped up to 1 s: a
+    /// zero would stop every task the moment it started. Unset reads as 1800.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_deadline: Option<u64>,
+
     /// How many times to retry a request the provider could not serve. Unset
     /// is `Retry::default()` — the number lives there, not here, so that an
     /// unset field and a missing config agree by construction.
