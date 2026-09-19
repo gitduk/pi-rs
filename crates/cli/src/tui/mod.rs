@@ -1051,6 +1051,11 @@ impl View {
     pub fn clear_tally(&mut self) {
         self.state.tally = Tally::default();
     }
+    /// What this session has spent, the run in flight included. `/status`
+    /// reads it; the status lines read the run alone.
+    pub fn session_spend(&self) -> Totals {
+        self.state.tally.session()
+    }
 }
 
 impl Ui {
@@ -1405,7 +1410,7 @@ impl Ui {
     // conversation can be rewound to.
     //
     // A run does not close it. The editor is a queue then, but `/help`,
-    // `/cost` and `/model` answer on the spot and the rest queue as what they
+    // `/status` and `/model` answer on the spot and the rest queue as what they
     // are, so the word being typed is still worth completing. `esc` reaches
     // `run.interrupt` past the list — see `keys::Menu`.
     fn menu(&mut self) -> Vec<MenuEntry> {
@@ -2521,7 +2526,6 @@ pub struct Tui {
     events: UnboundedReceiver<TermEvent>,
     // Stops the reader while a child holds the terminal.
     hold: Hold,
-    totals: Totals,
     bridge: crate::wechat::Bridge,
 }
 
@@ -2748,7 +2752,6 @@ impl Tui {
             ui,
             events,
             hold,
-            totals: Totals::default(),
             bridge,
         })
     }
@@ -2777,7 +2780,6 @@ impl Tui {
             ui,
             events: rx,
             hold: Hold::default(),
-            totals: Totals::default(),
             bridge: crate::wechat::Bridge::new(),
         }
     }
@@ -3348,7 +3350,7 @@ impl Tui {
                 continue;
             }
             let was = self.core.current;
-            let step = self.core.run(intent, &self.totals);
+            let step = self.core.run(intent);
             self.reconcile(was);
             if from_loop {
                 // `was`, not whichever lane is in front now: a step may move
@@ -3537,9 +3539,9 @@ impl Tui {
     // The run keeps the transcript for its length and posts what it is doing
     // to that lane's own channel, so the loop is free to draw, read keys and
     // serve the other lanes — including this one after the screen moves on.
-    // Hand the view over to a job about to start: the clock runs, and the
-    // per-run figures start from the session's running total rather than
-    // from nothing, so the line reads the whole session throughout.
+    // Hand the view over to a job about to start: the clock runs, the run's
+    // own figures start at nothing, and the session's earlier runs are handed
+    // to the tally as the base `/status` reports against.
     // `committed` says whether the prompt behind it can still be taken back.
     fn arm_view(&mut self, committed: bool) {
         let lane = self.core.lane_mut();
@@ -3883,14 +3885,13 @@ impl Tui {
         if said.is_none() && lane == self.core.current {
             self.bridge.finish_turn(cancelled).await;
         }
-        // The run's totals (subagents' included) land on its lane and the
-        // surface total; an interrupted run lands as the spend the view showed.
+        // The run's totals (subagents' included) land on its lane; an
+        // interrupted run lands as the spend the view showed.
         let spent = match &out {
             Ok(totals) => *totals,
             Err(_) => self.core.lanes[lane].view.state.tally.run_spend(),
         };
         self.core.lanes[lane].totals.merge(&spent);
-        self.totals.merge(&spent);
 
         // A `!` command's output comes home whole rather than as events, so
         // this is the only place it can reach the view that asked for it.
@@ -3964,7 +3965,6 @@ impl Tui {
 
         if let Some((report, spent)) = report {
             self.core.lanes[lane].totals.merge(&spent);
-            self.totals.merge(&spent);
             let _ = self.core.lanes[lane].events.send(Event::Compacted(report));
             if back && let Err(e) = self.core.save_lane(lane) {
                 self.say_of(lane, format!("warning: the transcript was not saved: {e}"));
@@ -4896,8 +4896,6 @@ mod tests {
 
         assert_eq!(tui.core.lanes[0].totals.usage.input, 100);
         assert_eq!(tui.core.lanes[0].totals.usage.output, 20);
-        assert_eq!(tui.totals.usage.input, 100);
-        assert_eq!(tui.totals.usage.output, 20);
     }
 
     // A flash is transient: it is not part of the transcript, and it is

@@ -91,7 +91,6 @@ const BUILTIN: &[Command] = &[
         "[text]",
         "repeat a line while it keeps changing the tree; bare, stop one",
     ),
-    Command::builtin("/cost", "", "what this session has spent so far"),
     Command::builtin(
         "/reload",
         "",
@@ -100,7 +99,7 @@ const BUILTIN: &[Command] = &[
     Command::builtin(
         "/status",
         "",
-        "what this run is standing on, and where it is writing",
+        "what this session stands on, has spent, and where it writes",
     ),
     Command::builtin(
         "/keys",
@@ -819,40 +818,6 @@ impl Repl {
         })
     }
 
-    // What `/cost` answers: one line per lane that has spent, then the
-    // total. A single lane keeps the old one-line answer — its label would
-    // only echo the total back.
-    //
-    // Lanes are picked by tokens, not by price: an unpriced model spends
-    // real context for $0.0000, and picking by cost would list none of them.
-    fn cost_lines(&self, total: &Totals) -> Vec<String> {
-        let spent = |t: &Totals| crate::render::spent(&t.usage, t.cost);
-        let billed: Vec<(usize, &Lane)> = self
-            .lanes
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| l.totals.usage.input + l.totals.usage.output > 0)
-            .collect();
-        if billed.len() < 2 {
-            return vec![spent(total)];
-        }
-        // The same figures per lane as the single-lane answer gives for the
-        // run: tokens, cache, and price, not the price alone.
-        let mut lines: Vec<String> = billed
-            .iter()
-            .map(|(i, l)| {
-                let name = l
-                    .name
-                    .clone()
-                    .or_else(|| l.worktree.clone())
-                    .unwrap_or_else(|| format!("#{}", i + 1));
-                format!("{name}: {}", spent(&l.totals))
-            })
-            .collect();
-        lines.push(format!("total: {}", spent(total)));
-        lines
-    }
-
     /// Rewind the conversation to an entry and write the shorter transcript
     /// back.
     ///
@@ -948,7 +913,6 @@ pub enum Intent {
     Help,
     Keys,
     Status,
-    Cost,
     Reload,
     Name(String),
     // The session to switch to, or empty to list what there is.
@@ -1047,11 +1011,9 @@ impl Intent {
     /// the session is away for the length of a run.
     pub fn fate(&self) -> Fate {
         match self {
-            // Answered from the config, the key map or the surface's own
-            // totals — none of which the run is holding.
-            Intent::Help | Intent::Keys | Intent::Status | Intent::Cost | Intent::Name(_) => {
-                Fate::Now
-            }
+            // Answered from the config, the key map or the view's own tally
+            // — none of which the run is holding.
+            Intent::Help | Intent::Keys | Intent::Status | Intent::Name(_) => Fate::Now,
             Intent::Reload | Intent::Model(_) => Fate::Now,
             // Bare, these only list what there is.
             Intent::Resume(name) | Intent::Worktree(name) if name.trim().is_empty() => Fate::Now,
@@ -1238,7 +1200,6 @@ pub fn read(line: &str) -> Intent {
     match word {
         "/exit" | "/quit" => Intent::Quit,
         "/help" => Intent::Help,
-        "/cost" => Intent::Cost,
         "/new" => Intent::New,
         "/resume" => Intent::Resume(rest(line)),
         "/keys" => Intent::Keys,
@@ -1323,9 +1284,14 @@ pub enum WechatCmd {
 
 impl Repl {
     // What this run stands on, in one place: the tail of the system prompt as
-    // the model receives it, then the two files a person opens when a run goes
-    // wrong. The instruction files are named rather than quoted — `standing`
-    // carries them whole, and their content is in the files themselves.
+    // the model receives it, the two files a person opens when a run goes
+    // wrong, and what the session has spent. The instruction files are named
+    // rather than quoted — `standing` carries them whole, and their content is
+    // in the files themselves.
+    //
+    // The spend is the session's — the status lines carry the run's own — read
+    // live from the lane's tally rather than the lane's settled totals, so a run
+    // under way is counted rather than waiting for it to end.
     fn status_lines(&self) -> Vec<String> {
         let lane = self.lane();
         let mut out = standing_head(&lane.standing);
@@ -1343,6 +1309,12 @@ impl Repl {
                 .path_of(lane.ctx.workspace.root(), &lane.id)
                 .display()
         ));
+        // Left out until something has been spent: a session nothing has been
+        // asked of yet has no figure, and a row of dashes is not one.
+        let spent = lane.view.session_spend();
+        if spent != Totals::default() {
+            out.push(format!("spent: {}", crate::render::spent(&spent)));
+        }
         out
     }
 }
@@ -1390,7 +1362,7 @@ impl Repl {
     /// Exhaustive with no catch-all, like `Intent::fate`: the arms a surface
     /// answers for itself are named rather than swept up, so a new intent has
     /// to say which side of that line it falls on.
-    pub fn run(&mut self, intent: Intent, totals: &Totals) -> Step {
+    pub fn run(&mut self, intent: Intent) -> Step {
         match intent {
             Intent::Bash(command) => Step::Bash(command),
             Intent::Prompt(send) => Step::Prompt { send, typed: None },
@@ -1417,7 +1389,6 @@ impl Repl {
             Intent::Keys => Step::Handled(self.keys.listing()),
             Intent::Reload => Step::Handled(self.reload()),
             Intent::Status => Step::Handled(self.status_lines()),
-            Intent::Cost => Step::Handled(self.cost_lines(totals)),
             Intent::New => {
                 self.fresh_session();
                 Step::Swap(Vec::new())
@@ -1520,8 +1491,9 @@ impl Repl {
     fn becomes(&mut self, id: String, created: u64) {
         self.lane_mut().id = id;
         self.lane_mut().created = created;
-        // The status line reads session totals, live from the view's tally;
-        // a new session starts both at nothing rather than the one just left.
+        // What `/status` reports is read off the view's tally, seeded from the
+        // lane's totals; a new session starts both at nothing rather than the
+        // one just left.
         self.lane_mut().totals = Totals::default();
         self.lane_mut().view.clear_tally();
         let id = self.lane().id.clone();
@@ -1970,7 +1942,7 @@ mod tests {
             commands: std::sync::Arc::new(Vec::new()),
             file: toml::from_str(file).unwrap(),
             claimed: Default::default(),
-            lanes: vec![billed_lane("s", 0, 0, 0.0)],
+            lanes: vec![a_lane("s")],
             current: 0,
         }
     }
@@ -2110,7 +2082,6 @@ mod tests {
     fn what_the_run_is_not_standing_on_goes_through() {
         for intent in [
             Intent::Status,
-            Intent::Cost,
             Intent::Help,
             Intent::Keys,
             Intent::Reload,
@@ -2192,20 +2163,11 @@ mod tests {
         );
     }
 
-    // One lane with the given totals, enough for `/cost` to bill.
-    fn billed_lane(name: &str, input: u64, output: u64, cost: f64) -> crate::lane::Lane {
+    // One lane that has spent nothing, enough for `/settings` to answer.
+    fn a_lane(name: &str) -> crate::lane::Lane {
         let dir = std::env::temp_dir();
         let ws = tools::Workspace::new(&dir).expect("a workspace");
         let (events, inbox) = crate::lane::Lane::channel();
-        let mut totals = agent::Totals::default();
-        totals.add(
-            &brain::stream::Usage {
-                input,
-                output,
-                ..Default::default()
-            },
-            cost,
-        );
         crate::lane::Lane {
             token: crate::lane::next_token(),
             agent: std::sync::Arc::new(agent::Agent::new(
@@ -2216,7 +2178,7 @@ mod tests {
             id: name.into(),
             created: 0,
             name: Some(name.to_string()),
-            totals,
+            totals: agent::Totals::default(),
             context: Vec::new(),
             standing: std::sync::Arc::from(""),
             ctx: tools::Ctx::new(ws),

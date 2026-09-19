@@ -130,6 +130,11 @@ replay_thinking = "tagged"
 # one that repaints under the spinner; the finished line is printed once a
 # turn ends and stays in the scrollback. Naming neither keeps these defaults.
 #
+# The spend parts — in_out, cache and cost — are the run's own: what this
+# answer has cost since you sent it, not what the session had before it. The
+# session's running total is the `spent:` line `/status` prints, and no part
+# of a status line reads it.
+#
 #   elapsed    3s / 2m05s — the running line only; nothing times a pipe
 #   in_out     8.4k in / 390 out, a dash for a half the provider never stated
 #   cache      41.2k cached, left out when nothing was read from cache

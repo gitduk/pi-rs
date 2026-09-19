@@ -133,7 +133,7 @@ through. `prompt.icon` is the one value that is neither colour nor attribute.
 A key that is not one of those is refused at load, like a misspelled compat
 key.
 
-`/help` `/new` `/resume` `/name` `/model` `/worktree` `/compact` `/loop` `/reload` `/keys` `/status` `/cost` `/wechat` `/exit`,
+`/help` `/new` `/resume` `/name` `/model` `/worktree` `/compact` `/loop` `/reload` `/keys` `/status` `/wechat` `/exit`,
 and one more for every skill on disk. Typing `/` opens a list of what the line
 could still become; `↑` `↓` pick, `Tab` accepts, `Esc` dismisses it until the
 next keystroke. `/model`, `/resume` and `/worktree` complete their arguments
@@ -227,10 +227,11 @@ cursor live in `~/.pi/wechat.json`.
 
 Every session keeps one at `~/.pi/sessions/<project>/<session>/journal.jsonl`,
 beside the transcript it recorded, so that dropping a session drops both.
-`/status` says where — along with the transcript's own file, and the tail of
-the system prompt the model is answering under. A tool that fails the same way
-twice is told the path too: the journal holds the call as it went on the wire,
-which the transcript does not. A run opens the journal of the session it starts on —
+`/status` says where — along with the transcript's own file, the tail of the
+system prompt the model is answering under, and what that session has spent so
+far. A tool that fails the same way twice is told the path too: the journal
+holds the call as it went on the wire, which the transcript does not. A run
+opens the journal of the session it starts on —
 `--resume` included — and `/resume` or `/new` switches it to the session now
 in charge, so the whole of a session reads as one file across the runs that
 touched it.
@@ -356,13 +357,16 @@ way until it is told so.
 
 **Token counts** come from the provider, and only from the provider. A host
 that reports nothing — or what it reports cannot be true — leaves that part
-out: the running line, the closing line and `/cost` show a dash where a count
+out: the running line, the closing line and `/status` show a dash where a count
 is missing, never a number of ours. A proxy that answers a
 thirty-thousand-token transcript with an input count of two hundred, and no
 caching of any kind to explain it, is not tokenizing differently; taking that
 figure at face value turns the running cost into fiction. A missing figure
 prices nothing, and the cost shown is only ever what the provider's own
-numbers amount to.
+numbers amount to. A status line counts the run — what this answer has cost
+since you sent it, which is the figure you can act on — while `/status` counts
+the session behind it; one tally feeds both, so neither can drift from the
+other.
 
 ## Layout
 

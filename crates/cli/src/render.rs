@@ -706,17 +706,18 @@ impl Paint {
     }
 }
 
-/// What a run has cost, in the one wording every place that says it uses.
-///
-/// The cost is shown only when the model is priced — an unpriced model reports
-/// no cost rather than $0.
-pub fn spent(usage: &brain::stream::Usage, cost: f64) -> String {
-    let mut parts = vec![in_out(usage.input, usage.output)];
-    if usage.cache_read > 0 {
-        parts.push(format!("{} cached", short(usage.cache_read)));
+/// A spend in the one wording every place that says it uses: `/status` hands
+/// it a session's figures, and a status line composes the same two out of its
+/// `in_out`, `cache` and `cost` segments, which say a run's. The cost is shown
+/// only when the model is priced — an unpriced model reports no cost rather
+/// than $0.
+pub fn spent(t: &agent::Totals) -> String {
+    let mut parts = vec![in_out(t.usage.input, t.usage.output)];
+    if t.usage.cache_read > 0 {
+        parts.push(format!("{} cached", short(t.usage.cache_read)));
     }
-    if cost > 0.0 {
-        parts.push(format!("${cost:.4}"));
+    if t.cost > 0.0 {
+        parts.push(format!("${:.4}", t.cost));
     }
     parts.join(icons::PART_SEP)
 }

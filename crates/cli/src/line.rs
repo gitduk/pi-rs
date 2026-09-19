@@ -14,7 +14,6 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::repl::{Repl, Step};
 
 pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
-    let mut totals = Totals::default();
     let mut buffer = String::new();
 
     // Worth writing when a person is watching stderr — `pi | tee` reaches here
@@ -47,7 +46,7 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
             continue;
         }
 
-        match core.run(crate::repl::read(line), &totals) {
+        match core.run(crate::repl::read(line)) {
             Step::Quit => break,
             Step::Bash(command) => {
                 // Awaited in place: this surface has nothing else to serve
@@ -78,7 +77,6 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
             }
             Step::Compact(focus) => match core.compact_now(focus.as_deref()).await {
                 Some((report, spent)) => {
-                    totals.merge(&spent);
                     core.lane_mut().totals.merge(&spent);
 
                     println!("compacted {} → {} tokens", report.before, report.after);
@@ -96,7 +94,6 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
             },
             Step::Prompt { send, typed } => {
                 let spent = turn(&mut core, send, typed, &tx).await;
-                totals.merge(&spent);
                 core.lane_mut().totals.merge(&spent);
             }
             Step::Wechat(_) => {

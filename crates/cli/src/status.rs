@@ -4,6 +4,11 @@
 //! those frames, kept in the scrollback with the run's own final word written
 //! over it. Both read one `Tally` through one `Snapshot`, so agreement between
 //! them is structural rather than two counts that happen to match.
+//!
+//! Both say the run in flight, and nothing before it: a session millions of
+//! tokens deep would otherwise never let the line read as what this answer
+//! cost. The session's own running total is `Tally::session`, and `/status` is
+//! the one place that reads it.
 
 use std::time::Duration;
 
@@ -23,6 +28,9 @@ fn elapsed(d: Duration) -> String {
 }
 
 /// Every value a status line can draw on, as far as it is known right now.
+///
+/// The spend figures are the run in flight's own, not the session's: what this
+/// answer has cost since it was submitted, which is what the line is read for.
 ///
 /// A zero count is the provider having stated nothing, and reads as a dash;
 /// every other zero drops its segment rather than standing in for a
@@ -50,17 +58,16 @@ pub struct Snapshot {
     pub worktree: Option<String>,
 }
 
-/// What the events have said the session has spent, kept as they arrive.
+/// What the events have said was spent, kept as they arrive.
 ///
-/// One per surface. `seed` starts it from what earlier runs spent, so every
-/// number a status line shows is a session total — the live line and the
-/// line the run ends on read the same figure at two moments rather than two
-/// tallies kept in step by hand.
+/// One per surface. It holds two figures over one set of events: the run in
+/// flight, which the lines draw, and the session it is part of, which
+/// `session` hands to `/status`.
 #[derive(Debug, Default, Clone)]
 pub struct Tally {
     // What earlier runs of this session had spent when this one started.
-    // The surface injects it; absent it is zero and the line reads as the
-    // run's own counts, which is what a pipe sees.
+    // The surface injects it; absent it is zero, and `session` reads what
+    // this run spent alone — which is what a pipe sees.
     base: Totals,
     // Turns of this run that have reported, and what they were priced at.
     settled: Totals,
@@ -127,15 +134,13 @@ impl Tally {
         elapsed: Option<Duration>,
         queued: usize,
     ) -> Snapshot {
-        let mut usage = self.base.usage;
-        usage.add(&self.settled.usage);
-        usage.add(&self.turn);
+        let run = self.run_spend();
         Snapshot {
             elapsed,
-            input: usage.input,
-            output: usage.output,
-            cache_read: usage.cache_read,
-            cost: self.base.cost + self.settled.cost,
+            input: run.usage.input,
+            output: run.usage.output,
+            cache_read: run.usage.cache_read,
+            cost: run.cost,
             turns: self.turns,
             ctx: self.ctx,
             compactions: self.compactions,
@@ -145,12 +150,21 @@ impl Tally {
         }
     }
 
-    /// What this run has spent so far, apart from what the session had
-    /// before it. The surface reads it when a run ends without its own word
-    /// — an interrupted turn — so the spend still lands in the totals.
+    /// What this run has spent so far: the turns that have reported plus the
+    /// one in flight. The lines read it, and the surface reads it again when a
+    /// run ends without its own word — an interrupted turn — so the spend still
+    /// lands in the totals.
     pub fn run_spend(&self) -> Totals {
         let mut t = self.settled;
         t.usage.add(&self.turn);
+        t
+    }
+
+    /// What the session has spent, the run in flight included: every run of it
+    /// this surface has watched. `/status` reads it; the lines say the run alone.
+    pub fn session(&self) -> Totals {
+        let mut t = self.base;
+        t.merge(&self.run_spend());
         t
     }
 }
@@ -176,8 +190,8 @@ impl Segment {
     pub fn render(self, s: &Snapshot) -> Option<String> {
         Some(match self {
             Segment::Elapsed => elapsed(s.elapsed?),
-            // Dashes say "a turn ran and the host stated nothing". A session
-            // nothing has ever been spent on — no run has stated a count —
+            // Dashes say "a turn ran and the host stated nothing". A run
+            // nothing has been spent on yet — no turn has stated a count —
             // drops the part instead of showing a row of zeros.
             Segment::InOut if s.turns == 0 && s.input == 0 && s.output == 0 => return None,
             Segment::InOut => brain::count::in_out(s.input, s.output),
@@ -330,11 +344,11 @@ mod tests {
         assert_eq!(s.compactions, 1);
     }
 
-    // The surface seeds the tally with the session's earlier runs, so the
-    // line reads session totals from the first turn of a run to its last —
-    // and the run's own word lands on top of the same base.
+    // The tally is seeded with what the session spent before this run, and
+    // that figure stays off the lines: a line reads the run in flight, and
+    // `session` is where the whole of it is asked for.
     #[test]
-    fn a_seeded_tally_reads_the_session_total_throughout() {
+    fn a_seeded_tally_keeps_the_session_off_the_line() {
         let base = Totals {
             usage: Usage {
                 input: 10_000,
@@ -349,11 +363,18 @@ mod tests {
         t.on(&agent::Event::TurnStart { turn: 1 });
         t.on(&agent::Event::Usage(usage(100, 5)));
         let mid = t.snapshot("m", None, None, 0);
+        assert_eq!((mid.input, mid.output, mid.cache_read), (100, 5, 0));
+        assert_eq!(mid.cost, 0.0);
+        let session = t.session();
         assert_eq!(
-            (mid.input, mid.output, mid.cache_read),
+            (
+                session.usage.input,
+                session.usage.output,
+                session.usage.cache_read
+            ),
             (10_100, 4_005, 300_000)
         );
-        assert_eq!(mid.cost, 0.02);
+        assert_eq!(session.cost, 0.02);
 
         t.on(&agent::Event::Done {
             turns: 1,
@@ -363,8 +384,11 @@ mod tests {
             compactions: 0,
         });
         let s = t.snapshot("m", None, None, 0);
-        assert_eq!((s.input, s.output), (10_200, 4_030));
-        assert_eq!(s.cost, 0.023);
+        assert_eq!((s.input, s.output), (200, 30));
+        assert_eq!(s.cost, 0.003);
+        let session = t.session();
+        assert_eq!((session.usage.input, session.usage.output), (10_200, 4_030));
+        assert_eq!(session.cost, 0.023);
     }
 
     // A `!` command and a compaction begin no turn, and a host that reports
