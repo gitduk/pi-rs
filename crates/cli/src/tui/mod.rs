@@ -13,7 +13,6 @@ mod panel;
 mod row;
 mod screen;
 
-use std::borrow::Cow;
 use std::collections::HashSet;
 use std::time::Instant;
 
@@ -36,7 +35,7 @@ use crate::session::{ResumeChoice, Store};
 use crate::status::{self, Segment, Snapshot, Tally};
 use editor::Editor;
 use panel::{Panel, Took};
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style as RStyle;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState};
@@ -292,19 +291,17 @@ struct ScrollbackRows<'a> {
     front: (usize, usize),
     // Next entry to read from the back, and the row offset inside it.
     back: (usize, usize),
-    // Each row's rendered length at this width, indexed to match `rows`.
-    // Rendered with the same iterator as the walk that follows, so the
-    // per-frame scrollback pass that needs the total pays only the line
-    // cache cost, not a second render.
+    // Each row's logical line count, the steps the two walks take. Wrapped
+    // heights are the rows' own caches, summed per frame in `flush`.
     lens: Vec<usize>,
 }
 
-type ScrollbackItem<'a> = (Cow<'a, str>, Option<&'a str>);
+type ScrollbackItem = (Line<'static>, Option<Line<'static>>);
 
 struct IndexedScrollbackRows<'a>(ScrollbackRows<'a>);
 
 impl<'a> Iterator for IndexedScrollbackRows<'a> {
-    type Item = (ScrollbackItem<'a>, usize);
+    type Item = (ScrollbackItem, usize);
 
     fn next(&mut self) -> Option<Self::Item> {
         self.0.next_indexed()
@@ -337,7 +334,7 @@ impl<'a> ScrollbackRows<'a> {
         IndexedScrollbackRows(self)
     }
 
-    fn next_indexed(&mut self) -> Option<(ScrollbackItem<'a>, usize)> {
+    fn next_indexed(&mut self) -> Option<(ScrollbackItem, usize)> {
         if self.rows.is_empty() {
             return None;
         }
@@ -348,13 +345,15 @@ impl<'a> ScrollbackRows<'a> {
                 if self.front.1 >= self.back.1 {
                     return None;
                 }
-                let item = entry.line(self.front.1, self.paint, self.done, self.width);
+                let (text, border) = entry.line(self.front.1, self.paint, self.done, self.width);
                 self.front.1 += 1;
+                let item = (text, border);
                 return Some((item, idx));
             }
             if self.front.1 < self.lens[idx] {
-                let item = entry.line(self.front.1, self.paint, self.done, self.width);
+                let (text, border) = entry.line(self.front.1, self.paint, self.done, self.width);
                 self.front.1 += 1;
+                let item = (text, border);
                 return Some((item, idx));
             }
             self.front = (self.front.0 + 1, 0);
@@ -362,7 +361,7 @@ impl<'a> ScrollbackRows<'a> {
         None
     }
 
-    fn next_back_indexed(&mut self) -> Option<(ScrollbackItem<'a>, usize)> {
+    fn next_back_indexed(&mut self) -> Option<(ScrollbackItem, usize)> {
         if self.rows.is_empty() {
             return None;
         }
@@ -374,17 +373,15 @@ impl<'a> ScrollbackRows<'a> {
                     return None;
                 }
                 self.back.1 -= 1;
-                return Some((
-                    entry.line(self.back.1, self.paint, self.done, self.width),
-                    idx,
-                ));
+                let (text, border) = entry.line(self.back.1, self.paint, self.done, self.width);
+                let item = (text, border);
+                return Some((item, idx));
             }
             if self.back.1 > 0 {
                 self.back.1 -= 1;
-                return Some((
-                    entry.line(self.back.1, self.paint, self.done, self.width),
-                    idx,
-                ));
+                let (text, border) = entry.line(self.back.1, self.paint, self.done, self.width);
+                let item = (text, border);
+                return Some((item, idx));
             }
             self.back = (self.back.0 - 1, self.lens[self.back.0 - 1]);
         }
@@ -393,7 +390,7 @@ impl<'a> ScrollbackRows<'a> {
 }
 
 impl<'a> Iterator for ScrollbackRows<'a> {
-    type Item = ScrollbackItem<'a>;
+    type Item = ScrollbackItem;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.next_indexed().map(|(item, _)| item)
@@ -419,7 +416,7 @@ fn body(
     partial: &str,
     space: (usize, usize),
     paint: &Paint,
-) -> Vec<String> {
+) -> Vec<Line<'static>> {
     let (width, room) = space;
     if folds.holds(reasoning, scrollback) {
         // The block's count row in the scrollback already answers the fold
@@ -429,16 +426,16 @@ fn body(
             .streaming
             .is_some_and(|id| scrollback.iter().rev().any(|r| r.block() == Some(id)));
         if !counted {
-            return vec![paint.on(&paint.theme.muted, THINKING)];
+            return vec![Line::from(paint.span(&paint.theme.muted, THINKING))];
         }
         return Vec::new();
     }
     if partial.is_empty() {
         return Vec::new();
     }
-    let mut rows: Vec<String> = if reasoning {
-        let painted = paint.on(&paint.theme.muted, partial);
-        screen::fit(&painted, width)
+    let mut rows: Vec<Line<'static>> = if reasoning {
+        let muted = Line::from(paint.span(&paint.theme.muted, partial));
+        screen::fit(&muted, width)
     } else {
         render::render_markdown(partial, paint)
             .into_iter()
@@ -520,7 +517,6 @@ fn push_tool_row(scrollback: &mut Vec<Row>, row: Row) {
 fn scrollback_from(
     session: &agent::session::Session,
     paint: &Paint,
-    bang_prompt: &str,
     folds: &mut Folds,
 ) -> Vec<Row> {
     // A call whose result is in the session shows only its result row; one that
@@ -546,14 +542,14 @@ fn scrollback_from(
         if gone != hidden && !matches!(entry, LogEntry::Compaction { .. }) {
             hidden = gone;
             if gone {
-                out.push(Row::notice(paint.on(
+                out.push(Row::notice(Line::from(paint.span(
                     &paint.theme.muted,
-                    &format!(
+                    format!(
                         "{} compacted; the model no longer sees the rest of this {}",
                         icons::COMPACT_RULE,
                         icons::COMPACT_RULE
                     ),
-                )));
+                ))));
             }
         }
         match entry {
@@ -573,7 +569,7 @@ fn scrollback_from(
                             // Muted, exactly as the live stream paints a
                             // reasoning row: a rebuilt block must not come
                             // out brighter than the one it replaces.
-                            let lines: Vec<String> = r
+                            let lines: Vec<Line<'static>> = r
                                 .content
                                 .iter()
                                 .filter_map(|c| match c {
@@ -602,7 +598,7 @@ fn scrollback_from(
             // Everything else the A table covers, the rebuild and a fresh
             // adoption draw from one place.
             other => {
-                if let Some(rows) = f_entry(other, paint, bang_prompt) {
+                if let Some(rows) = f_entry(other, paint) {
                     if matches!(other, LogEntry::Tool { .. }) {
                         for r in rows {
                             push_tool_row(&mut out, r);
@@ -620,11 +616,11 @@ fn scrollback_from(
 /// One entry's rows, as the rebuild and a fresh adoption both draw them:
 /// the A table without its cross-entry markers. Answers do not pass through
 /// here — their streamed rows are adopted by construction.
-fn f_entry(entry: &LogEntry, paint: &Paint, bang_prompt: &str) -> Option<Vec<Row>> {
+fn f_entry(entry: &LogEntry, paint: &Paint) -> Option<Vec<Row>> {
     match entry {
-        LogEntry::Ask { ask, .. } => Some(Row::prompt(ask.shown_text(), bang_prompt, paint)),
+        LogEntry::Ask { ask, .. } => Some(Row::prompt(ask.shown_text(), paint)),
         LogEntry::Bash { run, .. } => {
-            let mut rows = Row::prompt(run.shown_text(), bang_prompt, paint);
+            let mut rows = Row::prompt(run.shown_text(), paint);
             rows.extend(repl::bash_said(&run.text).into_iter().map(Row::notice));
             Some(rows)
         }
@@ -632,7 +628,7 @@ fn f_entry(entry: &LogEntry, paint: &Paint, bang_prompt: &str) -> Option<Vec<Row
         // a screen notice rather than under the prompt sigil.
         LogEntry::Note { note, .. } => Some(
             note.lines()
-                .map(|l| Row::notice(paint.on(&paint.theme.muted, l)))
+                .map(|l| Row::notice(Line::from(paint.span(&paint.theme.muted, l))))
                 .collect(),
         ),
         LogEntry::Tool {
@@ -691,9 +687,9 @@ pub struct Surface {
     opened: usize,
     // Rows the view is scrolled up by. Zero shows the newest rows.
     scroll: usize,
-    // The last measurement of a scrolled-up view: item counts then, and the
-    // rows they wrapped to. A reflow in place (resize, fold-all) re-bases.
-    counted: Option<(usize, usize, usize)>,
+    // The rows the scrolled-up view measured last: growth folds into
+    // `scroll`. `None` re-bases — a reflow must not move the view.
+    counted: Option<usize>,
     // The id of the last entry this surface adopted into the scrollback.
     // Entries beyond it are folded in through the A table as they commit, so
     // live never waits on a rebuild to show what happened.
@@ -750,19 +746,14 @@ pub enum StreamKind {
 impl Surface {
     // The screen a session rebuilds to: the transcript as rows, the fold
     // switch where the user left it, and nothing streaming yet.
-    fn from(
-        session: &agent::session::Session,
-        paint: &Paint,
-        bang_prompt: &str,
-        folded: bool,
-    ) -> Self {
+    fn from(session: &agent::session::Session, paint: &Paint, folded: bool) -> Self {
         let mut folds = Folds {
             folded,
             last: folded,
             ..Default::default()
         };
         Self {
-            scrollback: scrollback_from(session, paint, bang_prompt, &mut folds),
+            scrollback: scrollback_from(session, paint, &mut folds),
             folds,
             tail: session.entries().last().map(|e| e.id()),
             ..Default::default()
@@ -871,7 +862,8 @@ impl Vim {
     }
 }
 
-// What one rendered row of the main area sits on, as a click sees it: a
+// What one rendered row of the history area sits on, as a click sees it:
+// which block, named the only way a block in that region can be — a
 // scrollback row by index, the live region's pending-call rows, or nothing.
 #[derive(Clone, Copy, Debug)]
 enum Target {
@@ -880,18 +872,50 @@ enum Target {
     PendingTools,
 }
 
+// The frame's four regions, laid out once and drawn by name. The only place
+// the vertical arrangement is stated; everything else reads the rects back.
+#[derive(Clone, Copy, Default)]
+struct Regions {
+    // The scrolled transcript, the live region's rows included.
+    history: Rect,
+    // The completion list, or the open panel over it.
+    menu: Rect,
+    // The lane strip, or whatever flash took its row.
+    bar: Rect,
+    // The input line, pinned to the bottom.
+    editor: Rect,
+}
+
+impl Regions {
+    fn layout(area: Rect, menu_h: u16, bar_h: u16, editor_h: u16) -> Self {
+        let chunks = Layout::vertical([
+            Constraint::Fill(1),
+            Constraint::Length(menu_h),
+            Constraint::Length(bar_h),
+            Constraint::Length(editor_h),
+        ])
+        .split(area);
+        Self {
+            history: chunks[0],
+            menu: chunks[1],
+            bar: chunks[2],
+            editor: chunks[3],
+        }
+    }
+}
+
 struct Ui {
     screen: Screen,
     keys: Arc<Keys>,
     editor: Editor,
     paint: Paint,
-    // The painted prompt sigil, shared by the editor and the echoed lines.
-    prompt: String,
+    // The prompt sigil, shared by the editor and the echoed lines.
+    prompt: Span<'static>,
     // The same sigil for a `!` line, where the bang takes the icon's place.
-    bang_prompt: String,
+    bang_prompt: Span<'static>,
     // The lane bar's separator, painted once beside the two above it: the bar
     // is rebuilt every frame and this depends only on the theme.
-    tab_sep: String,
+    tab_sep: Span<'static>,
     // Which row of the open list is highlighted; kept rather than the list
     // itself, which is a function of what has been typed. `None` anchors a
     // fresh list on its bottom row, the best match, beside the input line.
@@ -935,13 +959,15 @@ struct Ui {
     tabs: Vec<Tab>,
     // A note answering the last keypress, painted, and when it landed. It
     // takes the bar's row for `FLASH` and then goes — see `flash`.
-    flash: Option<(String, Instant)>,
+    flash: Option<(Line<'static>, Instant)>,
     hovered_scrollback: Option<usize>,
     row_targets: Vec<Target>,
+    // Where the frame's regions landed last. The click handler reads them
+    // back: a screen row only means something inside a named region.
+    regions: Regions,
     // Whether the live region lists every pending call or only the newest
     // with a count. A click on a pending row flips it; it outlives the calls.
     live_tools_shown: bool,
-    main_top: u16,
 }
 
 // What to call a checkout. The root answers to its directory name, as
@@ -1111,7 +1137,7 @@ impl Ui {
             hovered_scrollback: None,
             row_targets: Vec::new(),
             live_tools_shown: false,
-            main_top: 0,
+            regions: Regions::default(),
         }
     }
 
@@ -1131,13 +1157,13 @@ impl Ui {
     // The separator between lanes on the bar: the one every other line on
     // this surface uses, dimmed so the names it divides are what the eye
     // lands on.
-    fn paint_sep(paint: &Paint) -> String {
-        paint.on(&paint.theme.muted, icons::PART_SEP)
+    fn paint_sep(paint: &Paint) -> Span<'static> {
+        paint.span(&paint.theme.muted, icons::PART_SEP)
     }
 
     // The prompt sigil as the terminal shows it, colour and all.
-    fn paint_prompt(paint: &Paint, icon: &str) -> String {
-        format!("{} ", paint.on(&paint.theme.prompt.color, icon))
+    fn paint_prompt(paint: &Paint, icon: &str) -> Span<'static> {
+        paint.span(&paint.theme.prompt.color, format!("{icon} "))
     }
     fn say(&mut self, view: &mut View, line: impl Into<String>) {
         let text = line.into();
@@ -1145,14 +1171,29 @@ impl Ui {
             view.surface.scrollback.push(Row::notice(String::new()));
             return;
         }
-        for line in text.lines() {
-            if let Some(last) = view.surface.scrollback.last_mut()
-                && last.repeated(line)
-            {
-                continue;
-            }
-            view.surface.scrollback.push(Row::notice(line.to_string()));
+        for text_line in text.lines().map(str::to_string) {
+            self.say_line(view, Line::from(text_line));
         }
+    }
+
+    // `say` in the muted voice, for the callers that used to hand a painted
+    // string through it.
+    fn say_muted(&mut self, view: &mut View, line: impl Into<String>) {
+        for text in line.into().lines() {
+            let line = Line::from(self.paint.span(&self.paint.theme.muted, text));
+            self.say_line(view, line);
+        }
+    }
+
+    // A line already built in spans — the styled word a run ends on, say —
+    // landing as one row. Plain text goes through `say`, which splits it.
+    fn say_line(&mut self, view: &mut View, line: Line<'static>) {
+        if let Some(last) = view.surface.scrollback.last_mut()
+            && last.repeated(&line)
+        {
+            return;
+        }
+        view.surface.scrollback.push(Row::notice(line));
     }
 
     // Answer one keypress on the bar row and leave nothing behind.
@@ -1162,14 +1203,14 @@ impl Ui {
     // holding the step key in a single checkout wrote a screenful of one line.
     // Muted here rather than at the callers, which had drifted apart on it.
     fn flash(&mut self, line: impl Into<String>) {
-        let text = self.paint.on(&self.paint.theme.muted, &line.into());
+        let text = Line::from(self.paint.span(&self.paint.theme.muted, line.into()));
         self.flash = Some((text, Instant::now()));
     }
 
     // The bar row while a flash is up, and the only place an expired one is
     // dropped — every frame passes through here, so nothing else has to
     // remember to clear it.
-    fn flash_line(&mut self, width: usize) -> Option<String> {
+    fn flash_line(&mut self, width: usize) -> Option<Line<'static>> {
         if self
             .flash
             .as_ref()
@@ -1178,12 +1219,12 @@ impl Ui {
             self.flash = None;
         }
         let (text, _) = self.flash.as_ref()?;
-        Some(render::clip(text, width))
+        screen::fit(text, width).into_iter().next()
     }
 
     // Where a finished row goes: a reasoning line into the streaming block's
     // foldable entry, anything else straight into scrollback.
-    fn land(&mut self, view: &mut View, painted: String, reasoning: bool) {
+    fn land(&mut self, view: &mut View, painted: Line<'static>, reasoning: bool) {
         if reasoning && let Some(id) = view.surface.folds.streaming {
             if let Some(row) = self.streaming_row(view, id) {
                 row.push_line(painted);
@@ -1338,13 +1379,10 @@ impl Ui {
             _ => {
                 self.close(&mut lane.view);
                 if let Some(said) = render::describe(&event, &self.paint, self.screen.usable()) {
-                    // Row by row: a scrollback line is written with a carriage
-                    // return of its own, and an embedded newline would stair-
-                    // step down the screen without one.
                     lane.view
                         .surface
                         .scrollback
-                        .extend(said.lines().map(Row::notice));
+                        .extend(said.into_iter().map(Row::notice));
                 }
             }
         }
@@ -1374,7 +1412,7 @@ impl Ui {
             if lane.view.surface.tail.is_some_and(|t| entry.id() <= t) {
                 continue;
             }
-            if let Some(rows) = f_entry(entry, &self.paint, &self.bang_prompt) {
+            if let Some(rows) = f_entry(entry, &self.paint) {
                 if let LogEntry::Tool { result: r, .. } = entry {
                     self.check_pending(lane, &r.call, rows.last(), width);
                     for r in rows {
@@ -1521,9 +1559,9 @@ impl Ui {
     // the status line. The editor draws separately, pinned to the bottom.
     // With the rows comes the count that leads them: the pending calls',
     // which a click opens — only the producer knows which rows those are.
-    fn live(&self, lane: &Lane, room: usize) -> (Vec<String>, usize) {
+    fn live(&self, lane: &Lane, room: usize) -> (Vec<Line<'static>>, usize) {
         let width = self.screen.usable();
-        let mut rows = Vec::new();
+        let mut rows: Vec<Line<'static>> = Vec::new();
 
         // Every pending call holds a row: collapsed the newest with a count
         // for the rest, opened one each, in the shape it will fold into.
@@ -1544,11 +1582,10 @@ impl Ui {
             };
             pending.push(format!("{}{extra}", pending_line(self.spinner, t)));
         }
-        rows.extend(
-            pending.into_iter().flat_map(|line| {
-                screen::fit(&self.paint.on(&self.paint.theme.muted, &line), width)
-            }),
-        );
+        rows.extend(pending.into_iter().flat_map(|line| {
+            let muted = Line::from(self.paint.span(&self.paint.theme.muted, line));
+            screen::fit(&muted, width)
+        }));
         // The draw tags screen rows by index, and a long summary wraps:
         // count the rows the block takes, not the lines before they did.
         let pending_rows = rows.len();
@@ -1575,10 +1612,8 @@ impl Ui {
                 icons::SPINNER_FRAMES[self.spinner % icons::SPINNER_FRAMES.len()]
             };
             let line = format!("{spin} {}", parts.join(icons::PART_SEP));
-            rows.extend(screen::fit(
-                &self.paint.on(&self.paint.theme.muted, &line),
-                width,
-            ));
+            let muted = Line::from(self.paint.span(&self.paint.theme.muted, line));
+            rows.extend(screen::fit(&muted, width));
         }
 
         (rows, pending_rows)
@@ -1586,35 +1621,32 @@ impl Ui {
 
     // The bottom bar, or None when there is nothing it could say. One lane is
     // the whole surface, and a bar naming it is a row spent on nothing.
-    fn lane_bar(&self, width: usize) -> Option<String> {
+    fn lane_bar(&self, width: usize) -> Option<Line<'static>> {
         if self.tabs.len() < 2 {
             return None;
         }
         let spin = icons::SPINNER_FRAMES[self.spinner % icons::SPINNER_FRAMES.len()];
         let theme = &self.paint.theme;
-        let painted: Vec<String> = self
-            .tabs
-            .iter()
-            .map(|tab| {
-                // The sign says what a lane is doing; being in front is not
-                // that, and `›` is the input prompt's. Plain against dim is
-                // all it takes, on a row nothing should look at twice.
-                let (sign, style) = match tab.mark {
-                    Mark::Front => ("", &theme.input),
-                    Mark::Running => (spin, &theme.muted),
-                    Mark::Done => (icons::DONE_MARK, &theme.status.ok),
-                    Mark::Failed => (icons::FAIL_MARK, &theme.status.err),
-                    Mark::Idle => ("", &theme.muted),
-                };
-                let label = if sign.is_empty() {
-                    tab.name.clone()
-                } else {
-                    format!("{sign} {}", tab.name)
-                };
-                self.paint.on(style, &label)
-            })
-            .collect();
-        Some(render::clip(&painted.join(&self.tab_sep), width))
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        for (i, tab) in self.tabs.iter().enumerate() {
+            if i > 0 {
+                spans.push(self.tab_sep.clone());
+            }
+            let (sign, style) = match tab.mark {
+                Mark::Front => ("", &theme.input),
+                Mark::Running => (spin, &theme.muted),
+                Mark::Done => (icons::DONE_MARK, &theme.status.ok),
+                Mark::Failed => (icons::FAIL_MARK, &theme.status.err),
+                Mark::Idle => ("", &theme.muted),
+            };
+            let label = if sign.is_empty() {
+                tab.name.clone()
+            } else {
+                format!("{sign} {}", tab.name)
+            };
+            spans.push(self.paint.span(style, label));
+        }
+        screen::fit(&Line::from(spans), width).into_iter().next()
     }
 
     // The checkout a step from this one, wrapping at either end — where the
@@ -1687,7 +1719,8 @@ impl Ui {
             .len()
             .min((self.screen.height as usize).saturating_sub(1 + bar_h));
         let editor_top = (caret.0 as usize + 1).saturating_sub(editor_h);
-        let input_view: Vec<String> = input.into_iter().skip(editor_top).take(editor_h).collect();
+        let input_view: Vec<Line<'static>> =
+            input.into_iter().skip(editor_top).take(editor_h).collect();
         let caret_in_view = (caret.0 as usize).saturating_sub(editor_top);
         // From the bottom up: the input line is pinned, the menu sits above
         // it, and the scrolled history fills what is left. The caret's row
@@ -1715,26 +1748,21 @@ impl Ui {
             .max(1);
         let (live, pending_rows) = self.live(lane, hist_view);
 
-        // While the view is scrolled up, rows the bottom gained since the
-        // last measurement fold back into `scroll`, keeping the window put.
+        // While the view is scrolled up, rows the bottom gained fold back
+        // into `scroll` — a sum of per-row cached heights, where a wrap
+        // counts for exactly the rows it takes.
         if lane.view.surface.scroll > 0 {
-            let items = (lane.view.surface.scrollback.len(), live.len());
-            // A frame whose item counts match the last measurement has not
-            // grown — nothing to fold, and no reason to re-wrap the history.
-            if lane
+            let total = lane
                 .view
                 .surface
-                .counted
-                .is_none_or(|(sb, lv, _)| (sb, lv) != items)
-            {
-                let total = self.scrollback_rows(&lane.view, width) + live.len();
-                lane.view.surface.scroll = absorb_growth(
-                    lane.view.surface.scroll,
-                    lane.view.surface.counted.map(|(_, _, t)| t),
-                    total,
-                );
-                lane.view.surface.counted = Some((items.0, items.1, total));
-            }
+                .scrollback
+                .iter()
+                .map(|r| r.height(&self.paint, &self.done, width))
+                .sum::<usize>()
+                + live.len();
+            lane.view.surface.scroll =
+                absorb_growth(lane.view.surface.scroll, lane.view.surface.counted, total);
+            lane.view.surface.counted = Some(total);
         } else {
             lane.view.surface.counted = None;
         }
@@ -1783,7 +1811,7 @@ impl Ui {
             } else {
                 Target::None
             };
-            ((Cow::Borrowed(s.as_str()), None), target)
+            ((s.clone(), None), target)
         });
 
         let (tagged_rows, scroll) = screen::window_tagged(
@@ -1793,7 +1821,8 @@ impl Ui {
             lane.view.surface.scroll,
         );
 
-        let (rows, row_targets): (Vec<String>, Vec<Target>) = tagged_rows.into_iter().unzip();
+        let (rows, row_targets): (Vec<Line<'static>>, Vec<Target>) =
+            tagged_rows.into_iter().unzip();
         self.row_targets = row_targets;
 
         lane.view.surface.scroll = scroll;
@@ -1804,53 +1833,37 @@ impl Ui {
             .min(menu.len().saturating_sub(1));
         let highlight = self.rat_style(&self.paint.theme.menu.selected);
         let _ = self.screen.draw(|frame| {
-            let area = frame.area();
             // The input line is last, so the caret sits on the bottom row and
             // the bar reads as the edge of the history above it rather than
             // as something hanging off the line being typed.
-            let chunks = Layout::vertical([
-                Constraint::Fill(1),
-                Constraint::Length(menu_h as u16),
-                Constraint::Length(bar_h as u16),
-                Constraint::Length(editor_h as u16),
-            ])
-            .split(area);
-            let (main, menu_area, bar_area, editor_area) =
-                (chunks[0], chunks[1], chunks[2], chunks[3]);
-            self.main_top = main.y;
-            frame.render_widget(Rows(&rows), main);
+            let regions =
+                Regions::layout(frame.area(), menu_h as u16, bar_h as u16, editor_h as u16);
+            self.regions = regions;
+            frame.render_widget(Rows(&rows), regions.history);
             if let Some((panel, _)) = &panel {
-                frame.render_widget(Rows(panel), menu_area);
+                frame.render_widget(Rows(panel), regions.menu);
             } else if !items.is_empty() {
                 let mut state = ListState::default();
                 state.select(Some(picked));
                 frame.render_stateful_widget(
                     List::new(items).highlight_style(highlight),
-                    menu_area,
+                    regions.menu,
                     &mut state,
                 );
             }
             if let Some(bar) = &bar {
-                frame.render_widget(Rows(std::slice::from_ref(bar)), bar_area);
+                frame.render_widget(Rows(std::slice::from_ref(bar)), regions.bar);
             }
-            frame.render_widget(Rows(&input_view), editor_area);
+            frame.render_widget(Rows(&input_view), regions.editor);
             if let Some((_, Some((row, col)))) = panel {
                 if (row as usize) < menu_h {
-                    frame.set_cursor_position((menu_area.x + col, menu_area.y + row));
+                    frame.set_cursor_position((regions.menu.x + col, regions.menu.y + row));
                 }
             } else if self.panel.is_none() {
-                let caret_row = editor_area.y + caret_in_view as u16;
+                let caret_row = regions.editor.y + caret_in_view as u16;
                 frame.set_cursor_position((caret.1, caret_row));
             }
         });
-    }
-
-    // Rows the scrollback renders to at this width, wraps included.
-    fn scrollback_rows(&self, view: &View, width: usize) -> usize {
-        ScrollbackRows::new(&view.surface.scrollback, &self.paint, &self.done, width)
-            .lens
-            .iter()
-            .sum()
     }
 
     // Rebuild the history from the transcript, forgetting everything the old
@@ -1858,14 +1871,14 @@ impl Ui {
     // screen has to show the new one, not the old one with a note on it.
     fn rebuild(&mut self, view: &mut View, session: &agent::session::Session) {
         let folded = view.surface.folds.folded;
-        view.surface = Surface::from(session, &self.paint, &self.bang_prompt, folded);
+        view.surface = Surface::from(session, &self.paint, folded);
     }
 
     // Accept a submitted input: echo it so the prompt survives the editor
     // being cleared, then fold the block that was current back to the switch
     // — the input pushes it out of current no matter what it turns out to be.
     fn submit(&mut self, view: &mut View, line: &str) {
-        let rows = Row::prompt(line, &self.bang_prompt, &self.paint);
+        let rows = Row::prompt(line, &self.paint);
         view.surface.scrollback.extend(rows);
         view.surface
             .folds
@@ -2263,10 +2276,11 @@ impl Ui {
         self.hovered_scrollback = None;
     }
 
-    // What the row at this screen row sits on, as a click sees it.
+    // What the row at this screen row sits on: the history region names
+    // the frame, the target names the block inside it.
     fn target_at(&self, row: u16) -> Option<Target> {
         self.row_targets
-            .get(row.checked_sub(self.main_top)? as usize)
+            .get(row.checked_sub(self.regions.history.y)? as usize)
             .copied()
     }
 
@@ -2282,7 +2296,7 @@ impl Ui {
         // The mouse must cover the row's own text, not the empty rest of the
         // row: the click that expands it lands on the head line only.
         let first = row.line(0, &self.paint, &[], self.screen.usable()).0;
-        ((col as usize) < render::visible_width(&first)).then_some(idx)
+        ((col as usize) < first.width()).then_some(idx)
     }
 
     fn on_mouse_move(&mut self, lane: &mut Lane, col: u16, row: u16) {
@@ -2403,6 +2417,11 @@ impl Ui {
         // are re-spelled from whichever list stands when they are drawn.
         self.live = core.config.status.live.clone();
         self.done = core.config.status.done.clone();
+        // The tally rows re-spell from `done` at draw time; their heights
+        // were measured against the old spelling. Sweep, or the view drifts.
+        for row in &mut view.surface.scrollback {
+            row.clear_height();
+        }
     }
 
     // One key, three meanings, and the escalation travels with the binding
@@ -3044,17 +3063,16 @@ impl Tui {
     // switched. The `whose:` prefix is what makes that readable, and it is
     // why this lands on `current`: a background lane's own view would need no
     // name on it.
-    fn say_of(&mut self, lane: usize, what: String) {
-        let text = if lane == self.core.current {
-            what
-        } else {
+    fn say_of(&mut self, lane: usize, what: impl Into<Line<'static>>) {
+        let mut line = what.into();
+        if lane != self.core.current {
             let whose = self.core.lanes[lane]
                 .worktree
                 .as_deref()
                 .unwrap_or("the main checkout");
-            format!("{whose}: {what}")
-        };
-        self.ui.say(&mut self.core.lane_mut().view, text);
+            line.spans.insert(0, Span::from(format!("{whose}: ")));
+        }
+        self.ui.say_line(&mut self.core.lane_mut().view, line);
     }
 
     // The one gate every input passes: a key, the phone, or an intent coming
@@ -3498,8 +3516,7 @@ impl Tui {
                         format!("rewound{at}")
                     }
                 };
-                let text = self.ui.paint.on(&self.ui.paint.theme.muted, &said);
-                self.ui.say(&mut self.core.lane_mut().view, text);
+                self.ui.say_muted(&mut self.core.lane_mut().view, &said);
             }
             Err(e) => {
                 self.ui.say(
@@ -3975,7 +3992,7 @@ impl Tui {
             // to save — only the same word a stopped turn ends on.
             self.say_of(
                 lane,
-                self.ui.paint.on(&self.ui.paint.theme.muted, "stopped"),
+                self.ui.paint.span(&self.ui.paint.theme.muted, "stopped"),
             );
         } else if back {
             let held = self.core.lanes[lane].agent.kept_tokens();
@@ -4003,15 +4020,14 @@ impl Tui {
         match out {
             Ok(_) => {}
             Err(AgentError::Cancelled) => {
-                let text = self.ui.paint.on(&self.ui.paint.theme.muted, "stopped");
-                self.ui.say(&mut self.core.lane_mut().view, text);
+                let stopped = Line::from(self.ui.paint.span(&self.ui.paint.theme.muted, "stopped"));
+                self.ui.say_line(&mut self.core.lane_mut().view, stopped);
             }
             Err(e) => {
-                let text = format!(
-                    "{} {e}",
-                    self.ui.paint.on(&self.ui.paint.theme.status.err, "error")
-                );
-                self.ui.say(&mut self.core.lane_mut().view, text);
+                let mark = self.ui.paint.span(&self.ui.paint.theme.status.err, "error");
+                let rest = Span::from(format!(" {e}"));
+                self.ui
+                    .say_line(&mut self.core.lane_mut().view, Line::from(vec![mark, rest]));
             }
         }
     }
@@ -4020,7 +4036,7 @@ impl Tui {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cow, Folds, Intent, Panel, Row, ScrollbackRows, Target, absorb_growth, scrollback_from,
+        Folds, Intent, Panel, Row, ScrollbackRows, Target, absorb_growth, scrollback_from,
     };
     use crate::icons;
     use crate::keys::{Keys, Mode};
@@ -4030,7 +4046,8 @@ mod tests {
     use crate::session::Store;
     use crate::settings::row;
     use crate::status::Segment;
-    use crate::tui::screen;
+    use crate::tui::screen::{self, plain};
+    use ratatui::text::Line;
 
     // Both scrollback producers draw block ids from one counter. They used
     // not to: a rebuilt block was always `0`, which held only while nothing
@@ -4056,7 +4073,7 @@ mod tests {
         }
 
         let mut folds = Folds::default();
-        let rows = scrollback_from(&s, &Paint::new(false), "! ", &mut folds);
+        let rows = scrollback_from(&s, &Paint::new(false), &mut folds);
         let ids: Vec<u64> = rows.iter().filter_map(Row::block).collect();
         assert_eq!(ids.len(), 3, "{} rows, {ids:?}", rows.len());
         let mut sorted = ids.clone();
@@ -4085,7 +4102,7 @@ mod tests {
         })]);
 
         let mut folds = Folds::default();
-        let rows = scrollback_from(&s, &Paint::new(false), "! ", &mut folds);
+        let rows = scrollback_from(&s, &Paint::new(false), &mut folds);
         let ids: Vec<u64> = rows.iter().filter_map(Row::block).collect();
         assert_eq!(ids.len(), 0);
     }
@@ -4221,7 +4238,11 @@ mod tests {
 
     // A closed reasoning block of id `id` and `n` lines in the scrollback.
     fn block(id: u64, n: usize, folded: bool) -> Row {
-        Row::reasoning(id, (1..=n).map(|i| format!("line {i}")).collect(), folded)
+        Row::reasoning(
+            id,
+            (1..=n).map(|i| Line::from(format!("line {i}"))).collect(),
+            folded,
+        )
     }
 
     // The rows of one result are painted once per width and handed out one at
@@ -4234,15 +4255,15 @@ mod tests {
         let long = "x".repeat(200);
         let rows = [Row::result(true, "edit", format!("head\n  12 + {long}"))];
 
-        let narrow: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 40)
-            .map(|(s, _)| s)
+        let narrow: Vec<String> = ScrollbackRows::new(&rows, &paint, &[], 40)
+            .map(|(s, _)| plain(&s))
             .collect();
-        let wide: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 160)
-            .map(|(s, _)| s)
+        let wide: Vec<String> = ScrollbackRows::new(&rows, &paint, &[], 160)
+            .map(|(s, _)| plain(&s))
             .collect();
         // And back again: widening must not be the only direction that repaints.
-        let again: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 40)
-            .map(|(s, _)| s)
+        let again: Vec<String> = ScrollbackRows::new(&rows, &paint, &[], 40)
+            .map(|(s, _)| plain(&s))
             .collect();
 
         assert_eq!(narrow.len(), 2, "head plus the one diff row");
@@ -4261,13 +4282,13 @@ mod tests {
         // empty scrollback panicked. The back walk kept doing it after the
         // front was fixed, and `screen::window` is the one that walks back.
         let paint = Paint::new(false);
-        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&[], &paint, &[], 80)
-            .map(|(s, _)| s)
+        let rows: Vec<String> = ScrollbackRows::new(&[], &paint, &[], 80)
+            .map(|(s, _)| plain(&s))
             .collect();
         assert!(rows.is_empty());
-        let back: Vec<Cow<'_, str>> = ScrollbackRows::new(&[], &paint, &[], 80)
+        let back: Vec<String> = ScrollbackRows::new(&[], &paint, &[], 80)
             .rev()
-            .map(|(s, _)| s)
+            .map(|(s, _)| plain(&s))
             .collect();
         assert!(back.is_empty(), "the back walk too");
     }
@@ -4298,8 +4319,8 @@ mod tests {
             }
             (f, b)
         };
-        let front: Vec<&str> = front.iter().map(|(s, _)| s.as_ref()).collect();
-        let back: Vec<&str> = back.iter().map(|(s, _)| s.as_ref()).collect();
+        let front: Vec<String> = front.iter().map(|(s, _)| plain(s)).collect();
+        let back: Vec<String> = back.iter().map(|(s, _)| plain(s)).collect();
         assert_eq!(front, vec!["a", "line 1"]);
         assert_eq!(back, vec!["d", "line 2"]);
     }
@@ -4309,9 +4330,9 @@ mod tests {
         // `ctrl+t` flips the block that is last now, and only it: the block
         // pushed out of last by the new one folds back to the switch.
         let mut t = Folds::default();
-        let mut scrollback = vec![Row::reasoning(9, vec!["old".to_string()], false)];
+        let mut scrollback = vec![Row::reasoning(9, vec![Line::from("old")], false)];
         t.start(&mut scrollback);
-        scrollback.push(Row::reasoning(1, vec!["new".to_string()], true));
+        scrollback.push(Row::reasoning(1, vec![Line::from("new")], true));
         t.toggle_current(&mut scrollback);
         assert!(t.folded);
         assert!(scrollback[0].folded() == Some(true));
@@ -4406,7 +4427,7 @@ mod tests {
             ..Default::default()
         };
         t.start(&mut []);
-        let mut scrollback = vec![Row::reasoning(1, vec!["new".to_string()], true)];
+        let mut scrollback = vec![Row::reasoning(1, vec![Line::from("new")], true)];
         t.flip_all(&mut scrollback);
         assert!(t.folded);
         assert!(scrollback[0].folded() == Some(true));
@@ -4476,14 +4497,16 @@ mod tests {
         let total = content.len();
         *scroll = absorb_growth(*scroll, *last_total, total);
         let (rows, s) = screen::window(
-            content.iter().map(|s| (Cow::Borrowed(s.as_str()), None)),
+            content
+                .iter()
+                .map(|s| (Line::from(s.clone()), None::<Line<'static>>)),
             80,
             room,
             *scroll,
         );
         *scroll = s;
         *last_total = Some(total);
-        rows
+        rows.into_iter().map(|l| plain(&l)).collect()
     }
 
     #[test]
@@ -4529,6 +4552,35 @@ mod tests {
         assert_eq!(
             frame(&content, room, &mut scroll, &mut last_total),
             vec!["5", "6", "7", "8"]
+        );
+    }
+
+    // A row that wraps counts for the rows it takes, not the line it is:
+    // both of its rows fold into the scroll, or the window drifts.
+    #[test]
+    fn a_wrapped_row_landing_below_moves_the_scroll_by_its_rows() {
+        let mut ui = test_ui(20, 12);
+        let (_dir, mut lane) = a_running_lane();
+        lane.view.surface.scrollback = (1..=12).map(|n| Row::notice(format!("row {n}"))).collect();
+        ui.flush(&mut lane);
+
+        // Scroll up, and base the measurement on this frame's layout.
+        lane.view.surface.scroll = 2;
+        lane.view.surface.counted = None;
+        ui.flush(&mut lane);
+        let rebased = lane.view.surface.scroll;
+        assert_eq!(rebased, 2);
+
+        // 25 columns at a 19-column width: one line, two rows.
+        lane.view
+            .surface
+            .scrollback
+            .push(Row::notice("x".repeat(25)));
+        ui.flush(&mut lane);
+        assert_eq!(
+            lane.view.surface.scroll,
+            rebased + 2,
+            "both wrapped rows folded into the scroll"
         );
     }
 
@@ -4859,7 +4911,7 @@ mod tests {
 
         // The rebuild filter drops the repaired stopped tool entry.
         let stopped_entry = &session.entries()[2];
-        assert!(super::f_entry(stopped_entry, &tui.ui.paint, "> ").is_none());
+        assert!(super::f_entry(stopped_entry, &tui.ui.paint).is_none());
     }
 
     // An interrupted turn never states its own word, so the spend the view
@@ -5330,7 +5382,7 @@ mod tests {
             ui.live(&lane, 10)
                 .0
                 .iter()
-                .any(|r| icons::SPINNER_FRAMES.iter().any(|f| r.contains(f))),
+                .any(|r| icons::SPINNER_FRAMES.iter().any(|f| plain(r).contains(f))),
             "a running lane draws the status line"
         );
 
@@ -5339,7 +5391,7 @@ mod tests {
             !ui.live(&lane, 10)
                 .0
                 .iter()
-                .any(|r| icons::SPINNER_FRAMES.iter().any(|f| r.contains(f))),
+                .any(|r| icons::SPINNER_FRAMES.iter().any(|f| plain(r).contains(f))),
             "the clock is still set; the turn is what says the run is over"
         );
     }

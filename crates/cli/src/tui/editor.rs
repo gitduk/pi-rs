@@ -1,7 +1,9 @@
 //! The line being typed: a text buffer, a caret, and the history behind it.
 
-use crate::render::Paint;
+use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthChar;
+
+use crate::render::Paint;
 
 #[derive(Default)]
 pub struct Editor {
@@ -13,15 +15,15 @@ pub struct Editor {
     at: usize,
     // The line being typed, parked while history is being browsed.
     draft: String,
-    // The painted first-row sigil, so the theme can restyle it.
-    prompt: String,
+    // The styled first-row sigil, so the theme can restyle it.
+    prompt: Span<'static>,
     // The same sigil for a `!` line: the bang takes the prompt's place, so
     // `! cmd` reads as a command rather than `› ! cmd`.
-    prompt_bang: String,
+    prompt_bang: Span<'static>,
 }
 
 impl Editor {
-    pub fn set_prompts(&mut self, prompt: String, bang: String) {
+    pub fn set_prompts(&mut self, prompt: Span<'static>, bang: Span<'static>) {
         self.prompt = prompt;
         self.prompt_bang = bang;
     }
@@ -333,7 +335,7 @@ impl Editor {
     /// its own is a row the count does not know about. Continuation rows
     /// indent under the prompt, so a wrapped line stays aligned under the
     /// first; the prompt's width is measured, never assumed.
-    pub fn view(&self, paint: &Paint, width: usize) -> (Vec<String>, (u16, u16)) {
+    pub fn view(&self, paint: &Paint, width: usize) -> (Vec<Line<'static>>, (u16, u16)) {
         // A line starting with `!` is a shell command; the bang takes the
         // prompt's place so the line reads `! cmd` rather than `› ! cmd`.
         let bang = self.text.starts_with('!');
@@ -348,13 +350,13 @@ impl Editor {
             self.cursor
         };
         let prompt = if bang {
-            self.prompt_bang.as_str()
+            self.prompt_bang.clone()
         } else {
-            self.prompt.as_str()
+            self.prompt.clone()
         };
         // The prompt is painted with the body, so its width is measured the
         // same way the body's is: never assumed, always what is on screen.
-        let prompt_w = crate::render::visible_width(prompt);
+        let prompt_w = prompt.width();
 
         let avail = width.saturating_sub(prompt_w).max(1);
         let mut rows: Vec<String> = Vec::new();
@@ -372,7 +374,7 @@ impl Editor {
                 continue;
             }
             let w = ch.width().unwrap_or(0);
-            if used + w > avail && !row.is_empty() {
+            if used + w > avail && used > 0 {
                 rows.push(std::mem::take(&mut row));
                 used = 0;
             }
@@ -391,13 +393,12 @@ impl Editor {
             .into_iter()
             .enumerate()
             .map(|(i, r)| {
-                let body = paint.on(&paint.theme.input, &r);
+                let body = paint.span(&paint.theme.input, r);
                 if i == 0 {
-                    format!("{prompt}{body}")
+                    Line::from(vec![prompt.clone(), body])
                 } else {
-                    let mut line = " ".repeat(prompt_w);
-                    line.push_str(&body);
-                    line
+                    let indent = Span::raw(" ".repeat(prompt_w));
+                    Line::from(vec![indent, body])
                 }
             })
             .collect();
@@ -450,6 +451,7 @@ fn floor_boundary(s: &str, mut i: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{Editor, Paint};
+    use ratatui::text::Span;
     // A painter the view tests share: colourless, so the rows they assert
     // on carry no escape sequences.
     fn paint() -> Paint {
@@ -461,8 +463,8 @@ mod tests {
     fn typed(s: &str) -> Editor {
         let mut e = Editor::default();
         e.set_prompts(
-            format!("{} ", crate::icons::INPUT_SIGIL),
-            format!("{} ", crate::icons::BANG_SIGIL),
+            Span::from(format!("{} ", crate::icons::INPUT_SIGIL)),
+            Span::from(format!("{} ", crate::icons::BANG_SIGIL)),
         );
         e.insert_str(s);
         e

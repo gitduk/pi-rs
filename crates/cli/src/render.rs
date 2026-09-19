@@ -5,6 +5,7 @@ use std::sync::{Arc, OnceLock};
 use agent::Event;
 use anyhow::{Result, bail};
 use brain::count::{in_out, short};
+use ratatui::text::{Line, Span};
 use serde::de::{Error as _, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -118,13 +119,6 @@ pub fn visible_width(s: &str) -> usize {
     visible(s)
         .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0))
         .sum()
-}
-
-/// The visible text of a painted string, for tests that assert on layout
-/// rather than colour.
-#[cfg(test)]
-pub fn strip_ansi(s: &str) -> String {
-    visible(s).collect()
 }
 
 /// One text attribute: bold, dim, italic — whatever SGR can set besides colour.
@@ -690,19 +684,35 @@ impl Paint {
         }
     }
 
-    /// `body` in `style`, with bold added while hovered — hover strengthens the
-    /// row without changing its colour, so a green check stays green and a grey
-    /// body stays grey under the cursor.
-    pub fn on_hovered(&self, hovered: bool, style: &Style, body: &str) -> String {
+    /// `body` in `style`, as a ratatui span: the unit every row on the surface
+    /// is built from. Styles flow structurally from here on — no SGR in the
+    /// text, so wrapping and measuring need no escape scanning.
+    pub fn span(&self, style: &Style, body: impl Into<String>) -> Span<'static> {
+        if !self.color {
+            Span::raw(body.into())
+        } else {
+            Span::styled(body.into(), style_to_ratatui(style))
+        }
+    }
+
+    /// `body` in `style`, as a span, with bold added while hovered — hover
+    /// strengthens the row without changing its colour, so a green check
+    /// stays green and a grey body stays grey under the cursor.
+    pub fn span_hovered(
+        &self,
+        hovered: bool,
+        style: &Style,
+        body: impl Into<String>,
+    ) -> Span<'static> {
         if !hovered || !self.color {
-            return self.on(style, body);
+            return self.span(style, body);
         }
         let bold = Style {
             color: style.color.clone(),
             sgr: style.sgr.iter().cloned().chain([Attr::Bold]).collect(),
             rendered: OnceLock::new(),
         };
-        self.on(&bold, body)
+        self.span(&bold, body)
     }
 }
 
@@ -742,6 +752,15 @@ pub fn line_to_ansi(line: &ratatui::text::Line<'_>) -> String {
         }
     }
     out
+}
+
+/// The pipe-side form of a described event: each line on its own row.
+fn lines_to_ansi(lines: &[ratatui::text::Line<'_>]) -> String {
+    lines
+        .iter()
+        .map(line_to_ansi)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn write_sgr(out: &mut String, code: u8) {
@@ -873,13 +892,14 @@ impl tui_markdown::StyleSheet for PiStyleSheet {
     }
 }
 
-/// Parse and render markdown into ANSI-styled lines using `tui-markdown` and theme.
-pub fn render_markdown(text: &str, paint: &Paint) -> Vec<String> {
+/// Parse and render markdown into styled lines using `tui-markdown` and theme.
+/// Styles ride on the spans; nothing here speaks SGR.
+pub fn render_markdown(text: &str, paint: &Paint) -> Vec<ratatui::text::Line<'static>> {
     if text.is_empty() {
         return Vec::new();
     }
     if !paint.color {
-        return text.lines().map(str::to_string).collect();
+        return text.lines().map(|l| Line::from(l.to_string())).collect();
     }
     let trimmed = trim_partial_fences(text);
     let sheet = PiStyleSheet {
@@ -889,20 +909,24 @@ pub fn render_markdown(text: &str, paint: &Paint) -> Vec<String> {
     };
     let options = tui_markdown::Options::new(sheet);
     let parsed = tui_markdown::from_str_with_options(trimmed, &options);
-    parsed.lines.iter().map(line_to_ansi).collect()
+    // The parsed text borrows the input; flatten text/line styles onto the
+    // spans and own the content, so the lines outlive this call.
+    parsed
+        .lines
+        .into_iter()
+        .map(|line| {
+            let line_style = parsed.style.patch(line.style);
+            let spans: Vec<Span<'static>> = line
+                .spans
+                .into_iter()
+                .map(|span| Span::styled(span.content.to_string(), line_style.patch(span.style)))
+                .collect();
+            Line::from(spans)
+        })
+        .collect()
 }
 
-/// The wording for every event that occupies a whole line.
-///
-/// Both surfaces call this: a tool call has to read the same in a pipe as in
-/// the terminal, and two copies of the wording would drift on the first edit.
-/// None is the caller's to place: the two deltas, which are a fragment rather
-/// than a line, and `Done`, which is a status line the surface composes itself.
-/// A run's line for one event, and for a tool that offers one, the rows of
-/// detail under it.
-///
-/// Newline-separated, because the caller decides what a row is: the interactive
-/// surface repaints a region and has to hand them over one at a time.
+/// The diff rows a sketched (folded) result shows under its head.
 pub const SKETCH_LIMIT: usize = 24;
 /// The preview rows a folded result shows: the head plus the sketch limit.
 pub const SKETCHED_ROWS: usize = 1 + SKETCH_LIMIT;
@@ -917,45 +941,53 @@ pub fn result_rows(
     hovered: bool,
     p: &Paint,
     width: usize,
-) -> Vec<String> {
+) -> Vec<ratatui::text::Line<'static>> {
     let room = width.saturating_sub(2).max(20);
-    let mark = if is_error {
-        p.on(&p.theme.status.err, icons::FAIL_MARK)
+    let (mark_style, mark) = if is_error {
+        (&p.theme.status.err, icons::FAIL_MARK)
     } else {
-        p.on(&p.theme.status.ok, icons::DONE_MARK)
+        (&p.theme.status.ok, icons::DONE_MARK)
     };
     let (head, rest) = preview.split_once('\n').unwrap_or((preview, ""));
-    let mut out = vec![format!(
-        "{mark} {name} {}",
-        p.on(&p.theme.muted, &clip(head, room))
-    )];
+    let mut out = vec![Line::from(vec![
+        p.span(mark_style, mark),
+        Span::raw(format!(" {name} ")),
+        p.span(&p.theme.muted, clip(head, room)),
+    ])];
     let diff_lines: Vec<&str> = rest.lines().collect();
-    let diff_style = |row: &str| {
+    let diff_style = |row: &str| -> &Style {
         // The row number leads each diff row, so the mark is the second word;
         // colour beats reading the diff text.
-        let style = match row.split_whitespace().nth(1) {
+        match row.split_whitespace().nth(1) {
             Some("+") => &p.theme.diff.add,
             Some("-") => &p.theme.diff.del,
             _ => &p.theme.muted,
-        };
-        p.on(style, &format!("  {}", clip(row, room)))
+        }
     };
-    let footer = |text: &str| p.on_hovered(hovered, &p.theme.muted, text);
-    if diff_lines.len() > SKETCH_LIMIT && !expanded {
-        out.extend(diff_lines[..SKETCH_LIMIT].iter().copied().map(&diff_style));
+    let footer = |text: &str| Line::from(p.span_hovered(hovered, &p.theme.muted, text));
+    let sketched = diff_lines.len() > SKETCH_LIMIT && !expanded;
+    let shown = if sketched {
+        &diff_lines[..SKETCH_LIMIT]
+    } else {
+        &diff_lines[..]
+    };
+    out.extend(
+        shown
+            .iter()
+            .map(|row| Line::from(p.span(diff_style(row), format!("  {}", clip(row, room))))),
+    );
+    if sketched {
         out.push(footer(&format!(
             "  {} {} more",
             icons::ELLIPSIS,
             diff_lines.len() - SKETCH_LIMIT
         )));
-    } else {
-        out.extend(diff_lines.iter().copied().map(&diff_style));
-        if diff_lines.len() > SKETCH_LIMIT {
-            out.push(footer("  ▴ collapse"));
-        }
+    } else if diff_lines.len() > SKETCH_LIMIT {
+        out.push(footer("  ▴ collapse"));
     }
     out
 }
+
 fn fmt_delay(ms: u64) -> String {
     if ms >= 1000 {
         format!("{:.2}s", ms as f64 / 1000.0)
@@ -964,52 +996,67 @@ fn fmt_delay(ms: u64) -> String {
     }
 }
 
-pub fn describe(event: &Event, p: &Paint, width: usize) -> Option<String> {
+/// The wording for every event that occupies a whole line.
+///
+/// Both surfaces call this: a tool call has to read the same in a pipe as in
+/// the terminal, and two copies of the wording would drift on the first edit.
+/// None is the caller's to place: the two deltas, which are a fragment rather
+/// than a line, and `Done`, which is a status line the surface composes itself.
+/// A run's line for one event, and for a tool that offers one, the rows of
+/// detail under it — one `Line` per screen row, because the caller decides
+/// what a row is: the interactive surface repaints a region and hands them
+/// over one at a time.
+pub fn describe(
+    event: &Event,
+    p: &Paint,
+    width: usize,
+) -> Option<Vec<ratatui::text::Line<'static>>> {
     let room = width.saturating_sub(2).max(20);
-    Some(match event {
-        Event::ToolStart { name, args, .. } => {
-            format!(
-                "{} {name} {}",
-                p.on(&p.theme.muted, icons::PENDING_MARK),
-                p.on(&p.theme.muted, &summarize(args))
-            )
-        }
+    let line = match event {
+        Event::ToolStart { name, args, .. } => Line::from(vec![
+            p.span(&p.theme.muted, icons::PENDING_MARK),
+            Span::raw(format!(" {name} ")),
+            p.span(&p.theme.muted, summarize(args)),
+        ]),
         Event::ToolEnd {
             name,
             is_error,
             preview,
             ..
-        } => result_rows(*is_error, name, preview, false, false, p, width).join("\n"),
-        Event::ToolDenied { name, reason, .. } => {
-            format!(
-                "{} {name} {}",
-                p.on(&p.theme.status.err, icons::FAIL_MARK),
-                p.on(&p.theme.muted, &clip(reason, room))
-            )
+        } => {
+            return Some(result_rows(
+                *is_error, name, preview, false, false, p, width,
+            ));
         }
-        Event::Compacted(r) => p.on(&p.theme.muted, &compaction_line(r)),
+        Event::ToolDenied { name, reason, .. } => Line::from(vec![
+            p.span(&p.theme.status.err, icons::FAIL_MARK),
+            Span::raw(format!(" {name} ")),
+            p.span(&p.theme.muted, clip(reason, room)),
+        ]),
+        Event::Compacted(r) => Line::from(p.span(&p.theme.muted, compaction_line(r))),
         Event::Retrying {
             attempt,
             delay_ms,
             reason,
-        } => p.on(
+        } => Line::from(p.span(
             &p.theme.muted,
-            &format!(
+            format!(
                 "retry {attempt} in {}{}{}",
                 fmt_delay(*delay_ms),
                 icons::PART_SEP,
                 clip(reason, room)
             ),
-        ),
-        Event::Warning(w) => format!(
-            "{} {}",
-            p.on(&p.theme.status.err, icons::WARN_MARK),
-            p.on(&p.theme.muted, w)
-        ),
+        )),
+        Event::Warning(w) => Line::from(vec![
+            p.span(&p.theme.status.err, icons::WARN_MARK),
+            Span::raw(" "),
+            p.span(&p.theme.muted, w),
+        ]),
         // Done is a status line rather than an event's wording, and the two
         // surfaces render it from their own configured segments.
         _ => return None,
-    })
+    };
+    Some(vec![line])
 }
 
 pub struct Renderer {
@@ -1090,16 +1137,16 @@ impl Renderer {
             // Worth seeing even under --quiet: the run did less than it was asked.
             Event::ToolDenied { .. } => {
                 self.settle();
-                if let Some(line) = describe(&event, &self.paint, 100) {
-                    eprintln!("{line}");
+                if let Some(lines) = describe(&event, &self.paint, 100) {
+                    eprintln!("{}", lines_to_ansi(&lines));
                 }
             }
             _ if self.quiet => {}
             _ => {
-                if let Some(line) = describe(&event, &self.paint, 100) {
+                if let Some(lines) = describe(&event, &self.paint, 100) {
                     self.end_thinking();
                     self.settle();
-                    eprintln!("{line}");
+                    eprintln!("{}", lines_to_ansi(&lines));
                 }
             }
         }

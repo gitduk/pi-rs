@@ -7,6 +7,7 @@
 //! the edit line and the dispatch are written here once.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::text::Line;
 
 use std::time::{Duration, Instant};
 
@@ -300,8 +301,8 @@ impl Panel {
     /// The row being rewritten is painted as itself — its value sits on the
     /// row, in the clear — and the caret rides it at the value's own cursor
     /// offset, wrapped like the input line.
-    pub fn view(&self, paint: &Paint, width: usize) -> (Vec<String>, Option<(u16, u16)>) {
-        let mut out = Vec::new();
+    pub fn view(&self, paint: &Paint, width: usize) -> (Vec<Line<'static>>, Option<(u16, u16)>) {
+        let mut out: Vec<Line<'static>> = Vec::new();
         let mut caret = None;
         for i in 0..self.rows.len() {
             let editing_this = self.editing.is_some() && i == self.at;
@@ -320,39 +321,43 @@ impl Panel {
                 let lead_w = crate::render::visible_width(&line[..lead_bytes]);
                 let caret_at = lead_bytes + editor.cursor();
                 let (lines, in_row, col) = wrap_edit(&line, lead_w, caret_at, width);
-                let painted: Vec<String> = lines
-                    .into_iter()
-                    .map(|l| paint.on(&paint.theme.input, &l))
-                    .collect();
-                out.extend(painted);
+                out.extend(
+                    lines
+                        .into_iter()
+                        .map(|l| Line::from(paint.span(&paint.theme.input, l))),
+                );
                 caret = Some((caret_row + in_row as u16, col as u16));
             } else {
                 let caret_sigil = if i == self.at { icons::MENU_SIGIL } else { " " };
                 let line = format!("{caret_sigil} {}", self.row(i));
                 let styled = if i == self.at {
-                    paint.on(&paint.theme.menu.selected, &line)
+                    Line::from(paint.span(&paint.theme.menu.selected, line))
                 } else {
-                    line
+                    Line::from(line)
                 };
                 out.extend(screen::fit(&styled, width));
             }
         }
         if let Some(why) = &self.refused {
-            out.extend(screen::fit(&format!("  {} {why}", icons::FAIL_MARK), width));
+            let refused = Line::from(format!("  {} {why}", icons::FAIL_MARK));
+            out.extend(screen::fit(&refused, width));
         }
         // The one line of chrome: what mode is up and what its keys are. A
         // panel that answers to q and space says so, or the first q lands as
         // a mystery.
         let line = if self.browsing() {
-            format!(
+            Line::from(format!(
                 "  normal{}j/k move · i edit · space write file · r revert · q close",
                 icons::KEY_NOTE_SEP
-            )
+            ))
         } else {
             let keep = self
                 .escape
                 .map_or_else(|| "enter".to_string(), |(a, b)| format!("enter or {a}{b}"));
-            format!("  insert{}{keep} keeps · esc discards", icons::KEY_NOTE_SEP)
+            Line::from(format!(
+                "  insert{}{keep} keeps · esc discards",
+                icons::KEY_NOTE_SEP
+            ))
         };
         out.extend(screen::fit(&line, width));
         (out, caret)
@@ -702,7 +707,7 @@ mod tests {
         // a wrapped value may land the caret anywhere, but never past the
         // text actually on its row.
         assert_eq!(
-            crate::render::visible_width(&rows[r as usize]),
+            rows[r as usize].width(),
             col as usize,
             "the caret is at the end of its own row"
         );

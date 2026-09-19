@@ -12,10 +12,10 @@
 //! or it is not made at all, and the two callers cannot disagree about what a
 //! row of a given kind looks like — there is only one of each.
 
-use std::borrow::Cow;
 use std::cell::RefCell;
 
 use brain::message::{ToolResult, ToolResultContent};
+use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::icons;
@@ -77,13 +77,32 @@ impl FoldedTools {
     }
 }
 
-pub struct Row(Kind);
+pub struct Row(Kind, Height);
+
+// The rows this row takes on screen at one width, wraps included, remembered
+// until the width or the content changes.
+#[derive(Default)]
+struct Height(RefCell<Option<(usize, usize)>>);
+
+impl Height {
+    fn get(&self, width: usize) -> Option<usize> {
+        self.0.borrow().filter(|(w, _)| *w == width).map(|(_, h)| h)
+    }
+
+    fn set(&self, width: usize, height: usize) {
+        *self.0.borrow_mut() = Some((width, height));
+    }
+
+    fn clear(&self) {
+        *self.0.borrow_mut() = None;
+    }
+}
 
 // The rendered rows of a tools summary, keyed by what they were painted at:
 // width, and the running/spinner frame that decides the leading mark.
 // Running rows must replace their frame as the spinner advances, which is
 // why the key is more than the width alone.
-type PaintedRows = Option<((usize, bool, usize), Vec<String>)>;
+type PaintedRows = Option<((usize, bool, usize), Vec<Line<'static>>)>;
 
 enum Kind {
     // One logical line of a prompt the user said: the border and the body
@@ -92,10 +111,10 @@ enum Kind {
     // wrap — the bar would end mid-air and the rest of the line would run
     // flush against the left edge.
     Said {
-        // The painted rule and its column: `SAID_RULE` in the prompt colour.
-        border: String,
-        // The line's text, painted in the input style, without the border.
-        body: String,
+        // The rule and its column: `SAID_RULE` in the prompt colour.
+        border: Line<'static>,
+        // The line's text, in the input style, without the border.
+        body: Line<'static>,
     },
     // A painted line the screen alone knows about: the banner, a command's
     // output, a warning. Colour does not depend on width, so painting it
@@ -105,7 +124,7 @@ enum Kind {
     // and the last one: a key held down, or a refusal repeated. It renders as
     // one row with a count rather than as a column of identical lines.
     Notice {
-        text: String,
+        text: Line<'static>,
         times: usize,
     },
     // A tool's result, kept as its parts. Clipping waits for the frame that
@@ -126,7 +145,7 @@ enum Kind {
         preview_lines: usize,
         expanded: bool,
         hovered: bool,
-        painted: RefCell<Option<(usize, Vec<String>)>>,
+        painted: RefCell<Option<(usize, Vec<Line<'static>>)>>,
     },
     // What a finished run left behind, kept as its numbers rather than as the
     // string they render to. The segments the config asks for and the theme
@@ -138,7 +157,7 @@ enum Kind {
         // Which block this row belongs to; the stream appends completed lines
         // to the open block's row and nothing else.
         block: u64,
-        lines: Vec<String>,
+        lines: Vec<Line<'static>>,
         folded: bool,
     },
     // A bundle of read-only tool results folded together into a summary row.
@@ -153,10 +172,15 @@ enum Kind {
 }
 
 impl Row {
+    // A row whose height is not measured yet; every constructor starts here.
+    fn new(kind: Kind) -> Self {
+        Self(kind, Height::default())
+    }
+
     /// Something only the screen ever knew. Free-form on purpose — no session
     /// entry answers for it, so nothing can drift.
-    pub fn notice(line: impl Into<String>) -> Self {
-        Row(Kind::Notice {
+    pub fn notice(line: impl Into<Line<'static>>) -> Self {
+        Self::new(Kind::Notice {
             text: line.into(),
             times: 1,
         })
@@ -165,23 +189,24 @@ impl Row {
     /// Fold a repeat into this row, if it is the same notice: the scrollback
     /// then shows `line ×2` where a second row would have gone.
     ///
-    /// Compares the painted text, which is what makes it safe: two notices
-    /// that read alike but are painted differently are different rows, and a
-    /// row of any other kind never folds.
-    pub fn repeated(&mut self, line: &str) -> bool {
+    /// Compares the spans, which is what makes it safe: two notices that
+    /// read alike but are styled differently are different rows, and a row of
+    /// any other kind never folds.
+    pub fn repeated(&mut self, line: &Line<'_>) -> bool {
         match &mut self.0 {
-            Kind::Notice { text, times } if text == line => {
+            Kind::Notice { text, times } if *text == *line => {
                 *times += 1;
+                self.1.clear();
                 true
             }
             _ => false,
         }
     }
 
-    /// One reasoning line. Also a string — a reasoning line lives inside a
-    /// block's row, not beside it.
-    pub fn reasoning_line(line: &str, paint: &Paint) -> String {
-        paint.on(&paint.theme.muted, line)
+    /// One reasoning line. A reasoning line lives inside a block's row, not
+    /// beside it.
+    pub fn reasoning_line(line: &str, paint: &Paint) -> Line<'static> {
+        Line::from(paint.span(&paint.theme.muted, line))
     }
 
     /// A whole assistant text block, for a caller that has one.
@@ -194,12 +219,12 @@ impl Row {
 
     /// The line a finished run ends on.
     pub fn tally(snap: Snapshot) -> Self {
-        Row(Kind::Tally(snap))
+        Self::new(Kind::Tally(snap))
     }
 
     /// A bundle of read-only tool results folded together into a summary row.
     pub fn tools_summary(tools: FoldedTools) -> Self {
-        Row(Kind::ToolsSummary {
+        Self::new(Kind::ToolsSummary {
             tools,
             folded: true,
             running: false,
@@ -214,6 +239,7 @@ impl Row {
         if let Kind::ToolsSummary { tools, painted, .. } = &mut self.0 {
             tools.push(FoldedTool { name, preview });
             *painted.borrow_mut() = None;
+            self.1.clear();
             true
         } else {
             false
@@ -247,6 +273,7 @@ impl Row {
             } => {
                 *folded = !*folded;
                 *painted.borrow_mut() = None;
+                self.1.clear();
                 true
             }
             Kind::Result {
@@ -254,6 +281,7 @@ impl Row {
             } => {
                 *expanded = !*expanded;
                 *painted.borrow_mut() = None;
+                self.1.clear();
                 true
             }
             _ => false,
@@ -270,9 +298,9 @@ impl Row {
                 painted,
                 ..
             } => {
-                // The rendered rows are keyed by (width, running, spinner),
-                // so running frames replace themselves; hovered is the only
-                // change that needs the cache dropped by hand.
+                // The rendered rows key on (width, running, spinner);
+                // hovered restyles, never re-measures — drop the painted
+                // cache, keep the height.
                 let hover_changed = *h != hovered;
                 if *r != running || *h != hovered || *r && *s != spin {
                     *r = running;
@@ -297,8 +325,8 @@ impl Row {
     }
 
     /// A reasoning block's first row. Later lines go in through `push_line`.
-    pub fn reasoning(block: u64, lines: Vec<String>, folded: bool) -> Self {
-        Row(Kind::Reasoning {
+    pub fn reasoning(block: u64, lines: Vec<Line<'static>>, folded: bool) -> Self {
+        Self::new(Kind::Reasoning {
             block,
             lines,
             folded,
@@ -310,7 +338,7 @@ impl Row {
     pub fn result(ok: bool, name: impl Into<String>, preview: impl Into<String>) -> Self {
         let preview = preview.into();
         let preview_lines = preview.lines().count();
-        Row(Kind::Result {
+        Self::new(Kind::Result {
             ok,
             name: name.into(),
             preview,
@@ -369,45 +397,63 @@ impl Row {
 
     /// A tool's start line: what an unanswered call keeps in the view.
     pub fn tool_start(name: &str, summary: &str, paint: &Paint) -> Self {
-        Self::notice(paint.on(&paint.theme.muted, &tool_start_line(name, summary)))
+        Self::notice(Line::from(
+            paint.span(&paint.theme.muted, tool_start_line(name, summary)),
+        ))
     }
 
     // One logical line of a prompt the user said: the rule it wears, and the
     // text under it. The border lives apart from the body so the screen can
     // repeat it on every row the body wraps to — see `Kind::Said`.
-    fn said(border: String, body: String) -> Self {
-        Row(Kind::Said { border, body })
+    fn said(border: Line<'static>, body: Line<'static>) -> Self {
+        Self::new(Kind::Said { border, body })
     }
 
     /// A prompt's lines as the stream echoed them: a `!` keeps its own mark
     /// and its continuation the plain indent, everything else wears the rule,
     /// unbroken down every line of it.
-    pub fn prompt(text: &str, bang: &str, paint: &Paint) -> Vec<Self> {
+    pub fn prompt(text: &str, paint: &Paint) -> Vec<Self> {
         if text.starts_with('!') {
             // A `!` is a command, not something said: the bang takes the
             // prompt's place, and the lines under it keep the plain indent.
+            let bang = paint.span(
+                &paint.theme.prompt.color,
+                format!("{} ", crate::icons::BANG_SIGIL),
+            );
             let mut rows = Vec::new();
             for (i, line) in text.lines().enumerate() {
                 let (prefix, body) = if i == 0 {
-                    (bang, line.strip_prefix('!').unwrap_or(line).trim_start())
+                    (
+                        bang.clone(),
+                        line.strip_prefix('!').unwrap_or(line).trim_start(),
+                    )
                 } else {
-                    ("  ", line)
+                    (Span::raw("  "), line)
                 };
-                let body = paint.on(&paint.theme.input, body);
-                rows.push(Self::notice(format!("{prefix}{body}")));
+                rows.push(Self::notice(Line::from(vec![
+                    prefix,
+                    paint.span(&paint.theme.input, body),
+                ])));
             }
             return rows;
         }
         // Unbroken down every line said: the icon marks what is being typed,
         // and a landed line wearing it reads as another place to type. The
         // border is kept apart from the body so wrapping can repeat it.
-        let border = format!("{} ", paint.on(&paint.theme.prompt.color, icons::SAID_RULE));
+        let border =
+            Line::from(paint.span(&paint.theme.prompt.color, format!("{} ", icons::SAID_RULE)));
         text.lines()
-            .map(|line| Self::said(border.clone(), paint.on(&paint.theme.input, line)))
+            .map(|line| {
+                Self::said(
+                    border.clone(),
+                    Line::from(paint.span(&paint.theme.input, line)),
+                )
+            })
             .collect()
     }
 
-    /// How many screen rows this renders to.
+    /// How many logical lines the row is made of — the `i`s `line` answers.
+    /// Wraps not counted; `height` is the screen-row count.
     pub fn len(&self) -> usize {
         match &self.0 {
             Kind::Notice { .. } | Kind::Said { .. } | Kind::Tally(_) => 1,
@@ -441,29 +487,52 @@ impl Row {
         }
     }
 
+    /// Forget the remembered height: the text this row renders from changed
+    /// underneath it, without going through any constructor.
+    pub fn clear_height(&mut self) {
+        self.1.clear();
+    }
+
+    /// Screen rows this row takes at `width`, wraps included, remembered by
+    /// width until the content changes. The scrolled-up view's accounting
+    /// reads these; a wrap is a row the count has to know about.
+    pub fn height(&self, paint: &Paint, done: &[Segment], width: usize) -> usize {
+        if let Some(h) = self.1.get(width) {
+            return h;
+        }
+        let mut h = 0;
+        for i in 0..self.len() {
+            let (line, border) = self.line(i, paint, done, width);
+            h += super::screen::wrap(border.as_ref(), &line, width).len();
+        }
+        self.1.set(width, h);
+        h
+    }
+
     /// What the screen renders for row `i` of this row, at this width: the
     /// text, and the border its continuation rows must repeat. A said row
     /// keeps the rule apart from the body so a line wider than the terminal
     /// can carry it to every row it wraps to; anything else is a single text
     /// with no border to keep.
-    pub fn line<'a>(
-        &'a self,
+    pub fn line(
+        &self,
         i: usize,
-        paint: &'a Paint,
+        paint: &Paint,
         done: &[Segment],
         width: usize,
-    ) -> (Cow<'a, str>, Option<&'a str>) {
+    ) -> (Line<'static>, Option<Line<'static>>) {
         match &self.0 {
-            Kind::Said { border, body } => (Cow::Borrowed(body), Some(border)),
-            Kind::Notice { text, times } if *times == 1 => (Cow::Borrowed(text), None),
+            Kind::Said { border, body } => (body.clone(), Some(border.clone())),
+            Kind::Notice { text, times } if *times == 1 => (text.clone(), None),
             Kind::Notice { text, times } => {
                 // The count wears the muted style whatever the line it trails,
                 // so a repeated warning still reads as one warning and a tally.
-                let count = paint.on(&paint.theme.muted, &format!(" ×{times}"));
-                (Cow::Owned(format!("{text}{count}")), None)
+                let mut spans = text.spans.clone();
+                spans.push(paint.span(&paint.theme.muted, format!(" ×{times}")));
+                (Line::from(spans), None)
             }
             Kind::Tally(snap) => (
-                Cow::Owned(paint.on(&paint.theme.muted, &status::line(done, snap))),
+                Line::from(paint.span(&paint.theme.muted, status::line(done, snap))),
                 None,
             ),
             Kind::Result {
@@ -485,16 +554,15 @@ impl Row {
                         &mut slot.insert((width, rows)).1
                     }
                 };
-                let text = rows.get(i).cloned().unwrap_or_default();
-                (Cow::Owned(text), None)
+                (rows.get(i).cloned().unwrap_or_default(), None)
             }
             Kind::Reasoning { lines, folded, .. } => {
                 let text = if *folded {
                     // The count row is synthesized at draw time, so it takes
                     // its muted styling here rather than from a painted row.
-                    Cow::Owned(paint.on(&paint.theme.muted, &thinking_summary(lines.len())))
+                    Line::from(paint.span(&paint.theme.muted, thinking_summary(lines.len())))
                 } else {
-                    Cow::Borrowed(lines[i].as_str())
+                    lines[i].clone()
                 };
                 (text, None)
             }
@@ -516,8 +584,7 @@ impl Row {
                         &mut slot.insert(((width, *running, *spinner), rows)).1
                     }
                 };
-                let text = rows.get(i).cloned().unwrap_or_default();
-                (Cow::Owned(text), None)
+                (rows.get(i).cloned().unwrap_or_default(), None)
             }
         }
     }
@@ -541,6 +608,7 @@ impl Row {
     pub fn set_folded(&mut self, to: bool) {
         if let Kind::Reasoning { folded, .. } = &mut self.0 {
             *folded = to;
+            self.1.clear();
         }
     }
 
@@ -555,9 +623,10 @@ impl Row {
     /// Append a finished line to a reasoning block. A no-op on anything else,
     /// which no caller can reach: the only handle to a row is one found by
     /// `block()`, and only a reasoning row answers that.
-    pub fn push_line(&mut self, painted: String) {
+    pub fn push_line(&mut self, line: Line<'static>) {
         if let Kind::Reasoning { lines, .. } = &mut self.0 {
-            lines.push(painted);
+            lines.push(line);
+            self.1.clear();
         }
     }
 
@@ -570,7 +639,7 @@ impl Row {
     /// note: they are what the run is standing on, not news, and a note about
     /// them scrolls away while this stays at the top where it belongs.
     pub fn banner(context: &[String], paint: &Paint) -> Vec<Self> {
-        let muted = |line: &str| Self::notice(paint.on(&paint.theme.muted, line));
+        let muted = |line: &str| Self::notice(Line::from(paint.span(&paint.theme.muted, line)));
         let mut rows = vec![muted(icons::VERSION_BANNER)];
         if !context.is_empty() {
             rows.push(muted("context:"));
@@ -623,13 +692,10 @@ pub fn tools_summary_header(
     spinner: usize,
     paint: &Paint,
     width: usize,
-) -> String {
-    // A finished batch wears a green check, an in-flight one spins. Each
-    // wears its own span: the check keeps its green under hover (bold added
-    // rather than the colour swapped), and the body's reset cannot cut the
-    // dim mid-line. One tool is its own full line; a folded batch keeps only
-    // the latest tool's description and its count — the unfolded one shows
-    // every tool below, so the count would only repeat the list.
+) -> Line<'static> {
+    // A finished batch wears a green check, an in-flight one spins — each
+    // its own span, so hover bolds instead of recolouring. Folded keeps the
+    // latest tool and its count; unfolded, the count would repeat the list.
     let body = if folded && !tools.is_single() {
         let digits = tools.count().to_string();
         let desc = tools.last().desc();
@@ -651,15 +717,18 @@ pub fn tools_summary_header(
         let room = width.saturating_sub(2).max(10);
         format!(" {}", clip_to(&tools.last().desc(), room))
     };
-    let mark = if running {
-        icons::SPINNER_FRAMES[spinner % icons::SPINNER_FRAMES.len()].to_string()
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(2);
+    if running {
+        spans.push(Span::raw(
+            icons::SPINNER_FRAMES[spinner % icons::SPINNER_FRAMES.len()],
+        ));
     } else {
-        paint.on_hovered(hovered, &paint.theme.status.ok, icons::DONE_MARK)
-    };
-    format!(
-        "{mark}{}",
-        paint.on_hovered(hovered, &paint.theme.muted, &body)
-    )
+        spans.push(paint.span_hovered(hovered, &paint.theme.status.ok, icons::DONE_MARK));
+    }
+    // The body keeps its own leading space: the running row has no mark-span
+    // to separate from it, and one space after the check is the look.
+    spans.push(paint.span_hovered(hovered, &paint.theme.muted, body));
+    Line::from(spans)
 }
 
 pub fn tools_summary_rows(
@@ -670,7 +739,7 @@ pub fn tools_summary_rows(
     spinner: usize,
     paint: &Paint,
     width: usize,
-) -> Vec<String> {
+) -> Vec<Line<'static>> {
     let header = tools_summary_header(tools, folded, running, hovered, spinner, paint, width);
     if folded {
         return vec![header];
@@ -681,10 +750,10 @@ pub fn tools_summary_rows(
     // second one, and the indent keeps them under it.
     let room = width.saturating_sub(2).max(10);
     for tool in tools.iter() {
-        rows.push(paint.on(
+        rows.push(Line::from(paint.span(
             &paint.theme.muted,
-            &format!("  {}", clip_to(&tool.desc(), room)),
-        ));
+            format!("  {}", clip_to(&tool.desc(), room)),
+        )));
     }
     rows
 }
@@ -718,10 +787,12 @@ mod tools_summary_tests {
         let paint = Paint::new(true);
         let mut row = Row::tools_summary(bundle(vec![tool("read", "a.rs")]));
 
+        use crate::tui::screen::plain;
+
         row.update_hover_state(true, false, 0);
-        let f0 = crate::render::strip_ansi(&row.line(0, &paint, &[], 80).0);
+        let f0 = plain(&row.line(0, &paint, &[], 80).0);
         row.update_hover_state(true, false, 1);
-        let f1 = crate::render::strip_ansi(&row.line(0, &paint, &[], 80).0);
+        let f1 = plain(&row.line(0, &paint, &[], 80).0);
 
         assert!(
             f0.starts_with(&format!("{} read a.rs", icons::SPINNER_FRAMES[0])),

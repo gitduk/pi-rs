@@ -7,10 +7,8 @@
 //! it too — so the buffer is rebuilt from the transcript rather than kept
 //! as terminal scrollback.
 
-use std::borrow::Cow;
 use std::io::Stdout;
 use std::io::Write;
-use std::str::Chars;
 
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -20,118 +18,57 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use unicode_width::UnicodeWidthChar;
 
-use crate::render::parse_sgr;
-
-const RESET: &str = "\x1b[0m";
-
-/// Break a line into pieces that each occupy exactly one terminal row.
+/// Break a styled line into lines that each occupy exactly one terminal row.
 ///
 /// Repainting works by counting rows, so a line that wraps on its own would
-/// throw the count off by however many times it wrapped. Escape sequences take
-/// no columns and must not be counted; every broken piece is closed with a
-/// reset and re-opens with the styling still in force, so a wrapped coloured
-/// line keeps its colour past the first row.
-pub fn fit(line: &str, width: usize) -> Vec<String> {
+/// throw the count off by however many times it wrapped. Styles ride on the
+/// spans, so a wrapped coloured line keeps its colour past the first row
+/// without anything re-opening an escape sequence. Escape sequences found in
+/// the content itself — outside noise a tool's output carried in — take no
+/// columns and no cells.
+pub fn fit(line: &Line<'_>, width: usize) -> Vec<Line<'static>> {
     let width = width.max(1);
-    let mut out = Vec::new();
-    let mut piece = String::new();
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut row: Vec<Span<'static>> = Vec::new();
     let mut used = 0usize;
-    // A break re-opens the SGR in force, or the rest of a coloured line
-    // would come out plain: the style lives at the head of the line.
-    let mut sgr = String::new();
-    let mut chars = line.chars();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            if let Some(params) = eat_escape(&mut chars, &mut piece) {
-                let mut parts = params.split(';').peekable();
-                while let Some(p) = parts.next() {
-                    match p {
-                        "0" | "" => sgr.clear(),
-                        "38" | "48" => {
-                            // The mode and its payload are data, not codes:
-                            // `5;n` or `2;r;g;b`, where a zero is a colour
-                            // component, never a reset.
-                            push_sgr(&mut sgr, p);
-                            match parts.peek().copied() {
-                                Some("5") => {
-                                    push_sgr(&mut sgr, "5");
-                                    parts.next();
-                                    if let Some(n) = parts.next() {
-                                        push_sgr(&mut sgr, n);
-                                    }
-                                }
-                                Some("2") => {
-                                    push_sgr(&mut sgr, "2");
-                                    parts.next();
-                                    for _ in 0..3 {
-                                        if let Some(v) = parts.next() {
-                                            push_sgr(&mut sgr, v);
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                        _ => push_sgr(&mut sgr, p),
+    for span in &line.spans {
+        let style = span.style;
+        let mut chars = span.content.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                // An escape in the content is outside noise: no columns, no
+                // cells, nothing the spans do not already say. Consume it.
+                let mut esc = crate::render::Escape::new();
+                for n in chars.by_ref() {
+                    if esc.closed(n) {
+                        break;
                     }
                 }
-            }
-            continue;
-        }
-        if c == '\r' {
-            continue;
-        }
-        let w = c.width().unwrap_or(0);
-        if c == '\n' || (used + w > width && used > 0) {
-            out.push(std::mem::take(&mut piece) + RESET);
-            if !sgr.is_empty() {
-                piece.push('\x1b');
-                piece.push('[');
-                piece.push_str(&sgr);
-                piece.push('m');
-            }
-            used = 0;
-            if c == '\n' {
                 continue;
             }
+            if c == '\n' {
+                out.push(Line::from(std::mem::take(&mut row)));
+                used = 0;
+                continue;
+            }
+            let w = c.width().unwrap_or(0);
+            if used + w > width && used > 0 {
+                out.push(Line::from(std::mem::take(&mut row)));
+                used = 0;
+            }
+            match row.last_mut() {
+                Some(s) if s.style == style => s.content.to_mut().push(c),
+                _ => row.push(Span::styled(c.to_string(), style)),
+            }
+            used += w;
         }
-        piece.push(c);
-        used += w;
     }
-    out.push(piece);
+    out.push(Line::from(row));
     out
-}
-
-// The escape sequence at the head of `chars`, appended to `out`; its SGR
-// parameters when it is one. The introducer is consumed before the scan:
-// `[` and `O` are themselves inside the final-byte range, so a scan that
-// started on one would stop on it and leave the parameters to be counted
-// as text.
-fn eat_escape<'a, 'b>(chars: &mut Chars<'a>, out: &'b mut String) -> Option<&'b str> {
-    let at = out.len();
-    out.push('\x1b');
-    let mut esc = crate::render::Escape::new();
-    for c in chars.by_ref() {
-        out.push(c);
-        if esc.closed(c) {
-            break;
-        }
-    }
-    out[at..]
-        .strip_prefix("\x1b[")
-        .and_then(|s| s.strip_suffix('m'))
-}
-
-// Append one SGR parameter, separated from the ones before it.
-fn push_sgr(sgr: &mut String, p: &str) {
-    if !sgr.is_empty() {
-        sgr.push(';');
-    }
-    sgr.push_str(p);
 }
 
 /// One column short of the real width, so nothing ever lands on the last cell.
@@ -158,34 +95,41 @@ pub fn usable(width: u16) -> usize {
 /// line's rule must run down every row it wraps to, or the bar is cut at the
 /// first one. See `wrap`.
 pub fn window_tagged<'a, T: Clone>(
-    lines: impl DoubleEndedIterator<Item = ((Cow<'a, str>, Option<&'a str>), T)>,
+    lines: impl DoubleEndedIterator<Item = ((Line<'a>, Option<Line<'a>>), T)>,
     width: usize,
     room: usize,
     scroll: usize,
-) -> (Vec<(String, T)>, usize) {
+) -> (Vec<(Line<'static>, T)>, usize) {
     let want = room + scroll;
-    let mut back: Vec<(String, T)> = Vec::new();
+    let mut back: Vec<(Line<'static>, T)> = Vec::new();
     for ((line, border), tag) in lines.rev() {
         if back.len() >= want {
             break;
         }
-        for piece in wrap(border, &line, width).into_iter().rev() {
+        for piece in wrap(border.as_ref(), &line, width).into_iter().rev() {
             back.push((piece, tag.clone()));
         }
     }
     let scroll = scroll.min(back.len().saturating_sub(room));
-    let mut rows: Vec<(String, T)> = back.into_iter().skip(scroll).take(room).collect();
+    let mut rows: Vec<(Line<'static>, T)> = back.into_iter().skip(scroll).take(room).collect();
     rows.reverse();
     (rows, scroll)
 }
 
+/// A line's text without its styling, for tests that assert on layout
+/// rather than colour.
+#[cfg(test)]
+pub(crate) fn plain(line: &Line<'_>) -> String {
+    line.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
 #[cfg(test)]
 pub fn window<'a>(
-    lines: impl DoubleEndedIterator<Item = (Cow<'a, str>, Option<&'a str>)>,
+    lines: impl DoubleEndedIterator<Item = (Line<'a>, Option<Line<'a>>)>,
     width: usize,
     room: usize,
     scroll: usize,
-) -> (Vec<String>, usize) {
+) -> (Vec<Line<'static>>, usize) {
     let (rows, scroll) = window_tagged(lines.map(|l| (l, ())), width, room, scroll);
     (rows.into_iter().map(|(r, ())| r).collect(), scroll)
 }
@@ -193,7 +137,7 @@ pub fn window<'a>(
 /// Break a line into pieces that each occupy exactly one terminal row — a
 /// bordered line repeats its border on every piece, so a said line keeps its
 /// rule unbroken down the rows it wraps to instead of cutting it at the first.
-pub fn wrap(border: Option<&str>, line: &str, width: usize) -> Vec<String> {
+pub fn wrap(border: Option<&Line<'_>>, line: &Line<'_>, width: usize) -> Vec<Line<'static>> {
     let Some(border) = border else {
         return fit(line, width);
     };
@@ -201,58 +145,67 @@ pub fn wrap(border: Option<&str>, line: &str, width: usize) -> Vec<String> {
     // narrow to spare both drops the rule rather than overflowing: a row wider
     // than `width` wraps again under whatever paints it, and `window` counted
     // the rows on the promise that none of them would.
-    let spare = width
-        .checked_sub(crate::render::visible_width(border))
-        .filter(|avail| *avail > 0);
+    let spare = width.checked_sub(border.width()).filter(|avail| *avail > 0);
     let Some(avail) = spare else {
         return fit(line, width);
     };
     fit(line, avail)
         .into_iter()
-        .map(|piece| format!("{border}{piece}"))
+        .map(|piece| {
+            let mut spans: Vec<Span<'static>> = border
+                .spans
+                .iter()
+                .map(|s| Span::styled(s.content.to_string(), s.style))
+                .collect();
+            spans.extend(piece.spans);
+            Line::from(spans)
+        })
         .collect()
 }
 
-// Write one fitted row into the buffer: style from the SGR escapes, one
-// cell per character.
-fn write_piece(piece: &str, x: u16, y: u16, buf: &mut Buffer) {
-    let mut style = Style::default();
+// Write one fitted row into the buffer: one cell per character, styled by
+// its span. Wide characters take two cells; combining marks decorate back.
+fn write_line(line: &Line<'_>, x: u16, y: u16, buf: &mut Buffer) {
     let mut col = x;
-    let mut chars = piece.chars();
-    let mut seq = String::new();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            seq.clear();
-            if let Some(sgr) = eat_escape(&mut chars, &mut seq) {
-                style = parse_sgr(sgr, style);
-            }
-            continue;
-        }
-        let w = c.width().unwrap_or(0) as u16;
-        if w == 0 {
-            if c.is_control() {
+    for span in &line.spans {
+        let mut chars = span.content.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                // Same deal as `fit`: outside noise, not a cell. Consume it.
+                let mut esc = crate::render::Escape::new();
+                for n in chars.by_ref() {
+                    if esc.closed(n) {
+                        break;
+                    }
+                }
                 continue;
             }
-            // A combining mark decorates the cell before it — skipping the
-            // blank second cell a wide character leaves behind.
-            let mut prev = col;
-            while prev > x {
-                prev -= 1;
-                let symbol = buf[(prev, y)].symbol().to_string();
-                if !symbol.is_empty() && symbol != " " {
-                    buf[(prev, y)].set_symbol(&format!("{symbol}{c}"));
-                    break;
+            let w = c.width().unwrap_or(0) as u16;
+            if w == 0 {
+                if c.is_control() {
+                    continue;
                 }
+                // A combining mark decorates the cell before it — skipping the
+                // blank second cell a wide character leaves behind.
+                let mut prev = col;
+                while prev > x {
+                    prev -= 1;
+                    let symbol = buf[(prev, y)].symbol().to_string();
+                    if !symbol.is_empty() && symbol != " " {
+                        buf[(prev, y)].set_symbol(&format!("{symbol}{c}"));
+                        break;
+                    }
+                }
+                continue;
             }
-            continue;
+            buf.set_stringn(col, y, c.to_string(), w as usize, span.style);
+            col += w;
         }
-        buf.set_stringn(col, y, c.to_string(), w as usize, style);
-        col += w;
     }
 }
 
 /// Every row the screen shows, wrapped and styled into the cell buffer.
-pub struct Rows<'a>(pub &'a [String]);
+pub struct Rows<'a>(pub &'a [Line<'a>]);
 
 impl Widget for Rows<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
@@ -266,7 +219,7 @@ impl Widget for Rows<'_> {
                 if y >= area.y + area.height {
                     break;
                 }
-                write_piece(&piece, area.x, y, buf);
+                write_line(&piece, area.x, y, buf);
                 y += 1;
             }
         }
@@ -501,19 +454,24 @@ impl Drop for Screen {
 
 #[cfg(test)]
 mod tests {
-    use super::window;
-    use std::borrow::Cow;
+    use super::{fit, plain, window};
+    use ratatui::text::Line;
+
+    // An escape the outside world left in the content takes no columns and
+    // no cells: the count and the text agree on what a row holds.
+    #[test]
+    fn an_escape_in_the_content_is_noise_not_cells() {
+        let line = Line::from("a\x1b[31mb");
+        let rows = fit(&line, 10);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(plain(&rows[0]), "ab");
+    }
 
     // The window's rows, plain, for a history of `lines` at width `width`.
     fn shown(lines: &[&str], width: usize, room: usize, scroll: usize) -> Vec<String> {
-        let owned: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
-        let (rows, _) = window(
-            owned.iter().map(|s| (Cow::Borrowed(s.as_str()), None)),
-            width,
-            room,
-            scroll,
-        );
-        rows
+        let owned: Vec<Line<'static>> = lines.iter().map(|l| Line::from(l.to_string())).collect();
+        let (rows, _) = window(owned.iter().map(|l| (l.clone(), None)), width, room, scroll);
+        rows.into_iter().map(|l| plain(&l)).collect()
     }
 
     #[test]
@@ -541,14 +499,15 @@ mod tests {
 
     #[test]
     fn scrolling_stops_at_the_oldest_row() {
-        let owned: Vec<String> = ["a", "b", "c"].iter().map(|l| l.to_string()).collect();
-        let (rows, scroll) = window(
-            owned.iter().map(|s| (Cow::Borrowed(s.as_str()), None)),
-            10,
-            2,
-            99,
+        let owned: Vec<Line<'static>> = ["a", "b", "c"]
+            .iter()
+            .map(|l| Line::from(l.to_string()))
+            .collect();
+        let (rows, scroll) = window(owned.iter().map(|l| (l.clone(), None)), 10, 2, 99);
+        assert_eq!(
+            rows.iter().map(plain).collect::<Vec<_>>(),
+            vec!["a".to_string(), "b".to_string()]
         );
-        assert_eq!(rows, vec!["a", "b"]);
         assert_eq!(scroll, 1, "clamped, so one press down comes back");
     }
 
