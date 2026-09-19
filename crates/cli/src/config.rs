@@ -46,6 +46,15 @@ pub struct Config {
     #[serde(default)]
     pub cache_control: CacheControl,
 
+    /// The judgment endpoint, when this machine has one. Present, the `judge`
+    /// tool is in the set and the model can delegate snap judgments to it;
+    /// absent, the tool never exists, so the model never sees a name it
+    /// cannot call. Only this user-level file can set it: a judgment endpoint
+    /// receives pieces of this machine's state, and a cloned `pi.toml` must
+    /// not choose where those go.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judge: Option<JudgeSection>,
+
     /// The model to run, as the endpoint names it: `deepseek-v4-flash`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -220,6 +229,38 @@ impl Config {
     /// silent mean the same thing to callers.
     pub fn loop_cap(&self) -> Option<usize> {
         self.loop_max_turns.or(Some(DEFAULT_LOOP_MAX_TURNS))
+    }
+}
+
+/// The `[judge]` section: where snap judgments are delegated to.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct JudgeSection {
+    /// The judgment endpoint's origin. The wire path is the tool's business,
+    /// not the file's — the same split as the main endpoint, whose path lives
+    /// in the transport too.
+    pub base_url: String,
+    /// `$NAME` reads that environment variable; anything else is the key
+    /// itself. Unset, or naming an unset variable, sends the request without
+    /// a key and lets the endpoint's response say what it needs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    /// The model to ask, as the endpoint names it. Absent, the request omits
+    /// the field and the endpoint serves its default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+impl JudgeSection {
+    /// The origin to post judgments to, `:port` shorthand expanded.
+    pub fn endpoint(&self) -> String {
+        expand_base_url(self.base_url.trim())
+    }
+
+    /// The credential to send, or None when the endpoint wants none. Read at
+    /// use rather than at load, for the same reason the main key is.
+    pub fn key(&self) -> Option<String> {
+        self.api_key.as_deref().and_then(expand_key)
     }
 }
 
@@ -461,11 +502,7 @@ impl Config {
     /// response says what it needs. The *shape* is checked at load, because a
     /// malformed `$NAME` is a typo today and every day after.
     pub fn key(&self) -> Option<String> {
-        let raw = self.api_key.as_deref()?;
-        match raw.strip_prefix('$') {
-            None => Some(raw.to_string()),
-            Some(name) => std::env::var(name).ok(),
-        }
+        self.api_key.as_deref().and_then(expand_key)
     }
 
     pub fn apply_env(&mut self) {
@@ -574,6 +611,15 @@ impl Config {
             return Some((only.clone(), Origin::OnlyModel));
         }
         None
+    }
+}
+
+/// `$NAME` reads that environment variable; anything else is the key itself.
+/// The one spelling of the credential contract, for every key in the file.
+fn expand_key(raw: &str) -> Option<String> {
+    match raw.strip_prefix('$') {
+        None => Some(raw.to_string()),
+        Some(name) => std::env::var(name).ok(),
     }
 }
 

@@ -16,7 +16,7 @@ const MAX_TIMEOUT_MS: u64 = 120_000;
 
 // The most that will be pulled off the wire. Well above any page worth
 // reading and well below anything that would cost the run its memory.
-const MAX_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const MAX_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Deserialize)]
 struct Args {

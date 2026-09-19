@@ -29,6 +29,7 @@ pub mod edit;
 pub mod fetch;
 pub mod glob;
 pub mod grep;
+pub mod judge;
 pub mod output;
 mod parses;
 pub mod read;

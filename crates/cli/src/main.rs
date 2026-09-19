@@ -372,6 +372,18 @@ pub fn resolve(
         registry = registry.with(tool);
     }
 
+    // A judgment endpoint is opt-in by section: no `[judge]` in the file, no
+    // tool in the set.
+    if let Some(judge) = &config.judge {
+        let endpoint = judge.endpoint();
+        registry = registry.with(tools::judge::Judge::new(
+            endpoint.clone(),
+            judge.key(),
+            judge.model.clone(),
+        ));
+        notes.push(format!("judge: snap judgments via {endpoint}"));
+    }
+
     let (scripts, skipped) = context::home()
         .map(|home| tools::script::discover_in(&home.join(".pi/tools")))
         .unwrap_or_default();

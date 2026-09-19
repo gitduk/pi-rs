@@ -29,6 +29,20 @@ api_key  = "$ANTHROPIC_API_KEY"
 cache_control = "standard"
 
 # ---------------------------------------------------------------------------
+# Snap judgments, delegated.
+#
+# A second endpoint a run can put typed questions to — classify this, score
+# that, how likely is this true — and get structured answers back, without a
+# turn of generation. Present, the `judge` tool is in the set; commented out,
+# it does not exist and the model never sees it. Only this file can set it:
+# a cloned `pi.toml` must not choose where this machine's state gets judged.
+# ---------------------------------------------------------------------------
+# [judge]
+# base_url = "https://api.typesafe.ai/v1"
+# api_key  = "$TYPESAFE_API_KEY"   # a `$` reads the environment, as above
+# model    = "jev-latest"          # absent, the endpoint serves its default
+
+# ---------------------------------------------------------------------------
 # What to run.
 # ---------------------------------------------------------------------------
 
