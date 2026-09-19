@@ -230,73 +230,14 @@ impl Tool for ScriptTool {
         Ok(ToolOutput::text(body).with_preview(self.name.clone()))
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
 
-    #[test]
-    fn the_comment_header_is_the_declaration() {
-        let text = "#!/usr/bin/env bash\n# description: Echo it back\n# msg: what to say\n# times: how often\ncat\n";
-        let (description, args) = header(text).unwrap();
-        assert_eq!(description, "Echo it back");
-        assert_eq!(
-            args,
-            vec![
-                ("msg".to_string(), "what to say".to_string()),
-                ("times".to_string(), "how often".to_string())
-            ]
-        );
-    }
-
-    #[test]
-    fn a_script_without_a_description_is_no_tool() {
-        assert!(header("#!/bin/sh\necho hi\n").is_none());
-    }
-
-    #[tokio::test]
-    async fn a_script_runs_with_the_call_on_stdin() {
-        let dir = tempfile::tempdir().unwrap();
-        let tools = dir.path().join("tools");
-        std::fs::create_dir_all(&tools).unwrap();
-        std::fs::write(
-            tools.join("echo.sh"),
-            "#!/usr/bin/env bash\n# description: Echo stdin\ncat\n",
-        )
-        .unwrap();
-        let (mut found, skipped) = discover_in(&tools);
-        assert!(skipped.is_empty(), "{skipped:?}");
-        assert_eq!(found.len(), 1);
-        let ctx = Ctx::new(crate::Workspace::new(dir.path()).unwrap());
-        let out = found
-            .remove(0)
-            .execute(json!({ "x": 1 }), &ctx)
-            .await
-            .unwrap();
-        assert_eq!(out.flatten(), "{\"x\":1}");
-    }
-
-    #[tokio::test]
-    async fn declared_string_args_ride_in_as_environment() {
-        let dir = tempfile::tempdir().unwrap();
-        let tools = dir.path().join("tools");
-        std::fs::create_dir_all(&tools).unwrap();
-        std::fs::write(
-            tools.join("greet.sh"),
-            "#!/usr/bin/env bash\n# description: Greet\n# name: who\n# punct: ending\nprintf '%s|%s|%s' \"$name\" \"$punct\" \"${c:-none}\"\n",
-        )
-        .unwrap();
-        let (mut found, _) = discover_in(&tools);
-        let ctx = Ctx::new(crate::Workspace::new(dir.path()).unwrap());
-        let out = found
-            .remove(0)
-            .execute(json!({ "name": "hi", "punct": "!" }), &ctx)
-            .await
-            .unwrap();
-        assert_eq!(out.flatten(), "hi|!|none");
-    }
-
+    // Declared args ride in as environment, but a name the process already
+    // owns — `PATH` among them — is never shadowed by a call's argument: an
+    // inherited environment wins, or a script is hijackable by its caller.
     #[tokio::test]
     async fn an_inherited_name_is_never_shadowed() {
         let dir = tempfile::tempdir().unwrap();

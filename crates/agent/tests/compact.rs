@@ -87,82 +87,94 @@ fn a_transcript_under_budget_is_left_alone() {
     assert_eq!(r.before, r.after);
 }
 
+// Which results may stand in for which: a later read of the same path
+// supersedes the older one — offset and limit sit outside the key — while
+// reads of different files and edits, which record that something happened,
+// never supersede anything.
 #[test]
-fn an_older_read_of_the_same_path_is_superseded_and_the_newest_survives() {
-    let mut m = vec![
-        Message::user("go"),
-        call("c1", "read", json!({ "path": "a.rs" })),
-        result("c1", "read", &big(9_000)),
-        call("c2", "read", json!({ "path": "a.rs" })),
-        result("c2", "read", &big(9_000)),
-    ];
-    // Between the two sizes: superseding one read is enough — a superseded
-    // result is dead weight and keeps only its notice — and the drop tier,
-    // which would move every index, is never reached.
-    let r = compact(&mut m, 4_000, &Policy::default());
-
-    assert_eq!(r.superseded, 1);
-    assert_eq!(r.dropped, 0, "{r:?}");
-    assert!(
-        body_of(&m[2]).contains("superseded by a later read"),
-        "{}",
-        body_of(&m[2])
-    );
-    assert!(
-        body_of(&m[4]).starts_with("xxx"),
-        "the newest read must survive"
-    );
-    assert_balanced(&m);
-}
-
-#[test]
-fn a_ranged_read_is_superseded_by_a_later_read_of_the_same_file() {
-    let mut m = vec![
-        Message::user("go"),
-        call(
-            "c1",
-            "read",
-            json!({ "path": "a.rs", "offset": 10, "limit": 5 }),
+fn supersession_takes_only_a_later_read_of_the_same_file() {
+    let rows: &[(&str, Vec<Message>, usize, usize)] = &[
+        (
+            "a later read of the same path",
+            vec![
+                Message::user("go"),
+                call("c1", "read", json!({ "path": "a.rs" })),
+                result("c1", "read", &big(9_000)),
+                call("c2", "read", json!({ "path": "a.rs" })),
+                result("c2", "read", &big(9_000)),
+            ],
+            4_000,
+            1,
         ),
-        result("c1", "read", &big(9_000)),
-        call("c2", "read", json!({ "path": "a.rs" })),
-        result("c2", "read", &big(9_000)),
-    ];
-    // Offset and limit are deliberately outside the key.
-    assert_eq!(compact(&mut m, 4_000, &Policy::default()).superseded, 1);
-}
-
-#[test]
-fn reads_of_different_files_never_supersede_each_other() {
-    let mut m = vec![
-        Message::user("go"),
-        call("c1", "read", json!({ "path": "a.rs" })),
-        result("c1", "read", &big(9_000)),
-        call("c2", "read", json!({ "path": "b.rs" })),
-        result("c2", "read", &big(9_000)),
-    ];
-    assert_eq!(compact(&mut m, 100_000, &Policy::default()).superseded, 0);
-}
-
-#[test]
-fn an_edit_result_is_never_superseded_by_a_later_edit() {
-    let mut m = vec![
-        Message::user("go"),
-        call(
-            "c1",
-            "edit",
-            json!({ "path": "a.rs", "edits": [{ "old_string": "one", "new_string": "two" }] }),
+        (
+            "offset and limit sit outside the key",
+            vec![
+                Message::user("go"),
+                call(
+                    "c1",
+                    "read",
+                    json!({ "path": "a.rs", "offset": 10, "limit": 5 }),
+                ),
+                result("c1", "read", &big(9_000)),
+                call("c2", "read", json!({ "path": "a.rs" })),
+                result("c2", "read", &big(9_000)),
+            ],
+            4_000,
+            1,
         ),
-        result("c1", "edit", &big(9_000)),
-        call(
-            "c2",
-            "edit",
-            json!({ "path": "a.rs", "edits": [{ "old_string": "three", "new_string": "four" }] }),
+        (
+            "reads of different files",
+            vec![
+                Message::user("go"),
+                call("c1", "read", json!({ "path": "a.rs" })),
+                result("c1", "read", &big(9_000)),
+                call("c2", "read", json!({ "path": "b.rs" })),
+                result("c2", "read", &big(9_000)),
+            ],
+            100_000,
+            0,
         ),
-        result("c2", "edit", &big(9_000)),
+        (
+            "a later edit of the same file",
+            vec![
+                Message::user("go"),
+                call(
+                    "c1",
+                    "edit",
+                    json!({ "path": "a.rs", "edits": [{ "old_string": "one", "new_string": "two" }] }),
+                ),
+                result("c1", "edit", &big(9_000)),
+                call(
+                    "c2",
+                    "edit",
+                    json!({ "path": "a.rs", "edits": [{ "old_string": "three", "new_string": "four" }] }),
+                ),
+                result("c2", "edit", &big(9_000)),
+            ],
+            4_000,
+            0,
+        ),
     ];
-    // An edit records something that happened; later edits do not unmake it.
-    assert_eq!(compact(&mut m, 4_000, &Policy::default()).superseded, 0);
+    for (what, m, budget, want) in rows {
+        let mut m = m.clone();
+        let r = compact(&mut m, *budget, &Policy::default());
+        assert_eq!(r.superseded, *want, "{what}: {r:?}");
+        if *want == 1 {
+            // The notice replaces the dead weight and the newest read survives.
+            assert_eq!(r.dropped, 0, "{what}: {r:?}");
+            assert!(
+                body_of(&m[2]).contains("superseded by a later read"),
+                "{what}: {}",
+                body_of(&m[2])
+            );
+            assert!(
+                body_of(&m[4]).starts_with("xxx"),
+                "{what}: the newest read must survive: {}",
+                body_of(&m[4])
+            );
+        }
+        assert_balanced(&m);
+    }
 }
 
 #[test]
@@ -209,89 +221,58 @@ fn the_working_tail_survives_while_older_results_age_out() {
     assert_balanced(&m);
 }
 
+// The aging rung keeps a distinctive head and tail and omits the middle; a
+// result too small to be worth pruning, or whose ends alone cannot fit, is
+// left as the notice alone.
 #[test]
-fn an_aged_out_result_keeps_its_head_and_tail() {
-    let mut m = vec![
-        Message::user("go"),
-        call("c1", "bash", json!({ "command": "cmd" })),
-        // The shape of a test run: a distinctive head, a long boring middle,
-        // and the failure summary at the tail.
-        result(
-            "c1",
-            "bash",
-            &format!("HEAD-BEGIN\n{}\nTAIL-END", big(30_000)),
+fn an_aged_out_result_keeps_its_ends_or_lowers_to_the_notice() {
+    let rows: &[(&str, String, usize, bool)] = &[
+        (
+            "a distinctive head and tail survive",
+            format!("HEAD-BEGIN\n{}\nTAIL-END", big(30_000)),
+            2_000,
+            true,
         ),
+        ("a result under the prune threshold", big(200), 100, false),
+        ("ends too big for the window", big(30_000), 500, false),
     ];
-    let r = compact(
-        &mut m,
-        2_000,
-        &Policy {
-            protect_tail: 0,
-            ..Policy::default()
-        },
-    );
-
-    assert_eq!(r.aged_out, 1, "{r:?}");
-    let body = body_of(&m[2]);
-    assert!(body.starts_with("[omitted"), "{}", body);
-    assert!(body.contains("HEAD-BEGIN"), "{body}");
-    assert!(body.contains("TAIL-END"), "{body}");
-    assert!(body.contains("chars omitted"), "{body}");
-    assert_balanced(&m);
+    for (what, body, budget, keeps_ends) in rows {
+        let mut m = vec![
+            Message::user("go"),
+            call("c1", "bash", json!({ "command": "cmd" })),
+            result("c1", "bash", body),
+        ];
+        let r = compact(
+            &mut m,
+            *budget,
+            &Policy {
+                protect_tail: 0,
+                ..Policy::default()
+            },
+        );
+        assert_eq!(r.aged_out, 1, "{what}: {r:?}");
+        let notice = body_of(&m[2]);
+        if *keeps_ends {
+            assert!(notice.starts_with("[omitted"), "{what}: {notice}");
+            assert!(notice.contains("HEAD-BEGIN"), "{what}: {notice}");
+            assert!(notice.contains("TAIL-END"), "{what}: {notice}");
+            assert!(notice.contains("chars omitted"), "{what}: {notice}");
+        } else {
+            assert_eq!(
+                notice, "[omitted to fit the context window]",
+                "{what}: {notice}"
+            );
+        }
+        assert_balanced(&m);
+    }
 }
 
+// Instructions the agent is in the middle of following are not spare context,
+// whatever the budget says: every rung refuses the skill exchange and takes
+// what surrounds it instead.
 #[test]
-fn a_result_under_the_prune_threshold_keeps_only_the_notice() {
-    let mut m = vec![
-        Message::user("go"),
-        call("c1", "bash", json!({ "command": "cmd" })),
-        result("c1", "bash", &big(200)),
-    ];
-    let r = compact(
-        &mut m,
-        100,
-        &Policy {
-            protect_tail: 0,
-            ..Policy::default()
-        },
-    );
-
-    assert_eq!(r.aged_out, 1, "{r:?}");
-    let body = body_of(&m[2]);
-    assert_eq!(body, "[omitted to fit the context window]", "{body}");
-    assert_balanced(&m);
-}
-
-#[test]
-fn a_head_and_tail_too_big_for_the_window_lowers_to_the_notice() {
-    let mut m = vec![
-        Message::user("go"),
-        call("c1", "bash", json!({ "command": "cmd" })),
-        result("c1", "bash", &big(30_000)),
-    ];
-    // Budget below what even a pruned result costs: the last rung drops the
-    // kept ends, leaving the notice alone.
-    let r = compact(
-        &mut m,
-        500,
-        &Policy {
-            protect_tail: 0,
-            ..Policy::default()
-        },
-    );
-
-    assert_eq!(r.aged_out, 1, "{r:?}");
-    assert_eq!(
-        body_of(&m[2]),
-        "[omitted to fit the context window]",
-        "{}",
-        body_of(&m[2])
-    );
-    assert_balanced(&m);
-}
-
-#[test]
-fn the_drop_tier_spares_a_skill_exchange() {
+fn a_skill_exchange_survives_whatever_tier_takes_the_rest() {
+    // The drop tier passes the skill by and takes the bash exchange instead.
     let mut m = vec![
         Message::user("go"),
         call("c1", "skill", json!({ "name": "commit" })),
@@ -307,10 +288,36 @@ fn the_drop_tier_spares_a_skill_exchange() {
             ..Policy::default()
         },
     );
-
-    // The skill body is instructions being followed: omission refuses it, and
-    // so does the drop tier, which takes the bash exchange instead.
     assert!(r.dropped > 0, "{r:?}");
+    assert!(
+        body_of(&m[2]).starts_with("xxx"),
+        "the skill body must survive: {}",
+        body_of(&m[2])
+    );
+    assert_balanced(&m);
+
+    // The omission rungs take the two reads and still refuse the skill.
+    let mut m = vec![
+        Message::user("go"),
+        call("c1", "skill", json!({ "name": "commit" })),
+        result("c1", "skill", &big(9_000)),
+        call("c2", "read", json!({ "path": "a.rs" })),
+        result("c2", "read", &big(9_000)),
+        call("c3", "read", json!({ "path": "a.rs" })),
+        result("c3", "read", &big(9_000)),
+    ];
+    let r = compact(
+        &mut m,
+        4_000,
+        &Policy {
+            protect_tail: 0,
+            ..Policy::default()
+        },
+    );
+    assert!(
+        r.superseded + r.aged_out > 0,
+        "everything else was still reclaimed: {r:?}"
+    );
     assert!(
         body_of(&m[2]).starts_with("xxx"),
         "the skill body must survive: {}",
@@ -635,16 +642,16 @@ mod budget {
         Agent::new(Arc::new(Never), spec)
     }
 
+    // The budget reserves room for output, but a reservation larger than the
+    // window itself would leave the transcript nothing, so it is capped; a
+    // normal window leaves most of itself to the transcript.
     #[test]
-    fn an_output_cap_larger_than_the_window_never_starves_the_transcript() {
+    fn the_budget_never_starves_the_transcript() {
         // 20k window against a spec declaring 64k of output: reserving it
         // verbatim would leave the transcript zero and compact every turn.
         let a = agent_with(20_000, 64_000);
         assert!(a.budget() >= 5_000, "{}", a.budget());
-    }
 
-    #[test]
-    fn a_normal_window_leaves_most_of_itself_to_the_transcript() {
         let a = agent_with(200_000, 32_000);
         let b = a.budget();
         assert!(b > 120_000 && b < 200_000, "{b}");
@@ -690,15 +697,10 @@ mod budget {
         );
     }
 
+    // Nothing over budget, nothing to do: `plan` records a compaction that
+    // changed nothing, and `compact_now` declines outright.
     #[tokio::test]
-    async fn a_short_transcript_has_nothing_to_compact() {
-        let a = agent_with(200_000, 32_000);
-        let mut s = Session::with_prompt("hello");
-        assert!(a.compact_now(&mut s, None).await.is_none());
-    }
-
-    #[test]
-    fn a_healthy_transcript_is_under_budget_and_stays_untouched() {
+    async fn a_healthy_transcript_has_nothing_to_compact() {
         let a = agent_with(200_000, 32_000);
         let s = Session::with_prompt("hello");
         let (record, r) = agent::compact::plan(&s, &a.spec, a.budget(), &agent::Policy::default());
@@ -711,44 +713,11 @@ mod budget {
                 ..Default::default()
             }
         );
+
+        let mut s = Session::with_prompt("hello");
+        assert!(a.compact_now(&mut s, None).await.is_none());
     }
 }
-
-#[test]
-fn a_skill_body_survives_a_compaction_that_takes_everything_else() {
-    let mut m = vec![
-        Message::user("go"),
-        call("c1", "skill", json!({ "name": "commit" })),
-        result("c1", "skill", &big(9_000)),
-        call("c2", "read", json!({ "path": "a.rs" })),
-        result("c2", "read", &big(9_000)),
-        call("c3", "read", json!({ "path": "a.rs" })),
-        result("c3", "read", &big(9_000)),
-    ];
-    let r = compact(
-        &mut m,
-        4_000,
-        &Policy {
-            protect_tail: 0,
-            ..Policy::default()
-        },
-    );
-
-    // Instructions the agent is in the middle of following are not spare
-    // context, whatever the budget says.
-    assert!(
-        body_of(&m[2]).starts_with("xxx"),
-        "the skill body must survive: {}",
-        body_of(&m[2])
-    );
-    assert!(
-        r.superseded + r.aged_out > 0,
-        "everything else was still reclaimed: {r:?}"
-    );
-}
-
-// The planner counts `MESSAGE_OVERHEAD` per entry and the sender counts it per
-// message. Those were two different numbers while the view merged a turn's
 // user entries: six parallel results cost the planner six framings and the
 // sender one, so compaction planned against a budget the request never spent.
 // One entry, one message closes it — and this is what keeps it closed.
@@ -875,9 +844,11 @@ fn a_bang_command_can_be_shrunk_where_a_question_cannot() {
 // answer is gone, paid for on every turn from here on.
 //
 // One prompt may stand unanswered, and only one: the opening task, which is
-// kept on purpose.
+// kept on purpose. Whatever the rounds weigh — prose and tool work, or bare
+// text — they fall whole.
 #[test]
 fn dropping_leaves_no_question_without_its_answer() {
+    // Tool-bearing rounds, cut by the default tail guard.
     let mut s = Session::new();
     s.prompt("the original task");
     for i in 0..7 {
@@ -898,45 +869,24 @@ fn dropping_leaves_no_question_without_its_answer() {
     s.push_assistant(vec![AssistantContent::Text(brain::message::Text {
         text: "last".into(),
     })]);
-
-    let policy = Policy {
-        protect_tail: 0,
-        ..Policy::default()
-    };
     let budget = estimate::tokens(&s.context(), &spec()) / 6;
-    let (record, report) = plan(&s, &spec(), budget, &policy);
-    s.record(record);
+    let (record, report) = plan(
+        &s,
+        &spec(),
+        budget,
+        &Policy {
+            protect_tail: 0,
+            ..Policy::default()
+        },
+    );
     assert!(
         report.dropped > 0,
         "nothing was dropped, so nothing is proven: {report:?}"
     );
+    s.record(record);
+    let tool_rounds = s.context();
 
-    let view = s.context();
-    assert_balanced(&view);
-    let typed = |m: &Message| {
-        matches!(m, Message::User { content }
-            if content.iter().any(|c| matches!(c, UserContent::Text(_))))
-    };
-    for i in 1..view.len().saturating_sub(1) {
-        assert!(
-            !(typed(&view[i]) && typed(&view[i + 1])),
-            "`{}` was left with no answer after it:\n{}",
-            view[i].text(),
-            view.iter()
-                .map(|m| format!("  {:.60}", m.text()))
-                .collect::<Vec<_>>()
-                .join("\n")
-        );
-    }
-    assert_eq!(view[0].text(), "the original task", "the task itself stays");
-}
-
-// The drop tier's unit is a round — a prompt and everything that answered it
-// (compact.rs's `droppable`). So whatever falls, falls as whole rounds: a
-// question that survives still has an answer after it, and the transcript
-// never ends on a bare question with nothing answering it.
-#[test]
-fn a_dropped_history_never_leaves_a_question_without_an_answer() {
+    // Text-only rounds, under a tiny tail guard: the same unit, lighter data.
     let mut s = Session::new();
     s.prompt("the task");
     for i in 0..8 {
@@ -948,36 +898,45 @@ fn a_dropped_history_never_leaves_a_question_without_an_answer() {
     s.push_assistant(vec![AssistantContent::Text(brain::message::Text {
         text: "last".into(),
     })]);
-
     let budget = estimate::tokens(&s.context(), &spec()) / 3;
-    // A tiny tail guard: under the default one nothing here is ever droppable,
-    // and the loop below would hold vacuously — it needs drops to have happened.
-    let policy = Policy {
-        protect_tail: 8,
-        ..Default::default()
-    };
-    let (record, report) = plan(&s, &spec(), budget, &policy);
+    let (record, report) = plan(
+        &s,
+        &spec(),
+        budget,
+        &Policy {
+            protect_tail: 8,
+            ..Default::default()
+        },
+    );
     assert!(report.dropped > 0, "the setup must actually drop something");
     s.record(record);
 
-    let left: String = s
-        .context()
-        .iter()
-        .map(|m| m.text())
-        .collect::<Vec<_>>()
-        .join("\n");
-    for i in 0..8 {
-        let q = format!("question {i}");
-        if let Some(at) = left.find(&q) {
+    let typed = |m: &Message| {
+        matches!(m, Message::User { content }
+            if content.iter().any(|c| matches!(c, UserContent::Text(_))))
+    };
+    for (label, view) in [
+        ("tool rounds", tool_rounds.clone()),
+        ("text rounds", s.context()),
+    ] {
+        assert_balanced(&view);
+        // No question stands with nothing answering it: two user turns in a
+        // row is a question whose answer was taken and whose asking stayed.
+        for i in 1..view.len().saturating_sub(1) {
             assert!(
-                !left[at + q.len()..].trim().is_empty(),
-                "`{q}` was left standing with no answer after it — a question \
-                 is not the answer's spare context"
+                !(typed(&view[i]) && typed(&view[i + 1])),
+                "{label}: `{}` was left with no answer after it",
+                view[i].text()
             );
         }
     }
+    assert_eq!(
+        tool_rounds[0].text(),
+        "the original task",
+        "the task itself stays"
+    );
     assert!(
-        left.contains("the task"),
+        s.context().iter().any(|m| m.text().contains("the task")),
         "the opening task is round zero's head and stays"
     );
 }

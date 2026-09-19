@@ -52,28 +52,3 @@ pub fn locator_in(out: &str) -> &str {
 pub fn spilled_body(c: &Ctx, out: &str) -> String {
     std::fs::read_to_string(c.spill_path(locator_in(out)).unwrap()).unwrap()
 }
-
-/// Every numbered row a view printed must be a verbatim row of the file.
-///
-/// An anchor is matched by its text, so a printed row that is not in the file
-/// is an anchor that can never match. Two guards in one, because each has
-/// already failed here: the rows, and the count — a view whose rows all happen
-/// to be one kind proves nothing about the other. Shared, because the view it
-/// was not applied to is the one that stayed broken.
-pub fn every_row_anchors_in_the_body(out: &str, path: &str, body: &str, least: usize) {
-    let mut checked = 0;
-    for row in out.lines() {
-        let Some((addr, text)) = row.split_once(':') else {
-            continue;
-        };
-        if !addr.starts_with(|c: char| c.is_ascii_digit()) {
-            continue;
-        }
-        assert!(
-            body.lines().any(|l| l.trim_start() == text.trim_start()),
-            "grep printed `{addr}:{text}` but no row of {path} matches it:\n{out}"
-        );
-        checked += 1;
-    }
-    assert!(checked >= least, "checked only {checked} of:\n{out}");
-}

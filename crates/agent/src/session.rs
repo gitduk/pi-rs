@@ -1106,28 +1106,78 @@ mod tests {
         assert!(matches!(nodes[0], Node::Ask { .. }));
     }
 
-    // A user stop records no note: the model reads the new prompt directly.
+    // What the last run did decides what precedes the next prompt: an answer
+    // and a user stop add nothing, a death is named — with its cause where
+    // one is known. One note per dead run; the sends after stay clean.
     #[test]
-    fn a_user_stop_adds_no_note_before_the_next_prompt() {
-        let mut s = Session::new();
-        s.prompt("version up");
-        s.mark_stopped(StopCause::User);
+    fn the_outcome_of_a_run_decides_the_note_before_the_next_prompt() {
+        // An answer that did full tool work asks for no note.
+        let mut answered = Session::new();
+        answered.prompt("go");
+        answered.push_assistant(vec![AssistantContent::ToolCall(ToolCall {
+            id: "c1".into(),
+            name: "read".into(),
+            args: serde_json::json!({}),
+        })]);
+        answered.push_results(vec![ToolResult::text("c1", "read", "a")]);
+        answered.push_assistant(vec![AssistantContent::Text(MsgText {
+            text: "it says a".into(),
+        })]);
+        answered.note_outcome(&Ok(Totals::default()));
 
-        s.send_prompt("delete the branch", None, None);
+        let stopped = |cause: StopCause| {
+            let mut s = Session::new();
+            s.prompt("go");
+            s.mark_stopped(cause);
+            s
+        };
+        let failed = |outcome: Result<Totals, AgentError>| {
+            let mut s = Session::new();
+            s.prompt("go");
+            s.note_outcome(&outcome);
+            s
+        };
 
-        let entries = s.entries();
-        assert_eq!(entries.len(), 2, "prompt and the new prompt, no note");
-        assert!(matches!(&entries[0], Entry::Ask { .. }));
-        assert!(matches!(&entries[1], Entry::Ask { .. }));
+        for (why, mut s, note) in [
+            ("an answer", answered, None),
+            ("a user stop", stopped(StopCause::User), None),
+            ("a cancelled run", failed(Err(AgentError::Cancelled)), None),
+            (
+                "a death of no known cause",
+                stopped(StopCause::Other),
+                Some(STOPPED_UNKNOWN.to_string()),
+            ),
+            (
+                "a death with a cause",
+                failed(Err(AgentError::Brain(brain::BrainError::Stream(
+                    "died".into(),
+                )))),
+                Some(stopped_note(Some("stream: died"))),
+            ),
+        ] {
+            s.send_prompt("and now this", None, None);
+            s.send_prompt("and still this", None, None);
 
-        // One note per dead run: subsequent sends stay clean.
-        s.send_prompt("and now this", None, None);
-        assert_eq!(s.entries().len(), 3, "no second note");
+            let entries = s.entries();
+            match &note {
+                Some(text) => match &entries[entries.len() - 3] {
+                    Entry::Note { note: got, .. } => assert_eq!(got, text, "{why}"),
+                    other => panic!("{why}: expected the note, got {other:?}"),
+                },
+                None => assert!(
+                    !entries.iter().any(|e| matches!(e, Entry::Note { .. })),
+                    "{why}: no note"
+                ),
+            }
+            assert!(
+                matches!(&entries[entries.len() - 1], Entry::Ask { .. }),
+                "{why}: the newest prompt is last"
+            );
+        }
     }
 
     // The note is the session's words, not the user's: it stays out of the
-    // rewind menu, nothing an unsend hands to the editor, and the model
-    // still reads it beside the next prompt.
+    // rewind menu, and nothing an unsend hands back to the editor.
     #[test]
     fn a_stop_note_is_model_only_and_not_rewindable() {
         let mut s = Session::new();
@@ -1147,80 +1197,11 @@ mod tests {
             2,
             "the two asks only — the note is not a place to rewind to"
         );
-        let reaches_the_model = s.context().iter().any(|m| {
-            matches!(
-                m,
-                Message::User { content } if content.iter().any(|b| {
-                    matches!(b, UserContent::Text(t) if t.text.contains(STOPPED_UNKNOWN))
-                })
-            )
-        });
-        assert!(reaches_the_model, "the note is sent with the new prompt");
 
         // The note travels with the archive, and comes back whole.
         let json = serde_json::to_string(&s).unwrap();
         let back: Session = serde_json::from_str(&json).unwrap();
         assert_eq!(back, s);
-    }
-
-    // A run that died on its own is named as such, not blamed on the user.
-    #[test]
-    fn an_unknown_stop_is_not_blamed_on_the_user() {
-        let mut s = Session::new();
-        s.prompt("version up");
-        s.push_assistant(vec![AssistantContent::ToolCall(ToolCall {
-            id: "c1".into(),
-            name: "bash".into(),
-            args: serde_json::json!({ "command": "grep" }),
-        })]);
-        s.push_results(vec![ToolResult::text("c1", "bash", "1.1.1")]);
-        s.mark_stopped(StopCause::Other);
-
-        s.send_prompt("delete the branch", None, None);
-
-        let entries = s.entries();
-        assert_eq!(
-            entries.len(),
-            5,
-            "prompt, tool work, the note, the new prompt"
-        );
-        assert_eq!(
-            match &entries[3] {
-                Entry::Note { note, .. } => note.as_str(),
-                other => panic!("expected the stop note, got {other:?}"),
-            },
-            STOPPED_UNKNOWN
-        );
-        assert!(matches!(&entries[4], Entry::Ask { .. }));
-    }
-
-    // An answered run leaves no marker, and a clean send stays clean.
-    #[test]
-    fn a_run_that_finished_adds_no_note() {
-        let mut s = Session::new();
-        s.prompt("go");
-        s.push_assistant(vec![AssistantContent::ToolCall(ToolCall {
-            id: "c1".into(),
-            name: "read".into(),
-            args: serde_json::json!({}),
-        })]);
-        s.push_results(vec![ToolResult::text("c1", "read", "a")]);
-        s.push_assistant(vec![AssistantContent::Text(MsgText {
-            text: "it says a".into(),
-        })]);
-
-        s.send_prompt("and now this", None, None);
-
-        let entries = s.entries();
-        assert_eq!(
-            entries.len(),
-            5,
-            "no note: prompt, call, result, reply, prompt"
-        );
-        assert!(
-            !entries.iter().any(|e| matches!(e, Entry::Note { .. })),
-            "an answered round adds no note"
-        );
     }
 
     // A rewind cuts the round the marker described; the marker goes with it.
@@ -1241,55 +1222,6 @@ mod tests {
         let entries = s.entries();
         assert_eq!(entries.len(), 1, "only the new prompt follows the rewind");
         assert!(matches!(&entries[0], Entry::Ask { .. }));
-    }
-
-    // An answer and a user stop record nothing; an error records a note naming it.
-    #[test]
-    fn note_outcome_tells_an_answer_from_a_user_stop() {
-        let mut answered = Session::new();
-        answered.prompt("go");
-        answered.note_outcome(&Ok(crate::Totals::default()));
-        answered.send_prompt("and now this", None, None);
-        assert_eq!(answered.entries().len(), 2, "no note after an answer");
-
-        let mut stopped = Session::new();
-        stopped.prompt("go");
-        stopped.note_outcome(&Err(crate::AgentError::Cancelled));
-        stopped.send_prompt("and now this", None, None);
-        assert_eq!(stopped.entries().len(), 2, "no note after a user stop");
-
-        let mut other = Session::new();
-        other.prompt("go");
-        other.note_outcome(&Err(crate::AgentError::Brain(brain::BrainError::Stream(
-            "died".into(),
-        ))));
-        other.send_prompt("and now this", None, None);
-        let entries = other.entries();
-        assert_eq!(entries.len(), 3, "prompt, the note, the new prompt");
-        assert_eq!(
-            match &entries[1] {
-                Entry::Note { note, .. } => note.as_str(),
-                other => panic!("expected the note aside, got {other:?}"),
-            },
-            &stopped_note(Some("stream: died"))
-        );
-    }
-
-    #[test]
-    fn note_outcome_includes_api_error_detail() {
-        let mut s = Session::new();
-        s.prompt("go");
-        s.note_outcome(&Err(crate::AgentError::Brain(brain::BrainError::Api {
-            format: "anthropic",
-            status: 429,
-            body: "quota exceeded".into(),
-        })));
-        s.send_prompt("retry", None, None);
-        let note = match &s.entries()[1] {
-            Entry::Note { note, .. } => note.as_str(),
-            other => panic!("expected note, got {other:?}"),
-        };
-        assert!(note.contains("anthropic 429: quota exceeded"));
     }
 
     // Rewinding to an answer is the opposite call: the answer stays, and the

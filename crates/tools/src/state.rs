@@ -84,12 +84,13 @@ pub fn key_of(path: &Path) -> String {
         })
         .collect()
 }
-
 #[cfg(test)]
 mod tests {
-    use super::{dir, file_stem, key_of};
+    use super::{file_stem, key_of};
     use std::path::Path;
 
+    // The whole point of encoding the slash: paths that differ only in where
+    // their separators sit must not land in one bucket.
     #[test]
     fn a_workspace_key_is_its_slash_path_with_separators_dashed() {
         assert_eq!(
@@ -98,39 +99,19 @@ mod tests {
         );
         assert_eq!(key_of(Path::new("/")), "%2F");
         assert_eq!(key_of(Path::new(".")), "-");
-        // The whole point of encoding the slash: paths that differ only in
-        // where their separators sit must not land in one bucket.
         assert_ne!(
             key_of(Path::new("/home/u/pi-rs")),
             key_of(Path::new("/home/u/pi/rs"))
         );
     }
 
-    #[test]
-    fn a_real_id_is_its_own_stem() {
-        assert_eq!(file_stem("1787426708-4135307"), "1787426708-4135307");
-    }
-
+    // The stem is the id when it is well formed, and something inert when it
+    // is not: an id can never name a path outside its directory.
     #[test]
     fn an_id_cannot_name_a_path_outside_its_directory() {
+        assert_eq!(file_stem("1787426708-4135307"), "1787426708-4135307");
         assert_eq!(file_stem("../../etc/cron.d/x"), "______etc_cron_d_x");
         assert_eq!(file_stem(".."), "__");
         assert_eq!(file_stem(""), "unnamed");
-    }
-
-    #[test]
-    fn pi_home_replaces_the_default_root() {
-        let prior = std::env::var_os("PI_HOME");
-        unsafe {
-            std::env::set_var("PI_HOME", "/srv/pi");
-        }
-        assert_eq!(
-            dir().map(|d| d.display().to_string()),
-            Some("/srv/pi".into())
-        );
-        match prior {
-            Some(v) => unsafe { std::env::set_var("PI_HOME", v) },
-            None => unsafe { std::env::remove_var("PI_HOME") },
-        }
     }
 }

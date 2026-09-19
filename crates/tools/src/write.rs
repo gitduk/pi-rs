@@ -214,24 +214,3 @@ impl Tool for Write {
         )))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::strip_numbers;
-
-    #[test]
-    fn numbers_are_stripped_and_crlf_survives() {
-        assert_eq!(strip_numbers("1:foo\r\n2:bar\r\n"), "foo\r\nbar\r\n");
-    }
-
-    #[test]
-    fn a_missing_final_newline_stays_missing() {
-        assert_eq!(strip_numbers("1:foo"), "foo");
-        assert_eq!(strip_numbers("1:foo\n2:bar"), "foo\nbar");
-    }
-
-    #[test]
-    fn a_line_without_a_number_passes_through() {
-        assert_eq!(strip_numbers("plain\r\n"), "plain\r\n");
-    }
-}

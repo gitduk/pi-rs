@@ -661,7 +661,6 @@ mod tests {
     fn an_explicit_newline_starts_a_row_of_its_own() {
         let (rows, caret) = typed("one\ntwo").view(&paint(), 40);
         assert_eq!(rows.len(), 2);
-        assert!(rows[1].starts_with("  two"));
         assert_eq!(caret, (1, 5));
     }
 

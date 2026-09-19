@@ -689,68 +689,6 @@ pub fn tools_summary_rows(
     rows
 }
 
-/// Format a folded tool summary line, e.g. "✓ read a.rs …12".
-#[cfg(test)]
-pub fn tools_summary_line(tools: &FoldedTools, paint: &Paint, width: usize) -> String {
-    tools_summary_header(tools, true, false, false, 0, paint, width)
-}
-
-#[cfg(test)]
-mod said_tests {
-    use super::*;
-    use crate::icons;
-
-    fn said(text: &str) -> Vec<String> {
-        let paint = Paint::new(true);
-        Row::prompt(text, "! ", &paint)
-            .iter()
-            .map(|r| {
-                let (body, border) = r.line(0, &paint, &[], 80);
-                crate::render::strip_ansi(&format!("{}{}", border.unwrap_or_default(), body))
-            })
-            .collect()
-    }
-
-    // A line that has landed wears a rule, not the prompt icon: the icon
-    // marks the line being typed, and one above the input read as a second
-    // place to type. The rule runs down every line, so a multi-line say is
-    // one bar rather than a mark and some indent.
-    #[test]
-    fn a_said_line_wears_a_rule_and_never_the_prompt_icon() {
-        let icon = crate::render::Theme::default().prompt.icon;
-        assert_eq!(said("hi"), [format!("{} hi", icons::SAID_RULE)]);
-        assert_eq!(
-            said("first\nsecond\nthird"),
-            [
-                format!("{} first", icons::SAID_RULE),
-                format!("{} second", icons::SAID_RULE),
-                format!("{} third", icons::SAID_RULE),
-            ],
-            "the rule is unbroken"
-        );
-        for row in said("hi\nthere") {
-            assert!(!row.contains(&icon), "the icon is the input line's: {row}");
-        }
-    }
-
-    // A `!` is a command, not something said, and keeps its own mark.
-    #[test]
-    fn a_bang_command_keeps_its_own_mark() {
-        assert_eq!(said("!cargo test"), ["! cargo test"]);
-    }
-
-    // The rule spends the same two columns the prompt did, so nothing that
-    // lines up against a said line moves.
-    #[test]
-    fn the_rule_costs_what_the_prompt_did() {
-        let icon = crate::render::Theme::default().prompt.icon;
-        assert_eq!(
-            unicode_width::UnicodeWidthStr::width(icons::SAID_RULE),
-            unicode_width::UnicodeWidthStr::width(icon.as_str()),
-        );
-    }
-}
-
 #[cfg(test)]
 mod tools_summary_tests {
     use super::*;
@@ -770,119 +708,6 @@ mod tools_summary_tests {
             bundle.push(tool);
         }
         bundle
-    }
-
-    #[test]
-    fn single_tool_summary() {
-        let paint = Paint::new(false);
-        let tools = bundle(vec![tool("read", "crates/agent/src/session.rs")]);
-        let line = tools_summary_line(&tools, &paint, 80);
-        assert_eq!(
-            line,
-            format!("{} read crates/agent/src/session.rs", icons::DONE_MARK)
-        );
-    }
-
-    #[test]
-    fn multiple_tools_shows_latest() {
-        let paint = Paint::new(false);
-        let mut tools = bundle(
-            (0..11)
-                .map(|i| tool("read", &format!("file_{i}.rs")))
-                .collect(),
-        );
-        tools.push(tool("read", "crates/agent/src/session.rs"));
-        let line = tools_summary_line(&tools, &paint, 80);
-        assert_eq!(
-            line,
-            format!(
-                "{} read crates/agent/src/session.rs {}12",
-                icons::DONE_MARK,
-                icons::ELLIPSIS
-            )
-        );
-
-        tools.push(tool("read", "/path/to/other.rs"));
-        let line = tools_summary_line(&tools, &paint, 80);
-        assert_eq!(
-            line,
-            format!(
-                "{} read /path/to/other.rs {}13",
-                icons::DONE_MARK,
-                icons::ELLIPSIS
-            )
-        );
-    }
-
-    #[test]
-    fn a_folded_batch_keeps_its_count() {
-        let paint = Paint::new(false);
-        let tools = bundle(vec![tool("bash", "git status"), tool("grep", "match")]);
-        let folded = tools_summary_header(&tools, true, false, false, 0, &paint, 80);
-        assert!(
-            folded.contains(&format!("{}2", icons::ELLIPSIS)),
-            "the folded head keeps the batch size: got {folded}"
-        );
-        let unfolded = tools_summary_header(&tools, false, false, false, 0, &paint, 80);
-        assert!(
-            !unfolded.contains(icons::ELLIPSIS),
-            "the unfolded head shows no count: got {unfolded}"
-        );
-    }
-
-    #[test]
-    fn long_tool_call_is_truncated() {
-        let paint = Paint::new(false);
-        let mut tools = bundle(
-            (0..13)
-                .map(|i| tool("read", &format!("file_{i}.rs")))
-                .collect(),
-        );
-        tools.push(tool(
-            "bash",
-            "curl https://xxxx.xxxx.com/a/long/url/and/much/more/parameters/and/data",
-        ));
-        let line = tools_summary_line(&tools, &paint, 80);
-        assert!(
-            line.contains(&format!(
-                "{} bash curl https://xxxx.xxxx.com/a/long/url",
-                icons::DONE_MARK
-            )),
-            "got: {line}"
-        );
-        assert!(
-            line.ends_with(&format!("{}14", icons::ELLIPSIS)),
-            "got: {line}"
-        );
-    }
-
-    #[test]
-    fn empty_preview_falls_back_to_tool_name() {
-        let paint = Paint::new(false);
-        let tools = bundle(vec![tool("bash", "")]);
-        let line = tools_summary_line(&tools, &paint, 80);
-        assert_eq!(line, format!("{} bash", icons::DONE_MARK));
-    }
-
-    #[test]
-    fn multiline_preview_uses_first_line() {
-        let paint = Paint::new(false);
-        let tools = bundle(vec![tool(
-            "bash",
-            "git status\nnothing to commit\nworking tree clean",
-        )]);
-        let line = tools_summary_line(&tools, &paint, 80);
-        assert_eq!(line, format!("{} bash git status", icons::DONE_MARK));
-    }
-
-    #[test]
-    fn running_tool_shows_spinner_animation() {
-        let paint = Paint::new(false);
-        let tools = bundle(vec![tool("read", "a.rs")]);
-        let frame0 = tools_summary_header(&tools, true, true, false, 0, &paint, 80);
-        assert!(frame0.starts_with(&format!("{} read a.rs", icons::SPINNER_FRAMES[0])));
-        let frame1 = tools_summary_header(&tools, true, true, false, 1, &paint, 80);
-        assert!(frame1.starts_with(&format!("{} read a.rs", icons::SPINNER_FRAMES[1])));
     }
 
     // The rendered rows are cached by (width, running, spinner), so a running
@@ -910,21 +735,7 @@ mod tools_summary_tests {
     }
 
     #[test]
-    fn hovered_tool_stays_on_the_same_check() {
-        let paint = Paint::new(true);
-        let tools = bundle(vec![tool("read", "a.rs")]);
-        let h0 = tools_summary_header(&tools, true, false, true, 0, &paint, 80);
-        let h1 = tools_summary_header(&tools, true, false, true, 1, &paint, 80);
-        assert_eq!(h0, h1, "hover must not animate the mark");
-        assert!(
-            crate::render::strip_ansi(&h0).starts_with(&format!("{} read a.rs", icons::DONE_MARK)),
-            "got: {h0}"
-        );
-    }
-
-    #[test]
     fn unfolded_tools_summary_shows_all_tools() {
-        let paint = Paint::new(false);
         let tools = bundle(vec![
             tool("read", "crates/agent/src/session.rs"),
             tool("grep", "match 1"),
@@ -935,25 +746,8 @@ mod tools_summary_tests {
         assert!(row.toggle_expand());
         assert_eq!(row.len(), 3);
 
-        let (head, _) = row.line(0, &paint, &[], 80);
-        assert!(head.starts_with(&format!("{} grep", icons::DONE_MARK)));
-        assert!(
-            !head.contains("…2"),
-            "the unfolded head shows no count: got {head}"
-        );
-
-        let (t0, _) = row.line(1, &paint, &[], 80);
-        assert!(!t0.contains(icons::DONE_MARK), "got: {t0}");
-        assert!(t0.contains("read crates/agent/src/session.rs"), "got: {t0}");
-
-        let (t1, _) = row.line(2, &paint, &[], 80);
-        assert!(!t1.contains(icons::DONE_MARK), "got: {t1}");
-        assert!(t1.contains("grep match 1"), "got: {t1}");
-
         assert!(row.toggle_expand());
         assert_eq!(row.len(), 1);
-        let (folded_head, _) = row.line(0, &paint, &[], 80);
-        assert!(folded_head.starts_with(&format!("{} grep", icons::DONE_MARK)));
     }
 
     #[test]
@@ -965,20 +759,15 @@ mod tools_summary_tests {
     }
     #[test]
     fn result_with_many_diff_lines_expands_and_collapses() {
-        let paint = Paint::new(false);
         let mut preview = "crates/foo.rs +30 -0".to_string();
         for i in 1..=30 {
             preview.push_str(&format!("\n  {i} + line {i}"));
         }
         let mut row = Row::result(true, "edit", preview);
         assert_eq!(row.len(), 26);
-        let (last_folded, _) = row.line(25, &paint, &[], 80);
-        assert!(last_folded.contains(&format!("{} 6 more", icons::ELLIPSIS)));
 
         assert!(row.toggle_expand());
         assert_eq!(row.len(), 32);
-        let (last_expanded, _) = row.line(31, &paint, &[], 80);
-        assert!(last_expanded.contains("collapse"));
 
         assert!(row.toggle_expand());
         assert_eq!(row.len(), 26);

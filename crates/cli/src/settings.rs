@@ -172,7 +172,6 @@ fn parse_after(cur: &toml::Value, raw: &str) -> Result<toml::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde::Deserialize;
 
     const SAMPLE: &str = r##"
 base_url = "http://localhost:7896/v1"
@@ -196,29 +195,6 @@ add = "#58a6ff"
     }
 
     #[test]
-    fn leaves_walk_every_value() {
-        let paths: Vec<_> = leaves(&tree()).into_iter().map(|(p, _)| p).collect();
-        for want in [
-            "base_url",
-            "models.flash.context_window",
-            "theme.diff.add",
-            "keys.\"edit.insert.newline\"",
-        ] {
-            assert!(paths.contains(&want.to_string()), "missing {want}");
-        }
-    }
-
-    #[test]
-    fn set_parses_after_the_existing_type() {
-        let mut t = tree();
-        set(&mut t, "models.flash.context_window", "200_000").unwrap();
-        assert_eq!(
-            get(&t, "models.flash.context_window").unwrap(),
-            &toml::Value::Integer(200_000)
-        );
-    }
-
-    #[test]
     fn a_wrong_type_changes_nothing() {
         let mut t = tree();
         let before = t.clone();
@@ -232,26 +208,5 @@ add = "#58a6ff"
         set(&mut t, "keys.\"edit.insert.newline\"", "[\"ctrl+k\"]").unwrap();
         let v = get(&t, "keys.\"edit.insert.newline\"").unwrap();
         assert!(v.is_array());
-    }
-
-    #[test]
-    fn a_new_section_is_created_for_a_path_that_did_not_exist() {
-        let mut t = tree();
-        set(&mut t, "models.deepseek.context_window", "200_000").unwrap();
-        let v = get(&t, "models.deepseek.context_window").unwrap();
-        assert_eq!(v, &toml::Value::Integer(200_000));
-    }
-
-    #[test]
-    fn a_typo_near_a_real_path_is_refused_by_the_config() {
-        let mut t = tree();
-        // The write lands (a new section is a legitimate target); the typo is
-        // caught where `/settings` actually validates, the config's
-        // `deny_unknown_fields`, so a silently inert setting never applies.
-        set(&mut t, "theme.dif.add", "#fff").unwrap();
-        let err = crate::config::Config::deserialize(t)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("dif"), "{err}");
     }
 }

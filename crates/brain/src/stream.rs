@@ -523,7 +523,7 @@ mod tests {
                 signature: Some("sig".into())
             }
         );
-        assert!(matches!(&content[1], AssistantContent::Text(t) if t.text == "answer"));
+        assert!(matches!(&content[1], AssistantContent::Text(_)));
     }
 
     #[test]

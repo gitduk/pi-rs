@@ -85,19 +85,22 @@ mod tests {
             classify(&api(429, "Your credit balance is too low")),
             Fault::Transient
         );
+        assert_eq!(classify(&api(429, "prompt is too long")), Fault::Transient);
     }
 
     #[test]
     fn a_status_outside_the_retry_set_is_not_retried() {
+        for (status, body) in [
+            (400, "Your credit balance is too low"),
+            (400, "tools.0.name: invalid"),
+            (401, "invalid x-api-key"),
+        ] {
+            assert_eq!(classify(&api(status, body)), Fault::Permanent);
+        }
         assert_eq!(
-            classify(&api(400, "Your credit balance is too low")),
+            classify(&BrainError::Config("no key".into())),
             Fault::Permanent
         );
-    }
-
-    #[test]
-    fn a_429_is_retried_even_when_the_body_says_overflow() {
-        assert_eq!(classify(&api(429, "prompt is too long")), Fault::Transient);
     }
 
     #[test]
@@ -117,19 +120,6 @@ mod tests {
     #[test]
     fn overflow_is_recognized_by_status_alone() {
         assert_eq!(classify(&api(413, "no body")), Fault::Overflow);
-    }
-
-    #[test]
-    fn an_ordinary_bad_request_is_not_retried() {
-        assert_eq!(
-            classify(&api(400, "tools.0.name: invalid")),
-            Fault::Permanent
-        );
-        assert_eq!(classify(&api(401, "invalid x-api-key")), Fault::Permanent);
-        assert_eq!(
-            classify(&BrainError::Config("no key".into())),
-            Fault::Permanent
-        );
     }
 
     #[test]

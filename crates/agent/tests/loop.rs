@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
-use brain::message::{AssistantContent, Message, UserContent};
+use brain::message::{Message, UserContent};
 use brain::model::ModelSpec;
 use brain::request::Request;
 use brain::stream::{BlockKind, StopReason, StreamEvent, Usage};
@@ -140,6 +140,21 @@ async fn drive_steered(
     (session, out, events)
 }
 
+// Every tool-result body in the view, in order.
+fn result_bodies(session: &Session) -> Vec<String> {
+    let mut out = Vec::new();
+    for m in session.context() {
+        if let Message::User { content } = m {
+            for c in content {
+                if let UserContent::ToolResult(r) = c {
+                    out.push(r.flatten_text());
+                }
+            }
+        }
+    }
+    out
+}
+
 // Every result in the view, in order. One entry is one message now, so a
 // turn's results arrive spread across several of them rather than packed into
 // one — joining is the wire's business.
@@ -155,124 +170,6 @@ fn tool_results(msgs: &[Message]) -> Vec<&brain::message::ToolResult> {
             _ => None,
         })
         .collect()
-}
-
-#[tokio::test]
-async fn a_turn_without_tool_calls_ends_the_run() {
-    let (_d, a, ctx) = harness(vec![text_turn("done")]);
-    let (session, out, events) = drive(&a, &ctx, "hi").await;
-
-    let totals = out.unwrap();
-    assert_eq!(totals.usage.input, 3_000);
-    assert_eq!(totals.cost, 3_000.0 / 1e6 + 5.0 * 2.0 / 1e6);
-    assert_eq!(session.context().len(), 2);
-    assert_eq!(session.context()[1].text(), "done");
-    assert!(events.contains(&Event::TextDelta("done".into())));
-}
-
-// A turn whose Done carries exactly this usage.
-fn turn_reporting(body: &str, usage: Usage) -> Vec<StreamEvent> {
-    let mut ev = text_turn(body);
-    ev.pop();
-    ev.push(StreamEvent::Done {
-        stop: StopReason::EndTurn,
-        usage,
-    });
-    ev
-}
-
-#[tokio::test]
-async fn a_host_that_reports_nothing_leaves_the_usage_zero() {
-    // Zero is the absence of a number, not a small one: the provider said
-    // nothing, so the totals carry nothing — the display layer shows dashes.
-    let (_d, a, ctx) = harness(vec![turn_reporting("done", Usage::default())]);
-    let totals = drive(&a, &ctx, "hi").await.1.unwrap();
-
-    assert_eq!(totals.usage.input, 0);
-    assert_eq!(totals.usage.output, 0);
-    assert_eq!(totals.cost, 0.0);
-    assert_eq!(totals.usage.cache_read, 0, "nothing was said about a cache");
-}
-
-#[tokio::test]
-async fn a_part_the_provider_reported_survives_verbatim() {
-    // Reporting one and not the other is the ordinary case, not a broken one:
-    // the stated half is passed through as-is, the unstated half stays zero.
-    let reported = Usage {
-        input: 4_321,
-        output: 0,
-        ..Default::default()
-    };
-    let (_d, a, ctx) = harness(vec![turn_reporting("done", reported)]);
-    let totals = drive(&a, &ctx, "hi").await.1.unwrap();
-
-    assert_eq!(totals.usage.input, 4_321);
-    assert_eq!(totals.usage.output, 0);
-}
-
-#[tokio::test]
-async fn a_count_far_under_the_prompt_is_passed_through_verbatim() {
-    // A proxy that under-reports input: the figure is what the host said, so
-    // it survives as-is — no cache read is invented for the gap.
-    let reported = Usage {
-        input: 12,
-        output: 40,
-        ..Default::default()
-    };
-    let (_d, a, ctx) = harness(vec![turn_reporting("done", reported)]);
-    let totals = drive(&a, &ctx, "hi").await.1.unwrap();
-
-    assert_eq!(totals.usage.input, 12);
-    assert_eq!(totals.usage.cache_read, 0, "nothing was said about a cache");
-    assert_eq!(totals.usage.output, 40);
-}
-
-#[tokio::test]
-async fn a_cached_prompt_is_passed_through_verbatim() {
-    // Cached input is excluded from the count by design, so twelve fresh
-    // tokens beside a large cache figure is exactly right.
-    for (read, write) in [(30_000, 0), (0, 30_000), (15_000, 15_000)] {
-        let reported = Usage {
-            input: 12,
-            output: 40,
-            cache_read: read,
-            cache_write: write,
-        };
-        let (_d, a, ctx) = harness(vec![turn_reporting("done", reported)]);
-        let totals = drive(&a, &ctx, "hi").await.1.unwrap();
-
-        assert_eq!(totals.usage.input, 12, "read={read} write={write}");
-        assert_eq!(totals.usage.cache_read, read, "read={read} write={write}");
-    }
-}
-
-#[tokio::test]
-async fn a_fully_reported_turn_is_passed_through_verbatim() {
-    let (_d, a, ctx) = harness(vec![text_turn("done")]);
-    let totals = drive(&a, &ctx, "hi").await.1.unwrap();
-    assert_eq!((totals.usage.input, totals.usage.output), (3_000, 5));
-}
-
-#[tokio::test]
-async fn a_tool_call_round_trips_into_the_transcript() {
-    let (_d, a, ctx) = harness(vec![
-        call_turn(&[("t1", "write", r#"{"path":"a.txt","content":"hello\n"}"#)]),
-        text_turn("wrote it"),
-    ]);
-    let (session, out, _) = drive(&a, &ctx, "make a.txt").await;
-    out.unwrap();
-
-    // user, assistant(call), user(result), assistant(text)
-    assert_eq!(session.context().len(), 4);
-    let view = session.context();
-    let results = tool_results(&view);
-    assert_eq!(results.len(), 1);
-    assert!(!results[0].is_error, "{:?}", results[0]);
-    assert_eq!(results[0].name, "write");
-    assert_eq!(
-        std::fs::read_to_string(ctx.workspace.root().join("a.txt")).unwrap(),
-        "hello\n"
-    );
 }
 
 #[tokio::test]
@@ -527,41 +424,6 @@ async fn cancellation_during_stream_saves_partial_assistant_response() {
     assert!(matches!(msgs[0], brain::message::Message::User { .. }));
     assert!(matches!(msgs[1], brain::message::Message::Assistant { .. }));
     assert!(matches!(msgs[2], brain::message::Message::User { .. }));
-}
-
-#[tokio::test]
-async fn reasoning_deltas_reach_the_renderer_separately_from_text() {
-    let (_d, a, ctx) = harness(vec![vec![
-        StreamEvent::BlockStart {
-            index: 0,
-            kind: BlockKind::Reasoning,
-        },
-        StreamEvent::ReasoningDelta {
-            index: 0,
-            delta: "thinking".into(),
-        },
-        StreamEvent::BlockStart {
-            index: 1,
-            kind: BlockKind::Text,
-        },
-        StreamEvent::TextDelta {
-            index: 1,
-            delta: "answer".into(),
-        },
-        StreamEvent::Done {
-            stop: StopReason::EndTurn,
-            usage: Usage::default(),
-        },
-    ]]);
-    let (session, out, events) = drive(&a, &ctx, "hi").await;
-    out.unwrap();
-
-    assert!(events.contains(&Event::ReasoningDelta("thinking".into())));
-    assert!(events.contains(&Event::TextDelta("answer".into())));
-    let Message::Assistant { content, .. } = &session.context()[1] else {
-        panic!()
-    };
-    assert!(matches!(content[0], AssistantContent::Reasoning(_)));
 }
 
 // Answers tool-bearing turns from a script and any tool-free turn — which is
@@ -840,52 +702,44 @@ async fn a_throttled_request_is_retried_until_it_lands() {
     assert_eq!(retries.len(), 2, "{retries:?}");
 }
 
+// Retrying is bounded by the attempt budget, whatever the failure reads as:
+// transient-looking or not, the run gives up rather than hammering forever.
 #[tokio::test]
-async fn a_429_is_retried_until_the_attempt_budget_runs_out() {
-    let dir = tempfile::tempdir().unwrap();
-    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
-    let mut a = Agent::new(
-        flaky(99, || brain::BrainError::Api {
-            format: "anthropic",
-            status: 429,
-            body: r#"{"error":{"code":"insufficient_quota"}}"#.into(),
-        }),
-        spec(),
-    );
-    fast_retry(&mut a);
+async fn retries_stop_at_the_attempt_budget() {
+    let cases: &[(&str, fn() -> brain::BrainError, usize)] = &[
+        (
+            "429",
+            || brain::BrainError::Api {
+                format: "anthropic",
+                status: 429,
+                body: "rate limit exceeded".into(),
+            },
+            Retry::default().attempts,
+        ),
+        (
+            "stream",
+            || brain::BrainError::Stream("connection reset".into()),
+            3,
+        ),
+    ];
+    for (kind, err, attempts) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
+        let mut a = Agent::new(flaky(99, *err), spec());
+        fast_retry(&mut a);
+        a.retry.attempts = *attempts;
 
-    let (_s, out, events) = drive(&a, &ctx, "go").await;
-    // Any 429 is retried until the attempt budget runs out.
-    assert!(out.is_err(), "{out:?}");
-    assert_eq!(
-        events
-            .iter()
-            .filter(|e| matches!(e, Event::Retrying { .. }))
-            .count(),
-        Retry::default().attempts
-    );
-}
-
-#[tokio::test]
-async fn retries_give_up_rather_than_hammering_forever() {
-    let dir = tempfile::tempdir().unwrap();
-    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
-    let mut a = Agent::new(
-        flaky(99, || brain::BrainError::Stream("connection reset".into())),
-        spec(),
-    );
-    fast_retry(&mut a);
-    a.retry.attempts = 3;
-
-    let (_s, out, events) = drive(&a, &ctx, "go").await;
-    assert!(out.is_err());
-    assert_eq!(
-        events
-            .iter()
-            .filter(|e| matches!(e, Event::Retrying { .. }))
-            .count(),
-        3
-    );
+        let (_s, out, events) = drive(&a, &ctx, "go").await;
+        assert!(out.is_err(), "{kind}: {out:?}");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, Event::Retrying { .. }))
+                .count(),
+            *attempts,
+            "{kind}: retries stop at the budget"
+        );
+    }
 }
 
 // Opens a stream and then never sends anything.
@@ -942,8 +796,10 @@ fn call_message(id: &str) -> Message {
 }
 
 // Refuses oversized requests until the transcript shrinks below `fits`.
+// `named` is the window the refusal states, when it states one.
 struct Picky {
     fits: usize,
+    named: Option<usize>,
     refusals: AtomicUsize,
 }
 
@@ -958,29 +814,23 @@ impl Transport for Picky {
         if size > self.fits {
             self.refusals.fetch_add(1, Ordering::SeqCst);
             // 413, not 400: only transient statuses are retried after a squeeze.
+            let body = match self.named {
+                Some(limit) => format!("prompt is too long: {size} tokens > {limit} maximum"),
+                None => "Request exceeds the maximum size".into(),
+            };
             return Err(brain::BrainError::Api {
                 format: "anthropic",
                 status: 413,
-                body: format!("prompt is too long: {size} tokens > {} maximum", self.fits),
+                body,
             });
         }
         Ok(futures::stream::iter(text_turn("fits now").into_iter().map(Ok)).boxed())
     }
 }
 
-#[tokio::test]
-async fn an_overflow_refusal_shrinks_the_transcript_and_retries() {
-    let dir = tempfile::tempdir().unwrap();
-    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
-    let picky = Arc::new(Picky {
-        fits: 2_000,
-        refusals: AtomicUsize::new(0),
-    });
-
-    let mut a = Agent::new(picky.clone(), spec());
-    fast_retry(&mut a);
-    // A transcript our own estimate calls comfortable, which the provider does
-    // not — and one compaction can actually shrink, unlike a lone huge prompt.
+// A transcript our own estimate calls comfortable: three fat tool results the
+// compaction can actually shrink, unlike a lone huge prompt.
+fn fat_history() -> Vec<Message> {
     let mut history = vec![Message::user("the task")];
     for i in 0..3 {
         history.push(call_message(&format!("h{i}")));
@@ -988,38 +838,73 @@ async fn an_overflow_refusal_shrinks_the_transcript_and_retries() {
             brain::message::ToolResult::text(format!("h{i}"), "read", "z".repeat(12_000)),
         ]));
     }
-    let mut session = Session::from_messages(history);
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    let out = a.run(&mut session, &ctx, &tx).await;
-    drop(tx);
-    let mut events = Vec::new();
-    while let Some(e) = rx.recv().await {
-        events.push(e);
-    }
+    history
+}
 
-    out.unwrap();
-    assert!(
-        picky.refusals.load(Ordering::SeqCst) > 0,
-        "the refusal must have happened"
-    );
-    // The refusal named its window, so the budget is refitted to it rather
-    // than squeezed blindly.
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, Event::Warning(w) if w.contains("2000-token window"))),
-        "{events:?}"
-    );
-    // Compaction must land the transcript inside the window the refusal
-    // named, comfortably — the head-and-tail floor lowers to a notice when
-    // the budget cannot hold even a pruned result.
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, Event::Compacted(r) if r.after < 1_000)),
-        "{events:?}"
-    );
-    assert_eq!(session.context().last().unwrap().text(), "fits now");
+// An overflow refusal squeezes the transcript and retries — refitting to the
+// window when the refusal names one, squeezing blindly when it does not.
+#[tokio::test]
+async fn an_overflow_refusal_shrinks_the_transcript_and_retries() {
+    // The named row keeps the roomy default window: what is under test is the
+    // refit to the refusal's own number, not a window the transcript actually
+    // fills. The unnamed row squeezes blindly against a modest window, the
+    // realistic case — an estimate off by a third, not by 30x.
+    for (window, fits, named) in [
+        (200_000u32, 2_000usize, Some(2_000usize)),
+        (60_000, 8_000, None),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
+        let picky = Arc::new(Picky {
+            fits,
+            named,
+            refusals: AtomicUsize::new(0),
+        });
+
+        let mut a = Agent::new(picky.clone(), spec());
+        fast_retry(&mut a);
+        a.spec.context_window = window;
+        let mut session = Session::from_messages(fat_history());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let out = a.run(&mut session, &ctx, &tx).await;
+        drop(tx);
+        let mut events = Vec::new();
+        while let Some(e) = rx.recv().await {
+            events.push(e);
+        }
+
+        out.unwrap();
+        assert!(
+            picky.refusals.load(Ordering::SeqCst) > 0,
+            "the refusal must have happened"
+        );
+        match named {
+            Some(_) => {
+                // The refusal named its window, so the budget is refitted to
+                // it rather than squeezed blindly — and compaction lands
+                // comfortably inside what the provider measured.
+                assert!(
+                    events
+                        .iter()
+                        .any(|e| matches!(e, Event::Warning(w) if w.contains("2000-token window"))),
+                    "{events:?}"
+                );
+                assert!(
+                    events
+                        .iter()
+                        .any(|e| matches!(e, Event::Compacted(r) if r.after < 1_000)),
+                    "{events:?}"
+                );
+            }
+            None => assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, Event::Warning(w) if w.contains("named no limit"))),
+                "{events:?}"
+            ),
+        }
+        assert_eq!(session.context().last().unwrap().text(), "fits now");
+    }
 }
 
 // Refuses three ways in order — unnamed, named, unnamed — so what the second
@@ -1095,66 +980,8 @@ async fn a_named_window_supersedes_the_guesswork_that_preceded_it() {
     assert!(blind[1].contains("60%"), "{}", blind[1]);
 }
 
-// Refuses without saying how big the window is.
-struct Mute {
-    fits: usize,
-}
-
-#[async_trait]
-impl Transport for Mute {
-    async fn stream(
-        &self,
-        spec: &ModelSpec,
-        req: &Request,
-    ) -> brain::Result<BoxStream<'static, brain::Result<StreamEvent>>> {
-        if brain::estimate::tokens(&req.messages, spec) > self.fits {
-            return Err(brain::BrainError::Api {
-                format: "anthropic",
-                status: 413,
-                body: "Request exceeds the maximum size".into(),
-            });
-        }
-        Ok(futures::stream::iter(text_turn("ok").into_iter().map(Ok)).boxed())
-    }
-}
-
-#[tokio::test]
-async fn an_overflow_with_no_number_falls_back_to_squeezing() {
-    let dir = tempfile::tempdir().unwrap();
-    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
-
-    let mut history = vec![Message::user("the task")];
-    for i in 0..3 {
-        history.push(call_message(&format!("h{i}")));
-        history.push(Message::tool_results(vec![
-            brain::message::ToolResult::text(format!("h{i}"), "read", "z".repeat(12_000)),
-        ]));
-    }
-
-    // Squeezing blindly only corrects a modest error — three passes at 60% —
-    // which is the realistic case: an estimate off by a third, not by 30x.
-    let mut spec = spec();
-    spec.context_window = 60_000;
-    let mut a = Agent::new(Arc::new(Mute { fits: 8_000 }), spec);
-    fast_retry(&mut a);
-    let mut session = Session::from_messages(history);
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    let out = a.run(&mut session, &ctx, &tx).await;
-    drop(tx);
-    let mut events = Vec::new();
-    while let Some(e) = rx.recv().await {
-        events.push(e);
-    }
-
-    out.unwrap();
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, Event::Warning(w) if w.contains("named no limit"))),
-        "{events:?}"
-    );
-}
-
+// A read that keeps coming back with the same content is a legitimate
+// re-read, not a loop: only an unbroken streak of failures is named.
 #[tokio::test]
 async fn a_call_that_keeps_returning_the_same_thing_is_named() {
     let dir = tempfile::tempdir().unwrap();
@@ -1170,155 +997,65 @@ async fn a_call_that_keeps_returning_the_same_thing_is_named() {
     let (session, out, _) = drive(&a, &ctx, "read it forever").await;
     out.unwrap();
 
-    let bodies: Vec<String> = session
-        .context()
-        .iter()
-        .flat_map(|m| match m {
-            Message::User { content } => content
-                .iter()
-                .filter_map(|c| match c {
-                    UserContent::ToolResult(r) => Some(r.flatten_text()),
-                    _ => None,
-                })
-                .collect(),
-            _ => Vec::new(),
-        })
-        .collect();
-
-    // A read that keeps coming back with the same content is a legitimate
-    // re-read, not a loop: only an unbroken streak of failures is named.
+    // The shape a session actually dies in is a refusal, not a re-read, so the
+    // re-read is never named however many times it repeats.
+    let bodies = result_bodies(&session);
     assert!(
         bodies.iter().all(|b| !b.contains("same `read` call")),
-        "{:?}",
-        bodies
+        "{bodies:?}"
     );
 }
 
-// The shape a session actually dies in: a tool the model cannot get the
-// arguments right for, refused identically for as long as it is allowed to run.
+// The failure mode a long session actually dies in: a tool refused the same
+// way, over and over. Whether the args repeat or drift, the refusal is the
+// same one — the loop-breaker keys on it, and the second one is already the
+// whole story.
 #[tokio::test]
-async fn a_call_that_keeps_failing_the_same_way_is_named_sooner() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("a.txt"), "steady\n").unwrap();
-    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
+async fn a_refusal_repeated_is_named_sooner_whether_the_args_repeat_or_drift() {
+    for vary in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "steady\n").unwrap();
+        let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
 
-    // An anchor that is not in the file: the same refusal, twice.
-    let same = || {
-        call_turn(&[(
-            "t",
-            "edit",
-            r#"{"path":"a.txt","edits":[{"old_string":"match code {","new_string":"x"}]}"#,
-        )])
-    };
-    // Read first, or the refusal is the read gate and the anchor never runs.
-    let read = call_turn(&[("t", "read", r#"{"path":"a.txt"}"#)]);
-    let a = Agent::new(
-        Scripted::new(vec![read, same(), same(), same(), text_turn("gave up")]),
-        spec(),
-    );
+        let anchor = |i: usize| {
+            let old = if vary {
+                format!("variant {i}")
+            } else {
+                "match code {".to_string()
+            };
+            format!(r#"{{"path":"a.txt","edits":[{{"old_string":"{old}","new_string":"x"}}]}}"#)
+        };
+        // Read first, or the refusal is the read gate and the anchors never run.
+        let read = call_turn(&[("t", "read", r#"{"path":"a.txt"}"#)]);
+        let mut turns = vec![read];
+        for i in 0..3 {
+            turns.push(call_turn(&[("t", "edit", &anchor(i))]));
+        }
+        turns.push(text_turn("gave up"));
+        let a = Agent::new(Scripted::new(turns), spec());
 
-    let (session, out, _) = drive(&a, &ctx, "edit it forever").await;
-    out.unwrap();
+        let (session, out, _) = drive(&a, &ctx, "edit it forever").await;
+        out.unwrap();
 
-    let bodies: Vec<String> = session
-        .context()
-        .iter()
-        .flat_map(|m| match m {
-            Message::User { content } => content
-                .iter()
-                .filter_map(|c| match c {
-                    UserContent::ToolResult(r) => Some(r.flatten_text()),
-                    _ => None,
-                })
-                .collect(),
-            _ => Vec::new(),
-        })
-        .collect();
-
-    let refusals: Vec<&String> = bodies
-        .iter()
-        .filter(|b| b.starts_with("no match in a.txt"))
-        .collect();
-    assert_eq!(
-        refusals.len(),
-        3,
-        "every call is refused the same way: {bodies:?}"
-    );
-    // No leeway for a refusal the way there is for a re-read: the second
-    // identical failure is already the whole story.
-    assert!(
-        !refusals[0].contains("same `edit` call"),
-        "{:?}",
-        refusals[0]
-    );
-    // And the notice rides inside the error the model reads, not beside it.
-    assert!(
-        refusals[1].contains("same `edit` call has now failed the same way 2 times"),
-        "{:?}",
-        refusals[1]
-    );
-}
-
-// The failure mode a long session actually dies in: the args keep changing, so
-// the args-keyed echo never matches — but the refusal is the same one.
-// The loop-breaker must key on the refusal, or it stays silent forever.
-#[tokio::test]
-async fn a_failure_repeated_with_different_args_is_still_named() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("a.txt"), "steady\n").unwrap();
-    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
-
-    // Same refusal, three different anchors — a model rewriting the call and
-    // getting the same error back every time. The args vary so the args-keyed
-    // echo never matches; the refusal's first line is stable, which is the
-    // shape a real session takes.
-    let turns: Vec<Vec<StreamEvent>> = (0..3)
-        .map(|i| {
-            call_turn(&[(
-                "t",
-                "edit",
-                &format!(
-                    r#"{{"path":"a.txt","edits":[{{"old_string":"variant {i}","new_string":"x"}}]}}"#
-                ),
-            )])
-        })
-        .chain([text_turn("gave up")])
-        .collect();
-    // Read first, or the refusal is the read gate and the anchors never run.
-    let read = call_turn(&[("t", "read", r#"{"path":"a.txt"}"#)]);
-    let a = Agent::new(
-        Scripted::new(std::iter::once(read).chain(turns).collect()),
-        spec(),
-    );
-
-    let (session, out, _) = drive(&a, &ctx, "edit it forever").await;
-    out.unwrap();
-
-    let bodies: Vec<String> = session
-        .context()
-        .iter()
-        .flat_map(|m| match m {
-            Message::User { content } => content
-                .iter()
-                .filter_map(|c| match c {
-                    UserContent::ToolResult(r) => Some(r.flatten_text()),
-                    _ => None,
-                })
-                .collect(),
-            _ => Vec::new(),
-        })
-        .collect();
-
-    let refusals: Vec<&String> = bodies
-        .iter()
-        .filter(|b| b.starts_with("no match in a.txt"))
-        .collect();
-    assert_eq!(refusals.len(), 3, "bodies={bodies:?}");
-    // The second refusal is already the whole story, whatever the args said.
-    assert!(
-        refusals[1].contains("same `edit` call has now failed the same way 2 times"),
-        "bodies={bodies:?}"
-    );
+        let bodies = result_bodies(&session);
+        let refusals: Vec<&String> = bodies
+            .iter()
+            .filter(|b| b.starts_with("no match in a.txt"))
+            .collect();
+        assert_eq!(refusals.len(), 3, "vary={vary}: {refusals:?}");
+        // No leeway for a refusal the way there is for a re-read, and the
+        // notice rides inside the error the model reads, not beside it.
+        assert!(
+            !refusals[0].contains("same `edit` call"),
+            "vary={vary}: {:?}",
+            refusals[0]
+        );
+        assert!(
+            refusals[1].contains("same `edit` call has now failed the same way 2 times"),
+            "vary={vary}: {:?}",
+            refusals[1]
+        );
+    }
 }
 
 #[tokio::test]

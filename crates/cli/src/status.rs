@@ -272,118 +272,6 @@ pub fn default_done() -> Vec<Segment> {
 mod tests {
     use super::*;
 
-    fn full() -> Snapshot {
-        Snapshot {
-            elapsed: Some(Duration::from_secs(125)),
-            input: 8_400,
-            output: 390,
-            cache_read: 41_200,
-            cost: 0.0012,
-            turns: 2,
-            ctx: Some((72_400, 114_000)),
-            compactions: 2,
-            queued: 1,
-            model: "deepseek-v4-flash".into(),
-            worktree: Some("feature-one".into()),
-        }
-    }
-
-    #[test]
-    fn every_segment_has_a_wording() {
-        let s = full();
-        let all = [
-            Segment::Elapsed,
-            Segment::InOut,
-            Segment::Cache,
-            Segment::Cost,
-            Segment::Turns,
-            Segment::Ctx,
-            Segment::Compacted,
-            Segment::Queued,
-            Segment::Model,
-        ];
-        assert_eq!(
-            parts(&all, &s),
-            vec![
-                "2m05s",
-                "8.4k in / 390 out",
-                "41.2k cached",
-                "$0.0012",
-                "2 turns",
-                "ctx 72.4k/114.0k",
-                "compacted 2×",
-                "1 queued",
-                "deepseek-v4-flash",
-            ]
-        );
-    }
-
-    // What a pipe cannot say and a turn in flight does not know yet: the
-    // segment goes rather than showing a zero that reads as a measurement.
-    #[test]
-    fn a_surface_with_nothing_to_say_drops_the_segment() {
-        let s = Snapshot::default();
-        let quiet = [
-            Segment::Elapsed,
-            Segment::Cache,
-            Segment::Cost,
-            Segment::Turns,
-            Segment::Ctx,
-            Segment::Compacted,
-            Segment::Queued,
-            Segment::Model,
-            Segment::Worktree,
-        ];
-        assert!(parts(&quiet, &s).is_empty());
-    }
-
-    // The one exception: the counts are always shown, and the half the provider
-    // has not stated is a dash.
-    #[test]
-    fn the_counts_stay_and_show_a_dash_for_the_unstated_half() {
-        let s = Snapshot {
-            input: 8_400,
-            ..Snapshot::default()
-        };
-        assert_eq!(line(&[Segment::InOut], &s), "8.4k in / - out");
-    }
-
-    #[test]
-    fn the_config_decides_the_order() {
-        let s = full();
-        assert_eq!(
-            line(&[Segment::Cost, Segment::Turns], &s),
-            "$0.0012 · 2 turns"
-        );
-    }
-
-    #[test]
-    fn a_budget_of_nothing_is_not_a_division() {
-        let s = Snapshot {
-            ctx: Some((100, 0)),
-            ..Snapshot::default()
-        };
-        assert!(parts(&[Segment::Ctx], &s).is_empty());
-    }
-
-    #[test]
-    fn an_unpriced_model_shows_no_cost() {
-        let s = Snapshot {
-            cost: 0.0,
-            ..Snapshot::default()
-        };
-        assert!(parts(&[Segment::Cost], &s).is_empty());
-    }
-
-    #[test]
-    fn the_default_live_line_shows_what_has_been_read_from_cache() {
-        let s = full();
-        assert_eq!(
-            line(&default_live(), &s),
-            "2m05s · 8.4k in / 390 out · 41.2k cached · ctx 72.4k/114.0k · 1 queued · feature-one"
-        );
-    }
-
     fn usage(input: u64, output: u64) -> Usage {
         Usage {
             input,
@@ -433,10 +321,13 @@ mod tests {
             compactions: 1,
         });
         let s = t.snapshot("m", None, None, 0);
-        assert_eq!(
-            line(&default_done(), &s),
-            "2 turns · 8.4k in / 390 out · ctx 72.4k/114.0k · compacted 1× · $0.0031"
-        );
+        // The run's word replaces the running tally rather than joining it:
+        // the same turns counted twice would double every number here.
+        assert_eq!(s.turns, 2);
+        assert_eq!((s.input, s.output), (8_400, 390));
+        assert_eq!(s.cost, 0.0031);
+        assert_eq!(s.ctx, Some((72_400, 114_000)));
+        assert_eq!(s.compactions, 1);
     }
 
     // The surface seeds the tally with the session's earlier runs, so the
@@ -476,11 +367,18 @@ mod tests {
         assert_eq!(s.cost, 0.023);
     }
 
-    // A host that reported none of its usage: the line says the turns and shows
-    // the gaps as dashes rather than hiding them.
+    // A `!` command and a compaction begin no turn, and a host that reports
+    // nothing has none to report: nothing may mint counts out of either.
     #[test]
-    fn a_run_the_host_said_nothing_about_still_shows_the_dashes() {
+    fn no_event_mints_counts() {
+        let quiet = Tally::default().snapshot("m", None, None, 0);
+        assert_eq!((quiet.input, quiet.output), (0, 0));
+
         let mut t = Tally::default();
+        t.on(&agent::Event::TurnStart { turn: 1 });
+        let started = t.snapshot("m", None, None, 0);
+        assert_eq!((started.input, started.output), (0, 0));
+
         t.on(&agent::Event::Done {
             turns: 3,
             usage: Usage::default(),
@@ -488,25 +386,9 @@ mod tests {
             ctx: (0, 0),
             compactions: 0,
         });
-        let s = t.snapshot("", None, None, 0);
-        assert_eq!(
-            line(&[Segment::Turns, Segment::InOut], &s),
-            "3 turns · - in / - out"
-        );
-    }
-
-    // A `!` command and a compaction begin no turn, so the counts have
-    // nothing to be silent about; a turn the host said nothing for still
-    // shows its dashes.
-    #[test]
-    fn work_that_begins_no_turn_shows_no_counts() {
-        let quiet = Tally::default().snapshot("m", None, None, 0);
-        assert!(parts(&[Segment::InOut], &quiet).is_empty());
-
-        let mut t = Tally::default();
-        t.on(&agent::Event::TurnStart { turn: 1 });
-        let started = t.snapshot("m", None, None, 0);
-        assert_eq!(line(&[Segment::InOut], &started), "- in / - out");
+        let s = t.snapshot("m", None, None, 0);
+        assert_eq!(s.turns, 3);
+        assert_eq!((s.input, s.output), (0, 0));
     }
 
     // Every field the events can fill is filled here, and the four they

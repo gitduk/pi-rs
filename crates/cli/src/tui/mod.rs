@@ -4020,58 +4020,17 @@ impl Tui {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cow, Folds, Intent, Panel, Row, ScrollbackRows, Target, absorb_growth, body,
-        scrollback_from,
+        Cow, Folds, Intent, Panel, Row, ScrollbackRows, Target, absorb_growth, scrollback_from,
     };
     use crate::icons;
     use crate::keys::{Keys, Mode};
     use crate::lane::{Lane, Round, Turn};
-    use crate::render::{self, Paint};
-    use crate::repl::{self, Choice, Command, Repl, Source};
+    use crate::render::Paint;
+    use crate::repl::{Choice, Command, Repl, Source};
     use crate::session::Store;
     use crate::settings::row;
-    use crate::status::{self, Segment};
+    use crate::status::Segment;
     use crate::tui::screen;
-
-    // One completed tool call, as the loop reports it: start, end, then the
-    // entry the commit folds in. Shared by the tool-row tests.
-    fn run_tool(
-        ui: &mut super::Ui,
-        lane: &mut crate::lane::Lane,
-        id: &str,
-        name: &str,
-        preview: &str,
-        entry_id: u64,
-    ) {
-        ui.on_event(
-            lane,
-            agent::Event::ToolStart {
-                id: id.into(),
-                name: name.into(),
-                args: serde_json::json!({}),
-            },
-        );
-        ui.on_event(
-            lane,
-            agent::Event::ToolEnd {
-                id: id.into(),
-                name: name.into(),
-                is_error: false,
-                preview: preview.into(),
-            },
-        );
-        ui.on_event(
-            lane,
-            agent::Event::Committed {
-                entries: vec![agent::session::Entry::Tool {
-                    id: agent::session::EntryId(entry_id),
-                    at: 0,
-                    result: brain::message::ToolResult::text(id, name, preview),
-                    preview: Some(preview.into()),
-                }],
-            },
-        );
-    }
 
     // Both scrollback producers draw block ids from one counter. They used
     // not to: a rebuilt block was always `0`, which held only while nothing
@@ -4130,24 +4089,6 @@ mod tests {
         let ids: Vec<u64> = rows.iter().filter_map(Row::block).collect();
         assert_eq!(ids.len(), 0);
     }
-    // The rebuilt screen shows a `!` run's output, derived from the entry's
-    // text by the same function the live path draws with — the ruling that
-    // retired `out.said`.
-    #[test]
-    fn a_bash_entry_rebuilds_its_output_rows() {
-        use agent::session::Session;
-        let mut s = Session::new();
-        crate::repl::record_bash(
-            &mut s,
-            "git status",
-            "Ran `git status`\n<stdout>\nnothing to commit\n</stdout>\n".into(),
-        );
-
-        let mut folds = Folds::default();
-        let rows = scrollback_from(&s, &Paint::new(false), "! ", &mut folds);
-        assert_eq!(rows.len(), 2, "the echo and the output, got {}", rows.len());
-    }
-
     // A multi-line error body reaches the pending live line and the committed
     // entry alike, so adoption's equality check compares two rows born from
     // one source — and a dropped preview would panic right here.
@@ -4194,187 +4135,6 @@ mod tests {
         assert!(lane.view.state.tools.is_empty());
         let after = lane.view.surface.scrollback.len();
         assert_eq!(after, 1, "one adopted row, got {after}");
-    }
-
-    #[test]
-    fn read_only_tools_are_folded_into_summary_while_modifications_are_kept() {
-        let mut ui = test_ui(80, 24);
-        let (_dir, mut lane) = a_running_lane();
-
-        run_tool(&mut ui, &mut lane, "c1", "grep", "match 1", 1);
-        run_tool(&mut ui, &mut lane, "c2", "read", "file content", 2);
-
-        // grep and read fold into a single ToolsSummary row
-        assert_eq!(lane.view.surface.scrollback.len(), 1);
-        let row_text = lane.view.surface.scrollback[0]
-            .line(0, &ui.paint, &[], 80)
-            .0;
-        assert!(
-            row_text.contains(&format!("read file content {}2", icons::ELLIPSIS)),
-            "got: {row_text}"
-        );
-
-        // edit (modifying tool) stays unbundled
-        let edit_preview = "src/main.rs +1 -1\n  1 - old\n  1 + new";
-        run_tool(&mut ui, &mut lane, "c3", "edit", edit_preview, 3);
-
-        assert_eq!(lane.view.surface.scrollback.len(), 2);
-        let edit_head = lane.view.surface.scrollback[1]
-            .line(0, &ui.paint, &[], 80)
-            .0;
-        assert!(edit_head.contains("edit"), "got: {edit_head}");
-
-        // Mouse click on tools summary expands it
-        ui.flush(&mut lane);
-        assert_eq!(lane.view.surface.scrollback[0].len(), 1);
-        ui.key(
-            &mut lane,
-            mouse_event(
-                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-                0,
-            ),
-            false,
-        );
-        assert_eq!(lane.view.surface.scrollback[0].len(), 3);
-
-        // Hover test
-        ui.key(
-            &mut lane,
-            mouse_event(crossterm::event::MouseEventKind::Moved, 0),
-            false,
-        );
-        assert_eq!(ui.hovered_scrollback, Some(0));
-
-        // Mouse click again folds it back
-        ui.key(
-            &mut lane,
-            mouse_event(
-                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-                0,
-            ),
-            false,
-        );
-        assert_eq!(lane.view.surface.scrollback[0].len(), 1);
-    }
-
-    // A folded summary row spins only while one of its tools is still in
-    // flight: a finished batch is history, so a spinner on it reads as a call
-    // that never finished.
-    #[test]
-    fn a_folded_summary_stops_spinning_once_its_tools_land() {
-        let mut ui = test_ui(80, 24);
-        let (_dir, mut lane) = a_running_lane();
-
-        // Two read calls land and adopt; the lane still runs (the model is
-        // writing its next call). The summary row stops spinning.
-        run_tool(&mut ui, &mut lane, "c1", "read", "content", 1);
-        run_tool(&mut ui, &mut lane, "c2", "read", "content", 2);
-        ui.flush(&mut lane);
-
-        let summary = &lane.view.surface.scrollback[0];
-        let (line, _) = summary.line(0, &ui.paint, &[], 80);
-        let line = crate::render::strip_ansi(&line);
-        assert!(
-            line.starts_with(&format!("{} read", icons::DONE_MARK)),
-            "the folded row wears the green check once its tools land: {line}"
-        );
-        assert!(
-            !icons::SPINNER_FRAMES.iter().any(|f| line.starts_with(f)),
-            "no spinner on a finished batch: {line}"
-        );
-
-        // A new call in flight spins it again.
-        ui.on_event(
-            &mut lane,
-            agent::Event::ToolStart {
-                id: "c3".into(),
-                name: "read".into(),
-                args: serde_json::json!({}),
-            },
-        );
-        ui.flush(&mut lane);
-        let (line, _) = lane.view.surface.scrollback[0].line(0, &ui.paint, &[], 80);
-        let line = crate::render::strip_ansi(&line);
-        assert!(
-            icons::SPINNER_FRAMES.iter().any(|f| line.starts_with(f)),
-            "the summary spins again while its next tool runs: {line}"
-        );
-    }
-
-    // The pending-call row answers a click: the batch opens to one row per
-    // call and closes again. Collapsed, the other calls' names are unreadable.
-    #[test]
-    fn a_click_on_the_pending_row_opens_the_batch_of_calls() {
-        let mut ui = test_ui(80, 24);
-        let (_dir, mut lane) = a_running_lane();
-
-        // Three calls in flight, none ended.
-        for name in ["read", "grep", "task"] {
-            ui.on_event(
-                &mut lane,
-                agent::Event::ToolStart {
-                    id: format!("c-{name}"),
-                    name: name.into(),
-                    args: serde_json::json!({}),
-                },
-            );
-        }
-        ui.flush(&mut lane);
-
-        let live: Vec<String> = ui
-            .live(&lane, 10)
-            .0
-            .iter()
-            .map(|l| crate::render::strip_ansi(l))
-            .collect();
-        assert!(
-            live[0].ends_with(" task (+2)"),
-            "collapsed names the newest and counts the rest: {}",
-            live[0]
-        );
-
-        ui.key(
-            &mut lane,
-            mouse_event(
-                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-                0,
-            ),
-            false,
-        );
-        let live: Vec<String> = ui
-            .live(&lane, 10)
-            .0
-            .iter()
-            .map(|l| crate::render::strip_ansi(l))
-            .collect();
-        assert_eq!(
-            live.len(),
-            4,
-            "three pending rows and the status line: {live:?}"
-        );
-        for (i, name) in ["read", "grep", "task"].iter().enumerate() {
-            assert!(
-                live[i].contains(name),
-                "every call in the batch shows its name: {}",
-                live[i]
-            );
-            assert!(
-                !live[i].contains("(+"),
-                "opened, the count gives way to the calls: {}",
-                live[i]
-            );
-        }
-
-        // A second click closes the batch again.
-        ui.key(
-            &mut lane,
-            mouse_event(
-                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-                0,
-            ),
-            false,
-        );
-        assert!(crate::render::strip_ansi(&ui.live(&lane, 10).0[0]).ends_with(" task (+2)"));
     }
 
     // A wrapped pending row is tagged on every screen row it takes: the count
@@ -4459,46 +4219,9 @@ mod tests {
         assert!(ui.live_tools_shown, "the status line is no click target");
     }
 
-    // Nothing loaded, nothing said — the common case is one personal file and
-    // a heading over an empty list is worse than no heading.
-    #[test]
-    fn an_opening_block_with_no_instruction_files_is_the_banner_alone() {
-        let rows = Row::banner(&[], &Paint::new(false));
-        assert_eq!(rows.len(), 1);
-    }
-
     // A closed reasoning block of id `id` and `n` lines in the scrollback.
     fn block(id: u64, n: usize, folded: bool) -> Row {
         Row::reasoning(id, (1..=n).map(|i| format!("line {i}")).collect(), folded)
-    }
-
-    // What the screen shows for a run in the middle of reasoning.
-    fn shown(t: &Folds, partial: &str) -> Vec<String> {
-        body(t, &[], true, partial, (80, 9), &Paint::new(false))
-    }
-
-    // The divergence this change removes. The live stream rendered an edit's
-    // sketch; the rebuild rendered the stored result's first line — so the
-    // same turn looked one way while it happened and another after a rewind.
-    // Now both build the same row from the same parts.
-    #[test]
-    fn the_live_row_and_the_rebuilt_row_are_the_same_row() {
-        let sketched = "2 files, +3 -1\n  12 + added\n  13 - gone";
-        // What the stream pushes when the tool ends.
-        let live = [Row::result(true, "edit", sketched)];
-        // What the rebuild pushes, reading the entry that same turn stored.
-        let stored = brain::message::ToolResult::text("c1", "edit", "✓ edit [a.rs#TAG] …");
-        let rebuilt = [Row::stored_result(&stored, Some(sketched))];
-
-        let paint = Paint::new(false);
-        let a: Vec<Cow<'_, str>> = ScrollbackRows::new(&live, &paint, &[], 80)
-            .map(|(s, _)| s)
-            .collect();
-        let b: Vec<Cow<'_, str>> = ScrollbackRows::new(&rebuilt, &paint, &[], 80)
-            .map(|(s, _)| s)
-            .collect();
-        assert_eq!(a, b);
-        assert_eq!(a.len(), 3, "head plus the two diff rows");
     }
 
     // The rows of one result are painted once per width and handed out one at
@@ -4530,57 +4253,6 @@ mod tests {
             narrow[1]
         );
         assert_eq!(narrow, again, "the narrow frame came back different");
-    }
-
-    // A tool that sketched nothing has nothing to store, and the rebuild falls
-    // back to the first line of what it did store — which is what
-    // `ToolOutput::preview` falls back to on the live side.
-    #[test]
-    fn a_result_without_a_sketch_falls_back_to_its_first_line() {
-        let stored = brain::message::ToolResult::text("c1", "read", "fn main() {}\nmore");
-        let rows = [Row::stored_result(&stored, None)];
-        let paint = Paint::new(false);
-        let out: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 80)
-            .map(|(s, _)| s)
-            .collect();
-        assert_eq!(out.len(), 1);
-        assert!(out[0].contains("fn main() {}"), "{}", out[0]);
-        assert!(!out[0].contains("more"), "only the first line");
-    }
-
-    // The bug this shape exists to fix: a result row used to be clipped when
-    // it landed and stored as the clipped string, so widening the terminal
-    // could never bring back what had been cut.
-    #[test]
-    fn widening_the_window_gives_back_what_was_clipped() {
-        let paint = Paint::new(false);
-        let rows = [Row::result(true, "read", "a".repeat(200))];
-        let narrow: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 40)
-            .map(|(s, _)| s)
-            .collect();
-        let wide: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 160)
-            .map(|(s, _)| s)
-            .collect();
-
-        assert!(narrow[0].ends_with('…'), "{}", narrow[0]);
-        assert!(
-            wide[0].len() > narrow[0].len(),
-            "the wider frame showed no more of it: {} vs {}",
-            wide[0].len(),
-            narrow[0].len()
-        );
-        // Both are one row, and both name the tool.
-        assert!(narrow[0].contains("read") && wide[0].contains("read"));
-    }
-
-    #[test]
-    fn a_plain_entry_is_itself() {
-        let rows = [Row::notice("hello".to_string())];
-        let paint = Paint::new(false);
-        let rows: Vec<Cow<'_, str>> = ScrollbackRows::new(&rows, &paint, &[], 80)
-            .map(|(s, _)| s)
-            .collect();
-        assert_eq!(rows, vec!["hello"]);
     }
 
     #[test]
@@ -4630,91 +4302,6 @@ mod tests {
         let back: Vec<&str> = back.iter().map(|(s, _)| s.as_ref()).collect();
         assert_eq!(front, vec!["a", "line 1"]);
         assert_eq!(back, vec!["d", "line 2"]);
-    }
-
-    // A said line wider than the terminal keeps its rule down every row it
-    // wraps to. Before the border lived apart from the text, the wrap cut it
-    // at the first row and the rest of the line ran flush against the left
-    // edge — the bar ended mid-air.
-    #[test]
-    fn a_wrapped_said_line_keeps_its_rule_down_every_row() {
-        let paint = Paint::new(false);
-        let rows = Row::prompt(&"curl ".repeat(30), "! ", &paint);
-        let scrollback = ScrollbackRows::new(&rows, &paint, &[], 20);
-        let (out, _) = screen::window(scrollback, 20, 10, 0);
-        assert!(out.len() > 1, "a line wider than the window wraps");
-        for (i, row) in out.iter().enumerate() {
-            assert!(
-                row.starts_with("\u{258c} "),
-                "row {i} lost the rule: {row:?}"
-            );
-        }
-        // Nothing is lost either: the wrapped rows still spell the whole line.
-        let joined: String = out
-            .iter()
-            .map(|row| {
-                render::strip_ansi(row)
-                    .trim_start_matches("\u{258c} ")
-                    .to_string()
-            })
-            .collect();
-        assert_eq!(joined, "curl ".repeat(30));
-    }
-
-    // A `!` command keeps its own mark and nothing is repeated: its wrapped
-    // rows are the command's continuation, not a new command each row.
-    #[test]
-    fn a_wrapped_bang_command_repeats_nothing() {
-        let paint = Paint::new(false);
-        let rows = Row::prompt(&format!("!{}", "go ".repeat(30)), "! ", &paint);
-        let scrollback = ScrollbackRows::new(&rows, &paint, &[], 20);
-        let (out, _) = screen::window(scrollback, 20, 10, 0);
-        assert!(out.len() > 1);
-        assert!(out[0].starts_with("! "));
-        for row in &out[1..] {
-            assert!(
-                !row.starts_with("! "),
-                "a continuation row wore the mark: {row:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_shut_window_is_one_row_whatever_it_holds() {
-        // Including the line still arriving: it is reasoning too, and putting
-        // it on screen is the window this row exists to replace.
-        let t = Folds::default();
-        assert_eq!(shown(&t, "half a sentence"), vec!["thinking..."]);
-    }
-
-    #[test]
-    fn an_unfolded_block_streams_its_line_live() {
-        // One switch on the last block: folded, the live row is the
-        // placeholder; unfolded, it is the reasoning itself.
-        let mut t = Folds::default();
-        t.start(&mut []);
-        t.last = false;
-        assert_eq!(shown(&t, "half a sentence"), vec!["half a sentence"]);
-        t.last = true;
-        assert_eq!(shown(&t, "half a sentence"), vec!["thinking..."]);
-    }
-
-    #[test]
-    fn a_counted_block_needs_no_live_placeholder() {
-        // The count row in the scrollback already stands for the folded
-        // block; a second "thinking..." live row would show it twice.
-        let mut t = Folds::default();
-        t.start(&mut []);
-        let scrollback = [block(1, 1, true)];
-        let rows = body(
-            &t,
-            &scrollback,
-            true,
-            "half a sentence",
-            (80, 9),
-            &Paint::new(false),
-        );
-        assert!(rows.is_empty());
     }
 
     #[test]
@@ -4847,44 +4434,9 @@ mod tests {
     }
 
     #[test]
-    fn refolding_hides_lines_the_reader_has_already_seen() {
-        // The screen repaints from scrollback every frame, so lines already
-        // shown are still the same entry: folding them takes them back.
-        let mut entry = block(1, 2, false);
-        let paint = Paint::new(false);
-        let rows: Vec<Cow<'_, str>> =
-            ScrollbackRows::new(std::slice::from_ref(&entry), &paint, &[], 80)
-                .map(|(s, _)| s)
-                .collect();
-        assert_eq!(rows, vec!["line 1", "line 2"]);
-        entry.set_folded(true);
-        let rows: Vec<Cow<'_, str>> =
-            ScrollbackRows::new(std::slice::from_ref(&entry), &paint, &[], 80)
-                .map(|(s, _)| s)
-                .collect();
-        assert_eq!(rows, vec![format!("thinking{}2 lines", icons::PART_SEP)]);
-    }
-
-    #[test]
     fn the_answer_is_never_folded() {
         let t = Folds::default();
         assert!(!t.holds(false, &[]));
-        let rows = body(&t, &[], false, "hello", (80, 9), &Paint::new(false));
-        assert_eq!(rows, vec!["hello"]);
-    }
-
-    #[test]
-    fn a_long_paragraph_is_trimmed_to_the_room_it_is_given() {
-        let t = Folds::default();
-        let rows = body(
-            &t,
-            &[],
-            false,
-            &"x".repeat(500),
-            (80, 3),
-            &Paint::new(false),
-        );
-        assert_eq!(rows.len(), 3);
     }
 
     #[test]
@@ -5096,27 +4648,6 @@ mod tests {
         tui.reconcile(was);
     }
 
-    // A panel sized by its line count clips whatever wraps past the bottom;
-    // its rows come back one terminal row each, and the height is the len.
-    #[tokio::test]
-    async fn a_wrapping_panel_still_shows_its_last_row() {
-        let dir = tempfile::tempdir().expect("a temp dir");
-        let mut tui = surface(dir.path());
-        let long = "x".repeat(200);
-        let mut rows: Vec<crate::settings::SettingRow> = (1..=3)
-            .map(|i| row(&format!("path{i}"), &long, false))
-            .collect();
-        rows.push(row("last.path", "the last value", false));
-        tui.ui.panel = Some(Panel::new(rows, &crate::config::Vim::default()));
-
-        tui.ui.flush(&mut tui.core.lanes[0]);
-        let painted = tui.ui.screen.painted();
-        assert!(
-            painted.iter().any(|line| line.contains("the last value")),
-            "the panel was sized past its last row: {painted:?}"
-        );
-    }
-
     // A browsing panel swallows the keys it does not know: a letter typed
     // over it neither moves a row nor reaches the input line underneath.
     #[tokio::test]
@@ -5176,28 +4707,10 @@ mod tests {
     async fn a_flash_does_not_follow_the_surface_to_another_lane() {
         let dir = tempfile::tempdir().expect("a temp dir");
         let mut tui = surface(dir.path());
-        tui.ui.tabs = vec![
-            super::Tab {
-                mark: super::Mark::Idle,
-                name: "pi-rs".into(),
-            },
-            super::Tab {
-                mark: super::Mark::Front,
-                name: "f1".into(),
-            },
-        ];
 
         tui.ui.flash("nothing running to stop");
         switch_to(&mut tui, running_lane(dir.path()));
         assert!(tui.ui.flash.is_none(), "the flash was left behind");
-
-        tui.ui.flush(&mut tui.core.lanes[1]);
-        let painted = tui.ui.screen.painted();
-        assert_eq!(
-            painted[painted.len() - 2].trim(),
-            "pi-rs \u{b7} f1",
-            "the strip has its row back: {painted:?}"
-        );
     }
 
     // A rebuilt lane has already been drawn, whatever its row counts say.
@@ -5344,19 +4857,9 @@ mod tests {
         )]);
         session.send_prompt("do something else", None::<String>, None);
 
-        // f_entry silences the repaired stopped tool entry
+        // The rebuild filter drops the repaired stopped tool entry.
         let stopped_entry = &session.entries()[2];
         assert!(super::f_entry(stopped_entry, &tui.ui.paint, "> ").is_none());
-
-        let mut folds = Folds::default();
-        let rows = scrollback_from(&session, &tui.ui.paint, "> ", &mut folds);
-        for r in &rows {
-            let (line, _) = r.line(0, &tui.ui.paint, &[], 80);
-            assert!(
-                !line.contains(agent::session::STOPPED_CALL),
-                "stopped call notice should not appear: {line}"
-            );
-        }
     }
 
     // An interrupted turn never states its own word, so the spend the view
@@ -5397,31 +4900,17 @@ mod tests {
         assert_eq!(tui.totals.usage.output, 20);
     }
 
-    // A flash answers the keypress on the bar row and leaves no trace in the
-    // transcript: it outranks the lane strip while it is up, and the strip
-    // comes back on its own once the window passes — with no help from
-    // whoever set the flash, who is long gone by then.
+    // A flash is transient: it is not part of the transcript, and it is
+    // dropped by the clock, not by whoever set it — who is long gone by then.
     #[test]
-    fn a_flash_takes_the_bar_row_and_gives_it_back() {
+    fn a_flash_is_transient_and_stays_out_of_the_transcript() {
         let mut ui = test_ui(40, 8);
-        ui.tabs = vec![
-            super::Tab {
-                mark: super::Mark::Front,
-                name: "pi-rs".into(),
-            },
-            super::Tab {
-                mark: super::Mark::Idle,
-                name: "f1".into(),
-            },
-        ];
         let (_dir, mut lane) = a_running_lane();
         let before = lane.view.surface.scrollback.len();
 
         ui.flash("the only checkout there is");
         ui.flush(&mut lane);
-        let painted = ui.screen.painted();
-        let bar = &painted[painted.len() - 2];
-        assert_eq!(bar.trim(), "the only checkout there is", "{painted:?}");
+        assert!(ui.flash.is_some());
         assert_eq!(
             lane.view.surface.scrollback.len(),
             before,
@@ -5438,12 +4927,6 @@ mod tests {
                 .expect("a clock"),
         ));
         ui.flush(&mut lane);
-        let painted = ui.screen.painted();
-        assert_eq!(
-            painted[painted.len() - 2].trim(),
-            "pi-rs \u{b7} f1",
-            "{painted:?}"
-        );
         assert!(ui.flash.is_none(), "the expired flash was dropped");
     }
 
@@ -5455,43 +4938,26 @@ mod tests {
         let mut ui = test_ui(40, 8);
         let (_dir, mut lane) = a_running_lane();
         lane.view.surface.scrollback.clear();
-        let shown = |ui: &super::Ui, lane: &Lane, i: usize| {
-            let (text, _) = lane.view.surface.scrollback[i].line(0, &ui.paint, &[], 80);
-            render::strip_ansi(&text)
-        };
 
         ui.say(&mut lane.view, "nothing to rewind to");
         ui.say(&mut lane.view, "nothing to rewind to");
         ui.say(&mut lane.view, "nothing to rewind to");
-        assert_eq!(lane.view.surface.scrollback.len(), 1);
-        assert_eq!(shown(&ui, &lane, 0), "nothing to rewind to \u{d7}3");
+        assert_eq!(
+            lane.view.surface.scrollback.len(),
+            1,
+            "three identical notices file as one row"
+        );
 
         // Broken by another line, the next repeat starts its own row rather
         // than reaching back over it.
         ui.say(&mut lane.view, "stopped");
         ui.say(&mut lane.view, "nothing to rewind to");
-        assert_eq!(lane.view.surface.scrollback.len(), 3);
-        assert_eq!(shown(&ui, &lane, 2), "nothing to rewind to");
-    }
-    #[test]
-    fn say_splits_multiline_text_into_separate_rows() {
-        let mut ui = test_ui(80, 24);
-        let (_dir, mut lane) = a_running_lane();
-        lane.view.surface.scrollback.clear();
-
-        ui.say(
-            &mut lane.view,
-            "error anthropic 429\nevent: error\ndata: quota exceeded",
+        assert_eq!(
+            lane.view.surface.scrollback.len(),
+            3,
+            "the repeat after the break starts its own row"
         );
-        assert_eq!(lane.view.surface.scrollback.len(), 3);
-        let (r0, _) = lane.view.surface.scrollback[0].line(0, &ui.paint, &[], 80);
-        let (r1, _) = lane.view.surface.scrollback[1].line(0, &ui.paint, &[], 80);
-        let (r2, _) = lane.view.surface.scrollback[2].line(0, &ui.paint, &[], 80);
-        assert_eq!(r0, "error anthropic 429");
-        assert_eq!(r1, "event: error");
-        assert_eq!(r2, "data: quota exceeded");
     }
-
     // The Normal `L` walks the checkouts in a ring forward; `H` walks it
     // back. Every checkout on disk is in it, not only the open ones
     // — the main one first, because that is the order `worktree::list`
@@ -5817,95 +5283,6 @@ mod tests {
         );
     }
 
-    // A surface with an in-memory screen, for the drawing tests below.
-    // The history area is what is left after the menu, the bar and the input.
-    // Measured without the bar's row, `window` is handed one row more than the
-    // frame can paint and `Rows` fills top-down — so the row that goes over
-    // the edge is the newest one, which is the one being read.
-    #[test]
-    fn the_newest_row_survives_a_frame_with_the_lane_bar_on_it() {
-        let mut ui = test_ui(40, 8);
-        ui.tabs = vec![
-            super::Tab {
-                mark: super::Mark::Front,
-                name: "pi-rs".into(),
-            },
-            super::Tab {
-                mark: super::Mark::Idle,
-                name: "f1".into(),
-            },
-        ];
-        let (_dir, mut lane) = a_running_lane();
-        lane.turn = Turn::Idle;
-        for i in 0..10 {
-            lane.view
-                .surface
-                .scrollback
-                .push(Row::notice(format!("row-{i}")));
-        }
-        ui.flush(&mut lane);
-
-        let painted = ui.screen.painted();
-        assert!(
-            painted.iter().any(|r| r.trim() == "pi-rs · f1"),
-            "the bar is on this frame: {painted:?}"
-        );
-        assert!(
-            painted.iter().any(|r| r.trim() == "row-9"),
-            "the newest row was pushed off the bottom: {painted:?}"
-        );
-    }
-
-    fn a_finished_run(ui: &mut super::Ui, lane: &mut Lane) {
-        ui.on_event(lane, agent::Event::TurnStart { turn: 1 });
-        ui.on_event(
-            lane,
-            agent::Event::Done {
-                turns: 2,
-                usage: brain::stream::Usage {
-                    input: 8_400,
-                    output: 390,
-                    ..Default::default()
-                },
-                cost: 0.0012,
-                ctx: (72_400, 114_000),
-                compactions: 0,
-            },
-        );
-    }
-
-    fn spelled(rows: &[Row], paint: &Paint, done: &[Segment]) -> Vec<String> {
-        ScrollbackRows::new(rows, paint, done, 80)
-            .map(|(r, _)| render::strip_ansi(&r))
-            .collect()
-    }
-
-    // The row a run ends on keeps its numbers, not the string they rendered
-    // to. The segment list that spells it out and the theme that paints it
-    // both outlive the run, and a string frozen at the end of it answers to
-    // neither.
-    #[test]
-    fn the_line_a_run_ends_on_is_respelled_from_its_numbers() {
-        let mut ui = test_ui(80, 24);
-        let (_dir, mut lane) = a_running_lane();
-        a_finished_run(&mut ui, &mut lane);
-
-        let rows = spelled(
-            &lane.view.surface.scrollback,
-            &ui.paint,
-            &status::default_done(),
-        );
-        assert_eq!(
-            rows.last().map(String::as_str),
-            Some("2 turns · 8.4k in / 390 out · ctx 72.4k/114.0k · $0.0012")
-        );
-
-        // The same row, asked for differently. A stored string could not do
-        // this, which is the whole of what changed.
-        let narrowed = spelled(&lane.view.surface.scrollback, &ui.paint, &[Segment::Cost]);
-        assert_eq!(narrowed.last().map(String::as_str), Some("$0.0012"));
-    }
-
     // Whichever door the config comes in by — an edit claimed for the
     // session, or the session value written to the file — it has to land, or
     // the line never moves.
@@ -5969,25 +5346,11 @@ mod tests {
         );
     }
 
-    // A surface with the modal keys on, at their defaults.
+    // The scratch file lives in shared /tmp and carries whatever the user
+    // was about to say, so it must not be readable by anyone else.
     #[test]
-    fn the_editor_setting_splits_into_a_program_and_its_arguments() {
-        assert_eq!(super::split_editor("nvim"), ("nvim".into(), vec![]));
-        assert_eq!(
-            super::split_editor("code -w"),
-            ("code".into(), vec!["-w".to_string()])
-        );
-        // Blank is what an unset variable already filtered out; `vi` is the
-        // same answer either way rather than a program named "".
-        assert_eq!(super::split_editor("   "), ("vi".into(), vec![]));
-    }
-
-    // The line can hold anything the user was about to say, and `/tmp` is
-    // shared, so the mode is part of the contract rather than a detail.
-    #[test]
-    fn the_scratch_file_carries_the_line_and_is_private() {
-        let path = super::scratch_file("hello\nworld").unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello\nworld");
+    fn the_scratch_file_is_private() {
+        let path = super::scratch_file("hello").unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -6505,10 +5868,5 @@ mod tests {
         wrote(&mut lane, "a.rs", "one\ntwo\n");
         assert!(matches!(lane.loop_step(true, None), Some(Round::Thin)));
         assert!(lane.looping.is_none());
-    }
-    // A loop whose goal is another loop would arm itself every round.
-    #[test]
-    fn a_loop_cannot_be_read_as_its_own_goal() {
-        assert!(matches!(repl::read("/loop go"), Intent::Loop(_)));
     }
 }

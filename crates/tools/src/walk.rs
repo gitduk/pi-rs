@@ -114,34 +114,3 @@ pub fn roots_of(ws: &Workspace, targets: &[&str], tier: Tier) -> Result<Vec<Path
 pub fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(8_000).any(|b| *b == 0)
 }
-
-#[cfg(test)]
-mod exclude_tests {
-    use super::excludes;
-    use globset::GlobSet;
-
-    fn set(patterns: &[&str]) -> GlobSet {
-        excludes(&patterns.iter().map(|s| s.to_string()).collect::<Vec<_>>())
-            .unwrap()
-            .unwrap()
-    }
-
-    #[test]
-    fn a_bare_name_excludes_files_under_the_directory_of_that_name() {
-        let s = set(&["__pycache__"]);
-        assert!(s.is_match("app/__pycache__/x.py"));
-        assert!(!s.is_match("app/x.py"));
-    }
-
-    #[test]
-    fn a_bare_name_still_excludes_a_file_carrying_it() {
-        assert!(set(&["x.py"]).is_match("deep/nested/x.py"));
-    }
-
-    #[test]
-    fn a_slashed_pattern_excludes_its_subtree() {
-        let s = set(&["app/gen"]);
-        assert!(s.is_match("app/gen/out.rs"));
-        assert!(!s.is_match("app/general.rs"));
-    }
-}

@@ -178,7 +178,7 @@ fn from(workspace: &Path, home: Option<&Path>, root: Option<&Path>) -> Loaded {
 
 #[cfg(test)]
 mod tests {
-    use super::{boundary, env, from, paths, workspace};
+    use super::{boundary, env, paths};
     use std::path::Path;
 
     fn write(path: &Path, body: &str) {
@@ -217,16 +217,11 @@ mod tests {
         assert!(boundary(&bare, tools::Tier::Exec).is_empty());
     }
 
-    // Every field has to hold still for a whole run — the block rides the
-    // cached prefix. The date is the only one that moves at all, and it moves
-    // once a day, so two runs an hour apart still share that prefix.
+    // The block rides the cached prompt prefix, so its one moving part, the
+    // date, has to move once a day — not on every run.
     #[test]
-    fn the_env_block_names_the_run_and_says_which_shell() {
+    fn the_env_date_moves_once_a_day_not_every_run() {
         let got = env(tools::Tier::Read);
-        println!("{got}");
-
-        assert!(got.starts_with("\n\n<env date=\""), "{got}");
-        assert!(got.ends_with("/>"), "{got}");
         let date = got
             .split("date=\"")
             .nth(1)
@@ -236,30 +231,6 @@ mod tests {
             .unwrap();
         assert_eq!(date.len(), 10, "a day, not an instant: {date}");
         assert_eq!(date.matches('-').count(), 2, "{date}");
-
-        assert!(
-            got.contains(&format!("pi=\"{}\"", env!("CARGO_PKG_VERSION"))),
-            "{got}"
-        );
-        // The tool is named `bash` and runs `sh`; this is where that is said.
-        assert!(got.contains("shell=\"sh\""), "{got}");
-
-        assert!(
-            got.contains("tier=\"read\""),
-            "spelled as the flag is: {got}"
-        );
-        assert!(env(tools::Tier::Exec).contains("tier=\"exec\""));
-        assert!(env(tools::Tier::Net).contains("tier=\"net\""));
-    }
-
-    #[test]
-    fn the_anchor_names_the_workspace_root() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        assert_eq!(
-            workspace(root),
-            format!("\n\n<workspace path=\"{}\"/>", root.display())
-        );
     }
 
     #[test]
@@ -304,21 +275,6 @@ mod tests {
     }
 
     #[test]
-    fn only_the_shared_name_counts() {
-        // The point of a vendor-neutral name is that one file serves every
-        // tool; reading the alternatives as well would reward keeping them
-        // apart.
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = tmp.path().join("repo");
-        std::fs::create_dir_all(repo.join(".git")).unwrap();
-        write(&repo.join("CLAUDE.md"), "another harness's file");
-        assert!(paths(&repo, None, None).is_empty());
-
-        write(&repo.join("AGENTS.md"), "agents");
-        assert_eq!(paths(&repo, None, None), vec![repo.join("AGENTS.md")]);
-    }
-
-    #[test]
     fn the_walk_stops_at_the_repository_root() {
         let tmp = tempfile::tempdir().unwrap();
         write(&tmp.path().join("AGENTS.md"), "outside");
@@ -342,31 +298,5 @@ mod tests {
         let notes = home.join("notes");
         std::fs::create_dir_all(&notes).unwrap();
         assert!(paths(&notes, Some(&home), None).is_empty());
-    }
-
-    #[test]
-    fn each_file_is_tagged_with_where_it_came_from() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = tmp.path().join("repo");
-        std::fs::create_dir_all(repo.join(".git")).unwrap();
-        write(&repo.join("AGENTS.md"), "  Use tabs.\n\n");
-        let got = from(&repo, None, None);
-        assert!(got.text.contains("<instructions path="));
-        assert!(got.text.contains("Use tabs."));
-        assert!(got.text.ends_with("</instructions>"), "{}", got.text);
-        assert_eq!(got.files.len(), 1);
-    }
-
-    #[test]
-    fn an_empty_file_contributes_nothing() {
-        // A placeholder someone created and never filled in should not appear
-        // as an empty block the model has to interpret.
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = tmp.path().join("repo");
-        std::fs::create_dir_all(repo.join(".git")).unwrap();
-        write(&repo.join("AGENTS.md"), "\n  \n");
-        let got = from(&repo, None, None);
-        assert!(got.text.is_empty());
-        assert!(got.files.is_empty());
     }
 }

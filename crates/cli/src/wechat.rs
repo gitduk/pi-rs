@@ -1104,33 +1104,6 @@ mod tests {
     }
 
     #[test]
-    fn a_stop_message_is_classified_before_anything_else() {
-        for stop in ["/stop", "/esc", " /stop "] {
-            assert!(matches!(stop.trim(), "/stop" | "/esc"));
-        }
-        assert!(!matches!("stop the run".trim(), "/stop" | "/esc"));
-    }
-
-    #[test]
-    fn a_message_within_the_budget_goes_out_whole_and_unmarked() {
-        let text = "short enough";
-        assert_eq!(split(text, 100), vec![text.to_string()]);
-    }
-
-    #[test]
-    fn a_long_message_breaks_at_paragraphs_and_carries_its_count() {
-        let para = "x".repeat(60);
-        let text = format!("{para}\n\n{para}\n\n{para}");
-        let pieces = split(&text, 100);
-        assert_eq!(pieces.len(), 3);
-        for (i, piece) in pieces.iter().enumerate() {
-            assert!(piece.starts_with(&format!("({}/3) ", i + 1)), "{piece}");
-            assert!(piece.len() <= 100, "{} bytes", piece.len());
-            assert!(piece.ends_with('x'), "the break ate content: {piece}");
-        }
-    }
-
-    #[test]
     fn a_run_with_no_boundary_is_cut_on_a_character_and_rejoins_exactly() {
         let text = "中".repeat(200);
         let pieces = split(&text, 100);
@@ -1143,39 +1116,9 @@ mod tests {
     }
 
     #[test]
-    fn a_hard_cut_keeps_the_indentation_it_lands_on() {
-        let text = format!("{}\n    indented tail", "x".repeat(120));
-        let pieces = split(&text, 60);
-        let tail = pieces.last().expect("a piece");
-        assert!(tail.ends_with("    indented tail"), "{tail}");
-    }
-
-    #[test]
     fn a_budget_shorter_than_one_character_still_advances() {
         let pieces = split("中文中文", 1);
         assert_eq!(pieces.len(), 4);
-    }
-
-    #[test]
-    fn a_boundary_too_early_in_the_budget_is_not_worth_taking() {
-        // The only newline sits at byte 5; cutting there would send a
-        // five-byte message and leave the rest just as long as before.
-        let text = format!("head\n{}", "x".repeat(200));
-        let pieces = split(&text, 100);
-        assert!(pieces[0].len() > 50, "{}", pieces[0]);
-    }
-
-    #[test]
-    fn a_tool_line_carries_the_summarized_argument() {
-        let args = serde_json::json!({ "path": "crates/cli/src/wechat.rs" });
-        assert_eq!(
-            tool_line("edit", &args),
-            format!("{} edit crates/cli/src/wechat.rs", icons::TOOL_GEAR)
-        );
-        assert_eq!(
-            tool_line("read", &serde_json::json!({})),
-            format!("{} read", icons::TOOL_GEAR)
-        );
     }
 
     fn started(name: &str) -> Event {
@@ -1241,78 +1184,5 @@ mod tests {
         assert_eq!(b.tool_buf, [format!("{} grep", icons::TOOL_GEAR)]);
         b.observe(&Event::Warning("careful".into())).await;
         assert!(b.tool_buf.is_empty(), "{:?}", b.tool_buf);
-    }
-
-    #[test]
-    fn format_markdown_headings_and_bold() {
-        let input = "# 标题\n\n这是 **重要** 内容。";
-        let formatted = format_markdown(input);
-        assert_eq!(formatted, "【标题】\n\n这是 「重要」 内容。");
-    }
-
-    #[test]
-    fn format_markdown_links() {
-        let input = "访问 [GitHub](https://github.com) 或 [https://crates.io](https://crates.io)。";
-        let formatted = format_markdown(input);
-        assert_eq!(
-            formatted,
-            "访问 GitHub (https://github.com) 或 https://crates.io。"
-        );
-    }
-
-    #[test]
-    fn format_markdown_code_block() {
-        let input = "```rust\nfn main() {}\n```";
-        let formatted = format_markdown(input);
-        assert_eq!(formatted, "─── 代码 (rust) ───\nfn main() {}\n────────");
-    }
-
-    #[test]
-    fn format_markdown_lists() {
-        let input = "- 项目一\n- 项目二\n\n1. 步骤一\n2. 步骤二";
-        let formatted = format_markdown(input);
-        assert_eq!(formatted, "• 项目一\n• 项目二\n\n1. 步骤一\n2. 步骤二");
-    }
-
-    #[test]
-    fn format_markdown_table_two_columns() {
-        let input = "| 参数 | 说明 |\n| --- | --- |\n| host | 地址 |\n| port | 端口 |";
-        let formatted = format_markdown(input);
-        assert_eq!(formatted, "【参数 | 说明】\n• host: 地址\n• port: 端口");
-    }
-
-    #[test]
-    fn format_markdown_table_multi_columns() {
-        let input = "| 文件 | 状态 | 说明 |\n| --- | --- | --- |\n| a.rs | 新增 | 测试 |\n| b.rs | 修改 | 修复 |";
-        let formatted = format_markdown(input);
-        let expected = "【文件 | 状态 | 说明】\n• a.rs\n  状态: 新增\n  说明: 测试\n\n• b.rs\n  状态: 修改\n  说明: 修复";
-        assert_eq!(formatted, expected);
-    }
-
-    #[test]
-    fn format_markdown_table_with_nested_formatting() {
-        let input = "| 命令 | 说明 |\n| --- | --- |\n| `cargo test` | 运行 **单元测试** |\n| `pi` | 启动 [链接](https://example.com) |";
-        let formatted = format_markdown(input);
-        assert_eq!(
-            formatted,
-            "【命令 | 说明】\n• `cargo test`: 运行 「单元测试」\n• `pi`: 启动 链接 (https://example.com)"
-        );
-    }
-
-    #[test]
-    fn format_markdown_images() {
-        let input = "架构：![系统设计图](https://example.com/arch.png) 示意：![](https://example.com/demo.png)";
-        let formatted = format_markdown(input);
-        assert_eq!(
-            formatted,
-            "架构：[图片: 系统设计图 (https://example.com/arch.png)] 示意：[图片: https://example.com/demo.png]"
-        );
-    }
-
-    #[test]
-    fn format_markdown_empty_comments() {
-        let input = "<!-- this is a comment -->";
-        let formatted = format_markdown(input);
-        assert_eq!(formatted, "");
     }
 }

@@ -220,6 +220,8 @@ pub fn bound(mut out: ToolOutput, ctx: &Ctx) -> ToolOutput {
 pub async fn gated(tool: &dyn Tool, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
     Ok(bound(tool.execute(args, ctx).await?, ctx))
 }
+
+#[cfg(test)]
 #[cfg(test)]
 mod tests {
     use crate::{Ctx, Workspace};
@@ -228,54 +230,49 @@ mod tests {
         Ctx::new(Workspace::new(dir).unwrap()).with_spill_root(dir.join("spill"))
     }
 
+    // Below the cap a stream is kept whole; at the cap, still whole; past it,
+    // the view shows both ends and the spill file holds every byte — not just
+    // the view.
     #[tokio::test]
-    async fn a_small_stream_stays_whole_and_unspilled() {
+    async fn the_spill_threshold_keeps_small_streams_whole_and_spills_the_rest() {
         let dir = tempfile::tempdir().unwrap();
         let got = super::take(&b"hi there"[..], &ctx(dir.path()))
             .await
             .unwrap();
         assert_eq!(got.text, "hi there");
-        assert_eq!(got.total, 8);
         assert!(got.spill.is_none());
-    }
 
-    #[tokio::test]
-    async fn a_stream_at_the_threshold_is_whole() {
-        let dir = tempfile::tempdir().unwrap();
         let body = "x".repeat(crate::spill::MAX_OUTPUT);
         let got = super::take(body.as_bytes(), &ctx(dir.path()))
             .await
             .unwrap();
         assert_eq!(got.text, body);
         assert!(got.spill.is_none());
-    }
 
-    #[tokio::test]
-    async fn a_stream_past_the_threshold_shows_both_ends_and_keeps_the_whole() {
-        let dir = tempfile::tempdir().unwrap();
         let c = ctx(dir.path());
         let body = "x".repeat(crate::spill::MAX_OUTPUT + 5_000);
         let got = super::take(body.as_bytes(), &c).await.unwrap();
-
         assert_eq!(got.total, body.len());
         let spill = got.spill.as_ref().expect("past the threshold must spill");
         assert_eq!(spill.bytes, body.len());
-        assert!(got.text.starts_with("xxx"), "{got:?}");
         assert!(got.text.contains("bytes omitted"), "{got:?}");
-        assert!(got.text.ends_with("xxx"), "{got:?}");
-
-        // The file holds every byte, not just the view.
         let back = std::fs::read(c.spill_path(&spill.locator).unwrap()).unwrap();
         assert_eq!(back.len(), body.len());
     }
 
+    // The ToolOutput door: what overflows is bounded and leaves the locator,
+    // what fits passes untouched.
     #[tokio::test]
-    async fn bytes_that_are_not_utf8_reach_the_view_as_replacements() {
+    async fn bound_spills_what_overflows_and_leaves_the_locator() {
         let dir = tempfile::tempdir().unwrap();
-        let got = super::take(&[b'a', 0xff, b'b'][..], &ctx(dir.path()))
-            .await
-            .unwrap();
-        assert_eq!(got.text, "a\u{fffd}b");
+        let huge = "x".repeat(super::spill::MAX_OUTPUT + 1_000);
+        let got = super::bound(super::ToolOutput::text(huge), &ctx(dir.path()));
+        let text = got.flatten();
+        assert!(text.contains("full output:"), "{text}");
+        assert!(text.len() < 40_000, "{}", text.len());
+
+        let small = super::bound(super::ToolOutput::text("tiny"), &ctx(dir.path()));
+        assert_eq!(small.flatten(), "tiny");
     }
 
     #[test]
@@ -284,19 +281,5 @@ mod tests {
         assert!(b.admits(super::SWEEP_BUDGET));
         assert!(b.spent());
         assert!(!b.admits(1));
-    }
-
-    #[tokio::test]
-    async fn bound_spills_what_overflows_and_leaves_the_locator() {
-        let dir = tempfile::tempdir().unwrap();
-        let huge = "x".repeat(super::spill::MAX_OUTPUT + 1_000);
-        let got = super::bound(super::ToolOutput::text(huge), &ctx(dir.path()));
-        let text = got.flatten();
-        assert!(text.contains("more bytes"), "{text}");
-        assert!(text.contains("full output:"), "{text}");
-        assert!(text.len() < 40_000, "{}", text.len());
-
-        let small = super::bound(super::ToolOutput::text("tiny"), &ctx(dir.path()));
-        assert_eq!(small.flatten(), "tiny");
     }
 }

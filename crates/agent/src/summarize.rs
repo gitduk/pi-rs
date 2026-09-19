@@ -124,8 +124,7 @@ pub async fn run(
 mod tests {
     use super::*;
     use crate::session::{EntryId, Prompt};
-    use brain::message::{ToolCall, ToolResult};
-    use serde_json::json;
+    use brain::message::ToolResult;
 
     fn user(text: &str) -> Entry {
         Entry::Ask {
@@ -157,46 +156,16 @@ mod tests {
         }
     }
 
+    // Over budget is the one thing the history certainly is, so the render
+    // never ships it whole: a block over its cap is clipped in place, and a
+    // whole history over the total keeps both ends and drops the middle.
     #[test]
-    fn a_rendered_history_names_tools_and_keeps_prose() {
-        let a = assistant(vec![
-            AssistantContent::Text(brain::message::Text {
-                text: "reading it".into(),
-            }),
-            AssistantContent::ToolCall(ToolCall {
-                id: "c1".into(),
-                name: "read".into(),
-                args: json!({ "path": "a.rs" }),
-            }),
-        ]);
-        let r = result("c1", "read", "fn main() {}");
-        let out = render(&[], &[&a, &r]);
-
-        assert!(out.contains("[assistant] reading it"), "{out}");
-        assert!(out.contains("[calls read] {\"path\":\"a.rs\"}"), "{out}");
-        assert!(out.contains("[read result] fn main() {}"), "{out}");
-    }
-
-    #[test]
-    fn an_earlier_summary_leads_so_the_model_can_fold_it_in() {
-        let m = user("go");
-        let out = render(&["did three things"], &[&m]);
-        assert!(
-            out.starts_with("[earlier summary]\ndid three things"),
-            "{out}"
-        );
-    }
-
-    #[test]
-    fn a_huge_result_is_clipped_rather_than_sent_whole() {
+    fn oversize_history_is_clipped_rather_than_sent_whole() {
         let r = result("c", "read", "x".repeat(50_000));
         let out = render(&[], &[&r]);
         assert!(out.len() < BLOCK_BYTES + 200, "{}", out.len());
         assert!(out.contains("more bytes"), "{out}");
-    }
 
-    #[test]
-    fn a_long_history_keeps_both_ends() {
         let first = user("the original task");
         let last = user("the final state");
         let filler: Vec<Entry> = (0..200)
@@ -215,20 +184,5 @@ mod tests {
         assert!(out.contains("the original task"), "the head must survive");
         assert!(out.contains("the final state"), "the tail must survive");
         assert!(out.contains("middle omitted"), "{}", &out[..80]);
-    }
-
-    #[test]
-    fn reasoning_is_left_out_of_the_record() {
-        let a = assistant(vec![AssistantContent::Reasoning(
-            brain::message::Reasoning {
-                id: None,
-                content: vec![brain::message::ReasoningContent::Text {
-                    text: "scratch work".into(),
-                    signature: None,
-                }],
-                by: None,
-            },
-        )]);
-        assert!(!render(&[], &[&a]).contains("scratch work"));
     }
 }

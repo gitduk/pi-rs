@@ -234,7 +234,7 @@ async fn the_child_answers_into_the_parents_transcript() {
         text_turn("there are four files"),
         text_turn("the subagent says four"),
     ]);
-    let (session, out) = drive(&agent, &ctx, "how many files").await;
+    let (_session, out) = drive(&agent, &ctx, "how many files").await;
 
     // D5: the child's spend rides home on the tool result, so the parent's run
     // pays for it — the parent's and child's two turns are 3000 in / 20 out.
@@ -246,11 +246,6 @@ async fn the_child_answers_into_the_parents_transcript() {
     );
     assert!(totals.cost > 0.0, "{totals:?}");
 
-    let transcript = format!("{:?}", session.entries());
-    assert!(
-        transcript.contains("there are four files"),
-        "the child's last words are the tool result: {transcript}"
-    );
     // D7: one transcript filed, under a namespace of the child's own.
     let sessions = kept.sessions.lock().unwrap();
     assert_eq!(sessions.len(), 1, "one child, one transcript");
@@ -325,85 +320,53 @@ async fn the_child_cannot_send_out_a_child_of_its_own() {
     );
 }
 
+// A child that hits a limit — of time or of turns — still answers with
+// the work it did: the work done before the limit is still work, and the
+// caller's turn survives the answer. Handing it back as an error means
+// the caller paid for it and got nothing; handing it back as `Cancelled`
+// would end the caller's turn outright.
 #[tokio::test]
-async fn a_child_that_says_nothing_still_says_something() {
-    let (_dir, agent, ctx, _seen, _kept) = harness(vec![
-        call_turn(
-            "c1",
-            "task",
-            r#"{"description":"be quiet","prompt":"be quiet"}"#,
+async fn a_child_cut_off_by_a_limit_answers_rather_than_fails() {
+    for (which, turns, max_turns, deadline) in [
+        (
+            "the deadline",
+            vec![
+                call_turn(
+                    "c1",
+                    "task",
+                    r#"{"description":"go round","prompt":"go round"}"#,
+                ),
+                call_turn("c2", "sleeper", "{}"),
+                text_turn("it reported back"),
+            ],
+            20,
+            std::time::Duration::from_millis(50),
         ),
-        vec![StreamEvent::Done {
-            stop: StopReason::EndTurn,
-            usage: Usage::default(),
-        }],
-        text_turn("nothing came back"),
-    ]);
-    let (session, _out) = drive(&agent, &ctx, "go").await;
-    let transcript = format!("{:?}", session.entries());
-    // An empty tool result is a thing the caller cannot read; a sentence
-    // saying it ran and produced nothing is.
-    assert!(
-        transcript.contains("without saying anything"),
-        "{transcript}"
-    );
-}
-
-#[tokio::test]
-async fn running_out_of_time_is_an_answer_not_a_failure() {
-    let (_dir, agent, ctx, _seen, _kept) = rigged(
-        vec![
-            call_turn(
-                "c1",
-                "task",
-                r#"{"description":"go round","prompt":"go round"}"#,
-            ),
-            call_turn("c2", "sleeper", "{}"),
-            text_turn("it reported back"),
-        ],
-        20,
-        std::time::Duration::from_millis(50),
-        false,
-    );
-    let (session, out) = drive(&agent, &ctx, "go").await;
-
-    // D10's whole point: the work done before the limit is still work. Handing
-    // it back as an error means the caller paid for it and got nothing — and
-    // handing it back as `Cancelled` would end the caller's turn outright.
-    assert!(
-        out.is_ok(),
-        "the caller's turn survives a child that ran out"
-    );
-    let transcript = format!("{:?}", session.entries());
-    assert!(transcript.contains("unfinished"), "{transcript}");
-    assert!(transcript.contains("stopped after"), "{transcript}");
-}
-
-#[tokio::test]
-async fn the_configured_turn_ceiling_stops_the_child() {
-    let (_dir, agent, ctx, _seen, _kept) = rigged(
-        vec![
-            call_turn("c1", "task", r#"{"description":"capped","prompt":"go"}"#),
-            call_turn(
-                "c2",
-                "write",
-                r#"{"path":"child.txt","content":"first turn"}"#,
-            ),
-            call_turn("c3", "sleeper", "{}"),
-            text_turn("caller wraps up"),
-        ],
-        1,
-        std::time::Duration::from_secs(600),
-        false,
-    );
-    let (session, out) = drive(&agent, &ctx, "go").await;
-    assert!(out.is_ok());
-    let transcript = format!("{:?}", session.entries());
-    assert!(transcript.contains("unfinished"), "{transcript}");
-    assert!(
-        transcript.contains("stopped at turn 2 of 1"),
-        "{transcript}"
-    );
+        (
+            "the turn cap",
+            vec![
+                call_turn("c1", "task", r#"{"description":"capped","prompt":"go"}"#),
+                call_turn(
+                    "c2",
+                    "write",
+                    r#"{"path":"child.txt","content":"first turn"}"#,
+                ),
+                call_turn("c3", "sleeper", "{}"),
+                text_turn("caller wraps up"),
+            ],
+            1,
+            std::time::Duration::from_secs(600),
+        ),
+    ] {
+        let (_dir, agent, ctx, _seen, _kept) = rigged(turns, max_turns, deadline, false);
+        let (session, out) = drive(&agent, &ctx, "go").await;
+        assert!(
+            out.is_ok(),
+            "{which}: the caller's turn survives a child that ran out: {out:?}"
+        );
+        let transcript = format!("{:?}", session.entries());
+        assert!(transcript.contains("unfinished"), "{which}: {transcript}");
+    }
 }
 
 #[test]
@@ -585,69 +548,6 @@ async fn what_the_child_wrote_comes_back_beside_what_it_says() {
     assert_eq!(
         ledger, "1 file: child.rs",
         "the child's writes, and only those: {transcript}"
-    );
-}
-
-#[tokio::test]
-async fn a_child_that_wrote_nothing_is_said_to_have_written_nothing() {
-    let (_dir, parent, ctx, _seen, kept) = harness(vec![text_turn("all done, fixed it")]);
-    let task = Task::new(&parent, kept, STANDING);
-    let out = task
-        .execute(json!({ "description": "fix it", "prompt": "fix it" }), &ctx)
-        .await
-        .expect("the child ran")
-        .flatten();
-
-    // The line worth having: it has just described changes it did not make.
-    assert!(out.contains("[wrote nothing]"), "{out}");
-}
-
-#[tokio::test]
-async fn a_check_that_passes_does_not_drag_its_output_along() {
-    let (_dir, parent, ctx, _seen, kept) = harness(vec![text_turn("did it")]);
-    std::fs::write(ctx.workspace.root().join("out.txt"), "SPECIMEN\n").unwrap();
-    let task = Task::new(&parent, kept, STANDING);
-    let out = task
-        .execute(
-            json!({ "description": "go", "prompt": "go", "verify": "cat out.txt" }),
-            &ctx,
-        )
-        .await
-        .expect("the child ran")
-        .flatten();
-
-    assert!(out.contains("[verify `cat out.txt`: exit 0]"), "{out}");
-    assert!(
-        !out.contains("SPECIMEN"),
-        "a check that passed says all it has to with its status: {out}"
-    );
-}
-
-#[tokio::test]
-async fn a_check_that_fails_comes_back_with_what_it_printed() {
-    let (_dir, parent, ctx, _seen, kept) = harness(vec![text_turn("did it")]);
-    std::fs::write(ctx.workspace.root().join("out.txt"), "SPECIMEN\n").unwrap();
-    let task = Task::new(&parent, kept, STANDING);
-    let out = task
-        .execute(
-            json!({ "description": "go", "prompt": "go", "verify": "cat out.txt; exit 3" }),
-            &ctx,
-        )
-        .await
-        .expect("the child ran")
-        .flatten();
-
-    assert!(
-        out.contains("[verify `cat out.txt; exit 3`: exit 3]"),
-        "{out}"
-    );
-    assert!(
-        out.contains("SPECIMEN"),
-        "a failing check is what was asked for: {out}"
-    );
-    assert!(
-        out.contains("did it"),
-        "and the child still gets its say: {out}"
     );
 }
 

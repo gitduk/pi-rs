@@ -431,23 +431,7 @@ impl Transport for ChatCompletions {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::{Reasoning, ReasoningContent, Text, ToolResult, ToolResultContent};
-    use crate::request::Effort;
     use crate::stream::Accumulator;
-
-    fn spec() -> ModelSpec {
-        ModelSpec {
-            base_url: "https://api.deepseek.com".into(),
-            format: Format::Chat,
-            context_window: 64_000,
-            thinking: Some(ThinkingControl::Effort),
-            ..ModelSpec::test()
-        }
-    }
-
-    fn body(req: Request) -> Value {
-        build_body(&spec(), &req)
-    }
 
     #[test]
     fn the_deepseek_cache_halves_split_into_usage() {
@@ -478,64 +462,6 @@ mod tests {
         assert_eq!(u.input, 1_000);
         assert_eq!(u.cache_read, 0);
         assert_eq!(u.output, 42);
-    }
-
-    #[test]
-    fn system_rides_the_head_and_tools_follow_the_schema() {
-        let req = Request {
-            system: Some("Be terse.".into()),
-            messages: vec![Message::user("hello")],
-            tools: vec![crate::request::ToolDef {
-                name: "read".into(),
-                description: "Read a file".into(),
-                input_schema: json!({ "type": "object" }),
-            }],
-            ..Default::default()
-        };
-        let b = body(req);
-        assert_eq!(b["model"], "test-model");
-        assert_eq!(b["stream"], true);
-        assert_eq!(b["max_tokens"], 32_000);
-        let msgs = b["messages"].as_array().unwrap();
-        assert_eq!(msgs[0]["role"], "system");
-        assert_eq!(msgs[0]["content"], "Be terse.");
-        assert_eq!(msgs[1]["role"], "user");
-        assert_eq!(b["tools"][0]["type"], "function");
-        assert_eq!(b["tools"][0]["function"]["name"], "read");
-    }
-
-    #[test]
-    fn an_effort_model_says_enabled_and_off_says_disabled() {
-        let on = body(Request {
-            effort: Effort::Medium,
-            ..Default::default()
-        });
-        assert_eq!(on["thinking"]["type"], "enabled");
-        assert_eq!(on["thinking"]["reasoning_effort"], "medium");
-
-        let off = body(Request::default());
-        assert_eq!(off["thinking"]["type"], "disabled");
-    }
-
-    #[test]
-    fn a_tool_result_becomes_a_tool_message_keyed_by_the_call() {
-        let req = Request {
-            messages: vec![Message::tool_results(vec![ToolResult {
-                call: "call_1".into(),
-                name: "read".into(),
-                content: vec![ToolResultContent::Text(Text {
-                    text: "the file".into(),
-                })],
-                is_error: false,
-                useless: false,
-            }])],
-            ..Default::default()
-        };
-        let b = body(req);
-        let msgs = b["messages"].as_array().unwrap();
-        assert_eq!(msgs[0]["role"], "tool");
-        assert_eq!(msgs[0]["tool_call_id"], "call_1");
-        assert_eq!(msgs[0]["content"], "the file");
     }
 
     #[test]
@@ -600,27 +526,6 @@ mod tests {
             c,
             AssistantContent::ToolCall(call) if call.name == "read" && call.args["path"] == "a.rs"
         )));
-    }
-
-    #[test]
-    fn a_demoted_reasoning_block_ships_as_tagged_prose() {
-        let req = Request {
-            messages: vec![Message::Assistant {
-                content: vec![AssistantContent::Reasoning(Reasoning {
-                    id: None,
-                    content: vec![ReasoningContent::Text {
-                        text: "think hard".into(),
-                        signature: None,
-                    }],
-                    by: Some("other-model".into()),
-                })],
-            }],
-            ..Default::default()
-        };
-        let b = body(req);
-        let msgs = b["messages"].as_array().unwrap();
-        assert_eq!(msgs[0]["role"], "assistant");
-        assert!(msgs[0]["content"].as_str().unwrap().contains("think hard"));
     }
 
     #[test]

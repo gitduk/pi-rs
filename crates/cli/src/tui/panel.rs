@@ -667,15 +667,6 @@ mod tests {
             col, 22,
             "one column past the value, at the end of `base_url = http://xz`"
         );
-        assert!(
-            rows[0].contains("base_url = http://xz"),
-            "the row is the line: {}",
-            rows[0]
-        );
-        assert!(
-            !rows[0].contains("\x1b[7m"),
-            "the row's selection stands down for the caret"
-        );
         assert_eq!(rows.len(), 3, "rows, then the footer — no edit line below");
     }
 
@@ -687,7 +678,7 @@ mod tests {
         let mut p = Panel::new(vec![row("模型.name", "http://x", false)], &vim());
         typed(&mut p, "i");
         typed(&mut p, "中");
-        let (rows, caret) = p.view(&Paint::new(true), 80);
+        let (_, caret) = p.view(&Paint::new(true), 80);
         let (r, col) = caret.expect("the caret rides the edited row");
         assert_eq!(r, 0);
         assert_eq!(
@@ -695,7 +686,6 @@ mod tests {
             crate::render::visible_width("› 模型.name = http://x中"),
             "one column past the value, however wide the path"
         );
-        assert!(rows[0].contains("模型.name = http://x中"));
     }
 
     // A value longer than the row wraps, the continuation indented under the

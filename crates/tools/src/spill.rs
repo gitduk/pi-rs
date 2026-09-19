@@ -236,18 +236,16 @@ mod tests {
             big
         );
     }
-    #[test]
-    fn prune_leaves_a_small_body_untouched() {
-        let body = "small";
-        assert_eq!(prune(body), body);
-    }
 
+    // Under the cap a body passes untouched; over it, both ends survive and
+    // what was taken is named.
     #[test]
     fn prune_keeps_both_ends_and_names_what_it_took() {
+        assert_eq!(prune("small"), "small");
+
         let body = "head-line\n".repeat(10_000);
         let got = prune(&body);
         assert!(got.ends_with("head-line\n"), "{got}");
-
         assert!(got.contains("bytes omitted"), "{got}");
         assert!(got.len() < body.len(), "prune must shrink");
     }

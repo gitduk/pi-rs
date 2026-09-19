@@ -125,27 +125,35 @@ mod tier_tests {
         }
     }
 
-    // The shape of the thing, stated once: what each ceiling reaches.
+    // The shape of the thing, stated once: what each ceiling reaches; the
+    // whole reason `Net` is a tier and not a rung — a run may reach the web
+    // without gaining the right to change anything here, and a run that may
+    // only read the tree does not silently gain the web; and what a project
+    // ceiling leaves, which is what `min` did while this was a total order.
     #[test]
-    fn a_ceiling_reaches_what_it_says_and_nothing_further() {
+    fn the_tier_lattice_reaches_and_caps_as_documented() {
         let reach = |c: Tier| ALL.into_iter().filter(|t| t.under(c)).collect::<Vec<_>>();
         assert_eq!(reach(Read), vec![Read]);
         assert_eq!(reach(Write), vec![Read, Write]);
         assert_eq!(reach(Net), vec![Read, Net]);
         assert_eq!(reach(Exec), vec![Read, Write, Exec, Net]);
-    }
 
-    // The whole reason `Net` is a tier and not a rung: a run may reach the
-    // web without gaining the right to change anything here, and a run that
-    // may only read the tree does not silently gain the web.
-    #[test]
-    fn net_and_write_are_beside_each_other_not_in_order() {
         assert!(!Net.under(Write));
         assert!(!Write.under(Net));
         assert!(!Net.under(Read));
         // Exec is the exception, and deliberately: `sh` can `curl`, so
         // refusing the fetch tool there would deny nothing.
         assert!(Net.under(Exec));
+
+        assert_eq!(Exec.capped_by(Read), Read);
+        assert_eq!(Exec.capped_by(Net), Net);
+        assert_eq!(Read.capped_by(Exec), Read);
+        assert_eq!(Net.capped_by(Write), Read);
+        assert_eq!(Write.capped_by(Net), Read);
+        for t in ALL {
+            assert_eq!(t.capped_by(t), t);
+            assert_eq!(t.capped_by(Exec), t, "exec caps nothing");
+        }
     }
 
     // The property `capped_by` has to keep, whatever tiers exist: the cap is
@@ -162,21 +170,6 @@ mod tier_tests {
                     assert!(t.under(cap), "{t:?} is under {a:?} and {b:?}, not {cap:?}");
                 }
             }
-        }
-    }
-
-    // What `min` did while this was a total order. Two ceilings with no
-    // order between them leave only what they share.
-    #[test]
-    fn a_project_ceiling_applies_downward() {
-        assert_eq!(Exec.capped_by(Read), Read);
-        assert_eq!(Exec.capped_by(Net), Net);
-        assert_eq!(Read.capped_by(Exec), Read);
-        assert_eq!(Net.capped_by(Write), Read);
-        assert_eq!(Write.capped_by(Net), Read);
-        for t in ALL {
-            assert_eq!(t.capped_by(t), t);
-            assert_eq!(t.capped_by(Exec), t, "exec caps nothing");
         }
     }
 }

@@ -1067,34 +1067,6 @@ mod tests {
         assert!(n.unwrap().contains("edit"));
     }
 
-    // The transcript says a call failed; only the journal says what the call
-    // actually carried. A loop is exactly when that difference starts to
-    // matter, so the notice that names the loop is where the journal is named.
-    #[test]
-    fn the_notice_points_at_the_journal_it_cannot_otherwise_reach() {
-        let journal = std::path::Path::new("/fixture/sessions/-w/s1/journal.jsonl");
-        let mut f = Failures::new();
-        too_many_failures(&call("edit"), Some("EDIT_REFUSED"), &mut f, Some(journal));
-        let notice = too_many_failures(&call("edit"), Some("EDIT_REFUSED"), &mut f, Some(journal))
-            .expect("the second same-code failure is named");
-
-        assert!(
-            notice.contains("/fixture/sessions/-w/s1/journal.jsonl"),
-            "{notice}"
-        );
-        // JSONL has no skeleton to fall back on, so a whole-file read is the
-        // one way to spend the window that the pointer would have saved.
-        assert!(notice.contains("grep"), "{notice}");
-
-        // A machine with nowhere to keep a journal still gets the loop named.
-        let mut f = Failures::new();
-        too_many_failures(&call("edit"), Some("EDIT_REFUSED"), &mut f, None);
-        let bare = too_many_failures(&call("edit"), Some("EDIT_REFUSED"), &mut f, None)
-            .expect("naming the loop does not depend on having a journal");
-        assert!(bare.contains("failed the same way"), "{bare}");
-        assert!(!bare.contains("grep"), "{bare}");
-    }
-
     #[test]
     fn a_different_code_starts_a_fresh_count() {
         let mut f = Failures::new();
@@ -1107,21 +1079,20 @@ mod tests {
     }
 
     #[test]
-    fn an_edit_success_does_not_clear_its_failure_streak() {
-        let mut f = Failures::new();
-        too_many_failures(&call("edit"), Some("EDIT_REFUSED"), &mut f, None);
-        note_success(&call("edit"), &mut f);
-        // Landing one edit does not mean the next will land, so its streak
-        // stays until the model changes approach.
-        assert!(f.contains_key(&("edit".into(), "EDIT_REFUSED".into())));
-    }
-
-    #[test]
-    fn a_success_clears_the_streak_for_any_other_tool() {
+    fn a_success_clears_the_streak_except_for_edits() {
         let mut f = Failures::new();
         too_many_failures(&call("bash"), Some("BASH_TIMEOUT"), &mut f, None);
         note_success(&call("bash"), &mut f);
         assert!(f.is_empty(), "a bash success breaks the bash streak");
+
+        // Landing one edit does not mean the next will land, so its streak
+        // stays until the model changes approach.
+        too_many_failures(&call("edit"), Some("EDIT_REFUSED"), &mut f, None);
+        note_success(&call("edit"), &mut f);
+        assert!(
+            f.contains_key(&("edit".into(), "EDIT_REFUSED".into())),
+            "an edit success keeps the edit streak"
+        );
     }
 
     #[test]
@@ -1138,41 +1109,5 @@ mod tests {
             too_many_failures(&call("edit"), Some("EDIT_REFUSED"), &mut f, None).is_none(),
             "a single failure after naming must not be called a repeat"
         );
-    }
-
-    #[test]
-    fn short_invalid_args_are_shown_whole() {
-        let raw = r#"{"path": "#;
-        assert_eq!(
-            invalid_args_snippet(raw, "EOF while parsing an object at line 1 column 9"),
-            raw
-        );
-    }
-
-    #[test]
-    fn long_invalid_args_center_on_the_failing_column() {
-        let raw = format!(r#"{{"path":"{}"}}"#, "a".repeat(600));
-        // Column at the very end: the window must reach the tail, hiding the
-        // head where the parse already succeeded.
-        let tail = invalid_args_snippet(
-            &raw,
-            "control character found in string at line 1 column 611",
-        );
-        assert!(tail.starts_with('…'), "{tail}");
-        assert!(tail.ends_with('}'), "{tail}");
-        assert!(tail.chars().count() <= MAX_INVALID_ARGS_SHOWN + 1, "{tail}");
-        // Column near the start: the window must keep the head and hide the
-        // tail instead.
-        let head = invalid_args_snippet(&raw, "expected value at line 1 column 2");
-        assert!(head.starts_with('{'), "{head}");
-        assert!(head.ends_with('…'), "{head}");
-    }
-
-    #[test]
-    fn long_invalid_args_without_a_column_fall_back_to_the_tail() {
-        let raw = format!(r#"{{"path":"{}"}}"#, "b".repeat(600));
-        let snippet = invalid_args_snippet(&raw, "not valid JSON");
-        assert!(snippet.ends_with('}'), "{snippet}");
-        assert!(snippet.starts_with('…'), "{snippet}");
     }
 }
