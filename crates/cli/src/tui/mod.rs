@@ -296,12 +296,58 @@ struct ScrollbackRows<'a> {
     lens: Vec<usize>,
 }
 
-type ScrollbackItem = (Line<'static>, Option<Line<'static>>);
+/// One line of the view as the window walks it: a scrollback row's line, which
+/// waits for the frame that shows it, or a live line already in hand.
+///
+/// The split is what a scrolled view costs. The walk passes over every line
+/// above where the window starts, and a row's line is asked for only once the
+/// window has reached it — the walk itself reads the row's own count.
+enum Piece<'a> {
+    Row {
+        row: &'a Row,
+        line: usize,
+        paint: &'a Paint,
+        done: &'a [Segment],
+        width: usize,
+    },
+    Live(screen::Ready<'a>),
+}
+
+impl screen::Piece for Piece<'_> {
+    fn height(&self) -> usize {
+        match self {
+            Piece::Row {
+                row,
+                line,
+                paint,
+                done,
+                width,
+            } => row.line_height(*line, paint, done, *width),
+            Piece::Live(line) => screen::Piece::height(line),
+        }
+    }
+
+    fn pieces(self) -> Vec<Line<'static>> {
+        match self {
+            Piece::Row {
+                row,
+                line,
+                paint,
+                done,
+                width,
+            } => {
+                let (line, border) = row.line(line, paint, done, width);
+                screen::wrap(border.as_ref(), &line, width)
+            }
+            Piece::Live(line) => screen::Piece::pieces(line),
+        }
+    }
+}
 
 struct IndexedScrollbackRows<'a>(ScrollbackRows<'a>);
 
 impl<'a> Iterator for IndexedScrollbackRows<'a> {
-    type Item = (ScrollbackItem, usize);
+    type Item = (Piece<'a>, usize);
 
     fn next(&mut self) -> Option<Self::Item> {
         self.0.next_indexed()
@@ -334,26 +380,38 @@ impl<'a> ScrollbackRows<'a> {
         IndexedScrollbackRows(self)
     }
 
-    fn next_indexed(&mut self) -> Option<(ScrollbackItem, usize)> {
+    // Line `line` of row `idx` as the window wants it: the row itself, whose
+    // count per line is already measured and whose text waits until a frame
+    // shows it.
+    fn piece(&self, idx: usize, line: usize) -> Piece<'a> {
+        Piece::Row {
+            row: &self.rows[idx],
+            line,
+            paint: self.paint,
+            done: self.done,
+            width: self.width,
+        }
+    }
+
+    fn next_indexed(&mut self) -> Option<(Piece<'a>, usize)> {
         if self.rows.is_empty() {
             return None;
         }
         while self.front.0 <= self.back.0 {
             let idx = self.front.0;
-            let entry = &self.rows[idx];
             if self.front.0 == self.back.0 {
+                // The two walks have met inside one row: no line left between
+                // them for either to take.
                 if self.front.1 >= self.back.1 {
                     return None;
                 }
-                let (text, border) = entry.line(self.front.1, self.paint, self.done, self.width);
+                let item = self.piece(idx, self.front.1);
                 self.front.1 += 1;
-                let item = (text, border);
                 return Some((item, idx));
             }
             if self.front.1 < self.lens[idx] {
-                let (text, border) = entry.line(self.front.1, self.paint, self.done, self.width);
+                let item = self.piece(idx, self.front.1);
                 self.front.1 += 1;
-                let item = (text, border);
                 return Some((item, idx));
             }
             self.front = (self.front.0 + 1, 0);
@@ -361,26 +419,23 @@ impl<'a> ScrollbackRows<'a> {
         None
     }
 
-    fn next_back_indexed(&mut self) -> Option<(ScrollbackItem, usize)> {
+    fn next_back_indexed(&mut self) -> Option<(Piece<'a>, usize)> {
         if self.rows.is_empty() {
             return None;
         }
         while self.front.0 <= self.back.0 {
             let idx = self.back.0;
-            let entry = &self.rows[idx];
             if self.front.0 == self.back.0 {
                 if self.front.1 >= self.back.1 {
                     return None;
                 }
                 self.back.1 -= 1;
-                let (text, border) = entry.line(self.back.1, self.paint, self.done, self.width);
-                let item = (text, border);
+                let item = self.piece(idx, self.back.1);
                 return Some((item, idx));
             }
             if self.back.1 > 0 {
                 self.back.1 -= 1;
-                let (text, border) = entry.line(self.back.1, self.paint, self.done, self.width);
-                let item = (text, border);
+                let item = self.piece(idx, self.back.1);
                 return Some((item, idx));
             }
             self.back = (self.back.0 - 1, self.lens[self.back.0 - 1]);
@@ -390,7 +445,7 @@ impl<'a> ScrollbackRows<'a> {
 }
 
 impl<'a> Iterator for ScrollbackRows<'a> {
-    type Item = ScrollbackItem;
+    type Item = Piece<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.next_indexed().map(|(item, _)| item)
@@ -1496,8 +1551,8 @@ impl Ui {
             self.editor.text(),
             &self.commands,
             &self.choices,
-            self.lists.sessions(),
-            self.lists.worktrees(),
+            || self.lists.sessions(),
+            || self.lists.worktrees(),
         )
         .into_iter()
         .rev()
@@ -1811,12 +1866,18 @@ impl Ui {
             } else {
                 Target::None
             };
-            ((s.clone(), None), target)
+            // In hand already, and the window takes it as it is.
+            (
+                Piece::Live(screen::Ready {
+                    line: s.clone(),
+                    width,
+                }),
+                target,
+            )
         });
 
         let (tagged_rows, scroll) = screen::window_tagged(
             scrollback.chain(live_stream),
-            width,
             hist_view,
             lane.view.surface.scroll,
         );
@@ -4245,6 +4306,13 @@ mod tests {
         )
     }
 
+    // The text one line of the view shows, read the way a frame reads it: the
+    // walk hands over what it has not built yet, so a test asks for the screen
+    // rows and joins them.
+    fn text(piece: super::Piece<'_>) -> String {
+        screen::Piece::pieces(piece).iter().map(plain).collect()
+    }
+
     // The rows of one result are painted once per width and handed out one at
     // a time, so a stale cache would show the narrow frame's clipping in the
     // wide one — and only below the head row, where the single-row case
@@ -4256,14 +4324,14 @@ mod tests {
         let rows = [Row::result(true, "edit", format!("head\n  12 + {long}"))];
 
         let narrow: Vec<String> = ScrollbackRows::new(&rows, &paint, &[], 40)
-            .map(|(s, _)| plain(&s))
+            .map(text)
             .collect();
         let wide: Vec<String> = ScrollbackRows::new(&rows, &paint, &[], 160)
-            .map(|(s, _)| plain(&s))
+            .map(text)
             .collect();
         // And back again: widening must not be the only direction that repaints.
         let again: Vec<String> = ScrollbackRows::new(&rows, &paint, &[], 40)
-            .map(|(s, _)| plain(&s))
+            .map(text)
             .collect();
 
         assert_eq!(narrow.len(), 2, "head plus the one diff row");
@@ -4283,12 +4351,12 @@ mod tests {
         // front was fixed, and `screen::window` is the one that walks back.
         let paint = Paint::new(false);
         let rows: Vec<String> = ScrollbackRows::new(&[], &paint, &[], 80)
-            .map(|(s, _)| plain(&s))
+            .map(text)
             .collect();
         assert!(rows.is_empty());
         let back: Vec<String> = ScrollbackRows::new(&[], &paint, &[], 80)
             .rev()
-            .map(|(s, _)| plain(&s))
+            .map(text)
             .collect();
         assert!(back.is_empty(), "the back walk too");
     }
@@ -4319,8 +4387,8 @@ mod tests {
             }
             (f, b)
         };
-        let front: Vec<String> = front.iter().map(|(s, _)| plain(s)).collect();
-        let back: Vec<String> = back.iter().map(|(s, _)| plain(s)).collect();
+        let front: Vec<String> = front.into_iter().map(text).collect();
+        let back: Vec<String> = back.into_iter().map(text).collect();
         assert_eq!(front, vec!["a", "line 1"]);
         assert_eq!(back, vec!["d", "line 2"]);
     }
@@ -4497,9 +4565,7 @@ mod tests {
         let total = content.len();
         *scroll = absorb_growth(*scroll, *last_total, total);
         let (rows, s) = screen::window(
-            content
-                .iter()
-                .map(|s| (Line::from(s.clone()), None::<Line<'static>>)),
+            content.iter().map(|s| Line::from(s.clone())),
             80,
             room,
             *scroll,
@@ -4785,7 +4851,7 @@ mod tests {
         let paint = Paint::new(false);
         let rows: Vec<String> =
             ScrollbackRows::new(&tui.core.lanes[1].view.surface.scrollback, &paint, &[], 80)
-                .map(|(r, _)| r.to_string())
+                .map(text)
                 .collect();
         assert!(
             rows.iter().any(|r| r.contains("what was said before")),

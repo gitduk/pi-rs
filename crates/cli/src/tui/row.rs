@@ -79,18 +79,64 @@ impl FoldedTools {
 
 pub struct Row(Kind, Height);
 
-// The rows this row takes on screen at one width, wraps included, remembered
-// until the width or the content changes.
+// The rows this row takes on screen at one width, wraps included, counted one
+// logical line at a time and remembered until the width or the content
+// changes.
 #[derive(Default)]
-struct Height(RefCell<Option<(usize, usize)>>);
+struct Height(RefCell<Option<Measured>>);
+
+struct Measured {
+    width: usize,
+    // One entry per logical line, `None` until that line is wrapped. Kept per
+    // line rather than as one total so a tall row is never wrapped in full to
+    // answer for one of its lines.
+    lines: Vec<Option<usize>>,
+}
 
 impl Height {
-    fn get(&self, width: usize) -> Option<usize> {
-        self.0.borrow().filter(|(w, _)| *w == width).map(|(_, h)| h)
+    // The measurement at this width, with room for `lines` of them. A width
+    // that has moved starts again; a row that has grown since keeps what was
+    // already counted, since nothing else can make its lines shorter.
+    fn at(&self, width: usize, lines: usize) -> std::cell::RefMut<'_, Measured> {
+        let mut held = self.0.borrow_mut();
+        match held.as_mut() {
+            Some(m) if m.width == width => {
+                if m.lines.len() < lines {
+                    m.lines.resize(lines, None);
+                }
+            }
+            _ => {
+                *held = Some(Measured {
+                    width,
+                    lines: vec![None; lines],
+                });
+            }
+        }
+        std::cell::RefMut::map(held, |h| h.as_mut().expect("filled above"))
     }
 
-    fn set(&self, width: usize, height: usize) {
-        *self.0.borrow_mut() = Some((width, height));
+    fn line(&self, width: usize, i: usize) -> Option<usize> {
+        self.0
+            .borrow()
+            .as_ref()
+            .filter(|m| m.width == width)
+            .and_then(|m| m.lines.get(i).copied().flatten())
+    }
+
+    // The row's count, once every line of it has been. Nothing to answer with
+    // while a line is still unmeasured, so a caller that asks then measures
+    // what is missing — see `height`.
+    fn total(&self, width: usize) -> Option<usize> {
+        let held = self.0.borrow();
+        let m = held.as_ref().filter(|m| m.width == width)?;
+        m.lines
+            .iter()
+            .all(Option::is_some)
+            .then(|| m.lines.iter().flatten().sum())
+    }
+
+    fn set(&self, width: usize, i: usize, height: usize) {
+        self.at(width, i + 1).lines[i] = Some(height);
     }
 
     fn clear(&self) {
@@ -497,15 +543,25 @@ impl Row {
     /// width until the content changes. The scrolled-up view's accounting
     /// reads these; a wrap is a row the count has to know about.
     pub fn height(&self, paint: &Paint, done: &[Segment], width: usize) -> usize {
-        if let Some(h) = self.1.get(width) {
+        if let Some(total) = self.1.total(width) {
+            return total;
+        }
+        (0..self.len())
+            .map(|i| self.line_height(i, paint, done, width))
+            .sum()
+    }
+
+    /// Screen rows logical line `i` takes at `width`, from the same
+    /// measurement `height` keeps. The window's walk reads one of these per
+    /// line it passes, so a line it is not going to show is counted without
+    /// being wrapped.
+    pub fn line_height(&self, i: usize, paint: &Paint, done: &[Segment], width: usize) -> usize {
+        if let Some(h) = self.1.line(width, i) {
             return h;
         }
-        let mut h = 0;
-        for i in 0..self.len() {
-            let (line, border) = self.line(i, paint, done, width);
-            h += super::screen::wrap(border.as_ref(), &line, width).len();
-        }
-        self.1.set(width, h);
+        let (line, border) = self.line(i, paint, done, width);
+        let h = super::screen::wrap(border.as_ref(), &line, width).len();
+        self.1.set(width, i, h);
         h
     }
 
@@ -842,5 +898,37 @@ mod tools_summary_tests {
 
         assert!(row.toggle_expand());
         assert_eq!(row.len(), 26);
+    }
+}
+
+#[cfg(test)]
+mod height_tests {
+    use super::*;
+
+    // The window reads one line's height at a time to pass over the rows a
+    // scrolled view does not show, while the view's own accounting reads the
+    // row whole. The two have to agree about where a row ends, whichever was
+    // asked first and at whichever width.
+    #[test]
+    fn a_rows_height_is_the_sum_of_its_lines() {
+        let paint = Paint::new(false);
+        let done: Vec<Segment> = Vec::new();
+        let row = Row::reasoning(1, vec![Line::from("abcdef"), Line::from("gh")], false);
+        for width in [2usize, 4, 80] {
+            let sum: usize = (0..row.len())
+                .map(|i| row.line_height(i, &paint, &done, width))
+                .sum();
+            assert_eq!(sum, row.height(&paint, &done, width), "at width {width}");
+        }
+        // Asked a whole row at a time, then one line at a time: same answer.
+        let fresh = Row::reasoning(1, vec![Line::from("abcdef"), Line::from("gh")], false);
+        assert_eq!(fresh.height(&paint, &done, 2), 4, "three rows and one");
+        assert_eq!(
+            fresh.line_height(0, &paint, &done, 2),
+            3,
+            "abcdef wraps to three"
+        );
+        assert_eq!(fresh.line_height(1, &paint, &done, 2), 1);
+        assert_eq!(fresh.height(&paint, &done, 2), 4);
     }
 }

@@ -239,12 +239,17 @@ fn worktree_candidates(trees: &[Choice], head: &str, prefix: &str) -> Vec<Candid
 /// against the workspace's saved sessions, `/worktree` against the
 /// repository's checkouts. A prompt is prose and a focus phrase is prose;
 /// guessing at either is worse than leaving it alone.
-pub fn complete(
+///
+/// The last two are asked for through a call rather than handed over, because
+/// every line but theirs is completed without them: reading the workspace's
+/// sessions is a walk of every transcript in it and reading the checkouts is a
+/// `git worktree list`, and a frame that offers neither should pay neither.
+pub fn complete<'a>(
     line: &str,
     commands: &[Command],
     models: &[Choice],
-    sessions: &[ResumeChoice],
-    worktrees: &[Choice],
+    sessions: impl Fn() -> &'a [ResumeChoice],
+    worktrees: impl Fn() -> &'a [Choice],
 ) -> Vec<Candidate> {
     if !line.starts_with('/') {
         return Vec::new();
@@ -284,14 +289,14 @@ pub fn complete(
         "/worktree" if typed == "rm" => Vec::new(),
         "/worktree" if typed.starts_with("rm ") => {
             let arg = typed["rm ".len()..].trim_start();
-            worktree_candidates(worktrees, "/worktree rm ", arg)
+            worktree_candidates(worktrees(), "/worktree rm ", arg)
         }
         // A name may hold a slash (`feat/one`), so unlike a model it is not
         // settled by the first word — only whitespace after it settles it.
         "/worktree" if typed.contains(char::is_whitespace) => Vec::new(),
-        "/worktree" => worktree_candidates(worktrees, "/worktree ", typed),
+        "/worktree" => worktree_candidates(worktrees(), "/worktree ", typed),
         // A first question is a whole sentence, so the argument may keep several words.
-        "/resume" => sessions
+        "/resume" => sessions()
             .iter()
             .filter(|s| {
                 !s.prompt.is_empty() && (s.prompt.starts_with(typed) || s.id.starts_with(typed))
@@ -1916,9 +1921,50 @@ pub(crate) fn mask_secret(path: &str, value: &str) -> String {
 #[cfg(test)]
 mod tests {
 
-    use super::{BUILTIN, Fate, Intent, Source, commands, read};
+    use super::{BUILTIN, Choice, Fate, Intent, Source, commands, read};
     use agent::session::{Entry, Prompt, Session};
     use tools::skills::Skill;
+
+    // The sets behind `/resume` and `/worktree` cost a walk of every
+    // transcript in the workspace and a `git worktree list`. A line that
+    // completes against neither must not pay for either: the frame after every
+    // turn was reading the whole bucket to redraw a menu nobody had opened.
+    #[test]
+    fn a_line_asks_for_the_lists_only_when_it_completes_against_one() {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let sessions = || -> &[crate::session::ResumeChoice] {
+            asked.borrow_mut().push("sessions");
+            &[]
+        };
+        let worktrees = || -> &[Choice] {
+            asked.borrow_mut().push("worktrees");
+            &[]
+        };
+        let mut notes = Vec::new();
+        let commands = commands(&[], &mut notes);
+        let line = |text: &str| {
+            asked.borrow_mut().clear();
+            super::complete(text, &commands, &[], sessions, worktrees);
+            asked.borrow().join(",")
+        };
+
+        assert_eq!(line("fix the flaky test"), "", "a prompt completes nothing");
+        assert_eq!(line("/new"), "", "a command word needs no list");
+        assert_eq!(line("/model "), "", "models are not one of the two");
+        assert_eq!(line("/resume "), "sessions");
+        assert_eq!(line("/worktree "), "worktrees");
+        assert_eq!(line("/worktree rm "), "worktrees");
+
+        // And what the call asks for is what it completes against.
+        let one = [crate::session::ResumeChoice {
+            id: "s1".into(),
+            prompt: "fix the flaky test".into(),
+            created: 0,
+        }];
+        let offered = super::complete("/resume f", &commands, &[], || &one[..], || &[]);
+        assert_eq!(offered.len(), 1);
+        assert_eq!(offered[0].line, "/resume s1");
+    }
 
     #[test]
     fn every_listed_command_actually_parses() {

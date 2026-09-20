@@ -81,6 +81,47 @@ pub fn usable(width: u16) -> usize {
     width.saturating_sub(1).max(1) as usize
 }
 
+/// One line of the view as the window walks it: how many screen rows it takes
+/// at the width it was sized for, and the text itself.
+///
+/// The text is asked for only by the lines the window shows. A scrolled view
+/// walks back over everything above where it starts, so a line it passes has
+/// to cost its count and nothing else — wrapping every one of them on the way
+/// is what made scrolling cost what had been scrolled.
+pub trait Piece {
+    /// Screen rows this line takes at the width it was sized for.
+    fn height(&self) -> usize;
+
+    /// The line's screen rows, oldest first: one per row it wraps to. See
+    /// `wrap`.
+    fn pieces(self) -> Vec<Line<'static>>;
+}
+
+/// A line in hand, sized by wrapping it at the width it was built for: the
+/// live block's lines, which are nothing but text, and what the layout tests
+/// hand the window — where the scrollback hands it a row's line it would
+/// rather not build. A live line is not a said one, so there is no border for
+/// its wrapped rows to repeat.
+///
+/// Counted by wrapping rather than taken as the one row a fitted line usually
+/// is: the count the window walks on and the rows it goes on to take have to
+/// agree about every line, and only the wrap makes them do it whatever the
+/// live block hands over.
+pub struct Ready<'a> {
+    pub line: Line<'a>,
+    pub width: usize,
+}
+
+impl Piece for Ready<'_> {
+    fn height(&self) -> usize {
+        fit(&self.line, self.width).len()
+    }
+
+    fn pieces(self) -> Vec<Line<'static>> {
+        fit(&self.line, self.width)
+    }
+}
+
 /// The window of rows to show: the last `room` rows of `lines`, with `scroll`
 /// rows held back from the bottom. The clamped scroll comes back with them.
 ///
@@ -88,32 +129,59 @@ pub fn usable(width: u16) -> usize {
 /// window has to be measured after wrapping. Measuring it in lines instead
 /// puts more rows in the area than fit and the newest ones fall off the
 /// bottom, out of sight below the input. The walk starts from the newest line
-/// and stops as soon as the window is full, so a long history is not wrapped
-/// in full on every frame.
-///
-/// Each line carries the border its wraps repeat, if it has one: a said
-/// line's rule must run down every row it wraps to, or the bar is cut at the
-/// first one. See `wrap`.
-pub fn window_tagged<'a, T: Clone>(
-    lines: impl DoubleEndedIterator<Item = ((Line<'a>, Option<Line<'a>>), T)>,
-    width: usize,
+/// and stops as soon as the window is full, so a long history is not built in
+/// full on every frame; each line says how many rows it takes, so the rows the
+/// window scrolls past are counted and dropped, unwrapped and unbuilt.
+pub fn window_tagged<T: Clone, P: Piece>(
+    lines: impl DoubleEndedIterator<Item = (P, T)>,
     room: usize,
     scroll: usize,
 ) -> (Vec<(Line<'static>, T)>, usize) {
     let want = room + scroll;
-    let mut back: Vec<(Line<'static>, T)> = Vec::new();
-    for ((line, border), tag) in lines.rev() {
-        if back.len() >= want {
+    // Backwards on the counts alone: a line the window will not show costs its
+    // height here, not the text it would take to build.
+    let mut pending: Vec<(P, T)> = Vec::new();
+    let mut have = 0usize;
+    for item in lines.rev() {
+        if have >= want {
             break;
         }
-        for piece in wrap(border.as_ref(), &line, width).into_iter().rev() {
-            back.push((piece, tag.clone()));
-        }
+        have += item.0.height();
+        pending.push(item);
     }
-    let scroll = scroll.min(back.len().saturating_sub(room));
-    let mut rows: Vec<(Line<'static>, T)> = back.into_iter().skip(scroll).take(room).collect();
-    rows.reverse();
-    (rows, scroll)
+    let scroll = scroll.min(have.saturating_sub(room));
+    let mut back: Vec<(Line<'static>, T)> = Vec::new();
+    let mut skip = scroll;
+    for (line, tag) in pending {
+        if back.len() >= room {
+            break;
+        }
+        // A line the window still has rows to hold back is passed over by its
+        // count alone; from the one it stops inside, nothing is asked but the
+        // text.
+        if skip > 0 {
+            let height = line.height();
+            if skip >= height {
+                skip -= height;
+                continue;
+            }
+        }
+        // Newest screen row first, the direction the walk came from, with the
+        // rows held back dropped off the front of it and the window's remaining
+        // room taken off the back.
+        let mut rows = line.pieces();
+        rows.reverse();
+        let left = room - back.len();
+        back.extend(
+            rows.into_iter()
+                .skip(skip)
+                .take(left)
+                .map(|row| (row, tag.clone())),
+        );
+        skip = 0;
+    }
+    back.reverse();
+    (back, scroll)
 }
 
 /// A line's text without its styling, for tests that assert on layout
@@ -125,12 +193,13 @@ pub(crate) fn plain(line: &Line<'_>) -> String {
 
 #[cfg(test)]
 pub fn window<'a>(
-    lines: impl DoubleEndedIterator<Item = (Line<'a>, Option<Line<'a>>)>,
+    lines: impl DoubleEndedIterator<Item = Line<'a>>,
     width: usize,
     room: usize,
     scroll: usize,
 ) -> (Vec<Line<'static>>, usize) {
-    let (rows, scroll) = window_tagged(lines.map(|l| (l, ())), width, room, scroll);
+    let lines = lines.map(move |line| (Ready { line, width }, ()));
+    let (rows, scroll) = window_tagged(lines, room, scroll);
     (rows.into_iter().map(|(r, ())| r).collect(), scroll)
 }
 
@@ -470,7 +539,7 @@ mod tests {
     // The window's rows, plain, for a history of `lines` at width `width`.
     fn shown(lines: &[&str], width: usize, room: usize, scroll: usize) -> Vec<String> {
         let owned: Vec<Line<'static>> = lines.iter().map(|l| Line::from(l.to_string())).collect();
-        let (rows, _) = window(owned.iter().map(|l| (l.clone(), None)), width, room, scroll);
+        let (rows, _) = window(owned.iter().cloned(), width, room, scroll);
         rows.into_iter().map(|l| plain(&l)).collect()
     }
 
@@ -497,13 +566,22 @@ mod tests {
         assert_eq!(shown(&["a", "b", "c", "d"], 10, 2, 1), vec!["b", "c"]);
     }
 
+    // The walk counts screen rows, so a window whose oldest row starts inside a
+    // wrapped line takes the rows of that line it reaches and cuts the rest —
+    // the line is not taken whole, and the rows held back are not taken at all.
+    #[test]
+    fn a_window_that_starts_inside_a_wrapped_line_cuts_that_line() {
+        // At width 2: "abcdef" is three rows, "gh" and "ij" one each.
+        assert_eq!(shown(&["abcdef", "gh", "ij"], 2, 2, 1), vec!["ef", "gh"]);
+    }
+
     #[test]
     fn scrolling_stops_at_the_oldest_row() {
         let owned: Vec<Line<'static>> = ["a", "b", "c"]
             .iter()
             .map(|l| Line::from(l.to_string()))
             .collect();
-        let (rows, scroll) = window(owned.iter().map(|l| (l.clone(), None)), 10, 2, 99);
+        let (rows, scroll) = window(owned.iter().cloned(), 10, 2, 99);
         assert_eq!(
             rows.iter().map(plain).collect::<Vec<_>>(),
             vec!["a".to_string(), "b".to_string()]
