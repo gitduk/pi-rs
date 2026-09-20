@@ -13,6 +13,9 @@ const ECHO_LIMIT: usize = 2_000;
 const ECHO_ENDS: usize = 3;
 // Rows a deletion lists before the rest are counted instead.
 const DELETED_ROWS: usize = 40;
+// Rows either side of a landing the line diff will align; past that the
+// landing is shown whole, the alignment costing rows squared.
+const DIFF_LINES: usize = 200;
 
 // What a call that gets the arguments wrong is told, so it resends the call
 // instead of staring at a bare serde error for a field it never named.
@@ -442,6 +445,73 @@ fn blank_note(edits: &[usize]) -> String {
     format!("\n{} {said}\n", named.join(", "))
 }
 
+// The rows a landing displaced and did not put back, and the rows it left that
+// were not there before, each numbered as its own file reads it.
+fn changed<'x>(
+    at: usize,
+    took: &'x [String],
+    start: usize,
+    gave: &'x [&'x str],
+) -> Vec<(char, usize, &'x str)> {
+    // The ends cannot differ under any alignment, and cutting them first keeps
+    // the table below to the rows actually in question.
+    let head = took
+        .iter()
+        .zip(gave)
+        .take_while(|(was, is)| was == is)
+        .count();
+    let tail = took[head..]
+        .iter()
+        .rev()
+        .zip(gave[head..].iter().rev())
+        .take_while(|(was, is)| was == is)
+        .count();
+    let (took, gave) = (
+        &took[head..took.len() - tail],
+        &gave[head..gave.len() - tail],
+    );
+    let (at, start) = (at + head, start + head);
+    let (n, m) = (took.len(), gave.len());
+    let mut gone: Vec<(char, usize, &'x str)> = Vec::new();
+    if n > DIFF_LINES || m > DIFF_LINES {
+        gone.extend((0..n).map(|i| ('-', at + i, took[i].as_str())));
+        gone.extend((0..m).map(|j| ('+', start + j, gave[j])));
+        return gone;
+    }
+    // The longest run of rows the two sides share, so a row that survives the
+    // edit is not read as one that went and one that arrived.
+    let stride = m + 1;
+    let mut shared = vec![0u32; (n + 1) * stride];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            shared[i * stride + j] = if took[i] == gave[j] {
+                shared[(i + 1) * stride + j + 1] + 1
+            } else {
+                shared[(i + 1) * stride + j].max(shared[i * stride + j + 1])
+            };
+        }
+    }
+    let mut come: Vec<(char, usize, &'x str)> = Vec::new();
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < n && j < m {
+        if took[i] == gave[j] {
+            (i, j) = (i + 1, j + 1);
+        } else if shared[(i + 1) * stride + j] >= shared[i * stride + j + 1] {
+            gone.push(('-', at + i, took[i].as_str()));
+            i += 1;
+        } else {
+            come.push(('+', start + j, gave[j]));
+            j += 1;
+        }
+    }
+    gone.extend((i..n).map(|i| ('-', at + i, took[i].as_str())));
+    come.extend((j..m).map(|j| ('+', start + j, gave[j])));
+    // All the rows that went, then all the rows that came: the numbers already
+    // say where each sits, and a reader scans the two runs apart.
+    gone.extend(come);
+    gone
+}
+
 // What a person watching sees: the lines that went, and the lines that came.
 //
 // Separate from the report the model reads, which is a set of addresses it can
@@ -453,21 +523,11 @@ fn sketch(path: &str, applied: &Applied) -> String {
     let mut row_lines: Vec<(char, usize, &str)> = Vec::new();
     for l in &applied.landed {
         let gave = hunk_rows(&lines, l);
-        // A landing whose body already matched changed nothing, and a diff
-        // that shows it says something happened that did not.
-        if l.took == gave {
-            continue;
-        }
-        minus += l.took.len();
-        plus += gave.len();
-        // Removed rows are numbered in the file they left, added rows in the
-        // one they joined: an earlier hunk's net change moves the two apart.
-        for (i, old) in l.took.iter().enumerate() {
-            row_lines.push(('-', l.took_at + i, old));
-        }
-        for (i, new) in gave.iter().enumerate() {
-            row_lines.push(('+', l.start + i, new));
-        }
+        let moved = changed(l.took_at, &l.took, l.start, gave);
+        let gone = moved.iter().filter(|(sign, ..)| *sign == '-').count();
+        minus += gone;
+        plus += moved.len() - gone;
+        row_lines.extend(moved);
     }
     // Right-aligned so a three-digit row lines up with a two-digit one.
     let width = row_lines
