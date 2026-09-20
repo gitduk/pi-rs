@@ -1,5 +1,6 @@
 use std::fmt::Write as _;
 use std::io::{IsTerminal, Write};
+use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
 use agent::Event;
@@ -303,6 +304,16 @@ impl Style {
         Self {
             color: None,
             sgr: a.to_vec(),
+            rendered: OnceLock::new(),
+        }
+    }
+
+    /// This style plus one attribute: hover's bold, a diff's reverse. Built
+    /// here, where the fields are, rather than at each of its two callers.
+    fn adding(&self, attr: Attr) -> Self {
+        Self {
+            color: self.color.clone(),
+            sgr: self.sgr.iter().cloned().chain([attr]).collect(),
             rendered: OnceLock::new(),
         }
     }
@@ -707,12 +718,7 @@ impl Paint {
         if !hovered || !self.color {
             return self.span(style, body);
         }
-        let bold = Style {
-            color: style.color.clone(),
-            sgr: style.sgr.iter().cloned().chain([Attr::Bold]).collect(),
-            rendered: OnceLock::new(),
-        };
-        self.span(&bold, body)
+        self.span(&style.adding(Attr::Bold), body)
     }
 }
 
@@ -955,15 +961,6 @@ pub fn result_rows(
         p.span(&p.theme.muted, clip(head, room)),
     ])];
     let diff_lines: Vec<&str> = rest.lines().collect();
-    let diff_style = |row: &str| -> &Style {
-        // The row number leads each diff row, so the mark is the second word;
-        // colour beats reading the diff text.
-        match row.split_whitespace().nth(1) {
-            Some("+") => &p.theme.diff.add,
-            Some("-") => &p.theme.diff.del,
-            _ => &p.theme.muted,
-        }
-    };
     let footer = |text: &str| Line::from(p.span_hovered(hovered, &p.theme.muted, text));
     let sketched = diff_lines.len() > SKETCH_LIMIT && !expanded;
     let shown = if sketched {
@@ -971,11 +968,7 @@ pub fn result_rows(
     } else {
         &diff_lines[..]
     };
-    out.extend(
-        shown
-            .iter()
-            .map(|row| Line::from(p.span(diff_style(row), format!("  {}", clip(row, room))))),
-    );
+    out.extend(sketch_rows(shown, p, room));
     if sketched {
         out.push(footer(&format!(
             "  {} {} more",
@@ -986,6 +979,102 @@ pub fn result_rows(
         out.push(footer("  ▴ collapse"));
     }
     out
+}
+
+/// The rows of a sketch, each under the sign that opens it, and the changed
+/// run of a rewritten line reversed inside both of its rows.
+fn sketch_rows(rows: &[&str], p: &Paint, room: usize) -> Vec<Line<'static>> {
+    let sign = |row: &str| row.chars().next().unwrap_or(' ');
+    let mut out = Vec::with_capacity(rows.len());
+    let mut runs = rows.chunk_by(|a, b| sign(a) == sign(b)).peekable();
+    while let Some(run) = runs.next() {
+        // One row gone and one come back is a line rewritten, and the two are
+        // read together; a wider block has no counterpart to pair.
+        let one_each = sign(run[0]) == '-'
+            && run.len() == 1
+            && runs
+                .peek()
+                .is_some_and(|next| sign(next[0]) == '+' && next.len() == 1);
+        if one_each {
+            let next = runs.next().expect("peeked");
+            out.extend(replaced(run[0], next[0], p, room));
+            continue;
+        }
+        let style = match sign(run[0]) {
+            '+' => &p.theme.diff.add,
+            '-' => &p.theme.diff.del,
+            _ => &p.theme.muted,
+        };
+        for row in run {
+            out.push(Line::from(p.span(style, format!("  {}", clip(row, room)))));
+        }
+    }
+    out
+}
+
+/// The two rows of a rewritten line: the sign and number in the row's own
+/// colour, and the run the two do not share reversed on top of it.
+fn replaced(was: &str, is: &str, p: &Paint, room: usize) -> [Line<'static>; 2] {
+    // The lead is the sign and the number, never the change: the number is
+    // right-aligned, so its space is the first one with a digit behind it.
+    let lead = was
+        .char_indices()
+        .find(|(at, c)| *c == ' ' && was[..*at].bytes().any(|b| b.is_ascii_digit()))
+        .map_or(was.len(), |(at, _)| at + 1);
+    let (was_body, is_body) = (
+        clip(&was[lead..], room.saturating_sub(lead)),
+        clip(&is[lead..], room.saturating_sub(lead)),
+    );
+    let (from, to) = diverged(&was_body, &is_body);
+    let row = |head: &str, body: &str, (start, end): (usize, usize), style: &Style| {
+        Line::from(vec![
+            p.span(style, format!("  {head}")),
+            p.span(style, body[..start].to_string()),
+            p.span(&style.adding(Attr::Reverse), body[start..end].to_string()),
+            p.span(style, body[end..].to_string()),
+        ])
+    };
+    [
+        row(
+            &was[..lead],
+            &was_body,
+            (from.start, from.end),
+            &p.theme.diff.del,
+        ),
+        row(&is[..lead], &is_body, (to.start, to.end), &p.theme.diff.add),
+    ]
+}
+
+/// The run two rows do not share, as byte ranges into each: what is left of
+/// them once the head and the tail they have in common are set aside.
+fn diverged(was: &str, is: &str) -> (Range<usize>, Range<usize>) {
+    let head = was
+        .chars()
+        .zip(is.chars())
+        .take_while(|(a, b)| a == b)
+        .count();
+    // Cut the head off first and count the tail in what is left: the two runs
+    // then cannot overlap, however alike the rows are.
+    let at = |s: &str| s.char_indices().nth(head).map_or(s.len(), |(i, _)| i);
+    let (was_at, is_at) = (at(was), at(is));
+    let (was_rest, is_rest) = (&was[was_at..], &is[is_at..]);
+    let tail = was_rest
+        .chars()
+        .rev()
+        .zip(is_rest.chars().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let cut = |rest: &str| match tail {
+        0 => rest.len(),
+        n => {
+            rest.char_indices()
+                .rev()
+                .nth(n - 1)
+                .expect("counted from here")
+                .0
+        }
+    };
+    (was_at..was_at + cut(was_rest), is_at..is_at + cut(is_rest))
 }
 
 fn fmt_delay(ms: u64) -> String {

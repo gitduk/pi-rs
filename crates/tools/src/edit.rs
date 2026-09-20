@@ -13,6 +13,9 @@ const ECHO_LIMIT: usize = 2_000;
 const ECHO_ENDS: usize = 3;
 // Rows a deletion lists before the rest are counted instead.
 const DELETED_ROWS: usize = 40;
+// Rows of file the edit did not touch that a sketch keeps either side of a
+// change: enough to place it, few enough that the change stays the subject.
+const CONTEXT: usize = 4;
 // Rows either side of a landing the line diff will align; past that the
 // landing is shown whole, the alignment costing rows squared.
 const DIFF_LINES: usize = 200;
@@ -445,14 +448,53 @@ fn blank_note(edits: &[usize]) -> String {
     format!("\n{} {said}\n", named.join(", "))
 }
 
-// The rows a landing displaced and did not put back, and the rows it left that
-// were not there before, each numbered as its own file reads it.
-fn changed<'x>(
+// One row of a sketch: a file row under the sign that says which side of the
+// edit it is on, or the count of the rows a long run of context left out.
+#[derive(Clone, Copy)]
+enum Row<'x> {
+    // `n` numbers the row in the file it is read in: the old file for a row
+    // that went, the new one for a row that came or stayed.
+    Line { sign: char, n: usize, text: &'x str },
+    Elided(usize),
+}
+
+impl<'x> Row<'x> {
+    // A row of the file as it stands now that this edit did not touch.
+    fn kept(n: usize, text: &'x str) -> Self {
+        Self::Line { sign: ' ', n, text }
+    }
+
+    // A row the edit displaced, numbered in the file it left.
+    fn gone(n: usize, text: &'x str) -> Self {
+        Self::Line { sign: '-', n, text }
+    }
+
+    // A row the edit left behind that was not there before.
+    fn come(n: usize, text: &'x str) -> Self {
+        Self::Line { sign: '+', n, text }
+    }
+
+    // Whether this row is one the edit left standing.
+    fn is_kept(&self) -> bool {
+        matches!(self, Self::Line { sign: ' ', .. })
+    }
+
+    // Whether this row carries the sign `mark`: how the head counts the rows
+    // the edit moved, and how one run is read apart from the next.
+    fn has(&self, mark: char) -> bool {
+        matches!(self, Self::Line { sign, .. } if *sign == mark)
+    }
+}
+
+// How a landing's rows line up: what it displaced, what it put there, and the
+// rows it left alone — in file order, so each change keeps its surroundings.
+fn aligned<'x>(
     at: usize,
     took: &'x [String],
     start: usize,
     gave: &'x [&'x str],
-) -> Vec<(char, usize, &'x str)> {
+    out: &mut Vec<Row<'x>>,
+) {
     // The ends cannot differ under any alignment, and cutting them first keeps
     // the table below to the rows actually in question.
     let head = took
@@ -466,81 +508,130 @@ fn changed<'x>(
         .zip(gave[head..].iter().rev())
         .take_while(|(was, is)| was == is)
         .count();
-    let (took, gave) = (
-        &took[head..took.len() - tail],
-        &gave[head..gave.len() - tail],
-    );
+    // The rows the two ends agree on are context, and they are numbered as the
+    // file the reader has now: the edit left them standing.
+    out.extend((0..head).map(|k| Row::kept(start + k, gave[k])));
+    // `at` and `start` now number the middle, the rows the sides do not share.
     let (at, start) = (at + head, start + head);
-    let (n, m) = (took.len(), gave.len());
-    let mut gone: Vec<(char, usize, &'x str)> = Vec::new();
+    let (n, m) = (took.len() - head - tail, gave.len() - head - tail);
     if n > DIFF_LINES || m > DIFF_LINES {
-        gone.extend((0..n).map(|i| ('-', at + i, took[i].as_str())));
-        gone.extend((0..m).map(|j| ('+', start + j, gave[j])));
-        return gone;
-    }
-    // The longest run of rows the two sides share, so a row that survives the
-    // edit is not read as one that went and one that arrived.
-    let stride = m + 1;
-    let mut shared = vec![0u32; (n + 1) * stride];
-    for i in (0..n).rev() {
-        for j in (0..m).rev() {
-            shared[i * stride + j] = if took[i] == gave[j] {
-                shared[(i + 1) * stride + j + 1] + 1
+        // Past the cap the alignment costs more than it says, and a block this
+        // size is read as the rows it displaced and the rows it put there.
+        out.extend((0..n).map(|i| Row::gone(at + i, took[head + i].as_str())));
+        out.extend((0..m).map(|j| Row::come(start + j, gave[head + j])));
+    } else {
+        let (took, gave) = (&took[head..head + n], &gave[head..head + m]);
+        // The longest run of rows the two sides share, so a row that survives
+        // the edit is not read as one that went and one that arrived.
+        let stride = m + 1;
+        let mut shared = vec![0u32; (n + 1) * stride];
+        for i in (0..n).rev() {
+            for j in (0..m).rev() {
+                shared[i * stride + j] = if took[i] == gave[j] {
+                    shared[(i + 1) * stride + j + 1] + 1
+                } else {
+                    shared[(i + 1) * stride + j].max(shared[i * stride + j + 1])
+                };
+            }
+        }
+        // The walk can interleave the two sides, so its runs are read after it:
+        // what went first, then what came, with the shared rows between.
+        let base = out.len();
+        let (mut i, mut j) = (0usize, 0usize);
+        while i < n && j < m {
+            if took[i] == gave[j] {
+                out.push(Row::kept(start + j, gave[j]));
+                (i, j) = (i + 1, j + 1);
+            } else if shared[(i + 1) * stride + j] >= shared[i * stride + j + 1] {
+                out.push(Row::gone(at + i, took[i].as_str()));
+                i += 1;
             } else {
-                shared[(i + 1) * stride + j].max(shared[i * stride + j + 1])
-            };
+                out.push(Row::come(start + j, gave[j]));
+                j += 1;
+            }
+        }
+        for (line, row) in (at + i..at + n).zip(&took[i..]) {
+            out.push(Row::gone(line, row.as_str()));
+        }
+        for (line, row) in (start + j..start + m).zip(&gave[j..]) {
+            out.push(Row::come(line, row));
+        }
+        let mut k = base;
+        while k < out.len() {
+            let end = out[k..]
+                .iter()
+                .position(Row::is_kept)
+                .map_or(out.len(), |p| k + p);
+            out[k..end].sort_by_key(|row| !row.has('-'));
+            k = end + 1;
         }
     }
-    let mut come: Vec<(char, usize, &'x str)> = Vec::new();
-    let (mut i, mut j) = (0usize, 0usize);
-    while i < n && j < m {
-        if took[i] == gave[j] {
-            (i, j) = (i + 1, j + 1);
-        } else if shared[(i + 1) * stride + j] >= shared[i * stride + j + 1] {
-            gone.push(('-', at + i, took[i].as_str()));
-            i += 1;
-        } else {
-            come.push(('+', start + j, gave[j]));
-            j += 1;
-        }
-    }
-    gone.extend((i..n).map(|i| ('-', at + i, took[i].as_str())));
-    come.extend((j..m).map(|j| ('+', start + j, gave[j])));
-    // All the rows that went, then all the rows that came: the numbers already
-    // say where each sits, and a reader scans the two runs apart.
-    gone.extend(come);
-    gone
+    out.extend((0..tail).map(|k| Row::kept(start + m + k, gave[gave.len() - tail + k])));
 }
 
-// What a person watching sees: the lines that went, and the lines that came.
+// The rows of the file no landing claimed, from `from` to `to`: an empty range
+// shows nothing.
+fn untouched<'x>(out: &mut Vec<Row<'x>>, lines: &[&'x str], from: usize, to: usize) {
+    out.extend((from..=to).map(|n| Row::kept(n, lines[n - 1])));
+}
+
+// What a person watching sees: the rows that went, the rows that came, and
+// enough of the rows that stayed to place them.
 //
 // Separate from the report the model reads, which is a set of addresses it can
 // edit against — "what changed" is a different question from "where next".
 fn sketch(path: &str, applied: &Applied) -> String {
-    let mut plus = 0usize;
-    let mut minus = 0usize;
     let lines: Vec<&str> = applied.content.lines().collect();
-    let mut row_lines: Vec<(char, usize, &str)> = Vec::new();
+    let mut rows: Vec<Row> = Vec::new();
+    let mut next = 1usize;
     for l in &applied.landed {
+        untouched(&mut rows, &lines, next, l.start.saturating_sub(1));
         let gave = hunk_rows(&lines, l);
-        let moved = changed(l.took_at, &l.took, l.start, gave);
-        let gone = moved.iter().filter(|(sign, ..)| *sign == '-').count();
-        minus += gone;
-        plus += moved.len() - gone;
-        row_lines.extend(moved);
+        aligned(l.took_at, &l.took, l.start, gave, &mut rows);
+        next = l.end.saturating_add(1);
     }
-    // Right-aligned so a three-digit row lines up with a two-digit one.
-    let width = row_lines
+    untouched(&mut rows, &lines, next, lines.len());
+    // Two landings inside one line report that line twice, and a row read
+    // twice is a row counted twice: each row is shown once.
+    let mut seen = std::collections::HashSet::new();
+    rows.retain(|row| match row {
+        Row::Line { sign, n, .. } if *sign != ' ' => seen.insert((*sign, *n)),
+        _ => true,
+    });
+    // What the head says: the rows the edit moved, not the rows it shows.
+    let count = |mark: char| rows.iter().filter(|r| r.has(mark)).count();
+    let (plus, minus) = (count('+'), count('-'));
+    // A run of context longer than the window either side of a change is shown
+    // at both its ends and counted in the middle, the way a reader skims it.
+    let mut shown: Vec<Row> = Vec::with_capacity(rows.len());
+    for run in rows.chunk_by(|a, b| a.is_kept() == b.is_kept()) {
+        if !run[0].is_kept() || run.len() <= CONTEXT * 2 {
+            shown.extend_from_slice(run);
+        } else {
+            shown.extend_from_slice(&run[..CONTEXT]);
+            shown.push(Row::Elided(run.len() - CONTEXT * 2));
+            shown.extend_from_slice(&run[run.len() - CONTEXT..]);
+        }
+    }
+    // Right-aligned so a three-digit row lines up with a two-digit one, and a
+    // counted run starts where the rows it stands for do.
+    let width = shown
         .iter()
-        .map(|(_, n, _)| *n)
+        .filter_map(|r| match r {
+            Row::Line { n, .. } => Some(*n),
+            Row::Elided(_) => None,
+        })
         .max()
         .map_or(1, |n| n.to_string().len());
-    let rows: Vec<String> = row_lines
+    let body: Vec<String> = shown
         .iter()
-        .map(|(sign, n, text)| format!("{n:>width$} {sign} {text}"))
+        .map(|r| match r {
+            Row::Line { sign, n, text } => format!("{sign}{n:>width$} {text}"),
+            Row::Elided(n) => format!("{}… {n} lines", " ".repeat(width + 2)),
+        })
         .collect();
     std::iter::once(format!("{path} +{plus} -{minus}"))
-        .chain(rows)
+        .chain(body)
         .collect::<Vec<_>>()
         .join("\n")
 }
