@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 use agent::session::Session;
 use agent::task::Home;
 
-use crate::store::session::Store;
+use crate::store::session::{Store, now};
 
 // The saves a subagent handed off to a background thread, still in flight.
 // The exit path drains these — a transcript promised on disk has to be there
@@ -63,14 +63,7 @@ impl Home for Filed {
             id.to_string(),
         );
         let handle = tokio::task::spawn_blocking(move || {
-            let saved = store.save(
-                &id,
-                &root,
-                &model,
-                Some("subagent"),
-                crate::store::session::now(),
-                &session,
-            );
+            let saved = store.save(&id, &root, &model, Some("subagent"), now(), &session);
             if let Err(e) = saved {
                 tracing::warn!(
                     target: "pi::session",

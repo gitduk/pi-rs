@@ -2588,10 +2588,11 @@ fn view_at(views: &mut Views, token: u64) -> &mut View {
     views.entry(token).or_default()
 }
 
-// The screen of the lane in front. Fields rather than `&mut self`: a caller
-// holding this screen still reads the core it belongs to.
-fn front_view<'a>(views: &'a mut Views, core: &Repl) -> &'a mut View {
-    view_at(views, core.lane().token)
+// The screen of the lane in front. Fields rather than `&mut self`, and the lane
+// rather than the core behind it: a caller holding this screen still reads and
+// writes the rest of the lane it belongs to.
+fn front_view<'a>(views: &'a mut Views, lane: &Lane) -> &'a mut View {
+    view_at(views, lane.token)
 }
 
 // Drop the screens of lanes that are gone. A lane can be removed without the
@@ -2867,7 +2868,7 @@ impl Tui {
     // sight — and the history is written per line rather than on the way out,
     // because quitting with two Ctrl-Cs skips every tidy exit path there is.
     fn echo_sent(&mut self, line: &str) {
-        let view = front_view(&mut self.views, &self.core);
+        let view = front_view(&mut self.views, self.core.lane());
         self.ui.submit(view, line);
         view.surface.scroll = 0;
         self.save_history();
@@ -2906,7 +2907,7 @@ impl Tui {
         }
         self.ui
             .leave_lane(view_at(&mut self.views, self.core.lanes[was].token));
-        let parked = std::mem::take(&mut front_view(&mut self.views, &self.core).draft);
+        let parked = std::mem::take(&mut front_view(&mut self.views, self.core.lane()).draft);
         self.ui.editor.set_line(&parked);
         self.ui.lists.at(self.core.lane().ctx.workspace.root());
         self.ui.at_root = self.core.lane().ctx.workspace.root().to_path_buf();
@@ -2917,7 +2918,7 @@ impl Tui {
         self.ui.editor.seed_history(lines);
         // A lane opened later has no banner yet, and the files it stands on
         // are its own.
-        let view = front_view(&mut self.views, &self.core);
+        let view = front_view(&mut self.views, self.core.lane());
         if !view.drawn {
             let context = self.core.lane().context.clone();
             *view = View::opening(&context, &self.ui.paint);
@@ -2927,7 +2928,7 @@ impl Tui {
         // and replaying an hour of another one into it would be a second
         // conversation arriving out of nowhere.
         for event in std::mem::take(&mut self.core.lane_mut().pending) {
-            let view = front_view(&mut self.views, &self.core);
+            let view = front_view(&mut self.views, self.core.lane());
             self.ui.on_event(self.core.lane_mut(), view, event);
         }
         // And the end of it, if it reached one out of sight.
@@ -2947,7 +2948,7 @@ impl Tui {
         land_handled(
             &mut self.ui,
             &self.core,
-            front_view(&mut self.views, &self.core),
+            front_view(&mut self.views, self.core.lane()),
             lines,
         );
     }
@@ -2955,12 +2956,12 @@ impl Tui {
     fn land_swap(&mut self, said: Vec<String>) {
         if let Some(session) = self.core.lane().session.as_ref() {
             self.ui
-                .rebuild(front_view(&mut self.views, &self.core), session);
+                .rebuild(front_view(&mut self.views, self.core.lane()), session);
         }
         // `at` forgets both lists, so it stands in for `refresh_sessions`: a
         // swap that did not move repeats the root, and drops them either way.
         self.ui.lists.at(self.core.lane_mut().ctx.workspace.root());
-        front_view(&mut self.views, &self.core)
+        front_view(&mut self.views, self.core.lane())
             .surface
             .scrollback
             .extend(said.into_iter().map(Row::notice));
@@ -2976,7 +2977,7 @@ impl Tui {
             while let Ok(event) = self.core.lanes[at].inbox.try_recv() {
                 if at == self.core.current {
                     self.bridge.observe(&event).await;
-                    let view = front_view(&mut self.views, &self.core);
+                    let view = front_view(&mut self.views, self.core.lane());
                     self.ui.on_event(&mut self.core.lanes[at], view, event);
                 } else {
                     // Deltas arrive thousands at a time and the backlog is
@@ -3133,7 +3134,7 @@ impl Tui {
             line.spans.insert(0, Span::from(format!("{whose}: ")));
         }
         self.ui
-            .say_line(front_view(&mut self.views, &self.core), line);
+            .say_line(front_view(&mut self.views, self.core.lane()), line);
     }
 
     // The one gate every input passes: a key, the phone, or an intent coming
@@ -3151,14 +3152,18 @@ impl Tui {
         match intent.fate() {
             Fate::Now => Wake::Do(intent),
             Fate::Queued => {
-                front_view(&mut self.views, &self.core).queued.push(intent);
+                front_view(&mut self.views, self.core.lane())
+                    .queued
+                    .push(intent);
                 Wake::Nothing
             }
             Fate::Steered(text) => {
                 // A `!` or a `/compact` holds the lane: nothing is listening,
                 // so the line waits for it the way every line used to.
                 let Some(steer) = self.core.lane().steer().cloned() else {
-                    front_view(&mut self.views, &self.core).queued.push(intent);
+                    front_view(&mut self.views, self.core.lane())
+                        .queued
+                        .push(intent);
                     return Wake::Nothing;
                 };
                 // Echoed like any submitted line, and unlike a queued one:
@@ -3170,7 +3175,9 @@ impl Tui {
                 // line was said takes the prompt back and the line — never
                 // heard, handed back at `finish` — starts a turn of its own,
                 // which is the opposite of what the user just asked for.
-                front_view(&mut self.views, &self.core).state.committed = true;
+                front_view(&mut self.views, self.core.lane())
+                    .state
+                    .committed = true;
                 steer.say(text);
                 Wake::Nothing
             }
@@ -3221,7 +3228,7 @@ impl Tui {
         };
         cancel.cancel();
         *take_back = unsend;
-        front_view(&mut self.views, &self.core).state.stopping = true;
+        front_view(&mut self.views, self.core.lane()).state.stopping = true;
     }
 
     /// Drive the terminal until the user leaves.
@@ -3244,7 +3251,7 @@ impl Tui {
             self.drop_vanished_lanes();
             prune_views(&self.core, &mut self.views);
             self.refresh_tabs();
-            let view = front_view(&mut self.views, &self.core);
+            let view = front_view(&mut self.views, self.core.lane());
             self.ui.flush(self.core.lane(), view);
             let running = self.core.lane().is_running();
             let anywhere = self.core.lanes.iter().any(|lane| lane.is_running());
@@ -3262,7 +3269,7 @@ impl Tui {
                     }
                     key = self.events.recv() => match key {
                         Some(key) => {
-                            let intent = self.ui.key(self.core.lane(), front_view(&mut self.views, &self.core), key, running);
+                            let intent = self.ui.key(self.core.lane(), front_view(&mut self.views, self.core.lane()), key, running);
                             self.admit(intent)
                         }
                         None => Wake::Leave,
@@ -3276,7 +3283,7 @@ impl Tui {
                         }
                         Some(run::wechat::Inbound::Stop) => self.admit(Intent::Interrupt),
                         Some(run::wechat::Inbound::Notice(text)) => {
-                            self.ui.say(front_view(&mut self.views, &self.core), text);
+                            self.ui.say(front_view(&mut self.views, self.core.lane()), text);
                             Wake::Nothing
                         }
                         None => Wake::Nothing,
@@ -3286,7 +3293,11 @@ impl Tui {
                 // One at a time, each still the intent it was read as. Joined
                 // as lines, a command and a prompt became one line and `read`
                 // saw only the first word.
-                Wake::Do(front_view(&mut self.views, &self.core).queued.remove(0))
+                Wake::Do(
+                    front_view(&mut self.views, self.core.lane())
+                        .queued
+                        .remove(0),
+                )
             };
             // Out here, where all of `self` is free again.
             let intent = match woke {
@@ -3356,7 +3367,7 @@ impl Tui {
                     }
                     from_loop = true;
                     self.core.lane_mut().pending_round = round;
-                    let view = front_view(&mut self.views, &self.core);
+                    let view = front_view(&mut self.views, self.core.lane());
                     self.ui.submit(view, &goal);
                     view.surface.scroll = 0;
                     if !note.is_empty()
@@ -3382,7 +3393,7 @@ impl Tui {
                 if goal.is_empty() {
                     // The round already queued goes with it: run after a stop,
                     // it is a turn nobody asked for and it reads as a typed one.
-                    front_view(&mut self.views, &self.core)
+                    front_view(&mut self.views, self.core.lane())
                         .queued
                         .retain(|q| !matches!(q, Intent::LoopRound { .. }));
                     match self.core.lane_mut().looping.take() {
@@ -3390,7 +3401,8 @@ impl Tui {
                         Some(l) => {
                             let said =
                                 format!("loop stopped after {} round(s) of `{}`", l.round, l.goal);
-                            self.ui.say(front_view(&mut self.views, &self.core), said);
+                            self.ui
+                                .say(front_view(&mut self.views, self.core.lane()), said);
                         }
                         // Nothing ended — a note about the line, not the lane.
                         None => self.ui.flash(
@@ -3415,7 +3427,7 @@ impl Tui {
                     continue;
                 }
                 self.core.lane_mut().loop_start(goal.clone());
-                front_view(&mut self.views, &self.core)
+                front_view(&mut self.views, self.core.lane())
                     .queued
                     .push(Intent::LoopRound {
                         goal,
@@ -3472,7 +3484,7 @@ impl Tui {
                             Ok(said) => said,
                             Err(e) => {
                                 self.ui.say(
-                                    front_view(&mut self.views, &self.core),
+                                    front_view(&mut self.views, self.core.lane()),
                                     format!("wechat: {e:#}"),
                                 );
                                 Vec::new()
@@ -3480,7 +3492,7 @@ impl Tui {
                         },
                         run::WechatCmd::Off => self.bridge.off(),
                     };
-                    front_view(&mut self.views, &self.core)
+                    front_view(&mut self.views, self.core.lane())
                         .surface
                         .scrollback
                         .extend(said.into_iter().map(Row::notice));
@@ -3516,11 +3528,13 @@ impl Tui {
             return;
         }
         self.ui.say(
-            front_view(&mut self.views, &self.core),
+            front_view(&mut self.views, self.core.lane()),
             "stopping — saving what the runs have written",
         );
-        self.ui
-            .flush(self.core.lane(), front_view(&mut self.views, &self.core));
+        self.ui.flush(
+            self.core.lane(),
+            front_view(&mut self.views, self.core.lane()),
+        );
         let waited = tokio::time::timeout(EXIT_GRACE, async {
             while left > 0 {
                 match done.recv().await {
@@ -3555,7 +3569,7 @@ impl Tui {
                 // It clears anything said before it: hence the notice after.
                 if let Some(session) = self.core.lane().session.as_ref() {
                     self.ui
-                        .rebuild(front_view(&mut self.views, &self.core), session);
+                        .rebuild(front_view(&mut self.views, self.core.lane()), session);
                 }
                 let said = match outcome {
                     Rewound::Unsent(_) if !self.ui.editor.is_empty() => {
@@ -3582,11 +3596,11 @@ impl Tui {
                     }
                 };
                 self.ui
-                    .say_muted(front_view(&mut self.views, &self.core), &said);
+                    .say_muted(front_view(&mut self.views, self.core.lane()), &said);
             }
             Err(e) => {
                 self.ui.say(
-                    front_view(&mut self.views, &self.core),
+                    front_view(&mut self.views, self.core.lane()),
                     format!("warning: the transcript was not saved: {e}"),
                 );
             }
@@ -3627,7 +3641,7 @@ impl Tui {
     // to the tally as the base `/status` reports against.
     // `committed` says whether the prompt behind it can still be taken back.
     fn arm_view(&mut self, committed: bool) {
-        let view = front_view(&mut self.views, &self.core);
+        let view = front_view(&mut self.views, self.core.lane());
         view.state.started = Some(std::time::Instant::now());
         view.state.committed = committed;
         view.state.stopping = false;
@@ -3648,7 +3662,7 @@ impl Tui {
         // The repair results and the stop note the send filed are entries
         // now: derive their rows like any commit, so they show without a
         // rebuild. The ask itself stays unadopted — the door echoed it.
-        let view = front_view(&mut self.views, &self.core);
+        let view = front_view(&mut self.views, self.core.lane());
         let tail = view.surface.tail;
         let fresh: Vec<LogEntry> = carried
             .entries()
@@ -3664,7 +3678,7 @@ impl Tui {
         self.arm_view(false);
         // Read while the agent is still reachable: `/model` may replace it
         // while this run works, and the run keeps the one it started on.
-        front_view(&mut self.views, &self.core).model =
+        front_view(&mut self.views, self.core.lane()).model =
             self.core.lane_mut().agent.spec.model.clone();
 
         let agent = self.core.lane_mut().agent.clone();
@@ -3734,7 +3748,9 @@ impl Tui {
         self.ui.show_mode();
         // A resize while the child held the terminal raised no event, so the
         // view's measurements are against a width that may no longer exist.
-        front_view(&mut self.views, &self.core).surface.counted = None;
+        front_view(&mut self.views, self.core.lane())
+            .surface
+            .counted = None;
 
         // Judged on its own: a save that succeeded is still a save when the
         // screen comes back badly, and reading the two together threw it away.
@@ -4086,7 +4102,7 @@ impl Tui {
 
     // Draw the end of a run into the view that is on screen.
     fn close_run(&mut self, out: Result<Totals, AgentError>) {
-        let view = front_view(&mut self.views, &self.core);
+        let view = front_view(&mut self.views, self.core.lane());
         self.ui.close(view);
         // A cancelled run's calls got no `ToolEnd`; their animated rows have to
         // reach scrollback some other way before the next flush draws them as a

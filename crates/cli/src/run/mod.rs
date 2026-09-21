@@ -16,9 +16,10 @@ use serde::Deserialize;
 
 use crate::run::lane::Lane;
 use crate::run::meter::Tally;
-use crate::store::config::Config;
+use crate::store::config::{self, Config};
 use crate::store::journal;
-use crate::store::session::{ResumeChoice, Store, Stored};
+use crate::store::session::{self, ResumeChoice, Store, Stored};
+use crate::store::settings;
 use crate::ui::icons;
 
 /// Where a command came from, and so what running it means.
@@ -332,7 +333,7 @@ pub struct Repl {
     pub keys: std::sync::Arc<crate::ui::keys::Keys>,
     /// The config in force, as opposed to the one on disk. `/model` picks from
     /// this, so a switch cannot quietly apply an edit `/reload` has not.
-    pub config: std::sync::Arc<crate::store::config::Config>,
+    pub config: std::sync::Arc<config::Config>,
     /// The command line, kept because it outranks the config and so has to be
     /// re-applied over every reload.
     pub args: std::sync::Arc<crate::Args>,
@@ -411,7 +412,7 @@ impl Repl {
     /// replaced.
     pub fn reload(&mut self) -> Vec<String> {
         // Re-read the file tree; the claimed overrides stay.
-        let tree = match crate::store::config::load_tree(self.args.config.as_deref()) {
+        let tree = match config::load_tree(self.args.config.as_deref()) {
             Ok(t) => t,
             Err(e) => return vec![format!("nothing reloaded — {}", refused("reload", e))],
         };
@@ -419,7 +420,7 @@ impl Repl {
         let mut said = self.rebuild();
         // Name any claim that still shadows a line the file just changed.
         for path in self.claimed.keys() {
-            if let Ok(old) = crate::store::settings::get(&self.file, path)
+            if let Ok(old) = settings::get(&self.file, path)
                 && old != &self.claimed[path]
             {
                 said.push(format!(
@@ -437,7 +438,7 @@ impl Repl {
     fn adopt(&mut self, config: Config) -> Result<Vec<String>, String> {
         let root = self.lane().ctx.workspace.root().to_path_buf();
         let failed = |e| Err(format!("nothing reloaded — {}", refused("reload", e)));
-        let project = match crate::store::config::load_project(&root) {
+        let project = match config::load_project(&root) {
             Ok(p) => p,
             Err(e) => return failed(e),
         };
@@ -490,7 +491,7 @@ impl Repl {
             &self.args,
             &self.config,
             &self.lane().agent.spec.model,
-            crate::store::config::Origin::Command,
+            config::Origin::Command,
         ) {
             Ok(dialled) if dialled.spec != self.lane().agent.spec => {
                 self.retarget(dialled.transport, dialled.spec);
@@ -535,7 +536,7 @@ impl Repl {
     fn effective(&self) -> Result<toml::Value, anyhow::Error> {
         let mut tree = self.file.clone();
         for (path, value) in &self.claimed {
-            crate::store::settings::put(&mut tree, path, value.clone())?;
+            settings::put(&mut tree, path, value.clone())?;
         }
         Ok(tree)
     }
@@ -545,18 +546,16 @@ impl Repl {
     // overlaid tree, so a claim the file can no longer address (an ancestor
     // the file has turned into a non-table) still answers, with the file's
     // own value beside it for the mark.
-    pub fn setting_rows(&self) -> Vec<crate::store::settings::SettingRow> {
-        let mut rows: BTreeMap<String, String> = crate::store::settings::leaves(&self.file)
-            .into_iter()
-            .collect();
+    pub fn setting_rows(&self) -> Vec<settings::SettingRow> {
+        let mut rows: BTreeMap<String, String> = settings::leaves(&self.file).into_iter().collect();
         for (path, claimed) in &self.claimed {
-            rows.insert(path.clone(), crate::store::settings::render(claimed));
+            rows.insert(path.clone(), settings::render(claimed));
         }
         rows.into_iter()
             .map(|(path, value)| {
                 let claimed = self.claimed.get(&path);
-                let file = crate::store::settings::get(&self.file, &path).ok();
-                crate::store::settings::SettingRow {
+                let file = settings::get(&self.file, &path).ok();
+                settings::SettingRow {
                     path,
                     value,
                     changed: claimed.is_some() && claimed != file,
@@ -568,7 +567,7 @@ impl Repl {
     // The same, saying why when nothing could be adopted.
     fn rebuilt(&mut self) -> Result<Vec<String>, String> {
         let tree = self.effective().map_err(|e| refused("settings", e))?;
-        let mut config = match crate::store::config::Config::deserialize(tree) {
+        let mut config = match config::Config::deserialize(tree) {
             Ok(c) => c,
             Err(e) => return Err(refused("settings", anyhow::anyhow!(e))),
         };
@@ -586,25 +585,25 @@ impl Repl {
             Ok(t) => t,
             Err(e) => return Err(refused("settings", e)),
         };
-        let old = crate::store::settings::get(&scratch, path).ok().cloned();
-        if let Err(e) = crate::store::settings::set(&mut scratch, path, &raw) {
+        let old = settings::get(&scratch, path).ok().cloned();
+        if let Err(e) = settings::set(&mut scratch, path, &raw) {
             return Err(refused("settings", e));
         }
-        let new = crate::store::settings::get(&scratch, path).unwrap().clone();
+        let new = settings::get(&scratch, path).unwrap().clone();
         // Validate by deserializing the scratch tree, so a bad value never
         // reaches the running config.
-        if let Err(e) = crate::store::config::Config::deserialize(scratch) {
+        if let Err(e) = config::Config::deserialize(scratch) {
             return Err(refused("settings", anyhow::anyhow!(e)));
         }
         self.claimed.insert(path.to_string(), new);
         let mut said = self.rebuild();
         let old_shown = match &old {
-            Some(v) => mask_secret(path, &crate::store::settings::render(v)),
+            Some(v) => mask_secret(path, &settings::render(v)),
             None => "<unset>".to_string(),
         };
         said.push(format!(
             "{path}: {old_shown} → {} (session only)",
-            mask_secret(path, &crate::store::settings::render(&self.claimed[path]))
+            mask_secret(path, &settings::render(&self.claimed[path]))
         ));
         Ok(said)
     }
@@ -630,7 +629,7 @@ impl Repl {
             return Ok(vec![format!("{path}: the session and the file agree")]);
         }
         let tree = self.effective().map_err(|e| format!("{e:#}"))?;
-        let value = crate::store::settings::get(&tree, path)
+        let value = settings::get(&tree, path)
             .map_err(|e| format!("{e:#}"))?
             .clone();
         let file = self
@@ -638,16 +637,15 @@ impl Repl {
             .config
             .as_deref()
             .map(std::path::PathBuf::from)
-            .or_else(crate::store::config::global_path)
+            .or_else(config::global_path)
             .ok_or_else(|| "no settings file to write".to_string())?;
-        crate::store::config::write(&file, path, value.clone()).map_err(|e| format!("{e:#}"))?;
+        config::write(&file, path, value.clone()).map_err(|e| format!("{e:#}"))?;
         self.claimed.remove(path);
-        self.file = crate::store::config::load_tree(self.args.config.as_deref())
-            .map_err(|e| format!("{e:#}"))?;
+        self.file = config::load_tree(self.args.config.as_deref()).map_err(|e| format!("{e:#}"))?;
         let mut said = self.rebuild();
         said.push(format!(
             "{path} = {} — written to the file",
-            mask_secret(path, &crate::store::settings::render(&value))
+            mask_secret(path, &settings::render(&value))
         ));
         Ok(said)
     }
@@ -678,12 +676,7 @@ impl Repl {
     /// force when it ran, and the total is the sum of those, so a switch to a
     /// dearer model does not reprice the cheap turns behind it.
     pub fn switch(&mut self, name: &str) -> Vec<String> {
-        let dialled = match crate::dial(
-            &self.args,
-            &self.config,
-            name,
-            crate::store::config::Origin::Command,
-        ) {
+        let dialled = match crate::dial(&self.args, &self.config, name, config::Origin::Command) {
             Ok(d) => d,
             Err(e) => {
                 let held = self.lane_mut().agent.spec.model.clone();
@@ -1097,7 +1090,7 @@ fn refused(what: &str, e: anyhow::Error) -> String {
 
 fn typed<'a>(path: &str, raw: &'a str) -> Cow<'a, str> {
     match path {
-        "base_url" => Cow::Owned(crate::store::config::expand_base_url(raw)),
+        "base_url" => Cow::Owned(config::expand_base_url(raw)),
         _ => Cow::Borrowed(raw),
     }
 }
@@ -1482,8 +1475,8 @@ impl Repl {
             let mut line = format!("{} = {}", row.path, mask_secret(&row.path, &row.value));
             if row.changed {
                 line.push_str(&format!(" {}", icons::CHANGED_MARK));
-                if let Ok(file) = crate::store::settings::get(&self.file, &row.path) {
-                    let file = mask_secret(&row.path, &crate::store::settings::render(file));
+                if let Ok(file) = settings::get(&self.file, &row.path) {
+                    let file = mask_secret(&row.path, &settings::render(file));
                     line.push_str(&format!(" file: {file}"));
                 }
             }
@@ -1534,10 +1527,7 @@ impl Repl {
         // A name identifies one session; carried over it would name two, which
         // is what `/name` exists to prevent.
         self.lane_mut().name = None;
-        self.becomes(
-            crate::store::session::new_id(),
-            crate::store::session::now(),
-        );
+        self.becomes(session::new_id(), session::now());
     }
 
     // Take a stored transcript as the running one — entries, name and id.
@@ -1660,7 +1650,7 @@ impl Repl {
     ) -> Result<Vec<String>, String> {
         let root = ws.root().to_path_buf();
         let failed = |e| format!("nothing opened — {}", refused("worktree", e));
-        let project = crate::store::config::load_project(&root).map_err(failed)?;
+        let project = config::load_project(&root).map_err(failed)?;
         let mut resolved = crate::resolve(&self.args, &ws, &self.config, &project, &self.claimed)
             .map_err(failed)?;
 
