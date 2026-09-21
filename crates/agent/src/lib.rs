@@ -14,6 +14,7 @@ use tracing::Instrument as _;
 
 use crate::session::Session;
 
+pub mod context;
 pub mod event;
 pub mod ext;
 pub mod ports;

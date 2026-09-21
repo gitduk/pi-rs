@@ -97,12 +97,13 @@ edit refuse.",
 /// that cache every turn, which is why the model and the window are not here:
 /// the window is the denominator of a number the turn already carries.
 ///
-/// The date is a day, not an instant, so that two runs an hour apart still
-/// share one cached prefix.
-pub fn env(tier: tools::Tier) -> String {
+/// `stamp` is the caller's clock reading, as a timestamp; only its day is
+/// used, so that two runs an hour apart still share one cached prefix. The
+/// reading is the caller's because a calendar is not the loop's business.
+pub fn env(stamp: &str, tier: tools::Tier) -> String {
+    let day = stamp.split_once('T').map_or(stamp, |(day, _)| day);
     // `sh`, not `$SHELL`: the bash tool runs `Command::new("sh")` whatever the
     // login shell is, and the tool's own name is what misleads about it.
-    let day = &crate::store::journal::rfc3339(std::time::SystemTime::now())[..10];
     let tier = format!("{tier:?}").to_lowercase();
     format!(
         "\n\n<env date=\"{day}\" platform=\"{}\" shell=\"sh\" pi=\"{}\" tier=\"{tier}\"/>",
@@ -221,16 +222,11 @@ mod tests {
     // date, has to move once a day — not on every run.
     #[test]
     fn the_env_date_moves_once_a_day_not_every_run() {
-        let got = env(tools::Tier::Read);
-        let date = got
-            .split("date=\"")
-            .nth(1)
-            .unwrap()
-            .split('"')
-            .next()
-            .unwrap();
-        assert_eq!(date.len(), 10, "a day, not an instant: {date}");
-        assert_eq!(date.matches('-').count(), 2, "{date}");
+        let got = env("2026-09-21T12:00:00.000Z", tools::Tier::Read);
+        assert!(got.contains("date=\"2026-09-21\""), "{got}");
+        // Two readings an hour apart name the same day, and so the same block.
+        assert_eq!(got, env("2026-09-21T13:00:00.000Z", tools::Tier::Read));
+        assert_ne!(got, env("2026-09-22T12:00:00.000Z", tools::Tier::Read));
     }
 
     #[test]

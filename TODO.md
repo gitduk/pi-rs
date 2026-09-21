@@ -76,7 +76,7 @@ crates/
 crates/agent/src/            ★ 核心
 ├── lib.rs          循环的八个动作、Agent、budget 算术、leashed
 ├── session.rs      transcript、投影、压缩记录
-├── context.rs      ↔ 从 cli 上移：standing 提示词的拼装
+├── context.rs      ✓ 已从 cli 上移：standing 提示词的拼装
 ├── event.rs        只装事实：Usage / ToolCall / Entry
 ├── ports.rs        Transport、Approver、Steer（**已落**；`Compactor` 还不是 trait，见下）
 └── ext/            挂在端口上的策略，不在循环体里（**已落**）
@@ -116,7 +116,7 @@ crates/cli/src/              ✧ 应用
 | `agent/{compact,summarize,oneshot,approval}.rs` | `agent/ext/` | **已做**（外加 `lib.rs` 的 `Retry` → `ext/retry.rs`；`Approver`/`Decision`/`Steer` → 新 `ports.rs`） |
 | `agent/task.rs`（499 行） | `crates/task/` | **移出 agent**（见下） |
 | `agent/event.rs` | `agent/event.rs` | 去掉 `cost` |
-| `cli/context.rs`（302 行） | `agent/src/context.rs` | **上移到 agent**（见下） |
+| `cli/context.rs`（302 行） | `agent/src/context.rs` | **已做**（见下） |
 | `hashline/`（755 行）、`syntax/`（477 行） | `tools/` | **并入**（见下） |
 | `cli/repl.rs`（2458 行） | `input/` + `run/` | **拆** |
 | `cli/lane.rs`（421 行） | `run/lane.rs` + `run/looping.rs` | **拆**（剥 `View`） |
@@ -133,10 +133,10 @@ crates/cli/src/              ✧ 应用
 - `render::Theme`、`status::Segment` 是**配置数据而非界面代码**（`config.rs:94-97` 持有），所以留在 `store/config.rs`，`ui/render.rs` 在上层依赖它。反过来的话 `store → ui` 就成了反向依赖。
 - `keys` 眼下挂在 `Lane` 上（`lane.rs` 有 `keys: Arc<Keys>`，`repl.rs` 也读）。按键表是界面词汇，`Lane` 不该有；拆完后 `Keys` 只出现在 `store/config`（产出）和 `ui`（消费）。
 - `tools::ToolOutput.spent: Totals`（`tools/src/lib.rs:265`）要跟着 cost 一起走：子代理回报改成 `Usage`，cost 由 `run/meter.rs` 在顶层算。这处会外溢到 `crates/tools`。
-- **`cli/context.rs` 上移到 `agent`**（已定）。它是 standing 提示词的拼装：`workspace()` 拼 `<workspace path>`，`boundary()` 拼 `<write_paths>`（工作区 + 配置的额外写根，跟 tier 有关），`env()` 拼 `<env date/platform/shell/pi/tier>`，再加 `AGENTS.md` 正文（`context.rs:57-151`），`main.rs:431-447` 把它们追在 system prompt 末尾。三个连带：
-  - `env()` 唯一的非-`tools` 外部依赖是 `journal::rfc3339`（`journal.rs:141`，连带 `civil` `:156`）。要么把这两个纯函数也搬进 agent（journal 改成从 agent 取，方向合法），要么让 `env()` 收一个日期参数由 `main.rs` 传。
+- **`cli/context.rs` 上移到 `agent`**（**已做**：`agent/src/context.rs`，`agent::context::*`）。它是 standing 提示词的拼装：`workspace()` 拼 `<workspace path>`，`boundary()` 拼 `<write_paths>`（工作区 + 配置的额外写根，跟 tier 有关），`env()` 拼 `<env date/platform/shell/pi/tier>`，再加 `AGENTS.md` 正文（`context.rs:57-151`），`main.rs:431-447` 把它们追在 system prompt 末尾。三个连带：
+  - `env()` 唯一的非-`tools` 外部依赖是 `journal::rfc3339`（`journal.rs:141`，连带 `civil` `:156`）。**已选后者**：`env(stamp, tier)` 收调用方的时钟读数，只取其中的「日」（`split_once('T')`），日历仍留在 cli；「一天而非一刻」这条契约留在 `env` 里，测试用两个相隔一小时的读数断言输出相同。
   - **agent 会第一次读盘**：现在 `crates/agent/src/` 里零 `std::fs`/`tokio::fs`，而 `context::from` 靠 `std::fs::read_to_string` 加祖先目录 walk。这与「核心只留一个循环」有点顶，但 system prompt 本来就是 agent 的东西（`agent::DEFAULT_SYSTEM` 已在里面）。
-  - `Setup.standing` / `Resolved.standing`（`agent/lib.rs` 的 `Setup`、`main.rs:322`、`:452`）会变形或消失；但 `Task::new(parent, home, standing)`（`task.rs:96`、`:99`）也吃这个字符串（子代理的 system 是 `{PROMPT}{standing}`），所以 agent 要么留一个 pub 的 standing 取用点，要么继续往下传算好的串。
+  - `Setup.standing` / `Resolved.standing`（`agent/lib.rs` 的 `Setup`、`main.rs:322`、`:452`）会变形或消失；但 `Task::new(parent, home, standing)`（`task.rs:96`、`:99`）也吃这个字符串（子代理的 system 是 `{PROMPT}{standing}`），所以 agent 要么留一个 pub 的 standing 取用点，要么继续往下传算好的串。**本次选了「继续往下传」**——形状没动，留待「agent 自己算 standing」那一步。
   - 版本号不用担心：`env!("CARGO_PKG_VERSION")` 在所有 crate 里一样（`version.workspace = true`，lockstep 发布）。
   - cli 仍需要**文件名列表**给 banner（`Resolved.context` → `View::opening`）——`context::load` 已经返回 `Loaded { text, files }`，接口够用。
 

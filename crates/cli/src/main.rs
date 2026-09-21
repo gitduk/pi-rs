@@ -16,8 +16,8 @@ use crate::store::icons;
 use crate::store::settings::Settings;
 use crate::store::{config, journal, session};
 use crate::ui::{line, render, tui};
+use agent::context;
 
-mod context;
 mod input;
 mod run;
 mod store;
@@ -425,9 +425,10 @@ pub fn resolve(
         None => agent::DEFAULT_SYSTEM.to_string(),
     };
     // The system prompt's "relative to it" needs the workspace named.
+    let stamp = journal::rfc3339(std::time::SystemTime::now());
     let mut standing = context::workspace(root);
     standing.push_str(&context::boundary(workspace, tier));
-    standing.push_str(&context::env(tier));
+    standing.push_str(&context::env(&stamp, tier));
     // Appended rather than sent as a message: these are standing instructions,
     // they do not change within a run, and the system prompt is the part of the
     // request a provider will cache.
