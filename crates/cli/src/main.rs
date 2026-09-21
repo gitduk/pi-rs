@@ -382,7 +382,7 @@ pub fn resolve(
     }
 
     let (scripts, skipped) = context::home()
-        .map(|home| tools::script::discover_in(&home.join(".pi/tools")))
+        .map(|home| scripts::discover_in(&home.join(".pi/tools")))
         .unwrap_or_default();
     notes.extend(skipped.iter().map(|p| format!("tool skipped — {p}")));
     let mut user_tools: Vec<String> = Vec::new();

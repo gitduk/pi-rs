@@ -13,6 +13,7 @@ brain = { path = "crates/brain" }
 tools = { path = "crates/tools" }
 agent = { path = "crates/agent" }
 task = { path = "crates/task" }
+scripts = { path = "crates/scripts" }
 wechat = { path = "crates/wechat" }
 
 anyhow = "1"

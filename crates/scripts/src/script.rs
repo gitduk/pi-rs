@@ -1,23 +1,12 @@
-//! User-defined tools: a script dropped into `~/.pi/tools/` is a tool.
-//! The comment header — from the shebang to the first non-comment line —
-//! is its interface: `# description:` what it does, and every other
-//! `# name: what it is` line declares one argument, however many. String
-//! arguments also arrive as environment variables `$name`: absent when not
-//! passed, never shadowing an inherited name, and capped in size — while
-//! the call's full JSON stays on stdin and stdout is the result; stderr
-//! only surfaces when the exit is non-zero. Output runs through the same
-//! bounded capture as bash's, so a runaway script floods neither memory
-//! nor transcript.
-
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt as _;
 
-use crate::output::{self, Capture};
-use crate::{Concurrency, Ctx, Tier, Tool, ToolError, ToolOutput};
+use tools::output::{self, Capture};
+use tools::{Concurrency, Ctx, Tier, Tool, ToolError, ToolOutput};
 
 const TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -33,77 +22,15 @@ fn is_identifier(name: &str) -> bool {
 
 /// One discovered script: the header is the contract the schema shows the
 /// model, the file is the code a run executes.
-pub struct ScriptTool {
-    name: String,
-    description: String,
-    args: Vec<(String, String)>,
-    path: PathBuf,
-}
-
-/// Scan the given directory. A script whose header carries no description
-/// is not registered — a tool the model cannot see described is a trap,
-/// and it is named in the skipped list instead.
-pub fn discover_in(dir: &Path) -> (Vec<ScriptTool>, Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return (Vec::new(), Vec::new());
-    };
-    let mut tools = Vec::new();
-    let mut skipped = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file()
-            || path
-                .file_name()
-                .is_some_and(|n| n.to_string_lossy().starts_with('.'))
-        {
-            continue;
-        }
-        let Some(name) = path.file_stem().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            skipped.push(format!("{}: not utf-8", path.display()));
-            continue;
-        };
-        let Some((description, args)) = header(&text) else {
-            skipped.push(format!("{}: no # description: line", path.display()));
-            continue;
-        };
-        tools.push(ScriptTool {
-            name: name.to_string(),
-            description,
-            args,
-            path,
-        });
-    }
-    (tools, skipped)
-}
-
-/// The `#` comment block a script opens with is its interface declaration.
-fn header(text: &str) -> Option<(String, Vec<(String, String)>)> {
-    let mut description = None;
-    let mut args = Vec::new();
-    for line in text.lines() {
-        let Some(line) = line.strip_prefix('#') else {
-            break;
-        };
-        let Some((key, rest)) = line.trim().split_once(':') else {
-            continue;
-        };
-        let value = rest.trim();
-        match key.trim() {
-            "description" if !value.is_empty() => description = Some(value.to_string()),
-            // Everything else in the header names an argument; the value is
-            // what the schema says about it.
-            key if !key.is_empty() => args.push((key.to_string(), value.to_string())),
-            _ => {}
-        }
-    }
-    description.map(|d| (d, args))
+pub struct Script {
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) args: Vec<(String, String)>,
+    pub(crate) path: PathBuf,
 }
 
 #[async_trait]
-impl Tool for ScriptTool {
+impl Tool for Script {
     fn name(&self) -> &str {
         &self.name
     }
@@ -199,13 +126,13 @@ impl Tool for ScriptTool {
             } => Some(r?),
             _ = tokio::time::sleep(TIMEOUT) => None,
             _ = ctx.cancel.cancelled() => {
-                crate::bash::reap(group).await;
+                tools::bash::reap(group).await;
                 return Err(ToolError::Cancelled);
             }
         };
 
         let Some((status, errs)) = waited else {
-            crate::bash::reap(group).await;
+            tools::bash::reap(group).await;
             return Err(ToolError::Timeout {
                 ms: TIMEOUT.as_millis() as u64,
             });
@@ -230,9 +157,11 @@ impl Tool for ScriptTool {
         Ok(ToolOutput::text(body).with_preview(self.name.clone()))
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::discover_in;
     use serde_json::json;
 
     // Declared args ride in as environment, but a name the process already
@@ -249,7 +178,7 @@ mod tests {
         )
         .unwrap();
         let (mut found, _) = discover_in(&tools);
-        let ctx = Ctx::new(crate::Workspace::new(dir.path()).unwrap());
+        let ctx = Ctx::new(tools::Workspace::new(dir.path()).unwrap());
         let out = found
             .remove(0)
             .execute(json!({ "PATH": "/hijacked" }), &ctx)

@@ -34,7 +34,7 @@
 
 - [x] **`Task`（子代理）从 `agent` 拆成 `crates/task`**（**已做**）。细节见下面「工具实现按域分家」。
 
-- [ ] **`ScriptTool` 拆成 `crates/scripts` 并改名 `Script`**（未动手，等发话）。细节见下面「工具实现按域分家」。
+- [x] **`ScriptTool` 拆成 `crates/scripts` 并改名 `Script`**（**已做**）。细节见下面「工具实现按域分家」。
 
 - [x] **`hashline` 和 `syntax` 并回 `tools`**（**已做**）。细节见下面「hashline 与 syntax 并回 `tools`」。
 
@@ -63,7 +63,7 @@ crates/
 ├── llm/        ↔ brain：wire 类型、传输、SSE、token 估算、消息
 ├── tools/      契约 + 文件系统域：Tool/Registry/Ctx/Tier、read/write/edit/grep/glob、bash、fetch、judge，加 spill/state/walk/workspace/output/parses/rows/blocks（rows/blocks 是 hashline 的落点）、edit/（编辑引擎）、syntax/（tree-sitter）
 ├── skills/     ↔ 从 tools 拆出：技能发现 + `Load`
-├── scripts/    ↔ 从 tools 拆出：脚本发现 + `Script`
+├── scripts/    ✓ 已从 tools 拆出：脚本发现 + `Script`
 ├── task/       ✓ 已从 agent 拆出：子代理工具
 ├── agent/      核心：纯循环 + 接缝
 ├── cli/        应用：输入 / 驱动 / 存储 / 界面
@@ -153,12 +153,12 @@ crates/cli/src/              ✧ 应用
 | `SkillTool`（→ `Load`） | `tools` | `skills`（已定，顺带改名） |
 | `Task`（子代理） | `agent` | `task`（**已做**） |
 | `Judge` | `tools` | `tools`（见下） |
-| `ScriptTool`（→ `Script`） | `tools` | `scripts`（已定） |
+| `ScriptTool`（→ `Script`） | `tools` | `scripts`（**已做**） |
 
-新 crate `crates/scripts`：与 `crates/skills` 对仗。自成一体的脚本发现（`discover_in` + 文件头解析）跟技能发现一样，不该混在文件系统工具里。
+新 crate `crates/scripts`（**已做**）：与 `crates/skills` 对仗。自成一体的脚本发现（`discover_in` + 文件头解析）跟技能发现一样，不该混在文件系统工具里。
 
-- `src/lib.rs`：发现层——`discover_in`、`is_identifier`、文件头解析（现 `tools/src/script.rs` 的上半）。
-- `src/script.rs`：`Script`（原 `ScriptTool`，就是这一行改名）。
+- `src/lib.rs`：发现层——`discover_in`、文件头解析（现 `tools/src/script.rs` 的上半）。**`is_identifier` 留在 `script.rs`**：它唯一的调用者是执行路径（`$name` 那一段），发现层从不问它。
+- `src/script.rs`：`Script`（原 `ScriptTool`，就是这一行改名）+ `is_identifier` + 那个单测。`discover_in` 要构造 `Script`，所以它的四个字段是 `pub(crate)`。
 - 依赖：`tools`（`Ctx`/`Tier`/`Tool`/`ToolError`/`ToolOutput`/`Concurrency`/`output::{Capture,take}`/`Workspace`）、`async-trait`、`serde_json`、`tokio`（`process`/`io-util`）；dev：`tokio`、`tempfile`。
 - 接口放宽：`tools::bash::reap`（`bash.rs:27`、`:42`）由 `pub(crate)` 放宽为 `pub`。`output::take` 和 `output::Capture` 已经是 pub，不用动。
 - `crates/tools` 侧：删 `src/script.rs`，删 `lib.rs` 里 `pub mod script;`。
@@ -182,7 +182,7 @@ crates/cli/src/              ✧ 应用
 现有两个例外，都改：
 
 - **`SkillTool` → `Load`**：随 `skills` 拆分一并做。**不能**改成 `skill::Skill`——发现层的 `Skill` 已占名，会出现 `skill::Skill` 和 `skills::Skill` 两个不同类型只差一个字母。wire name 仍是 `skill`。
-- **`ScriptTool` → `Script`**：随拆分落进 `crates/scripts`，路径读作 `scripts::Script`（模块名与类型名同名是这库的常规写法）。全库只有 4 处，全在 `tools/src/script.rs`（定义 `:36`、`discover_in` 返回类型 `:46`、构造 `:72`、`impl Tool for` `:106`），零外部调用点。wire name 不受影响（`name()` 返回脚本文件自己头里的名字）。
+- **`ScriptTool` → `Script`**（**已做**）：随拆分落进 `crates/scripts`，路径读作 `scripts::Script`（模块名与类型名同名是这库的常规写法）。全库只有 4 处，全在 `tools/src/script.rs`（定义 `:36`、`discover_in` 返回类型 `:46`、构造 `:72`、`impl Tool for` `:106`），零外部调用点。wire name 不受影响（`name()` 返回脚本文件自己头里的名字）。
 
 struct 名不必等于 wire name，这库里本来就不是：`ScriptTool::name()` 返回的是脚本自己的名字，不叫 "script"。
 

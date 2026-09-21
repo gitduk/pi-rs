@@ -372,6 +372,7 @@ other.
 
 | crate | | |
 |---|---|---|
+| `scripts` | 0.3k | user-defined tools: a script in a directory is a tool |
 | `task` | 0.5k | the subagent: a whole agent loop behind one tool call |
 | `brain` | 2.7k | messages, wires, streams, faults, estimates |
 | `agent` | 3.9k | the turn loop, compaction, the session |
