@@ -1191,14 +1191,6 @@ impl Ui {
     }
 
     // The values both lines draw on, as this surface currently knows them.
-    fn snapshot(&self, lane: &Lane, view: &View) -> Snapshot {
-        lane.snapshot(
-            &view.model,
-            view.state.started.map(|s| s.elapsed()),
-            view.queued.len(),
-        )
-    }
-
     // The separator between lanes on the bar: the one every other line on
     // this surface uses, dimmed so the names it divides are what the eye
     // lands on.
@@ -1379,7 +1371,7 @@ impl Ui {
                 self.close(view);
                 // Still running as far as the screen is concerned: `turn`
                 // clears the clock only once the loop returns.
-                let snap = self.snapshot(lane, view);
+                let snap = snapshot(lane, view);
                 // Asked now rather than at every draw: a run whose segments
                 // all had nothing to say leaves no row, and a blank one is
                 // worse than none.
@@ -1647,7 +1639,7 @@ impl Ui {
         ));
 
         if lane.is_running() {
-            let mut parts = status::parts(&self.live, &self.snapshot(lane, view));
+            let mut parts = status::parts(&self.live, &snapshot(lane, view));
             // A run that is stopping says so; an ordinary running line needs
             // no word for it — the spinner is what says the turn is on.
             if view.state.stopping {
@@ -2602,6 +2594,17 @@ fn view_at(views: &mut Views, token: u64) -> &mut View {
 // The screen of the lane in front. Fields rather than `&mut self`, and the lane
 // rather than the core behind it: a caller holding this screen still reads and
 // writes the rest of the lane it belongs to.
+// What a lane's status line is drawn from: the numbers the events carried, and
+// the two they cannot say — when this turn started, and what is queued behind
+// it.
+fn snapshot(lane: &Lane, view: &View) -> Snapshot {
+    lane.snapshot(
+        &view.model,
+        view.state.started.map(|s| s.elapsed()),
+        view.queued.len(),
+    )
+}
+
 fn front_view<'a>(views: &'a mut Views, lane: &Lane) -> &'a mut View {
     view_at(views, lane.token())
 }

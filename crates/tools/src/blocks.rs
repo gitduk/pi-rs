@@ -12,15 +12,10 @@ pub(crate) fn extent_of(path: &str, content: &str, line: usize) -> Option<(usize
 /// these by prefix, matched against the line itself, so no per-language name
 /// grammar is needed.
 pub(crate) fn openings(path: &str, content: &str) -> Vec<usize> {
-    let Some(lang) = crate::syntax::Lang::of(path) else {
-        return Vec::new();
-    };
-    let mut rows: Vec<usize> = crate::syntax::extents(lang, content)
-        .keys()
-        .copied()
-        .collect();
-    rows.sort_unstable();
-    rows
+    extents(path, content)
+        .into_iter()
+        .map(|(opens, _)| opens)
+        .collect()
 }
 
 /// Every opening row with the block it opens, for a refusal naming several

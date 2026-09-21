@@ -5,6 +5,7 @@
 //! Lines matter in two places only: a block named by its first line, and the
 //! line numbers the echo reports.
 
+use super::crop;
 use std::ops::Range;
 
 /// Where one edit landed, for the report the model reads.
@@ -642,15 +643,6 @@ fn sim(a: &str, b: &str) -> f64 {
     }
     let denom = ca.len().max(cb.len()).max(1);
     common as f64 / denom as f64
-}
-
-fn crop(s: &str, max: usize) -> String {
-    let mut chars = s.chars();
-    let mut t: String = chars.by_ref().take(max).collect();
-    if chars.next().is_some() {
-        t.push('…');
-    }
-    t
 }
 
 #[cfg(test)]
