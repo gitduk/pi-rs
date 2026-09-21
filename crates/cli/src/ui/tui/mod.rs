@@ -4792,8 +4792,7 @@ mod tests {
             config: std::sync::Arc::new(crate::store::config::Config::default()),
             args: std::sync::Arc::new(<crate::Args as clap::Parser>::parse_from(["pi"])),
             commands: std::sync::Arc::new(Vec::new()),
-            file: toml::Value::Table(Default::default()),
-            claimed: Default::default(),
+            settings: crate::store::settings::Settings::new(toml::Value::Table(Default::default())),
             lanes: vec![running_lane(dir)],
             current: 0,
         };
@@ -5485,10 +5484,10 @@ mod tests {
         let mut args = <crate::Args as clap::Parser>::parse_from(["pi"]);
         args.config = Some(file.display().to_string());
         tui.core.args = std::sync::Arc::new(args);
-        tui.core.claimed.insert(
-            "status.done".to_string(),
-            toml::Value::Array(vec![toml::Value::String("cost".into())]),
-        );
+        tui.core
+            .settings
+            .claim("status.done", "[\"cost\"]")
+            .expect("a valid claim");
         let said = tui
             .core
             .write_to_file("status.done")

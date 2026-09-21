@@ -2,8 +2,16 @@
 //!
 //! There is no table of settings here: the tree is `Config` serialized, so a
 //! field added to the struct appears without anything else being edited.
+//!
+//! `Settings` is the pair a run carries: the tree as the file last said it, and
+//! the values this session claimed on top. What the config is computed from is
+//! the two overlaid; what the panel edits is the claim, and `/reload` replaces
+//! the file's half.
+
+use std::collections::BTreeMap;
 
 use anyhow::{Result, bail};
+use serde::Deserialize as _;
 
 /// Every leaf, as `path` and the value rendered the way a file would write it.
 pub fn leaves(tree: &toml::Value) -> Vec<(String, String)> {
@@ -34,6 +42,119 @@ pub struct SettingRow {
     pub path: String,
     pub value: String,
     pub changed: bool,
+}
+
+/// The config file as this run read it, and the values this session claimed on
+/// top of it.
+pub struct Settings {
+    // The tree as last read from disk. `/settings` edits a copy of it;
+    // `/reload` replaces it.
+    file: toml::Value,
+    // What this session has claimed, by path. Replayed over every reload, so a
+    // claimed value keeps winning over the file.
+    claimed: BTreeMap<String, toml::Value>,
+}
+
+impl Settings {
+    pub fn new(file: toml::Value) -> Self {
+        Self {
+            file,
+            claimed: BTreeMap::new(),
+        }
+    }
+
+    /// Re-read the file, keeping what this session has claimed.
+    pub fn reread(&mut self, at: Option<&str>) -> Result<()> {
+        self.file = crate::store::config::load_tree(at)?;
+        Ok(())
+    }
+
+    /// The file tree with the claims on top — what the config is computed from.
+    pub fn effective(&self) -> Result<toml::Value> {
+        let mut tree = self.file.clone();
+        for (path, value) in &self.claimed {
+            put(&mut tree, path, value.clone())?;
+        }
+        Ok(tree)
+    }
+
+    pub fn claimed(&self) -> &BTreeMap<String, toml::Value> {
+        &self.claimed
+    }
+
+    /// What the file alone says at `path`, for the check that names a claim
+    /// still shadowing a line the file has moved on from.
+    pub fn file_value(&self, path: &str) -> Option<toml::Value> {
+        get(&self.file, path).ok().cloned()
+    }
+
+    /// What this session has claimed at `path`, if anything.
+    pub fn claimed_value(&self, path: &str) -> Option<toml::Value> {
+        self.claimed.get(path).cloned()
+    }
+
+    /// Take a value into the session, or refuse it whole: the write is tried on
+    /// a scratch tree first, so a value the config would not accept reaches
+    /// neither the config in force nor the claim. Answers with the value that
+    /// was there and the one that now is.
+    pub fn claim(&mut self, path: &str, raw: &str) -> Result<(Option<toml::Value>, toml::Value)> {
+        let mut scratch = self.effective()?;
+        let old = get(&scratch, path).ok().cloned();
+        set(&mut scratch, path, raw)?;
+        let new = get(&scratch, path).expect("the path was just set").clone();
+        crate::store::config::Config::deserialize(scratch).map_err(|e| anyhow::anyhow!(e))?;
+        self.claimed.insert(path.to_string(), new.clone());
+        Ok((old, new))
+    }
+
+    /// Plant a claim no line of the file can address, which is what the panel
+    /// has to keep answering for. No path in the program makes one — `claim`
+    /// refuses what the config will not take — so this is the tests' way in.
+    #[cfg(test)]
+    pub(crate) fn claim_unchecked(&mut self, path: &str, value: toml::Value) {
+        self.claimed.insert(path.to_string(), value);
+    }
+
+    /// Drop this session's claim on `path`. False when there was none.
+    pub fn drop_claim(&mut self, path: &str) -> bool {
+        self.claimed.remove(path).is_some()
+    }
+
+    /// The file's rows with the session's claims on top — what the panel shows
+    /// and the read-only list prints. Path by path rather than one overlaid
+    /// tree, so a claim the file can no longer address (an ancestor the file
+    /// has turned into a non-table) still answers, with the file's own value
+    /// beside it for the mark.
+    pub fn rows(&self) -> Vec<SettingRow> {
+        let mut rows: BTreeMap<String, String> = leaves(&self.file).into_iter().collect();
+        for (path, claimed) in &self.claimed {
+            rows.insert(path.clone(), render(claimed));
+        }
+        rows.into_iter()
+            .map(|(path, value)| {
+                let claimed = self.claimed.get(&path);
+                let file = get(&self.file, &path).ok();
+                SettingRow {
+                    path,
+                    value,
+                    changed: claimed.is_some() && claimed != file,
+                }
+            })
+            .collect()
+    }
+}
+
+/// What the panel and the read-only list show in place of a value the journal
+/// redacts: whether there is one, never which.
+pub(crate) fn mask_secret(path: &str, value: &str) -> String {
+    if crate::store::journal::secret(crate::store::journal::leaf(path)) {
+        match value {
+            "" => "<unset>".to_string(),
+            _ => "<set>".to_string(),
+        }
+    } else {
+        value.to_string()
+    }
 }
 
 #[cfg(test)]

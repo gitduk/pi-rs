@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 use crate::input::commands::{Command, commands};
 use crate::input::expand;
 use crate::run::{Repl, lane, subagent, wechat, worktree};
+use crate::store::settings::Settings;
 use crate::store::{config, journal, session};
 use crate::ui::{icons, keys, line, render, status, tui};
 
@@ -619,9 +620,10 @@ async fn main() -> Result<()> {
             config: config.clone(),
             args: args.clone(),
             commands: commands.clone(),
-            file: config::load_tree(args.config.as_deref())
-                .unwrap_or_else(|_| toml::Value::Table(Default::default())),
-            claimed: BTreeMap::new(),
+            settings: Settings::new(
+                config::load_tree(args.config.as_deref())
+                    .unwrap_or_else(|_| toml::Value::Table(Default::default())),
+            ),
             current: 0,
             lanes: vec![lane::Lane {
                 token: lane::next_token(),

@@ -15,8 +15,8 @@ use super::Paint;
 use super::editor::Editor;
 use super::screen;
 use crate::input::Intent;
-use crate::run::mask_secret;
 use crate::store::settings::SettingRow;
+use crate::store::settings::mask_secret;
 use crate::ui::icons;
 use crate::ui::keys::Action;
 

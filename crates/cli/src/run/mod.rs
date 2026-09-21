@@ -4,8 +4,6 @@ pub mod subagent;
 pub mod wechat;
 pub mod worktree;
 
-use std::collections::BTreeMap;
-
 use agent::Totals;
 use agent::session::Session;
 use tools::{Tool, ToolError};
@@ -19,7 +17,7 @@ use crate::run::meter::Tally;
 use crate::store::config::{self, Config};
 use crate::store::journal;
 use crate::store::session::{self, Store, Stored};
-use crate::store::settings;
+use crate::store::settings::{self, Settings, mask_secret};
 use crate::ui::icons;
 
 /// A session and everything that outlives any one turn of it.
@@ -43,12 +41,9 @@ pub struct Repl {
     /// holds the same table to complete against and re-reads it whenever this
     /// one is replaced.
     pub commands: std::sync::Arc<Vec<Command>>,
-    /// The config tree as last read from disk. `/settings` edits a copy of
-    /// this tree; `/reload` replaces it.
-    pub file: toml::Value,
-    /// What the settings panel has claimed this run, by path. Replayed over
-    /// every reload so the claimed values keep winning over the file.
-    pub claimed: BTreeMap<String, toml::Value>,
+    /// The config file and what this session claimed on top of it: what
+    /// `/settings` edits, and what `/reload` replaces the file's half of.
+    pub settings: Settings,
     /// Every checkout open in this run, in the order they were opened. The
     /// main one is first, because that is where a run starts.
     pub lanes: Vec<Lane>,
@@ -111,16 +106,14 @@ impl Repl {
     /// replaced.
     pub fn reload(&mut self) -> Vec<String> {
         // Re-read the file tree; the claimed overrides stay.
-        let tree = match config::load_tree(self.args.config.as_deref()) {
-            Ok(t) => t,
-            Err(e) => return vec![format!("nothing reloaded — {}", refused("reload", e))],
-        };
-        self.file = tree;
+        if let Err(e) = self.settings.reread(self.args.config.as_deref()) {
+            return vec![format!("nothing reloaded — {}", refused("reload", e))];
+        }
         let mut said = self.rebuild();
         // Name any claim that still shadows a line the file just changed.
-        for path in self.claimed.keys() {
-            if let Ok(old) = settings::get(&self.file, path)
-                && old != &self.claimed[path]
+        for path in self.settings.claimed().keys() {
+            if let Some(old) = self.settings.file_value(path)
+                && old != self.settings.claimed()[path]
             {
                 said.push(format!(
                     "{path}: the file changed it, but this session is still shadowing it — /settings, then r on the row takes the file back"
@@ -146,7 +139,7 @@ impl Repl {
             &self.lane().ctx.workspace,
             &config,
             &project,
-            &self.claimed,
+            self.settings.claimed(),
         ) {
             Ok(r) => r,
             Err(e) => return failed(e),
@@ -230,47 +223,26 @@ impl Repl {
         self.rebuilt().unwrap_or_else(|why| vec![why])
     }
 
-    // The file tree with the claimed overrides on top — what the config is
-    // computed from.
-    fn effective(&self) -> Result<toml::Value, anyhow::Error> {
-        let mut tree = self.file.clone();
-        for (path, value) in &self.claimed {
-            settings::put(&mut tree, path, value.clone())?;
-        }
-        Ok(tree)
-    }
-
     // The file's rows with the session's claims on top — what the panel
     // shows and the read-only list prints. Path by path rather than one
     // overlaid tree, so a claim the file can no longer address (an ancestor
     // the file has turned into a non-table) still answers, with the file's
     // own value beside it for the mark.
     pub fn setting_rows(&self) -> Vec<settings::SettingRow> {
-        let mut rows: BTreeMap<String, String> = settings::leaves(&self.file).into_iter().collect();
-        for (path, claimed) in &self.claimed {
-            rows.insert(path.clone(), settings::render(claimed));
-        }
-        rows.into_iter()
-            .map(|(path, value)| {
-                let claimed = self.claimed.get(&path);
-                let file = settings::get(&self.file, &path).ok();
-                settings::SettingRow {
-                    path,
-                    value,
-                    changed: claimed.is_some() && claimed != file,
-                }
-            })
-            .collect()
+        self.settings.rows()
     }
 
     // The same, saying why when nothing could be adopted.
     fn rebuilt(&mut self) -> Result<Vec<String>, String> {
-        let tree = self.effective().map_err(|e| refused("settings", e))?;
+        let tree = self
+            .settings
+            .effective()
+            .map_err(|e| refused("settings", e))?;
         let mut config = match config::Config::deserialize(tree) {
             Ok(c) => c,
             Err(e) => return Err(refused("settings", anyhow::anyhow!(e))),
         };
-        config.apply_env_unclaimed(&self.claimed);
+        config.apply_env_unclaimed(self.settings.claimed());
         self.adopt(config)
     }
 
@@ -279,22 +251,10 @@ impl Repl {
     /// The panel's edit line answers through here, so a refusal comes back
     /// named, to be shown beside the edit that earned it.
     pub fn edit(&mut self, path: &str, raw: &str) -> Result<Vec<String>, String> {
-        let raw = typed(path, raw);
-        let mut scratch = match self.effective() {
-            Ok(t) => t,
-            Err(e) => return Err(refused("settings", e)),
-        };
-        let old = settings::get(&scratch, path).ok().cloned();
-        if let Err(e) = settings::set(&mut scratch, path, &raw) {
-            return Err(refused("settings", e));
-        }
-        let new = settings::get(&scratch, path).unwrap().clone();
-        // Validate by deserializing the scratch tree, so a bad value never
-        // reaches the running config.
-        if let Err(e) = config::Config::deserialize(scratch) {
-            return Err(refused("settings", anyhow::anyhow!(e)));
-        }
-        self.claimed.insert(path.to_string(), new);
+        let (old, new) = self
+            .settings
+            .claim(path, &typed(path, raw))
+            .map_err(|e| refused("settings", e))?;
         let mut said = self.rebuild();
         let old_shown = match &old {
             Some(v) => mask_secret(path, &settings::render(v)),
@@ -302,7 +262,7 @@ impl Repl {
         };
         said.push(format!(
             "{path}: {old_shown} → {} (session only)",
-            mask_secret(path, &settings::render(&self.claimed[path]))
+            mask_secret(path, &settings::render(&new))
         ));
         Ok(said)
     }
@@ -311,7 +271,7 @@ impl Repl {
     /// the path means the file is already in force and there is nothing to
     /// say.
     pub fn revert(&mut self, path: &str) -> Vec<String> {
-        if self.claimed.remove(path).is_none() {
+        if !self.settings.drop_claim(path) {
             return Vec::new();
         }
         let mut said = self.rebuild();
@@ -324,13 +284,9 @@ impl Repl {
     /// The value was validated when the session took it, so only the disk
     /// can refuse.
     pub fn write_to_file(&mut self, path: &str) -> Result<Vec<String>, String> {
-        if !self.claimed.contains_key(path) {
+        let Some(value) = self.settings.claimed_value(path) else {
             return Ok(vec![format!("{path}: the session and the file agree")]);
-        }
-        let tree = self.effective().map_err(|e| format!("{e:#}"))?;
-        let value = settings::get(&tree, path)
-            .map_err(|e| format!("{e:#}"))?
-            .clone();
+        };
         let file = self
             .args
             .config
@@ -339,8 +295,10 @@ impl Repl {
             .or_else(config::global_path)
             .ok_or_else(|| "no settings file to write".to_string())?;
         config::write(&file, path, value.clone()).map_err(|e| format!("{e:#}"))?;
-        self.claimed.remove(path);
-        self.file = config::load_tree(self.args.config.as_deref()).map_err(|e| format!("{e:#}"))?;
+        self.settings.drop_claim(path);
+        self.settings
+            .reread(self.args.config.as_deref())
+            .map_err(|e| format!("{e:#}"))?;
         let mut said = self.rebuild();
         said.push(format!(
             "{path} = {} — written to the file",
@@ -763,8 +721,8 @@ impl Repl {
             let mut line = format!("{} = {}", row.path, mask_secret(&row.path, &row.value));
             if row.changed {
                 line.push_str(&format!(" {}", icons::CHANGED_MARK));
-                if let Ok(file) = settings::get(&self.file, &row.path) {
-                    let file = mask_secret(&row.path, &settings::render(file));
+                if let Some(file) = self.settings.file_value(&row.path) {
+                    let file = mask_secret(&row.path, &settings::render(&file));
                     line.push_str(&format!(" file: {file}"));
                 }
             }
@@ -939,8 +897,14 @@ impl Repl {
         let root = ws.root().to_path_buf();
         let failed = |e| format!("nothing opened — {}", refused("worktree", e));
         let project = config::load_project(&root).map_err(failed)?;
-        let mut resolved = crate::resolve(&self.args, &ws, &self.config, &project, &self.claimed)
-            .map_err(failed)?;
+        let mut resolved = crate::resolve(
+            &self.args,
+            &ws,
+            &self.config,
+            &project,
+            self.settings.claimed(),
+        )
+        .map_err(failed)?;
 
         let (events, inbox) = Lane::channel();
         // The model travels; what the root decides does not. A switch changes
@@ -1196,17 +1160,6 @@ pub fn record_bash(session: &mut Session, command: &str, text: String) {
 }
 
 // A secret value as a change line shows it: set or unset, never the value.
-pub(crate) fn mask_secret(path: &str, value: &str) -> String {
-    if journal::secret(journal::leaf(path)) {
-        match value {
-            "" => "<unset>".to_string(),
-            _ => "<set>".to_string(),
-        }
-    } else {
-        value.to_string()
-    }
-}
-
 #[cfg(test)]
 mod tests {
 
@@ -1281,8 +1234,7 @@ mod tests {
             config: std::sync::Arc::new(crate::store::config::Config::default()),
             args: std::sync::Arc::new(<crate::Args as clap::Parser>::parse_from(["pi"])),
             commands: std::sync::Arc::new(Vec::new()),
-            file: toml::from_str(file).unwrap(),
-            claimed: Default::default(),
+            settings: crate::store::settings::Settings::new(toml::from_str(file).unwrap()),
             lanes: vec![a_lane("s")],
             current: 0,
         }
@@ -1290,10 +1242,9 @@ mod tests {
 
     fn claimed_base_url() -> crate::run::Repl {
         let mut core = core_with_file(r#"base_url = "http://127.0.0.1:7896""#);
-        core.claimed.insert(
-            "base_url".to_string(),
-            toml::Value::String("http://127.0.0.1:7897".to_string()),
-        );
+        core.settings
+            .claim("base_url", "http://127.0.0.1:7897")
+            .expect("a valid claim");
         core
     }
 
@@ -1302,8 +1253,8 @@ mod tests {
         // `models` is no longer a table, so the claim cannot be overlaid onto
         // the file — the row is still due, with the mark and its r.
         let mut core = core_with_file("model = \"flash\"\nmodels = 3");
-        core.claimed
-            .insert("models.flash".to_string(), toml::Value::String("m2".into()));
+        core.settings
+            .claim_unchecked("models.flash", toml::Value::String("m2".into()));
         let rows = core.setting_rows();
         let model = rows
             .iter()
@@ -1334,8 +1285,8 @@ mod tests {
         assert!(row.changed, "the file still says 7896");
 
         let mut core = core_with_file("model = \"flash\"");
-        core.claimed
-            .insert("margins".to_string(), toml::Value::Integer(2));
+        core.settings
+            .claim_unchecked("margins", toml::Value::Integer(2));
         let rows = core.setting_rows();
         let added = rows.iter().find(|r| r.path == "margins").expect("added");
         assert_eq!(added.value, "2");
@@ -1632,8 +1583,7 @@ mod tests {
             config: std::sync::Arc::new(crate::store::config::Config::default()),
             args: std::sync::Arc::new(<crate::Args as clap::Parser>::parse_from(["pi"])),
             commands,
-            file: toml::Value::Table(Default::default()),
-            claimed: Default::default(),
+            settings: crate::store::settings::Settings::new(toml::Value::Table(Default::default())),
             lanes: vec![lane],
             current: 0,
         }
