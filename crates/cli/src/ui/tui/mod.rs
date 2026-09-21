@@ -28,7 +28,7 @@ use crate::input::commands::{Candidate, Choice, Command};
 use crate::input::{self, Fate, Intent, Rewound, Step};
 use crate::run::lane::{Lane, Round, Turn};
 use crate::run::meter::Snapshot;
-use crate::run::{self, Repl};
+use crate::run::{self, App};
 use crate::store::session::{ResumeChoice, Store};
 use crate::ui::icons;
 use crate::ui::keys::{Action, Keys, Layers, Menu, Mode, Press};
@@ -2419,7 +2419,7 @@ impl Ui {
 
     // Every copy of the config the surface keeps, brought up to date — the one
     // landing `/reload` and everything the settings panel does share.
-    fn adopt_config(&mut self, core: &Repl, view: &mut View) {
+    fn adopt_config(&mut self, core: &App, view: &mut View) {
         // The key map lives in two places; a reload has to reach both or the
         // screen keeps answering to the old bindings.
         if !Arc::ptr_eq(&self.keys, &core.keys) {
@@ -2482,7 +2482,7 @@ fn absorb_growth(scroll: usize, last: Option<usize>, total: usize) -> usize {
 // What a `Step::Handled` leaves behind: its lines, and whatever the command
 // changed under the surface. A free function because a run in flight lands
 // them from inside its own borrow, where `self` is in pieces.
-fn land_handled(ui: &mut Ui, core: &Repl, view: &mut View, lines: Vec<String>) {
+fn land_handled(ui: &mut Ui, core: &App, view: &mut View, lines: Vec<String>) {
     view.surface
         .scrollback
         .extend(lines.into_iter().map(Row::notice));
@@ -2568,7 +2568,7 @@ where
 }
 
 pub struct Tui {
-    core: Repl,
+    core: App,
     // What each lane looks like, keyed by lane token. Held here rather than on
     // the lane because a screen is the surface's: the lane list reorders and
     // drops lanes, and a screen joined to a lane by identity cannot end up
@@ -2600,7 +2600,7 @@ fn front_view<'a>(views: &'a mut Views, lane: &Lane) -> &'a mut View {
 // Drop the screens of lanes that are gone. A lane can be removed without the
 // surface being told — `/worktree` removes one to leave it — so this reads the
 // lane list rather than tracking it.
-fn prune_views(core: &Repl, views: &mut Views) {
+fn prune_views(core: &App, views: &mut Views) {
     views.retain(|token, _| core.lanes.iter().any(|lane| lane.token == *token));
 }
 
@@ -2789,7 +2789,7 @@ fn drop_shared_history() {
 const HISTORY_KEEP: usize = 1_000;
 
 impl Tui {
-    pub fn new(mut core: Repl, keys: Arc<Keys>, bridge: run::wechat::Bridge) -> Result<Self> {
+    pub fn new(mut core: App, keys: Arc<Keys>, bridge: run::wechat::Bridge) -> Result<Self> {
         let paint = Paint::with_theme(true, Arc::new(core.config.theme.clone()));
         let mut ui = Ui::new(
             Screen::new()?,
@@ -2837,7 +2837,7 @@ impl Tui {
     // settle side. No reader thread and no history file: the terminal the
     // test runner owns is not this test's to touch.
     #[cfg(test)]
-    fn on_test_screen(mut core: Repl, keys: Arc<Keys>) -> Self {
+    fn on_test_screen(mut core: App, keys: Arc<Keys>) -> Self {
         let paint = Paint::with_theme(false, Arc::new(core.config.theme.clone()));
         let mut ui = Ui::new(
             screen::Screen::test(80, 24),
@@ -3315,7 +3315,7 @@ impl Tui {
             // anything else this iteration does leaves it unset.
             self.core.lane_mut().pending_round = None;
             // What the surface answers for itself: the screen, the keyboard
-            // and the process are not `Repl`'s to move.
+            // and the process are not `App`'s to move.
             // Whether the line about to run is a loop's own round.
             let mut from_loop = false;
             let intent = match intent {
@@ -3446,7 +3446,7 @@ impl Tui {
                 continue;
             }
             let was = self.core.current;
-            let step = self.core.run(intent);
+            let step = self.core.dispatch(intent);
             self.reconcile(was);
             if from_loop {
                 // `was`, not whichever lane is in front now: a step may move
@@ -4133,7 +4133,7 @@ mod tests {
         view_at,
     };
     use crate::input::commands::{Choice, Command, Source};
-    use crate::run::Repl;
+    use crate::run::App;
     use crate::run::lane::{Lane, Round, Turn};
     use crate::store::session::Store;
     use crate::store::settings::row;
@@ -4786,7 +4786,7 @@ mod tests {
 
     fn surface(dir: &std::path::Path) -> super::Tui {
         let keys = std::sync::Arc::new(Keys::default());
-        let core = Repl {
+        let core = App {
             store: Store::new(dir.join("state")),
             keys: keys.clone(),
             config: std::sync::Arc::new(crate::store::config::Config::default()),

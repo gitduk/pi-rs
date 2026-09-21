@@ -12,9 +12,9 @@ use anyhow::Result;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::input::Step;
-use crate::run::Repl;
+use crate::run::App;
 
-pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
+pub async fn run(mut core: App, tx: UnboundedSender<Event>) -> Result<()> {
     let mut buffer = String::new();
 
     // Worth writing when a person is watching stderr — `pi | tee` reaches here
@@ -47,7 +47,7 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
             continue;
         }
 
-        match core.run(crate::input::read(line)) {
+        match core.dispatch(crate::input::read(line)) {
             Step::Quit => break,
             Step::Bash(command) => {
                 // Awaited in place: this surface has nothing else to serve
@@ -106,7 +106,7 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
 }
 
 async fn turn(
-    core: &mut Repl,
+    core: &mut App,
     prompt: String,
     typed: Option<String>,
     tx: &UnboundedSender<Event>,

@@ -20,11 +20,12 @@ use crate::store::session::{self, Store, Stored};
 use crate::store::settings::{self, Settings, mask_secret};
 use crate::ui::icons;
 
-/// A session and everything that outlives any one turn of it.
+/// Everything a run holds that outlives any one turn of it, and the one place
+/// an intent is answered.
 ///
-/// Both surfaces hold one of these and differ only in how they read a line and
-/// where they put what comes back.
-pub struct Repl {
+/// Both surfaces hold one and differ only in how they read a line and where
+/// they put what comes back.
+pub struct App {
     pub store: Store,
     /// Held so `/keys` can show what is actually in force, overrides included.
     pub keys: std::sync::Arc<crate::ui::keys::Keys>,
@@ -51,7 +52,7 @@ pub struct Repl {
     pub current: usize,
 }
 
-impl Repl {
+impl App {
     // Put the lane in front's key map and command table in force. A skill
     // belongs to one tree and not another, and so does a rebound key;
     // leaving the last lane's in place had this one answering to another
@@ -91,7 +92,7 @@ impl Repl {
     }
 }
 
-impl Repl {
+impl App {
     /// Re-read the config and everything it decides.
     ///
     /// Whole or not at all: on any failure nothing changes, which is why the
@@ -556,7 +557,7 @@ fn carries_reasoning(session: &agent::session::Session) -> bool {
     })
 }
 
-impl Repl {
+impl App {
     // What this run stands on, in one place: the tail of the system prompt as
     // the model receives it, the two files a person opens when a run goes
     // wrong, and what the session has spent. The instruction files are named
@@ -608,14 +609,13 @@ fn standing_head(standing: &str) -> Vec<String> {
         .collect()
 }
 
-// How long ago a transcript was last saved, in human terms.
-impl Repl {
+impl App {
     /// Carry out an intent, or say what the surface must do to carry it out.
     ///
     /// Exhaustive with no catch-all, like `Intent::fate`: the arms a surface
     /// answers for itself are named rather than swept up, so a new intent has
     /// to say which side of that line it falls on.
-    pub fn run(&mut self, intent: Intent) -> Step {
+    pub fn dispatch(&mut self, intent: Intent) -> Step {
         match intent {
             Intent::Bash(command) => Step::Bash(command),
             Intent::Prompt(send) => Step::Prompt { send, typed: None },
@@ -1136,10 +1136,10 @@ mod tests {
         }
     }
 
-    // A Repl whose file tree is the given TOML, enough for the `/settings`
+    // A App whose file tree is the given TOML, enough for the `/settings`
     // surface to answer.
-    fn core_with_file(file: &str) -> crate::run::Repl {
-        crate::run::Repl {
+    fn core_with_file(file: &str) -> crate::run::App {
+        crate::run::App {
             store: crate::store::session::Store::new(
                 std::env::temp_dir().join("pi-settings-get-test"),
             ),
@@ -1153,7 +1153,7 @@ mod tests {
         }
     }
 
-    fn claimed_base_url() -> crate::run::Repl {
+    fn claimed_base_url() -> crate::run::App {
         let mut core = core_with_file(r#"base_url = "http://127.0.0.1:7896""#);
         core.settings
             .claim("base_url", "http://127.0.0.1:7897")
@@ -1452,7 +1452,7 @@ mod tests {
         root: &std::path::Path,
         transport: std::sync::Arc<Recording>,
         model: &str,
-    ) -> crate::run::Repl {
+    ) -> crate::run::App {
         let ws = tools::Workspace::new(root).unwrap();
         let mut agent = agent::Agent::new(transport, test_spec(model));
         let store = crate::store::session::Store::new(root.join("state"));
@@ -1490,7 +1490,7 @@ mod tests {
             keys: keys.clone(),
             commands: commands.clone(),
         };
-        crate::run::Repl {
+        crate::run::App {
             store,
             keys,
             config: std::sync::Arc::new(crate::store::config::Config::default()),
@@ -1503,7 +1503,7 @@ mod tests {
     }
 
     // What the child asked for, once.
-    async fn run_the_child(core: &crate::run::Repl) {
+    async fn run_the_child(core: &crate::run::App) {
         let task = core
             .lane()
             .agent

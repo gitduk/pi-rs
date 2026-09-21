@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 
 use crate::input::commands::{Command, commands};
 use crate::input::expand;
-use crate::run::{Repl, lane, subagent, wechat, worktree};
+use crate::run::{App, lane, subagent, wechat, worktree};
 use crate::store::settings::Settings;
 use crate::store::{config, journal, session};
 use crate::ui::{icons, keys, line, render, status, tui};
@@ -321,7 +321,7 @@ pub struct Resolved {
     pub max_turns: Option<usize>,
     pub task_deadline: Option<std::time::Duration>,
     pub keys: keys::Keys,
-    /// The built-ins plus one command per skill. Here rather than in the Repl
+    /// The built-ins plus one command per skill. Here rather than in the App
     /// because a skill discovered at reload has to reach the prompt the same
     /// way everything else the config decides does.
     pub commands: Vec<Command>,
@@ -607,14 +607,14 @@ async fn main() -> Result<()> {
     let resumed = carried.context().len();
 
     let Some(prompt) = prompt else {
-        // Before `id` moves into the Repl: the context borrows it to name the
+        // Before `id` moves into the App: the context borrows it to name the
         // session its spills belong to.
         // Held on the lane as well as in force: a switch back to this tree has
         // to put its own key map and command table back, not the last one's.
         let commands = std::sync::Arc::new(resolved.commands);
         let ctx = tools::Ctx::new(workspace).with_session(&id);
         let (events, inbox) = lane::Lane::channel();
-        let core = Repl {
+        let core = App {
             store,
             keys: key_map.clone(),
             config: config.clone(),
