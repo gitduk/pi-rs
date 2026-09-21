@@ -696,10 +696,11 @@ fn f_entry(entry: &LogEntry, paint: &Paint) -> Option<Vec<Row>> {
 
 // Everything the terminal shows, and nothing the session knows.
 /// What one lane looks like on screen: its conversation, the stream filling
-/// it, where it is scrolled and what this run has cost. Owned by the lane it
-/// belongs to, so the surface draws whichever `Repl::current` names and there
-/// is no second list to keep in step; everything on `Ui` around it is the one
-/// terminal, the one keyboard and whatever menu is open over them.
+/// it, where it is scrolled, and the half-typed line parked when the surface
+/// left it. The surface holds one per lane, keyed by the lane's token, so the
+/// lane list can reorder and drop lanes without a screen following the wrong
+/// one; everything on `Ui` around it is the one terminal, the one keyboard and
+/// whatever menu is open over them.
 #[derive(Default)]
 pub struct View {
     // What this screen shows: a rewind replaces it whole.
@@ -1132,8 +1133,8 @@ impl Ui {
     // standing in it would be filed in whichever checkout came next — and
     // the state built against that lane: a flash, the rewind selector over
     // its transcript.
-    fn leave_lane(&mut self, lane: &mut Lane) {
-        lane.view.draft = self.editor.take_composing();
+    fn leave_lane(&mut self, view: &mut View) {
+        view.draft = self.editor.take_composing();
         self.flash = None;
         self.rewind.clear();
     }
@@ -1184,15 +1185,15 @@ impl Ui {
     }
 
     // The values both lines draw on, as this surface currently knows them.
-    fn snapshot(&self, lane: &Lane) -> Snapshot {
+    fn snapshot(&self, lane: &Lane, view: &View) -> Snapshot {
         lane.tally.snapshot(
-            &lane.view.model,
+            &view.model,
             lane.worktree.as_deref(),
-            lane.view.state.started.map(|s| s.elapsed()),
+            view.state.started.map(|s| s.elapsed()),
             // Both are lines the user has given the surface that have not
             // reached the model. Which side of the seam one waits on is the
             // loop's business, not the reader's.
-            lane.view.queued.len() + lane.steer().map_or(0, agent::Steer::len),
+            view.queued.len() + lane.steer().map_or(0, agent::Steer::len),
         )
     }
 
@@ -1352,36 +1353,36 @@ impl Ui {
         }
     }
 
-    fn on_event(&mut self, lane: &mut Lane, event: Event) {
+    fn on_event(&mut self, lane: &mut Lane, view: &mut View, event: Event) {
         // Anything the model produces spends the chance to unsend: past this
         // the prompt has been answered, not merely sent.
         if matches!(
             event,
             Event::TextDelta(_) | Event::ReasoningDelta(_) | Event::ToolStart { .. }
         ) {
-            lane.view.state.committed = true;
+            view.state.committed = true;
         }
         // Every number either status line shows is read here, once. The arms
         // below decide only what reaches the scrollback.
         lane.tally.on(&event);
         match &event {
-            Event::TextDelta(d) => self.write(&mut lane.view, d, false),
-            Event::ReasoningDelta(d) => self.write(&mut lane.view, d, true),
+            Event::TextDelta(d) => self.write(view, d, false),
+            Event::ReasoningDelta(d) => self.write(view, d, true),
             // Counted already, and none of them draws a row of its own.
             Event::Usage(_)
             | Event::TurnEnd { .. }
             | Event::TurnStart { .. }
             | Event::Context { .. } => {}
             Event::Done { .. } => {
-                self.close(&mut lane.view);
+                self.close(view);
                 // Still running as far as the screen is concerned: `turn`
                 // clears the clock only once the loop returns.
-                let snap = self.snapshot(lane);
+                let snap = self.snapshot(lane, view);
                 // Asked now rather than at every draw: a run whose segments
                 // all had nothing to say leaves no row, and a blank one is
                 // worse than none.
                 if !status::parts(&self.done, &snap).is_empty() {
-                    lane.view.surface.scrollback.push(Row::tally(snap));
+                    view.surface.scrollback.push(Row::tally(snap));
                 }
             }
             // A call's two events are one line here: the start takes a row in
@@ -1389,8 +1390,8 @@ impl Ui {
             // scrolls that row up as its ✓/✗ line. Parallel calls each hold a
             // row, matched back by id because they end out of order.
             Event::ToolStart { id, name, args, .. } => {
-                self.close(&mut lane.view);
-                lane.view.state.tools.push(RunTool {
+                self.close(view);
+                view.state.tools.push(RunTool {
                     id: id.clone(),
                     name: name.clone(),
                     summary: render::summarize(args),
@@ -1403,11 +1404,11 @@ impl Ui {
                 is_error,
                 preview,
             } => {
-                self.close(&mut lane.view);
+                self.close(view);
                 // Not a row yet: the line parks in the live region until the
                 // committed entries arrive, and adoption checks it against
                 // what the entry itself derives to.
-                if let Some(t) = lane.view.state.tools.iter_mut().find(|t| t.id == *id) {
+                if let Some(t) = view.state.tools.iter_mut().find(|t| t.id == *id) {
                     t.done = Some(Row::result(!*is_error, name.clone(), preview.clone()));
                 }
             }
@@ -1415,14 +1416,13 @@ impl Ui {
             // table, check them against the pending live-region lines, and
             // file them: the event carries state, never drawing instructions.
             Event::Committed { entries } => {
-                self.close(&mut lane.view);
-                self.adopt(lane, entries);
+                self.close(view);
+                self.adopt(view, entries);
             }
             _ => {
-                self.close(&mut lane.view);
+                self.close(view);
                 if let Some(said) = render::describe(&event, &self.paint, self.screen.usable()) {
-                    lane.view
-                        .surface
+                    view.surface
                         .scrollback
                         .extend(said.into_iter().map(Row::notice));
                 }
@@ -1448,34 +1448,34 @@ impl Ui {
     // two lines are built from different halves — the event's facts and the
     // entry's content — so their equality is the drift alarm the
     // two-producer layout used to lack.
-    fn adopt(&self, lane: &mut Lane, entries: &[LogEntry]) {
+    fn adopt(&self, view: &mut View, entries: &[LogEntry]) {
         let width = self.screen.usable();
         for entry in entries {
-            if lane.view.surface.tail.is_some_and(|t| entry.id() <= t) {
+            if view.surface.tail.is_some_and(|t| entry.id() <= t) {
                 continue;
             }
             if let Some(rows) = f_entry(entry, &self.paint) {
                 if let LogEntry::Tool { result: r, .. } = entry {
-                    self.check_pending(lane, &r.call, rows.last(), width);
+                    self.check_pending(view, &r.call, rows.last(), width);
                     for r in rows {
-                        push_tool_row(&mut lane.view.surface.scrollback, r);
+                        push_tool_row(&mut view.surface.scrollback, r);
                     }
                 } else {
-                    lane.view.surface.scrollback.extend(rows);
+                    view.surface.scrollback.extend(rows);
                 }
             }
-            lane.view.surface.tail = Some(entry.id());
+            view.surface.tail = Some(entry.id());
         }
     }
 
     // Retire the pending line a `ToolEnd` parked in the live region, checking
     // it against the row the committed entry derives to. Equality is
     // expected; anything else is drift the old layout shipped silently.
-    fn check_pending(&self, lane: &mut Lane, call: &str, row: Option<&Row>, width: usize) {
-        let Some(at) = lane.view.state.tools.iter().position(|t| t.id == call) else {
+    fn check_pending(&self, view: &mut View, call: &str, row: Option<&Row>, width: usize) {
+        let Some(at) = view.state.tools.iter().position(|t| t.id == call) else {
             return;
         };
-        let Some(pending) = lane.view.state.tools.remove(at).done else {
+        let Some(pending) = view.state.tools.remove(at).done else {
             return;
         };
         if let Some(row) = row {
@@ -1601,7 +1601,7 @@ impl Ui {
     // the status line. The editor draws separately, pinned to the bottom.
     // With the rows comes the count that leads them: the pending calls',
     // which a click opens — only the producer knows which rows those are.
-    fn live(&self, lane: &Lane, room: usize) -> (Vec<Line<'static>>, usize) {
+    fn live(&self, lane: &Lane, view: &View, room: usize) -> (Vec<Line<'static>>, usize) {
         let width = self.screen.usable();
         let mut rows: Vec<Line<'static>> = Vec::new();
 
@@ -1610,15 +1610,14 @@ impl Ui {
         let mut pending = Vec::new();
         if self.live_tools_shown {
             pending.extend(
-                lane.view
-                    .state
+                view.state
                     .tools
                     .iter()
                     .map(|t| pending_line(self.spinner, t)),
             );
-        } else if let Some(t) = lane.view.state.tools.last() {
-            let extra = if lane.view.state.tools.len() > 1 {
-                format!(" (+{})", lane.view.state.tools.len() - 1)
+        } else if let Some(t) = view.state.tools.last() {
+            let extra = if view.state.tools.len() > 1 {
+                format!(" (+{})", view.state.tools.len() - 1)
             } else {
                 String::new()
             };
@@ -1633,22 +1632,22 @@ impl Ui {
         let pending_rows = rows.len();
 
         rows.extend(body(
-            &lane.view.surface.folds,
-            &lane.view.surface.scrollback,
-            lane.view.surface.stream.kind == StreamKind::Reasoning,
-            &lane.view.surface.stream.text,
+            &view.surface.folds,
+            &view.surface.scrollback,
+            view.surface.stream.kind == StreamKind::Reasoning,
+            &view.surface.stream.text,
             (width, room),
             &self.paint,
         ));
 
         if lane.is_running() {
-            let mut parts = status::parts(&self.live, &self.snapshot(lane));
+            let mut parts = status::parts(&self.live, &self.snapshot(lane, view));
             // A run that is stopping says so; an ordinary running line needs
             // no word for it — the spinner is what says the turn is on.
-            if lane.view.state.stopping {
+            if view.state.stopping {
                 parts.push(format!("stopping{}", icons::ELLIPSIS));
             }
-            let spin = if lane.view.state.stopping {
+            let spin = if view.state.stopping {
                 icons::SPIN_STOPPED
             } else {
                 icons::SPINNER_FRAMES[self.spinner % icons::SPINNER_FRAMES.len()]
@@ -1747,7 +1746,7 @@ impl Ui {
         view.surface.scrollback = opening.into_iter().chain(rest).collect();
     }
 
-    fn flush(&mut self, lane: &mut Lane) {
+    fn flush(&mut self, lane: &Lane, view: &mut View) {
         let menu = self.menu();
         let width = self.screen.usable();
         // A flash outranks the lane strip: it is gone in a moment, where the
@@ -1788,32 +1787,29 @@ impl Ui {
         let hist_view = (self.screen.height as usize)
             .saturating_sub(editor_h + menu_h + bar_h)
             .max(1);
-        let (live, pending_rows) = self.live(lane, hist_view);
+        let (live, pending_rows) = self.live(lane, view, hist_view);
 
         // While the view is scrolled up, rows the bottom gained fold back
         // into `scroll` — a sum of per-row cached heights, where a wrap
         // counts for exactly the rows it takes.
-        if lane.view.surface.scroll > 0 {
-            let total = lane
-                .view
+        if view.surface.scroll > 0 {
+            let total = view
                 .surface
                 .scrollback
                 .iter()
                 .map(|r| r.height(&self.paint, &self.done, width))
                 .sum::<usize>()
                 + live.len();
-            lane.view.surface.scroll =
-                absorb_growth(lane.view.surface.scroll, lane.view.surface.counted, total);
-            lane.view.surface.counted = Some(total);
+            view.surface.scroll = absorb_growth(view.surface.scroll, view.surface.counted, total);
+            view.surface.counted = Some(total);
         } else {
-            lane.view.surface.counted = None;
+            view.surface.counted = None;
         }
         // Measured in rows, not lines: a line wider than the terminal wraps
         // into several, and counting lines here would put more rows in the
         // area than fit — pushing the newest ones off the bottom, underneath
         // the input, where nothing shows them.
-        let last_tools_idx = lane
-            .view
+        let last_tools_idx = view
             .surface
             .scrollback
             .iter()
@@ -1822,28 +1818,23 @@ impl Ui {
         // A summary row spins only while one of its tools is still in flight:
         // a finished batch is history, and only the last row can still grow.
         let summary_live = lane_running
-            && lane
-                .view
+            && view
                 .state
                 .tools
                 .iter()
                 .any(|t| t.done.is_none() && !is_modifying_tool(&t.name))
-            && last_tools_idx.is_some_and(|i| i + 1 == lane.view.surface.scrollback.len());
+            && last_tools_idx.is_some_and(|i| i + 1 == view.surface.scrollback.len());
 
-        for (idx, row) in lane.view.surface.scrollback.iter_mut().enumerate() {
+        for (idx, row) in view.surface.scrollback.iter_mut().enumerate() {
             let is_hovered = self.hovered_scrollback == Some(idx);
             let is_running = summary_live && Some(idx) == last_tools_idx;
             row.update_hover_state(is_running, is_hovered, self.spinner);
         }
 
-        let scrollback = ScrollbackRows::new(
-            &lane.view.surface.scrollback,
-            &self.paint,
-            &self.done,
-            width,
-        )
-        .indexed()
-        .map(|(item, idx)| (item, Target::Scrollback(idx)));
+        let scrollback =
+            ScrollbackRows::new(&view.surface.scrollback, &self.paint, &self.done, width)
+                .indexed()
+                .map(|(item, idx)| (item, Target::Scrollback(idx)));
 
         // The pending-call rows lead the live block; a click on one opens or
         // closes the batch.
@@ -1866,14 +1857,14 @@ impl Ui {
         let (tagged_rows, scroll) = screen::window_tagged(
             scrollback.chain(live_stream),
             hist_view,
-            lane.view.surface.scroll,
+            view.surface.scroll,
         );
 
         let (rows, row_targets): (Vec<Line<'static>>, Vec<Target>) =
             tagged_rows.into_iter().unzip();
         self.row_targets = row_targets;
 
-        lane.view.surface.scroll = scroll;
+        view.surface.scroll = scroll;
         let items = self.menu_items(&menu);
         let picked = self
             .picked
@@ -1933,13 +1924,13 @@ impl Ui {
             .fold_previous(&mut view.surface.scrollback);
     }
 
-    fn key(&mut self, lane: &mut Lane, event: TermEvent, running: bool) -> Intent {
+    fn key(&mut self, lane: &Lane, view: &mut View, event: TermEvent, running: bool) -> Intent {
         let key = match event {
             TermEvent::Resize(w, h) => {
                 self.screen.resized(w, h);
                 // Re-measuring starts at the new width: the re-wrap is a
                 // change of layout, not output, and must not move the view.
-                lane.view.surface.counted = None;
+                view.surface.counted = None;
                 return Intent::None;
             }
             TermEvent::Paste(text) => {
@@ -1952,13 +1943,13 @@ impl Ui {
             }
             TermEvent::Mouse(mouse) => {
                 match mouse.kind {
-                    MouseEventKind::ScrollUp => self.scroll_view(&mut lane.view, true, 1),
-                    MouseEventKind::ScrollDown => self.scroll_view(&mut lane.view, false, 1),
+                    MouseEventKind::ScrollUp => self.scroll_view(view, true, 1),
+                    MouseEventKind::ScrollDown => self.scroll_view(view, false, 1),
                     MouseEventKind::Moved | MouseEventKind::Drag(_) => {
-                        self.on_mouse_move(lane, mouse.column, mouse.row);
+                        self.on_mouse_move(view, mouse.column, mouse.row);
                     }
                     MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                        self.on_mouse_click(lane, mouse.column, mouse.row);
+                        self.on_mouse_click(view, mouse.column, mouse.row);
                     }
                     _ => {}
                 }
@@ -2087,7 +2078,7 @@ impl Ui {
             Some(Action::RunInterrupt) => {
                 // Esc before the model has moved means "I didn't mean to send
                 // that"; an empty editor, or unsending overwrites a line.
-                if self.editor.is_empty() && lane.is_running() && !lane.view.state.committed {
+                if self.editor.is_empty() && lane.is_running() && !view.state.committed {
                     return Intent::Unsend;
                 }
                 return Intent::Interrupt;
@@ -2185,37 +2176,25 @@ impl Ui {
             Some(Action::MoveBufferEnd) => self.editor.buffer_end(),
             Some(Action::HistoryOlder) => self.editor.up(),
             Some(Action::HistoryNewer) => self.editor.down(),
-            Some(Action::ScrollPageUp) => {
-                self.scroll_view(&mut lane.view, true, self.page_scroll_step())
-            }
-            Some(Action::ScrollPageDown) => {
-                self.scroll_view(&mut lane.view, false, self.page_scroll_step())
-            }
-            Some(Action::ScrollHalfUp) => {
-                self.scroll_view(&mut lane.view, true, self.half_scroll_step())
-            }
-            Some(Action::ScrollHalfDown) => {
-                self.scroll_view(&mut lane.view, false, self.half_scroll_step())
-            }
+            Some(Action::ScrollPageUp) => self.scroll_view(view, true, self.page_scroll_step()),
+            Some(Action::ScrollPageDown) => self.scroll_view(view, false, self.page_scroll_step()),
+            Some(Action::ScrollHalfUp) => self.scroll_view(view, true, self.half_scroll_step()),
+            Some(Action::ScrollHalfDown) => self.scroll_view(view, false, self.half_scroll_step()),
             Some(Action::ThinkFold) => {
                 // The last block only: the one streaming, or the newest
                 // finished one when nothing is. The switch is left alone, so
                 // the blocks no one is touching keep what they had.
-                lane.view
-                    .surface
+                view.surface
                     .folds
-                    .toggle_current(&mut lane.view.surface.scrollback);
+                    .toggle_current(&mut view.surface.scrollback);
             }
             Some(Action::ThinkFoldAll) => {
                 // Every block in the scrollback, the last one included, and
                 // the switch with them: one key presses the whole screen to a
                 // single state.
-                lane.view
-                    .surface
-                    .folds
-                    .flip_all(&mut lane.view.surface.scrollback);
+                view.surface.folds.flip_all(&mut view.surface.scrollback);
                 // A fold-all reflows blocks above the view too; re-baseline.
-                lane.view.surface.counted = None;
+                view.surface.counted = None;
             }
 
             Some(Action::MenuAccept) => {
@@ -2333,11 +2312,11 @@ impl Ui {
     }
 
     /// The scrollback row the mouse is over, if the cursor is on its text.
-    fn hovered_row(&self, lane: &Lane, col: u16, row: u16) -> Option<usize> {
+    fn hovered_row(&self, view: &View, col: u16, row: u16) -> Option<usize> {
         let Target::Scrollback(idx) = self.target_at(row)? else {
             return None;
         };
-        let row = lane.view.surface.scrollback.get(idx)?;
+        let row = view.surface.scrollback.get(idx)?;
         if !row.is_expandable() {
             return None;
         }
@@ -2347,25 +2326,24 @@ impl Ui {
         ((col as usize) < first.width()).then_some(idx)
     }
 
-    fn on_mouse_move(&mut self, lane: &mut Lane, col: u16, row: u16) {
-        self.hovered_scrollback = self.hovered_row(lane, col, row);
+    fn on_mouse_move(&mut self, view: &mut View, col: u16, row: u16) {
+        self.hovered_scrollback = self.hovered_row(view, col, row);
     }
 
-    fn on_mouse_click(&mut self, lane: &mut Lane, col: u16, row: u16) {
+    fn on_mouse_click(&mut self, view: &mut View, col: u16, row: u16) {
         match self.target_at(row) {
             // The pending batch opens and closes where it stands: the live
             // rows are rebuilt every frame, so the flip is all it takes.
             Some(Target::PendingTools) => self.live_tools_shown = !self.live_tools_shown,
             _ => {
-                if let Some(idx) = self.hovered_row(lane, col, row)
-                    && lane
-                        .view
+                if let Some(idx) = self.hovered_row(view, col, row)
+                    && view
                         .surface
                         .scrollback
                         .get_mut(idx)
                         .is_some_and(|r| r.toggle_expand())
                 {
-                    lane.view.surface.counted = None;
+                    view.surface.counted = None;
                 }
             }
         }
@@ -2589,11 +2567,32 @@ where
 
 pub struct Tui {
     core: Repl,
+    // What each lane looks like, keyed by lane token. Held here rather than on
+    // the lane because a screen is the surface's: the lane list reorders and
+    // drops lanes, and a screen joined to a lane by identity cannot end up
+    // drawn for the wrong one when it does.
+    views: Views,
     ui: Ui,
     events: UnboundedReceiver<TermEvent>,
     // Stops the reader while a child holds the terminal.
     hold: Hold,
     bridge: run::wechat::Bridge,
+}
+
+type Views = std::collections::BTreeMap<u64, View>;
+
+// The screen one lane's token names, built on first sight: a lane the core
+// opened while the surface was busy with another has none yet. A screen whose
+// lane is gone goes unasked for until the next prune.
+fn view_at(views: &mut Views, token: u64) -> &mut View {
+    views.entry(token).or_default()
+}
+
+// Drop the screens of lanes that are gone. A lane can be removed without the
+// surface being told — `/worktree` removes one to leave it — so this reads the
+// lane list rather than tracking it.
+fn prune_views(core: &Repl, views: &mut Views) {
+    views.retain(|token, _| core.lanes.iter().any(|lane| lane.token == *token));
 }
 
 // crossterm reads blockingly, so the keyboard gets a thread of its own and
@@ -2801,7 +2800,8 @@ impl Tui {
         let context = core.lane().context.clone();
         let mut opening = View::opening(&context, &ui.paint);
         opening.model = core.lane().agent.spec.model.clone();
-        core.lane_mut().view = opening;
+        let mut views = Views::new();
+        views.insert(core.lane().token, opening);
         drop_shared_history();
         {
             let lines = history_of(&core.store, core.lane().ctx.workspace.root());
@@ -2809,13 +2809,14 @@ impl Tui {
         }
         // A resumed session shows its transcript from the start: the whole
         // screen is rebuildable now, so there is no reason to hide it.
-        let lane = core.lane_mut();
-        if let Some(session) = lane.session.as_ref().filter(|s| !s.is_empty()) {
-            ui.rebuild(&mut lane.view, session);
+        let token = core.lane().token;
+        if let Some(session) = core.lane().session.as_ref().filter(|s| !s.is_empty()) {
+            ui.rebuild(view_at(&mut views, token), session);
         }
         let (events, hold) = reader();
         Ok(Self {
             core,
+            views,
             ui,
             events,
             hold,
@@ -2844,6 +2845,7 @@ impl Tui {
         let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             core,
+            views: Views::new(),
             ui,
             events: rx,
             hold: Hold::default(),
@@ -2859,8 +2861,11 @@ impl Tui {
     // sight — and the history is written per line rather than on the way out,
     // because quitting with two Ctrl-Cs skips every tidy exit path there is.
     fn echo_sent(&mut self, line: &str) {
-        self.ui.submit(&mut self.core.lane_mut().view, line);
-        self.core.lane_mut().view.surface.scroll = 0;
+        self.ui
+            .submit(view_at(&mut self.views, self.core.lane().token), line);
+        view_at(&mut self.views, self.core.lane().token)
+            .surface
+            .scroll = 0;
         self.save_history();
     }
 
@@ -2895,8 +2900,9 @@ impl Tui {
         if was == self.core.current {
             return;
         }
-        self.ui.leave_lane(&mut self.core.lanes[was]);
-        let parked = std::mem::take(&mut self.core.lane_mut().view.draft);
+        self.ui
+            .leave_lane(view_at(&mut self.views, self.core.lanes[was].token));
+        let parked = std::mem::take(&mut view_at(&mut self.views, self.core.lane().token).draft);
         self.ui.editor.set_line(&parked);
         self.ui.lists.at(self.core.lane().ctx.workspace.root());
         self.ui.at_root = self.core.lane().ctx.workspace.root().to_path_buf();
@@ -2907,17 +2913,19 @@ impl Tui {
         self.ui.editor.seed_history(lines);
         // A lane opened later has no banner yet, and the files it stands on
         // are its own.
-        if !self.core.lane().view.drawn {
+        if !view_at(&mut self.views, self.core.lane().token).drawn {
             let context = self.core.lane().context.clone();
             let opening = View::opening(&context, &self.ui.paint);
-            self.core.lane_mut().view = opening;
+            *view_at(&mut self.views, self.core.lane().token) = opening;
         }
         // What this lane's run posted while nobody was looking, in the order it
         // arrived. Not through the bridge: the phone follows the lane in front,
         // and replaying an hour of another one into it would be a second
         // conversation arriving out of nowhere.
         for event in std::mem::take(&mut self.core.lane_mut().pending) {
-            self.ui.on_event(self.core.lane_mut(), event);
+            let token = self.core.lane().token;
+            self.ui
+                .on_event(self.core.lane_mut(), view_at(&mut self.views, token), event);
         }
         // And the end of it, if it reached one out of sight.
         if let Some((out, unsend)) = self.core.lane_mut().take_ended() {
@@ -2931,27 +2939,26 @@ impl Tui {
         }
     }
 
-    // Put a handled command's lines into the view of the lane in front. Lent
-    // out rather than borrowed in place: the view lives inside `core`, which
-    // this also reads.
+    // Put a handled command's lines into the view of the lane in front.
     fn land_lines(&mut self, lines: Vec<String>) {
         let at = self.core.current;
-        let mut view = std::mem::take(&mut self.core.lanes[at].view);
-        land_handled(&mut self.ui, &self.core, &mut view, lines);
-        self.core.lanes[at].view = view;
+        land_handled(
+            &mut self.ui,
+            &self.core,
+            view_at(&mut self.views, self.core.lanes[at].token),
+            lines,
+        );
     }
 
     fn land_swap(&mut self, said: Vec<String>) {
-        let lane = self.core.lane_mut();
-        if let Some(session) = lane.session.as_ref() {
-            self.ui.rebuild(&mut lane.view, session);
+        let token = self.core.lane().token;
+        if let Some(session) = self.core.lane().session.as_ref() {
+            self.ui.rebuild(view_at(&mut self.views, token), session);
         }
         // `at` forgets both lists, so it stands in for `refresh_sessions`: a
         // swap that did not move repeats the root, and drops them either way.
         self.ui.lists.at(self.core.lane_mut().ctx.workspace.root());
-        self.core
-            .lane_mut()
-            .view
+        view_at(&mut self.views, self.core.lane().token)
             .surface
             .scrollback
             .extend(said.into_iter().map(Row::notice));
@@ -2967,7 +2974,12 @@ impl Tui {
             while let Ok(event) = self.core.lanes[at].inbox.try_recv() {
                 if at == self.core.current {
                     self.bridge.observe(&event).await;
-                    self.ui.on_event(self.core.lane_mut(), event);
+                    let token = self.core.lanes[at].token;
+                    self.ui.on_event(
+                        &mut self.core.lanes[at],
+                        view_at(&mut self.views, token),
+                        event,
+                    );
                 } else {
                     // Deltas arrive thousands at a time and the backlog is
                     // replayed in one go: a run of them folded into one keeps
@@ -3089,11 +3101,13 @@ impl Tui {
                     .as_ref()
                     .map(|l| l.note.clone())
                     .unwrap_or_default();
-                self.core.lanes[lane].view.queued.push(Intent::LoopRound {
-                    goal,
-                    note,
-                    round: Some(next as u64),
-                });
+                view_at(&mut self.views, self.core.lanes[lane].token)
+                    .queued
+                    .push(Intent::LoopRound {
+                        goal,
+                        note,
+                        round: Some(next as u64),
+                    });
                 format!("loop round {next}")
             }
             Round::Cut => return,
@@ -3120,7 +3134,8 @@ impl Tui {
                 .unwrap_or("the main checkout");
             line.spans.insert(0, Span::from(format!("{whose}: ")));
         }
-        self.ui.say_line(&mut self.core.lane_mut().view, line);
+        self.ui
+            .say_line(view_at(&mut self.views, self.core.lane().token), line);
     }
 
     // The one gate every input passes: a key, the phone, or an intent coming
@@ -3138,14 +3153,18 @@ impl Tui {
         match intent.fate() {
             Fate::Now => Wake::Do(intent),
             Fate::Queued => {
-                self.core.lane_mut().view.queued.push(intent);
+                view_at(&mut self.views, self.core.lane().token)
+                    .queued
+                    .push(intent);
                 Wake::Nothing
             }
             Fate::Steered(text) => {
                 // A `!` or a `/compact` holds the lane: nothing is listening,
                 // so the line waits for it the way every line used to.
                 let Some(steer) = self.core.lane().steer().cloned() else {
-                    self.core.lane_mut().view.queued.push(intent);
+                    view_at(&mut self.views, self.core.lane().token)
+                        .queued
+                        .push(intent);
                     return Wake::Nothing;
                 };
                 // Echoed like any submitted line, and unlike a queued one:
@@ -3157,7 +3176,9 @@ impl Tui {
                 // line was said takes the prompt back and the line — never
                 // heard, handed back at `finish` — starts a turn of its own,
                 // which is the opposite of what the user just asked for.
-                self.core.lane_mut().view.state.committed = true;
+                view_at(&mut self.views, self.core.lane().token)
+                    .state
+                    .committed = true;
                 steer.say(text);
                 Wake::Nothing
             }
@@ -3208,7 +3229,9 @@ impl Tui {
         };
         cancel.cancel();
         *take_back = unsend;
-        self.core.lane_mut().view.state.stopping = true;
+        view_at(&mut self.views, self.core.lane().token)
+            .state
+            .stopping = true;
     }
 
     /// Drive the terminal until the user leaves.
@@ -3229,12 +3252,20 @@ impl Tui {
             self.serve_lanes().await;
             // Before the bar rebuilds, so a vanished tab goes with its lane.
             self.drop_vanished_lanes();
+            prune_views(&self.core, &mut self.views);
             self.refresh_tabs();
-            self.ui.flush(self.core.lane_mut());
+            self.ui.flush(
+                self.core.lane(),
+                view_at(&mut self.views, self.core.lane().token),
+            );
             let running = self.core.lane().is_running();
             let anywhere = self.core.lanes.iter().any(|lane| lane.is_running());
             // A queued intent waits for the lane it was aimed at to come free.
-            let woke = if self.core.lane_mut().view.queued.is_empty() || running {
+            let woke = if view_at(&mut self.views, self.core.lane().token)
+                .queued
+                .is_empty()
+                || running
+            {
                 // Every branch must be cancel-safe: a loser is dropped mid-poll.
                 // `recv()` and `tick()` are; a blocking read gets its own thread.
                 tokio::select! {
@@ -3247,7 +3278,7 @@ impl Tui {
                     }
                     key = self.events.recv() => match key {
                         Some(key) => {
-                            let intent = self.ui.key(self.core.lane_mut(), key, running);
+                            let intent = self.ui.key(self.core.lane(), view_at(&mut self.views, self.core.lane().token), key, running);
                             self.admit(intent)
                         }
                         None => Wake::Leave,
@@ -3261,7 +3292,7 @@ impl Tui {
                         }
                         Some(run::wechat::Inbound::Stop) => self.admit(Intent::Interrupt),
                         Some(run::wechat::Inbound::Notice(text)) => {
-                            self.ui.say(&mut self.core.lane_mut().view, text);
+                            self.ui.say(view_at(&mut self.views, self.core.lane().token), text);
                             Wake::Nothing
                         }
                         None => Wake::Nothing,
@@ -3271,7 +3302,11 @@ impl Tui {
                 // One at a time, each still the intent it was read as. Joined
                 // as lines, a command and a prompt became one line and `read`
                 // saw only the first word.
-                Wake::Do(self.core.lane_mut().view.queued.remove(0))
+                Wake::Do(
+                    view_at(&mut self.views, self.core.lane().token)
+                        .queued
+                        .remove(0),
+                )
             };
             // Out here, where all of `self` is free again.
             let intent = match woke {
@@ -3341,8 +3376,11 @@ impl Tui {
                     }
                     from_loop = true;
                     self.core.lane_mut().pending_round = round;
-                    self.ui.submit(&mut self.core.lane_mut().view, &goal);
-                    self.core.lane_mut().view.surface.scroll = 0;
+                    self.ui
+                        .submit(view_at(&mut self.views, self.core.lane().token), &goal);
+                    view_at(&mut self.views, self.core.lane().token)
+                        .surface
+                        .scroll = 0;
                     if !note.is_empty()
                         && let Some(session) = self.core.lane_mut().session.as_mut()
                     {
@@ -3366,9 +3404,7 @@ impl Tui {
                 if goal.is_empty() {
                     // The round already queued goes with it: run after a stop,
                     // it is a turn nobody asked for and it reads as a typed one.
-                    self.core
-                        .lane_mut()
-                        .view
+                    view_at(&mut self.views, self.core.lane().token)
                         .queued
                         .retain(|q| !matches!(q, Intent::LoopRound { .. }));
                     match self.core.lane_mut().looping.take() {
@@ -3376,7 +3412,8 @@ impl Tui {
                         Some(l) => {
                             let said =
                                 format!("loop stopped after {} round(s) of `{}`", l.round, l.goal);
-                            self.ui.say(&mut self.core.lane_mut().view, said);
+                            self.ui
+                                .say(view_at(&mut self.views, self.core.lane().token), said);
                         }
                         // Nothing ended — a note about the line, not the lane.
                         None => self.ui.flash(
@@ -3401,11 +3438,13 @@ impl Tui {
                     continue;
                 }
                 self.core.lane_mut().loop_start(goal.clone());
-                self.core.lane_mut().view.queued.push(Intent::LoopRound {
-                    goal,
-                    note: String::new(),
-                    round: None,
-                });
+                view_at(&mut self.views, self.core.lane().token)
+                    .queued
+                    .push(Intent::LoopRound {
+                        goal,
+                        note: String::new(),
+                        round: None,
+                    });
                 continue;
             }
             // Bare `/settings` opens a panel rather than printing the
@@ -3455,16 +3494,16 @@ impl Tui {
                         run::WechatCmd::On => match self.bridge.on().await {
                             Ok(said) => said,
                             Err(e) => {
-                                self.ui
-                                    .say(&mut self.core.lane_mut().view, format!("wechat: {e:#}"));
+                                self.ui.say(
+                                    view_at(&mut self.views, self.core.lane().token),
+                                    format!("wechat: {e:#}"),
+                                );
                                 Vec::new()
                             }
                         },
                         run::WechatCmd::Off => self.bridge.off(),
                     };
-                    self.core
-                        .lane_mut()
-                        .view
+                    view_at(&mut self.views, self.core.lane().token)
                         .surface
                         .scrollback
                         .extend(said.into_iter().map(Row::notice));
@@ -3500,10 +3539,13 @@ impl Tui {
             return;
         }
         self.ui.say(
-            &mut self.core.lane_mut().view,
+            view_at(&mut self.views, self.core.lane().token),
             "stopping — saving what the runs have written",
         );
-        self.ui.flush(self.core.lane_mut());
+        self.ui.flush(
+            self.core.lane(),
+            view_at(&mut self.views, self.core.lane().token),
+        );
         let waited = tokio::time::timeout(EXIT_GRACE, async {
             while left > 0 {
                 match done.recv().await {
@@ -3536,9 +3578,9 @@ impl Tui {
                 // whole view from it, so the screen returns to the node the
                 // conversation did instead of keeping the forgotten turns.
                 // It clears anything said before it: hence the notice after.
-                let lane = self.core.lane_mut();
-                if let Some(session) = lane.session.as_ref() {
-                    self.ui.rebuild(&mut lane.view, session);
+                let token = self.core.lane().token;
+                if let Some(session) = self.core.lane().session.as_ref() {
+                    self.ui.rebuild(view_at(&mut self.views, token), session);
                 }
                 let said = match outcome {
                     Rewound::Unsent(_) if !self.ui.editor.is_empty() => {
@@ -3564,11 +3606,12 @@ impl Tui {
                         format!("rewound{at}")
                     }
                 };
-                self.ui.say_muted(&mut self.core.lane_mut().view, &said);
+                self.ui
+                    .say_muted(view_at(&mut self.views, self.core.lane().token), &said);
             }
             Err(e) => {
                 self.ui.say(
-                    &mut self.core.lane_mut().view,
+                    view_at(&mut self.views, self.core.lane().token),
                     format!("warning: the transcript was not saved: {e}"),
                 );
             }
@@ -3609,10 +3652,12 @@ impl Tui {
     // to the tally as the base `/status` reports against.
     // `committed` says whether the prompt behind it can still be taken back.
     fn arm_view(&mut self, committed: bool) {
+        let token = self.core.lane().token;
+        let view = view_at(&mut self.views, token);
+        view.state.started = Some(std::time::Instant::now());
+        view.state.committed = committed;
+        view.state.stopping = false;
         let lane = self.core.lane_mut();
-        lane.view.state.started = Some(std::time::Instant::now());
-        lane.view.state.committed = committed;
-        lane.view.state.stopping = false;
         lane.tally.seed(lane.totals);
     }
 
@@ -3629,14 +3674,17 @@ impl Tui {
         // The repair results and the stop note the send filed are entries
         // now: derive their rows like any commit, so they show without a
         // rebuild. The ask itself stays unadopted — the door echoed it.
-        let tail = self.core.lane().view.surface.tail;
+        let tail = view_at(&mut self.views, self.core.lane().token)
+            .surface
+            .tail;
         let fresh: Vec<LogEntry> = carried
             .entries()
             .iter()
             .filter(|e| tail.is_none_or(|t| e.id() > t) && !matches!(e, LogEntry::Ask { .. }))
             .cloned()
             .collect();
-        self.ui.adopt(self.core.lane_mut(), &fresh);
+        self.ui
+            .adopt(view_at(&mut self.views, self.core.lane().token), &fresh);
         let cancel = CancellationToken::new();
         let steer = agent::Steer::default();
         let ctx = self.core.lane_mut().ctx.clone().with_cancel(cancel.clone());
@@ -3644,7 +3692,8 @@ impl Tui {
         self.arm_view(false);
         // Read while the agent is still reachable: `/model` may replace it
         // while this run works, and the run keeps the one it started on.
-        self.core.lane_mut().view.model = self.core.lane_mut().agent.spec.model.clone();
+        view_at(&mut self.views, self.core.lane().token).model =
+            self.core.lane_mut().agent.spec.model.clone();
 
         let agent = self.core.lane_mut().agent.clone();
         let sent = self.core.lane_mut().events.clone();
@@ -3713,7 +3762,9 @@ impl Tui {
         self.ui.show_mode();
         // A resize while the child held the terminal raised no event, so the
         // view's measurements are against a width that may no longer exist.
-        self.core.lane_mut().view.surface.counted = None;
+        view_at(&mut self.views, self.core.lane().token)
+            .surface
+            .counted = None;
 
         // Judged on its own: a save that succeeded is still a save when the
         // screen comes back badly, and reading the two together threw it away.
@@ -3871,8 +3922,7 @@ impl Tui {
             return;
         };
         let back = self.core.lanes[lane].finish();
-        self.core.lanes[lane]
-            .view
+        view_at(&mut self.views, self.core.lanes[lane].token)
             .queued
             .extend(back.unheard.into_iter().map(Intent::Prompt));
         let unsend = back.unsend;
@@ -3898,7 +3948,9 @@ impl Tui {
         // view as events, and a compact never arrives at this function.
         let said = match kind {
             Kind::Bash { lines, tail } => {
-                self.core.lanes[lane].view.surface.tail = tail;
+                view_at(&mut self.views, self.core.lanes[lane].token)
+                    .surface
+                    .tail = tail;
                 Some(lines)
             }
             _ => None,
@@ -3962,7 +4014,10 @@ impl Tui {
         // this is the only place it can reach the view that asked for it.
         if let Some(said) = said.filter(|lines| !lines.is_empty()) {
             let rows = said.into_iter().map(Row::notice);
-            self.core.lanes[lane].view.surface.scrollback.extend(rows);
+            view_at(&mut self.views, self.core.lanes[lane].token)
+                .surface
+                .scrollback
+                .extend(rows);
         }
 
         // Before the split below, so a round that ended off-screen still arms
@@ -4054,28 +4109,37 @@ impl Tui {
         }
         // The pass is over, so the clock stops. What it was driving — the
         // live region — already went with the turn.
-        self.core.lanes[lane].view.state.started = None;
+        view_at(&mut self.views, self.core.lanes[lane].token)
+            .state
+            .started = None;
     }
 
     // Draw the end of a run into the view that is on screen.
     fn close_run(&mut self, out: Result<Totals, AgentError>) {
-        self.ui.close(&mut self.core.lane_mut().view);
+        self.ui
+            .close(view_at(&mut self.views, self.core.lane().token));
         // A cancelled run's calls got no `ToolEnd`; their animated rows have to
         // reach scrollback some other way before the next flush draws them as a
         // frozen spinner.
-        self.ui.abandon_tools(&mut self.core.lane_mut().view);
-        self.core.lane_mut().view.state.started = None;
+        self.ui
+            .abandon_tools(view_at(&mut self.views, self.core.lane().token));
+        view_at(&mut self.views, self.core.lane().token)
+            .state
+            .started = None;
         match out {
             Ok(_) => {}
             Err(AgentError::Cancelled) => {
                 let stopped = Line::from(self.ui.paint.span(&self.ui.paint.theme.muted, "stopped"));
-                self.ui.say_line(&mut self.core.lane_mut().view, stopped);
+                self.ui
+                    .say_line(view_at(&mut self.views, self.core.lane().token), stopped);
             }
             Err(e) => {
                 let mark = self.ui.paint.span(&self.ui.paint.theme.status.err, "error");
                 let rest = Span::from(format!(" {e}"));
-                self.ui
-                    .say_line(&mut self.core.lane_mut().view, Line::from(vec![mark, rest]));
+                self.ui.say_line(
+                    view_at(&mut self.views, self.core.lane().token),
+                    Line::from(vec![mark, rest]),
+                );
             }
         }
     }
@@ -4084,7 +4148,8 @@ impl Tui {
 #[cfg(test)]
 mod tests {
     use super::{
-        Folds, Intent, Panel, Row, ScrollbackRows, Target, absorb_growth, scrollback_from,
+        Folds, Intent, Panel, Row, ScrollbackRows, Target, View, absorb_growth, scrollback_from,
+        view_at,
     };
     use crate::run::lane::{Lane, Round, Turn};
     use crate::run::{Choice, Command, Repl, Source};
@@ -4163,10 +4228,12 @@ mod tests {
 
         let mut ui = test_ui(80, 24);
         let (_dir, mut lane) = a_running_lane();
+        let mut view = View::default();
         let body = "edit refused:\nline one\nline two";
 
         ui.on_event(
             &mut lane,
+            &mut view,
             agent::Event::ToolStart {
                 id: "c1".into(),
                 name: "edit".into(),
@@ -4175,6 +4242,7 @@ mod tests {
         );
         ui.on_event(
             &mut lane,
+            &mut view,
             agent::Event::ToolEnd {
                 id: "c1".into(),
                 name: "edit".into(),
@@ -4186,6 +4254,7 @@ mod tests {
         // the event showed riding along (see `run_calls`'s error arm).
         ui.on_event(
             &mut lane,
+            &mut view,
             agent::Event::Committed {
                 entries: vec![Entry::Tool {
                     id: EntryId(7),
@@ -4197,8 +4266,8 @@ mod tests {
         );
 
         // The pending spinner retired, the ✗ row filed once.
-        assert!(lane.view.state.tools.is_empty());
-        let after = lane.view.surface.scrollback.len();
+        assert!(view.state.tools.is_empty());
+        let after = view.surface.scrollback.len();
         assert_eq!(after, 1, "one adopted row, got {after}");
     }
 
@@ -4208,9 +4277,11 @@ mod tests {
     fn a_wrapped_pending_batch_tags_every_row_it_takes() {
         let mut ui = test_ui(40, 24);
         let (_dir, mut lane) = a_running_lane();
+        let mut view = View::default();
 
         ui.on_event(
             &mut lane,
+            &mut view,
             agent::Event::ToolStart {
                 id: "c-long".into(),
                 name: "bash".into(),
@@ -4220,25 +4291,27 @@ mod tests {
         );
         ui.on_event(
             &mut lane,
+            &mut view,
             agent::Event::ToolStart {
                 id: "c-read".into(),
                 name: "read".into(),
                 args: serde_json::json!({}),
             },
         );
-        ui.flush(&mut lane);
+        ui.flush(&lane, &mut view);
 
         // Collapsed, the batch is one row; open it so every call holds a
         // row, then the long one wraps.
         ui.key(
-            &mut lane,
+            &lane,
+            &mut view,
             mouse_event(
                 crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
                 0,
             ),
             false,
         );
-        ui.flush(&mut lane);
+        ui.flush(&lane, &mut view);
 
         let tagged = ui
             .row_targets
@@ -4253,7 +4326,8 @@ mod tests {
         // The tail of the wrapped batch answers — the row the count used to
         // miss — and the status line after the batch does not.
         ui.key(
-            &mut lane,
+            &lane,
+            &mut view,
             mouse_event(
                 crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
                 2,
@@ -4261,9 +4335,10 @@ mod tests {
             false,
         );
         assert!(!ui.live_tools_shown, "the wrapped batch's tail answers");
-        ui.flush(&mut lane);
+        ui.flush(&lane, &mut view);
         ui.key(
-            &mut lane,
+            &lane,
+            &mut view,
             mouse_event(
                 crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
                 0,
@@ -4271,10 +4346,11 @@ mod tests {
             false,
         );
         assert!(ui.live_tools_shown);
-        ui.flush(&mut lane);
+        ui.flush(&lane, &mut view);
         let last = ui.row_targets.len() - 1;
         ui.key(
-            &mut lane,
+            &lane,
+            &mut view,
             mouse_event(
                 crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
                 last as u16,
@@ -4613,25 +4689,23 @@ mod tests {
     #[test]
     fn a_wrapped_row_landing_below_moves_the_scroll_by_its_rows() {
         let mut ui = test_ui(20, 12);
-        let (_dir, mut lane) = a_running_lane();
-        lane.view.surface.scrollback = (1..=12).map(|n| Row::notice(format!("row {n}"))).collect();
-        ui.flush(&mut lane);
+        let (_dir, lane) = a_running_lane();
+        let mut view = View::default();
+        view.surface.scrollback = (1..=12).map(|n| Row::notice(format!("row {n}"))).collect();
+        ui.flush(&lane, &mut view);
 
         // Scroll up, and base the measurement on this frame's layout.
-        lane.view.surface.scroll = 2;
-        lane.view.surface.counted = None;
-        ui.flush(&mut lane);
-        let rebased = lane.view.surface.scroll;
+        view.surface.scroll = 2;
+        view.surface.counted = None;
+        ui.flush(&lane, &mut view);
+        let rebased = view.surface.scroll;
         assert_eq!(rebased, 2);
 
         // 25 columns at a 19-column width: one line, two rows.
-        lane.view
-            .surface
-            .scrollback
-            .push(Row::notice("x".repeat(25)));
-        ui.flush(&mut lane);
+        view.surface.scrollback.push(Row::notice("x".repeat(25)));
+        ui.flush(&lane, &mut view);
         assert_eq!(
-            lane.view.surface.scroll,
+            view.surface.scroll,
             rebased + 2,
             "both wrapped rows folded into the scroll"
         );
@@ -4701,7 +4775,7 @@ mod tests {
         let (events, inbox) = Lane::channel();
         Lane {
             agent: std::sync::Arc::new(agent::Agent::new(std::sync::Arc::new(Mute), spec)),
-            token: 1,
+            token: crate::run::lane::next_token(),
             session: None,
             id: "s1".into(),
             created: 0,
@@ -4723,7 +4797,6 @@ mod tests {
                 steer: None,
                 unsend: false,
             },
-            view: Default::default(),
             keys: std::sync::Arc::new(Keys::default()),
             commands: std::sync::Arc::new(Vec::new()),
         }
@@ -4762,8 +4835,11 @@ mod tests {
         let mut tui = surface(dir.path());
         let rows = vec![row("model", "flash", false)];
         tui.ui.panel = Some(Panel::new(rows, &crate::store::config::Vim::default()));
+        let token = tui.core.lane().token;
         let lane = tui.core.lane_mut();
-        let intent = tui.ui.key(lane, typed('z'), false);
+        let intent = tui
+            .ui
+            .key(lane, view_at(&mut tui.views, token), typed('z'), false);
         assert!(matches!(intent, Intent::None));
         assert!(
             tui.ui.editor.is_empty(),
@@ -4827,20 +4903,29 @@ mod tests {
     async fn switching_back_to_a_rebuilt_lane_keeps_its_transcript() {
         let dir = tempfile::tempdir().expect("a temp dir");
         let mut tui = surface(dir.path());
-        let mut lane = running_lane(dir.path());
+        let lane = running_lane(dir.path());
+        let mut view = super::View::opening(&[], &tui.ui.paint);
         // As `rebuild` leaves it: the conversation, and no banner.
-        lane.view = super::View::opening(&[], &tui.ui.paint);
-        lane.view.surface.scrollback = vec![Row::notice("what was said before")];
-        lane.view.surface.opened = 0;
+        view.surface.scrollback = vec![Row::notice("what was said before")];
+        view.surface.opened = 0;
+        // The screen the lane comes back with, keyed by the lane it was built
+        // for: a lane no longer carries its own.
+        tui.views.insert(lane.token, view);
         switch_to(&mut tui, lane);
 
         // By content, not by count: the banner this would lay over it is one
         // row too, so a length check cannot tell them apart.
         let paint = Paint::new(false);
-        let rows: Vec<String> =
-            ScrollbackRows::new(&tui.core.lanes[1].view.surface.scrollback, &paint, &[], 80)
-                .map(text)
-                .collect();
+        let rows: Vec<String> = ScrollbackRows::new(
+            &view_at(&mut tui.views, tui.core.lanes[1].token)
+                .surface
+                .scrollback,
+            &paint,
+            &[],
+            80,
+        )
+        .map(text)
+        .collect();
         assert!(
             rows.iter().any(|r| r.contains("what was said before")),
             "the transcript survives the switch: {rows:?}"
@@ -5005,14 +5090,15 @@ mod tests {
     #[test]
     fn a_flash_is_transient_and_stays_out_of_the_transcript() {
         let mut ui = test_ui(40, 8);
-        let (_dir, mut lane) = a_running_lane();
-        let before = lane.view.surface.scrollback.len();
+        let (_dir, lane) = a_running_lane();
+        let mut view = View::default();
+        let before = view.surface.scrollback.len();
 
         ui.flash("the only checkout there is");
-        ui.flush(&mut lane);
+        ui.flush(&lane, &mut view);
         assert!(ui.flash.is_some());
         assert_eq!(
-            lane.view.surface.scrollback.len(),
+            view.surface.scrollback.len(),
             before,
             "a flash is not part of the transcript"
         );
@@ -5026,7 +5112,7 @@ mod tests {
                 .checked_sub(super::FLASH)
                 .expect("a clock"),
         ));
-        ui.flush(&mut lane);
+        ui.flush(&lane, &mut view);
         assert!(ui.flash.is_none(), "the expired flash was dropped");
     }
 
@@ -5036,24 +5122,25 @@ mod tests {
     #[test]
     fn the_same_notice_twice_running_is_one_row_and_a_count() {
         let mut ui = test_ui(40, 8);
-        let (_dir, mut lane) = a_running_lane();
-        lane.view.surface.scrollback.clear();
+        let (_dir, _lane) = a_running_lane();
+        let mut view = View::default();
+        view.surface.scrollback.clear();
 
-        ui.say(&mut lane.view, "nothing to rewind to");
-        ui.say(&mut lane.view, "nothing to rewind to");
-        ui.say(&mut lane.view, "nothing to rewind to");
+        ui.say(&mut view, "nothing to rewind to");
+        ui.say(&mut view, "nothing to rewind to");
+        ui.say(&mut view, "nothing to rewind to");
         assert_eq!(
-            lane.view.surface.scrollback.len(),
+            view.surface.scrollback.len(),
             1,
             "three identical notices file as one row"
         );
 
         // Broken by another line, the next repeat starts its own row rather
         // than reaching back over it.
-        ui.say(&mut lane.view, "stopped");
-        ui.say(&mut lane.view, "nothing to rewind to");
+        ui.say(&mut view, "stopped");
+        ui.say(&mut view, "nothing to rewind to");
         assert_eq!(
-            lane.view.surface.scrollback.len(),
+            view.surface.scrollback.len(),
             3,
             "the repeat after the break starts its own row"
         );
@@ -5228,7 +5315,8 @@ mod tests {
         switch_to(&mut tui, running_lane(second.path()));
 
         assert_eq!(
-            tui.core.lanes[was].view.draft, "half a thought meant for this lane",
+            view_at(&mut tui.views, tui.core.lanes[was].token).draft,
+            "half a thought meant for this lane",
             "the draft is parked on the lane that was left"
         );
         assert_eq!(
@@ -5245,7 +5333,8 @@ mod tests {
             "the draft is back in the editor with its lane"
         );
         assert_eq!(
-            tui.core.lanes[was].view.draft, "",
+            view_at(&mut tui.views, tui.core.lanes[was].token).draft,
+            "",
             "the parked draft was taken up, not left behind"
         );
     }
@@ -5267,7 +5356,8 @@ mod tests {
         switch_to(&mut tui, running_lane(second.path()));
 
         assert_eq!(
-            tui.core.lanes[was].view.draft, "half a thought meant for this lane",
+            view_at(&mut tui.views, tui.core.lanes[was].token).draft,
+            "half a thought meant for this lane",
             "the composing line is parked, not the recalled one"
         );
     }
@@ -5288,14 +5378,15 @@ mod tests {
         ui.lists.worktrees.set(trees).ok();
         ui.vim.as_mut().unwrap().mode = Mode::Normal;
         let (_dir, mut lane) = a_running_lane();
+        let mut view = View::default();
 
-        let next = ui.key(&mut lane, typed('L'), false);
+        let next = ui.key(&lane, &mut view, typed('L'), false);
         assert!(
             matches!(&next, Intent::Worktree(name) if name == "f1"),
             "{next:?}"
         );
         lane.worktree = Some("f1".into());
-        let prev = ui.key(&mut lane, typed('H'), false);
+        let prev = ui.key(&lane, &mut view, typed('H'), false);
         assert!(
             matches!(&prev, Intent::Worktree(name) if name == "pi-rs"),
             "{prev:?}"
@@ -5303,20 +5394,20 @@ mod tests {
 
         // The lowercase pair no longer leaves the lane it is typed in.
         for lower in ['h', 'l'] {
-            let intent = ui.key(&mut lane, typed(lower), false);
+            let intent = ui.key(&lane, &mut view, typed(lower), false);
             assert!(matches!(intent, Intent::None), "`{lower}`: {intent:?}");
         }
 
         // And the window moves without the caret: scrolled up by J, back by K.
-        lane.view.surface.scroll = 0;
-        ui.key(&mut lane, typed('K'), false);
-        let up = lane.view.surface.scroll;
+        view.surface.scroll = 0;
+        ui.key(&lane, &mut view, typed('K'), false);
+        let up = view.surface.scroll;
         assert!(up > 0, "K went back through the window: {up}");
-        ui.key(&mut lane, typed('J'), false);
+        ui.key(&lane, &mut view, typed('J'), false);
         assert!(
-            lane.view.surface.scroll < up,
+            view.surface.scroll < up,
             "J came forward again: {}",
-            lane.view.surface.scroll
+            view.surface.scroll
         );
     }
 
@@ -5335,16 +5426,17 @@ mod tests {
             help: "a fresh session".into(),
             source: Source::Builtin,
         }]);
-        let (_dir, mut lane) = a_running_lane();
+        let (_dir, lane) = a_running_lane();
+        let mut view = View::default();
         let esc = || super::TermEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
         // Nothing typed raises no list, so the common way to stop a run is one
         // press, as the running row says it is. Committed, or an empty line
         // would mean `Unsend` — a different answer to the same key, and not
         // the one this is about.
-        lane.view.state.committed = true;
+        view.state.committed = true;
         assert!(ui.menu().is_empty(), "an empty line completes to nothing");
-        let intent = ui.key(&mut lane, esc(), true);
+        let intent = ui.key(&lane, &mut view, esc(), true);
         assert!(matches!(intent, Intent::Interrupt), "{intent:?}");
 
         ui.editor.set_line("/ne");
@@ -5354,18 +5446,18 @@ mod tests {
         );
 
         // First press: the list, and nothing asked of the loop.
-        let intent = ui.key(&mut lane, esc(), true);
+        let intent = ui.key(&lane, &mut view, esc(), true);
         assert!(matches!(intent, Intent::None), "{intent:?}");
         assert!(ui.menu().is_empty(), "the list went");
         // Second: through where the list was, to the run.
-        let intent = ui.key(&mut lane, esc(), true);
+        let intent = ui.key(&lane, &mut view, esc(), true);
         assert!(matches!(intent, Intent::Interrupt), "{intent:?}");
 
         // Typing past the dismissal brings the list back, and Tab still
         // completes mid-run — the half of the menu the run never claimed.
         ui.editor.set_line("/n");
         let tab = super::TermEvent::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        ui.key(&mut lane, tab, true);
+        ui.key(&lane, &mut view, tab, true);
         assert_eq!(
             ui.editor.text(),
             "/new",
@@ -5378,7 +5470,7 @@ mod tests {
             Vec::new(),
             &crate::store::config::Vim::default(),
         ));
-        let intent = ui.key(&mut lane, esc(), true);
+        let intent = ui.key(&lane, &mut view, esc(), true);
         assert!(matches!(intent, Intent::None), "{intent:?}");
         assert!(
             ui.panel.is_none(),
@@ -5430,9 +5522,10 @@ mod tests {
     fn the_live_region_ends_with_the_turn_and_not_with_the_clock() {
         let ui = test_ui(80, 24);
         let (_dir, mut lane) = a_running_lane();
-        lane.view.state.started = Some(std::time::Instant::now());
+        let mut view = View::default();
+        view.state.started = Some(std::time::Instant::now());
         assert!(
-            ui.live(&lane, 10)
+            ui.live(&lane, &view, 10)
                 .0
                 .iter()
                 .any(|r| icons::SPINNER_FRAMES.iter().any(|f| plain(r).contains(f))),
@@ -5441,7 +5534,7 @@ mod tests {
 
         lane.turn = Turn::Idle;
         assert!(
-            !ui.live(&lane, 10)
+            !ui.live(&lane, &view, 10)
                 .0
                 .iter()
                 .any(|r| icons::SPINNER_FRAMES.iter().any(|f| plain(r).contains(f))),
@@ -5488,25 +5581,26 @@ mod tests {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let key = |code: KeyCode| super::TermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
         let mut ui = test_ui(80, 24);
-        let (dir, mut lane) = a_running_lane();
+        let (dir, lane) = a_running_lane();
+        let mut view = View::default();
         std::fs::write(dir.path().join("at_probe.rs"), "").unwrap();
         std::fs::write(dir.path().join("at_probe2.rs"), "").unwrap();
         std::fs::create_dir(dir.path().join("probe_dir")).unwrap();
         ui.at_root = dir.path().to_path_buf();
 
         ui.editor.set_line("look at @at_pro");
-        let intent = ui.key(&mut lane, key(KeyCode::Tab), false);
+        let intent = ui.key(&lane, &mut view, key(KeyCode::Tab), false);
         assert_eq!(ui.editor.text(), "look at @at_probe.rs ");
         assert!(matches!(intent, Intent::None));
 
         // A directory keeps completing: no space, so the walk can descend.
         ui.editor.set_line("in @probe_d");
-        ui.key(&mut lane, key(KeyCode::Tab), false);
+        ui.key(&lane, &mut view, key(KeyCode::Tab), false);
         assert_eq!(ui.editor.text(), "in @probe_dir/");
 
         // Enter with the list open applies the path instead of sending.
         ui.editor.set_line("look at @at_pro");
-        let intent = ui.key(&mut lane, key(KeyCode::Enter), false);
+        let intent = ui.key(&lane, &mut view, key(KeyCode::Enter), false);
         assert_eq!(ui.editor.text(), "look at @at_probe.rs ");
         assert!(matches!(intent, Intent::None));
 
@@ -5514,7 +5608,7 @@ mod tests {
         // stale index sat on the worse of the two matches above.
         ui.editor.set_line("look at @at_probe");
         ui.picked = Some(0);
-        ui.key(&mut lane, key(KeyCode::Tab), false);
+        ui.key(&lane, &mut view, key(KeyCode::Tab), false);
         assert_eq!(ui.editor.text(), "look at @at_probe.rs ");
     }
 
@@ -5532,7 +5626,13 @@ mod tests {
 
         assert_eq!(tui.ui.at_root, now.path());
         tui.ui.editor.set_line("see @mar");
-        tui.ui.key(tui.core.lane_mut(), key(KeyCode::Tab), false);
+        let token = tui.core.lane().token;
+        tui.ui.key(
+            tui.core.lane(),
+            view_at(&mut tui.views, token),
+            key(KeyCode::Tab),
+            false,
+        );
         assert_eq!(tui.ui.editor.text(), "see @marker.rs ");
     }
 
@@ -5542,13 +5642,14 @@ mod tests {
     #[test]
     fn jk_leaves_insert_and_takes_its_first_half_back_off_the_line() {
         let mut ui = vim_ui();
-        let (_dir, mut lane) = a_running_lane();
+        let (_dir, lane) = a_running_lane();
+        let mut view = View::default();
 
-        ui.key(&mut lane, typed('j'), false);
+        ui.key(&lane, &mut view, typed('j'), false);
         assert_eq!(ui.editor.text(), "j", "a lone j is a j");
         assert_eq!(mode(&ui), Some(Mode::Insert));
 
-        ui.key(&mut lane, typed('k'), false);
+        ui.key(&lane, &mut view, typed('k'), false);
         assert_eq!(ui.editor.text(), "", "the j goes with the mode change");
         assert_eq!(mode(&ui), Some(Mode::Normal));
     }
@@ -5558,12 +5659,13 @@ mod tests {
     #[test]
     fn a_j_left_behind_does_not_arm_a_later_k() {
         let mut ui = vim_ui();
-        let (_dir, mut lane) = a_running_lane();
+        let (_dir, lane) = a_running_lane();
+        let mut view = View::default();
 
-        ui.key(&mut lane, typed('j'), false);
+        ui.key(&lane, &mut view, typed('j'), false);
         let stale = super::Instant::now() - std::time::Duration::from_secs(1);
         ui.vim.as_mut().unwrap().last = Some(('j', stale));
-        ui.key(&mut lane, typed('k'), false);
+        ui.key(&lane, &mut view, typed('k'), false);
 
         assert_eq!(ui.editor.text(), "jk");
         assert_eq!(mode(&ui), Some(Mode::Insert));
@@ -5575,12 +5677,13 @@ mod tests {
     fn a_bound_key_between_the_halves_breaks_the_sequence() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut ui = vim_ui();
-        let (_dir, mut lane) = a_running_lane();
+        let (_dir, lane) = a_running_lane();
+        let mut view = View::default();
 
-        ui.key(&mut lane, typed('j'), false);
+        ui.key(&lane, &mut view, typed('j'), false);
         let left = super::TermEvent::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
-        ui.key(&mut lane, left, false);
-        ui.key(&mut lane, typed('k'), false);
+        ui.key(&lane, &mut view, left, false);
+        ui.key(&lane, &mut view, typed('k'), false);
 
         assert_eq!(ui.editor.text(), "kj", "the caret had moved before the k");
         assert_eq!(mode(&ui), Some(Mode::Insert));
@@ -5592,16 +5695,17 @@ mod tests {
     #[test]
     fn an_unbound_character_types_nothing_in_normal() {
         let mut ui = vim_ui();
-        let (_dir, mut lane) = a_running_lane();
+        let (_dir, lane) = a_running_lane();
+        let mut view = View::default();
         ui.editor.set_line("hello");
         ui.vim.as_mut().unwrap().mode = Mode::Normal;
 
-        ui.key(&mut lane, typed('z'), false);
+        ui.key(&lane, &mut view, typed('z'), false);
         assert_eq!(ui.editor.text(), "hello");
 
         // And the keys it does bind still command.
-        ui.key(&mut lane, typed('0'), false);
-        ui.key(&mut lane, typed('x'), false);
+        ui.key(&lane, &mut view, typed('0'), false);
+        ui.key(&lane, &mut view, typed('x'), false);
         assert_eq!(ui.editor.text(), "ello");
     }
 
@@ -5609,20 +5713,21 @@ mod tests {
     #[test]
     fn i_and_a_return_to_insert_on_either_side_of_the_caret() {
         let mut ui = vim_ui();
-        let (_dir, mut lane) = a_running_lane();
+        let (_dir, lane) = a_running_lane();
+        let mut view = View::default();
         ui.editor.set_line("ab");
         ui.vim.as_mut().unwrap().mode = Mode::Normal;
 
-        ui.key(&mut lane, typed('0'), false);
-        ui.key(&mut lane, typed('i'), false);
+        ui.key(&lane, &mut view, typed('0'), false);
+        ui.key(&lane, &mut view, typed('i'), false);
         assert_eq!(mode(&ui), Some(Mode::Insert));
-        ui.key(&mut lane, typed('Z'), false);
+        ui.key(&lane, &mut view, typed('Z'), false);
         assert_eq!(ui.editor.text(), "Zab", "i types where the caret is");
 
         ui.vim.as_mut().unwrap().mode = Mode::Normal;
-        ui.key(&mut lane, typed('0'), false);
-        ui.key(&mut lane, typed('a'), false);
-        ui.key(&mut lane, typed('Y'), false);
+        ui.key(&lane, &mut view, typed('0'), false);
+        ui.key(&lane, &mut view, typed('a'), false);
+        ui.key(&lane, &mut view, typed('Y'), false);
         assert_eq!(ui.editor.text(), "ZYab", "a types past it");
     }
 
@@ -5631,28 +5736,29 @@ mod tests {
     #[test]
     fn s_and_c_delete_their_range_and_land_in_insert() {
         let mut ui = vim_ui();
-        let (_dir, mut lane) = a_running_lane();
+        let (_dir, lane) = a_running_lane();
+        let mut view = View::default();
         ui.editor.set_line("abcd");
         ui.vim.as_mut().unwrap().mode = Mode::Normal;
 
-        ui.key(&mut lane, typed('0'), false);
-        ui.key(&mut lane, typed('s'), false);
+        ui.key(&lane, &mut view, typed('0'), false);
+        ui.key(&lane, &mut view, typed('s'), false);
         assert_eq!(ui.editor.text(), "bcd");
         assert_eq!(mode(&ui), Some(Mode::Insert));
-        ui.key(&mut lane, typed('Z'), false);
+        ui.key(&lane, &mut view, typed('Z'), false);
         assert_eq!(ui.editor.text(), "Zbcd", "s types where the character was");
 
         ui.vim.as_mut().unwrap().mode = Mode::Normal;
-        ui.key(&mut lane, typed('0'), false);
+        ui.key(&lane, &mut view, typed('0'), false);
         let right = super::TermEvent::Key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Right,
             crossterm::event::KeyModifiers::NONE,
         ));
-        ui.key(&mut lane, right, false);
-        ui.key(&mut lane, typed('C'), false);
+        ui.key(&lane, &mut view, right, false);
+        ui.key(&lane, &mut view, typed('C'), false);
         assert_eq!(ui.editor.text(), "Z");
         assert_eq!(mode(&ui), Some(Mode::Insert));
-        ui.key(&mut lane, typed('Y'), false);
+        ui.key(&lane, &mut view, typed('Y'), false);
         assert_eq!(ui.editor.text(), "ZY", "C leaves the caret where it cut");
     }
 
@@ -5660,25 +5766,26 @@ mod tests {
     #[test]
     fn s_and_cc_change_the_line_without_removing_it() {
         let mut ui = vim_ui();
-        let (_dir, mut lane) = a_running_lane();
+        let (_dir, lane) = a_running_lane();
+        let mut view = View::default();
         ui.editor.set_line("ab\ncd\nef");
         ui.vim.as_mut().unwrap().mode = Mode::Normal;
 
         ui.editor.buffer_start();
         ui.editor.down();
-        ui.key(&mut lane, typed('S'), false);
+        ui.key(&lane, &mut view, typed('S'), false);
         assert_eq!(mode(&ui), Some(Mode::Insert));
         assert_eq!(ui.editor.text(), "ab\n\nef");
-        ui.key(&mut lane, typed('Z'), false);
+        ui.key(&lane, &mut view, typed('Z'), false);
         assert_eq!(ui.editor.text(), "ab\nZ\nef");
 
         ui.vim.as_mut().unwrap().mode = Mode::Normal;
         ui.editor.down();
-        ui.key(&mut lane, typed('c'), false);
-        ui.key(&mut lane, typed('c'), false);
+        ui.key(&lane, &mut view, typed('c'), false);
+        ui.key(&lane, &mut view, typed('c'), false);
         assert_eq!(mode(&ui), Some(Mode::Insert));
         assert_eq!(ui.editor.text(), "ab\nZ\n");
-        ui.key(&mut lane, typed('Y'), false);
+        ui.key(&lane, &mut view, typed('Y'), false);
         assert_eq!(ui.editor.text(), "ab\nZ\nY");
     }
 
@@ -5687,13 +5794,14 @@ mod tests {
     #[test]
     fn o_and_o_open_a_line_and_land_in_insert() {
         let mut ui = vim_ui();
-        let (_dir, mut lane) = a_running_lane();
+        let (_dir, lane) = a_running_lane();
+        let mut view = View::default();
         ui.editor.set_line("ab\ncd");
         ui.vim.as_mut().unwrap().mode = Mode::Normal;
 
-        ui.key(&mut lane, typed('O'), false);
+        ui.key(&lane, &mut view, typed('O'), false);
         assert_eq!(mode(&ui), Some(Mode::Insert));
-        ui.key(&mut lane, typed('Z'), false);
+        ui.key(&lane, &mut view, typed('Z'), false);
         assert_eq!(
             ui.editor.text(),
             "ab\nZ\ncd",
@@ -5702,8 +5810,8 @@ mod tests {
 
         ui.editor.set_line("ab\ncd");
         ui.vim.as_mut().unwrap().mode = Mode::Normal;
-        ui.key(&mut lane, typed('o'), false);
-        ui.key(&mut lane, typed('Z'), false);
+        ui.key(&lane, &mut view, typed('o'), false);
+        ui.key(&lane, &mut view, typed('Z'), false);
         assert_eq!(
             ui.editor.text(),
             "ab\ncd\nZ",
@@ -5715,24 +5823,25 @@ mod tests {
     #[test]
     fn dd_takes_the_whole_line_and_stays_in_normal() {
         let mut ui = vim_ui();
-        let (_dir, mut lane) = a_running_lane();
+        let (_dir, lane) = a_running_lane();
+        let mut view = View::default();
         ui.editor.set_line("ab\ncd\nef");
         ui.vim.as_mut().unwrap().mode = Mode::Normal;
 
-        ui.key(&mut lane, typed('d'), false);
+        ui.key(&lane, &mut view, typed('d'), false);
         assert_eq!(ui.editor.text(), "ab\ncd\nef", "the first d waits");
 
-        ui.key(&mut lane, typed('d'), false);
+        ui.key(&lane, &mut view, typed('d'), false);
         assert_eq!(ui.editor.text(), "ab\ncd");
         assert_eq!(mode(&ui), Some(Mode::Normal));
 
-        ui.key(&mut lane, typed('d'), false);
-        ui.key(&mut lane, typed('d'), false);
+        ui.key(&lane, &mut view, typed('d'), false);
+        ui.key(&lane, &mut view, typed('d'), false);
         assert_eq!(ui.editor.text(), "ab");
 
-        ui.key(&mut lane, typed('d'), false);
-        ui.key(&mut lane, typed('z'), false);
-        ui.key(&mut lane, typed('d'), false);
+        ui.key(&lane, &mut view, typed('d'), false);
+        ui.key(&lane, &mut view, typed('z'), false);
+        ui.key(&lane, &mut view, typed('d'), false);
         assert_eq!(
             ui.editor.text(),
             "ab",
@@ -5744,19 +5853,20 @@ mod tests {
     #[test]
     fn gg_g_and_caret_walk_the_lines() {
         let mut ui = vim_ui();
-        let (_dir, mut lane) = a_running_lane();
+        let (_dir, lane) = a_running_lane();
+        let mut view = View::default();
         ui.editor.set_line("  ab\ncd");
         ui.vim.as_mut().unwrap().mode = Mode::Normal;
 
-        ui.key(&mut lane, typed('g'), false);
-        ui.key(&mut lane, typed('g'), false);
+        ui.key(&lane, &mut view, typed('g'), false);
+        ui.key(&lane, &mut view, typed('g'), false);
         assert_eq!(ui.editor.cursor(), 0);
         assert_eq!(mode(&ui), Some(Mode::Normal));
 
-        ui.key(&mut lane, typed('^'), false);
+        ui.key(&lane, &mut view, typed('^'), false);
         assert_eq!(ui.editor.cursor(), 2, "past the indent");
 
-        ui.key(&mut lane, typed('G'), false);
+        ui.key(&lane, &mut view, typed('G'), false);
         assert_eq!(ui.editor.cursor(), ui.editor.text().len());
     }
 

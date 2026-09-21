@@ -16,7 +16,6 @@ use tokio_util::sync::CancellationToken;
 use tools::Ctx;
 
 use crate::run::meter::Tally;
-use crate::ui::tui::View;
 
 /// Where this lane's turn stands.
 ///
@@ -230,6 +229,9 @@ pub struct Lane {
     /// What this lane's finished runs have cost, in and out and in money.
     /// Per lane, not per surface: with lanes working off-screen the surface
     /// that shows the bill has to be able to say which lane ran it up.
+    /// What this lane's finished runs have cost, in and out and in money.
+    /// Per lane, not per surface: with lanes working off-screen the surface
+    /// that shows the bill has to be able to say which lane ran it up.
     pub totals: Totals,
     /// What the run in flight has cost so far, as its events stated it. Seeded
     /// from `totals` when a run arms and cleared when a session begins; the
@@ -262,10 +264,6 @@ pub struct Lane {
     pub pending: Vec<Event>,
     /// Where this lane's turn stands.
     pub turn: Turn,
-    /// What this lane looks like on screen. Held here rather than parked
-    /// beside the surface: the screen shows the lane `Repl::current` names,
-    /// so there is one view to draw and no second list to keep in step.
-    pub view: View,
     /// What a slash answers to here, and the key map in force. Both are what
     /// this root's config and skills resolved to, so they travel with the lane
     /// rather than with the run — a tree switched back to answers to its own.

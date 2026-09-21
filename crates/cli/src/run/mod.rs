@@ -1704,7 +1704,6 @@ impl Repl {
             looping: None,
             pending_round: None,
             turn: crate::run::lane::Turn::Idle,
-            view: Default::default(),
         });
         self.current = self.lanes.len() - 1;
         self.in_force();
@@ -2252,7 +2251,6 @@ mod tests {
             looping: None,
             pending_round: None,
             turn: crate::run::lane::Turn::Idle,
-            view: Default::default(),
             keys: std::sync::Arc::new(crate::ui::keys::Keys::default()),
             commands: std::sync::Arc::new(Vec::new()),
         }
@@ -2345,7 +2343,6 @@ mod tests {
             looping: None,
             pending_round: None,
             turn: crate::run::lane::Turn::Idle,
-            view: Default::default(),
             keys: keys.clone(),
             commands: commands.clone(),
         };

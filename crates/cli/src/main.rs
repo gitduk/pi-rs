@@ -637,7 +637,6 @@ async fn main() -> Result<()> {
                 pending_round: None,
                 turn: crate::run::lane::Turn::Idle,
                 tally: Default::default(),
-                view: Default::default(),
                 keys: key_map.clone(),
                 commands,
             }],
