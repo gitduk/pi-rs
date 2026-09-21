@@ -1,14 +1,15 @@
-//! What the two status lines say, and which parts each one says it with.
+//! What each part of a status line reads as, and how the parts make one line.
 //!
-//! The live line is repainted while a turn runs; the done line is the last of
-//! those frames, kept in the scrollback with the run's own final word written
-//! over it. Both read one `Tally` through one `Snapshot`, so agreement between
-//! them is structural rather than two counts that happen to match.
+//! Which parts a line shows is the config's, so the vocabulary is below this
+//! (`store/status.rs`); what is here draws them. The live line is repainted
+//! while a turn runs; the done line is the last of those frames, kept in the
+//! scrollback with the run's own final word written over it. Both read one
+//! `Tally` through one `Snapshot`, so agreement between them is structural
+//! rather than two counts that happen to match.
 //!
 //! Both say the run in flight, and nothing before it: a session millions of
 //! tokens deep would otherwise never let the line read as what this answer
-//! cost. The session's own running total is `Tally::session`, and `/status` is
-//! the one place that reads it.
+//! cost.
 
 use std::time::Duration;
 

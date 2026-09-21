@@ -12,7 +12,7 @@ use agent::session::Session;
 use serde::Deserialize;
 
 use crate::input::commands::{Choice, Command, RESUME_WIDTH, ago, help};
-use crate::input::{Intent, Rewound, Step, WechatCmd, dispatch, lines, refused, typed};
+use crate::input::{Intent, Rewound, Step, WechatCmd, dispatch, lines, refused};
 use crate::run::lane::Lane;
 use crate::run::meter::Tally;
 use crate::store::config::{self, Config};
@@ -255,7 +255,7 @@ impl App {
     pub fn edit(&mut self, path: &str, raw: &str) -> Result<Vec<String>, String> {
         let (old, new) = self
             .settings
-            .claim(path, &typed(path, raw))
+            .claim(path, raw)
             .map_err(|e| refused("settings", e))?;
         let mut said = self.rebuild();
         let old_shown = match &old {

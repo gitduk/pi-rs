@@ -1,3 +1,9 @@
+//! Drawing: what a painted span is, how a theme's style becomes one, and the
+//! line-mode renderer that writes rows into a pipe.
+//!
+//! What a config names is below this (`store/theme.rs`), and so is what a
+//! string occupies (`store/text.rs`); what is here puts the two on a screen.
+
 use std::fmt::Write as _;
 use std::io::{IsTerminal, Write};
 use std::ops::Range;

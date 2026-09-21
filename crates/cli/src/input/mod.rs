@@ -4,12 +4,9 @@
 pub mod commands;
 pub mod complete;
 
-use std::borrow::Cow;
-
 use tools::skills::Skill;
 
 use crate::input::commands::{Command, Source};
-use crate::store::config;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Intent {
@@ -194,13 +191,6 @@ pub(crate) fn refused(what: &str, e: anyhow::Error) -> String {
     let detail = format!("{e:#}");
     tracing::warn!(target: "pi::session", command = what, error = %detail, "refused");
     detail
-}
-
-pub(crate) fn typed<'a>(path: &str, raw: &'a str) -> Cow<'a, str> {
-    match path {
-        "base_url" => Cow::Owned(config::expand_base_url(raw)),
-        _ => Cow::Borrowed(raw),
-    }
 }
 
 // A skill command as a message the user could have typed, or why it could not

@@ -98,9 +98,10 @@ impl Settings {
     /// neither the config in force nor the claim. Answers with the value that
     /// was there and the one that now is.
     pub fn claim(&mut self, path: &str, raw: &str) -> Result<(Option<toml::Value>, toml::Value)> {
+        let raw = typed(path, raw);
         let mut scratch = self.effective()?;
         let old = get(&scratch, path).ok().cloned();
-        set(&mut scratch, path, raw)?;
+        set(&mut scratch, path, &raw)?;
         let new = get(&scratch, path).expect("the path was just set").clone();
         crate::store::config::Config::deserialize(scratch).map_err(|e| anyhow::anyhow!(e))?;
         self.claimed.insert(path.to_string(), new.clone());
@@ -154,6 +155,15 @@ pub(crate) fn mask_secret(path: &str, value: &str) -> String {
         }
     } else {
         value.to_string()
+    }
+}
+
+/// The value a path takes, before it is written: `base_url` names a host that
+/// may be spelled with the environment's own variables in it.
+fn typed<'a>(path: &str, raw: &'a str) -> std::borrow::Cow<'a, str> {
+    match path {
+        "base_url" => std::borrow::Cow::Owned(crate::store::config::expand_base_url(raw)),
+        _ => std::borrow::Cow::Borrowed(raw),
     }
 }
 
