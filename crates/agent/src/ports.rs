@@ -1,6 +1,25 @@
-//! What the user says to a run that is already working.
+//! What the loop reaches the outside world through: the transport it sends on,
+//! the gate it asks before a call, and the lines said to a run already working.
 
+pub use brain::transport::Transport;
+
+use serde_json::Value;
 use std::sync::{Arc, Mutex};
+use tools::Tier;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Decision {
+    Allow,
+    // The model reads this and can pick another route; a denial is a result,
+    // not the end of the turn.
+    Deny(String),
+}
+
+/// Gate consulted before every call. Implementations may prompt, consult a
+/// policy file, or decide statically.
+pub trait Approver: Send + Sync {
+    fn approve(&self, name: &str, tier: Tier, args: &Value) -> Decision;
+}
 
 /// Lines said after the run began, waiting for the next point where the
 /// transcript can legally take one.

@@ -2555,7 +2555,7 @@ enum Kind {
     },
     // A `/compact`, and what it shrank and spent. None means the transcript
     // already fit — or, with a cancelled `ran`, that nobody ever looked.
-    Compact(Option<(agent::compact::Report, Totals)>),
+    Compact(Option<(agent::Report, Totals)>),
 }
 // A job that ran off the loop, reporting back to the loop that started it.
 //
@@ -4950,7 +4950,7 @@ mod tests {
                 (
                     "compact with a report",
                     super::Kind::Compact(Some((
-                        agent::compact::Report::default(),
+                        agent::Report::default(),
                         agent::Totals::default(),
                     ))),
                 ),

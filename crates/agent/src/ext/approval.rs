@@ -1,19 +1,8 @@
+//! The gate the loop asks before every tool call, decided by tier.
+
+use crate::ports::{Approver, Decision};
 use serde_json::Value;
 use tools::Tier;
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Decision {
-    Allow,
-    // The model reads this and can pick another route; a denial is a result,
-    // not the end of the turn.
-    Deny(String),
-}
-
-/// Gate consulted before every call. Implementations may prompt, consult a
-/// policy file, or decide statically.
-pub trait Approver: Send + Sync {
-    fn approve(&self, name: &str, tier: Tier, args: &Value) -> Decision;
-}
 
 /// Allows every tier this ceiling reaches. Not a comparison: `Tier` is a
 /// lattice, and `write` and `net` sit beside each other rather than in order.
@@ -36,7 +25,8 @@ impl Approver for Ceiling {
 
 #[cfg(test)]
 mod tests {
-    use super::{Approver, Ceiling, Decision};
+    use super::Ceiling;
+    use crate::ports::{Approver, Decision};
     use serde_json::json;
     use tools::Tier;
 

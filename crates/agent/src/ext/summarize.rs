@@ -5,7 +5,7 @@ use crate::session::Entry;
 use brain::stream::Usage;
 use brain::transport::Transport;
 
-pub const PROMPT: &str = include_str!("../prompts/summarize.md");
+pub const PROMPT: &str = include_str!("../../prompts/summarize.md");
 
 // Per-block cap, in bytes, of the rendered history. A summarizer needs to
 // know a file was read, not to re-read it.
@@ -109,7 +109,7 @@ pub async fn run(
         None => history,
     };
     let (text, usage) =
-        crate::oneshot::ask(transport, spec, PROMPT, body, MAX_SUMMARY_TOKENS, idle).await?;
+        crate::ext::oneshot::ask(transport, spec, PROMPT, body, MAX_SUMMARY_TOKENS, idle).await?;
     // Nothing to say is a failure here: the span goes either way, and it goes
     // unsummarized.
     if text.trim().is_empty() {

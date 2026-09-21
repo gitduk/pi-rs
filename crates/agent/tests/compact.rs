@@ -1,5 +1,6 @@
-use agent::compact::{Policy, Report, plan};
+use agent::ext::compact::plan;
 use agent::session::{Prompt, Session};
+use agent::{Policy, Report};
 use brain::estimate;
 
 mod common;
@@ -690,7 +691,7 @@ mod budget {
             protect_tail: a.kept_tokens(),
             ..agent::Policy::default()
         };
-        let (_record, report) = agent::compact::plan(&s, &a.spec, budget, &policy);
+        let (_record, report) = agent::ext::compact::plan(&s, &a.spec, budget, &policy);
         assert!(
             !report.still_over,
             "the tail left nothing to reclaim: {report:?}"
@@ -703,7 +704,8 @@ mod budget {
     async fn a_healthy_transcript_has_nothing_to_compact() {
         let a = agent_with(200_000, 32_000);
         let s = Session::with_prompt("hello");
-        let (record, r) = agent::compact::plan(&s, &a.spec, a.budget(), &agent::Policy::default());
+        let (record, r) =
+            agent::ext::compact::plan(&s, &a.spec, a.budget(), &agent::Policy::default());
         assert!(!r.touched());
         assert_eq!(
             record,

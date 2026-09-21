@@ -606,7 +606,7 @@ impl Renderer {
 
 // Says what was given up, not just how much. A silent shrink looks like the
 // agent forgetting things for no reason.
-fn compaction_line(r: &agent::compact::Report) -> String {
+fn compaction_line(r: &agent::Report) -> String {
     let mut parts = Vec::new();
     if r.superseded > 0 {
         parts.push(format!("{} superseded", r.superseded));

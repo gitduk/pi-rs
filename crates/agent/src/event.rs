@@ -29,7 +29,7 @@ pub enum Event {
         reason: String,
     },
     // The transcript was shrunk to fit before this turn was sent.
-    Compacted(crate::compact::Report),
+    Compacted(crate::ext::compact::Report),
     // What the transcript occupies against what it may, for the request just
     // sent. Ours rather than the provider's: this is what compaction acts on.
     Context {

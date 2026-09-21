@@ -14,20 +14,18 @@ use tracing::Instrument as _;
 
 use crate::session::Session;
 
-pub mod approval;
-pub mod compact;
 pub mod event;
-mod oneshot;
+pub mod ext;
+pub mod ports;
 pub mod session;
-pub mod steer;
-pub mod summarize;
 pub mod task;
 
-pub use approval::{Approver, Ceiling, Decision};
-pub use compact::Policy;
 use event::say;
 pub use event::{Event, Totals};
-pub use steer::Steer;
+pub use ext::approval::Ceiling;
+pub use ext::compact::{Policy, Report};
+pub use ext::retry::Retry;
+pub use ports::{Approver, Decision, Steer};
 
 pub const DEFAULT_SYSTEM: &str = include_str!("../prompts/system.md");
 
@@ -50,46 +48,6 @@ const MAX_SQUEEZE: usize = 3;
 // Longer blobs show a window around serde's column, not the head: the parse
 // fails where the text stopped, and that is usually the tail.
 const MAX_INVALID_ARGS_SHOWN: usize = 400;
-
-/// Retry schedule for a request the provider could not serve right now.
-#[derive(Debug, Clone, Copy)]
-pub struct Retry {
-    pub attempts: usize,
-    pub base: std::time::Duration,
-    pub max: std::time::Duration,
-    /// No data for this long means the stream is wedged. Generous, because a
-    /// reasoning model can legitimately think for minutes before its first
-    /// token.
-    pub idle: std::time::Duration,
-}
-
-impl Default for Retry {
-    fn default() -> Self {
-        Self {
-            attempts: 9,
-            base: std::time::Duration::from_millis(800),
-            max: std::time::Duration::from_secs(30),
-            idle: std::time::Duration::from_secs(300),
-        }
-    }
-}
-
-impl Retry {
-    // Exponential, capped, with jitter so concurrent agents do not retry in
-    // lockstep against a provider that is already struggling.
-    fn delay(&self, attempt: usize) -> std::time::Duration {
-        let grown = self.base.saturating_mul(1u32 << attempt.min(10));
-        let capped = grown.min(self.max);
-        // Nanos from the clock are a good enough jitter source for a backoff,
-        // and cheaper than taking on a rng dependency.
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos())
-            .unwrap_or(0) as u64;
-        let jitter = capped.as_millis() as u64 / 4;
-        capped + std::time::Duration::from_millis(if jitter == 0 { 0 } else { nanos % jitter })
-    }
-}
 
 /// How long a run has to wind down after its stop token is tripped before it
 /// is dropped where it stands.
@@ -470,11 +428,11 @@ impl Agent {
         }
         // Holding the working tail back is a preference; fitting at all is not.
         // Once the provider has refused the request, the tail yields.
-        let policy = compact::Policy {
+        let policy = ext::compact::Policy {
             protect_tail: if urgent { 0 } else { self.tail_within(budget) },
             ..*policy
         };
-        let (mut record, mut report) = compact::plan(session, &self.spec, budget, &policy);
+        let (mut record, mut report) = ext::compact::plan(session, &self.spec, budget, &policy);
         if !record.dropped.is_empty() {
             let (used, priced) = self
                 .retire_span(session, &mut record, None)
@@ -518,14 +476,14 @@ impl Agent {
         &self,
         session: &mut Session,
         focus: Option<&str>,
-    ) -> Option<(compact::Report, Totals)> {
+    ) -> Option<(ext::compact::Report, Totals)> {
         let base = self.compaction;
         let tail = self.tail_within(self.budget());
-        let policy = compact::Policy {
+        let policy = ext::compact::Policy {
             protect_tail: tail,
             ..base
         };
-        let (mut record, mut report) = compact::plan(session, &self.spec, tail, &policy);
+        let (mut record, mut report) = ext::compact::plan(session, &self.spec, tail, &policy);
         let mut spent = Totals::default();
         if !record.dropped.is_empty() {
             let (used, priced) = self
@@ -566,9 +524,11 @@ impl Agent {
             None => (&*self.transport, &self.spec),
         };
         let history =
-            summarize::render(&session.summaries(), &session.entries_for(&record.dropped));
+            ext::summarize::render(&session.summaries(), &session.entries_for(&record.dropped));
 
-        let usage = match summarize::run(transport, spec, history, focus, self.retry.idle).await {
+        let usage = match ext::summarize::run(transport, spec, history, focus, self.retry.idle)
+            .await
+        {
             Ok((text, used)) => {
                 record.summary = Some(text);
                 // The new summary covers what the old one did, so the entry
