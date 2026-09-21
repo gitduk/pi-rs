@@ -8,6 +8,7 @@
 //! the two overlaid; what the panel edits is the claim, and `/reload` replaces
 //! the file's half.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use anyhow::{Result, bail};
@@ -160,10 +161,10 @@ pub(crate) fn mask_secret(path: &str, value: &str) -> String {
 
 /// The value a path takes, before it is written: `base_url` names a host that
 /// may be spelled with the environment's own variables in it.
-fn typed<'a>(path: &str, raw: &'a str) -> std::borrow::Cow<'a, str> {
+fn typed<'a>(path: &str, raw: &'a str) -> Cow<'a, str> {
     match path {
-        "base_url" => std::borrow::Cow::Owned(crate::store::config::expand_base_url(raw)),
-        _ => std::borrow::Cow::Borrowed(raw),
+        "base_url" => Cow::Owned(crate::store::config::expand_base_url(raw)),
+        _ => Cow::Borrowed(raw),
     }
 }
 
