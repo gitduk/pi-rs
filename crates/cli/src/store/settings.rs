@@ -85,8 +85,8 @@ impl Settings {
 
     /// What the file alone says at `path`, for the check that names a claim
     /// still shadowing a line the file has moved on from.
-    pub fn file_value(&self, path: &str) -> Option<toml::Value> {
-        get(&self.file, path).ok().cloned()
+    pub fn file_value(&self, path: &str) -> Option<&toml::Value> {
+        get(&self.file, path).ok()
     }
 
     /// What this session has claimed at `path`, if anything.

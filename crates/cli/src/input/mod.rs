@@ -245,7 +245,7 @@ pub(crate) fn recallable(line: &str, commands: &[Command]) -> bool {
 }
 
 // A word `parse` did not know: a skill to run, or a typo to name.
-pub(crate) fn dispatch(commands: &[Command], word: &str, args: &str) -> Step {
+pub(crate) fn step_for(commands: &[Command], word: &str, args: &str) -> Step {
     let Some(skill) = skill_for(commands, word) else {
         return Step::Flash(format!("unknown command {word} — /help lists them"));
     };

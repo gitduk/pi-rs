@@ -12,7 +12,7 @@ use agent::session::Session;
 use serde::Deserialize;
 
 use crate::input::commands::{Choice, Command, RESUME_WIDTH, ago, help};
-use crate::input::{Intent, Rewound, Step, WechatCmd, dispatch, lines, refused};
+use crate::input::{Intent, Rewound, Step, WechatCmd, lines, refused, step_for};
 use crate::run::lane::Lane;
 use crate::run::meter::Tally;
 use crate::store::config::{self, Config};
@@ -115,7 +115,7 @@ impl App {
         // Name any claim that still shadows a line the file just changed.
         for path in self.settings.claimed().keys() {
             if let Some(old) = self.settings.file_value(path)
-                && old != self.settings.claimed()[path]
+                && old != &self.settings.claimed()[path]
             {
                 said.push(format!(
                     "{path}: the file changed it, but this session is still shadowing it — /settings, then r on the row takes the file back"
@@ -691,7 +691,7 @@ impl App {
                     }
                 }
             }
-            Intent::Other { word, args } => dispatch(&self.commands, &word, &args),
+            Intent::Other { word, args } => step_for(&self.commands, &word, &args),
             Intent::Wechat(rest) => match rest.trim() {
                 "" => Step::Wechat(WechatCmd::Status),
                 "on" => Step::Wechat(WechatCmd::On),
@@ -723,7 +723,7 @@ impl App {
             if row.changed {
                 line.push_str(&format!(" {}", icons::CHANGED_MARK));
                 if let Some(file) = self.settings.file_value(&row.path) {
-                    let file = mask_secret(&row.path, &settings::render(&file));
+                    let file = mask_secret(&row.path, &settings::render(file));
                     line.push_str(&format!(" file: {file}"));
                 }
             }
