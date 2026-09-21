@@ -26,7 +26,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::input::commands::{Candidate, Choice, Command};
 use crate::input::{self, Fate, Intent, Rewound, Step};
-use crate::run::lane::{Lane, Round, Turn};
+use crate::run::lane::{Lane, Turn};
+use crate::run::looping::Round;
 use crate::run::meter::Snapshot;
 use crate::run::{self, App};
 use crate::store::session::{ResumeChoice, Store};
@@ -4134,7 +4135,8 @@ mod tests {
     };
     use crate::input::commands::{Choice, Command, Source};
     use crate::run::App;
-    use crate::run::lane::{Lane, Round, Turn};
+    use crate::run::lane::{Lane, Turn};
+    use crate::run::looping::Round;
     use crate::store::session::Store;
     use crate::store::settings::row;
     use crate::ui::icons;

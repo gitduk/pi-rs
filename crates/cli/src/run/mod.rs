@@ -1,5 +1,6 @@
 pub mod bash;
 pub mod lane;
+pub mod looping;
 pub mod meter;
 pub mod subagent;
 pub mod wechat;
