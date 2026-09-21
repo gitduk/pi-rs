@@ -94,7 +94,7 @@ pub struct Config {
     pub theme: crate::store::theme::Theme,
     /// Which parts the running and the finished status lines show.
     #[serde(default)]
-    pub status: crate::ui::status::Lines,
+    pub status: crate::store::status::Lines,
     /// Vim keys: on unless a file turns them off.
     #[serde(default)]
     pub vim: Vim,

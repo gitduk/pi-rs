@@ -32,10 +32,11 @@ use crate::run::meter::Snapshot;
 use crate::run::{self, App};
 use crate::store::icons;
 use crate::store::session::{ResumeChoice, Store};
+use crate::store::status::{Segment, default_done, default_live};
 use crate::store::theme::Style as ThemeStyle;
 use crate::ui::keys::{Action, Keys, Layers, Menu, Mode, Press};
 use crate::ui::render::{self, Paint};
-use crate::ui::status::{self, Segment};
+use crate::ui::status;
 use editor::Editor;
 use panel::{Panel, Took};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -1180,8 +1181,8 @@ impl Ui {
             vim: None,
             panel: None,
             spinner: 0,
-            live: status::default_live(),
-            done: status::default_done(),
+            live: default_live(),
+            done: default_done(),
             tabs: Vec::new(),
             flash: None,
             hovered_scrollback: None,
@@ -4153,9 +4154,9 @@ mod tests {
     use crate::store::icons;
     use crate::store::session::Store;
     use crate::store::settings::row;
+    use crate::store::status::Segment;
     use crate::ui::keys::{Keys, Mode};
     use crate::ui::render::Paint;
-    use crate::ui::status::Segment;
     use crate::ui::tui::screen::{self, plain};
     use ratatui::text::Line;
 

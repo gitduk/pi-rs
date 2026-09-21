@@ -478,7 +478,7 @@ pub struct Renderer {
     quiet: bool,
     // The segments this surface ends a run with. A pipe times nothing and
     // queues nothing, so `elapsed` and `queued` have nothing to say here.
-    done: Vec<crate::ui::status::Segment>,
+    done: Vec<crate::store::status::Segment>,
     // Read off the same events the terminal reads, so a piped run ends on the
     // line the terminal would have shown it.
     tally: crate::run::meter::Tally,
@@ -496,7 +496,7 @@ impl Renderer {
     pub fn new(
         quiet: bool,
         theme: Arc<Theme>,
-        done: Vec<crate::ui::status::Segment>,
+        done: Vec<crate::store::status::Segment>,
         model: String,
         worktree: Option<String>,
     ) -> Self {
@@ -646,7 +646,7 @@ mod tests {
         let mut r = super::Renderer::new(
             false,
             std::sync::Arc::new(super::Theme::default()),
-            crate::ui::status::default_done(),
+            crate::store::status::default_done(),
             String::new(),
             None,
         );

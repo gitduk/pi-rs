@@ -20,8 +20,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::run::meter::Snapshot;
 use crate::store::icons;
+use crate::store::status::Segment;
 use crate::ui::render::{self, Paint};
-use crate::ui::status::{self, Segment};
+use crate::ui::status;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FoldedTool {
