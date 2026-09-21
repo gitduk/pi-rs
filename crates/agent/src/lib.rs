@@ -17,7 +17,7 @@ use crate::session::Session;
 pub mod context;
 pub mod event;
 pub mod ext;
-pub mod ports;
+pub mod seams;
 pub mod session;
 pub mod task;
 
@@ -26,7 +26,7 @@ pub use event::{Event, Totals};
 pub use ext::approval::Ceiling;
 pub use ext::compact::{Policy, Report};
 pub use ext::retry::Retry;
-pub use ports::{Approver, Decision, Steer};
+pub use seams::{Approver, Decision, Steer};
 
 pub const DEFAULT_SYSTEM: &str = include_str!("../prompts/system.md");
 

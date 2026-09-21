@@ -1,6 +1,6 @@
 //! The gate the loop asks before every tool call, decided by tier.
 
-use crate::ports::{Approver, Decision};
+use crate::seams::{Approver, Decision};
 use serde_json::Value;
 use tools::Tier;
 
@@ -26,7 +26,7 @@ impl Approver for Ceiling {
 #[cfg(test)]
 mod tests {
     use super::Ceiling;
-    use crate::ports::{Approver, Decision};
+    use crate::seams::{Approver, Decision};
     use serde_json::json;
     use tools::Tier;
 

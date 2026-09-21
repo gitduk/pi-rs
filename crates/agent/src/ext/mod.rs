@@ -1,4 +1,4 @@
-//! Strategies that hang on the core's ports. Nothing here is in the loop body:
+//! Strategies that hang on the core's seams. Nothing here is in the loop body:
 //! the loop asks, these answer.
 
 pub mod approval;

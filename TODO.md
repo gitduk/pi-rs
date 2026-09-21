@@ -65,7 +65,7 @@ crates/
 ├── skills/     ↔ 从 tools 拆出：技能发现 + `Load`
 ├── scripts/    ↔ 从 tools 拆出：脚本发现 + `Script`
 ├── task/       ↔ 从 agent 拆出：子代理工具
-├── agent/      核心：纯循环 + 端口
+├── agent/      核心：纯循环 + 接缝
 ├── cli/        应用：输入 / 驱动 / 存储 / 界面
 └── wechat/    不动
 ```
@@ -78,8 +78,8 @@ crates/agent/src/            ★ 核心
 ├── session.rs      transcript、投影、压缩记录
 ├── context.rs      ✓ 已从 cli 上移：standing 提示词的拼装
 ├── event.rs        只装事实：Usage / ToolCall / Entry
-├── ports.rs        Transport、Approver、Steer（**已落**；`Compactor` 还不是 trait，见下）
-└── ext/            挂在端口上的策略，不在循环体里（**已落**）
+├── seams.rs        Transport、Approver、Steer（**已落**；`Compactor` 还不是 trait，见下）
+└── ext/            挂在接缝上的策略，不在循环体里（**已落**）
     ├── compact.rs  summarize.rs  oneshot.rs
     └── approval.rs retry.rs
 
@@ -113,7 +113,7 @@ crates/cli/src/              ✧ 应用
 
 | 现在 | 去 | 动作 |
 |---|---|---|
-| `agent/{compact,summarize,oneshot,approval}.rs` | `agent/ext/` | **已做**（外加 `lib.rs` 的 `Retry` → `ext/retry.rs`；`Approver`/`Decision`/`Steer` → 新 `ports.rs`） |
+| `agent/{compact,summarize,oneshot,approval}.rs` | `agent/ext/` | **已做**（外加 `lib.rs` 的 `Retry` → `ext/retry.rs`；`Approver`/`Decision`/`Steer` → 新 `seams.rs`） |
 | `agent/task.rs`（499 行） | `crates/task/` | **移出 agent**（见下） |
 | `agent/event.rs` | `agent/event.rs` | 去掉 `cost` |
 | `cli/context.rs`（302 行） | `agent/src/context.rs` | **已做**（见下） |
@@ -169,7 +169,7 @@ crates/cli/src/              ✧ 应用
 
 - `agent::STOP_GRACE` 和 `agent::event::say` 由 `pub(crate)` 放宽为 `pub`（`Agent` 的 `system`/`registry`/`task_max_turns` 已经是 pub 字段）。`tools::bash::run`（`bash.rs:132`）本来就 pub，不用动。
 - `Agent::hang`（`lib.rs:203`）现在直接构造 `task::Task`，挪出后 agent 构造不了它。要么把 `hang` 改成通用的 `hang(tool: impl Tool)`（那它就是 `Registry::with`，可以删掉），要么整个挪到 cli。倾向前者。
-- `Home` 是核心向应用要的端口（`Setup.home: Arc<dyn Home>`），倾 **留在 `agent`**——但它是从**要搬走的那个文件里挖出来**的（定义在 `task.rs:21`），不是原地不动：得把 trait 切出来放 agent（如 `ports.rs`），由 `task` 实现。
+- `Home` 是核心向应用要的端口（`Setup.home: Arc<dyn Home>`），倾 **留在 `agent`**——但它是从**要搬走的那个文件里挖出来**的（定义在 `task.rs:21`），不是原地不动：得把 trait 切出来放 agent（如 `seams.rs`），由 `task` 实现。
 - 两个文件跟着走：`crates/agent/tests/task.rs`（20.0K，`:16` 的 `use agent::task::{Home, Task}`；它用 `agent/tests/common` 的 `spec()`，跨 crate 拿不到，得自带一份）与 `crates/agent/prompts/task.md`（1.6K，`task.rs:15` 的 `include_str!("../prompts/task.md")`）。
 - cli 侧改路径：`cli/src/subagent.rs:11`、`repl.rs:383`、`repl.rs:2355`（`agent::task::Task::NAME`）。
 
@@ -351,12 +351,12 @@ struct 名不必等于 wire name，这库里本来就不是：`ScriptTool::name(
 - `/loop` 出核心：`Looping`/`Round`（现 `crates/cli/src/lane.rs`）和 TUI 的 `step_loop` 归到核心**上面**的驱动器，核心不知情。
 - 命令解析出核心：`read`/`expand`/skills 收进输入层，不在核心。
 - `Intent` 三分：命令意图 / 队列专用（`Submit`、`LoopRound`）/ UI 私有（`None`、`Interrupt`、`Rewind`、`Setting*`）。
-- 压缩端口是**承重**的：它必须在请求前跑（transcript 装不下 = 整轮没了），默认实现只能是恒等（什么都不删），不能缺席。
-- TUI 与核心解耦：`View` 移出 `Lane`（切断 `lane.rs → tui` 的反向依赖）——**已做**（`View` 归界面，按 lane token 存）；`Lane` 裸字段收进只读 `snapshot()` 加核心方法——**未做**（`ui/tui/mod.rs` 仍有约 35 处直接读 `lane.worktree`/`lane.looping`/`lane.ctx`/`lane.turn`/`lane.tally` 等字段）。**不加 `Surface` trait**——核心对外的通道已经齐了（`Event` 出事实、`Step` 出决策、`Steer` 入一句话，`Transport`/`Compactor`/`Approver` 是运行中的端口），而「开始一轮 / 停止 / 交终端」都是界面自己的决定：`Step::Prompt { send, typed }` 请界面开一轮，`Intent::Interrupt`/`Unsend`/`EditExternally` 根本到不了 `dispatch`。残留与三步见上面「TUI 解耦：残留与三步」（已定）。
+- 压缩这道接缝是**承重**的：它必须在请求前跑（transcript 装不下 = 整轮没了），默认实现只能是恒等（什么都不删），不能缺席。
+- TUI 与核心解耦：`View` 移出 `Lane`（切断 `lane.rs → tui` 的反向依赖）——**已做**（`View` 归界面，按 lane token 存）；`Lane` 裸字段收进只读 `snapshot()` 加核心方法——**未做**（`ui/tui/mod.rs` 仍有约 35 处直接读 `lane.worktree`/`lane.looping`/`lane.ctx`/`lane.turn`/`lane.tally` 等字段）。**不加 `Surface` trait**——核心对外的通道已经齐了（`Event` 出事实、`Step` 出决策、`Steer` 入一句话，`Transport`/`Compactor`/`Approver` 是运行中的接缝），而「开始一轮 / 停止 / 交终端」都是界面自己的决定：`Step::Prompt { send, typed }` 请界面开一轮，`Intent::Interrupt`/`Unsend`/`EditExternally` 根本到不了 `dispatch`。残留与三步见上面「TUI 解耦：残留与三步」（已定）。
 - 分层目录：见上面「目标目录结构」。`cli` 内部用**模块**不拆 crate：`input`/`run`/`store`/`ui` 是四个模块 + `pub(crate)` 划边界（拆 crate 不可逆，等边界真稳了再说）。
 
 ## 待定
 
 - **`Compactor` 的签名**（名字已定，签名未定）：`compact` 收什么、返回什么。手上的形状是 `(session, budget, tx)` → `Vec<Message>`。
   - 名字的理由：库里本来就说 compaction（`compact.rs`、`Event::Compacted`、`/compact`、`Policy`、`maybe_compact`、`compact_now`）；原提案的 `Furnisher`/`fit` 是多余的同义词。
-  - 另两个端口不用动：`Transport` 不变；`Approver` **已经存在**（`agent/src/approval.rs:14`，`Decision`/`Ceiling` 都在，`Agent::approver` 已是 `Arc<dyn Approver>`，签名 `approve(&self, name, tier, args) -> Decision` 不用重设）——原提案的 `Arbiter` 是白造的词。
+  - 另两道接缝不用动：`Transport` 不变；`Approver` **已经存在**（`agent/src/approval.rs:14`，`Decision`/`Ceiling` 都在，`Agent::approver` 已是 `Arc<dyn Approver>`，签名 `approve(&self, name, tier, args) -> Decision` 不用重设）——原提案的 `Arbiter` 是白造的词。
