@@ -265,7 +265,7 @@ pub struct Lane {
     /// this root's config and skills resolved to, so they travel with the lane
     /// rather than with the run — a tree switched back to answers to its own.
     pub keys: std::sync::Arc<crate::ui::keys::Keys>,
-    pub commands: std::sync::Arc<Vec<crate::run::Command>>,
+    pub commands: std::sync::Arc<Vec<crate::input::commands::Command>>,
     /// The `/loop` this lane is under, if any.
     pub looping: Option<Looping>,
     /// The `/loop` round waiting in the queue, taken by the turn it arms: the

@@ -24,9 +24,11 @@ use futures::FutureExt;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
+use crate::input::commands::{Candidate, Choice, Command};
+use crate::input::{self, Fate, Intent, Rewound, Step};
 use crate::run::lane::{Lane, Round, Turn};
 use crate::run::meter::Snapshot;
-use crate::run::{self, Candidate, Choice, Command, Fate, Intent, Repl, Rewound, Step};
+use crate::run::{self, Repl};
 use crate::store::session::{ResumeChoice, Store};
 use crate::ui::icons;
 use crate::ui::keys::{Action, Keys, Layers, Menu, Mode, Press};
@@ -1534,7 +1536,7 @@ impl Ui {
                 .collect();
         }
         // Bottom-up: the best match belongs on the row right above the input.
-        run::complete(
+        crate::input::commands::complete(
             self.editor.text(),
             &self.commands,
             &self.choices,
@@ -2040,7 +2042,7 @@ impl Ui {
                         // that produced it goes, so it cannot be re-submitted
                         // as a stray prompt later.
                         self.editor.take();
-                        if run::recallable(&line, &self.commands) {
+                        if input::recallable(&line, &self.commands) {
                             self.editor.remember(&line);
                         }
                         return if line.trim().is_empty() {
@@ -2063,7 +2065,7 @@ impl Ui {
                     }
                     None => {
                         let typed = self.editor.take();
-                        if run::recallable(&typed, &self.commands) {
+                        if input::recallable(&typed, &self.commands) {
                             self.editor.remember(&typed);
                         }
                         return if typed.trim().is_empty() {
@@ -3375,11 +3377,11 @@ impl Tui {
                     {
                         session.push_note(&note);
                     }
-                    run::read(&goal)
+                    input::read(&goal)
                 }
                 Intent::Submit(line) => {
                     self.echo_sent(&line);
-                    run::read(&line)
+                    input::read(&line)
                 }
                 // A key that means a command — `ctrl+l` twice is `/new` —
                 // arrives already read.
@@ -3422,7 +3424,7 @@ impl Tui {
                     self.ui.flash(said);
                     continue;
                 }
-                if matches!(run::read(&goal), Intent::Loop(_)) {
+                if matches!(input::read(&goal), Intent::Loop(_)) {
                     self.ui.flash("a loop cannot be its own goal");
                     continue;
                 }
@@ -3477,10 +3479,10 @@ impl Tui {
                 Step::Compact(focus) => self.start_compact(focus, &done_tx),
                 Step::Wechat(cmd) => {
                     let said = match cmd {
-                        run::WechatCmd::Status => self.bridge.status(),
+                        input::WechatCmd::Status => self.bridge.status(),
                         // Only local locks and a client build await here; the
                         // login and long poll already run in their own tasks.
-                        run::WechatCmd::On => match self.bridge.on().await {
+                        input::WechatCmd::On => match self.bridge.on().await {
                             Ok(said) => said,
                             Err(e) => {
                                 self.ui.say(
@@ -3490,7 +3492,7 @@ impl Tui {
                                 Vec::new()
                             }
                         },
-                        run::WechatCmd::Off => self.bridge.off(),
+                        input::WechatCmd::Off => self.bridge.off(),
                     };
                     front_view(&mut self.views, self.core.lane())
                         .surface
@@ -4130,8 +4132,9 @@ mod tests {
         Folds, Intent, Panel, Row, ScrollbackRows, Target, View, absorb_growth, scrollback_from,
         view_at,
     };
+    use crate::input::commands::{Choice, Command, Source};
+    use crate::run::Repl;
     use crate::run::lane::{Lane, Round, Turn};
-    use crate::run::{Choice, Command, Repl, Source};
     use crate::store::session::Store;
     use crate::store::settings::row;
     use crate::ui::icons;

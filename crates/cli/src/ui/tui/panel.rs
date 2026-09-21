@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 use super::Paint;
 use super::editor::Editor;
 use super::screen;
-use crate::run::{Intent, mask_secret};
+use crate::input::Intent;
+use crate::run::mask_secret;
 use crate::store::settings::SettingRow;
 use crate::ui::icons;
 use crate::ui::keys::Action;
@@ -419,7 +420,7 @@ fn wrap_edit(line: &str, lead_w: usize, caret: usize, width: usize) -> (Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::{Paint, Panel, Took};
-    use crate::run::Intent;
+    use crate::input::Intent;
     use crate::store::settings::{SettingRow, row};
     use crate::ui::keys::Action;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};

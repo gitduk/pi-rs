@@ -11,7 +11,8 @@ use agent::{AgentError, Event, Totals};
 use anyhow::Result;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::run::{Repl, Step};
+use crate::input::Step;
+use crate::run::Repl;
 
 pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
     let mut buffer = String::new();
@@ -46,7 +47,7 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
             continue;
         }
 
-        match core.run(crate::run::read(line)) {
+        match core.run(crate::input::read(line)) {
             Step::Quit => break,
             Step::Bash(command) => {
                 // Awaited in place: this surface has nothing else to serve

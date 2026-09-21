@@ -9,7 +9,9 @@ use brain::transport::{Transport, anthropic::Anthropic, chat::ChatCompletions, o
 use clap::{Parser, ValueEnum};
 use tokio::sync::mpsc;
 
-use crate::run::{Command, Repl, commands, expand, lane, subagent, wechat, worktree};
+use crate::input::commands::{Command, commands};
+use crate::input::expand;
+use crate::run::{Repl, lane, subagent, wechat, worktree};
 use crate::store::{config, journal, session};
 use crate::ui::{icons, keys, line, render, status, tui};
 
