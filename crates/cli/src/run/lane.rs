@@ -124,7 +124,7 @@ pub struct Lane {
     /// What a slash answers to here, and the key map in force. Both are what
     /// this root's config and skills resolved to, so they travel with the lane
     /// rather than with the run — a tree switched back to answers to its own.
-    pub keys: std::sync::Arc<crate::ui::keys::Keys>,
+    pub keys: std::sync::Arc<crate::store::keys::Keys>,
     pub commands: std::sync::Arc<Vec<crate::input::commands::Command>>,
     /// The `/loop` this lane is under, if any.
     pub looping: Option<Looping>,

@@ -31,10 +31,10 @@ use crate::run::looping::Round;
 use crate::run::meter::Snapshot;
 use crate::run::{self, App};
 use crate::store::icons;
+use crate::store::keys::{Action, Keys, Layers, Menu, Mode, Press};
 use crate::store::session::{ResumeChoice, Store};
 use crate::store::status::{Segment, default_done, default_live};
 use crate::store::theme::Style as ThemeStyle;
-use crate::ui::keys::{Action, Keys, Layers, Menu, Mode, Press};
 use crate::ui::render::{self, Paint};
 use crate::ui::status;
 use editor::Editor;
@@ -1500,7 +1500,7 @@ impl Ui {
     // A run does not close it. The editor is a queue then, but `/help`,
     // `/status` and `/model` answer on the spot and the rest queue as what they
     // are, so the word being typed is still worth completing. `esc` reaches
-    // `run.interrupt` past the list — see `crate::ui::keys::Menu`.
+    // `run.interrupt` past the list — see `crate::store::keys::Menu`.
     fn menu(&mut self) -> Vec<MenuEntry> {
         if self.panel.is_some() {
             // The panel owns this space; the completion list waits.
@@ -4152,10 +4152,10 @@ mod tests {
     use crate::run::lane::{Lane, Turn};
     use crate::run::looping::Round;
     use crate::store::icons;
+    use crate::store::keys::{Keys, Mode};
     use crate::store::session::Store;
     use crate::store::settings::row;
     use crate::store::status::Segment;
-    use crate::ui::keys::{Keys, Mode};
     use crate::ui::render::Paint;
     use crate::ui::tui::screen::{self, plain};
     use ratatui::text::Line;

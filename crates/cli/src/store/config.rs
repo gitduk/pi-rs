@@ -216,13 +216,13 @@ impl Binds {
 
 impl Config {
     /// The key table this config asks for, defaults included.
-    pub fn key_map(&self) -> Result<crate::ui::keys::Keys> {
+    pub fn key_map(&self) -> Result<crate::store::keys::Keys> {
         let overrides = self
             .keys
             .iter()
             .map(|(id, b)| (id.clone(), b.clone().into_vec()))
             .collect();
-        crate::ui::keys::Keys::resolve(&overrides)
+        crate::store::keys::Keys::resolve(&overrides)
     }
     /// The ceiling an unset `loop_max_turns` reads as — see the field. An
     /// `Option` here mirrors the field, so `None` and the config staying

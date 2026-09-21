@@ -321,7 +321,7 @@ pub struct Resolved {
     pub effort: Effort,
     pub max_turns: Option<usize>,
     pub task_deadline: Option<std::time::Duration>,
-    pub keys: crate::ui::keys::Keys,
+    pub keys: crate::store::keys::Keys,
     /// The built-ins plus one command per skill. Here rather than in the App
     /// because a skill discovered at reload has to reach the prompt the same
     /// way everything else the config decides does.

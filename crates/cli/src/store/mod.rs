@@ -1,6 +1,7 @@
 pub mod config;
 pub mod icons;
 pub mod journal;
+pub mod keys;
 pub mod session;
 pub mod settings;
 pub mod status;

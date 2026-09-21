@@ -29,7 +29,7 @@ use crate::store::settings::{self, Settings, mask_secret};
 pub struct App {
     pub store: Store,
     /// Held so `/keys` can show what is actually in force, overrides included.
-    pub keys: std::sync::Arc<crate::ui::keys::Keys>,
+    pub keys: std::sync::Arc<crate::store::keys::Keys>,
     /// The config in force, as opposed to the one on disk. `/model` picks from
     /// this, so a switch cannot quietly apply an edit `/reload` has not.
     pub config: std::sync::Arc<config::Config>,
@@ -1144,7 +1144,7 @@ mod tests {
             store: crate::store::session::Store::new(
                 std::env::temp_dir().join("pi-settings-get-test"),
             ),
-            keys: std::sync::Arc::new(crate::ui::keys::Keys::default()),
+            keys: std::sync::Arc::new(crate::store::keys::Keys::default()),
             config: std::sync::Arc::new(crate::store::config::Config::default()),
             args: std::sync::Arc::new(<crate::Args as clap::Parser>::parse_from(["pi"])),
             commands: std::sync::Arc::new(Vec::new()),
@@ -1396,7 +1396,7 @@ mod tests {
             looping: None,
             pending_round: None,
             turn: crate::run::lane::Turn::Idle,
-            keys: std::sync::Arc::new(crate::ui::keys::Keys::default()),
+            keys: std::sync::Arc::new(crate::store::keys::Keys::default()),
             commands: std::sync::Arc::new(Vec::new()),
         }
     }
@@ -1466,7 +1466,7 @@ mod tests {
             "standing",
         );
 
-        let keys = std::sync::Arc::new(crate::ui::keys::Keys::default());
+        let keys = std::sync::Arc::new(crate::store::keys::Keys::default());
         let commands = std::sync::Arc::new(Vec::<crate::run::Command>::new());
         let (events, inbox) = crate::run::lane::Lane::channel();
         let lane = crate::run::lane::Lane {

@@ -16,9 +16,9 @@ use super::editor::Editor;
 use super::screen;
 use crate::input::Intent;
 use crate::store::icons;
+use crate::store::keys::Action;
 use crate::store::settings::SettingRow;
 use crate::store::settings::mask_secret;
-use crate::ui::keys::Action;
 
 /// The rows a panel shows: every path the config has, the value in force for
 /// the session, and whether the file still holds another one.
@@ -421,8 +421,8 @@ fn wrap_edit(line: &str, lead_w: usize, caret: usize, width: usize) -> (Vec<Stri
 mod tests {
     use super::{Paint, Panel, Took};
     use crate::input::Intent;
+    use crate::store::keys::Action;
     use crate::store::settings::{SettingRow, row};
-    use crate::ui::keys::Action;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn act(panel: &mut Panel, action: Action) -> Took {
