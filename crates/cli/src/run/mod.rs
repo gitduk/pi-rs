@@ -1071,7 +1071,7 @@ mod tests {
     use crate::input::commands::{BUILTIN, Choice, Source, commands};
     use crate::input::{Fate, Intent, read};
     use agent::session::{Entry, Prompt, Session};
-    use tools::skills::Skill;
+    use skills::Skill;
 
     // The sets behind `/resume` and `/worktree` cost a walk of every
     // transcript in the workspace and a `git worktree list`. A line that

@@ -3,7 +3,7 @@
 
 use std::borrow::Cow;
 
-use tools::skills::Skill;
+use skills::Skill;
 
 use crate::store::session::ResumeChoice;
 

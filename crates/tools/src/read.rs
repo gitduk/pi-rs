@@ -9,10 +9,10 @@ use crate::{Ctx, Tier, Tool, ToolError, ToolOutput, output, spill};
 const DEFAULT_LIMIT: usize = 2_000;
 pub(crate) const MAX_LINE: usize = 2_000;
 const BINARY_SNIFF: usize = 8_000;
-pub(crate) const MAX_BYTES: u64 = 10 << 20;
+pub const MAX_BYTES: u64 = 10 << 20;
 
 /// The one refusal every over-limit file shares, whatever tool meets it.
-pub(crate) fn over_limit(name: &str, len: u64) -> String {
+pub fn over_limit(name: &str, len: u64) -> String {
     format!("{name} is {len} bytes, over the {MAX_BYTES}-byte read limit; use bash to slice it")
 }
 const OUTLINE_OVER: usize = 300;

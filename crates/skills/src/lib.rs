@@ -1,7 +1,11 @@
-use crate::read::{MAX_BYTES, over_limit};
+mod load;
+
+pub use load::{Load, instructions};
+
 use brain::slice::head_bytes;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
+use tools::read::{MAX_BYTES, over_limit};
 
 // One line in the tool catalog: past this, the description costs more than
 // the decision it buys.

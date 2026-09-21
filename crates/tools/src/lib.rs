@@ -36,8 +36,6 @@ pub mod read;
 pub mod registry;
 mod rows;
 pub mod rtk;
-pub mod skill;
-pub mod skills;
 pub mod spill;
 mod syntax;
 pub mod walk;

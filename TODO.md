@@ -6,13 +6,13 @@
 
 **crate 边界**
 
-- [ ] **skills 从 `tools` 拆成独立 crate**（未动手，等发话）。
+- [x] **skills 从 `tools` 拆成独立 crate**（**已做**）。
   动机：`crates/tools` 里有 `skill.rs`（199 行，`SkillTool`）和 `skills.rs`（261 行，发现与 `Skill`），与「工具实现」不是一回事。
-  目标：新 crate `crates/skills`，`tools` 不再含 skill 代码。
+  目标：新 crate `crates/skills`，`tools` 不再含 skill 代码。**已落地。**
 
   新 crate `crates/skills`：
   - `src/lib.rs`：发现层——`Skill`、`Found`、`sources`、`discover`、`discover_from`、`frontmatter`、`body`（现 `tools/src/skills.rs` 整体搬入）。
-  - `src/load.rs`：`Load`（由 `SkillTool` 改名，见下）、`instructions`、`NAME`（现 `tools/src/skill.rs` 整体搬入）。
+  - `src/load.rs`：`Load`（由 `SkillTool` 改名，见下）、`instructions`、`NAME`（现 `tools/src/skill.rs` 整体搬入）。`NAME` 改成私有的——全库只有 `Load::name()` 读它，`compact.rs` 的 `PROTECTED` 用的是字面量 `"skill"`（agent 不可能依赖 skills）。
   - 依赖：`tools`（`Tool`/`Ctx`/`Tier`/`ToolError`/`ToolOutput`/`parse_args`/`read`）、`brain`（`slice::head_bytes`）、`async-trait`、`serde`、`serde_json`、`serde_yaml_ng`、`tokio`（`fs`）；dev：`tokio`、`tempfile`。
 
   `crates/tools` 侧：
@@ -22,14 +22,14 @@
   装配与调用点：
   - 根 `Cargo.toml` 加 `skills = { path = "crates/skills" }`；`crates/cli/Cargo.toml` 加 `skills.workspace = true`。
   - `crates/cli/src/main.rs:356` `tools::skills::discover` → `skills::discover`；`:370` `tools::skill::SkillTool::new` → `skills::Load::new`。
-  - `crates/cli/src/repl.rs:6` `use tools::skills::Skill;` → `use skills::Skill;`；`:1112` `tools::skill::instructions` → `skills::instructions`；`:1926`（`#[cfg(test)]` 模块里）同一句 `use` 也要改。
+  - `use tools::skills::Skill;` 有**四处**（计划里只列了三处）：`input/mod.rs:7`、`input/commands.rs:6`、`run/mod.rs:1074`（`#[cfg(test)]` 模块）、加 `input/mod.rs:211` 的 `instructions`。均已改。
   - 测试 `crates/tools/tests/skill.rs` → `crates/skills/tests/skills.rs`（`tools/tests/common` 跨 crate 用不了，需自带一个小 `ctx()`；里面一处 `SkillTool::new` 同步改名）。
 
   验证：`cargo build`、`cargo test`、`cargo clippy --all-targets`（预期静默）、提交前 `cargo fmt`。
   无环：`tools::Registry::builtin()` 本来就不含 skill 工具（注释已说明「`task` 和 `skill` 由能构造它们的一方事后挂上」），所以 `skills → tools` 单向，`tools` 永不反向依赖 `skills`。
 
   顺带改名：**`SkillTool` → `Load`**。理由：全库 `impl Tool for` 的类型名都是裸名动作（`Read`/`Write`/`Edit`/`Grep`/`Glob`/`Bash`/`Fetch`/`Judge`/`Task`），带 `Tool` 后缀的只有 `SkillTool` 和 `ScriptTool`；而且搬进 `crates/skills` 后会读成 `skills::SkillTool`。
-  `Load` 合这个模式，也正是工具描述的首句「Load a skill's instructions and follow them.」。wire name 保持 `skill` 不变（它在 `compact.rs` 的 `PROTECTED` 白名单里，不跟 struct 名挂钩——`ScriptTool::name()` 也是返回脚本自己的名字）。
+  `Load` 合这个模式，也正是工具描述的首句「Load a skill's instructions and follow them.」（**已改**；wire name 仍是 `skill`，实测 `Load::name()` 返回 `NAME`，`compact.rs` 的 `PROTECTED` 对得上）。wire name 保持 `skill` 不变（它在 `compact.rs` 的 `PROTECTED` 白名单里，不跟 struct 名挂钩——`ScriptTool::name()` 也是返回脚本自己的名字）。
   改动面：仅定义（`skill.rs:24`）、`main.rs:370`、`tests/skill.rs:29` 三处。
 
 - [x] **`Task`（子代理）从 `agent` 拆成 `crates/task`**（**已做**）。细节见下面「工具实现按域分家」。
@@ -62,7 +62,7 @@
 crates/
 ├── llm/        ↔ brain：wire 类型、传输、SSE、token 估算、消息
 ├── tools/      契约 + 文件系统域：Tool/Registry/Ctx/Tier、read/write/edit/grep/glob、bash、fetch、judge，加 spill/state/walk/workspace/output/parses/rows/blocks（rows/blocks 是 hashline 的落点）、edit/（编辑引擎）、syntax/（tree-sitter）
-├── skills/     ↔ 从 tools 拆出：技能发现 + `Load`
+├── skills/     ✓ 已从 tools 拆出：技能发现 + `Load`
 ├── scripts/    ✓ 已从 tools 拆出：脚本发现 + `Script`
 ├── task/       ✓ 已从 agent 拆出：子代理工具
 ├── agent/      核心：纯循环 + 接缝
@@ -150,7 +150,7 @@ crates/cli/src/              ✧ 应用
 |---|---|---|
 | `Read`/`Write`/`Edit`/`Grep`/`Glob` | `tools` | `tools`（不动，同域） |
 | `Bash`/`Fetch` | `tools` | `tools`（不动） |
-| `SkillTool`（→ `Load`） | `tools` | `skills`（已定，顺带改名） |
+| `SkillTool`（→ `Load`） | `tools` | `skills`（**已做**） |
 | `Task`（子代理） | `agent` | `task`（**已做**） |
 | `Judge` | `tools` | `tools`（见下） |
 | `ScriptTool`（→ `Script`） | `tools` | `scripts`（**已做**） |

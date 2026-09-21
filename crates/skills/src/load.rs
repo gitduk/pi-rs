@@ -2,11 +2,11 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::read::{MAX_BYTES, over_limit};
-use crate::skills::{Skill, body};
-use crate::{Ctx, Tier, Tool, ToolError, ToolOutput};
+use crate::{Skill, body};
+use tools::read::{MAX_BYTES, over_limit};
+use tools::{Ctx, Tier, Tool, ToolError, ToolOutput};
 
-pub const NAME: &str = "skill";
+const NAME: &str = "skill";
 
 #[derive(Deserialize)]
 struct Args {
@@ -21,12 +21,12 @@ struct Args {
 /// Descriptions ride in this tool's own description, which every request
 /// carries; the bodies do not. That split is the whole point — a dozen skills
 /// cost a paragraph of context until one is actually needed.
-pub struct SkillTool {
+pub struct Load {
     skills: Vec<Skill>,
     description: String,
 }
 
-impl SkillTool {
+impl Load {
     pub fn new(skills: Vec<Skill>) -> Self {
         let mut description = String::from(
             "Load a skill's instructions and follow them. Use one whenever its \
@@ -118,7 +118,7 @@ pub fn instructions(skill: &Skill, text: &str) -> String {
 }
 
 #[async_trait]
-impl Tool for SkillTool {
+impl Tool for Load {
     fn name(&self) -> &str {
         NAME
     }
@@ -148,7 +148,7 @@ impl Tool for SkillTool {
     }
 
     async fn execute(&self, args: Value, _ctx: &Ctx) -> Result<ToolOutput, ToolError> {
-        let args: Args = crate::parse_args(args)?;
+        let args: Args = tools::parse_args(args)?;
         let skill = self.find(&args.name)?;
 
         let Some(rel) = args.file else {

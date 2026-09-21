@@ -350,7 +350,7 @@ pub fn resolve(
     let skills = if args.no_skills {
         Vec::new()
     } else {
-        let found = tools::skills::discover(root);
+        let found = skills::discover(root);
         // A skill that silently fails to appear is one the user goes looking
         // for in the wrong place.
         notes.extend(
@@ -364,7 +364,7 @@ pub fn resolve(
     // Before the move: a skill is two things at once, a command the user can
     // type and a body the model can load, and both read the same list.
     let commands = commands(&skills, &mut notes);
-    let tool = tools::skill::SkillTool::new(skills);
+    let tool = skills::Load::new(skills);
     if !tool.is_empty() {
         registry = registry.with(tool);
     }

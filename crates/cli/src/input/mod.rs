@@ -4,7 +4,7 @@
 pub mod commands;
 pub mod complete;
 
-use tools::skills::Skill;
+use skills::Skill;
 
 use crate::input::commands::{Command, Source};
 
@@ -208,7 +208,7 @@ fn expanded(skill: &Skill, args: &str) -> Result<String, String> {
     let mut out = format!(
         "Run the `{}` skill. Its instructions follow.\n\n{}",
         skill.name,
-        tools::skill::instructions(skill, &text)
+        skills::instructions(skill, &text)
     );
     if !args.is_empty() {
         // Below the instructions, so the skill is read as the standing order

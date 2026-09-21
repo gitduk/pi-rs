@@ -16,6 +16,7 @@ futures = { workspace = true }
 agent.workspace = true
 task.workspace = true
 scripts.workspace = true
+skills.workspace = true
 brain.workspace = true
 tools.workspace = true
 wechat.workspace = true

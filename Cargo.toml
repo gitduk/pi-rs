@@ -14,6 +14,7 @@ tools = { path = "crates/tools" }
 agent = { path = "crates/agent" }
 task = { path = "crates/task" }
 scripts = { path = "crates/scripts" }
+skills = { path = "crates/skills" }
 wechat = { path = "crates/wechat" }
 
 anyhow = "1"

@@ -1,9 +1,14 @@
-mod common;
-
-use common::ctx;
 use serde_json::json;
-use tools::skills::discover_from;
-use tools::{Tool, ToolError};
+use skills::{Load, discover_from};
+use tools::{Ctx, Tool, ToolError, Workspace};
+
+// A workspace of its own, so the gate under test is this call's and not
+// whoever is running the suite's.
+fn ctx() -> (tempfile::TempDir, Ctx) {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace::new(dir.path()).unwrap();
+    (dir, Ctx::new(ws))
+}
 
 // Skills live outside the workspace, so the workspace's gate does not cover
 // them: the skill directory is its own boundary, and a `file:` argument
@@ -26,7 +31,7 @@ async fn a_file_argument_cannot_leave_the_skill_directory() {
     let found = discover_from(&[dir.path().join("skills")]);
 
     let (_w, c) = ctx();
-    let r = tools::skill::SkillTool::new(found.skills)
+    let r = Load::new(found.skills)
         .execute(
             json!({ "name": "thinking", "file": "../commit/SKILL.md" }),
             &c,
