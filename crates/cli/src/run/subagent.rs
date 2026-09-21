@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 use agent::session::Session;
 use agent::task::Home;
 
-use crate::session::Store;
+use crate::store::session::Store;
 
 // The saves a subagent handed off to a background thread, still in flight.
 // The exit path drains these — a transcript promised on disk has to be there
@@ -68,7 +68,7 @@ impl Home for Filed {
                 &root,
                 &model,
                 Some("subagent"),
-                crate::session::now(),
+                crate::store::session::now(),
                 &session,
             );
             if let Err(e) = saved {

@@ -91,10 +91,10 @@ pub struct Config {
     pub keys: BTreeMap<String, Binds>,
     /// The SGR codes behind every colour the terminal uses.
     #[serde(default)]
-    pub theme: crate::render::Theme,
+    pub theme: crate::ui::render::Theme,
     /// Which parts the running and the finished status lines show.
     #[serde(default)]
-    pub status: crate::status::Lines,
+    pub status: crate::ui::status::Lines,
     /// Vim keys: on unless a file turns them off.
     #[serde(default)]
     pub vim: Vim,
@@ -216,13 +216,13 @@ impl Binds {
 
 impl Config {
     /// The key table this config asks for, defaults included.
-    pub fn key_map(&self) -> Result<crate::keys::Keys> {
+    pub fn key_map(&self) -> Result<crate::ui::keys::Keys> {
         let overrides = self
             .keys
             .iter()
             .map(|(id, b)| (id.clone(), b.clone().into_vec()))
             .collect();
-        crate::keys::Keys::resolve(&overrides)
+        crate::ui::keys::Keys::resolve(&overrides)
     }
     /// The ceiling an unset `loop_max_turns` reads as — see the field. An
     /// `Option` here mirrors the field, so `None` and the config staying
@@ -849,7 +849,7 @@ pub fn write(path: &Path, dotted: &str, value: toml::Value) -> Result<()> {
     let mut doc = body
         .parse::<toml_edit::DocumentMut>()
         .context("the config file must stay valid TOML")?;
-    let segments = crate::settings::segments(dotted)?;
+    let segments = crate::store::settings::segments(dotted)?;
     // Walk to the parent table, creating intermediate tables as needed.
     let mut table = doc.as_table_mut();
     let last = segments[segments.len() - 1].clone();

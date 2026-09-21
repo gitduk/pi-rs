@@ -11,7 +11,7 @@ use agent::{AgentError, Event, Totals};
 use anyhow::Result;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::repl::{Repl, Step};
+use crate::run::{Repl, Step};
 
 pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
     let mut buffer = String::new();
@@ -22,7 +22,7 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
 
     loop {
         if prompt {
-            eprint!("{} ", crate::icons::PIPE_SIGIL);
+            eprint!("{} ", crate::ui::icons::PIPE_SIGIL);
             let _ = std::io::stderr().flush();
         }
         buffer.clear();
@@ -46,7 +46,7 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
             continue;
         }
 
-        match core.run(crate::repl::read(line)) {
+        match core.run(crate::run::read(line)) {
             Step::Quit => break,
             Step::Bash(command) => {
                 // Awaited in place: this surface has nothing else to serve
@@ -56,9 +56,9 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
                     .ctx
                     .clone()
                     .with_cancel(agent::cancel_on_interrupt());
-                let out = crate::repl::run_bash(&ctx, &command).await;
+                let out = crate::run::run_bash(&ctx, &command).await;
                 if let Some(session) = core.lane_mut().session.as_mut() {
-                    crate::repl::record_bash(session, &command, out.text.clone());
+                    crate::run::record_bash(session, &command, out.text.clone());
                 }
                 if let Err(e) = core.save() {
                     eprintln!("warning: the transcript was not saved: {e}");

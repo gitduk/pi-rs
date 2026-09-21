@@ -585,7 +585,7 @@ impl Keys {
                 let note = if b.note.is_empty() {
                     String::new()
                 } else {
-                    format!("{}{}", crate::icons::KEY_NOTE_SEP, b.note)
+                    format!("{}{}", crate::ui::icons::KEY_NOTE_SEP, b.note)
                 };
                 format!("{:width$}  {}{note}", b.id, keys.join(", "))
             })
@@ -1270,7 +1270,7 @@ mod tests {
         assert!(rows.contains("edit.delete.word-back"), "{rows}");
         // Round-trips: the keys shown can be pasted back into [keys].
         for row in Keys::default().listing() {
-            let keys = row.split(crate::icons::KEY_NOTE_SEP).next().unwrap();
+            let keys = row.split(crate::ui::icons::KEY_NOTE_SEP).next().unwrap();
             let keys = keys.split_once("  ").expect("id then keys").1;
             for spec in keys.trim().split(", ") {
                 assert!(parse(spec).is_ok(), "cannot re-read `{spec}`");

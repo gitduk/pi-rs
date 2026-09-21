@@ -102,7 +102,7 @@ edit refuse.",
 pub fn env(tier: tools::Tier) -> String {
     // `sh`, not `$SHELL`: the bash tool runs `Command::new("sh")` whatever the
     // login shell is, and the tool's own name is what misleads about it.
-    let day = &crate::journal::rfc3339(std::time::SystemTime::now())[..10];
+    let day = &crate::store::journal::rfc3339(std::time::SystemTime::now())[..10];
     let tier = format!("{tier:?}").to_lowercase();
     format!(
         "\n\n<env date=\"{day}\" platform=\"{}\" shell=\"sh\" pi=\"{}\" tier=\"{tier}\"/>",

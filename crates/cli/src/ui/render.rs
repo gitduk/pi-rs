@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span};
 use serde::de::{Error as _, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::icons;
+use crate::ui::icons;
 
 const RESET: &str = "\x1b[0m";
 
@@ -1153,10 +1153,10 @@ pub struct Renderer {
     quiet: bool,
     // The segments this surface ends a run with. A pipe times nothing and
     // queues nothing, so `elapsed` and `queued` have nothing to say here.
-    done: Vec<crate::status::Segment>,
+    done: Vec<crate::ui::status::Segment>,
     // Read off the same events the terminal reads, so a piped run ends on the
     // line the terminal would have shown it.
-    tally: crate::status::Tally,
+    tally: crate::run::meter::Tally,
     model: String,
     // The worktree this run is working in, for the segment that names it.
     worktree: Option<String>,
@@ -1171,7 +1171,7 @@ impl Renderer {
     pub fn new(
         quiet: bool,
         theme: Arc<Theme>,
-        done: Vec<crate::status::Segment>,
+        done: Vec<crate::ui::status::Segment>,
         model: String,
         worktree: Option<String>,
     ) -> Self {
@@ -1179,7 +1179,7 @@ impl Renderer {
             paint: Paint::with_theme(std::io::stderr().is_terminal(), theme),
             quiet,
             done,
-            tally: crate::status::Tally::default(),
+            tally: crate::run::meter::Tally::default(),
             model,
             worktree,
             thinking: false,
@@ -1218,7 +1218,7 @@ impl Renderer {
                 let snap = self
                     .tally
                     .snapshot(&self.model, self.worktree.as_deref(), None, 0);
-                let line = crate::status::line(&self.done, &snap);
+                let line = crate::ui::status::line(&self.done, &snap);
                 if !line.is_empty() {
                     eprintln!("{}", self.paint.on(&self.paint.theme.muted, &line));
                 }
@@ -1384,7 +1384,7 @@ mod tests {
         let mut r = super::Renderer::new(
             false,
             std::sync::Arc::new(super::Theme::default()),
-            crate::status::default_done(),
+            crate::ui::status::default_done(),
             String::new(),
             None,
         );

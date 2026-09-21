@@ -18,9 +18,10 @@ use brain::message::{ToolResult, ToolResultContent};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::icons;
-use crate::render::{self, Paint};
-use crate::status::{self, Segment, Snapshot};
+use crate::run::meter::Snapshot;
+use crate::ui::icons;
+use crate::ui::render::{self, Paint};
+use crate::ui::status::{self, Segment};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FoldedTool {
@@ -462,10 +463,7 @@ impl Row {
         if text.starts_with('!') {
             // A `!` is a command, not something said: the bang takes the
             // prompt's place, and the lines under it keep the plain indent.
-            let bang = paint.span(
-                &paint.theme.prompt.color,
-                format!("{} ", crate::icons::BANG_SIGIL),
-            );
+            let bang = paint.span(&paint.theme.prompt.color, format!("{} ", icons::BANG_SIGIL));
             let mut rows = Vec::new();
             for (i, line) in text.lines().enumerate() {
                 let (prefix, body) = if i == 0 {
@@ -843,7 +841,7 @@ mod tools_summary_tests {
         let paint = Paint::new(true);
         let mut row = Row::tools_summary(bundle(vec![tool("read", "a.rs")]));
 
-        use crate::tui::screen::plain;
+        use crate::ui::tui::screen::plain;
 
         row.update_hover_state(true, false, 0);
         let f0 = plain(&row.line(0, &paint, &[], 80).0);

@@ -7,7 +7,6 @@
 //! services three sources at once — the agent's events, the keyboard, and a
 //! timer for the spinner — so nothing has to be bolted on beside it.
 
-mod complete;
 mod editor;
 mod panel;
 mod row;
@@ -25,14 +24,15 @@ use futures::FutureExt;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
-use crate::icons;
-use crate::keys::{Action, Keys, Layers, Menu, Mode, Press};
-use crate::lane::{Lane, Round, Turn};
-use crate::render::Style as ThemeStyle;
-use crate::render::{self, Paint};
-use crate::repl::{self, Candidate, Choice, Command, Fate, Intent, Repl, Rewound, Step};
-use crate::session::{ResumeChoice, Store};
-use crate::status::{self, Segment, Snapshot, Tally};
+use crate::run::lane::{Lane, Round, Turn};
+use crate::run::meter::Snapshot;
+use crate::run::{self, Candidate, Choice, Command, Fate, Intent, Repl, Rewound, Step};
+use crate::store::session::{ResumeChoice, Store};
+use crate::ui::icons;
+use crate::ui::keys::{Action, Keys, Layers, Menu, Mode, Press};
+use crate::ui::render::Style as ThemeStyle;
+use crate::ui::render::{self, Paint};
+use crate::ui::status::{self, Segment};
 use editor::Editor;
 use panel::{Panel, Took};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -106,7 +106,7 @@ impl Lists {
     // there.
     fn worktrees(&self) -> &[Choice] {
         self.worktrees.get_or_init(|| {
-            crate::worktree::list(&self.workspace)
+            run::worktree::list(&self.workspace)
                 .map(|trees| {
                     trees
                         .into_iter()
@@ -676,7 +676,7 @@ fn f_entry(entry: &LogEntry, paint: &Paint) -> Option<Vec<Row>> {
         LogEntry::Ask { ask, .. } => Some(Row::prompt(ask.shown_text(), paint)),
         LogEntry::Bash { run, .. } => {
             let mut rows = Row::prompt(run.shown_text(), paint);
-            rows.extend(repl::bash_said(&run.text).into_iter().map(Row::notice));
+            rows.extend(run::bash_said(&run.text).into_iter().map(Row::notice));
             Some(rows)
         }
         // Machine prose, not the user's line: rebuilt in the muted voice of
@@ -751,8 +751,9 @@ pub struct Surface {
     tail: Option<EntryId>,
 }
 
-// This run's readings and interaction state. It ends with the run: no tools
-// running, no clock, no figures of its own.
+// What this run is doing, as far as the screen knows. It ends with the run:
+// no tools running, no clock. What the run has cost is the lane's tally, which
+// outlives the screen it was drawn on.
 #[derive(Default)]
 pub struct State {
     // Calls in flight, plus ended calls whose entries are not adopted yet:
@@ -766,10 +767,6 @@ pub struct State {
     // Whether this run has produced anything yet — a word, a thought, a call.
     // Once it has, Esc means stop rather than unsend.
     committed: bool,
-    // Every number this run has reported, as the events stated them. Both
-    // status lines read it, so the line the run ends on is the live line's
-    // last frame rather than a second count of the same turns.
-    tally: Tally,
     // The run has been asked to stop and is still winding down.
     stopping: bool,
 }
@@ -853,7 +850,7 @@ struct Vim {
 }
 
 impl Vim {
-    fn new(cfg: &crate::config::Vim) -> Self {
+    fn new(cfg: &crate::store::config::Vim) -> Self {
         let mut vim = Self {
             mode: Mode::Insert,
             escape: None,
@@ -868,7 +865,7 @@ impl Vim {
     // characters here rather than at every keystroke. Anything that is not
     // exactly two of them is no sequence — the documented way to leave
     // Normal unreachable while keeping the layer's bindings listed.
-    fn configure(&mut self, cfg: &crate::config::Vim) {
+    fn configure(&mut self, cfg: &crate::store::config::Vim) {
         self.escape = cfg.escape_pair();
         self.window = std::time::Duration::from_millis(cfg.escape_timeout_ms);
     }
@@ -999,7 +996,7 @@ struct Ui {
     rewind: Vec<MenuEntry>,
     // The @-completion cache, keyed by the query the walk was built for —
     // a directory walk sits behind every keystroke otherwise.
-    at_menu: Option<(String, Vec<complete::FileEntry>)>,
+    at_menu: Option<(String, Vec<crate::input::complete::FileEntry>)>,
     // The directory @ paths resolve against: the lane's workspace root.
     at_root: std::path::PathBuf,
     spinner: usize,
@@ -1127,16 +1124,6 @@ impl View {
             ..Self::default()
         }
     }
-    /// The counts back to nothing: a session switch must not render the
-    /// session that was as this one's.
-    pub fn clear_tally(&mut self) {
-        self.state.tally = Tally::default();
-    }
-    /// What this session has spent, the run in flight included. `/status`
-    /// reads it; the status lines read the run alone.
-    pub fn session_spend(&self) -> Totals {
-        self.state.tally.session()
-    }
 }
 
 impl Ui {
@@ -1198,7 +1185,7 @@ impl Ui {
 
     // The values both lines draw on, as this surface currently knows them.
     fn snapshot(&self, lane: &Lane) -> Snapshot {
-        lane.view.state.tally.snapshot(
+        lane.tally.snapshot(
             &lane.view.model,
             lane.worktree.as_deref(),
             lane.view.state.started.map(|s| s.elapsed()),
@@ -1376,7 +1363,7 @@ impl Ui {
         }
         // Every number either status line shows is read here, once. The arms
         // below decide only what reaches the scrollback.
-        lane.view.state.tally.on(&event);
+        lane.tally.on(&event);
         match &event {
             Event::TextDelta(d) => self.write(&mut lane.view, d, false),
             Event::ReasoningDelta(d) => self.write(&mut lane.view, d, true),
@@ -1505,7 +1492,7 @@ impl Ui {
     // A run does not close it. The editor is a queue then, but `/help`,
     // `/status` and `/model` answer on the spot and the rest queue as what they
     // are, so the word being typed is still worth completing. `esc` reaches
-    // `run.interrupt` past the list — see `keys::Menu`.
+    // `run.interrupt` past the list — see `crate::ui::keys::Menu`.
     fn menu(&mut self) -> Vec<MenuEntry> {
         if self.panel.is_some() {
             // The panel owns this space; the completion list waits.
@@ -1520,7 +1507,7 @@ impl Ui {
         // An @ token outranks the word completions: it names a path, and the
         // filesystem holds the answer, not the command tables.
         if let Some((start, end, query)) =
-            complete::at_prefix(self.editor.text(), self.editor.cursor())
+            crate::input::complete::at_prefix(self.editor.text(), self.editor.cursor())
         {
             // The cache is keyed by the query: every keystroke moves it, but
             // every frame redraws the menu against the same one.
@@ -1529,7 +1516,7 @@ impl Ui {
                 .as_ref()
                 .is_none_or(|(q, _)| q.as_str() != query)
             {
-                let items = complete::candidates(query, &self.at_root);
+                let items = crate::input::complete::candidates(query, &self.at_root);
                 self.at_menu = Some((query.to_string(), items));
                 self.picked = None;
             }
@@ -1547,7 +1534,7 @@ impl Ui {
                 .collect();
         }
         // Bottom-up: the best match belongs on the row right above the input.
-        repl::complete(
+        run::complete(
             self.editor.text(),
             &self.commands,
             &self.choices,
@@ -1709,7 +1696,7 @@ impl Ui {
     // checkout, `!forward` its previous. The ring walks the checkouts in
     // the order the bar shows them — the ones already open, in the order
     // they were opened — and puts the ones not open yet after them, in the
-    // order `worktree::list` reports. `Intent::Worktree` opens one that is
+    // order `run::worktree::list` reports. `Intent::Worktree` opens one that is
     // not, which is the same thing the picker did when you chose an unopened
     // row.
     //
@@ -2062,7 +2049,7 @@ impl Ui {
                         // that produced it goes, so it cannot be re-submitted
                         // as a stray prompt later.
                         self.editor.take();
-                        if repl::recallable(&line, &self.commands) {
+                        if run::recallable(&line, &self.commands) {
                             self.editor.remember(&line);
                         }
                         return if line.trim().is_empty() {
@@ -2085,7 +2072,7 @@ impl Ui {
                     }
                     None => {
                         let typed = self.editor.take();
-                        if repl::recallable(&typed, &self.commands) {
+                        if run::recallable(&typed, &self.commands) {
                             self.editor.remember(&typed);
                         }
                         return if typed.trim().is_empty() {
@@ -2441,7 +2428,7 @@ impl Ui {
     // is the one surprise this has to rule out. Turning them off is also the
     // only thing that changes the mode without a key — everything else keeps
     // whichever mode was last asked for, submitted lines included.
-    fn set_vim(&mut self, cfg: &crate::config::Vim) {
+    fn set_vim(&mut self, cfg: &crate::store::config::Vim) {
         match (&mut self.vim, cfg.enabled) {
             (slot @ None, true) => *slot = Some(Vim::new(cfg)),
             (slot, false) => *slot = None,
@@ -2606,7 +2593,7 @@ pub struct Tui {
     events: UnboundedReceiver<TermEvent>,
     // Stops the reader while a child holds the terminal.
     hold: Hold,
-    bridge: crate::wechat::Bridge,
+    bridge: run::wechat::Bridge,
 }
 
 // crossterm reads blockingly, so the keyboard gets a thread of its own and
@@ -2794,7 +2781,7 @@ fn drop_shared_history() {
 const HISTORY_KEEP: usize = 1_000;
 
 impl Tui {
-    pub fn new(mut core: Repl, keys: Arc<Keys>, bridge: crate::wechat::Bridge) -> Result<Self> {
+    pub fn new(mut core: Repl, keys: Arc<Keys>, bridge: run::wechat::Bridge) -> Result<Self> {
         let paint = Paint::with_theme(true, Arc::new(core.config.theme.clone()));
         let mut ui = Ui::new(
             Screen::new()?,
@@ -2860,7 +2847,7 @@ impl Tui {
             ui,
             events: rx,
             hold: Hold::default(),
-            bridge: crate::wechat::Bridge::new(),
+            bridge: run::wechat::Bridge::new(),
         }
     }
 
@@ -3269,11 +3256,11 @@ impl Tui {
                         // The phone types at the lane in front, like a hand,
                         // and its `/stop` is esc. Same intents, same gate, so
                         // they cannot drift apart.
-                        Some(crate::wechat::Inbound::Text { text }) => {
+                        Some(run::wechat::Inbound::Text { text }) => {
                             self.admit(Intent::Submit(text))
                         }
-                        Some(crate::wechat::Inbound::Stop) => self.admit(Intent::Interrupt),
-                        Some(crate::wechat::Inbound::Notice(text)) => {
+                        Some(run::wechat::Inbound::Stop) => self.admit(Intent::Interrupt),
+                        Some(run::wechat::Inbound::Notice(text)) => {
                             self.ui.say(&mut self.core.lane_mut().view, text);
                             Wake::Nothing
                         }
@@ -3361,11 +3348,11 @@ impl Tui {
                     {
                         session.push_note(&note);
                     }
-                    repl::read(&goal)
+                    run::read(&goal)
                 }
                 Intent::Submit(line) => {
                     self.echo_sent(&line);
-                    repl::read(&line)
+                    run::read(&line)
                 }
                 // A key that means a command — `ctrl+l` twice is `/new` —
                 // arrives already read.
@@ -3409,7 +3396,7 @@ impl Tui {
                     self.ui.flash(said);
                     continue;
                 }
-                if matches!(repl::read(&goal), Intent::Loop(_)) {
+                if matches!(run::read(&goal), Intent::Loop(_)) {
                     self.ui.flash("a loop cannot be its own goal");
                     continue;
                 }
@@ -3462,10 +3449,10 @@ impl Tui {
                 Step::Compact(focus) => self.start_compact(focus, &done_tx),
                 Step::Wechat(cmd) => {
                     let said = match cmd {
-                        repl::WechatCmd::Status => self.bridge.status(),
+                        run::WechatCmd::Status => self.bridge.status(),
                         // Only local locks and a client build await here; the
                         // login and long poll already run in their own tasks.
-                        repl::WechatCmd::On => match self.bridge.on().await {
+                        run::WechatCmd::On => match self.bridge.on().await {
                             Ok(said) => said,
                             Err(e) => {
                                 self.ui
@@ -3473,7 +3460,7 @@ impl Tui {
                                 Vec::new()
                             }
                         },
-                        repl::WechatCmd::Off => self.bridge.off(),
+                        run::WechatCmd::Off => self.bridge.off(),
                     };
                     self.core
                         .lane_mut()
@@ -3626,7 +3613,7 @@ impl Tui {
         lane.view.state.started = Some(std::time::Instant::now());
         lane.view.state.committed = committed;
         lane.view.state.stopping = false;
-        lane.view.state.tally.seed(lane.totals);
+        lane.tally.seed(lane.totals);
     }
 
     fn start_turn(&mut self, prompt: String, typed: Option<String>, done: &UnboundedSender<Done>) {
@@ -3787,7 +3774,7 @@ impl Tui {
         let done = done.clone();
         tokio::spawn(async move {
             let out = guard(async move {
-                let out = repl::run_bash(&ctx, &command).await;
+                let out = run::run_bash(&ctx, &command).await;
                 // Esc that stopped the `!` is a cancelled run too; `ran` says
                 // so instead of a success that spent nothing.
                 let ran = if ctx.cancel.is_cancelled() {
@@ -3796,7 +3783,7 @@ impl Tui {
                     Ok(Totals::default())
                 };
                 let tail = carried.entries().last().map(|e| e.id());
-                repl::record_bash(&mut carried, &command, out.text.clone());
+                run::record_bash(&mut carried, &command, out.text.clone());
                 (carried, ran, out.screen(), tail)
             })
             .await;
@@ -3967,7 +3954,7 @@ impl Tui {
         // interrupted run lands as the spend the view showed.
         let spent = match &out {
             Ok(totals) => *totals,
-            Err(_) => self.core.lanes[lane].view.state.tally.run_spend(),
+            Err(_) => self.core.lanes[lane].tally.run_spend(),
         };
         self.core.lanes[lane].totals.merge(&spent);
 
@@ -4099,15 +4086,15 @@ mod tests {
     use super::{
         Folds, Intent, Panel, Row, ScrollbackRows, Target, absorb_growth, scrollback_from,
     };
-    use crate::icons;
-    use crate::keys::{Keys, Mode};
-    use crate::lane::{Lane, Round, Turn};
-    use crate::render::Paint;
-    use crate::repl::{Choice, Command, Repl, Source};
-    use crate::session::Store;
-    use crate::settings::row;
-    use crate::status::Segment;
-    use crate::tui::screen::{self, plain};
+    use crate::run::lane::{Lane, Round, Turn};
+    use crate::run::{Choice, Command, Repl, Source};
+    use crate::store::session::Store;
+    use crate::store::settings::row;
+    use crate::ui::icons;
+    use crate::ui::keys::{Keys, Mode};
+    use crate::ui::render::Paint;
+    use crate::ui::status::Segment;
+    use crate::ui::tui::screen::{self, plain};
     use ratatui::text::Line;
 
     // Both scrollback producers draw block ids from one counter. They used
@@ -4720,6 +4707,7 @@ mod tests {
             created: 0,
             name: None,
             totals: agent::Totals::default(),
+            tally: Default::default(),
             context: Vec::new(),
             standing: std::sync::Arc::from(""),
             ctx: tools::Ctx::new(ws),
@@ -4746,7 +4734,7 @@ mod tests {
         let core = Repl {
             store: Store::new(dir.join("state")),
             keys: keys.clone(),
-            config: std::sync::Arc::new(crate::config::Config::default()),
+            config: std::sync::Arc::new(crate::store::config::Config::default()),
             args: std::sync::Arc::new(<crate::Args as clap::Parser>::parse_from(["pi"])),
             commands: std::sync::Arc::new(Vec::new()),
             file: toml::Value::Table(Default::default()),
@@ -4773,7 +4761,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a checkout");
         let mut tui = surface(dir.path());
         let rows = vec![row("model", "flash", false)];
-        tui.ui.panel = Some(Panel::new(rows, &crate::config::Vim::default()));
+        tui.ui.panel = Some(Panel::new(rows, &crate::store::config::Vim::default()));
         let lane = tui.core.lane_mut();
         let intent = tui.ui.key(lane, typed('z'), false);
         assert!(matches!(intent, Intent::None));
@@ -4991,13 +4979,9 @@ mod tests {
         session.prompt("the task the user actually asked for");
 
         tui.core.lanes[0]
-            .view
-            .state
             .tally
             .on(&agent::Event::TurnStart { turn: 1 });
         tui.core.lanes[0]
-            .view
-            .state
             .tally
             .on(&agent::Event::Usage(brain::stream::Usage {
                 input: 100,
@@ -5076,7 +5060,7 @@ mod tests {
     }
     // The Normal `L` walks the checkouts in a ring forward; `H` walks it
     // back. Every checkout on disk is in it, not only the open ones
-    // — the main one first, because that is the order `worktree::list`
+    // — the main one first, because that is the order `run::worktree::list`
     // reports and a lane in it carries no name.
     #[test]
     fn stepping_the_checkouts_walks_the_ring_and_wraps_both_ways() {
@@ -5390,7 +5374,10 @@ mod tests {
 
         // A panel is modal — `/settings` opens one while a run is in flight —
         // and `esc` there is about the panel, the way it is about the list.
-        ui.panel = Some(Panel::new(Vec::new(), &crate::config::Vim::default()));
+        ui.panel = Some(Panel::new(
+            Vec::new(),
+            &crate::store::config::Vim::default(),
+        ));
         let intent = ui.key(&mut lane, esc(), true);
         assert!(matches!(intent, Intent::None), "{intent:?}");
         assert!(
@@ -5478,7 +5465,7 @@ mod tests {
 
     fn vim_ui() -> super::Ui {
         let mut ui = test_ui(80, 24);
-        ui.set_vim(&crate::config::Vim {
+        ui.set_vim(&crate::store::config::Vim {
             enabled: true,
             ..Default::default()
         });
@@ -5781,13 +5768,13 @@ mod tests {
         let mut ui = vim_ui();
         ui.vim.as_mut().unwrap().mode = Mode::Normal;
 
-        ui.set_vim(&crate::config::Vim {
+        ui.set_vim(&crate::store::config::Vim {
             enabled: false,
             ..Default::default()
         });
         assert!(ui.vim.is_none());
 
-        ui.set_vim(&crate::config::Vim {
+        ui.set_vim(&crate::store::config::Vim {
             enabled: true,
             ..Default::default()
         });
@@ -5796,7 +5783,7 @@ mod tests {
 
     fn test_ui(width: u16, height: u16) -> super::Ui {
         super::Ui::new(
-            crate::tui::screen::Screen::test(width, height),
+            crate::ui::tui::screen::Screen::test(width, height),
             std::sync::Arc::new(Keys::default()),
             Vec::new(),
             std::sync::Arc::new(Vec::new()),

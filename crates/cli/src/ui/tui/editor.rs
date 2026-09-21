@@ -3,7 +3,7 @@
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthChar;
 
-use crate::render::Paint;
+use crate::ui::render::Paint;
 
 #[derive(Default)]
 pub struct Editor {
@@ -463,8 +463,8 @@ mod tests {
     fn typed(s: &str) -> Editor {
         let mut e = Editor::default();
         e.set_prompts(
-            Span::from(format!("{} ", crate::icons::INPUT_SIGIL)),
-            Span::from(format!("{} ", crate::icons::BANG_SIGIL)),
+            Span::from(format!("{} ", crate::ui::icons::INPUT_SIGIL)),
+            Span::from(format!("{} ", crate::ui::icons::BANG_SIGIL)),
         );
         e.insert_str(s);
         e

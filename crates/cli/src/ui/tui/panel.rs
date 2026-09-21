@@ -14,10 +14,10 @@ use std::time::{Duration, Instant};
 use super::Paint;
 use super::editor::Editor;
 use super::screen;
-use crate::icons;
-use crate::keys::Action;
-use crate::repl::{Intent, mask_secret};
-use crate::settings::SettingRow;
+use crate::run::{Intent, mask_secret};
+use crate::store::settings::SettingRow;
+use crate::ui::icons;
+use crate::ui::keys::Action;
 
 /// The rows a panel shows: every path the config has, the value in force for
 /// the session, and whether the file still holds another one.
@@ -49,7 +49,7 @@ pub enum Took {
 }
 
 impl Panel {
-    pub fn new(rows: Vec<SettingRow>, vim: &crate::config::Vim) -> Self {
+    pub fn new(rows: Vec<SettingRow>, vim: &crate::store::config::Vim) -> Self {
         Self {
             rows,
             at: 0,
@@ -318,7 +318,7 @@ impl Panel {
                 // the line: its width is measured from it, never assumed, and
                 // the caret's byte offset rides after the value's own.
                 let lead_bytes = icons::MENU_SIGIL.len() + 1 + row.path.len() + 3;
-                let lead_w = crate::render::visible_width(&line[..lead_bytes]);
+                let lead_w = crate::ui::render::visible_width(&line[..lead_bytes]);
                 let caret_at = lead_bytes + editor.cursor();
                 let (lines, in_row, col) = wrap_edit(&line, lead_w, caret_at, width);
                 out.extend(
@@ -419,9 +419,9 @@ fn wrap_edit(line: &str, lead_w: usize, caret: usize, width: usize) -> (Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::{Paint, Panel, Took};
-    use crate::keys::Action;
-    use crate::repl::Intent;
-    use crate::settings::{SettingRow, row};
+    use crate::run::Intent;
+    use crate::store::settings::{SettingRow, row};
+    use crate::ui::keys::Action;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn act(panel: &mut Panel, action: Action) -> Took {
@@ -453,8 +453,8 @@ mod tests {
     }
 
     // The default vim settings: escape `jk`, the window the config ships with.
-    fn vim() -> crate::config::Vim {
-        <crate::config::Vim as Default>::default()
+    fn vim() -> crate::store::config::Vim {
+        <crate::store::config::Vim as Default>::default()
     }
 
     fn settings() -> Vec<SettingRow> {
@@ -496,7 +496,7 @@ mod tests {
         // `hl` as the pair: an `h` while browsing arms nothing, so `i` opens
         // the edit with the value whole and `l` lands as a letter — not as
         // the close that eats the value's last character and submits.
-        let vim = crate::config::Vim {
+        let vim = crate::store::config::Vim {
             escape: "hl".into(),
             ..vim()
         };
@@ -688,7 +688,7 @@ mod tests {
         assert_eq!(r, 0);
         assert_eq!(
             col as usize,
-            crate::render::visible_width("› 模型.name = http://x中"),
+            crate::ui::render::visible_width("› 模型.name = http://x中"),
             "one column past the value, however wide the path"
         );
     }

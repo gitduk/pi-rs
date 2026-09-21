@@ -1,3 +1,9 @@
+pub mod lane;
+pub mod meter;
+pub mod subagent;
+pub mod wechat;
+pub mod worktree;
+
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
@@ -8,11 +14,12 @@ use tools::{Tool, ToolError};
 
 use serde::Deserialize;
 
-use crate::config::Config;
-use crate::icons;
-use crate::journal;
-use crate::lane::Lane;
-use crate::session::{ResumeChoice, Store, Stored};
+use crate::run::lane::Lane;
+use crate::run::meter::Tally;
+use crate::store::config::Config;
+use crate::store::journal;
+use crate::store::session::{ResumeChoice, Store, Stored};
+use crate::ui::icons;
 
 /// Where a command came from, and so what running it means.
 #[derive(Clone)]
@@ -128,7 +135,7 @@ fn gist(description: &str) -> String {
     let first = description
         .split_once(". ")
         .map_or(description, |(head, _)| head);
-    crate::render::clip(first.trim().trim_end_matches('.'), GIST)
+    crate::ui::render::clip(first.trim().trim_end_matches('.'), GIST)
 }
 
 /// What a slash answers to: the built-ins, then one command per skill.
@@ -302,7 +309,7 @@ pub fn complete<'a>(
                 !s.prompt.is_empty() && (s.prompt.starts_with(typed) || s.id.starts_with(typed))
             })
             .map(|s| Candidate {
-                show: crate::render::clip(&s.prompt, RESUME_WIDTH),
+                show: crate::ui::render::clip(&s.prompt, RESUME_WIDTH),
                 line: format!("/resume {}", s.id),
                 help: ago(s.created),
                 more: false,
@@ -322,10 +329,10 @@ const RESUME_WIDTH: usize = 60;
 pub struct Repl {
     pub store: Store,
     /// Held so `/keys` can show what is actually in force, overrides included.
-    pub keys: std::sync::Arc<crate::keys::Keys>,
+    pub keys: std::sync::Arc<crate::ui::keys::Keys>,
     /// The config in force, as opposed to the one on disk. `/model` picks from
     /// this, so a switch cannot quietly apply an edit `/reload` has not.
-    pub config: std::sync::Arc<crate::config::Config>,
+    pub config: std::sync::Arc<crate::store::config::Config>,
     /// The command line, kept because it outranks the config and so has to be
     /// re-applied over every reload.
     pub args: std::sync::Arc<crate::Args>,
@@ -381,7 +388,7 @@ impl Repl {
         root: std::path::PathBuf,
         model: String,
     ) -> std::sync::Arc<dyn agent::task::Home> {
-        crate::subagent::Filed::armed(self.store.clone(), root, model)
+        crate::run::subagent::Filed::armed(self.store.clone(), root, model)
     }
 
     pub fn lane_mut(&mut self) -> &mut Lane {
@@ -404,7 +411,7 @@ impl Repl {
     /// replaced.
     pub fn reload(&mut self) -> Vec<String> {
         // Re-read the file tree; the claimed overrides stay.
-        let tree = match crate::config::load_tree(self.args.config.as_deref()) {
+        let tree = match crate::store::config::load_tree(self.args.config.as_deref()) {
             Ok(t) => t,
             Err(e) => return vec![format!("nothing reloaded — {}", refused("reload", e))],
         };
@@ -412,7 +419,7 @@ impl Repl {
         let mut said = self.rebuild();
         // Name any claim that still shadows a line the file just changed.
         for path in self.claimed.keys() {
-            if let Ok(old) = crate::settings::get(&self.file, path)
+            if let Ok(old) = crate::store::settings::get(&self.file, path)
                 && old != &self.claimed[path]
             {
                 said.push(format!(
@@ -430,7 +437,7 @@ impl Repl {
     fn adopt(&mut self, config: Config) -> Result<Vec<String>, String> {
         let root = self.lane().ctx.workspace.root().to_path_buf();
         let failed = |e| Err(format!("nothing reloaded — {}", refused("reload", e)));
-        let project = match crate::config::load_project(&root) {
+        let project = match crate::store::config::load_project(&root) {
             Ok(p) => p,
             Err(e) => return failed(e),
         };
@@ -483,7 +490,7 @@ impl Repl {
             &self.args,
             &self.config,
             &self.lane().agent.spec.model,
-            crate::config::Origin::Command,
+            crate::store::config::Origin::Command,
         ) {
             Ok(dialled) if dialled.spec != self.lane().agent.spec => {
                 self.retarget(dialled.transport, dialled.spec);
@@ -528,7 +535,7 @@ impl Repl {
     fn effective(&self) -> Result<toml::Value, anyhow::Error> {
         let mut tree = self.file.clone();
         for (path, value) in &self.claimed {
-            crate::settings::put(&mut tree, path, value.clone())?;
+            crate::store::settings::put(&mut tree, path, value.clone())?;
         }
         Ok(tree)
     }
@@ -538,17 +545,18 @@ impl Repl {
     // overlaid tree, so a claim the file can no longer address (an ancestor
     // the file has turned into a non-table) still answers, with the file's
     // own value beside it for the mark.
-    pub fn setting_rows(&self) -> Vec<crate::settings::SettingRow> {
-        let mut rows: BTreeMap<String, String> =
-            crate::settings::leaves(&self.file).into_iter().collect();
+    pub fn setting_rows(&self) -> Vec<crate::store::settings::SettingRow> {
+        let mut rows: BTreeMap<String, String> = crate::store::settings::leaves(&self.file)
+            .into_iter()
+            .collect();
         for (path, claimed) in &self.claimed {
-            rows.insert(path.clone(), crate::settings::render(claimed));
+            rows.insert(path.clone(), crate::store::settings::render(claimed));
         }
         rows.into_iter()
             .map(|(path, value)| {
                 let claimed = self.claimed.get(&path);
-                let file = crate::settings::get(&self.file, &path).ok();
-                crate::settings::SettingRow {
+                let file = crate::store::settings::get(&self.file, &path).ok();
+                crate::store::settings::SettingRow {
                     path,
                     value,
                     changed: claimed.is_some() && claimed != file,
@@ -560,7 +568,7 @@ impl Repl {
     // The same, saying why when nothing could be adopted.
     fn rebuilt(&mut self) -> Result<Vec<String>, String> {
         let tree = self.effective().map_err(|e| refused("settings", e))?;
-        let mut config = match crate::config::Config::deserialize(tree) {
+        let mut config = match crate::store::config::Config::deserialize(tree) {
             Ok(c) => c,
             Err(e) => return Err(refused("settings", anyhow::anyhow!(e))),
         };
@@ -578,25 +586,25 @@ impl Repl {
             Ok(t) => t,
             Err(e) => return Err(refused("settings", e)),
         };
-        let old = crate::settings::get(&scratch, path).ok().cloned();
-        if let Err(e) = crate::settings::set(&mut scratch, path, &raw) {
+        let old = crate::store::settings::get(&scratch, path).ok().cloned();
+        if let Err(e) = crate::store::settings::set(&mut scratch, path, &raw) {
             return Err(refused("settings", e));
         }
-        let new = crate::settings::get(&scratch, path).unwrap().clone();
+        let new = crate::store::settings::get(&scratch, path).unwrap().clone();
         // Validate by deserializing the scratch tree, so a bad value never
         // reaches the running config.
-        if let Err(e) = crate::config::Config::deserialize(scratch) {
+        if let Err(e) = crate::store::config::Config::deserialize(scratch) {
             return Err(refused("settings", anyhow::anyhow!(e)));
         }
         self.claimed.insert(path.to_string(), new);
         let mut said = self.rebuild();
         let old_shown = match &old {
-            Some(v) => mask_secret(path, &crate::settings::render(v)),
+            Some(v) => mask_secret(path, &crate::store::settings::render(v)),
             None => "<unset>".to_string(),
         };
         said.push(format!(
             "{path}: {old_shown} → {} (session only)",
-            mask_secret(path, &crate::settings::render(&self.claimed[path]))
+            mask_secret(path, &crate::store::settings::render(&self.claimed[path]))
         ));
         Ok(said)
     }
@@ -622,7 +630,7 @@ impl Repl {
             return Ok(vec![format!("{path}: the session and the file agree")]);
         }
         let tree = self.effective().map_err(|e| format!("{e:#}"))?;
-        let value = crate::settings::get(&tree, path)
+        let value = crate::store::settings::get(&tree, path)
             .map_err(|e| format!("{e:#}"))?
             .clone();
         let file = self
@@ -630,16 +638,16 @@ impl Repl {
             .config
             .as_deref()
             .map(std::path::PathBuf::from)
-            .or_else(crate::config::global_path)
+            .or_else(crate::store::config::global_path)
             .ok_or_else(|| "no settings file to write".to_string())?;
-        crate::config::write(&file, path, value.clone()).map_err(|e| format!("{e:#}"))?;
+        crate::store::config::write(&file, path, value.clone()).map_err(|e| format!("{e:#}"))?;
         self.claimed.remove(path);
-        self.file =
-            crate::config::load_tree(self.args.config.as_deref()).map_err(|e| format!("{e:#}"))?;
+        self.file = crate::store::config::load_tree(self.args.config.as_deref())
+            .map_err(|e| format!("{e:#}"))?;
         let mut said = self.rebuild();
         said.push(format!(
             "{path} = {} — written to the file",
-            mask_secret(path, &crate::settings::render(&value))
+            mask_secret(path, &crate::store::settings::render(&value))
         ));
         Ok(said)
     }
@@ -674,7 +682,7 @@ impl Repl {
             &self.args,
             &self.config,
             name,
-            crate::config::Origin::Command,
+            crate::store::config::Origin::Command,
         ) {
             Ok(d) => d,
             Err(e) => {
@@ -1089,7 +1097,7 @@ fn refused(what: &str, e: anyhow::Error) -> String {
 
 fn typed<'a>(path: &str, raw: &'a str) -> Cow<'a, str> {
     match path {
-        "base_url" => Cow::Owned(crate::config::expand_base_url(raw)),
+        "base_url" => Cow::Owned(crate::store::config::expand_base_url(raw)),
         _ => Cow::Borrowed(raw),
     }
 }
@@ -1305,7 +1313,7 @@ impl Repl {
             out.push("context:".into());
             out.extend(lane.context.iter().map(|c| format!("- {c}")));
         }
-        out.push(match crate::journal::path() {
+        out.push(match journal::path() {
             Some(p) => format!("journal: {}", p.display()),
             None => "journal: not recording — PI_LOG is off, or it would not open".into(),
         });
@@ -1317,9 +1325,9 @@ impl Repl {
         ));
         // Left out until something has been spent: a session nothing has been
         // asked of yet has no figure, and a row of dashes is not one.
-        let spent = lane.view.session_spend();
+        let spent = lane.tally.session();
         if spent != Totals::default() {
-            out.push(format!("spent: {}", crate::render::spent(&spent)));
+            out.push(format!("spent: {}", crate::ui::render::spent(&spent)));
         }
         out
     }
@@ -1473,9 +1481,9 @@ impl Repl {
         for row in self.setting_rows() {
             let mut line = format!("{} = {}", row.path, mask_secret(&row.path, &row.value));
             if row.changed {
-                line.push_str(&format!(" {}", crate::icons::CHANGED_MARK));
-                if let Ok(file) = crate::settings::get(&self.file, &row.path) {
-                    let file = mask_secret(&row.path, &crate::settings::render(file));
+                line.push_str(&format!(" {}", icons::CHANGED_MARK));
+                if let Ok(file) = crate::store::settings::get(&self.file, &row.path) {
+                    let file = mask_secret(&row.path, &crate::store::settings::render(file));
                     line.push_str(&format!(" file: {file}"));
                 }
             }
@@ -1497,16 +1505,15 @@ impl Repl {
     fn becomes(&mut self, id: String, created: u64) {
         self.lane_mut().id = id;
         self.lane_mut().created = created;
-        // What `/status` reports is read off the view's tally, seeded from the
-        // lane's totals; a new session starts both at nothing rather than the
-        // one just left.
+        // What `/status` reports is the lane's tally over its settled totals;
+        // a new session starts both at nothing rather than the one just left.
         self.lane_mut().totals = Totals::default();
-        self.lane_mut().view.clear_tally();
+        self.lane_mut().tally = Tally::default();
         let id = self.lane().id.clone();
         let path = self
             .store
             .journal_path(self.lane().ctx.workspace.root(), &id);
-        crate::journal::switched(&path, &id);
+        journal::switched(&path, &id);
         // Spills are filed under the session id; a session has to own its own
         // namespace or the one before it keeps swallowing them.
         self.lane_mut().ctx = self
@@ -1527,7 +1534,10 @@ impl Repl {
         // A name identifies one session; carried over it would name two, which
         // is what `/name` exists to prevent.
         self.lane_mut().name = None;
-        self.becomes(crate::session::new_id(), crate::session::now());
+        self.becomes(
+            crate::store::session::new_id(),
+            crate::store::session::now(),
+        );
     }
 
     // Take a stored transcript as the running one — entries, name and id.
@@ -1557,7 +1567,7 @@ impl Repl {
     // said in that tree, not an empty page.
     fn enter_worktree(&mut self, name: &str) -> Result<Step, String> {
         let from = self.lane_mut().ctx.workspace.root().to_path_buf();
-        let tree = crate::worktree::enter(&from, name).map_err(|e| refused("worktree", e))?;
+        let tree = crate::run::worktree::enter(&from, name).map_err(|e| refused("worktree", e))?;
         // Built before the comparison: both sides are then canonical, and a
         // path git and the workspace spell differently is still one directory.
         let ws = tools::Workspace::new(&tree.path)
@@ -1594,7 +1604,7 @@ impl Repl {
     // passed on rather than forced past.
     fn remove_worktree(&mut self, name: &str) -> Result<Step, String> {
         let from = self.lane().ctx.workspace.root().to_path_buf();
-        if let Some(target) = crate::worktree::list(&from)
+        if let Some(target) = crate::run::worktree::list(&from)
             .ok()
             .and_then(|trees| trees.into_iter().find(|t| !t.main && t.name == name))
         {
@@ -1609,7 +1619,8 @@ impl Repl {
                 ));
             }
         }
-        let removed = crate::worktree::remove(&from, name).map_err(|e| refused("worktree", e))?;
+        let removed =
+            crate::run::worktree::remove(&from, name).map_err(|e| refused("worktree", e))?;
         for i in (0..self.lanes.len()).rev() {
             if i != self.current
                 && self.lanes[i]
@@ -1649,7 +1660,7 @@ impl Repl {
     ) -> Result<Vec<String>, String> {
         let root = ws.root().to_path_buf();
         let failed = |e| format!("nothing opened — {}", refused("worktree", e));
-        let project = crate::config::load_project(&root).map_err(failed)?;
+        let project = crate::store::config::load_project(&root).map_err(failed)?;
         let mut resolved = crate::resolve(&self.args, &ws, &self.config, &project, &self.claimed)
             .map_err(failed)?;
 
@@ -1672,13 +1683,14 @@ impl Repl {
         // Built, not cloned from the lane being left: a `Ctx`'s tables key on
         // absolute paths in one tree, and none of that lane's describe this.
         self.lanes.push(Lane {
-            token: crate::lane::next_token(),
+            token: crate::run::lane::next_token(),
             agent: std::sync::Arc::new(ag),
             session: Some(Session::default()),
             id: String::new(),
             created: 0,
             name: None,
             totals: Totals::default(),
+            tally: Tally::default(),
 
             context: resolved.context,
             standing: resolved.standing,
@@ -1691,7 +1703,7 @@ impl Repl {
             pending: Vec::new(),
             looping: None,
             pending_round: None,
-            turn: crate::lane::Turn::Idle,
+            turn: crate::run::lane::Turn::Idle,
             view: Default::default(),
         });
         self.current = self.lanes.len() - 1;
@@ -1716,13 +1728,13 @@ impl Repl {
     // one the session is in marked.
     fn worktree_listing(&self) -> Vec<String> {
         let here = self.lane().ctx.workspace.root();
-        let trees = match crate::worktree::list(here) {
+        let trees = match crate::run::worktree::list(here) {
             Ok(t) => t,
             Err(e) => return vec![refused("worktree", e)],
         };
         // By containment rather than equality: a run started in a subdirectory
         // is still in that checkout, and it is the one to mark.
-        let at = crate::worktree::holding(&trees, here).map(|t| t.path.clone());
+        let at = crate::run::worktree::holding(&trees, here).map(|t| t.path.clone());
         let width = trees
             .iter()
             .map(|t| unicode_width::UnicodeWidthStr::width(t.name.as_str()))
@@ -1737,12 +1749,12 @@ impl Repl {
                     " "
                 };
                 let on = t.branch.as_deref().unwrap_or("detached HEAD");
-                format!("{mark} {}  {on}", crate::render::pad(&t.name, width))
+                format!("{mark} {}  {on}", crate::ui::render::pad(&t.name, width))
             })
             .collect();
         out.push(format!(
             "/worktree <name> works in one, creating it under {}/ if it is not there",
-            crate::worktree::DIR
+            crate::run::worktree::DIR
         ));
         out.push("/worktree rm <name> removes one — its checkout, sessions and branch".into());
         out
@@ -1766,7 +1778,7 @@ impl Repl {
                 let text = if s.prompt.is_empty() {
                     "(no question)".into()
                 } else {
-                    crate::render::clip(&s.prompt, RESUME_WIDTH)
+                    crate::ui::render::clip(&s.prompt, RESUME_WIDTH)
                 };
                 (s.id == self.lane().id, text, s.created)
             })
@@ -1782,7 +1794,7 @@ impl Repl {
                 format!(
                     "{} {}  {:>10}",
                     if *mark { icons::CURRENT_ITEM } else { " " },
-                    crate::render::pad(text, width),
+                    crate::ui::render::pad(text, width),
                     ago(*created)
                 )
             })
@@ -1932,7 +1944,7 @@ mod tests {
     #[test]
     fn a_line_asks_for_the_lists_only_when_it_completes_against_one() {
         let asked = std::cell::RefCell::new(Vec::new());
-        let sessions = || -> &[crate::session::ResumeChoice] {
+        let sessions = || -> &[crate::store::session::ResumeChoice] {
             asked.borrow_mut().push("sessions");
             &[]
         };
@@ -1956,7 +1968,7 @@ mod tests {
         assert_eq!(line("/worktree rm "), "worktrees");
 
         // And what the call asks for is what it completes against.
-        let one = [crate::session::ResumeChoice {
+        let one = [crate::store::session::ResumeChoice {
             id: "s1".into(),
             prompt: "fix the flaky test".into(),
             created: 0,
@@ -1981,11 +1993,13 @@ mod tests {
 
     // A Repl whose file tree is the given TOML, enough for the `/settings`
     // surface to answer.
-    fn core_with_file(file: &str) -> crate::repl::Repl {
-        crate::repl::Repl {
-            store: crate::session::Store::new(std::env::temp_dir().join("pi-settings-get-test")),
-            keys: std::sync::Arc::new(crate::keys::Keys::default()),
-            config: std::sync::Arc::new(crate::config::Config::default()),
+    fn core_with_file(file: &str) -> crate::run::Repl {
+        crate::run::Repl {
+            store: crate::store::session::Store::new(
+                std::env::temp_dir().join("pi-settings-get-test"),
+            ),
+            keys: std::sync::Arc::new(crate::ui::keys::Keys::default()),
+            config: std::sync::Arc::new(crate::store::config::Config::default()),
             args: std::sync::Arc::new(<crate::Args as clap::Parser>::parse_from(["pi"])),
             commands: std::sync::Arc::new(Vec::new()),
             file: toml::from_str(file).unwrap(),
@@ -1995,7 +2009,7 @@ mod tests {
         }
     }
 
-    fn claimed_base_url() -> crate::repl::Repl {
+    fn claimed_base_url() -> crate::run::Repl {
         let mut core = core_with_file(r#"base_url = "http://127.0.0.1:7896""#);
         core.claimed.insert(
             "base_url".to_string(),
@@ -2212,12 +2226,12 @@ mod tests {
     }
 
     // One lane that has spent nothing, enough for `/settings` to answer.
-    fn a_lane(name: &str) -> crate::lane::Lane {
+    fn a_lane(name: &str) -> crate::run::lane::Lane {
         let dir = std::env::temp_dir();
         let ws = tools::Workspace::new(&dir).expect("a workspace");
-        let (events, inbox) = crate::lane::Lane::channel();
-        crate::lane::Lane {
-            token: crate::lane::next_token(),
+        let (events, inbox) = crate::run::lane::Lane::channel();
+        crate::run::lane::Lane {
+            token: crate::run::lane::next_token(),
             agent: std::sync::Arc::new(agent::Agent::new(
                 std::sync::Arc::new(Recording::default()),
                 test_spec("m"),
@@ -2227,6 +2241,7 @@ mod tests {
             created: 0,
             name: Some(name.to_string()),
             totals: agent::Totals::default(),
+            tally: Default::default(),
             context: Vec::new(),
             standing: std::sync::Arc::from(""),
             ctx: tools::Ctx::new(ws),
@@ -2236,9 +2251,9 @@ mod tests {
             pending: Vec::new(),
             looping: None,
             pending_round: None,
-            turn: crate::lane::Turn::Idle,
+            turn: crate::run::lane::Turn::Idle,
             view: Default::default(),
-            keys: std::sync::Arc::new(crate::keys::Keys::default()),
+            keys: std::sync::Arc::new(crate::ui::keys::Keys::default()),
             commands: std::sync::Arc::new(Vec::new()),
         }
     }
@@ -2295,24 +2310,24 @@ mod tests {
         root: &std::path::Path,
         transport: std::sync::Arc<Recording>,
         model: &str,
-    ) -> crate::repl::Repl {
+    ) -> crate::run::Repl {
         let ws = tools::Workspace::new(root).unwrap();
         let mut agent = agent::Agent::new(transport, test_spec(model));
-        let store = crate::session::Store::new(root.join("state"));
+        let store = crate::store::session::Store::new(root.join("state"));
         agent.hang(
-            crate::subagent::Filed::armed(
-                crate::session::Store::new(root.join("state")),
+            crate::run::subagent::Filed::armed(
+                crate::store::session::Store::new(root.join("state")),
                 root.to_path_buf(),
                 model.into(),
             ),
             "standing",
         );
 
-        let keys = std::sync::Arc::new(crate::keys::Keys::default());
-        let commands = std::sync::Arc::new(Vec::<crate::repl::Command>::new());
-        let (events, inbox) = crate::lane::Lane::channel();
-        let lane = crate::lane::Lane {
-            token: crate::lane::next_token(),
+        let keys = std::sync::Arc::new(crate::ui::keys::Keys::default());
+        let commands = std::sync::Arc::new(Vec::<crate::run::Command>::new());
+        let (events, inbox) = crate::run::lane::Lane::channel();
+        let lane = crate::run::lane::Lane {
+            token: crate::run::lane::next_token(),
             agent: std::sync::Arc::new(agent),
             session: Some(agent::session::Session::default()),
             id: "s1".into(),
@@ -2321,6 +2336,7 @@ mod tests {
             context: Vec::new(),
             standing: std::sync::Arc::from("standing"),
             totals: agent::Totals::default(),
+            tally: Default::default(),
             ctx: tools::Ctx::new(ws),
             worktree: None,
             events,
@@ -2328,15 +2344,15 @@ mod tests {
             pending: Vec::new(),
             looping: None,
             pending_round: None,
-            turn: crate::lane::Turn::Idle,
+            turn: crate::run::lane::Turn::Idle,
             view: Default::default(),
             keys: keys.clone(),
             commands: commands.clone(),
         };
-        crate::repl::Repl {
+        crate::run::Repl {
             store,
             keys,
-            config: std::sync::Arc::new(crate::config::Config::default()),
+            config: std::sync::Arc::new(crate::store::config::Config::default()),
             args: std::sync::Arc::new(<crate::Args as clap::Parser>::parse_from(["pi"])),
             commands,
             file: toml::Value::Table(Default::default()),
@@ -2347,7 +2363,7 @@ mod tests {
     }
 
     // What the child asked for, once.
-    async fn run_the_child(core: &crate::repl::Repl) {
+    async fn run_the_child(core: &crate::run::Repl) {
         let task = core
             .lane()
             .agent
@@ -2396,7 +2412,7 @@ mod tests {
 
     #[test]
     fn remove_worktree_closes_idle_lane_in_same_run() {
-        let dir = crate::worktree::test_repo();
+        let dir = crate::run::worktree::test_repo();
         let transport = std::sync::Arc::new(Recording::default());
         let mut core = a_repl(dir.path(), transport, "model-a");
 
@@ -2416,7 +2432,7 @@ mod tests {
 
     #[test]
     fn remove_worktree_updates_current_index_when_earlier_lane_is_closed() {
-        let dir = crate::worktree::test_repo();
+        let dir = crate::run::worktree::test_repo();
         let transport = std::sync::Arc::new(Recording::default());
         let mut core = a_repl(dir.path(), transport, "model-a");
 
@@ -2434,14 +2450,14 @@ mod tests {
 
     #[test]
     fn remove_worktree_refuses_when_another_lane_is_running() {
-        let dir = crate::worktree::test_repo();
+        let dir = crate::run::worktree::test_repo();
         let transport = std::sync::Arc::new(Recording::default());
         let mut core = a_repl(dir.path(), transport, "model-a");
 
         core.enter_worktree("fix-tools").unwrap();
         assert_eq!(core.lanes.len(), 2);
 
-        core.lanes[1].turn = crate::lane::Turn::Running {
+        core.lanes[1].turn = crate::run::lane::Turn::Running {
             cancel: tokio_util::sync::CancellationToken::new(),
             steer: None,
             unsend: false,

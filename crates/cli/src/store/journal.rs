@@ -632,10 +632,10 @@ pub fn install(path: &Path, level: LogLevel) {
 pub fn opening(
     id: &str,
     args: &crate::Args,
-    config: &crate::config::Config,
-    project: &crate::config::Project,
+    config: &crate::store::config::Config,
+    project: &crate::store::config::Project,
     root: &Path,
-    prior: Option<&crate::session::Stored>,
+    prior: Option<&crate::store::session::Stored>,
 ) {
     tracing::info!(
         target: "pi::session",
@@ -659,8 +659,8 @@ pub fn opening(
         // Written out rather than debug-printed: the point is to compare it
         // against what the user meant to write, not against the enum.
         let keys = match binds {
-            crate::config::Binds::One(k) => k.clone(),
-            crate::config::Binds::Many(k) => k.join(", "),
+            crate::store::config::Binds::One(k) => k.clone(),
+            crate::store::config::Binds::Many(k) => k.join(", "),
         };
         tracing::debug!(target: "pi::keys", action, keys, "rebound");
     }
@@ -710,7 +710,7 @@ mod tests {
         let Value::String(s) = clip(&long, 33) else {
             panic!("a string clips to a string")
         };
-        assert!(s.contains(&format!("{}+", crate::icons::ELLIPSIS)));
+        assert!(s.contains(&format!("{}+", crate::ui::icons::ELLIPSIS)));
         // Would have panicked on construction if the cut split the é.
         assert!(s.starts_with("élan"));
         assert_eq!(clip("short", 33), Value::String("short".into()));
@@ -855,7 +855,7 @@ mod tests {
             at_info[0]["patch"]
                 .as_str()
                 .unwrap()
-                .contains(&format!("{}+", crate::icons::ELLIPSIS))
+                .contains(&format!("{}+", crate::ui::icons::ELLIPSIS))
         );
         assert_eq!(at_debug[0]["patch"].as_str().unwrap().len(), 4_000);
     }
