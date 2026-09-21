@@ -1025,7 +1025,7 @@ impl Intent {
     /// the session is away for the length of a run.
     pub fn fate(&self) -> Fate {
         match self {
-            // Answered from the config, the key map or the view's own tally
+            // Answered from the config, the key map or the lane's own tally
             // — none of which the run is holding.
             Intent::Help | Intent::Keys | Intent::Status | Intent::Name(_) => Fate::Now,
             Intent::Reload | Intent::Model(_) => Fate::Now,

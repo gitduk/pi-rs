@@ -229,9 +229,6 @@ pub struct Lane {
     /// What this lane's finished runs have cost, in and out and in money.
     /// Per lane, not per surface: with lanes working off-screen the surface
     /// that shows the bill has to be able to say which lane ran it up.
-    /// What this lane's finished runs have cost, in and out and in money.
-    /// Per lane, not per surface: with lanes working off-screen the surface
-    /// that shows the bill has to be able to say which lane ran it up.
     pub totals: Totals,
     /// What the run in flight has cost so far, as its events stated it. Seeded
     /// from `totals` when a run arms and cleared when a session begins; the

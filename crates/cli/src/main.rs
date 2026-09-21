@@ -9,6 +9,10 @@ use brain::transport::{Transport, anthropic::Anthropic, chat::ChatCompletions, o
 use clap::{Parser, ValueEnum};
 use tokio::sync::mpsc;
 
+use crate::run::{Command, Repl, commands, expand, lane, subagent, wechat, worktree};
+use crate::store::{config, journal, session};
+use crate::ui::{icons, keys, line, render, status, tui};
+
 mod context;
 mod input;
 mod run;
@@ -220,7 +224,7 @@ pub struct Dialled {
 // Every name resolves now — an unlisted one is passed through with default
 // numbers — so the only way this fails is a config with no endpoint to send
 // it to, and the useful half of that message is who asked.
-fn unknown(model: &str, named_by: crate::store::config::Origin) -> String {
+fn unknown(model: &str, named_by: config::Origin) -> String {
     format!(
         "`{model}`, named by {}, cannot be reached — see examples/pi.toml",
         named_by.describe()
@@ -235,15 +239,15 @@ fn unknown(model: &str, named_by: crate::store::config::Origin) -> String {
 /// already defaults to claiming nothing.
 pub fn dial(
     args: &Args,
-    config: &crate::store::config::Config,
+    config: &config::Config,
     model: &str,
-    named_by: crate::store::config::Origin,
+    named_by: config::Origin,
 ) -> Result<Dialled> {
     let mut spec = config
         .find(model)
         .with_context(|| unknown(model, named_by))?;
     if let Some(url) = &args.base_url {
-        spec.base_url = crate::store::config::expand_base_url(url);
+        spec.base_url = config::expand_base_url(url);
     }
     if let Some(window) = args.context {
         spec.context_window = window;
@@ -269,9 +273,9 @@ pub fn dial(
             args.config
                 .clone()
                 .map(std::path::PathBuf::from)
-                .or_else(crate::store::config::global_path)
+                .or_else(config::global_path)
         })
-        .and_then(|path| crate::store::config::warn_if_exposed(&path));
+        .and_then(|path| config::warn_if_exposed(&path));
     let transport = transport_for(&spec, key);
     Ok(Dialled {
         spec,
@@ -313,11 +317,11 @@ pub struct Resolved {
     pub effort: Effort,
     pub max_turns: Option<usize>,
     pub task_deadline: Option<std::time::Duration>,
-    pub keys: crate::ui::keys::Keys,
+    pub keys: keys::Keys,
     /// The built-ins plus one command per skill. Here rather than in the Repl
     /// because a skill discovered at reload has to reach the prompt the same
     /// way everything else the config decides does.
-    pub commands: Vec<crate::run::Command>,
+    pub commands: Vec<Command>,
     /// Worth saying once, at startup and at each reload.
     pub notes: Vec<String>,
     /// The instruction files folded into the system prompt, named as a person
@@ -331,8 +335,8 @@ pub struct Resolved {
 pub fn resolve(
     args: &Args,
     workspace: &tools::Workspace,
-    config: &crate::store::config::Config,
-    project: &crate::store::config::Project,
+    config: &config::Config,
+    project: &config::Project,
     claimed: &BTreeMap<String, toml::Value>,
 ) -> Result<Resolved> {
     let root = workspace.root();
@@ -355,7 +359,7 @@ pub fn resolve(
     };
     // Before the move: a skill is two things at once, a command the user can
     // type and a body the model can load, and both read the same list.
-    let commands = crate::run::commands(&skills, &mut notes);
+    let commands = commands(&skills, &mut notes);
     let tool = tools::skill::SkillTool::new(skills);
     if !tool.is_empty() {
         registry = registry.with(tool);
@@ -396,7 +400,7 @@ pub fn resolve(
 
     let settled = config.settle(
         &project.clone(),
-        crate::store::config::Flags {
+        config::Flags {
             effort: args.effort,
             tier: args.tier,
             max_turns: args.max_turns,
@@ -457,13 +461,13 @@ pub fn resolve(
 fn paint(
     mut rx: mpsc::UnboundedReceiver<agent::Event>,
     quiet: bool,
-    theme: std::sync::Arc<crate::ui::render::Theme>,
-    done: Vec<crate::ui::status::Segment>,
+    theme: std::sync::Arc<render::Theme>,
+    done: Vec<status::Segment>,
     model: String,
     worktree: Option<String>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut r = crate::ui::render::Renderer::new(quiet, theme, done, model, worktree);
+        let mut r = render::Renderer::new(quiet, theme, done, model, worktree);
         while let Some(event) = rx.recv().await {
             r.on(event);
         }
@@ -475,14 +479,14 @@ fn paint(
 async fn main() -> Result<()> {
     let args = std::sync::Arc::new(Args::parse());
     let prompt = read_prompt(&args)?;
-    let config = Arc::new(crate::store::config::load(args.config.as_deref())?);
+    let config = Arc::new(config::load(args.config.as_deref())?);
 
     let workspace = tools::Workspace::new(&args.cwd)
         .and_then(|ws| ws.with_write_roots(&config.write_roots))
         .with_context(|| format!("cannot use {} as a workspace", args.cwd))?;
-    let project = crate::store::config::load_project(workspace.root())?;
+    let project = config::load_project(workspace.root())?;
 
-    let store = crate::store::session::Store::default();
+    let store = session::Store::default();
     // Before anything reads the store: the first run after the bucket-key
     // change is the one that must still find what it wrote before it.
     store.migrate_legacy_buckets();
@@ -495,7 +499,7 @@ async fn main() -> Result<()> {
             // The journals live in the buckets now, so the two sweeps walk one
             // tree. Transcripts go by reach, journals by age — a run worth
             // reading back is a fortnight old at most, and the work is not.
-            crate::store::journal::prune(store.root());
+            journal::prune(store.root());
             store.prune();
         }
     });
@@ -510,12 +514,12 @@ async fn main() -> Result<()> {
     let id = prior
         .as_ref()
         .map(|p| p.id.clone())
-        .unwrap_or_else(crate::store::session::new_id);
-    crate::store::journal::install(
+        .unwrap_or_else(session::new_id);
+    journal::install(
         &store.journal_path(workspace.root(), &id),
-        crate::store::journal::level_from_env(),
+        journal::level_from_env(),
     );
-    crate::store::journal::opening(
+    journal::opening(
         &id,
         &args,
         &config,
@@ -547,7 +551,7 @@ async fn main() -> Result<()> {
     let root = workspace.root().to_path_buf();
     // Asked once: it shells out to git, and three startups of that was the
     // pause `Lists` exists to avoid.
-    let worktree = crate::run::worktree::current(&root);
+    let worktree = worktree::current(&root);
     let model_id = dialled.spec.model.clone();
 
     let mut ag = agent::Agent::new(dialled.transport, dialled.spec);
@@ -557,7 +561,7 @@ async fn main() -> Result<()> {
     if let Some(name) = &config.summarize_model
         && name != &model_id
     {
-        let summarizer = dial(&args, &config, name, crate::store::config::Origin::Global)
+        let summarizer = dial(&args, &config, name, config::Origin::Global)
             .with_context(|| format!("defaults.summarize_with = \"{name}\""))?;
         ag.summarizer = Some((summarizer.transport, summarizer.spec));
     }
@@ -575,7 +579,7 @@ async fn main() -> Result<()> {
         system: std::mem::take(&mut resolved.system),
         tier: resolved.tier,
         effort: resolved.effort,
-        home: crate::run::subagent::Filed::armed(store.clone(), root.clone(), model_id.clone()),
+        home: subagent::Filed::armed(store.clone(), root.clone(), model_id.clone()),
         standing: &resolved.standing,
         task_max_turns: resolved.max_turns,
         task_deadline: resolved.task_deadline,
@@ -595,7 +599,7 @@ async fn main() -> Result<()> {
     let created = prior
         .as_ref()
         .map(|p| p.created)
-        .unwrap_or_else(crate::store::session::now);
+        .unwrap_or_else(session::now);
     let carried = prior.map(|p| p.into_session()).unwrap_or_default();
     let resumed = carried.context().len();
 
@@ -606,19 +610,19 @@ async fn main() -> Result<()> {
         // to put its own key map and command table back, not the last one's.
         let commands = std::sync::Arc::new(resolved.commands);
         let ctx = tools::Ctx::new(workspace).with_session(&id);
-        let (events, inbox) = crate::run::lane::Lane::channel();
-        let core = crate::run::Repl {
+        let (events, inbox) = lane::Lane::channel();
+        let core = Repl {
             store,
             keys: key_map.clone(),
             config: config.clone(),
             args: args.clone(),
             commands: commands.clone(),
-            file: crate::store::config::load_tree(args.config.as_deref())
+            file: config::load_tree(args.config.as_deref())
                 .unwrap_or_else(|_| toml::Value::Table(Default::default())),
             claimed: BTreeMap::new(),
             current: 0,
-            lanes: vec![crate::run::lane::Lane {
-                token: crate::run::lane::next_token(),
+            lanes: vec![lane::Lane {
+                token: lane::next_token(),
                 agent: std::sync::Arc::new(ag),
                 session: Some(carried),
                 id,
@@ -635,7 +639,7 @@ async fn main() -> Result<()> {
                 pending: Vec::new(),
                 looping: None,
                 pending_round: None,
-                turn: crate::run::lane::Turn::Idle,
+                turn: lane::Turn::Idle,
                 tally: Default::default(),
                 keys: key_map.clone(),
                 commands,
@@ -645,12 +649,12 @@ async fn main() -> Result<()> {
         // side and the repaint goes out the other. Missing either, there is
         // nothing to hold still, and printing a line at a time is right.
         if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-            let out = crate::ui::tui::Tui::new(core, key_map, run::wechat::Bridge::new())?
+            let out = tui::Tui::new(core, key_map, wechat::Bridge::new())?
                 .run()
                 .await;
             // Subagents handed their transcripts to a background save; wait
             // for those to land before the runtime goes with them.
-            crate::run::subagent::flush().await;
+            subagent::flush().await;
             return out;
         }
         let painter = paint(
@@ -661,16 +665,16 @@ async fn main() -> Result<()> {
             model_id.clone(),
             worktree.clone(),
         );
-        let out = crate::ui::line::run(core, tx).await;
+        let out = line::run(core, tx).await;
         let _ = painter.await;
-        crate::run::subagent::flush().await;
+        subagent::flush().await;
         return out;
     };
 
     // A skill command is a prompt, so it means here what it means at the
     // terminal. The built-ins are not: they operate on a session, and a run
     // that answers once has none to operate on.
-    let prompt = match crate::run::expand(&resolved.commands, &prompt) {
+    let prompt = match expand(&resolved.commands, &prompt) {
         Some(Ok(instructions)) => instructions,
         Some(Err(why)) => bail!("{why}"),
         None => prompt,
@@ -705,7 +709,7 @@ async fn main() -> Result<()> {
         Ok(_) if !args.quiet => {
             let called = name.as_deref().map_or(String::new(), |n| format!(" “{n}”"));
             let carried = if resumed > 0 {
-                format!("{}resumed {resumed} messages", crate::ui::icons::PART_SEP)
+                format!("{}resumed {resumed} messages", icons::PART_SEP)
             } else {
                 String::new()
             };
@@ -719,7 +723,7 @@ async fn main() -> Result<()> {
 
     // Above both ways out below: one exits the process outright, and a stopped
     // run is the one whose subagents were cut short with a save in flight.
-    crate::run::subagent::flush().await;
+    subagent::flush().await;
 
     // A run the user stopped is not a failure of the run; scripts should be
     // able to tell the two apart.
@@ -729,7 +733,7 @@ async fn main() -> Result<()> {
 
     // Said only when there is something to diagnose. A successful run that
     // announced its journal would train everyone to stop reading the line.
-    if let (Err(e), Some(path)) = (&outcome, crate::store::journal::path()) {
+    if let (Err(e), Some(path)) = (&outcome, journal::path()) {
         tracing::error!(target: "pi::loop", error = %e, "run failed");
         eprintln!(
             "\x1b[{}mjournal: {}\x1b[0m",

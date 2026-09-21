@@ -41,9 +41,9 @@ pub struct Snapshot {
 
 /// What the events have said was spent, kept as they arrive.
 ///
-/// One per surface. It holds two figures over one set of events: the run in
-/// flight, which the lines draw, and the session it is part of, which
-/// `session` hands to `/status`.
+/// One per lane, and one per piped run. It holds two figures over one set of
+/// events: the run in flight, which the lines draw, and the session it is part
+/// of, which `session` hands to `/status`.
 #[derive(Debug, Default, Clone)]
 pub struct Tally {
     // What earlier runs of this session had spent when this one started.
