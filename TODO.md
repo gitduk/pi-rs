@@ -352,7 +352,7 @@ struct 名不必等于 wire name，这库里本来就不是：`ScriptTool::name(
 - 命令解析出核心：`read`/`expand`/skills 收进输入层，不在核心。
 - `Intent` 三分：命令意图 / 队列专用（`Submit`、`LoopRound`）/ UI 私有（`None`、`Interrupt`、`Rewind`、`Setting*`）。
 - 压缩这道接缝是**承重**的：它必须在请求前跑（transcript 装不下 = 整轮没了），默认实现只能是恒等（什么都不删），不能缺席。
-- TUI 与核心解耦：`View` 移出 `Lane`（切断 `lane.rs → tui` 的反向依赖）——**已做**（`View` 归界面，按 lane token 存）；`Lane` 裸字段收进只读 `snapshot()` 加核心方法——**未做**（`ui/tui/mod.rs` 仍有约 35 处直接读 `lane.worktree`/`lane.looping`/`lane.ctx`/`lane.turn`/`lane.tally` 等字段）。**不加 `Surface` trait**——核心对外的通道已经齐了（`Event` 出事实、`Step` 出决策、`Steer` 入一句话，`Transport`/`Compactor`/`Approver` 是运行中的接缝），而「开始一轮 / 停止 / 交终端」都是界面自己的决定：`Step::Prompt { send, typed }` 请界面开一轮，`Intent::Interrupt`/`Unsend`/`EditExternally` 根本到不了 `dispatch`。残留与三步见上面「TUI 解耦：残留与三步」（已定）。
+- TUI 与核心解耦：`View` 移出 `Lane`（切断 `lane.rs → tui` 的反向依赖）——**已做**（`View` 归界面，按 lane token 存）；`Lane` 裸字段收进只读 `snapshot()` 加核心方法——**已做**：`lane.rs` 上多了 `snapshot()`（读数一次读完）、一组只读访问器（`worktree`/`looping`/`run`/`session`/`root`/`token`/`model`…）与一组动作方法（`begin`/`stop`/`cancel`/`end`/`take_pending`/`arm_round`/`take_looping`/`take_session`/`return_session`/`note`/`charge`/`charge_run`…）；`ui/tui/mod.rs` 的**生产路径已零裸字段**（原来约 35 处），只剩 `#[cfg(test)]` 里 10 处夹具写入。**没做的**：字段仍是 `pub`——真正私有要 20 字段的构造函数，而本 crate 的边界机制本来就是 `pub(crate)`＋模块（见「分层目录」那条），不建议为此加构造函数。**不加 `Surface` trait**——核心对外的通道已经齐了（`Event` 出事实、`Step` 出决策、`Steer` 入一句话，`Transport`/`Compactor`/`Approver` 是运行中的接缝），而「开始一轮 / 停止 / 交终端」都是界面自己的决定：`Step::Prompt { send, typed }` 请界面开一轮，`Intent::Interrupt`/`Unsend`/`EditExternally` 根本到不了 `dispatch`。残留与三步见上面「TUI 解耦：残留与三步」（已定）。
 - 分层目录：见上面「目标目录结构」。`cli` 内部用**模块**不拆 crate：`input`/`run`/`store`/`ui` 是四个模块 + `pub(crate)` 划边界（拆 crate 不可逆，等边界真稳了再说）。
 
 ## 待定

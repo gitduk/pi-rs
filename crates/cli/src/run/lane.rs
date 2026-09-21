@@ -8,7 +8,9 @@ pub fn next_token() -> u64 {
     NEXT_TOKEN.fetch_add(1, Ordering::Relaxed)
 }
 
-use agent::session::Session;
+use std::path::Path;
+
+use agent::session::{EntryId, Session};
 use agent::{Agent, Event, Steer, Totals};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio_util::sync::CancellationToken;
@@ -16,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use tools::Ctx;
 
 use crate::run::looping::{Looping, Round};
-use crate::run::meter::Tally;
+use crate::run::meter::{Snapshot, Tally};
 
 /// Where this lane's run stands.
 ///
@@ -208,5 +210,217 @@ impl Lane {
             self.looping = Some(looping);
         }
         Some(out)
+    }
+
+    // ------------------------------------------------------- what a run does
+
+    /// A run has taken this lane. `steer` is the mailbox it hears at the next
+    /// turn boundary; a job that calls no model has none to hear from.
+    pub fn begin(&mut self, cancel: CancellationToken, steer: Option<Steer>) {
+        self.run = Run::Running {
+            cancel,
+            steer,
+            unsend: false,
+        };
+    }
+
+    /// Ask the run under way to stop, and say whether there was one. `unsend`
+    /// also takes the prompt back, which is what `esc` means.
+    pub fn stop(&mut self, unsend: bool) -> bool {
+        match &mut self.run {
+            Run::Running {
+                cancel,
+                unsend: take_back,
+                ..
+            } => {
+                cancel.cancel();
+                *take_back = unsend;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Stop whatever is running, saying nothing about the prompt. For the ways
+    /// out that are leaving anyway.
+    pub fn cancel(&self) {
+        if let Run::Running { cancel, .. } = &self.run {
+            cancel.cancel();
+        }
+    }
+
+    /// What a run left behind, and whether its prompt was taken back. The other
+    /// half of [`Lane::take_ended`], which is the surface collecting it.
+    pub fn end(&mut self, out: Result<Totals, agent::AgentError>, unsend: bool) {
+        self.run = Run::Ended { out, unsend };
+    }
+
+    /// Where this lane's run stands, for a surface that only draws it.
+    pub fn run(&self) -> &Run {
+        &self.run
+    }
+
+    // ---------------------------------------------------- what a surface reads
+
+    /// What a surface draws this lane from: where it is, what it is doing, and
+    /// what it is doing it under. One call rather than four reaches into it.
+    pub fn snapshot(
+        &self,
+        model: &str,
+        started: Option<std::time::Duration>,
+        queued: usize,
+    ) -> Snapshot {
+        // Both the lines queued on the surface and the ones said mid-run are
+        // lines the user has given it that have not reached the model. Which
+        // side of the seam one waits on is the loop's business, not the
+        // reader's.
+        self.tally.snapshot(
+            model,
+            self.worktree.as_deref(),
+            started,
+            queued + self.steer().map_or(0, agent::Steer::len),
+        )
+    }
+
+    /// The checkout this lane works in, when it is not the repository's own.
+    pub fn worktree(&self) -> Option<&str> {
+        self.worktree.as_deref()
+    }
+
+    /// The loop this lane is under, if any.
+    pub fn looping(&self) -> Option<&Looping> {
+        self.looping.as_ref()
+    }
+
+    /// The transcript, for a surface that only reads it.
+    pub fn session(&self) -> Option<&Session> {
+        self.session.as_ref()
+    }
+
+    /// The ask nobody has answered, when a run left one open.
+    pub fn last_ask(&self) -> Option<EntryId> {
+        self.session.as_ref().and_then(Session::last_ask)
+    }
+
+    /// The checkout this lane works in.
+    pub fn root(&self) -> &Path {
+        self.ctx.workspace.root()
+    }
+
+    /// The context a job runs with: this lane's, with the job's own way out.
+    pub fn ctx_for(&self, cancel: CancellationToken) -> Ctx {
+        self.ctx.clone().with_cancel(cancel)
+    }
+
+    /// What the views of this lane are keyed by.
+    pub fn token(&self) -> u64 {
+        self.token
+    }
+
+    /// The model this lane's runs ask for.
+    pub fn model(&self) -> &str {
+        &self.agent.spec.model
+    }
+
+    /// The agent these runs go through, for what only it knows.
+    pub fn agent(&self) -> &Agent {
+        &self.agent
+    }
+
+    /// What runs of this lane report as they go.
+    pub fn sender(&self) -> &UnboundedSender<Event> {
+        &self.events
+    }
+
+    /// What this lane has been told and not yet heard.
+    pub fn inbox(&mut self) -> &mut UnboundedReceiver<Event> {
+        &mut self.inbox
+    }
+
+    /// The id this lane's session is saved under.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// What arrived while nobody was looking, in order.
+    pub fn take_pending(&mut self) -> Vec<Event> {
+        std::mem::take(&mut self.pending)
+    }
+
+    // ------------------------------------------------------------- the meter
+
+    /// Fold an event into the meter. The loop's facts arrive here and nowhere
+    /// else: what a run has spent is only known from them.
+    pub fn note(&mut self, event: &Event) {
+        self.tally.on(event);
+    }
+
+    /// Start the meter at what the session has already spent, so a resumed
+    /// tree does not read as a free run.
+    pub fn seed_meter(&mut self) {
+        self.tally.seed(self.totals);
+    }
+
+    /// Charge a run's spending to the session, once it has reported it.
+    pub fn charge(&mut self, spent: &Totals) {
+        self.totals.merge(spent);
+    }
+
+    /// The same, from the run itself: its own word when it has one, and the
+    /// meter's reading of the turn in flight when it was cut short before
+    /// pricing it.
+    pub fn charge_run(&mut self, out: &Result<Totals, agent::AgentError>) {
+        let spent = match out {
+            Ok(totals) => *totals,
+            Err(_) => self.tally.run_spend(),
+        };
+        self.totals.merge(&spent);
+    }
+
+    // -------------------------------------------------------------- the loop
+
+    /// Take the loop off this lane: what `/loop` off, a round that ended it,
+    /// and a lane being left all mean.
+    pub fn take_looping(&mut self) -> Option<Looping> {
+        self.looping.take()
+    }
+
+    /// Arm the round the loop queued — or none, when the line about to run is
+    /// not one of a loop's own.
+    pub fn arm_round(&mut self, round: Option<u64>) {
+        self.pending_round = round;
+    }
+
+    /// Take that round back: a job is starting, or the loop it belonged to is
+    /// gone.
+    pub fn take_round(&mut self) -> Option<u64> {
+        self.pending_round.take()
+    }
+
+    // -------------------------------------------------------- the transcript
+
+    /// Lend the transcript to a job for the length of its run.
+    pub fn take_session(&mut self) -> Option<Session> {
+        self.session.take()
+    }
+
+    /// Take it back: the job has finished, or never started.
+    pub fn return_session(&mut self, session: Session) {
+        self.session = Some(session);
+    }
+
+    /// What a run's ending should leave in the transcript.
+    pub fn note_outcome(&mut self, out: &Result<Totals, agent::AgentError>) {
+        if let Some(session) = self.session.as_mut() {
+            session.note_outcome(out);
+        }
+    }
+
+    /// A line the run filed rather than the model: a command's note, read back
+    /// with the rest of the transcript. Nothing to file when there is none.
+    pub fn push_note(&mut self, note: &str) {
+        if let Some(session) = self.session.as_mut() {
+            session.push_note(note);
+        }
     }
 }
