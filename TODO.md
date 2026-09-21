@@ -50,7 +50,7 @@
 
   注意 `MINE` 这张名单被好几个条目同时动：`brain`→`llm` 改一项，`hashline`/`syntax` 并入删两项，新拆出的 `skills`/`scripts`/`task` 各加一项。做这批改动时最后统一收一次。**已收**：现在是 `["pi", "agent", "llm", "tools", "task", "scripts", "skills", "wechat"]`，与 workspace 的 8 个 package 名逐一对应（`"cli"` 那个幽灵项和漏掉的 `wechat` 一并修好）。
 
-- [ ] **`Repl` 拆成 `App` + `Lanes` + `Settings`**（**部分已做**：`App`/`Settings` 已落地，`Lanes` 未拆——原因见「`Repl` 拆成三块」）。
+- [x] ~~**`Repl` 拆成 `App` + `Lanes` + `Settings`**~~：`App`/`Settings` 已落地；`Lanes` **决定不做**（复核：15 个方法里 12 个要 `store`/`config`/`settings`/`args`，拆出去只是把参数逐个下传，`lanes`/`current` 本来就是 `App` 的状态。同源的 `run/worktree.rs` 三个方法同理）。
 
 - [x] **统一 turn/round 的口径**（**已做**）：`loop_max_turns` → `loop_max_rounds`、`lane::Turn` → `Run`（连同字段 `lane.turn` → `lane.run`）、删 `Segment::Turns`、修 5 处散文。细节见下面「turn 与 round：两个层级」。
 
