@@ -19,7 +19,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::run::meter::Snapshot;
-use crate::ui::icons;
+use crate::store::icons;
 use crate::ui::render::{self, Paint};
 use crate::ui::status::{self, Segment};
 

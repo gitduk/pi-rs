@@ -710,7 +710,7 @@ mod tests {
         let Value::String(s) = clip(&long, 33) else {
             panic!("a string clips to a string")
         };
-        assert!(s.contains(&format!("{}+", crate::ui::icons::ELLIPSIS)));
+        assert!(s.contains(&format!("{}+", crate::store::icons::ELLIPSIS)));
         // Would have panicked on construction if the cut split the é.
         assert!(s.starts_with("élan"));
         assert_eq!(clip("short", 33), Value::String("short".into()));
@@ -855,7 +855,7 @@ mod tests {
             at_info[0]["patch"]
                 .as_str()
                 .unwrap()
-                .contains(&format!("{}+", crate::ui::icons::ELLIPSIS))
+                .contains(&format!("{}+", crate::store::icons::ELLIPSIS))
         );
         assert_eq!(at_debug[0]["patch"].as_str().unwrap().len(), 4_000);
     }

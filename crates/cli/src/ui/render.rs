@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span};
 use serde::de::{Error as _, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::ui::icons;
+use crate::store::icons;
 
 const RESET: &str = "\x1b[0m";
 

@@ -463,8 +463,8 @@ mod tests {
     fn typed(s: &str) -> Editor {
         let mut e = Editor::default();
         e.set_prompts(
-            Span::from(format!("{} ", crate::ui::icons::INPUT_SIGIL)),
-            Span::from(format!("{} ", crate::ui::icons::BANG_SIGIL)),
+            Span::from(format!("{} ", crate::store::icons::INPUT_SIGIL)),
+            Span::from(format!("{} ", crate::store::icons::BANG_SIGIL)),
         );
         e.insert_str(s);
         e

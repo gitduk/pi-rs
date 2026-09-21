@@ -12,9 +12,10 @@ use tokio::sync::mpsc;
 use crate::input::commands::{Command, commands};
 use crate::input::expand;
 use crate::run::{App, lane, subagent, wechat, worktree};
+use crate::store::icons;
 use crate::store::settings::Settings;
 use crate::store::{config, journal, session};
-use crate::ui::{icons, keys, line, render, status, tui};
+use crate::ui::{keys, line, render, status, tui};
 
 mod context;
 mod input;

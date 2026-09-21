@@ -90,7 +90,7 @@ pub fn parts(segments: &[Segment], s: &Snapshot) -> Vec<String> {
 
 /// Those parts as one line.
 pub fn line(segments: &[Segment], s: &Snapshot) -> String {
-    parts(segments, s).join(crate::ui::icons::PART_SEP)
+    parts(segments, s).join(crate::store::icons::PART_SEP)
 }
 
 /// Which parts each line shows, as the config states it. An absent list is the

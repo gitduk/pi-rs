@@ -15,9 +15,9 @@ use super::Paint;
 use super::editor::Editor;
 use super::screen;
 use crate::input::Intent;
+use crate::store::icons;
 use crate::store::settings::SettingRow;
 use crate::store::settings::mask_secret;
-use crate::ui::icons;
 use crate::ui::keys::Action;
 
 /// The rows a panel shows: every path the config has, the value in force for

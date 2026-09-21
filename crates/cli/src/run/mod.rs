@@ -16,10 +16,10 @@ use crate::input::{Intent, Rewound, Step, WechatCmd, dispatch, lines, refused, t
 use crate::run::lane::Lane;
 use crate::run::meter::Tally;
 use crate::store::config::{self, Config};
+use crate::store::icons;
 use crate::store::journal;
 use crate::store::session::{self, Store, Stored};
 use crate::store::settings::{self, Settings, mask_secret};
-use crate::ui::icons;
 
 /// Everything a run holds that outlives any one turn of it, and the one place
 /// an intent is answered.

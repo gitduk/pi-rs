@@ -19,7 +19,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use wechat::Update;
 
-use crate::ui::icons;
+use crate::store::icons;
 
 /// What the bridge hands the surface.
 pub enum Inbound {
