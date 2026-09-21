@@ -469,10 +469,11 @@ fn paint(
     theme: std::sync::Arc<crate::store::theme::Theme>,
     done: Vec<crate::store::status::Segment>,
     model: String,
+    pricing: llm::model::Pricing,
     worktree: Option<String>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut r = render::Renderer::new(quiet, theme, done, model, worktree);
+        let mut r = render::Renderer::new(quiet, theme, done, model, pricing, worktree);
         while let Some(event) = rx.recv().await {
             r.on(event);
         }
@@ -558,6 +559,7 @@ async fn main() -> Result<()> {
     // pause `Lists` exists to avoid.
     let worktree = worktree::current(&root);
     let model_id = dialled.spec.model.clone();
+    let pricing = dialled.spec.pricing;
 
     let mut ag = agent::Agent::new(dialled.transport, dialled.spec);
     // Resolved here rather than lazily: a name that does not exist should be a
@@ -669,6 +671,7 @@ async fn main() -> Result<()> {
             std::sync::Arc::new(config.theme.clone()),
             config.status.done.clone(),
             model_id.clone(),
+            pricing,
             worktree.clone(),
         );
         let out = line::run(core, tx).await;
@@ -692,6 +695,7 @@ async fn main() -> Result<()> {
         std::sync::Arc::new(config.theme.clone()),
         config.status.done.clone(),
         model_id.clone(),
+        pricing,
         worktree.clone(),
     );
     let ctx = tools::Ctx::new(workspace)

@@ -258,9 +258,11 @@ pub struct ToolOutput {
     /// One line for a progress display. Set it when the first line of the
     /// result is structure rather than content.
     pub preview: Option<String>,
-    /// What this call cost that the caller has not counted: a nested run's
+    /// What this call used that the caller has not counted: a nested run's
     /// totals, carried back on the result that ended it.
-    pub spent: llm::Totals,
+    /// What the call spent, for a tool that runs a model of its own. Tokens
+    /// only: what they are worth is the surface's arithmetic, not ours.
+    pub spent: llm::stream::Usage,
 }
 
 impl ToolOutput {
@@ -271,7 +273,7 @@ impl ToolOutput {
             })],
             useless: false,
             preview: None,
-            spent: llm::Totals::default(),
+            spent: llm::stream::Usage::default(),
         }
     }
 
@@ -280,9 +282,9 @@ impl ToolOutput {
         self
     }
 
-    /// Report what this call cost beyond its own turn, for the caller's run
+    /// Report what this call used beyond its own turn, for the caller's run
     /// to count.
-    pub fn with_spent(mut self, spent: llm::Totals) -> Self {
+    pub fn with_spent(mut self, spent: llm::stream::Usage) -> Self {
         self.spent = spent;
         self
     }

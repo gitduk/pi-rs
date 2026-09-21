@@ -130,13 +130,15 @@ pub struct ModelSpec {
     pub pricing: Pricing,
 }
 
-impl ModelSpec {
+impl Pricing {
+    /// What this usage costs at these rates. The multiplication lives here
+    /// rather than with the loop: the loop has no business knowing money.
     pub fn cost(&self, usage: &crate::stream::Usage) -> f64 {
         let m = 1_000_000.0;
-        usage.input as f64 / m * self.pricing.input_per_mtok
-            + usage.output as f64 / m * self.pricing.output_per_mtok
-            + usage.cache_read as f64 / m * self.pricing.cache_read_per_mtok
-            + usage.cache_write as f64 / m * self.pricing.cache_write_per_mtok
+        usage.input as f64 / m * self.input_per_mtok
+            + usage.output as f64 / m * self.output_per_mtok
+            + usage.cache_read as f64 / m * self.cache_read_per_mtok
+            + usage.cache_write as f64 / m * self.cache_write_per_mtok
     }
 }
 

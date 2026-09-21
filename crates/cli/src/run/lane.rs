@@ -52,7 +52,7 @@ pub enum Run {
     // job with none of those settles where it ended instead, or its report
     // waits on a screen that may never come back.
     Ended {
-        out: Result<Totals, agent::AgentError>,
+        out: Result<llm::stream::Usage, agent::AgentError>,
         // Esc asked for the prompt back while this was still running.
         unsend: bool,
     },
@@ -146,7 +146,7 @@ impl Lane {
     ///
     /// Only when it is: a lane still working must keep its `Running`, or the
     /// token `esc` reaches and the request to unsend go with it.
-    pub fn take_ended(&mut self) -> Option<(Result<Totals, agent::AgentError>, bool)> {
+    pub fn take_ended(&mut self) -> Option<(Result<llm::stream::Usage, agent::AgentError>, bool)> {
         match self.run {
             Run::Ended { .. } => match std::mem::replace(&mut self.run, Run::Idle) {
                 Run::Ended { out, unsend } => Some((out, unsend)),
@@ -251,7 +251,7 @@ impl Lane {
 
     /// What a run left behind, and whether its prompt was taken back. The other
     /// half of [`Lane::take_ended`], which is the surface collecting it.
-    pub fn end(&mut self, out: Result<Totals, agent::AgentError>, unsend: bool) {
+    pub fn end(&mut self, out: Result<llm::stream::Usage, agent::AgentError>, unsend: bool) {
         self.run = Run::Ended { out, unsend };
     }
 
@@ -352,7 +352,7 @@ impl Lane {
     /// Fold an event into the meter. The loop's facts arrive here and nowhere
     /// else: what a run has spent is only known from them.
     pub fn note(&mut self, event: &Event) {
-        self.tally.on(event);
+        self.tally.on(event, self.agent.spec.pricing);
     }
 
     /// Start the meter at what the session has already spent, so a resumed
@@ -361,20 +361,22 @@ impl Lane {
         self.tally.seed(self.totals);
     }
 
-    /// Charge a run's spending to the session, once it has reported it.
-    pub fn charge(&mut self, spent: &Totals) {
-        self.totals.merge(spent);
+    /// Charge what a run spent to the session, once it has reported it, at the
+    /// rate this lane's model is priced at.
+    pub fn charge(&mut self, spent: &llm::stream::Usage) {
+        let cost = self.agent.spec.pricing.cost(spent);
+        self.totals.add(spent, cost);
     }
 
     /// The same, from the run itself: its own word when it has one, and the
     /// meter's reading of the turn in flight when it was cut short before
     /// pricing it.
-    pub fn charge_run(&mut self, out: &Result<Totals, agent::AgentError>) {
+    pub fn charge_run(&mut self, out: &Result<llm::stream::Usage, agent::AgentError>) {
         let spent = match out {
-            Ok(totals) => *totals,
-            Err(_) => self.tally.run_spend(),
+            Ok(usage) => *usage,
+            Err(_) => self.tally.run_spend().usage,
         };
-        self.totals.merge(&spent);
+        self.charge(&spent);
     }
 
     // -------------------------------------------------------------- the loop
@@ -410,7 +412,7 @@ impl Lane {
     }
 
     /// What a run's ending should leave in the transcript.
-    pub fn note_outcome(&mut self, out: &Result<Totals, agent::AgentError>) {
+    pub fn note_outcome(&mut self, out: &Result<llm::stream::Usage, agent::AgentError>) {
         if let Some(session) = self.session.as_mut() {
             session.note_outcome(out);
         }

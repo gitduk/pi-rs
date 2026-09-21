@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::{AgentError, Totals};
+use crate::AgentError;
 use llm::message::{
     AssistantContent, Image, Message, Text, ToolCall, ToolResult, ToolResultContent, UserContent,
 };
+use llm::stream::Usage;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -563,7 +564,7 @@ impl Session {
     /// Fold how the run that just ended went into the next prompt: a run that
     /// did not answer its prompt records why, for [`Session::send_prompt`] to
     /// name; one that answered records nothing.
-    pub fn note_outcome(&mut self, outcome: &Result<Totals, AgentError>) {
+    pub fn note_outcome(&mut self, outcome: &Result<Usage, AgentError>) {
         match outcome {
             Ok(_) | Err(AgentError::Cancelled) => {}
             Err(e) => self.interrupted = Some(StopCause::Error(e.to_string())),
@@ -1123,7 +1124,7 @@ mod tests {
         answered.push_assistant(vec![AssistantContent::Text(MsgText {
             text: "it says a".into(),
         })]);
-        answered.note_outcome(&Ok(Totals::default()));
+        answered.note_outcome(&Ok(Usage::default()));
 
         let stopped = |cause: StopCause| {
             let mut s = Session::new();
@@ -1131,7 +1132,7 @@ mod tests {
             s.mark_stopped(cause);
             s
         };
-        let failed = |outcome: Result<Totals, AgentError>| {
+        let failed = |outcome: Result<Usage, AgentError>| {
             let mut s = Session::new();
             s.prompt("go");
             s.note_outcome(&outcome);

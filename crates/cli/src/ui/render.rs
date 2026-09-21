@@ -489,6 +489,9 @@ pub struct Renderer {
     // line the terminal would have shown it.
     tally: crate::run::meter::Tally,
     model: String,
+    /// What the model costs, so this surface prices the events it reads the
+    /// same way the terminal's does.
+    pricing: llm::model::Pricing,
     // The worktree this run is working in, for the segment that names it.
     worktree: Option<String>,
     thinking: bool,
@@ -504,6 +507,7 @@ impl Renderer {
         theme: Arc<Theme>,
         done: Vec<crate::store::status::Segment>,
         model: String,
+        pricing: llm::model::Pricing,
         worktree: Option<String>,
     ) -> Self {
         Self {
@@ -512,6 +516,7 @@ impl Renderer {
             done,
             tally: crate::run::meter::Tally::default(),
             model,
+            pricing,
             worktree,
             thinking: false,
             out_dirty: false,
@@ -524,7 +529,7 @@ impl Renderer {
     pub fn on(&mut self, event: Event) {
         // Before the arms and outside the `quiet` guards: a run still has to
         // arrive at the right total when nothing about it was printed.
-        self.tally.on(&event);
+        self.tally.on(&event, self.pricing);
         match &event {
             Event::ReasoningDelta(d) if !self.quiet => {
                 if !self.thinking {
@@ -654,6 +659,7 @@ mod tests {
             std::sync::Arc::new(super::Theme::default()),
             crate::store::status::default_done(),
             String::new(),
+            llm::model::Pricing::default(),
             None,
         );
         r.on(agent::Event::TextDelta("There".into()));

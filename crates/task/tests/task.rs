@@ -13,7 +13,7 @@ mod common;
 use common::spec;
 
 use agent::session::Session;
-use agent::{Agent, Home, Totals};
+use agent::{Agent, Home};
 use task::Task;
 use tools::{Ctx, FileLocks, Registry, Tier, Tool, ToolError, ToolOutput, Viewed, Workspace};
 
@@ -215,7 +215,7 @@ async fn drive(
     agent: &Agent,
     ctx: &Ctx,
     prompt: &str,
-) -> (Session, Result<Totals, agent::AgentError>) {
+) -> (Session, Result<llm::stream::Usage, agent::AgentError>) {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let mut session = Session::with_prompt(prompt);
     let out = agent.run(&mut session, ctx, &tx).await;
@@ -240,11 +240,10 @@ async fn the_child_answers_into_the_parents_transcript() {
     // pays for it — the parent's and child's two turns are 3000 in / 20 out.
     let totals = out.expect("the parent's run ends");
     assert_eq!(
-        (totals.usage.input, totals.usage.output),
+        (totals.input, totals.output),
         (3_000, 20),
         "the run that called the child counts its spend: {totals:?}"
     );
-    assert!(totals.cost > 0.0, "{totals:?}");
 
     // D7: one transcript filed, under a namespace of the child's own.
     let sessions = kept.sessions.lock().unwrap();

@@ -44,7 +44,7 @@ pub enum Event {
     },
     // Something the run recovered from but the user should know about.
     Warning(String),
-    // What the turn has cost so far, as the provider has reported it.
+    // What the turn has used so far, as the provider has reported it.
     //
     // Cumulative for the turn, not a delta, and not every wire sends one: the
     // Anthropic wire states the input count before the first token, while an
@@ -54,12 +54,10 @@ pub enum Event {
 
     TurnEnd {
         usage: Usage,
-        cost: f64,
     },
     Done {
         turns: usize,
         usage: Usage,
-        cost: f64,
         // What the transcript occupied against what it was allowed to, in
         // tokens, for the request that ended the run.
         ctx: (usize, usize),
@@ -137,17 +135,14 @@ fn note(event: &Event) {
         Event::Warning(w) => tracing::warn!(target: "pi::loop", "{w}"),
         // Named for what it carries: the loop sends this before the turn's
         // tool calls run, so "end" would put the record in the wrong place.
-        Event::TurnEnd { usage, cost, .. } => tracing::info!(
+        Event::TurnEnd { usage, .. } => tracing::info!(
             target: "pi::loop",
             input = usage.input,
             output = usage.output,
             cache_read = usage.cache_read,
             cache_write = usage.cache_write,
-            cost,
-            "priced"
+            "counted"
         ),
-        Event::Done { turns, cost, .. } => {
-            tracing::info!(target: "pi::loop", turns, cost, "done")
-        }
+        Event::Done { turns, .. } => tracing::info!(target: "pi::loop", turns, "done"),
     }
 }

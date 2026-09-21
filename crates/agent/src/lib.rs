@@ -5,7 +5,7 @@ use futures::StreamExt;
 use llm::message::{Message, ToolCall, ToolResult};
 use llm::model::ModelSpec;
 use llm::request::{Effort, Request};
-use llm::stream::{Accumulator, InvalidToolArgs, StreamEvent};
+use llm::stream::{Accumulator, InvalidToolArgs, StreamEvent, Usage};
 use llm::transport::Transport;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
@@ -156,7 +156,7 @@ impl Agent {
         session: &mut Session,
         ctx: &Ctx,
         tx: &UnboundedSender<Event>,
-    ) -> Result<Totals, AgentError> {
+    ) -> Result<Usage, AgentError> {
         self.steered(session, ctx, tx, &Steer::default()).await
     }
 
@@ -167,8 +167,8 @@ impl Agent {
         ctx: &Ctx,
         tx: &UnboundedSender<Event>,
         steer: &Steer,
-    ) -> Result<Totals, AgentError> {
-        let mut totals = Totals::default();
+    ) -> Result<Usage, AgentError> {
+        let mut totals = Usage::default();
         // How many times a tool has failed in a row, so a loop can be named —
         // naming it is the only thing that stops one.
         let mut failures: Failures = Failures::new();
@@ -299,15 +299,8 @@ impl Agent {
                 }
             };
 
-            let cost = self.spec.cost(&done.usage);
-            totals.add(&done.usage, cost);
-            say(
-                tx,
-                Event::TurnEnd {
-                    usage: done.usage,
-                    cost,
-                },
-            );
+            totals.add(&done.usage);
+            say(tx, Event::TurnEnd { usage: done.usage });
 
             // Two providers accept an oversized request instead of refusing it:
             // one silently, one by truncating and then having no room to answer.
@@ -353,8 +346,7 @@ impl Agent {
                     tx,
                     Event::Done {
                         turns: turn,
-                        usage: totals.usage,
-                        cost: totals.cost,
+                        usage: totals,
                         // Re-measured rather than reused: `used` is what went
                         // out, and the reply landed in the session since.
                         ctx: (
@@ -402,7 +394,7 @@ impl Agent {
         session: &mut Session,
         budget: usize,
         urgent: bool,
-        totals: &mut Totals,
+        totals: &mut Usage,
         tx: &UnboundedSender<Event>,
     ) -> (Vec<Message>, bool) {
         let measured = session.context();
@@ -418,12 +410,12 @@ impl Agent {
         };
         let (mut record, mut report) = ext::compact::plan(session, &self.spec, budget, &policy);
         if !record.dropped.is_empty() {
-            let (used, priced) = self
+            let used = self
                 .retire_span(session, &mut record, None)
                 .instrument(tracing::info_span!(target: "pi::compact", "summarize"))
                 .await;
             report.summarized = record.summary.is_some();
-            totals.add(&used, priced);
+            totals.add(&used);
         }
         // A pass that reclaimed nothing is not news; reporting it every turn
         // buries the ones that did.
@@ -460,7 +452,7 @@ impl Agent {
         &self,
         session: &mut Session,
         focus: Option<&str>,
-    ) -> Option<(ext::compact::Report, Totals)> {
+    ) -> Option<(ext::compact::Report, Usage)> {
         let base = self.compaction;
         let tail = self.tail_within(self.budget());
         let policy = ext::compact::Policy {
@@ -468,14 +460,14 @@ impl Agent {
             ..base
         };
         let (mut record, mut report) = ext::compact::plan(session, &self.spec, tail, &policy);
-        let mut spent = Totals::default();
+        let mut spent = Usage::default();
         if !record.dropped.is_empty() {
-            let (used, priced) = self
+            let used = self
                 .retire_span(session, &mut record, focus)
                 .instrument(tracing::info_span!(target: "pi::compact", "summarize"))
                 .await;
             report.summarized = record.summary.is_some();
-            spent.add(&used, priced);
+            spent.add(&used);
         }
         if !report.touched() {
             return None;
@@ -492,17 +484,16 @@ impl Agent {
     // A failure is not fatal: the entries still go. Losing the summary costs
     // context; failing the turn costs the whole run.
     //
-    // Returns the usage *and what it cost*, because only here is it known
-    // which spec priced it. Handing back a bare usage let both callers pick a
-    // spec themselves, and both picked the main model's — so a cheaper
-    // summarizer would have been billed at the expensive model's rates and
-    // without a word.
+    // Returns the tokens only. What they cost is the surface's arithmetic —
+    // see `run/meter.rs` — so a summarizer on a cheaper model is billed at the
+    // run's rate rather than its own. Worth saying out loud: it is why the
+    // number on the status line is an estimate, not an invoice.
     async fn retire_span(
         &self,
         session: &Session,
         record: &mut session::Compaction,
         focus: Option<&str>,
-    ) -> (llm::stream::Usage, f64) {
+    ) -> llm::stream::Usage {
         let (transport, spec) = match &self.summarizer {
             Some((t, s)) => (&**t, s),
             None => (&*self.transport, &self.spec),
@@ -510,9 +501,7 @@ impl Agent {
         let history =
             ext::summarize::render(&session.summaries(), &session.entries_for(&record.dropped));
 
-        let usage = match ext::summarize::run(transport, spec, history, focus, self.retry.idle)
-            .await
-        {
+        match ext::summarize::run(transport, spec, history, focus, self.retry.idle).await {
             Ok((text, used)) => {
                 record.summary = Some(text);
                 // The new summary covers what the old one did, so the entry
@@ -524,9 +513,7 @@ impl Agent {
                 tracing::warn!(target: "pi::compact", error = %e, "summarizing dropped history failed");
                 llm::stream::Usage::default()
             }
-        };
-        let cost = spec.cost(&usage);
-        (usage, cost)
+        }
     }
 
     /// What the transcript may occupy. The reply, the system prompt and the
@@ -680,7 +667,7 @@ impl Agent {
         ctx: &Ctx,
         tx: &UnboundedSender<Event>,
         failures: &mut Failures,
-        spent: &mut Totals,
+        spent: &mut Usage,
     ) -> Result<Vec<(ToolResult, Option<String>)>, AgentError> {
         // Read once for the batch rather than per failure, and from `ctx`
         // rather than the machine: a session moves — `/new`, `/resume` — and
@@ -813,7 +800,7 @@ impl Agent {
                 (_, Some(Ok(out))) => {
                     // A nested run's spend belongs to the run that called it:
                     // folded in here, it reaches `Event::Done` and the return.
-                    spent.merge(&out.spent);
+                    spent.add(&out.spent);
                     sketched = out.preview.clone();
                     say(
                         tx,

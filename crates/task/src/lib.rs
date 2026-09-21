@@ -8,7 +8,7 @@ use tokio::sync::{mpsc::unbounded_channel, watch};
 use tools::{Ctx, Tier, Tool, ToolError, ToolOutput, bash};
 
 use agent::session::Session;
-use agent::{Agent, AgentError, Event, Home, Totals};
+use agent::{Agent, AgentError, Event, Home};
 use tracing::Instrument as _;
 
 const PROMPT: &str = include_str!("../prompts/task.md");
@@ -110,7 +110,7 @@ struct Heard {
     turns: usize,
     // Accumulated per turn rather than taken from `run`, which hands back
     // nothing when it ends early — and a run cut short has still been paid for.
-    spent: Totals,
+    spent: llm::stream::Usage,
 }
 
 #[async_trait]
@@ -215,7 +215,7 @@ impl Tool for Task {
                         }
                     }
                     Event::TextDelta(text) => heard.text.push_str(&text),
-                    Event::TurnEnd { usage, cost } => heard.spent.add(&usage, cost),
+                    Event::TurnEnd { usage } => heard.spent.add(&usage),
                     _ => {}
                 }
             }
@@ -313,11 +313,11 @@ impl Tool for Task {
             Err(why) => {
                 // The child's spend rode home on the collector, but an error
                 // result carries no `.with_spent`: name what went uncounted.
-                let uncounted = if heard.spent.usage.input + heard.spent.usage.output > 0 {
+                let uncounted = if heard.spent.input + heard.spent.output > 0 {
                     format!(
                         " ({} turn(s), {}, ran uncounted)",
                         heard.turns,
-                        llm::count::slash(heard.spent.usage.input, heard.spent.usage.output)
+                        llm::count::slash(heard.spent.input, heard.spent.output)
                     )
                 } else {
                     String::new()
@@ -389,7 +389,7 @@ fn sketch(description: &str, heard: &Heard) -> String {
         "{} turn{} · {}",
         heard.turns,
         if heard.turns == 1 { "" } else { "s" },
-        llm::count::slash(heard.spent.usage.input, heard.spent.usage.output)
+        llm::count::slash(heard.spent.input, heard.spent.output)
     );
     // Flattened, not trusted: this row is written one line at a time, and a
     // newline in it would stair-step everything drawn after.

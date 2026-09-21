@@ -447,7 +447,10 @@ impl App {
     ///
     /// Here rather than at each surface: both asked the agent directly, and
     /// both had to reach past the lane for the session to do it.
-    pub async fn compact_now(&mut self, focus: Option<&str>) -> Option<(agent::Report, Totals)> {
+    pub async fn compact_now(
+        &mut self,
+        focus: Option<&str>,
+    ) -> Option<(agent::Report, llm::stream::Usage)> {
         // One borrow of the lane, two of its fields: they are disjoint, and
         // asking twice would not be.
         let lane = self.lane_mut();

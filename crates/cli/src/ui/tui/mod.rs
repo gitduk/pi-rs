@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::time::Instant;
 
 use agent::session::{Entry as LogEntry, EntryId, Session};
-use agent::{AgentError, Event, Totals};
+use agent::{AgentError, Event};
 use anyhow::Result;
 use crossterm::event::{Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use futures::FutureExt;
@@ -2549,7 +2549,7 @@ enum Kind {
     },
     // A `/compact`, and what it shrank and spent. None means the transcript
     // already fit — or, with a cancelled `ran`, that nobody ever looked.
-    Compact(Option<(agent::Report, Totals)>),
+    Compact(Option<(agent::Report, llm::stream::Usage)>),
 }
 // A job that ran off the loop, reporting back to the loop that started it.
 //
@@ -2562,7 +2562,7 @@ struct Done {
     // The transcript back, and how the job went. None when it panicked and
     // took its copy down with it — one field, because those two are never
     // separately absent.
-    ran: Option<(Session, Result<Totals, AgentError>)>,
+    ran: Option<(Session, Result<llm::stream::Usage, AgentError>)>,
 }
 
 // Run `job` off the loop, turning a panic into a `None` the settle side can
@@ -3804,7 +3804,7 @@ impl Tui {
                 let ran = if ctx.cancel.is_cancelled() {
                     Err(AgentError::Cancelled)
                 } else {
-                    Ok(Totals::default())
+                    Ok(llm::stream::Usage::default())
                 };
                 let tail = carried.entries().last().map(|e| e.id());
                 run::bash::record_bash(&mut carried, &command, out.text.clone());
@@ -3862,9 +3862,10 @@ impl Tui {
             // A report only exists where the pass ran to the end: `Ok(None)`
             // is a transcript that already fit, `Err` one nobody looked at.
             let (kind, ran) = match out {
-                Some((carried, Ok(got))) => {
-                    (Kind::Compact(got), Some((carried, Ok(Totals::default()))))
-                }
+                Some((carried, Ok(got))) => (
+                    Kind::Compact(got),
+                    Some((carried, Ok(llm::stream::Usage::default()))),
+                ),
                 Some((carried, Err(e))) => (Kind::Compact(None), Some((carried, Err(e)))),
                 None => (Kind::Compact(None), None),
             };
@@ -4074,7 +4075,7 @@ impl Tui {
     }
 
     // Draw the end of a run into the view that is on screen.
-    fn close_run(&mut self, out: Result<Totals, AgentError>) {
+    fn close_run(&mut self, out: Result<llm::stream::Usage, AgentError>) {
         let view = front_view(&mut self.views, self.core.lane());
         self.ui.close(view);
         // A cancelled run's calls got no `ToolEnd`; their animated rows have to
@@ -4907,7 +4908,7 @@ mod tests {
                     "compact with a report",
                     super::Kind::Compact(Some((
                         agent::Report::default(),
-                        agent::Totals::default(),
+                        llm::stream::Usage::default(),
                     ))),
                 ),
             ]
@@ -4919,7 +4920,7 @@ mod tests {
                 kind,
                 ran: Some((
                     agent::session::Session::default(),
-                    Ok(agent::Totals::default()),
+                    Ok(llm::stream::Usage::default()),
                 )),
             })
             .await;
@@ -5016,16 +5017,12 @@ mod tests {
         let mut session = agent::session::Session::new();
         session.prompt("the task the user actually asked for");
 
-        tui.core.lanes[0]
-            .tally
-            .on(&agent::Event::TurnStart { turn: 1 });
-        tui.core.lanes[0]
-            .tally
-            .on(&agent::Event::Usage(llm::stream::Usage {
-                input: 100,
-                output: 20,
-                ..Default::default()
-            }));
+        tui.core.lanes[0].note(&agent::Event::TurnStart { turn: 1 });
+        tui.core.lanes[0].note(&agent::Event::Usage(llm::stream::Usage {
+            input: 100,
+            output: 20,
+            ..Default::default()
+        }));
 
         tui.settle(super::Done {
             token: tui.core.lanes[0].token(),

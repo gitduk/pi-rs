@@ -7,8 +7,9 @@
 
 use std::io::{BufRead, IsTerminal, Write};
 
-use agent::{AgentError, Event, Totals};
+use agent::{AgentError, Event};
 use anyhow::Result;
+use llm::stream::Usage;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::input::Step;
@@ -78,7 +79,7 @@ pub async fn run(mut core: App, tx: UnboundedSender<Event>) -> Result<()> {
             }
             Step::Compact(focus) => match core.compact_now(focus.as_deref()).await {
                 Some((report, spent)) => {
-                    core.lane_mut().totals.merge(&spent);
+                    core.lane_mut().charge(&spent);
 
                     println!("compacted {} → {} tokens", report.before, report.after);
                     if let Err(e) = core.save() {
@@ -95,7 +96,7 @@ pub async fn run(mut core: App, tx: UnboundedSender<Event>) -> Result<()> {
             },
             Step::Prompt { send, typed } => {
                 let spent = turn(&mut core, send, typed, &tx).await;
-                core.lane_mut().totals.merge(&spent);
+                core.lane_mut().charge(&spent);
             }
             Step::Wechat(_) => {
                 println!("wechat needs a terminal to show the login QR — run pi in a terminal")
@@ -110,11 +111,11 @@ async fn turn(
     prompt: String,
     typed: Option<String>,
     tx: &UnboundedSender<Event>,
-) -> Totals {
+) -> Usage {
     // Lent for the length of the turn and put back after, the same shape the
     // terminal uses — here there is no loop to free, only one owner throughout.
     let Some(mut session) = core.lane_mut().session.take() else {
-        return Totals::default();
+        return Usage::default();
     };
     session.send_prompt(prompt, typed, None);
     let ctx = core
@@ -133,14 +134,14 @@ async fn turn(
     }
 
     match out {
-        Ok(totals) => totals,
+        Ok(usage) => usage,
         Err(AgentError::Cancelled) => {
             eprintln!("stopped");
-            Totals::default()
+            Usage::default()
         }
         Err(e) => {
             eprintln!("error {e}");
-            Totals::default()
+            Usage::default()
         }
     }
 }

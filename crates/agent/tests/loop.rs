@@ -118,7 +118,7 @@ async fn drive(
     agent: &Agent,
     ctx: &Ctx,
     prompt: &str,
-) -> (Session, Result<agent::Totals, AgentError>, Vec<Event>) {
+) -> (Session, Result<llm::stream::Usage, AgentError>, Vec<Event>) {
     drive_steered(agent, ctx, prompt, &Steer::default()).await
 }
 
@@ -128,7 +128,7 @@ async fn drive_steered(
     ctx: &Ctx,
     prompt: &str,
     steer: &Steer,
-) -> (Session, Result<agent::Totals, AgentError>, Vec<Event>) {
+) -> (Session, Result<llm::stream::Usage, AgentError>, Vec<Event>) {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut session = Session::with_prompt(prompt);
     let out = agent.steered(&mut session, ctx, &tx, steer).await;
@@ -498,7 +498,7 @@ fn bulky_turn(id: &str) -> Vec<StreamEvent> {
 // expensive model's rates — twice over, silently, and only visible in a total
 // that looked plausible.
 #[tokio::test]
-async fn a_summary_is_priced_by_the_model_that_wrote_it() {
+async fn a_summary_on_another_model_still_counts_toward_the_run() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.txt"), "z".repeat(2_000)).unwrap();
     let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
@@ -516,17 +516,11 @@ async fn a_summary_is_priced_by_the_model_that_wrote_it() {
     let mut main = spec();
     main.context_window = 24_000;
     main.max_output_tokens = 2_000;
-    main.pricing = llm::model::Pricing {
-        input_per_mtok: 1_000.0,
-        output_per_mtok: 1_000.0,
-        ..Default::default()
-    };
 
-    // Same endpoint, its own rates: what is being tested is which spec prices
-    // the summary, not which server answered.
+    // Same endpoint, a different model: what it costs is the surface's
+    // arithmetic now, but whose tokens they are is still the loop's business.
     let mut cheap = main.clone();
     cheap.model = "cheap".into();
-    cheap.pricing = llm::model::Pricing::default();
 
     let delegated = wire();
     let mut a = Agent::new(delegated.clone(), main.clone());
@@ -542,10 +536,8 @@ async fn a_summary_is_priced_by_the_model_that_wrote_it() {
         "nothing summarized"
     );
     assert!(
-        cheaply.cost < dearly.cost,
-        "a free summarizer was billed at the main model's rates: {} vs {}",
-        cheaply.cost,
-        dearly.cost
+        cheaply.input > 0 && cheaply.input == dearly.input,
+        "the summary's tokens belong to the run that paid for them: {cheaply:?} vs {dearly:?}"
     );
 }
 
