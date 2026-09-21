@@ -14,8 +14,9 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::input::Step;
 use crate::run::App;
+use crate::run::meter::Rates;
 
-pub async fn run(mut core: App, tx: UnboundedSender<Event>) -> Result<()> {
+pub async fn run(mut core: App, tx: UnboundedSender<Event>, rates: Rates) -> Result<()> {
     let mut buffer = String::new();
 
     // Worth writing when a person is watching stderr — `pi | tee` reaches here
@@ -95,7 +96,7 @@ pub async fn run(mut core: App, tx: UnboundedSender<Event>) -> Result<()> {
                 }
             },
             Step::Prompt { send, typed } => {
-                let spent = turn(&mut core, send, typed, &tx).await;
+                let spent = turn(&mut core, send, typed, &tx, &rates).await;
                 core.lane_mut().charge(&spent);
             }
             Step::Wechat(_) => {
@@ -111,7 +112,13 @@ async fn turn(
     prompt: String,
     typed: Option<String>,
     tx: &UnboundedSender<Event>,
+    rates: &Rates,
 ) -> Usage {
+    // The renderer owns the receiver, so it prices on a task of its own and
+    // cannot ask the lane. Between runs is the only place this surface can
+    // switch models — a line comes off stdin one at a time — so handing it the
+    // rate here is the whole of keeping the two in step.
+    rates.set(core.lane().agent.spec.pricing);
     // Lent for the length of the turn and put back after, the same shape the
     // terminal uses — here there is no loop to free, only one owner throughout.
     let Some(mut session) = core.lane_mut().session.take() else {

@@ -469,11 +469,11 @@ fn paint(
     theme: std::sync::Arc<crate::store::theme::Theme>,
     done: Vec<crate::store::status::Segment>,
     model: String,
-    pricing: llm::model::Pricing,
+    rates: crate::run::meter::Rates,
     worktree: Option<String>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut r = render::Renderer::new(quiet, theme, done, model, pricing, worktree);
+        let mut r = render::Renderer::new(quiet, theme, done, model, rates, worktree);
         while let Some(event) = rx.recv().await {
             r.on(event);
         }
@@ -559,7 +559,7 @@ async fn main() -> Result<()> {
     // pause `Lists` exists to avoid.
     let worktree = worktree::current(&root);
     let model_id = dialled.spec.model.clone();
-    let pricing = dialled.spec.pricing;
+    let rates = crate::run::meter::Rates::new(dialled.spec.pricing);
 
     let mut ag = agent::Agent::new(dialled.transport, dialled.spec);
     // Resolved here rather than lazily: a name that does not exist should be a
@@ -671,10 +671,10 @@ async fn main() -> Result<()> {
             std::sync::Arc::new(config.theme.clone()),
             config.status.done.clone(),
             model_id.clone(),
-            pricing,
+            rates.clone(),
             worktree.clone(),
         );
-        let out = line::run(core, tx).await;
+        let out = line::run(core, tx, rates).await;
         let _ = painter.await;
         subagent::flush().await;
         return out;
@@ -695,7 +695,7 @@ async fn main() -> Result<()> {
         std::sync::Arc::new(config.theme.clone()),
         config.status.done.clone(),
         model_id.clone(),
-        pricing,
+        rates,
         worktree.clone(),
     );
     let ctx = tools::Ctx::new(workspace)

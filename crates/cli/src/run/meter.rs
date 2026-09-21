@@ -8,6 +8,7 @@ use std::time::Duration;
 use llm::model::Pricing;
 use llm::stream::Usage;
 use llm::totals::Totals;
+use std::sync::{Arc, Mutex};
 
 /// Every value a status line can draw on, as far as it is known right now.
 ///
@@ -42,6 +43,32 @@ pub struct Snapshot {
 
 /// What the events have said was spent, kept as they arrive.
 ///
+/// The rate in force, shared because the surface that prices a line is not the
+/// one that knows a model was switched: a piped run renders on its own task.
+///
+/// One writer per run, at its start — between runs is the only place a pipe can
+/// switch models — so a line and the session total it is drawn beside cannot be
+/// priced differently.
+#[derive(Clone, Default)]
+pub struct Rates(Arc<Mutex<Pricing>>);
+
+impl Rates {
+    pub fn new(pricing: Pricing) -> Self {
+        Self(Arc::new(Mutex::new(pricing)))
+    }
+
+    pub fn set(&self, pricing: Pricing) {
+        // Nothing here can panic while the lock is held, so it cannot in fact
+        // be poisoned; recovering keeps one broken write from taking the run
+        // down with it, the same way `Steer` does.
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = pricing;
+    }
+
+    pub fn get(&self) -> Pricing {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 /// One per lane, and one per piped run. It holds two figures over one set of
 /// events: the run in flight, which the lines draw, and the session it is part
 /// of, which `session` hands to `/status`.
