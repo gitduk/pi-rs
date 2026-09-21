@@ -416,7 +416,7 @@ async fn an_over_long_output_is_kept_somewhere_the_model_can_reach() {
             .map(|sessions| {
                 sessions
                     .filter_map(|s| s.unwrap().path().read_dir().ok())
-                    .flat_map(|files| files)
+                    .flatten()
                     .count()
             })
             .unwrap_or(0)

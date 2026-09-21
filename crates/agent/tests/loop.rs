@@ -698,7 +698,10 @@ async fn a_throttled_request_is_retried_until_it_lands() {
 // transient-looking or not, the run gives up rather than hammering forever.
 #[tokio::test]
 async fn retries_stop_at_the_attempt_budget() {
-    let cases: &[(&str, fn() -> llm::BrainError, usize)] = &[
+    // A case: what it is called, the failure to answer with, and how many
+    // attempts that should take.
+    type Case = (&'static str, fn() -> llm::BrainError, usize);
+    let cases: &[Case] = &[
         (
             "429",
             || llm::BrainError::Api {
