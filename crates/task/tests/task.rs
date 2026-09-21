@@ -13,8 +13,8 @@ mod common;
 use common::spec;
 
 use agent::session::Session;
-use agent::task::{Home, Task};
-use agent::{Agent, Totals};
+use agent::{Agent, Home, Totals};
+use task::Task;
 use tools::{Ctx, FileLocks, Registry, Tier, Tool, ToolError, ToolOutput, Viewed, Workspace};
 
 struct Scripted {

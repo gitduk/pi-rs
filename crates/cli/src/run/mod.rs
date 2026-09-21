@@ -80,11 +80,7 @@ impl App {
     // Where a subagent started in this lane files what it did. Root and model
     // vary — a `/worktree` moves one, a `/model` the other — and the rest
     // never does.
-    fn home(
-        &self,
-        root: std::path::PathBuf,
-        model: String,
-    ) -> std::sync::Arc<dyn agent::task::Home> {
+    fn home(&self, root: std::path::PathBuf, model: String) -> std::sync::Arc<dyn agent::Home> {
         crate::run::subagent::Filed::armed(self.store.clone(), root, model)
     }
 
@@ -159,11 +155,10 @@ impl App {
             system: std::mem::take(&mut resolved.system),
             tier: resolved.tier,
             effort: resolved.effort,
-            home,
-            standing: &resolved.standing,
             task_max_turns: resolved.max_turns,
             task_deadline: resolved.task_deadline,
         });
+        crate::run::subagent::hang(ag, home, &resolved.standing);
         self.lane_mut().context = resolved.context;
         self.lane_mut().standing = resolved.standing;
         // A skill can appear between one turn and the next, so the table of
@@ -397,7 +392,7 @@ impl App {
         let standing = self.lane().standing.clone();
         let ag = std::sync::Arc::make_mut(&mut self.lane_mut().agent);
         ag.retarget(transport, spec);
-        ag.hang(home, &standing);
+        crate::run::subagent::hang(ag, home, &standing);
     }
 
     // What `/model` on its own shows.
@@ -914,11 +909,10 @@ impl App {
             system: std::mem::take(&mut resolved.system),
             tier: resolved.tier,
             effort: resolved.effort,
-            home,
-            standing: &resolved.standing,
             task_max_turns: resolved.max_turns,
             task_deadline: resolved.task_deadline,
         });
+        crate::run::subagent::hang(&mut ag, home, &resolved.standing);
 
         // Built, not cloned from the lane being left: a `Ctx`'s tables key on
         // absolute paths in one tree, and none of that lane's describe this.
@@ -1454,7 +1448,8 @@ mod tests {
         let ws = tools::Workspace::new(root).unwrap();
         let mut agent = agent::Agent::new(transport, test_spec(model));
         let store = crate::store::session::Store::new(root.join("state"));
-        agent.hang(
+        crate::run::subagent::hang(
+            &mut agent,
             crate::run::subagent::Filed::armed(
                 crate::store::session::Store::new(root.join("state")),
                 root.to_path_buf(),
@@ -1502,12 +1497,7 @@ mod tests {
 
     // What the child asked for, once.
     async fn run_the_child(core: &crate::run::App) {
-        let task = core
-            .lane()
-            .agent
-            .registry
-            .get(agent::task::Task::NAME)
-            .unwrap();
+        let task = core.lane().agent.registry.get(task::Task::NAME).unwrap();
         let ctx = tools::Ctx::new(core.lane().ctx.workspace.clone());
         task.execute(
             serde_json::json!({ "description": "go", "prompt": "go" }),

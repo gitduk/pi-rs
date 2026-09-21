@@ -8,7 +8,8 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 use agent::session::Session;
-use agent::task::Home;
+use agent::{Agent, Home};
+use task::Task;
 
 use crate::store::session::{Store, now};
 
@@ -28,6 +29,18 @@ pub(crate) async fn flush() {
     for save in saves {
         let _ = save.await;
     }
+}
+
+/// Hang the subagent tool off an agent, replacing any it already carries.
+///
+/// **Call it after `Agent::apply`.** `Task` clones the agent it is handed, so
+/// anything set afterwards reaches this run and none of the children it spawns
+/// — which is how the startup path once gave the parent its retry policy and
+/// the child none. And it has to be after, because the child is cloned from an
+/// agent that is already finished.
+pub fn hang(agent: &mut Agent, home: Arc<dyn Home>, standing: &str) {
+    let task = Task::new(agent, home, standing);
+    agent.registry = std::mem::take(&mut agent.registry).with(task);
 }
 
 pub struct Filed {

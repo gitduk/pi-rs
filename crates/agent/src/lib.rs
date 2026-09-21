@@ -19,14 +19,13 @@ pub mod event;
 pub mod ext;
 pub mod seams;
 pub mod session;
-pub mod task;
 
 use event::say;
 pub use event::{Event, Totals};
 pub use ext::approval::Ceiling;
 pub use ext::compact::{Policy, Report};
 pub use ext::retry::Retry;
-pub use seams::{Approver, Decision, Steer};
+pub use seams::{Approver, Decision, Home, Steer};
 
 pub const DEFAULT_SYSTEM: &str = include_str!("../prompts/system.md");
 
@@ -52,7 +51,7 @@ const MAX_INVALID_ARGS_SHOWN: usize = 400;
 
 /// How long a run has to wind down after its stop token is tripped before it
 /// is dropped where it stands.
-pub(crate) const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+pub const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
@@ -103,13 +102,11 @@ enum Action {
 }
 /// Everything the config and the workspace decide, in one bundle for
 /// [`Agent::apply`] to put onto an agent.
-pub struct Setup<'a> {
+pub struct Setup {
     pub registry: Registry,
     pub system: String,
     pub tier: Tier,
     pub effort: Effort,
-    pub home: Arc<dyn task::Home>,
-    pub standing: &'a str,
     pub task_max_turns: Option<usize>,
     pub task_deadline: Option<std::time::Duration>,
 }
@@ -136,32 +133,19 @@ impl Agent {
         self.transport = transport;
         self.spec = spec;
     }
-    /// Put everything the config and workspace decide onto this agent — the
-    /// tools, the ceiling, the system prompt, the effort — and
-    /// hang the subagent tool off the result.
+    /// Put everything the config and workspace decide onto this agent: the
+    /// tools, the ceiling, the system prompt, the effort.
     ///
-    /// **Call it last.** `Task` clones the agent it is handed, so any field set
-    /// after this is one the child does not have — which is how the startup path
-    /// once gave the parent its retry policy and the child none.
-    pub fn apply(&mut self, setup: Setup<'_>) {
+    /// What a run answers to is one of those things, and a caller that wants a
+    /// subagent hang it off the registry afterwards — see `run/subagent.rs`,
+    /// where the tool and the snapshot it takes of this agent can both see it.
+    pub fn apply(&mut self, setup: Setup) {
         self.registry = setup.registry;
         self.approver = Arc::new(Ceiling(setup.tier));
         self.system = setup.system;
         self.effort = setup.effort;
         self.task_max_turns = setup.task_max_turns;
         self.task_deadline = setup.task_deadline;
-        self.hang(setup.home, setup.standing);
-    }
-
-    /// Hang a subagent off this agent, replacing any it already carries.
-    ///
-    /// Separate from `apply` because `Task` keeps a snapshot of the parent:
-    /// anything that changes the parent afterwards — `/model` re-dialling the
-    /// transport — has to build a new one, or the child goes on talking to the
-    /// old endpoint with the old key.
-    pub fn hang(&mut self, home: Arc<dyn task::Home>, standing: &str) {
-        let task = task::Task::new(self, home, standing);
-        self.registry = std::mem::take(&mut self.registry).with(task);
     }
 
     /// A run nobody is talking to. What a subagent, a `--print` and a test all

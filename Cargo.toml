@@ -12,6 +12,7 @@ license = "MIT"
 brain = { path = "crates/brain" }
 tools = { path = "crates/tools" }
 agent = { path = "crates/agent" }
+task = { path = "crates/task" }
 wechat = { path = "crates/wechat" }
 
 anyhow = "1"

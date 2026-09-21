@@ -32,7 +32,7 @@
   `Load` 合这个模式，也正是工具描述的首句「Load a skill's instructions and follow them.」。wire name 保持 `skill` 不变（它在 `compact.rs` 的 `PROTECTED` 白名单里，不跟 struct 名挂钩——`ScriptTool::name()` 也是返回脚本自己的名字）。
   改动面：仅定义（`skill.rs:24`）、`main.rs:370`、`tests/skill.rs:29` 三处。
 
-- [ ] **`Task`（子代理）从 `agent` 拆成 `crates/task`**（未动手，等发话）。细节见下面「工具实现按域分家」。
+- [x] **`Task`（子代理）从 `agent` 拆成 `crates/task`**（**已做**）。细节见下面「工具实现按域分家」。
 
 - [ ] **`ScriptTool` 拆成 `crates/scripts` 并改名 `Script`**（未动手，等发话）。细节见下面「工具实现按域分家」。
 
@@ -64,7 +64,7 @@ crates/
 ├── tools/      契约 + 文件系统域：Tool/Registry/Ctx/Tier、read/write/edit/grep/glob、bash、fetch、judge，加 spill/state/walk/workspace/output/parses/rows/blocks（rows/blocks 是 hashline 的落点）、edit/（编辑引擎）、syntax/（tree-sitter）
 ├── skills/     ↔ 从 tools 拆出：技能发现 + `Load`
 ├── scripts/    ↔ 从 tools 拆出：脚本发现 + `Script`
-├── task/       ↔ 从 agent 拆出：子代理工具
+├── task/       ✓ 已从 agent 拆出：子代理工具
 ├── agent/      核心：纯循环 + 接缝
 ├── cli/        应用：输入 / 驱动 / 存储 / 界面
 └── wechat/    不动
@@ -114,7 +114,7 @@ crates/cli/src/              ✧ 应用
 | 现在 | 去 | 动作 |
 |---|---|---|
 | `agent/{compact,summarize,oneshot,approval}.rs` | `agent/ext/` | **已做**（外加 `lib.rs` 的 `Retry` → `ext/retry.rs`；`Approver`/`Decision`/`Steer` → 新 `seams.rs`） |
-| `agent/task.rs`（499 行） | `crates/task/` | **移出 agent**（见下） |
+| `agent/task.rs`（499 行） | `crates/task/` | **已做**（见下；`Home` 留在 agent 的 `seams.rs`，`Agent::hang` 删除、改由 cli 挂） |
 | `agent/event.rs` | `agent/event.rs` | 去掉 `cost` |
 | `cli/context.rs`（302 行） | `agent/src/context.rs` | **已做**（见下） |
 | `hashline/`（755 行）、`syntax/`（477 行） | `tools/` | **并入**（见下） |
@@ -151,7 +151,7 @@ crates/cli/src/              ✧ 应用
 | `Read`/`Write`/`Edit`/`Grep`/`Glob` | `tools` | `tools`（不动，同域） |
 | `Bash`/`Fetch` | `tools` | `tools`（不动） |
 | `SkillTool`（→ `Load`） | `tools` | `skills`（已定，顺带改名） |
-| `Task`（子代理） | `agent` | `task`（本次定） |
+| `Task`（子代理） | `agent` | `task`（**已做**） |
 | `Judge` | `tools` | `tools`（见下） |
 | `ScriptTool`（→ `Script`） | `tools` | `scripts`（已定） |
 

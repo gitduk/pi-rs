@@ -1718,6 +1718,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_path_to_error",
+ "task",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -2615,6 +2616,23 @@ dependencies = [
  "thiserror 2.0.20",
  "walkdir",
  "yaml-rust",
+]
+
+[[package]]
+name = "task"
+version = "1.23.4"
+dependencies = [
+ "agent",
+ "async-trait",
+ "brain",
+ "futures",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tools",
+ "tracing",
 ]
 
 [[package]]

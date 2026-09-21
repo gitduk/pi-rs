@@ -7,23 +7,11 @@ use serde_json::{Value, json};
 use tokio::sync::{mpsc::unbounded_channel, watch};
 use tools::{Ctx, Tier, Tool, ToolError, ToolOutput, bash};
 
-use crate::event::{Event, Totals};
-use crate::session::Session;
-use crate::{Agent, AgentError};
+use agent::session::Session;
+use agent::{Agent, AgentError, Event, Home, Totals};
 use tracing::Instrument as _;
 
-pub const PROMPT: &str = include_str!("../prompts/task.md");
-
-/// Where a finished subagent's work goes.
-///
-/// This layer says what it needs and the surface provides it; what a child
-/// spent travels back on the tool result instead.
-pub trait Home: Send + Sync {
-    // A subagent has no screen, so its transcript is the only account of what
-    // it did. Called once with the whole transcript, whether the run finished
-    // or was cut short.
-    fn keep(&self, id: &str, session: Session);
-}
+const PROMPT: &str = include_str!("../prompts/task.md");
 
 // Ids only have to be distinct inside one process; the parent's own namespace
 // makes them distinct across runs.
@@ -280,7 +268,7 @@ impl Tool for Task {
                 ran = &mut run => Some(ran),
                 _ = async {
                     grace_stop.cancelled().await;
-                    tokio::time::sleep(crate::STOP_GRACE).await;
+                    tokio::time::sleep(agent::STOP_GRACE).await;
                 } => None,
             };
             match outcome {

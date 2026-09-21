@@ -1,8 +1,10 @@
 //! What the loop reaches the outside world through: the transport it sends on,
-//! the gate it asks before a call, and the lines said to a run already working.
+//! the gate it asks before a call, where a finished subagent's work goes, and
+//! the lines said to a run already working.
 
 pub use brain::transport::Transport;
 
+use crate::session::Session;
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 use tools::Tier;
@@ -19,6 +21,17 @@ pub enum Decision {
 /// policy file, or decide statically.
 pub trait Approver: Send + Sync {
     fn approve(&self, name: &str, tier: Tier, args: &Value) -> Decision;
+}
+
+/// Where a finished subagent's work goes.
+///
+/// This layer says what it needs and the surface provides it; what a child
+/// spent travels back on the tool result instead.
+pub trait Home: Send + Sync {
+    // A subagent has no screen, so its transcript is the only account of what
+    // it did. Called once with the whole transcript, whether the run finished
+    // or was cut short.
+    fn keep(&self, id: &str, session: Session);
 }
 
 /// Lines said after the run began, waiting for the next point where the

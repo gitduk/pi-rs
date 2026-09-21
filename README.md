@@ -372,6 +372,7 @@ other.
 
 | crate | | |
 |---|---|---|
+| `task` | 0.5k | the subagent: a whole agent loop behind one tool call |
 | `brain` | 2.7k | messages, wires, streams, faults, estimates |
 | `agent` | 3.9k | the turn loop, compaction, the session |
 | `tools` | 5.0k | the tool set, the tiered workspace gate, and the tree-sitter outlines an edit anchors on |

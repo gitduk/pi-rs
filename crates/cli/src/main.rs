@@ -576,19 +576,19 @@ async fn main() -> Result<()> {
     if let Some(secs) = config.idle_timeout {
         ag.retry.idle = std::time::Duration::from_secs(secs.max(1));
     }
-    // Before `Agent::apply`, which is where the child is cloned: anything hung
-    // after it would reach this run and none of the subagents it spawns. Last,
-    // so the child is cloned from an agent that is finished.
     ag.apply(agent::Setup {
         registry: std::mem::take(&mut resolved.registry),
         system: std::mem::take(&mut resolved.system),
         tier: resolved.tier,
         effort: resolved.effort,
-        home: subagent::Filed::armed(store.clone(), root.clone(), model_id.clone()),
-        standing: &resolved.standing,
         task_max_turns: resolved.max_turns,
         task_deadline: resolved.task_deadline,
     });
+    subagent::hang(
+        &mut ag,
+        subagent::Filed::armed(store.clone(), root.clone(), model_id.clone()),
+        &resolved.standing,
+    );
     // After `Agent::apply`, which has taken what the agent needs: this takes a
     // field out of what is left.
     let key_map = std::sync::Arc::new(resolved.keys);
