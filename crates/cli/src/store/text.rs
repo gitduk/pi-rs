@@ -4,7 +4,7 @@
 //! Columns, not characters: a line of Chinese fits half as many characters in
 //! the same width, and an escape sequence occupies none.
 
-use brain::count::{in_out, short};
+use llm::count::{in_out, short};
 
 use crate::store::icons;
 

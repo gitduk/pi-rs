@@ -1,9 +1,9 @@
-use brain::message::AssistantContent;
-use brain::model::ModelSpec;
+use llm::message::AssistantContent;
+use llm::model::ModelSpec;
 
 use crate::session::Entry;
-use brain::stream::Usage;
-use brain::transport::Transport;
+use llm::stream::Usage;
+use llm::transport::Transport;
 
 pub const PROMPT: &str = include_str!("../../prompts/summarize.md");
 
@@ -103,7 +103,7 @@ pub async fn run(
     history: String,
     focus: Option<&str>,
     idle: std::time::Duration,
-) -> brain::Result<(String, Usage)> {
+) -> llm::Result<(String, Usage)> {
     let body = match focus.map(str::trim).filter(|f| !f.is_empty()) {
         Some(f) => format!("Focus the summary on: {f}\n\n{history}"),
         None => history,
@@ -113,7 +113,7 @@ pub async fn run(
     // Nothing to say is a failure here: the span goes either way, and it goes
     // unsummarized.
     if text.trim().is_empty() {
-        return Err(brain::BrainError::Summarizer(
+        return Err(llm::BrainError::Summarizer(
             "the summarizer returned nothing".into(),
         ));
     }
@@ -124,7 +124,7 @@ pub async fn run(
 mod tests {
     use super::*;
     use crate::session::{EntryId, Prompt};
-    use brain::message::ToolResult;
+    use llm::message::ToolResult;
 
     fn user(text: &str) -> Entry {
         Entry::Ask {
@@ -170,7 +170,7 @@ mod tests {
         let last = user("the final state");
         let filler: Vec<Entry> = (0..200)
             .map(|i| {
-                assistant(vec![AssistantContent::Text(brain::message::Text {
+                assistant(vec![AssistantContent::Text(llm::message::Text {
                     text: format!("step {i} ") + &"y".repeat(600),
                 })])
             })

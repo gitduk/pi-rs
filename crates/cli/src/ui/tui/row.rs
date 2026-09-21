@@ -14,7 +14,7 @@
 
 use std::cell::RefCell;
 
-use brain::message::{ToolResult, ToolResultContent};
+use llm::message::{ToolResult, ToolResultContent};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 

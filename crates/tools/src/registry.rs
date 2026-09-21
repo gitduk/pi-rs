@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use brain::request::ToolDef;
+use llm::request::ToolDef;
 
 use crate::Tool;
 

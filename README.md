@@ -375,7 +375,7 @@ other.
 | `scripts` | 0.3k | user-defined tools: a script in a directory is a tool |
 | `skills` | 0.5k | skills: instructions a run can load on demand |
 | `task` | 0.5k | the subagent: a whole agent loop behind one tool call |
-| `brain` | 2.7k | messages, wires, streams, faults, estimates |
+| `llm` | 2.7k | messages, wires, streams, faults, estimates |
 | `agent` | 3.9k | the turn loop, compaction, the session |
 | `tools` | 5.0k | the tool set, the tiered workspace gate, and the tree-sitter outlines an edit anchors on |
 | `pi` | 6.2k | terminal, config, sessions, the journal |

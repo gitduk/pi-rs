@@ -36,9 +36,9 @@ impl Segment {
             // nothing has been spent on yet — no turn has stated a count —
             // drops the part instead of showing a row of zeros.
             Segment::InOut if s.turns == 0 && s.input == 0 && s.output == 0 => return None,
-            Segment::InOut => brain::count::in_out(s.input, s.output),
+            Segment::InOut => llm::count::in_out(s.input, s.output),
             Segment::Cache if s.cache_read == 0 => return None,
-            Segment::Cache => format!("{} cached", brain::count::short(s.cache_read)),
+            Segment::Cache => format!("{} cached", llm::count::short(s.cache_read)),
             // An unpriced model reports no cost rather than $0.
             Segment::Cost if s.cost <= 0.0 => return None,
             Segment::Cost => format!("${:.4}", s.cost),
@@ -50,8 +50,8 @@ impl Segment {
                 (_, 0) => return None,
                 (used, budget) => format!(
                     "ctx {}/{}",
-                    brain::count::short(used as u64),
-                    brain::count::short(budget as u64)
+                    llm::count::short(used as u64),
+                    llm::count::short(budget as u64)
                 ),
             },
             Segment::Compacted if s.compactions == 0 => return None,

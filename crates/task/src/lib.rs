@@ -317,7 +317,7 @@ impl Tool for Task {
                     format!(
                         " ({} turn(s), {}, ran uncounted)",
                         heard.turns,
-                        brain::count::slash(heard.spent.usage.input, heard.spent.usage.output)
+                        llm::count::slash(heard.spent.usage.input, heard.spent.usage.output)
                     )
                 } else {
                     String::new()
@@ -389,7 +389,7 @@ fn sketch(description: &str, heard: &Heard) -> String {
         "{} turn{} · {}",
         heard.turns,
         if heard.turns == 1 { "" } else { "s" },
-        brain::count::slash(heard.spent.usage.input, heard.spent.usage.output)
+        llm::count::slash(heard.spent.usage.input, heard.spent.usage.output)
     );
     // Flattened, not trusted: this row is written one line at a time, and a
     // newline in it would stair-step everything drawn after.

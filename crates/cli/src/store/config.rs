@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use brain::model::{CacheControl, Format, ModelSpec, Pricing, ReplayThinking, ThinkingControl};
+use llm::model::{CacheControl, Format, ModelSpec, Pricing, ReplayThinking, ThinkingControl};
 use serde::{Deserialize, Serialize};
 
 use crate::{EffortArg, FormatArg, TierArg};

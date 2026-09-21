@@ -6,12 +6,12 @@
 //! two cannot drift — an `effort` or a `tool_choice` changed in one of them
 //! and not the other would be a difference nobody chose.
 
-use brain::message::Message;
-use brain::model::ModelSpec;
-use brain::request::{Effort, Request, ToolChoice};
-use brain::stream::{Accumulator, Usage};
-use brain::transport::Transport;
 use futures::StreamExt;
+use llm::message::Message;
+use llm::model::ModelSpec;
+use llm::request::{Effort, Request, ToolChoice};
+use llm::stream::{Accumulator, Usage};
+use llm::transport::Transport;
 
 pub(crate) async fn ask(
     transport: &dyn Transport,
@@ -22,7 +22,7 @@ pub(crate) async fn ask(
     // The same leash `attempt` keeps: a provider that stops sending holds a
     // compaction open exactly as it would hold a turn.
     idle: std::time::Duration,
-) -> brain::Result<(String, Usage)> {
+) -> llm::Result<(String, Usage)> {
     let req = Request {
         system: Some(system.to_string()),
         messages: vec![Message::user(body)],

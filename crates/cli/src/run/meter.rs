@@ -5,8 +5,8 @@
 
 use std::time::Duration;
 
-use brain::stream::Usage;
-use brain::totals::Totals;
+use llm::stream::Usage;
+use llm::totals::Totals;
 
 /// Every value a status line can draw on, as far as it is known right now.
 ///

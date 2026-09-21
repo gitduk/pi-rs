@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{AgentError, Totals};
-use brain::message::{
+use llm::message::{
     AssistantContent, Image, Message, Text, ToolCall, ToolResult, ToolResultContent, UserContent,
 };
 use serde::{Deserialize, Serialize};
@@ -966,7 +966,7 @@ pub fn omitted_block(entry: &Entry, notice: &str) -> Vec<UserContent> {
 mod tests {
 
     use super::*;
-    use brain::message::{Text as MsgText, ToolCall, ToolResult};
+    use llm::message::{Text as MsgText, ToolCall, ToolResult};
 
     // The contract the Anthropic encoder's join is written against: what a
     // turn holds arrives as separate messages, and joining them is the wire's
@@ -1149,7 +1149,7 @@ mod tests {
             ),
             (
                 "a death with a cause",
-                failed(Err(AgentError::Brain(brain::BrainError::Stream(
+                failed(Err(AgentError::Brain(llm::BrainError::Stream(
                     "died".into(),
                 )))),
                 Some(stopped_note(Some("stream: died"))),

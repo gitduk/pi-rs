@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use brain::estimate;
-use brain::model::ModelSpec;
+use llm::estimate;
+use llm::model::ModelSpec;
 use serde_json::Value;
 
 use crate::session::{
@@ -103,7 +103,7 @@ struct Item<'a> {
 }
 
 impl<'a> Item<'a> {
-    fn result(&self) -> Option<&'a brain::message::ToolResult> {
+    fn result(&self) -> Option<&'a llm::message::ToolResult> {
         match self.entry {
             Entry::Tool { result: r, .. } if self.notice.is_none() => Some(r),
             _ => None,
@@ -185,8 +185,8 @@ fn pruned(notice: &str, text: &str, policy: &Policy) -> String {
     if c <= policy.prune_chars {
         return notice.to_string();
     }
-    let head = brain::slice::head_chars(text, policy.head_chars);
-    let tail = brain::slice::tail_chars(text, policy.tail_chars);
+    let head = llm::slice::head_chars(text, policy.head_chars);
+    let tail = llm::slice::tail_chars(text, policy.tail_chars);
     let dropped = c.saturating_sub(policy.head_chars + policy.tail_chars);
     format!("{notice}\n\n{head}\n\n[… {dropped} chars omitted …]\n\n{tail}")
 }
@@ -354,7 +354,7 @@ pub fn plan(
                 .enumerate()
                 .filter(|(k, b)| {
                     !already_gone.contains_key(&(*id, *k))
-                        && matches!(b, brain::message::AssistantContent::ToolCall(c)
+                        && matches!(b, llm::message::AssistantContent::ToolCall(c)
                             if oversized_args(c) > 0)
                 })
                 .map(|(k, _)| k)

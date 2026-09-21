@@ -2,11 +2,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
-use brain::model::ModelSpec;
-use brain::request::Request;
-use brain::stream::{BlockKind, StopReason, StreamEvent, Usage};
-use brain::transport::Transport;
 use futures::stream::{BoxStream, StreamExt};
+use llm::model::ModelSpec;
+use llm::request::Request;
+use llm::stream::{BlockKind, StopReason, StreamEvent, Usage};
+use llm::transport::Transport;
 use serde_json::{Value, json};
 
 mod common;
@@ -30,7 +30,7 @@ impl Transport for Scripted {
         &self,
         _spec: &ModelSpec,
         req: &Request,
-    ) -> brain::Result<BoxStream<'static, brain::Result<StreamEvent>>> {
+    ) -> llm::Result<BoxStream<'static, llm::Result<StreamEvent>>> {
         if let Some(system) = &req.system {
             self.saw.lock().unwrap().push(system.clone());
         }

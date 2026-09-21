@@ -380,11 +380,7 @@ impl App {
     // `Task` holds a snapshot of the agent it was built from, so a retarget
     // that stopped at the lane would leave the child on the old provider —
     // with the old key — while the status line named the new model.
-    fn retarget(
-        &mut self,
-        transport: std::sync::Arc<dyn brain::Transport>,
-        spec: brain::ModelSpec,
-    ) {
+    fn retarget(&mut self, transport: std::sync::Arc<dyn llm::Transport>, spec: llm::ModelSpec) {
         let home = self.home(
             self.lane().ctx.workspace.root().to_path_buf(),
             spec.model.clone(),
@@ -471,9 +467,9 @@ impl App {
         let Some(lane) = self.lanes.get(at) else {
             return 0;
         };
-        lane.session.as_ref().map_or(0, |s| {
-            brain::estimate::tokens(&s.context(), &lane.agent.spec)
-        })
+        lane.session
+            .as_ref()
+            .map_or(0, |s| llm::estimate::tokens(&s.context(), &lane.agent.spec))
     }
 
     /// Rewind the conversation to an entry and write the shorter transcript
@@ -510,7 +506,7 @@ impl App {
 // Takes the three pieces rather than a config entry, because the running model
 // may never have been one — a name passed through with default numbers has no
 // entry to read.
-fn summary(format: &str, window: u32, p: &brain::model::Pricing) -> String {
+fn summary(format: &str, window: u32, p: &llm::model::Pricing) -> String {
     let mut parts = vec![format.to_string(), format!("{}k", window / 1000)];
     if p.input_per_mtok > 0.0 || p.output_per_mtok > 0.0 {
         parts.push(format!(
@@ -526,8 +522,8 @@ fn summary(format: &str, window: u32, p: &brain::model::Pricing) -> String {
 // Only ever asked about a model that did not write it — the origin recorded on
 // each block cannot match after a switch — so the signed path is out and one of
 // these three is what the transport will do with it.
-fn demotion(replay: brain::model::ReplayThinking) -> &'static str {
-    use brain::model::ReplayThinking as R;
+fn demotion(replay: llm::model::ReplayThinking) -> &'static str {
+    use llm::model::ReplayThinking as R;
     match replay {
         R::Tagged => "reasoning from the earlier turns replays wrapped in <think> tags",
         R::Off => "reasoning from the earlier turns is dropped rather than replayed",
@@ -545,7 +541,7 @@ fn carries_reasoning(session: &agent::session::Session) -> bool {
     session.view().iter().any(|s| {
         s.entry().blocks().is_some_and(|bs| {
             bs.iter()
-                .any(|b| matches!(b, brain::message::AssistantContent::Reasoning(_)))
+                .any(|b| matches!(b, llm::message::AssistantContent::Reasoning(_)))
         })
     })
 }
@@ -1400,38 +1396,37 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl brain::Transport for Recording {
+    impl llm::Transport for Recording {
         async fn stream(
             &self,
-            spec: &brain::model::ModelSpec,
-            _req: &brain::request::Request,
-        ) -> brain::Result<
-            futures::stream::BoxStream<'static, brain::Result<brain::stream::StreamEvent>>,
-        > {
+            spec: &llm::model::ModelSpec,
+            _req: &llm::request::Request,
+        ) -> llm::Result<futures::stream::BoxStream<'static, llm::Result<llm::stream::StreamEvent>>>
+        {
             self.saw.lock().unwrap().push(spec.model.clone());
-            let done = Ok(brain::stream::StreamEvent::Done {
-                stop: brain::stream::StopReason::EndTurn,
-                usage: brain::stream::Usage::default(),
+            let done = Ok(llm::stream::StreamEvent::Done {
+                stop: llm::stream::StopReason::EndTurn,
+                usage: llm::stream::Usage::default(),
             });
             Ok(Box::pin(futures::stream::iter(std::iter::once(done))))
         }
     }
 
-    fn test_spec(model: &str) -> brain::model::ModelSpec {
-        brain::model::ModelSpec {
+    fn test_spec(model: &str) -> llm::model::ModelSpec {
+        llm::model::ModelSpec {
             model: model.into(),
             base_url: "http://localhost".into(),
-            format: brain::model::Format::Anthropic {
-                cache_control: brain::model::CacheControl::Off,
+            format: llm::model::Format::Anthropic {
+                cache_control: llm::model::CacheControl::Off,
             },
             context_window: 200_000,
             max_output_tokens: 8_000,
             vision: true,
-            thinking: Some(brain::model::ThinkingControl::Budget),
+            thinking: Some(llm::model::ThinkingControl::Budget),
             accepts_temperature: true,
             can_force_tool: true,
-            replay_thinking: brain::model::ReplayThinking::Tagged,
-            pricing: brain::model::Pricing {
+            replay_thinking: llm::model::ReplayThinking::Tagged,
+            pricing: llm::model::Pricing {
                 input_per_mtok: 1.0,
                 output_per_mtok: 2.0,
                 ..Default::default()

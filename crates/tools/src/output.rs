@@ -9,8 +9,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use brain::message::ToolResultContent;
-use brain::slice::{head_bytes, tail_bytes};
+use llm::message::ToolResultContent;
+use llm::slice::{head_bytes, tail_bytes};
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt};
 

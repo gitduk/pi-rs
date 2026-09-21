@@ -547,7 +547,7 @@ mod tests {
     }
 
     use super::*;
-    use brain::message::{AssistantContent, Message, ToolCall};
+    use llm::message::{AssistantContent, Message, ToolCall};
     use serde_json::json;
 
     fn log_with(messages: Vec<Message>) -> Session {
@@ -578,7 +578,7 @@ mod tests {
     }
 
     fn results() -> Message {
-        Message::tool_results(vec![brain::message::ToolResult::text("c1", "read", "body")])
+        Message::tool_results(vec![llm::message::ToolResult::text("c1", "read", "body")])
     }
 
     // Unreachability is not enough on its own: a checkout that is merely

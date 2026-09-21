@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use brain::message::ToolResultContent;
+use llm::message::ToolResultContent;
 use serde_json::{Deserializer, Value};
 
 /// Parse a tool's arguments with a serde path on any error, so a missing or
@@ -260,18 +260,18 @@ pub struct ToolOutput {
     pub preview: Option<String>,
     /// What this call cost that the caller has not counted: a nested run's
     /// totals, carried back on the result that ended it.
-    pub spent: brain::Totals,
+    pub spent: llm::Totals,
 }
 
 impl ToolOutput {
     pub fn text(body: impl Into<String>) -> Self {
         Self {
-            content: vec![ToolResultContent::Text(brain::message::Text {
+            content: vec![ToolResultContent::Text(llm::message::Text {
                 text: body.into(),
             })],
             useless: false,
             preview: None,
-            spent: brain::Totals::default(),
+            spent: llm::Totals::default(),
         }
     }
 
@@ -282,7 +282,7 @@ impl ToolOutput {
 
     /// Report what this call cost beyond its own turn, for the caller's run
     /// to count.
-    pub fn with_spent(mut self, spent: brain::Totals) -> Self {
+    pub fn with_spent(mut self, spent: llm::Totals) -> Self {
         self.spent = spent;
         self
     }

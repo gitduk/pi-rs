@@ -8,7 +8,7 @@ description = "The agent loop: turns, tools, subagents, compaction"
 
 [dependencies]
 async-trait.workspace = true
-brain.workspace = true
+llm.workspace = true
 tools.workspace = true
 futures.workspace = true
 serde.workspace = true

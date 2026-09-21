@@ -40,7 +40,7 @@
 
 **改名与清理**
 
-- [ ] **`brain` → `llm` 改名**（已定名，暂不替换）。
+- [x] **`brain` → `llm` 改名**（**已做**；33 个文件，`crates/brain` → `crates/llm`，package 名与 5 个 `Cargo.toml` 的 `*.workspace` 一并改）。
   范围：`brain::` 178 行 / 195 处、25 个文件，加 4 个 `Cargo.toml`（根 `Cargo.toml` 的 workspace dep，和 `crates/{agent,cli,tools}/Cargo.toml`）。
   两处要手动改：`crates/cli/src/journal.rs:391` 的 crate 白名单（`MINE` 硬编码了 workspace 里所有 crate 名，按 `journal.rs:386-389` 的注释，漏一个就会让那个 crate 的 `tracing` 调用在每一级静默丢掉）；`crates/agent/src/event.rs:2` 注释「the type now lives in `brain`」。
 
@@ -48,7 +48,7 @@
   顺带同步 `README.md:375` 的 Layout 表。
   纯内部改名，对外行为不变。
 
-  注意 `MINE` 这张名单被好几个条目同时动：`brain`→`llm` 改一项，`hashline`/`syntax` 并入删两项，新拆出的 `skills`/`scripts`/`task` 各加一项。做这批改动时最后统一收一次。
+  注意 `MINE` 这张名单被好几个条目同时动：`brain`→`llm` 改一项，`hashline`/`syntax` 并入删两项，新拆出的 `skills`/`scripts`/`task` 各加一项。做这批改动时最后统一收一次。**已收**：现在是 `["pi", "agent", "llm", "tools", "task", "scripts", "skills", "wechat"]`，与 workspace 的 8 个 package 名逐一对应（`"cli"` 那个幽灵项和漏掉的 `wechat` 一并修好）。
 
 - [ ] **`Repl` 拆成 `App` + `Lanes` + `Settings`**（**部分已做**：`App`/`Settings` 已落地，`Lanes` 未拆——原因见「`Repl` 拆成三块」）。
 
@@ -60,7 +60,7 @@
 
 ```
 crates/
-├── llm/        ↔ brain：wire 类型、传输、SSE、token 估算、消息
+├── llm/        ✓ 已由 brain 改名：wire 类型、传输、SSE、token 估算、消息
 ├── tools/      契约 + 文件系统域：Tool/Registry/Ctx/Tier、read/write/edit/grep/glob、bash、fetch、judge，加 spill/state/walk/workspace/output/parses/rows/blocks（rows/blocks 是 hashline 的落点）、edit/（编辑引擎）、syntax/（tree-sitter）
 ├── skills/     ✓ 已从 tools 拆出：技能发现 + `Load`
 ├── scripts/    ✓ 已从 tools 拆出：脚本发现 + `Script`

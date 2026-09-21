@@ -8,7 +8,7 @@ description = "Skills: instructions a run can load on demand"
 
 [dependencies]
 tools.workspace = true
-brain.workspace = true
+llm.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true

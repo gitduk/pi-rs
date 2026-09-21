@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use brain::message::{Message, ToolCall, ToolResult};
-use brain::model::ModelSpec;
-use brain::request::{Effort, Request};
-use brain::stream::{Accumulator, InvalidToolArgs, StreamEvent};
-use brain::transport::Transport;
 use futures::StreamExt;
+use llm::message::{Message, ToolCall, ToolResult};
+use llm::model::ModelSpec;
+use llm::request::{Effort, Request};
+use llm::stream::{Accumulator, InvalidToolArgs, StreamEvent};
+use llm::transport::Transport;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 use tools::{Concurrency, Ctx, Registry, Tier, ToolError, ToolOutput};
@@ -56,7 +56,7 @@ pub const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
     #[error(transparent)]
-    Brain(#[from] brain::BrainError),
+    Brain(#[from] llm::BrainError),
 
     #[error("cancelled")]
     Cancelled,
@@ -219,7 +219,7 @@ impl Agent {
                 if shrunk {
                     compactions += 1;
                 }
-                used = brain::estimate::tokens(&sent, &self.spec);
+                used = llm::estimate::tokens(&sent, &self.spec);
                 say(tx, Event::Context { used, budget });
                 tracing::debug!(
                     target: "pi::loop",
@@ -250,14 +250,13 @@ impl Agent {
                 {
                     Ok(done) => break done,
                     Err((AgentError::Brain(e), _))
-                        if brain::classify(&e) == brain::Fault::Overflow
-                            && squeezes < MAX_SQUEEZE =>
+                        if llm::classify(&e) == llm::Fault::Overflow && squeezes < MAX_SQUEEZE =>
                     {
                         squeezes += 1;
                         // The refusal usually names the real window. Reading it
                         // beats guessing when the estimate was wrong by an
                         // unknown amount.
-                        match brain::fault::overflow_limit(&e) {
+                        match llm::fault::overflow_limit(&e) {
                             Some(limit) => {
                                 // Every shrink so far was guesswork against the
                                 // window the spec claimed, and that baseline is
@@ -315,7 +314,7 @@ impl Agent {
             // Both look like success and neither can be caught before the fact.
             let window = self.spec.context_window as usize;
             let silently_truncated = done.usage.input as usize > window
-                || (done.stop == brain::StopReason::MaxTokens && done.usage.output == 0);
+                || (done.stop == llm::StopReason::MaxTokens && done.usage.output == 0);
             if silently_truncated && scale > SQUEEZE.powi(MAX_SQUEEZE as i32) {
                 scale *= SQUEEZE;
                 say(
@@ -359,7 +358,7 @@ impl Agent {
                         // Re-measured rather than reused: `used` is what went
                         // out, and the reply landed in the session since.
                         ctx: (
-                            brain::estimate::tokens(&session.context(), &self.spec),
+                            llm::estimate::tokens(&session.context(), &self.spec),
                             budget,
                         ),
                         compactions,
@@ -408,7 +407,7 @@ impl Agent {
     ) -> (Vec<Message>, bool) {
         let measured = session.context();
         let policy = &self.compaction;
-        if brain::estimate::tokens(&measured, &self.spec) <= budget {
+        if llm::estimate::tokens(&measured, &self.spec) <= budget {
             return (measured, false);
         }
         // Holding the working tail back is a preference; fitting at all is not.
@@ -503,7 +502,7 @@ impl Agent {
         session: &Session,
         record: &mut session::Compaction,
         focus: Option<&str>,
-    ) -> (brain::stream::Usage, f64) {
+    ) -> (llm::stream::Usage, f64) {
         let (transport, spec) = match &self.summarizer {
             Some((t, s)) => (&**t, s),
             None => (&*self.transport, &self.spec),
@@ -523,7 +522,7 @@ impl Agent {
             }
             Err(e) => {
                 tracing::warn!(target: "pi::compact", error = %e, "summarizing dropped history failed");
-                brain::stream::Usage::default()
+                llm::stream::Usage::default()
             }
         };
         let cost = spec.cost(&usage);
@@ -544,8 +543,8 @@ impl Agent {
         // used against — an overridden window, a proxy, a stale entry. Reserving
         // it verbatim would leave the transcript nothing at all.
         let reply = (self.spec.max_output_tokens as usize).min(window / 4);
-        let fixed = brain::estimate::text(&self.system)
-            + brain::estimate::tool_defs(&self.registry.defs())
+        let fixed = llm::estimate::text(&self.system)
+            + llm::estimate::tool_defs(&self.registry.defs())
             + reply
             + SAFETY_MARGIN;
         // Even an unworkable configuration leaves a floor: stripping the
@@ -559,7 +558,7 @@ impl Agent {
         req: &Request,
         ctx: &Ctx,
         tx: &UnboundedSender<Event>,
-    ) -> Result<brain::stream::Completion, (AgentError, Option<brain::stream::Completion>)> {
+    ) -> Result<llm::stream::Completion, (AgentError, Option<llm::stream::Completion>)> {
         let mut attempt = 0usize;
         loop {
             let (err, partial) = match self.attempt(req, ctx, tx).await {
@@ -574,13 +573,13 @@ impl Agent {
                 other => return Err((other, partial)),
             };
 
-            if attempt >= self.retry.attempts || brain::classify(&e) != brain::Fault::Transient {
+            if attempt >= self.retry.attempts || llm::classify(&e) != llm::Fault::Transient {
                 // The classification, not just the error: "why was this not
                 // retried" is answerable from the fault and from nothing else.
                 tracing::error!(
                     target: "pi::wire",
                     attempts = attempt,
-                    fault = ?brain::classify(&e),
+                    fault = ?llm::classify(&e),
                     error = %e,
                     "giving up"
                 );
@@ -611,7 +610,7 @@ impl Agent {
         req: &Request,
         ctx: &Ctx,
         tx: &UnboundedSender<Event>,
-    ) -> Result<brain::stream::Completion, (AgentError, Option<brain::stream::Completion>)> {
+    ) -> Result<llm::stream::Completion, (AgentError, Option<llm::stream::Completion>)> {
         // A fresh accumulator per attempt: half a stream must not bleed into
         // the message the retry produces.
         let mut acc = Accumulator::new(self.spec.model.clone());
@@ -957,8 +956,8 @@ fn too_many_failures(
     Some(notice)
 }
 
-fn wedged(idle: std::time::Duration) -> brain::BrainError {
-    brain::BrainError::Stream(format!("the stream sent nothing for {}s", idle.as_secs()))
+fn wedged(idle: std::time::Duration) -> llm::BrainError {
+    llm::BrainError::Stream(format!("the stream sent nothing for {}s", idle.as_secs()))
 }
 
 // The leash every provider call here keeps: silence past `idle` reads as a
@@ -966,7 +965,7 @@ fn wedged(idle: std::time::Duration) -> brain::BrainError {
 async fn leashed<T>(
     idle: std::time::Duration,
     fut: impl std::future::Future<Output = T>,
-) -> brain::Result<T> {
+) -> llm::Result<T> {
     tokio::time::timeout(idle, fut)
         .await
         .map_err(|_| wedged(idle))
@@ -999,7 +998,7 @@ pub fn cancel_on_interrupt() -> CancellationToken {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use brain::message::ToolCall;
+    use llm::message::ToolCall;
 
     fn call(name: &str) -> ToolCall {
         ToolCall {

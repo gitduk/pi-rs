@@ -389,7 +389,7 @@ struct JournalLayer {
 // level, which is precisely the kind of bug this file exists to catch.
 fn ours(level: LevelFilter) -> Targets {
     const MINE: [&str; 8] = [
-        "pi", "cli", "agent", "brain", "tools", "task", "scripts", "skills",
+        "pi", "agent", "llm", "tools", "task", "scripts", "skills", "wechat",
     ];
     let theirs = if level == LevelFilter::TRACE {
         level

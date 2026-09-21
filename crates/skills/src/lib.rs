@@ -2,7 +2,7 @@ mod load;
 
 pub use load::{Load, instructions};
 
-use brain::slice::head_bytes;
+use llm::slice::head_bytes;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use tools::read::{MAX_BYTES, over_limit};

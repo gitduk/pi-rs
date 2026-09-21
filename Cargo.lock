@@ -13,8 +13,8 @@ name = "agent"
 version = "1.23.4"
 dependencies = [
  "async-trait",
- "brain",
  "futures",
+ "llm",
  "serde",
  "serde_json",
  "tempfile",
@@ -205,20 +205,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
 dependencies = [
  "generic-array",
-]
-
-[[package]]
-name = "brain"
-version = "1.23.4"
-dependencies = [
- "async-trait",
- "eventsource-stream",
- "futures",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tracing",
 ]
 
 [[package]]
@@ -1337,6 +1323,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
+name = "llm"
+version = "1.23.4"
+dependencies = [
+ "async-trait",
+ "eventsource-stream",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1707,12 +1707,12 @@ dependencies = [
  "agent",
  "anyhow",
  "async-trait",
- "brain",
  "clap",
  "crossterm",
  "futures",
  "ignore",
  "libc",
+ "llm",
  "pulldown-cmark",
  "ratatui",
  "scripts",
@@ -2489,7 +2489,7 @@ name = "skills"
 version = "1.23.4"
 dependencies = [
  "async-trait",
- "brain",
+ "llm",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -2651,8 +2651,8 @@ version = "1.23.4"
 dependencies = [
  "agent",
  "async-trait",
- "brain",
  "futures",
+ "llm",
  "serde",
  "serde_json",
  "tempfile",
@@ -2987,7 +2987,6 @@ name = "tools"
 version = "1.23.4"
 dependencies = [
  "async-trait",
- "brain",
  "filetime",
  "globset",
  "grep-matcher",
@@ -2995,6 +2994,7 @@ dependencies = [
  "grep-searcher",
  "ignore",
  "libc",
+ "llm",
  "reqwest",
  "serde",
  "serde_json",

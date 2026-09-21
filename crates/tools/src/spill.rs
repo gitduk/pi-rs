@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use brain::slice::{head_bytes, tail_bytes};
+use llm::slice::{head_bytes, tail_bytes};
 
 use crate::{Ctx, ToolError, state};
 

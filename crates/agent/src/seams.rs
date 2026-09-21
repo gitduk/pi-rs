@@ -2,7 +2,7 @@
 //! the gate it asks before a call, where a finished subagent's work goes, and
 //! the lines said to a run already working.
 
-pub use brain::transport::Transport;
+pub use llm::transport::Transport;
 
 use crate::session::Session;
 use serde_json::Value;

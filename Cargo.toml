@@ -9,7 +9,7 @@ rust-version = "1.88"
 license = "MIT"
 
 [workspace.dependencies]
-brain = { path = "crates/brain" }
+llm = { path = "crates/llm" }
 tools = { path = "crates/tools" }
 agent = { path = "crates/agent" }
 task = { path = "crates/task" }

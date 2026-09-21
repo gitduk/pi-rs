@@ -379,7 +379,7 @@ impl Tool for Read {
                 let mut row = String::new();
                 if line.len() > MAX_LINE {
                     row.push_str(&crate::rows::addr(n, &spans));
-                    row.push_str(brain::slice::head_bytes(line, MAX_LINE));
+                    row.push_str(llm::slice::head_bytes(line, MAX_LINE));
                     row.push_str("… (line truncated)\n");
                 } else {
                     crate::rows::line(&mut row, n, &spans, line);

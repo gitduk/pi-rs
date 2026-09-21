@@ -3,10 +3,10 @@ use std::io::{IsTerminal as _, Read as _};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use brain::model::{CacheControl, Format, ModelSpec};
-use brain::request::Effort;
-use brain::transport::{Transport, anthropic::Anthropic, chat::ChatCompletions, openai::OpenAi};
 use clap::{Parser, ValueEnum};
+use llm::model::{CacheControl, Format, ModelSpec};
+use llm::request::Effort;
+use llm::transport::{Transport, anthropic::Anthropic, chat::ChatCompletions, openai::OpenAi};
 use tokio::sync::mpsc;
 
 use crate::input::commands::{Command, commands};

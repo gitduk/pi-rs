@@ -18,9 +18,9 @@ use std::time::Instant;
 use agent::session::{Entry as LogEntry, EntryId, Session};
 use agent::{AgentError, Event, Totals};
 use anyhow::Result;
-use brain::message::{AssistantContent, ReasoningContent};
 use crossterm::event::{Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use futures::FutureExt;
+use llm::message::{AssistantContent, ReasoningContent};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
@@ -4168,7 +4168,7 @@ mod tests {
     #[test]
     fn rebuilt_reasoning_blocks_get_ids_of_their_own() {
         use agent::session::Session;
-        use brain::message::{AssistantContent, Reasoning, ReasoningContent};
+        use llm::message::{AssistantContent, Reasoning, ReasoningContent};
 
         let mut s = Session::new();
         s.prompt("go");
@@ -4199,7 +4199,7 @@ mod tests {
     #[test]
     fn rebuilt_empty_reasoning_blocks_are_ignored() {
         use agent::session::Session;
-        use brain::message::{AssistantContent, Reasoning, ReasoningContent};
+        use llm::message::{AssistantContent, Reasoning, ReasoningContent};
 
         let mut s = Session::new();
         s.prompt("go");
@@ -4257,7 +4257,7 @@ mod tests {
                 entries: vec![Entry::Tool {
                     id: EntryId(7),
                     at: 0,
-                    result: brain::message::ToolResult::error("c1", "edit", body),
+                    result: llm::message::ToolResult::error("c1", "edit", body),
                     preview: Some(body.into()),
                 }],
             },
@@ -4743,23 +4743,23 @@ mod tests {
     fn running_lane(dir: &std::path::Path) -> Lane {
         struct Mute;
         #[async_trait::async_trait]
-        impl brain::Transport for Mute {
+        impl llm::Transport for Mute {
             async fn stream(
                 &self,
-                _spec: &brain::model::ModelSpec,
-                _req: &brain::request::Request,
-            ) -> brain::Result<
-                futures::stream::BoxStream<'static, brain::Result<brain::stream::StreamEvent>>,
+                _spec: &llm::model::ModelSpec,
+                _req: &llm::request::Request,
+            ) -> llm::Result<
+                futures::stream::BoxStream<'static, llm::Result<llm::stream::StreamEvent>>,
             > {
                 Ok(Box::pin(futures::stream::empty()))
             }
         }
         let ws = tools::Workspace::new(dir).expect("a workspace");
-        let spec = brain::model::ModelSpec {
+        let spec = llm::model::ModelSpec {
             model: "m".into(),
             base_url: "http://localhost".into(),
-            format: brain::model::Format::Anthropic {
-                cache_control: brain::model::CacheControl::Off,
+            format: llm::model::Format::Anthropic {
+                cache_control: llm::model::CacheControl::Off,
             },
             context_window: 200_000,
             max_output_tokens: 8_000,
@@ -4767,8 +4767,8 @@ mod tests {
             thinking: None,
             accepts_temperature: true,
             can_force_tool: true,
-            replay_thinking: brain::model::ReplayThinking::Tagged,
-            pricing: brain::model::Pricing::default(),
+            replay_thinking: llm::model::ReplayThinking::Tagged,
+            pricing: llm::model::Pricing::default(),
         };
         let (events, inbox) = Lane::channel();
         Lane {
@@ -5036,8 +5036,8 @@ mod tests {
         let tui = surface(dir.path());
         let mut session = agent::session::Session::new();
         session.prompt("run check");
-        session.push_assistant(vec![brain::message::AssistantContent::ToolCall(
-            brain::message::ToolCall {
+        session.push_assistant(vec![llm::message::AssistantContent::ToolCall(
+            llm::message::ToolCall {
                 id: "c1".into(),
                 name: "bash".into(),
                 args: serde_json::json!({ "command": "cargo check" }),
@@ -5065,7 +5065,7 @@ mod tests {
             .on(&agent::Event::TurnStart { turn: 1 });
         tui.core.lanes[0]
             .tally
-            .on(&agent::Event::Usage(brain::stream::Usage {
+            .on(&agent::Event::Usage(llm::stream::Usage {
                 input: 100,
                 output: 20,
                 ..Default::default()

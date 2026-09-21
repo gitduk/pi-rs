@@ -2,12 +2,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
-use brain::message::{Message, UserContent};
-use brain::model::ModelSpec;
-use brain::request::Request;
-use brain::stream::{BlockKind, StopReason, StreamEvent, Usage};
-use brain::transport::Transport;
 use futures::stream::{BoxStream, StreamExt};
+use llm::message::{Message, UserContent};
+use llm::model::ModelSpec;
+use llm::request::Request;
+use llm::stream::{BlockKind, StopReason, StreamEvent, Usage};
+use llm::transport::Transport;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
@@ -45,7 +45,7 @@ impl Transport for Scripted {
         &self,
         _spec: &ModelSpec,
         _req: &Request,
-    ) -> brain::Result<BoxStream<'static, brain::Result<StreamEvent>>> {
+    ) -> llm::Result<BoxStream<'static, llm::Result<StreamEvent>>> {
         let i = self.next.fetch_add(1, Ordering::SeqCst);
         if let Some((at, steer, text)) = self.interject.lock().unwrap().as_ref()
             && *at == i
@@ -158,7 +158,7 @@ fn result_bodies(session: &Session) -> Vec<String> {
 // Every result in the view, in order. One entry is one message now, so a
 // turn's results arrive spread across several of them rather than packed into
 // one — joining is the wire's business.
-fn tool_results(msgs: &[Message]) -> Vec<&brain::message::ToolResult> {
+fn tool_results(msgs: &[Message]) -> Vec<&llm::message::ToolResult> {
     msgs.iter()
         .filter_map(|m| match m {
             Message::User { content } => Some(content.iter()),
@@ -363,7 +363,7 @@ async fn cancellation_during_stream_saves_partial_assistant_response() {
             &self,
             _spec: &ModelSpec,
             _req: &Request,
-        ) -> brain::Result<BoxStream<'static, brain::Result<StreamEvent>>> {
+        ) -> llm::Result<BoxStream<'static, llm::Result<StreamEvent>>> {
             let cancel = self.cancel.clone();
             let stream = futures::stream::unfold((0usize, cancel), |(step, cancel)| async move {
                 match step {
@@ -413,7 +413,7 @@ async fn cancellation_during_stream_saves_partial_assistant_response() {
     };
     assert_eq!(answer.len(), 1);
     match &answer[0] {
-        brain::message::AssistantContent::Text(t) => assert_eq!(t.text, "partial output"),
+        llm::message::AssistantContent::Text(t) => assert_eq!(t.text, "partial output"),
         other => panic!("expected text block, got {other:?}"),
     }
 
@@ -421,9 +421,9 @@ async fn cancellation_during_stream_saves_partial_assistant_response() {
     session.send_prompt("second prompt", None, None);
     let msgs = session.context();
     assert_eq!(msgs.len(), 3, "user -> assistant -> user");
-    assert!(matches!(msgs[0], brain::message::Message::User { .. }));
-    assert!(matches!(msgs[1], brain::message::Message::Assistant { .. }));
-    assert!(matches!(msgs[2], brain::message::Message::User { .. }));
+    assert!(matches!(msgs[0], llm::message::Message::User { .. }));
+    assert!(matches!(msgs[1], llm::message::Message::Assistant { .. }));
+    assert!(matches!(msgs[2], llm::message::Message::User { .. }));
 }
 
 // Answers tool-bearing turns from a script and any tool-free turn — which is
@@ -440,7 +440,7 @@ impl Transport for WithSummarizer {
         &self,
         _spec: &ModelSpec,
         req: &Request,
-    ) -> brain::Result<BoxStream<'static, brain::Result<StreamEvent>>> {
+    ) -> llm::Result<BoxStream<'static, llm::Result<StreamEvent>>> {
         let events = if req.tools.is_empty() {
             self.summaries.fetch_add(1, Ordering::SeqCst);
             // The history to summarize arrives flattened into one user turn.
@@ -516,7 +516,7 @@ async fn a_summary_is_priced_by_the_model_that_wrote_it() {
     let mut main = spec();
     main.context_window = 24_000;
     main.max_output_tokens = 2_000;
-    main.pricing = brain::model::Pricing {
+    main.pricing = llm::model::Pricing {
         input_per_mtok: 1_000.0,
         output_per_mtok: 1_000.0,
         ..Default::default()
@@ -526,7 +526,7 @@ async fn a_summary_is_priced_by_the_model_that_wrote_it() {
     // the summary, not which server answered.
     let mut cheap = main.clone();
     cheap.model = "cheap".into();
-    cheap.pricing = brain::model::Pricing::default();
+    cheap.pricing = llm::model::Pricing::default();
 
     let delegated = wire();
     let mut a = Agent::new(delegated.clone(), main.clone());
@@ -612,9 +612,9 @@ async fn a_summarizer_that_fails_drops_the_history_without_failing_the_turn() {
             &self,
             _: &ModelSpec,
             req: &Request,
-        ) -> brain::Result<BoxStream<'static, brain::Result<StreamEvent>>> {
+        ) -> llm::Result<BoxStream<'static, llm::Result<StreamEvent>>> {
             if req.tools.is_empty() {
-                return Err(brain::BrainError::Stream("summarizer is down".into()));
+                return Err(llm::BrainError::Stream("summarizer is down".into()));
             }
             let i = self.0.fetch_add(1, Ordering::SeqCst);
             let events = if i < 4 {
@@ -648,7 +648,7 @@ async fn a_summarizer_that_fails_drops_the_history_without_failing_the_turn() {
 // Fails the first `fail` attempts with `err`, then answers normally.
 struct Flaky {
     remaining: AtomicUsize,
-    err: fn() -> brain::BrainError,
+    err: fn() -> llm::BrainError,
 }
 
 #[async_trait]
@@ -657,7 +657,7 @@ impl Transport for Flaky {
         &self,
         _: &ModelSpec,
         _: &Request,
-    ) -> brain::Result<BoxStream<'static, brain::Result<StreamEvent>>> {
+    ) -> llm::Result<BoxStream<'static, llm::Result<StreamEvent>>> {
         if self.remaining.fetch_sub(1, Ordering::SeqCst) > 0 {
             return Err((self.err)());
         }
@@ -665,7 +665,7 @@ impl Transport for Flaky {
     }
 }
 
-fn flaky(times: usize, err: fn() -> brain::BrainError) -> Arc<Flaky> {
+fn flaky(times: usize, err: fn() -> llm::BrainError) -> Arc<Flaky> {
     Arc::new(Flaky {
         remaining: AtomicUsize::new(times),
         err,
@@ -682,7 +682,7 @@ async fn a_throttled_request_is_retried_until_it_lands() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
     let mut a = Agent::new(
-        flaky(2, || brain::BrainError::Api {
+        flaky(2, || llm::BrainError::Api {
             format: "anthropic",
             status: 429,
             body: "rate limit exceeded".into(),
@@ -706,10 +706,10 @@ async fn a_throttled_request_is_retried_until_it_lands() {
 // transient-looking or not, the run gives up rather than hammering forever.
 #[tokio::test]
 async fn retries_stop_at_the_attempt_budget() {
-    let cases: &[(&str, fn() -> brain::BrainError, usize)] = &[
+    let cases: &[(&str, fn() -> llm::BrainError, usize)] = &[
         (
             "429",
-            || brain::BrainError::Api {
+            || llm::BrainError::Api {
                 format: "anthropic",
                 status: 429,
                 body: "rate limit exceeded".into(),
@@ -718,7 +718,7 @@ async fn retries_stop_at_the_attempt_budget() {
         ),
         (
             "stream",
-            || brain::BrainError::Stream("connection reset".into()),
+            || llm::BrainError::Stream("connection reset".into()),
             3,
         ),
     ];
@@ -751,7 +751,7 @@ impl Transport for Wedged {
         &self,
         _: &ModelSpec,
         _: &Request,
-    ) -> brain::Result<BoxStream<'static, brain::Result<StreamEvent>>> {
+    ) -> llm::Result<BoxStream<'static, llm::Result<StreamEvent>>> {
         Ok(futures::stream::pending().boxed())
     }
 }
@@ -785,8 +785,8 @@ async fn a_stream_that_stops_sending_does_not_hold_the_turn_open() {
 
 fn call_message(id: &str) -> Message {
     Message::Assistant {
-        content: vec![brain::message::AssistantContent::ToolCall(
-            brain::message::ToolCall {
+        content: vec![llm::message::AssistantContent::ToolCall(
+            llm::message::ToolCall {
                 id: id.into(),
                 name: "read".into(),
                 args: json!({ "path": "a.rs" }),
@@ -809,8 +809,8 @@ impl Transport for Picky {
         &self,
         spec: &ModelSpec,
         req: &Request,
-    ) -> brain::Result<BoxStream<'static, brain::Result<StreamEvent>>> {
-        let size = brain::estimate::tokens(&req.messages, spec);
+    ) -> llm::Result<BoxStream<'static, llm::Result<StreamEvent>>> {
+        let size = llm::estimate::tokens(&req.messages, spec);
         if size > self.fits {
             self.refusals.fetch_add(1, Ordering::SeqCst);
             // 413, not 400: only transient statuses are retried after a squeeze.
@@ -818,7 +818,7 @@ impl Transport for Picky {
                 Some(limit) => format!("prompt is too long: {size} tokens > {limit} maximum"),
                 None => "Request exceeds the maximum size".into(),
             };
-            return Err(brain::BrainError::Api {
+            return Err(llm::BrainError::Api {
                 format: "anthropic",
                 status: 413,
                 body,
@@ -834,9 +834,11 @@ fn fat_history() -> Vec<Message> {
     let mut history = vec![Message::user("the task")];
     for i in 0..3 {
         history.push(call_message(&format!("h{i}")));
-        history.push(Message::tool_results(vec![
-            brain::message::ToolResult::text(format!("h{i}"), "read", "z".repeat(12_000)),
-        ]));
+        history.push(Message::tool_results(vec![llm::message::ToolResult::text(
+            format!("h{i}"),
+            "read",
+            "z".repeat(12_000),
+        )]));
     }
     history
 }
@@ -920,8 +922,8 @@ impl Transport for Mixed {
         &self,
         _spec: &ModelSpec,
         _req: &Request,
-    ) -> brain::Result<BoxStream<'static, brain::Result<StreamEvent>>> {
-        let unnamed = || brain::BrainError::Api {
+    ) -> llm::Result<BoxStream<'static, llm::Result<StreamEvent>>> {
+        let unnamed = || llm::BrainError::Api {
             format: "anthropic",
             status: 413,
             body: "Request exceeds the maximum size".into(),
@@ -929,7 +931,7 @@ impl Transport for Mixed {
         match self.calls.fetch_add(1, Ordering::SeqCst) {
             0 => Err(unnamed()),
             // 413, not 400: only transient statuses are retried after a squeeze.
-            1 => Err(brain::BrainError::Api {
+            1 => Err(llm::BrainError::Api {
                 format: "anthropic",
                 status: 413,
                 body: format!("prompt is too long: 99999 tokens > {} maximum", self.limit),

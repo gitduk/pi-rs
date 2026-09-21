@@ -1,11 +1,11 @@
 use agent::ext::compact::plan;
 use agent::session::{Prompt, Session};
 use agent::{Policy, Report};
-use brain::estimate;
+use llm::estimate;
 
 mod common;
-use brain::message::{AssistantContent, Message, ToolCall, ToolResult, UserContent};
 use common::spec;
+use llm::message::{AssistantContent, Message, ToolCall, ToolResult, UserContent};
 use serde_json::json;
 
 // Drive the real path — plan, record, derive — and hand back the new view.
@@ -372,7 +372,7 @@ fn a_dropped_exchange_never_orphans_the_result_that_answered_it() {
     for i in 0..8 {
         m.push(Message::Assistant {
             content: vec![
-                AssistantContent::Text(brain::message::Text { text: big(20_000) }),
+                AssistantContent::Text(llm::message::Text { text: big(20_000) }),
                 AssistantContent::ToolCall(ToolCall {
                     id: format!("c{i}"),
                     name: "read".into(),
@@ -575,14 +575,14 @@ mod budget {
     use agent::Agent;
     use agent::session::Session;
     use async_trait::async_trait;
-    #[allow(unused_imports)]
-    use brain::message::Text as _Text;
-    use brain::message::{AssistantContent, ToolCall, ToolResult};
-    use brain::model::ModelSpec;
-    use brain::request::Request;
-    use brain::stream::StreamEvent;
-    use brain::transport::Transport;
     use futures::stream::BoxStream;
+    #[allow(unused_imports)]
+    use llm::message::Text as _Text;
+    use llm::message::{AssistantContent, ToolCall, ToolResult};
+    use llm::model::ModelSpec;
+    use llm::request::Request;
+    use llm::stream::StreamEvent;
+    use llm::transport::Transport;
     use serde_json::json;
     use std::sync::Arc;
 
@@ -618,7 +618,7 @@ mod budget {
             &self,
             _: &ModelSpec,
             _: &Request,
-        ) -> brain::Result<BoxStream<'static, brain::Result<StreamEvent>>> {
+        ) -> llm::Result<BoxStream<'static, llm::Result<StreamEvent>>> {
             Ok(Box::pin(futures::stream::empty()))
         }
     }
@@ -629,13 +629,13 @@ mod budget {
             &self,
             _: &ModelSpec,
             _: &Request,
-        ) -> brain::Result<BoxStream<'static, brain::Result<StreamEvent>>> {
+        ) -> llm::Result<BoxStream<'static, llm::Result<StreamEvent>>> {
             unreachable!("budget needs no network")
         }
     }
 
     fn agent_with(context: u32, max_output: u32) -> Agent {
-        let spec = brain::model::ModelSpec {
+        let spec = llm::model::ModelSpec {
             context_window: context,
             max_output_tokens: max_output,
             ..spec()
@@ -664,12 +664,12 @@ mod budget {
         let mut a = agent_with(1_000_000, 32_000);
         a.summarizer = Some((Arc::new(Empty), spec()));
         let mut s = bulky_session();
-        let before = brain::estimate::tokens(&s.context(), &spec());
+        let before = llm::estimate::tokens(&s.context(), &spec());
         assert!(before < a.budget(), "the automatic pass would decline this");
 
         let (report, _) = a.compact_now(&mut s, None).await.expect("something to do");
         assert!(report.touched());
-        let after = brain::estimate::tokens(&s.context(), &spec());
+        let after = llm::estimate::tokens(&s.context(), &spec());
         assert!(after < before, "{before} -> {after}");
         // It stops at the tail the agent is working from rather than at zero.
         assert!(after >= a.kept_tokens() / 2, "took the tail too: {after}");
@@ -683,7 +683,7 @@ mod budget {
         let s = bulky_session();
         let budget = a.budget();
         assert!(
-            brain::estimate::tokens(&s.context(), &a.spec) > budget,
+            llm::estimate::tokens(&s.context(), &a.spec) > budget,
             "the transcript has to start over budget for this to mean anything"
         );
 
@@ -761,7 +761,7 @@ fn the_planner_and_the_sender_count_the_same_transcript() {
 fn a_bang_command_goes_with_the_question_that_refers_to_it() {
     let mut s = Session::new();
     s.prompt("the task");
-    s.push_assistant(vec![AssistantContent::Text(brain::message::Text {
+    s.push_assistant(vec![AssistantContent::Text(llm::message::Text {
         text: big(9_000),
     })]);
     let ran = s.push_bash(Prompt {
@@ -770,7 +770,7 @@ fn a_bang_command_goes_with_the_question_that_refers_to_it() {
         shown: Some("!cargo test".into()),
     });
     s.prompt("fix that");
-    s.push_assistant(vec![AssistantContent::Text(brain::message::Text {
+    s.push_assistant(vec![AssistantContent::Text(llm::message::Text {
         text: "on it".into(),
     })]);
 
@@ -815,7 +815,7 @@ fn a_bang_command_can_be_shrunk_where_a_question_cannot() {
         shown: Some("!cargo test".into()),
     });
     s.prompt("fix that");
-    s.push_assistant(vec![AssistantContent::Text(brain::message::Text {
+    s.push_assistant(vec![AssistantContent::Text(llm::message::Text {
         text: "on it".into(),
     })]);
 
@@ -855,7 +855,7 @@ fn dropping_leaves_no_question_without_its_answer() {
     s.prompt("the original task");
     for i in 0..7 {
         s.push_assistant(vec![
-            AssistantContent::Text(brain::message::Text { text: big(20_000) }),
+            AssistantContent::Text(llm::message::Text { text: big(20_000) }),
             AssistantContent::ToolCall(ToolCall {
                 id: format!("c{i}"),
                 name: "read".into(),
@@ -863,12 +863,12 @@ fn dropping_leaves_no_question_without_its_answer() {
             }),
         ]);
         s.push_results(vec![ToolResult::text(format!("c{i}"), "read", "contents")]);
-        s.push_assistant(vec![AssistantContent::Text(brain::message::Text {
+        s.push_assistant(vec![AssistantContent::Text(llm::message::Text {
             text: big(20_000),
         })]);
         s.prompt(format!("question {i}"));
     }
-    s.push_assistant(vec![AssistantContent::Text(brain::message::Text {
+    s.push_assistant(vec![AssistantContent::Text(llm::message::Text {
         text: "last".into(),
     })]);
     let budget = estimate::tokens(&s.context(), &spec()) / 6;
@@ -892,12 +892,12 @@ fn dropping_leaves_no_question_without_its_answer() {
     let mut s = Session::new();
     s.prompt("the task");
     for i in 0..8 {
-        s.push_assistant(vec![AssistantContent::Text(brain::message::Text {
+        s.push_assistant(vec![AssistantContent::Text(llm::message::Text {
             text: big(40),
         })]);
         s.prompt(format!("question {i}"));
     }
-    s.push_assistant(vec![AssistantContent::Text(brain::message::Text {
+    s.push_assistant(vec![AssistantContent::Text(llm::message::Text {
         text: "last".into(),
     })]);
     let budget = estimate::tokens(&s.context(), &spec()) / 3;
