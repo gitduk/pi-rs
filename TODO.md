@@ -349,6 +349,7 @@ struct 名不必等于 wire name，这库里本来就不是：`ScriptTool::name(
 - 核心只留八步：投影 → 组装 `Request` → 出网 → 回写 assistant → 判终止 → 跑工具 → 回写结果 → 回投影。
 - `cost` 出核心：`spec.cost()` 不参与控制流，乘法挪到调用方，`agent::Event` 去掉 `cost` 字段，`Agent::run` 返回 `Usage`；`tools::ToolOutput.spent` 跟着改成 `Usage`。**已做**：乘法搬到 `llm` 的费率表自己名下（`Pricing::cost`，`ModelSpec::cost` 已无使用者故删除）；`Event::TurnEnd`/`Done`、`Agent::run`/`steered`、`retire_span`、`ToolOutput.spent`/`with_spent`、子代理回报全部只带 token；cli 侧 `Tally::on(event, pricing)` 与 `Lane::{note, charge, charge_run}` 按 lane 自己 agent 的费率乘一次。
   两条**已知代价**（都写在代码注释里）：摘要用更便宜的模型时，它的 token 按本次 run 的费率算（原实现的 `retire_span` 精确计价没了）；运行中 `/model` 换模型后，同一轮后续事件会按新费率算。`agent/tests/loop.rs` 那条「便宜的摘要器不被按主模型计费」的测试因此改成核心还能保证的事——摘要的 token 计入本次 run 的总数。
+  两条代价**已决定接受**（可接受误差，不修）。真要修的话路子是：`Event::Compacted` 的报告带上这次摘要的 `Usage`，cli 按摘要模型的费率单独算、再从 run 总数里扣掉。
 - `/loop` 出核心：`Looping`/`Round`（现 `crates/cli/src/lane.rs`）和 TUI 的 `step_loop` 归到核心**上面**的驱动器，核心不知情。
 - 命令解析出核心：`read`/`expand`/skills 收进输入层，不在核心。
 - `Intent` 三分：命令意图 / 队列专用（`Submit`、`LoopRound`）/ UI 私有（`None`、`Interrupt`、`Rewind`、`Setting*`）。
