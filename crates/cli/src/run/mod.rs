@@ -589,7 +589,7 @@ impl App {
         // asked of yet has no figure, and a row of dashes is not one.
         let spent = lane.tally.session();
         if spent != Totals::default() {
-            out.push(format!("spent: {}", crate::ui::render::spent(&spent)));
+            out.push(format!("spent: {}", crate::store::text::spent(&spent)));
         }
         out
     }
@@ -991,7 +991,7 @@ impl App {
                     " "
                 };
                 let on = t.branch.as_deref().unwrap_or("detached HEAD");
-                format!("{mark} {}  {on}", crate::ui::render::pad(&t.name, width))
+                format!("{mark} {}  {on}", crate::store::text::pad(&t.name, width))
             })
             .collect();
         out.push(format!(
@@ -1020,7 +1020,7 @@ impl App {
                 let text = if s.prompt.is_empty() {
                     "(no question)".into()
                 } else {
-                    crate::ui::render::clip(&s.prompt, RESUME_WIDTH)
+                    crate::store::text::clip(&s.prompt, RESUME_WIDTH)
                 };
                 (s.id == self.lane().id, text, s.created)
             })
@@ -1036,7 +1036,7 @@ impl App {
                 format!(
                     "{} {}  {:>10}",
                     if *mark { icons::CURRENT_ITEM } else { " " },
-                    crate::ui::render::pad(text, width),
+                    crate::store::text::pad(text, width),
                     ago(*created)
                 )
             })

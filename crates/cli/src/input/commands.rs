@@ -120,7 +120,7 @@ fn gist(description: &str) -> String {
     let first = description
         .split_once(". ")
         .map_or(description, |(head, _)| head);
-    crate::ui::render::clip(first.trim().trim_end_matches('.'), GIST)
+    crate::store::text::clip(first.trim().trim_end_matches('.'), GIST)
 }
 
 /// What a slash answers to: the built-ins, then one command per skill.
@@ -294,7 +294,7 @@ pub fn complete<'a>(
                 !s.prompt.is_empty() && (s.prompt.starts_with(typed) || s.id.starts_with(typed))
             })
             .map(|s| Candidate {
-                show: crate::ui::render::clip(&s.prompt, RESUME_WIDTH),
+                show: crate::store::text::clip(&s.prompt, RESUME_WIDTH),
                 line: format!("/resume {}", s.id),
                 help: ago(s.created),
                 more: false,

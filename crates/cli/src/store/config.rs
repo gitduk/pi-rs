@@ -91,7 +91,7 @@ pub struct Config {
     pub keys: BTreeMap<String, Binds>,
     /// The SGR codes behind every colour the terminal uses.
     #[serde(default)]
-    pub theme: crate::ui::render::Theme,
+    pub theme: crate::store::theme::Theme,
     /// Which parts the running and the finished status lines show.
     #[serde(default)]
     pub status: crate::ui::status::Lines,

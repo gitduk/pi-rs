@@ -32,8 +32,8 @@ use crate::run::meter::Snapshot;
 use crate::run::{self, App};
 use crate::store::icons;
 use crate::store::session::{ResumeChoice, Store};
+use crate::store::theme::Style as ThemeStyle;
 use crate::ui::keys::{Action, Keys, Layers, Menu, Mode, Press};
-use crate::ui::render::Style as ThemeStyle;
 use crate::ui::render::{self, Paint};
 use crate::ui::status::{self, Segment};
 use editor::Editor;
@@ -621,7 +621,11 @@ fn scrollback_from(
                             if answered.contains(&c.id) {
                                 continue;
                             }
-                            out.push(Row::tool_start(&c.name, &render::summarize(&c.args), paint));
+                            out.push(Row::tool_start(
+                                &c.name,
+                                &crate::store::text::summarize(&c.args),
+                                paint,
+                            ));
                         }
                         AssistantContent::Reasoning(r) => {
                             // Muted, exactly as the live stream paints a
@@ -1397,7 +1401,7 @@ impl Ui {
                 view.state.tools.push(RunTool {
                     id: id.clone(),
                     name: name.clone(),
-                    summary: render::summarize(args),
+                    summary: crate::store::text::summarize(args),
                     done: None,
                 });
             }
@@ -1589,7 +1593,11 @@ impl Ui {
         let muted = self.rat_style(&self.paint.theme.muted);
         menu.iter()
             .map(|c| {
-                let line = format!("  {}  {}", render::pad(c.show(), head), c.help());
+                let line = format!(
+                    "  {}  {}",
+                    crate::store::text::pad(c.show(), head),
+                    c.help()
+                );
                 ListItem::new(Line::from(Span::styled(line, muted)))
             })
             .collect()
@@ -1597,7 +1605,7 @@ impl Ui {
 
     // A theme style, as ratatui sees it.
     fn rat_style(&self, s: &ThemeStyle) -> RStyle {
-        render::style_to_ratatui(s)
+        crate::store::theme::style_to_ratatui(s)
     }
 
     // The rows above the input line: running tools, the open stream, and
@@ -1736,7 +1744,12 @@ impl Ui {
         Some(order[i].to_string())
     }
 
-    fn set_theme(&mut self, view: &mut View, context: &[String], theme: Arc<render::Theme>) {
+    fn set_theme(
+        &mut self,
+        view: &mut View,
+        context: &[String],
+        theme: Arc<crate::store::theme::Theme>,
+    ) {
         self.paint.theme = theme;
         self.bang_prompt = Self::paint_prompt(&self.paint, icons::BANG_SIGIL);
         self.tab_sep = Self::paint_sep(&self.paint);
@@ -3591,7 +3604,7 @@ impl Tui {
                             .session
                             .as_ref()
                             .and_then(|s| s.last_node())
-                            .map(|n| render::clip(n.show(), 60))
+                            .map(|n| crate::store::text::clip(n.show(), 60))
                             .filter(|t| !t.is_empty())
                             .map(|t| format!(" — the transcript now ends at {t}"))
                             .unwrap_or_default();
@@ -3623,7 +3636,7 @@ impl Tui {
             .into_iter()
             .map(|node| MenuEntry::Message {
                 id: node.id(),
-                show: render::clip(node.show(), 60),
+                show: crate::store::text::clip(node.show(), 60),
                 help: "you — unsends it",
             })
             .collect();

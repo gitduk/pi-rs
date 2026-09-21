@@ -220,7 +220,7 @@ impl Bridge {
                 self.say(&format!(
                     "{} {name} failed — {}",
                     icons::FAIL_MARK,
-                    crate::ui::render::clip(preview, 80)
+                    crate::store::text::clip(preview, 80)
                 ))
                 .await;
             }
@@ -639,7 +639,7 @@ fn backoff(failures: &mut u32) -> Duration {
 // `describe`: the name plus the argument the summary picked out. Empty args
 // collapse to the bare name so the line never ends on a stray space.
 fn tool_line(name: &str, args: &serde_json::Value) -> String {
-    match crate::ui::render::summarize(args) {
+    match crate::store::text::summarize(args) {
         summary if summary.is_empty() => format!("{} {name}", icons::TOOL_GEAR),
         summary => format!("{} {name} {summary}", icons::TOOL_GEAR),
     }

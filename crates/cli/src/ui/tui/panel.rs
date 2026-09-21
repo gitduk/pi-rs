@@ -319,7 +319,7 @@ impl Panel {
                 // the line: its width is measured from it, never assumed, and
                 // the caret's byte offset rides after the value's own.
                 let lead_bytes = icons::MENU_SIGIL.len() + 1 + row.path.len() + 3;
-                let lead_w = crate::ui::render::visible_width(&line[..lead_bytes]);
+                let lead_w = crate::store::text::visible_width(&line[..lead_bytes]);
                 let caret_at = lead_bytes + editor.cursor();
                 let (lines, in_row, col) = wrap_edit(&line, lead_w, caret_at, width);
                 out.extend(
@@ -689,7 +689,7 @@ mod tests {
         assert_eq!(r, 0);
         assert_eq!(
             col as usize,
-            crate::ui::render::visible_width("› 模型.name = http://x中"),
+            crate::store::text::visible_width("› 模型.name = http://x中"),
             "one column past the value, however wide the path"
         );
     }

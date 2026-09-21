@@ -465,7 +465,7 @@ pub fn resolve(
 fn paint(
     mut rx: mpsc::UnboundedReceiver<agent::Event>,
     quiet: bool,
-    theme: std::sync::Arc<render::Theme>,
+    theme: std::sync::Arc<crate::store::theme::Theme>,
     done: Vec<status::Segment>,
     model: String,
     worktree: Option<String>,
