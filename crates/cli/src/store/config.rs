@@ -103,10 +103,10 @@ pub struct Config {
     /// and this is the floor for the shape they cannot (a round that keeps
     /// changing files forever). Unset reads as 10; esc is always the brake.
     #[serde(
-        default = "default_loop_max_turns",
+        default = "default_loop_max_rounds",
         skip_serializing_if = "Option::is_none"
     )]
-    pub loop_max_turns: Option<usize>,
+    pub loop_max_rounds: Option<usize>,
 
     /// Turn ceiling for subagent tasks. Unset reads as 50.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -177,13 +177,13 @@ fn default_escape() -> String {
 fn default_escape_ms() -> u64 {
     250
 }
-fn default_loop_max_turns() -> Option<usize> {
-    Some(DEFAULT_LOOP_MAX_TURNS)
+fn default_loop_max_rounds() -> Option<usize> {
+    Some(DEFAULT_LOOP_MAX_ROUNDS)
 }
 
-// The ceiling an unset `loop_max_turns` reads as: the floor for a loop that
+// The ceiling an unset `loop_max_rounds` reads as: the floor for a loop that
 // keeps changing files without ever repeating itself.
-const DEFAULT_LOOP_MAX_TURNS: usize = 10;
+const DEFAULT_LOOP_MAX_ROUNDS: usize = 10;
 
 impl Default for Vim {
     fn default() -> Self {
@@ -224,11 +224,11 @@ impl Config {
             .collect();
         crate::store::keys::Keys::resolve(&overrides)
     }
-    /// The ceiling an unset `loop_max_turns` reads as — see the field. An
+    /// The ceiling an unset `loop_max_rounds` reads as — see the field. An
     /// `Option` here mirrors the field, so `None` and the config staying
     /// silent mean the same thing to callers.
     pub fn loop_cap(&self) -> Option<usize> {
-        self.loop_max_turns.or(Some(DEFAULT_LOOP_MAX_TURNS))
+        self.loop_max_rounds.or(Some(DEFAULT_LOOP_MAX_ROUNDS))
     }
 }
 

@@ -52,7 +52,7 @@
 
 - [ ] **`Repl` 拆成 `App` + `Lanes` + `Settings`**（**部分已做**：`App`/`Settings` 已落地，`Lanes` 未拆——原因见「`Repl` 拆成三块」）。
 
-- [ ] **统一 turn/round 的口径**（未动手，等发话）：`loop_max_turns` → `loop_max_rounds`、`lane::Turn` → `Run`、删 `Segment::Turns`、修几处散文。细节见下面「turn 与 round：两个层级」。
+- [x] **统一 turn/round 的口径**（**已做**）：`loop_max_turns` → `loop_max_rounds`、`lane::Turn` → `Run`（连同字段 `lane.turn` → `lane.run`）、删 `Segment::Turns`、修 5 处散文。细节见下面「turn 与 round：两个层级」。
 
 ## 目标目录结构（未落地）
 
@@ -226,7 +226,7 @@ struct 名不必等于 wire name，这库里本来就不是：`ScriptTool::name(
 
 `hashline` 的 699 行安全关键代码失去「只有一个依赖的独立 crate」这个编译器保证——并进 `tools` 后跟 tokio/reqwest/tree-sitter 一起编译，也没人拦它做 IO。但这个保证现在也没被用起来：整个 crate 只有 2 个单测，`tests/` 目录是空的。`syntax` 本来就没这个保证可言（零测试）。
 
-## turn 与 round 是两个层级（已定）
+## turn 与 round 是两个层级（已定，**已做**）
 
 先纠正一处：`/loop` 的 round 和 compaction 的 round **不是** agent 的 turn，它们粗一级。`compact.rs:495-500` 把这件事说清楚了，而且是踩过坑之后说清楚的：
 
@@ -251,7 +251,7 @@ struct 名不必等于 wire name，这库里本来就不是：`ScriptTool::name(
 - **round** 只指「一次提问 + 它引出的一切」：`Looping.round`、`Round` 枚举、`THIN_ROUNDS`、`pending_round`、`Intent::LoopRound`、`Entry::Ask.round`、`compact::round_starts` 都已正确，**不动**。
 - **改 `loop_max_turns` → `loop_max_rounds`**：全库唯一名不副实的键。
 - **`cli::lane::Turn` → `Run`**：运行状态机，与两层都不同义。
-- **删 `Segment::Turns`**。
+- **删 `Segment::Turns`**（**已做**；用户可见：`[status] live/done` 里写过的 `"turns"` 现在会在启动时报反序列化错，旧键不写兼容）。
 - **顺带修几处把粗一级写成 turn 的散文**（见下）。
 
 ### 改动面
@@ -273,7 +273,7 @@ struct 名不必等于 wire name，这库里本来就不是：`ScriptTool::name(
 
 - 枚举变体（`status.rs:180`）、render 分支（`:203-204`）、`default_done()` 首位（`:275`），及相应测试。
 - **这是用户可见的破坏**：`Segment` 带 `#[serde(rename_all = "snake_case")]`，所以 `"turns"` 今天在 `[status] live/done` 里是合法值；删变体后写过的配置会在启动时报反序列化错。R47 说不管兼容，但别再无声。
-- `Snapshot.turns` 仍被 `Segment::InOut` 的判空用到（`status.rs:196`），字段保留不改名；若愿意，把那段判空改成只看 in/out，就能连字段一起删。
+- `Snapshot.turns` 仍被 `Segment::InOut` 的判空用到（`ui/status.rs:38`），字段保留不改名——按这条的原话，「只看 in/out 就能连字段一起删」那一步**仍开着**。
 
 **散文里把粗一级叫 turn 的**（只改注释，不动代码）
 

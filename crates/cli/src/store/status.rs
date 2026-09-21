@@ -13,7 +13,6 @@ pub enum Segment {
     InOut,
     Cache,
     Cost,
-    Turns,
     Ctx,
     Compacted,
     Queued,
@@ -54,11 +53,10 @@ pub fn default_live() -> Vec<Segment> {
     ]
 }
 
-/// The same for the done line — `turns · in/out · cached · $cost` as it stood,
-/// with context and compaction added.
+/// The same for the done line — `in/out · cached · $cost` as it stood, with
+/// context and compaction added.
 pub fn default_done() -> Vec<Segment> {
     vec![
-        Segment::Turns,
         Segment::InOut,
         Segment::Cache,
         Segment::Ctx,

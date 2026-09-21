@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::input::commands::{Candidate, Choice, Command};
 use crate::input::{self, Fate, Intent, Rewound, Step};
-use crate::run::lane::{Lane, Turn};
+use crate::run::lane::{Lane, Run};
 use crate::run::looping::Round;
 use crate::run::meter::Snapshot;
 use crate::run::{self, App};
@@ -3037,11 +3037,11 @@ impl Tui {
                 mark: if at == current {
                     Mark::Front
                 } else {
-                    match &lane.turn {
-                        Turn::Running { .. } => Mark::Running,
-                        Turn::Ended { out: Ok(_), .. } => Mark::Done,
-                        Turn::Ended { out: Err(_), .. } => Mark::Failed,
-                        Turn::Idle => Mark::Idle,
+                    match &lane.run {
+                        Run::Running { .. } => Mark::Running,
+                        Run::Ended { out: Ok(_), .. } => Mark::Done,
+                        Run::Ended { out: Err(_), .. } => Mark::Failed,
+                        Run::Idle => Mark::Idle,
                     }
                 },
                 name: lane_name(lane),
@@ -3131,7 +3131,7 @@ impl Tui {
             Round::Oscillating => "loop stopped — a round undid the work before it".to_string(),
             Round::Thin => "loop stopped — rounds are only nibbling now".to_string(),
             Round::Capped(n) => {
-                format!("loop stopped at loop_max_turns ({n}) — rounds were still changing files")
+                format!("loop stopped at loop_max_rounds ({n}) — rounds were still changing files")
             }
         };
         self.say_of(lane, said);
@@ -3234,11 +3234,11 @@ impl Tui {
     fn stop_current(&mut self, unsend: bool) {
         // Said here rather than at the callers: the state is the only thing
         // that knows, and every way of asking to stop arrives through it.
-        let Turn::Running {
+        let Run::Running {
             cancel,
             unsend: take_back,
             ..
-        } = &mut self.core.lane_mut().turn
+        } = &mut self.core.lane_mut().run
         else {
             self.ui.flash("nothing running to stop");
             return;
@@ -3536,7 +3536,7 @@ impl Tui {
     async fn settle_all(&mut self, done: &mut UnboundedReceiver<Done>) {
         let mut left = 0;
         for lane in &self.core.lanes {
-            if let Turn::Running { cancel, .. } = &lane.turn {
+            if let Run::Running { cancel, .. } = &lane.run {
                 cancel.cancel();
                 left += 1;
             }
@@ -3712,7 +3712,7 @@ impl Tui {
                 ran: out.map(|out| (carried, out)),
             });
         });
-        self.core.lane_mut().turn = Turn::Running {
+        self.core.lane_mut().run = Run::Running {
             cancel,
             steer: Some(steer),
             unsend: false,
@@ -3821,7 +3821,7 @@ impl Tui {
         let cancel = CancellationToken::new();
         let ctx = self.core.lane_mut().ctx.clone().with_cancel(cancel.clone());
         // Committed forecloses `Intent::Unsend`, the only writer of
-        // `Turn::Running.unsend`, which a `!` has no prompt to honour.
+        // `Run::Running.unsend`, which a `!` has no prompt to honour.
         self.arm_view(true);
 
         let token = self.core.lane().token;
@@ -3857,7 +3857,7 @@ impl Tui {
             };
             let _ = done.send(Done { token, kind, ran });
         });
-        self.core.lane_mut().turn = Turn::Running {
+        self.core.lane_mut().run = Run::Running {
             cancel,
             // Not a turn: nothing here calls a model, so there is no boundary
             // at which a line could be heard.
@@ -3904,7 +3904,7 @@ impl Tui {
             };
             let _ = done.send(Done { token, kind, ran });
         });
-        self.core.lane_mut().turn = Turn::Running {
+        self.core.lane_mut().run = Run::Running {
             cancel,
             // Not a turn: nothing here calls a model, so there is no boundary
             // at which a line could be heard.
@@ -4031,7 +4031,7 @@ impl Tui {
         // Out of sight: what the run left to draw waits with it, and the lane
         // says so in the bar until someone looks.
         if lane != self.core.current {
-            self.core.lanes[lane].turn = Turn::Ended { out, unsend };
+            self.core.lanes[lane].run = Run::Ended { out, unsend };
             return;
         }
         self.close_run(out);
@@ -4149,7 +4149,7 @@ mod tests {
     };
     use crate::input::commands::{Choice, Command, Source};
     use crate::run::App;
-    use crate::run::lane::{Lane, Turn};
+    use crate::run::lane::{Lane, Run};
     use crate::run::looping::Round;
     use crate::store::icons;
     use crate::store::keys::{Keys, Mode};
@@ -4712,7 +4712,7 @@ mod tests {
     // ---------------------------------------------------------- settling
 
     // A lane wired up enough to be settled: a real transcript, a real agent,
-    // and a `Turn::Running` standing in for the job that is about to report.
+    // and a `Run::Running` standing in for the job that is about to report.
     // A lane and the directory it lives in — the guard comes back so the
     // caller keeps it alive for as long as the lane is used.
     fn a_running_lane() -> (tempfile::TempDir, Lane) {
@@ -4725,7 +4725,7 @@ mod tests {
     // exactly what `drop_vanished_lanes` exists to find.
     fn vanished_lane(name: &str) -> Lane {
         let (_dir, mut lane) = a_running_lane();
-        lane.turn = Turn::Idle;
+        lane.run = Run::Idle;
         lane.worktree = Some(name.into());
         std::fs::remove_dir_all(lane.ctx.workspace.root()).expect("the checkout goes");
         lane
@@ -4790,7 +4790,7 @@ mod tests {
             looping: None,
             pending_round: None,
             // What every `start_*` leaves behind while its job runs.
-            turn: Turn::Running {
+            run: Run::Running {
                 cancel: tokio_util::sync::CancellationToken::new(),
                 steer: None,
                 unsend: false,
@@ -5254,7 +5254,7 @@ mod tests {
         let earlier = vanished_lane("fix-old");
         tui.core.lanes.insert(0, earlier);
         tui.core.current = 1;
-        tui.core.lanes[1].turn = Turn::Idle;
+        tui.core.lanes[1].run = Run::Idle;
         tui.drop_vanished_lanes();
         assert_eq!(tui.core.lanes.len(), 1);
         assert_eq!(tui.core.current, 0, "the front lane follows its index");
@@ -5276,7 +5276,7 @@ mod tests {
         assert_eq!(tui.core.lanes.len(), 3, "the run's lane must not move");
 
         // The run over, the same pass now reaches the vanished lane.
-        tui.core.lanes[2].turn = Turn::Idle;
+        tui.core.lanes[2].run = Run::Idle;
         tui.drop_vanished_lanes();
         assert_eq!(tui.core.lanes.len(), 2);
     }
@@ -5529,7 +5529,7 @@ mod tests {
             "a running lane draws the status line"
         );
 
-        lane.turn = Turn::Idle;
+        lane.run = Run::Idle;
         assert!(
             !ui.live(&lane, &view, 10)
                 .0

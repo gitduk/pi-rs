@@ -189,7 +189,7 @@ way it runs alone.
 What it does not do is judge whether a goal was reached. `/loop find me an
 answer` is a loop with nothing to measure — those belong in the ordinary
 back-and-forth, where you are the one who decides to go again. Esc ends a loop
-along with the round it caught, and `loop_max_turns` puts a ceiling on the one
+along with the round it caught, and `loop_max_rounds` puts a ceiling on the one
 shape convergence cannot catch: a round that undoes the one before it changes
 files forever. `/loop` on its own stops the one in force, and a second `/loop` is refused
 rather than replacing it — the round already queued would otherwise run and be

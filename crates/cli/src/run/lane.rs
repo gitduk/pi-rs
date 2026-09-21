@@ -18,19 +18,19 @@ use tools::Ctx;
 use crate::run::looping::{Looping, Round};
 use crate::run::meter::Tally;
 
-/// Where this lane's turn stands.
+/// Where this lane's run stands.
 ///
 /// One value rather than a flag beside an outcome: a lane is idle, or running,
 /// or holding the end of a run nobody has seen — never two of those, and the
 /// compiler is what should say so.
-pub enum Turn {
+pub enum Run {
     // Nothing running, nothing waiting to be looked at.
     Idle,
     // A run under way.
     Running {
         // What `esc` cancels, and only for the lane in front.
         cancel: CancellationToken,
-        // Where a line typed mid-run goes, when the job in flight is a turn
+        // Where a line typed mid-run goes, when the job in flight is a run
         // and can hear one: the run takes it at its next turn boundary.
         //
         // `None` for a `!` or a `/compact`. Neither calls a model, so neither
@@ -73,12 +73,12 @@ pub struct Handback {
 pub struct Lane {
     pub token: u64,
     /// Shared so a run can take it with it: `Agent::run` needs only `&self`,
-    /// and a turn outlives the borrow the surface could lend it. `/model` and
+    /// and a run outlives the borrow the surface could lend it. `/model` and
     /// `/reload` write through `Arc::make_mut`, so a run in flight keeps the
     /// agent it started on — which is what they meant all along.
     pub agent: std::sync::Arc<Agent>,
     /// The transcript, or None while a run has it — it is lent out for the
-    /// length of a turn. An empty session left in its place would read like a
+    /// length of a run. An empty session left in its place would read like a
     /// session with nothing in it, which is a different thing to anyone asking.
     pub session: Option<Session>,
     pub id: String,
@@ -119,8 +119,8 @@ pub struct Lane {
     /// What arrived while nobody was looking, in order, waiting to be replayed
     /// into the view the moment this lane comes back to the front.
     pub pending: Vec<Event>,
-    /// Where this lane's turn stands.
-    pub turn: Turn,
+    /// Where this lane's run stands.
+    pub run: Run,
     /// What a slash answers to here, and the key map in force. Both are what
     /// this root's config and skills resolved to, so they travel with the lane
     /// rather than with the run — a tree switched back to answers to its own.
@@ -128,7 +128,7 @@ pub struct Lane {
     pub commands: std::sync::Arc<Vec<crate::input::commands::Command>>,
     /// The `/loop` this lane is under, if any.
     pub looping: Option<Looping>,
-    /// The `/loop` round waiting in the queue, taken by the turn it arms: the
+    /// The `/loop` round waiting in the queue, taken by the run it arms: the
     /// ask it opens records which automatic round it is.
     pub pending_round: Option<u64>,
 }
@@ -145,9 +145,9 @@ impl Lane {
     /// Only when it is: a lane still working must keep its `Running`, or the
     /// token `esc` reaches and the request to unsend go with it.
     pub fn take_ended(&mut self) -> Option<(Result<Totals, agent::AgentError>, bool)> {
-        match self.turn {
-            Turn::Ended { .. } => match std::mem::replace(&mut self.turn, Turn::Idle) {
-                Turn::Ended { out, unsend } => Some((out, unsend)),
+        match self.run {
+            Run::Ended { .. } => match std::mem::replace(&mut self.run, Run::Idle) {
+                Run::Ended { out, unsend } => Some((out, unsend)),
                 _ => None,
             },
             _ => None,
@@ -157,8 +157,8 @@ impl Lane {
     /// A job has given this lane's transcript back. The one place `Running`
     /// ends: a lane left in it queues every later prompt and never drains.
     pub fn finish(&mut self) -> Handback {
-        match std::mem::replace(&mut self.turn, Turn::Idle) {
-            Turn::Running { unsend, steer, .. } => Handback {
+        match std::mem::replace(&mut self.run, Run::Idle) {
+            Run::Running { unsend, steer, .. } => Handback {
                 unsend,
                 unheard: steer.map(|s| s.take()).unwrap_or_default(),
             },
@@ -168,15 +168,15 @@ impl Lane {
 
     /// Where a line typed mid-run goes, while a run is there to hear one.
     pub fn steer(&self) -> Option<&Steer> {
-        match &self.turn {
-            Turn::Running { steer, .. } => steer.as_ref(),
+        match &self.run {
+            Run::Running { steer, .. } => steer.as_ref(),
             _ => None,
         }
     }
 
     /// Whether a run has this lane's transcript right now.
     pub fn is_running(&self) -> bool {
-        matches!(self.turn, Turn::Running { .. })
+        matches!(self.run, Run::Running { .. })
     }
 
     /// The round this lane's loop queued has begun. Nothing else it runs is

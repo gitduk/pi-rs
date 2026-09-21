@@ -645,7 +645,7 @@ async fn main() -> Result<()> {
                 pending: Vec::new(),
                 looping: None,
                 pending_round: None,
-                turn: lane::Turn::Idle,
+                run: lane::Run::Idle,
                 tally: Default::default(),
                 keys: key_map.clone(),
                 commands,

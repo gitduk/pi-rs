@@ -933,7 +933,7 @@ impl App {
             pending: Vec::new(),
             looping: None,
             pending_round: None,
-            turn: crate::run::lane::Turn::Idle,
+            run: crate::run::lane::Run::Idle,
         });
         self.current = self.lanes.len() - 1;
         self.in_force();
@@ -1382,7 +1382,7 @@ mod tests {
             pending: Vec::new(),
             looping: None,
             pending_round: None,
-            turn: crate::run::lane::Turn::Idle,
+            run: crate::run::lane::Run::Idle,
             keys: std::sync::Arc::new(crate::store::keys::Keys::default()),
             commands: std::sync::Arc::new(Vec::new()),
         }
@@ -1474,7 +1474,7 @@ mod tests {
             pending: Vec::new(),
             looping: None,
             pending_round: None,
-            turn: crate::run::lane::Turn::Idle,
+            run: crate::run::lane::Run::Idle,
             keys: keys.clone(),
             commands: commands.clone(),
         };
@@ -1580,7 +1580,7 @@ mod tests {
         core.enter_worktree("fix-tools").unwrap();
         assert_eq!(core.lanes.len(), 2);
 
-        core.lanes[1].turn = crate::run::lane::Turn::Running {
+        core.lanes[1].run = crate::run::lane::Run::Running {
             cancel: tokio_util::sync::CancellationToken::new(),
             steer: None,
             unsend: false,

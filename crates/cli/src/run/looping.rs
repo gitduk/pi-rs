@@ -142,7 +142,7 @@ pub enum Round {
     // Several rounds in a row moved fewer than `THIN_CHANGES` lines. The
     // fingerprint cannot catch a round that keeps nibbling, so this does.
     Thin,
-    // `loop_max_turns` reached, with rounds still changing the tree.
+    // `loop_max_rounds` reached, with rounds still changing the tree.
     Capped(usize),
     // Esc, an error, or a prompt taken back. The loop goes with the run.
     Cut,

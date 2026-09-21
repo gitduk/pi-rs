@@ -42,8 +42,6 @@ impl Segment {
             // An unpriced model reports no cost rather than $0.
             Segment::Cost if s.cost <= 0.0 => return None,
             Segment::Cost => format!("${:.4}", s.cost),
-            Segment::Turns if s.turns == 0 => return None,
-            Segment::Turns => format!("{} turns", s.turns),
             // Both numbers rather than the share between them: a percentage of
             // a million-token window reads as 0% for most of a session.
             Segment::Ctx => match s.ctx? {

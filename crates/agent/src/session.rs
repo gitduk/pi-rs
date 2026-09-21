@@ -137,7 +137,7 @@ pub enum Entry {
     // all. Never omitted — what someone asked is not the answer's spare
     // context.
     //
-    // `round` numbers a `/loop` turn: `None` is a hand-typed line — including
+    // `round` numbers a `/loop` round: `None` is a hand-typed line — including
     // the loop's first round, which is the `/loop goal` line itself; `Some(n)`
     // is one of the loop's automatic rounds, n ≥ 2.
     Ask {
