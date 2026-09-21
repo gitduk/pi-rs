@@ -569,7 +569,7 @@ async fn main() -> Result<()> {
         && name != &model_id
     {
         let summarizer = dial(&args, &config, name, config::Origin::Global)
-            .with_context(|| format!("defaults.summarize_with = \"{name}\""))?;
+            .with_context(|| format!("summarize_model = \"{name}\""))?;
         ag.summarizer = Some((summarizer.transport, summarizer.spec));
     }
     if let Some(n) = config.retries {
