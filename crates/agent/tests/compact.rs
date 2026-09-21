@@ -576,8 +576,6 @@ mod budget {
     use agent::session::Session;
     use async_trait::async_trait;
     use futures::stream::BoxStream;
-    #[allow(unused_imports)]
-    use llm::message::Text as _Text;
     use llm::message::{AssistantContent, ToolCall, ToolResult};
     use llm::model::ModelSpec;
     use llm::request::Request;
