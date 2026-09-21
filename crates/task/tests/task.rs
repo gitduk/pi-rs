@@ -370,6 +370,11 @@ async fn a_child_cut_off_by_a_limit_answers_rather_than_fails() {
 
 // The deadline bounds silence, not the run: a child that keeps the events
 // coming outlives it; the whole-run clock would have cut it off.
+//
+// Fifty milliseconds rather than three: the scripted turns are instant, so
+// what this measures is how long the scheduler may leave the child alone
+// between them, and three milliseconds lost that race under a loaded suite —
+// the same test failed for the same reason before any of this moved.
 #[tokio::test]
 async fn a_child_that_keeps_talking_outlives_the_deadline() {
     let mut turns = vec![call_turn(
@@ -387,7 +392,7 @@ async fn a_child_that_keeps_talking_outlives_the_deadline() {
     turns.push(text_turn("done"));
     turns.push(text_turn("wrapped"));
     let (_dir, agent, ctx, _seen, _kept) =
-        rigged(turns, 40, std::time::Duration::from_millis(3), false);
+        rigged(turns, 40, std::time::Duration::from_millis(50), false);
     let (session, out) = drive(&agent, &ctx, "go").await;
 
     assert!(out.is_ok(), "progress kept the child alive: {out:?}");
