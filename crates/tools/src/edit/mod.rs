@@ -1,9 +1,12 @@
+mod edits;
+
+use self::edits::{Anchor, Applied, Landed, Refusal};
 use async_trait::async_trait;
-use hashline::{Anchor, Applied, Landed, Refusal};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::read::{MAX_BYTES, over_limit};
+use crate::rows::{header, view_hash};
 use crate::{Ctx, EditError, Tier, Tool, ToolError, ToolOutput};
 
 // Bytes of landed rows echoed before showing a hunk's ends instead: forty rows
@@ -96,7 +99,7 @@ fn prepare(mut args: Value) -> Value {
     args
 }
 
-fn to_edits(path: &str, args: &[EditArg]) -> Result<Vec<hashline::Edit>, ToolError> {
+fn to_edits(path: &str, args: &[EditArg]) -> Result<Vec<edits::Edit>, ToolError> {
     args.iter()
         .enumerate()
         .map(|(index, arg)| {
@@ -125,7 +128,7 @@ fn to_edits(path: &str, args: &[EditArg]) -> Result<Vec<hashline::Edit>, ToolErr
             };
             // `whole_block` needs a parser: a block that never opened would
             // send the model hunting for a line in a file nothing parses.
-            if arg.whole_block && syntax::Lang::of(path).is_none() {
+            if arg.whole_block && crate::syntax::Lang::of(path).is_none() {
                 return Err(ToolError::Edit(
                     EditError::Refused,
                     format!(
@@ -134,7 +137,7 @@ fn to_edits(path: &str, args: &[EditArg]) -> Result<Vec<hashline::Edit>, ToolErr
                     ),
                 ));
             }
-            Ok(hashline::Edit {
+            Ok(edits::Edit {
                 anchor,
                 new: arg.new_string.clone(),
                 replace_all: arg.replace_all,
@@ -285,15 +288,15 @@ fn crop(s: &str, max: usize) -> String {
 
 // The constructs a view of the file opens with, keyed by first line.
 fn construct_extents(path: &str, source: &str) -> std::collections::HashMap<usize, (usize, usize)> {
-    syntax::Lang::of(path).map_or_else(std::collections::HashMap::new, |l| {
-        syntax::extents(l, source)
+    crate::syntax::Lang::of(path).map_or_else(std::collections::HashMap::new, |l| {
+        crate::syntax::extents(l, source)
     })
 }
 
 /// The report the model reads: where the edit landed, and what it displaced.
 fn echo(path: &str, before: &str, applied: &Applied) -> String {
     let landed = &applied.landed;
-    let mut out = hashline::header(path);
+    let mut out = header(path);
     // A block taken whole that was not meant is the miss worth naming: the
     // extent, not the anchor, is what the model got wrong.
     let old: Vec<&str> = before.lines().collect();
@@ -769,11 +772,11 @@ impl Tool for Edit {
                 "{path}: read it before editing it"
             )));
         };
-        let stale = viewed != hashline::view_hash(&content);
+        let stale = viewed != view_hash(&content);
 
         // Nothing has touched the disk yet: a refused call leaves no trace.
-        let applied = hashline::apply(path, &content, &edits, &crate::blocks::TreeSitter)
-            .map_err(|e| refuse(path, &e, edits.len()))?;
+        let applied =
+            edits::apply(path, &content, &edits).map_err(|e| refuse(path, &e, edits.len()))?;
         if let Some(why) = broke_syntax(path, &content, &applied.content, &applied.landed) {
             tracing::warn!(
                 target: "pi::edit",
@@ -788,7 +791,7 @@ impl Tool for Edit {
         ctx.note_write(&real);
         crate::write::atomic_write(&real, applied.content.as_bytes()).await?;
         // The model just saw this change; the note is for outside drift.
-        ctx.note_view(&real, &hashline::view_hash(&applied.content));
+        ctx.note_view(&real, &view_hash(&applied.content));
         // What the tool is being asked to do, by shape: the one number that
         // says whether the insert anchors are earning their place.
         let forms = |want: fn(&Anchor) -> bool| edits.iter().filter(|e| want(&e.anchor)).count();

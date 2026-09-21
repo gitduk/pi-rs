@@ -388,7 +388,7 @@ struct JournalLayer {
 // alternative — matching `pi::` alone — drops such a call silently at every
 // level, which is precisely the kind of bug this file exists to catch.
 fn ours(level: LevelFilter) -> Targets {
-    const MINE: [&str; 7] = ["pi", "cli", "agent", "brain", "tools", "hashline", "syntax"];
+    const MINE: [&str; 5] = ["pi", "cli", "agent", "brain", "tools"];
     let theirs = if level == LevelFilter::TRACE {
         level
     } else {

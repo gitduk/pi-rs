@@ -8,8 +8,6 @@ description = "The tool surface a run can act through"
 
 [dependencies]
 brain.workspace = true
-hashline.workspace = true
-syntax.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -25,6 +23,16 @@ grep-matcher.workspace = true
 grep-regex.workspace = true
 grep-searcher.workspace = true
 reqwest.workspace = true
+
+# Syntax, for the outlines a `whole_block` anchor and a parse check read.
+tree-sitter = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-python = "0.25"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-go = "0.25"
+tree-sitter-json = "0.24"
+tree-sitter-md = "0.5"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

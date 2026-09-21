@@ -374,12 +374,10 @@ other.
 |---|---|---|
 | `brain` | 2.7k | messages, wires, streams, faults, estimates |
 | `agent` | 3.9k | the turn loop, compaction, the session |
-| `tools` | 3.8k | the tool set and the tiered workspace gate |
+| `tools` | 5.0k | the tool set, the tiered workspace gate, and the tree-sitter outlines an edit anchors on |
 | `pi` | 6.2k | terminal, config, sessions, the journal |
-| `hashline` | 1.0k | byte-anchored edits — pure, no IO |
-| `syntax` | 0.4k | tree-sitter outlines for eight languages |
 
-~18k lines, 339 tests. `cargo test` runs everything; `cargo clippy
+~18k lines, 412 tests. `cargo test` runs everything; `cargo clippy
 --all-targets` is expected to be silent.
 
 ## Not built

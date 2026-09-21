@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use hashline::view_hash;
+use crate::rows::{header, view_hash};
 
 use crate::{Ctx, Tier, Tool, ToolError, ToolOutput, output, spill};
 
@@ -319,8 +319,8 @@ impl Tool for Read {
         // of a long file is worth answering with a skeleton.
         let ranged = args.offset.is_some() || args.limit.is_some();
         let wants_outline = args.outline.unwrap_or(!ranged && all.len() > OUTLINE_OVER);
-        if wants_outline && let Some(lang) = syntax::Lang::of(&rel) {
-            let items = syntax::outline(lang, content);
+        if wants_outline && let Some(lang) = crate::syntax::Lang::of(&rel) {
+            let items = crate::syntax::outline(lang, content);
             if !items.is_empty() {
                 // From the items already in hand: asking `rows::spans` here
                 // would parse the file a second time for the same answer.
@@ -344,7 +344,7 @@ impl Tool for Read {
                     ctx,
                     &rel,
                     View {
-                        head: format!("{} {} lines · outline", hashline::header(&rel), all.len()),
+                        head: format!("{} {} lines · outline", header(&rel), all.len()),
                         rows,
                         note: "… declarations only, each with the range that replaces it \
                                whole. Read a range with offset and limit.\n"
@@ -398,7 +398,7 @@ impl Tool for Read {
             ctx,
             &rel,
             View {
-                head: hashline::header(&rel),
+                head: header(&rel),
                 rows,
                 note,
                 // Both ends of the file reached. Whether a range was asked for

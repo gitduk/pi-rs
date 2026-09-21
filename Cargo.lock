@@ -954,13 +954,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hashline"
-version = "1.23.4"
-dependencies = [
- "thiserror 2.0.20",
-]
-
-[[package]]
 name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2604,20 +2597,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "syntax"
-version = "1.23.4"
-dependencies = [
- "tree-sitter",
- "tree-sitter-go",
- "tree-sitter-javascript",
- "tree-sitter-json",
- "tree-sitter-md",
- "tree-sitter-python",
- "tree-sitter-rust",
- "tree-sitter-typescript",
-]
-
-[[package]]
 name = "syntect"
 version = "5.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2969,7 +2948,6 @@ dependencies = [
  "grep-matcher",
  "grep-regex",
  "grep-searcher",
- "hashline",
  "ignore",
  "libc",
  "reqwest",
@@ -2977,12 +2955,19 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "serde_yaml_ng",
- "syntax",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
  "tracing",
+ "tree-sitter",
+ "tree-sitter-go",
+ "tree-sitter-javascript",
+ "tree-sitter-json",
+ "tree-sitter-md",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "tree-sitter-typescript",
 ]
 
 [[package]]

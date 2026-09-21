@@ -36,7 +36,7 @@
 
 - [ ] **`ScriptTool` 拆成 `crates/scripts` 并改名 `Script`**（未动手，等发话）。细节见下面「工具实现按域分家」。
 
-- [ ] **`hashline` 和 `syntax` 并回 `tools`**（未动手，等发话）。细节见下面「hashline 与 syntax 并回 `tools`」。
+- [x] **`hashline` 和 `syntax` 并回 `tools`**（**已做**）。细节见下面「hashline 与 syntax 并回 `tools`」。
 
 **改名与清理**
 
@@ -61,7 +61,7 @@
 ```
 crates/
 ├── llm/        ↔ brain：wire 类型、传输、SSE、token 估算、消息
-├── tools/      契约 + 文件系统域：Tool/Registry/Ctx/Tier、read/write/edit/grep/glob、bash、fetch、judge，加 spill/state/walk/workspace/output/parses/rows/blocks（后两个是 hashline 并进来的落点）
+├── tools/      契约 + 文件系统域：Tool/Registry/Ctx/Tier、read/write/edit/grep/glob、bash、fetch、judge，加 spill/state/walk/workspace/output/parses/rows/blocks（rows/blocks 是 hashline 的落点）、edit/（编辑引擎）、syntax/（tree-sitter）
 ├── skills/     ↔ 从 tools 拆出：技能发现 + `Load`
 ├── scripts/    ↔ 从 tools 拆出：脚本发现 + `Script`
 ├── task/       ↔ 从 agent 拆出：子代理工具
@@ -186,7 +186,7 @@ crates/cli/src/              ✧ 应用
 
 struct 名不必等于 wire name，这库里本来就不是：`ScriptTool::name()` 返回的是脚本自己的名字，不叫 "script"。
 
-## hashline 与 syntax 并回 `tools`（已定）
+## hashline 与 syntax 并回 `tools`（已定，**已做**）
 
 两个 crate 都只有 `tools` 一个消费者，都既不是工具也不是契约——是工具底下的一层库。`brain` 同属这个货架，但它有 `agent`/`tools` 两个消费者，且就是「模型侧」，所以不动。
 

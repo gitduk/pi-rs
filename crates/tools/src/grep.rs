@@ -190,7 +190,7 @@ impl Tool for Grep {
                         if !lines.is_empty() {
                             // The view hash comes from the same bytes that were searched,
                             // so an edit anchored on it cannot be racing this read.
-                            let hash = hashline::view_hash(&text);
+                            let hash = crate::rows::view_hash(&text);
                             let _ = tx.send(Ok(Hit {
                                 path: ws.display(entry.path()),
                                 hash,
@@ -290,7 +290,7 @@ impl Tool for Grep {
                 break;
             }
             ctx.note_view(&ctx.workspace.root().join(&h.path), &h.hash);
-            let mut section = format!("{}\n", hashline::header(&h.path));
+            let mut section = format!("{}\n", crate::rows::header(&h.path));
             // The one view that prints addresses without spans: a match is
             // rarely a construct's opening row, and a parse per hit file would
             // cost more than a view that only points is worth.

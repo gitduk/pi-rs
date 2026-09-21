@@ -24,7 +24,7 @@ where
 }
 
 pub mod bash;
-pub mod blocks;
+mod blocks;
 pub mod edit;
 pub mod fetch;
 pub mod glob;
@@ -40,6 +40,7 @@ pub mod script;
 pub mod skill;
 pub mod skills;
 pub mod spill;
+mod syntax;
 pub mod walk;
 pub mod workspace;
 pub mod write;

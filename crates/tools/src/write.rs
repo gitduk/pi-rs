@@ -26,7 +26,7 @@ fn is_header(line: &str) -> bool {
         Some((path, tag)) => {
             !path.is_empty() && tag.len() == 4 && tag.chars().all(|c| c.is_ascii_hexdigit())
         }
-        // The header hashline prints now: just the path.
+        // The header `rows` prints now: just the path.
         None => !inner.is_empty(),
     }
 }
@@ -197,7 +197,7 @@ impl Tool for Write {
 
         let lines = content.lines().count();
         let unit = if lines == 1 { "line" } else { "lines" };
-        let hash = hashline::view_hash(&content);
+        let hash = crate::rows::view_hash(&content);
         ctx.note_view(&path, &hash);
         // Same split as read: the model's line names the version an edit
         // matches against, the display and the log do not need it in front of
@@ -205,7 +205,7 @@ impl Tool for Write {
         tracing::info!(target: "pi::write", path = %rel, hash = %hash, "wrote");
         Ok(ToolOutput::text(format!(
             "{} wrote {lines} {unit}, {} bytes{note}",
-            hashline::header(&rel),
+            crate::rows::header(&rel),
             content.len()
         ))
         .with_preview(format!(

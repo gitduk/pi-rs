@@ -1,12 +1,29 @@
 //! How a view spells the address of a line it prints.
 //!
 //! Five views print lines — a skeleton, a range read, a grep hit, an edit's
-//! echo, and the refusal that hands back numbering an edit moved — and
-//! `hashline` parses what the model copies back out of them. One spelling here
-//! rather than five `format!`s is the difference between that staying true and
+//! echo, and the refusal that hands back numbering an edit moved — and the
+//! edit tool reads the addresses back out of them. One spelling here rather
+//! than five `format!`s is the difference between that staying true and
 //! staying true by luck.
 
 use std::collections::HashMap;
+
+/// Name for a file in a report or a refusal, as the views print it.
+pub(crate) fn header(path: &str) -> String {
+    format!("[{path}]")
+}
+
+/// Content hash for the staleness note: a file that changed underneath the
+/// model since its last view gets a note beside the report. Not a gate any
+/// more — the anchors are the gate.
+pub(crate) fn view_hash(content: &str) -> String {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in content.as_bytes() {
+        h ^= *b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    format!("{:04X}", (h ^ (h >> 16)) & 0xFFFF)
+}
 
 /// Where each construct that opens on a row ends, keyed by the row it opens on.
 ///
@@ -17,15 +34,15 @@ use std::collections::HashMap;
 /// Every construct, not only the declarations an outline lists: a range ending
 /// one line off a `match` or a struct literal is what breaks a file.
 pub(crate) fn spans(path: &str, content: &str) -> HashMap<usize, usize> {
-    let Some(lang) = syntax::Lang::of(path) else {
+    let Some(lang) = crate::syntax::Lang::of(path) else {
         return HashMap::new();
     };
-    syntax::spans(lang, content)
+    crate::syntax::spans(lang, content)
 }
 
 /// The same, for a skeleton — which lists declarations and shows spans for
 /// those alone.
-pub(crate) fn of(items: &[syntax::Item]) -> HashMap<usize, usize> {
+pub(crate) fn of(items: &[crate::syntax::Item]) -> HashMap<usize, usize> {
     items
         .iter()
         .filter(|item| item.end > item.line)

@@ -7,8 +7,6 @@
 
 use std::ops::Range;
 
-use crate::Blocks;
-
 /// Where one edit landed, for the report the model reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Landed {
@@ -171,13 +169,9 @@ pub enum Refusal {
 
 /// Apply every edit to `content`, each matched against the original.
 ///
-/// `blocks` resolves a `whole_block` anchor; `NoBlocks` refuses them all.
-pub fn apply(
-    path: &str,
-    content: &str,
-    edits: &[Edit],
-    blocks: &dyn Blocks,
-) -> Result<Applied, Refusal> {
+/// A `whole_block` anchor resolves through [`crate::blocks`], which reads the
+/// outline tree-sitter gives the file.
+pub fn apply(path: &str, content: &str, edits: &[Edit]) -> Result<Applied, Refusal> {
     if edits.is_empty() {
         return Err(Refusal::NoEdits);
     }
@@ -204,7 +198,7 @@ pub fn apply(
         }
 
         if edit.whole_block {
-            let (span, whole) = block(path, body, &lines, anchor, blocks, index)?;
+            let (span, whole) = block(path, body, &lines, anchor, index)?;
             let text = match edit.anchor {
                 Anchor::Replace(_) => splice(&whole, &edit.new, ending(crlf)),
                 _ => translate(&edit.new, crlf),
@@ -233,7 +227,7 @@ pub fn apply(
                 path: path.to_string(),
                 index,
                 n: found.len(),
-                detail: candidates(path, body, &lines, &found, blocks),
+                detail: candidates(path, body, &lines, &found),
             });
         }
         let text = translate(&edit.new, crlf);
@@ -452,7 +446,6 @@ fn block(
     body: &str,
     lines: &[&str],
     anchor: &str,
-    blocks: &dyn Blocks,
     index: usize,
 ) -> Result<(Range<usize>, String), Refusal> {
     // The address a view prints leaves the line's own indentation on the
@@ -460,7 +453,7 @@ fn block(
     let needle = without_address(anchor)
         .unwrap_or_else(|| anchor.trim())
         .trim();
-    let opens = blocks.openings(path, body);
+    let opens = crate::blocks::openings(path, body);
     let hits: Vec<usize> = opens
         .iter()
         .copied()
@@ -489,9 +482,8 @@ fn block(
             });
         }
     };
-    let (start, end) = blocks
-        .extent_of(path, body, at)
-        .ok_or_else(|| Refusal::NoBlock {
+    let (start, end) =
+        crate::blocks::extent_of(path, body, at).ok_or_else(|| Refusal::NoBlock {
             path: path.to_string(),
             index,
             text: needle.to_string(),
@@ -579,17 +571,11 @@ fn line_of(body: &str, at: usize) -> usize {
 
 // Why the anchor was refused, in the words the model needs: where each
 // candidate is, what block holds it, and what precedes it.
-fn candidates(
-    path: &str,
-    body: &str,
-    lines: &[&str],
-    hits: &[Range<usize>],
-    blocks: &dyn Blocks,
-) -> String {
+fn candidates(path: &str, body: &str, lines: &[&str], hits: &[Range<usize>]) -> String {
     // Spelled out for the first few and counted for the rest: an anchor that
     // names a thousand rows is answered with a prefix, not a thousand lines.
     const SHOWN: usize = 8;
-    let extents = blocks.extents(path, body);
+    let extents = crate::blocks::extents(path, body);
     let mut out: Vec<String> = hits
         .iter()
         .take(SHOWN)
@@ -670,7 +656,6 @@ fn crop(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::NoBlocks;
 
     fn replace(old: &str, new: &str) -> Edit {
         Edit {
@@ -686,14 +671,14 @@ mod tests {
         // `two` exists only once the first edit lands, so a call matched
         // incrementally would take it; this one must not.
         let edits = [replace("one", "two"), replace("two", "three")];
-        let err = apply("a.rs", "one\n", &edits, &NoBlocks).unwrap_err();
+        let err = apply("a.rs", "one\n", &edits).unwrap_err();
         assert!(matches!(err, Refusal::NoMatch { index: 1, .. }), "{err}");
     }
 
     #[test]
     fn two_replacements_over_the_same_text_are_an_overlap() {
         let edits = [replace("x", "1"), replace("x", "2")];
-        let err = apply("a.rs", "x\n", &edits, &NoBlocks).unwrap_err();
+        let err = apply("a.rs", "x\n", &edits).unwrap_err();
         assert!(matches!(err, Refusal::Overlap { .. }), "{err}");
     }
 }

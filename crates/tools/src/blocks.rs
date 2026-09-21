@@ -1,29 +1,38 @@
-/// Resolves hashline's `whole_block` anchors through tree-sitter. Lives here
-/// rather than in hashline so that crate stays a pure function of its inputs.
-pub struct TreeSitter;
+//! Resolves `whole_block` anchors through tree-sitter: the outline is what
+//! says where a block starts and where it ends.
 
-impl hashline::Blocks for TreeSitter {
-    fn extent_of(&self, path: &str, content: &str, line: usize) -> Option<(usize, usize)> {
-        syntax::block(syntax::Lang::of(path)?, content, line)
-    }
+/// The inclusive 1-based rows of the block at `line`, if there is one. Both
+/// ends: an annotation above the line belongs to what it annotates, so the
+/// start may sit above `line`.
+pub(crate) fn extent_of(path: &str, content: &str, line: usize) -> Option<(usize, usize)> {
+    crate::syntax::block(crate::syntax::Lang::of(path)?, content, line)
+}
 
-    // One walk of the file, where the default would resolve every opening on
-    // its own: a refusal naming many candidates would parse once per candidate.
-    fn extents(&self, path: &str, content: &str) -> Vec<(usize, usize)> {
-        let Some(lang) = syntax::Lang::of(path) else {
-            return Vec::new();
-        };
-        let mut rows: Vec<(usize, usize)> = syntax::extents(lang, content).into_values().collect();
-        rows.sort_unstable();
-        rows
-    }
+/// Every row a block opens on, in order. A `whole_block` anchor names one of
+/// these by prefix, matched against the line itself, so no per-language name
+/// grammar is needed.
+pub(crate) fn openings(path: &str, content: &str) -> Vec<usize> {
+    let Some(lang) = crate::syntax::Lang::of(path) else {
+        return Vec::new();
+    };
+    let mut rows: Vec<usize> = crate::syntax::extents(lang, content)
+        .keys()
+        .copied()
+        .collect();
+    rows.sort_unstable();
+    rows
+}
 
-    fn openings(&self, path: &str, content: &str) -> Vec<usize> {
-        let Some(lang) = syntax::Lang::of(path) else {
-            return Vec::new();
-        };
-        let mut rows: Vec<usize> = syntax::extents(lang, content).keys().copied().collect();
-        rows.sort_unstable();
-        rows
-    }
+/// Every opening row with the block it opens, for a refusal naming several
+/// candidates at once: one walk of the file, where resolving each opening on
+/// its own would parse once per candidate.
+pub(crate) fn extents(path: &str, content: &str) -> Vec<(usize, usize)> {
+    let Some(lang) = crate::syntax::Lang::of(path) else {
+        return Vec::new();
+    };
+    let mut rows: Vec<(usize, usize)> = crate::syntax::extents(lang, content)
+        .into_values()
+        .collect();
+    rows.sort_unstable();
+    rows
 }
