@@ -57,9 +57,9 @@ pub async fn run(mut core: Repl, tx: UnboundedSender<Event>) -> Result<()> {
                     .ctx
                     .clone()
                     .with_cancel(agent::cancel_on_interrupt());
-                let out = crate::run::run_bash(&ctx, &command).await;
+                let out = crate::run::bash::run_bash(&ctx, &command).await;
                 if let Some(session) = core.lane_mut().session.as_mut() {
-                    crate::run::record_bash(session, &command, out.text.clone());
+                    crate::run::bash::record_bash(session, &command, out.text.clone());
                 }
                 if let Err(e) = core.save() {
                     eprintln!("warning: the transcript was not saved: {e}");

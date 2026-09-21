@@ -678,7 +678,7 @@ fn f_entry(entry: &LogEntry, paint: &Paint) -> Option<Vec<Row>> {
         LogEntry::Ask { ask, .. } => Some(Row::prompt(ask.shown_text(), paint)),
         LogEntry::Bash { run, .. } => {
             let mut rows = Row::prompt(run.shown_text(), paint);
-            rows.extend(run::bash_said(&run.text).into_iter().map(Row::notice));
+            rows.extend(run::bash::bash_said(&run.text).into_iter().map(Row::notice));
             Some(rows)
         }
         // Machine prose, not the user's line: rebuilt in the muted voice of
@@ -3813,7 +3813,7 @@ impl Tui {
         let done = done.clone();
         tokio::spawn(async move {
             let out = guard(async move {
-                let out = run::run_bash(&ctx, &command).await;
+                let out = run::bash::run_bash(&ctx, &command).await;
                 // Esc that stopped the `!` is a cancelled run too; `ran` says
                 // so instead of a success that spent nothing.
                 let ran = if ctx.cancel.is_cancelled() {
@@ -3822,7 +3822,7 @@ impl Tui {
                     Ok(Totals::default())
                 };
                 let tail = carried.entries().last().map(|e| e.id());
-                run::record_bash(&mut carried, &command, out.text.clone());
+                run::bash::record_bash(&mut carried, &command, out.text.clone());
                 (carried, ran, out.screen(), tail)
             })
             .await;
