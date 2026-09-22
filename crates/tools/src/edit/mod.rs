@@ -9,11 +9,12 @@ use crate::read::{MAX_BYTES, over_limit};
 use crate::rows::view_hash;
 use crate::{Ctx, EditError, Tier, Tool, ToolError, ToolOutput};
 
-// Rows kept either side of a change, whether the change is what the edit did
-// or the rows it left standing: enough to place it, few enough that the change
-// stays the subject. A run longer than twice this is elided in the middle,
-// under the count of what went missing.
+// Rows kept either side of a change: of file the edit did not touch, enough
+// to place it, few enough that the change stays the subject.
 const CONTEXT: usize = 4;
+// Changed rows shown before the rest are counted: the rows the edit wrote are
+// what the reader came for, and a window this wide fits what one edit meant.
+const CHANGED_RUN: usize = 40;
 // Rows either side of a landing the line diff will align; past that the
 // landing is shown whole, the alignment costing rows squared.
 const DIFF_LINES: usize = 200;
@@ -484,21 +485,33 @@ fn sketch(path: &str, applied: &Applied) -> String {
     // What the head says: the rows the edit moved, not the rows it shows.
     let count = |mark: char| rows.iter().filter(|r| r.has(mark)).count();
     let (plus, minus) = (count('+'), count('-'));
-    // Any run past the window is shown at both its ends with the count of
-    // what was left out between them — changed rows and context alike. Which
-    // side of an edit a row is on does not change how a reader skims past it,
-    // and the count is what says how much was skimmed.
+    // A run of changed rows is read from its top; context only from the ends
+    // a change borders, since the file's own head is a thousand rows away.
     let mut shown: Vec<Row> = Vec::with_capacity(rows.len());
-    for run in rows.chunk_by(|a, b| a.is_kept() == b.is_kept()) {
-        // The marker is a row of its own, so a run is worth folding only when
-        // the count and the rows it spares come to less than the run does.
-        if run.len() <= CONTEXT * 2 + 1 {
+    let runs: Vec<&[Row]> = rows.chunk_by(|a, b| a.is_kept() == b.is_kept()).collect();
+    // A sole run of kept rows has no change to border it — an edit that moved
+    // a newline alone — so both its ends are windowed, or neither would show.
+    let sole = runs.len() == 1;
+    for (i, run) in runs.iter().enumerate() {
+        let (head, tail) = if run[0].is_kept() {
+            let end = |bordered: bool| if bordered { CONTEXT } else { 0 };
+            (end(sole || i > 0), end(sole || i + 1 < runs.len()))
+        } else {
+            (CHANGED_RUN, 0)
+        };
+        // Fold only when it drops more than one row: a run one row past its
+        // window is shown whole rather than trimmed.
+        if run.len() <= head + tail + 1 {
             shown.extend_from_slice(run);
             continue;
         }
-        shown.extend_from_slice(&run[..CONTEXT]);
-        shown.push(Row::Elided(run.len() - CONTEXT * 2));
-        shown.extend_from_slice(&run[run.len() - CONTEXT..]);
+        shown.extend_from_slice(&run[..head]);
+        // A marker earns its row only where shown rows sit on both sides of
+        // it, or where a changed run was cut short.
+        if !run[0].is_kept() || (head > 0 && tail > 0) {
+            shown.push(Row::Elided(run.len() - head - tail));
+        }
+        shown.extend_from_slice(&run[run.len() - tail..]);
     }
     // Right-aligned so a three-digit row lines up with a two-digit one, and
     // the mark starts where the rows it stands for do.
@@ -514,7 +527,6 @@ fn sketch(path: &str, applied: &Applied) -> String {
         .iter()
         .map(|r| match r {
             Row::Line { sign, n, text } => format!("{sign}{n:>width$} {text}"),
-            Row::Elided(1) => format!("{}… 1 line", " ".repeat(width + 2)),
             Row::Elided(n) => format!("{}… {n} lines", " ".repeat(width + 2)),
         })
         .collect();
