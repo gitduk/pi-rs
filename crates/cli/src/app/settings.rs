@@ -369,3 +369,74 @@ impl App {
             .collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::app::tests::a_lane;
+
+    // A App whose file tree is the given TOML, enough for the `/settings`
+    // surface to answer.
+    fn core_with_file(file: &str) -> crate::app::App {
+        crate::app::App {
+            store: crate::store::session::Store::new(
+                std::env::temp_dir().join("pi-settings-get-test"),
+            ),
+            keys: std::sync::Arc::new(crate::store::keys::Keys::default()),
+            config: std::sync::Arc::new(crate::store::config::Config::default()),
+            args: std::sync::Arc::new(<crate::Args as clap::Parser>::parse_from(["pi"])),
+            commands: std::sync::Arc::new(Vec::new()),
+            settings: crate::store::settings::Settings::new(toml::from_str(file).unwrap()),
+            lanes: vec![a_lane("s")],
+            current: 0,
+        }
+    }
+
+    fn claimed_base_url() -> crate::app::App {
+        let mut core = core_with_file(r#"base_url = "http://127.0.0.1:7896""#);
+        core.settings
+            .claim("base_url", "http://127.0.0.1:7897")
+            .expect("a valid claim");
+        core
+    }
+
+    #[test]
+    fn rows_answer_path_by_path_when_the_file_breaks_under_a_claim() {
+        // `models` is no longer a table, so the claim cannot be overlaid onto
+        // the file — the row is still due, with the mark and its r.
+        let mut core = core_with_file("model = \"flash\"\nmodels = 3");
+        core.settings
+            .claim_unchecked("models.flash", toml::Value::String("m2".into()));
+        let rows = core.setting_rows();
+        let model = rows
+            .iter()
+            .find(|r| r.path == "model")
+            .expect("the file's own row");
+        assert!(!model.changed);
+        let claimed = rows
+            .iter()
+            .find(|r| r.path == "models.flash")
+            .expect("the claimed row");
+        assert_eq!(claimed.value, "m2");
+        assert!(claimed.changed, "the file has no value there to agree with");
+    }
+
+    #[test]
+    fn panel_rows_read_the_claim_over_the_file_and_mark_it() {
+        let core = claimed_base_url();
+        let rows = core.setting_rows();
+        let row = rows
+            .iter()
+            .find(|r| r.path == "base_url")
+            .expect("the claimed path is a row");
+        assert_eq!(row.value, "http://127.0.0.1:7897");
+        assert!(row.changed, "the file still says 7896");
+
+        let mut core = core_with_file("model = \"flash\"");
+        core.settings
+            .claim_unchecked("margins", toml::Value::Integer(2));
+        let rows = core.setting_rows();
+        let added = rows.iter().find(|r| r.path == "margins").expect("added");
+        assert_eq!(added.value, "2");
+        assert!(added.changed);
+    }
+}

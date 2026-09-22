@@ -450,6 +450,7 @@ pub(crate) fn test_repo() -> tempfile::TempDir {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::tests::{Recording, a_repl};
 
     fn repo() -> tempfile::TempDir {
         test_repo()
@@ -716,5 +717,67 @@ mod tests {
         let trees = list(dir.path()).unwrap();
         assert_eq!(trees.len(), 1);
         assert!(trees[0].main, "the main checkout survives");
+    }
+
+    #[test]
+    fn remove_worktree_closes_idle_lane_in_same_run() {
+        let dir = crate::app::worktree::test_repo();
+        let transport = std::sync::Arc::new(Recording::default());
+        let mut core = a_repl(dir.path(), transport, "model-a");
+
+        core.enter_worktree("fix-tools").unwrap();
+        assert_eq!(core.lanes.len(), 2);
+        assert_eq!(core.current, 1);
+
+        core.current = 0;
+        core.in_force();
+
+        let res = core.remove_worktree("fix-tools");
+        assert!(res.is_ok(), "remove_worktree failed: {res:?}");
+        assert_eq!(core.lanes.len(), 1);
+        assert_eq!(core.current, 0);
+        assert!(!dir.path().join(".worktrees/fix-tools").exists());
+    }
+
+    #[test]
+    fn remove_worktree_updates_current_index_when_earlier_lane_is_closed() {
+        let dir = crate::app::worktree::test_repo();
+        let transport = std::sync::Arc::new(Recording::default());
+        let mut core = a_repl(dir.path(), transport, "model-a");
+
+        core.enter_worktree("feat-one").unwrap();
+        core.enter_worktree("feat-two").unwrap();
+        assert_eq!(core.lanes.len(), 3);
+        assert_eq!(core.current, 2);
+
+        let res = core.remove_worktree("feat-one");
+        assert!(res.is_ok(), "remove_worktree failed: {res:?}");
+        assert_eq!(core.lanes.len(), 2);
+        assert_eq!(core.current, 1);
+        assert_eq!(core.lane().worktree.as_deref(), Some("feat-two"));
+    }
+
+    #[test]
+    fn remove_worktree_refuses_when_another_lane_is_running() {
+        let dir = crate::app::worktree::test_repo();
+        let transport = std::sync::Arc::new(Recording::default());
+        let mut core = a_repl(dir.path(), transport, "model-a");
+
+        core.enter_worktree("fix-tools").unwrap();
+        assert_eq!(core.lanes.len(), 2);
+
+        core.lanes[1].run = crate::app::lane::Run::Running {
+            cancel: tokio_util::sync::CancellationToken::new(),
+            steer: None,
+            unsend: false,
+        };
+
+        core.current = 0;
+        core.in_force();
+
+        let err = core.remove_worktree("fix-tools").unwrap_err();
+        assert!(err.contains("running in another lane"), "{err}");
+        assert_eq!(core.lanes.len(), 2);
+        assert!(dir.path().join(".worktrees/fix-tools").exists());
     }
 }
