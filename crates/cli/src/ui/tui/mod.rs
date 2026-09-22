@@ -8,6 +8,7 @@
 //! timer for the spinner — so nothing has to be bolted on beside it.
 
 mod editor;
+mod mouse;
 mod panel;
 mod row;
 mod screen;
@@ -15,6 +16,7 @@ mod scrollback;
 mod term;
 mod tool;
 mod view;
+mod vim;
 
 use std::time::Instant;
 
@@ -32,7 +34,7 @@ use crate::app::{self, App};
 use crate::input::commands::{Candidate, Choice, Command};
 use crate::input::{self, Builtin, Fate, Intent, Rewound, Step};
 use crate::store::icons;
-use crate::store::keys::{Action, Keys, Layers, Menu, Mode, Press};
+use crate::store::keys::{Action, Keys, Layers, Menu, Press};
 use crate::store::session::{ResumeChoice, Store};
 use crate::store::status::{Segment, default_done, default_live};
 use crate::store::theme::Style as ThemeStyle;
@@ -40,7 +42,6 @@ use crate::ui::render::{self, Paint};
 use crate::ui::status;
 use editor::Editor;
 use panel::{Panel, Took};
-use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style as RStyle;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState};
@@ -48,6 +49,7 @@ use row::Row;
 use screen::{Rows, Screen};
 use std::sync::Arc;
 
+use mouse::{Regions, Target, at_row_name};
 use scrollback::{Piece, ScrollbackRows, absorb_growth, body, f_entry};
 use term::{
     Deafened, EXIT_GRACE, HISTORY_KEEP, Hold, drop_shared_history, external_editor, history_of,
@@ -55,6 +57,7 @@ use term::{
 };
 use tool::{RunTool, is_modifying_tool, pending_line, push_tool_row};
 use view::{Queued, StreamKind, Surface, View, Views, front_view, prune_views, snapshot, view_at};
+use vim::{Typed, Vim, double_tap};
 
 // What a folded run shows instead of what it is thinking.
 const THINKING: &str = "thinking...";
@@ -74,14 +77,6 @@ const FLASH: std::time::Duration = std::time::Duration::from_secs(3);
 // reworded one would have drifted.
 const NO_TRANSCRIPT: &str = "this checkout has no transcript — /new or /resume first";
 const NOTHING_TO_REWIND: &str = "nothing to rewind to";
-
-// Whether a press lands inside the double-tap window of the previous one,
-// and records the press either way.
-fn double_tap(last: &mut Option<Instant>, now: Instant) -> bool {
-    let hit = last.is_some_and(|p| now.duration_since(p) < DOUBLE_TAP);
-    *last = Some(now);
-    hit
-}
 
 // What the workspace-dependent completions answer with, each read the first
 // time one is asked for.
@@ -146,149 +141,6 @@ impl Lists {
     fn at(&mut self, workspace: &std::path::Path) {
         self.workspace = workspace.to_path_buf();
         self.forget();
-    }
-}
-
-// What a typed character means to the modal keys.
-enum Typed {
-    // It lands in the line, as it would with vim keys off.
-    Insert,
-    // It closed the escape sequence: the half already on screen has to come
-    // back off, and the mode has changed.
-    Escape,
-    // Normal mode. An unbound character commands nothing and types nothing —
-    // without this the mode would be a costume, every key still typing.
-    Ignore,
-    // Normal mode finished a doubled key (`dd`, `gg`, `cc`): the action it
-    // names, for the caller to answer.
-    Command(Action),
-}
-
-// The modal keys' whole state: the mode that is up, the sequence that leaves
-// Insert, and the character that may be its first half.
-//
-// One struct rather than four fields on `Ui`: none of them means anything
-// without the others, and `Ui` already carries more loose state than it
-// should. `Ui` holds it as an `Option`, so vim being off is the absence of
-// the state rather than a flag beside it — "off, but in Normal" cannot be
-// written down.
-struct Vim {
-    mode: Mode,
-    // The two characters that leave Insert, resolved once. `None` — an empty
-    // setting, or any other length — is no sequence, and with it no way into
-    // Normal at all.
-    escape: Option<(char, char)>,
-    window: std::time::Duration,
-    // The last character typed, and when. Lazy, like the double-taps: the
-    // character is on screen already and nothing is held pending, so the line
-    // is never a guess about a key that has not arrived.
-    last: Option<(char, Instant)>,
-}
-
-impl Vim {
-    fn new(cfg: &crate::store::config::Vim) -> Self {
-        let mut vim = Self {
-            mode: Mode::Insert,
-            escape: None,
-            window: std::time::Duration::ZERO,
-            last: None,
-        };
-        vim.configure(cfg);
-        vim
-    }
-
-    // Take what the config says about the sequence, resolving the two
-    // characters here rather than at every keystroke. Anything that is not
-    // exactly two of them is no sequence — the documented way to leave
-    // Normal unreachable while keeping the layer's bindings listed.
-    fn configure(&mut self, cfg: &crate::store::config::Vim) {
-        self.escape = cfg.escape_pair();
-        self.window = std::time::Duration::from_millis(cfg.escape_timeout_ms);
-    }
-
-    // The doubled keys — `dd`, `gg`, `cc` — are the escape pair's
-    // Normal-mode cousins: the same character twice inside the same window.
-    fn doubled(c: char) -> Option<Action> {
-        match c {
-            'd' => Some(Action::DeleteLine),
-            'g' => Some(Action::MoveBufferStart),
-            'c' => Some(Action::ChangeLine),
-            _ => None,
-        }
-    }
-
-    // Was `prev` the character typed just now? The take spends the stored
-    // half either way.
-    fn armed(&mut self, prev: char, now: Instant) -> bool {
-        self.last
-            .take()
-            .is_some_and(|(p, at)| p == prev && now.duration_since(at) < self.window)
-    }
-
-    // What `c` does, and the mode change if it makes one.
-    fn typed(&mut self, c: char, now: Instant) -> Typed {
-        if self.mode == Mode::Normal {
-            if let Some(action) = Self::doubled(c) {
-                if self.armed(c, now) {
-                    return Typed::Command(action);
-                }
-                self.last = Some((c, now));
-            } else {
-                self.last = None;
-            }
-            return Typed::Ignore;
-        }
-        let Some((first, second)) = self.escape else {
-            return Typed::Insert;
-        };
-        if self.armed(first, now) && c == second {
-            self.mode = Mode::Normal;
-            return Typed::Escape;
-        }
-        self.last = Some((c, now));
-        Typed::Insert
-    }
-}
-
-// What one rendered row of the history area sits on, as a click sees it:
-// which block, named the only way a block in that region can be — a
-// scrollback row by index, the live region's pending-call rows, or nothing.
-#[derive(Clone, Copy, Debug)]
-enum Target {
-    None,
-    Scrollback(usize),
-    PendingTools,
-}
-
-// The frame's four regions, laid out once and drawn by name. The only place
-// the vertical arrangement is stated; everything else reads the rects back.
-#[derive(Clone, Copy, Default)]
-struct Regions {
-    // The scrolled transcript, the live region's rows included.
-    history: Rect,
-    // The completion list, or the open panel over it.
-    menu: Rect,
-    // The lane strip, or whatever flash took its row.
-    bar: Rect,
-    // The input line, pinned to the bottom.
-    editor: Rect,
-}
-
-impl Regions {
-    fn layout(area: Rect, menu_h: u16, bar_h: u16, editor_h: u16) -> Self {
-        let chunks = Layout::vertical([
-            Constraint::Fill(1),
-            Constraint::Length(menu_h),
-            Constraint::Length(bar_h),
-            Constraint::Length(editor_h),
-        ])
-        .split(area);
-        Self {
-            history: chunks[0],
-            menu: chunks[1],
-            bar: chunks[2],
-            editor: chunks[3],
-        }
     }
 }
 
@@ -432,17 +284,6 @@ impl MenuEntry {
             MenuEntry::File { path, .. } => path,
             MenuEntry::Message { help, .. } => help,
         }
-    }
-}
-
-// The menu row's left column for an @ path: the file's own name, `/` when
-// it is a directory the walk can descend into.
-fn at_row_name(path: &str, dir: bool) -> String {
-    let name = path.rsplit('/').find(|s| !s.is_empty()).unwrap_or(path);
-    if dir {
-        format!("{name}/")
-    } else {
-        name.to_string()
     }
 }
 
@@ -1616,130 +1457,6 @@ impl Ui {
             }
         }
         Asked::Own(Deed::Nothing)
-    }
-
-    // Nudge the scrolled history window by `step` rows, up or down.
-    fn scroll_view(&mut self, view: &mut View, up: bool, step: usize) {
-        view.surface.scroll = if up {
-            view.surface.scroll.saturating_add(step)
-        } else {
-            view.surface.scroll.saturating_sub(step)
-        };
-        // The row under the mouse changed: the old hover index no longer
-        // names the screen position, so drop it until the next move.
-        self.hovered_scrollback = None;
-    }
-
-    // What the row at this screen row sits on: the history region names
-    // the frame, the target names the block inside it.
-    fn target_at(&self, row: u16) -> Option<Target> {
-        self.row_targets
-            .get(row.checked_sub(self.regions.history.y)? as usize)
-            .copied()
-    }
-
-    /// The scrollback row the mouse is over, if the cursor is on its text.
-    fn hovered_row(&self, view: &View, col: u16, row: u16) -> Option<usize> {
-        let Target::Scrollback(idx) = self.target_at(row)? else {
-            return None;
-        };
-        let row = view.surface.scrollback.get(idx)?;
-        if !row.is_expandable() {
-            return None;
-        }
-        // The mouse must cover the row's own text, not the empty rest of the
-        // row: the click that expands it lands on the head line only.
-        let first = row.line(0, &self.paint, &[], self.screen.usable()).0;
-        ((col as usize) < first.width()).then_some(idx)
-    }
-
-    fn on_mouse_move(&mut self, view: &mut View, col: u16, row: u16) {
-        self.hovered_scrollback = self.hovered_row(view, col, row);
-    }
-
-    fn on_mouse_click(&mut self, view: &mut View, col: u16, row: u16) {
-        match self.target_at(row) {
-            // The pending batch opens and closes where it stands: the live
-            // rows are rebuilt every frame, so the flip is all it takes.
-            Some(Target::PendingTools) => self.live_tools_shown = !self.live_tools_shown,
-            _ => {
-                if let Some(idx) = self.hovered_row(view, col, row)
-                    && view
-                        .surface
-                        .scrollback
-                        .get_mut(idx)
-                        .is_some_and(|r| r.toggle_expand())
-                {
-                    view.surface.counted = None;
-                }
-            }
-        }
-    }
-
-    // A page keeps 4 rows of context at the edge, the way the upstream pi
-    // TUI does (`Math.max(1, viewportHeight - 4)`).
-    fn page_scroll_step(&self) -> usize {
-        (self.screen.height as usize).saturating_sub(4).max(1)
-    }
-
-    fn half_scroll_step(&self) -> usize {
-        ((self.screen.height as usize) / 2).max(1)
-    }
-
-    // Back to Insert. The half-typed escape character goes with the mode: it
-    // belonged to a line nobody is commanding any more.
-    fn leave_normal(&mut self) {
-        if let Some(v) = &mut self.vim {
-            v.mode = Mode::Insert;
-            v.last = None;
-        }
-        self.show_mode();
-    }
-
-    // The line, rewritten from nothing: `S`, or `cc` by its doubled spelling.
-    // Both leave, because what follows is typing.
-    fn change_line(&mut self) {
-        self.editor.clear_line();
-        self.leave_normal();
-    }
-
-    // Put the mode where it can be seen: the shape of the caret, and the
-    // the prompt sigil where the theme gives the two modes different ones. It
-    // does not by default — one bar either way — because the caret is where
-    // the eye already is; a terminal that will not reshape it is what
-    // `prompt.normal` is for.
-    //
-    // This is what pays for the mode never resetting itself. A mode that
-    // persists across submitted lines and cannot be seen would be a trap;
-    // one that can be seen is just where you left it.
-    fn show_mode(&mut self) {
-        // Three states, not two: vim off is not "Insert", and a caret shaped
-        // for a mode nobody turned on is a change to somebody else's terminal.
-        let normal = self.vim.as_ref().map(|v| v.mode == Mode::Normal);
-        let icon = match normal {
-            Some(true) => self.paint.theme.prompt.normal.clone(),
-            _ => self.paint.theme.prompt.icon.clone(),
-        };
-        self.prompt = Self::paint_prompt(&self.paint, &icon);
-        self.editor
-            .set_prompts(self.prompt.clone(), self.bang_prompt.clone());
-        self.screen.cursor_shape(normal);
-    }
-
-    // Follow what the config says about the modal keys.
-    //
-    // Turning them off drops the state rather than parking it: coming back
-    // later in Normal, with no keystroke between having asked to go there,
-    // is the one surprise this has to rule out. Turning them off is also the
-    // only thing that changes the mode without a key — everything else keeps
-    // whichever mode was last asked for, submitted lines included.
-    fn set_vim(&mut self, cfg: &crate::store::config::Vim) {
-        match (&mut self.vim, cfg.enabled) {
-            (slot @ None, true) => *slot = Some(Vim::new(cfg)),
-            (slot, false) => *slot = None,
-            (Some(v), true) => v.configure(cfg),
-        }
-        self.show_mode();
     }
 
     // Every copy of the config the surface keeps, brought up to date — the one
