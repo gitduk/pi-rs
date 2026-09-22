@@ -35,25 +35,9 @@ pub enum Intent {
     Wechat(String),
     // What to run over and over, or empty to stop the loop in force.
     Loop(String),
-    // One round of a loop, put back through the door by the surface — so that
-    // the turn it starts can be told from a line typed between rounds.
-    // `read` never answers it. `note` is the loop's word to
-    // the model, filed as machine prose rather than glued to the goal, which
-    // must stay what `read` would parse.
-    LoopRound {
-        goal: String,
-        note: String,
-        // Which automatic round this is: `None` for the loop's first — that
-        // one is the `/loop goal` line itself — `Some(n)` for n ≥ 2.
-        // Recorded on the ask the round opens.
-        round: Option<u64>,
-    },
     // Not a built-in word. It may name a skill and it may name nothing; the
     // command table settles that, and `read` does not have it.
-    Other {
-        word: String,
-        args: String,
-    },
+    Other { word: String, args: String },
     // `/new`, and `ctrl+l` twice: a fresh session, the old one kept on disk,
     // and the screen rebuilt from the empty one. One variant, because they
     // are one intent however it was expressed.
@@ -123,7 +107,7 @@ impl Intent {
             Intent::Other { .. } => Fate::Queued,
             // Arms the lane and submits its first round like a typed line;
             // both want the lane free.
-            Intent::Loop(_) | Intent::LoopRound { .. } => Fate::Queued,
+            Intent::Loop(_) => Fate::Queued,
             // Prose reaches the run that is already talking to the model:
             // waiting for it is what makes a correction arrive too late to be
             // one.

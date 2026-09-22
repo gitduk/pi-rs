@@ -716,7 +716,10 @@ pub struct View {
     // What arrived while the run was working, kept as intents rather than
     // lines: their fate was settled at the door, and re-reading them on the
     // way out would ask a question that has already been answered.
-    queued: Vec<Intent>,
+    // A line waiting for the lane, or a round of the loop this lane is under.
+    // The round is not an `Intent`: nothing the door can read produces one, and
+    // nothing in `App` answers one, so it lives with the queue it waits in.
+    queued: Vec<Queued>,
     // Whether this lane's opening block has been built. A rebuild swaps the
     // whole surface and does not touch this — neither an empty scrollback nor
     // a zero `opened` can stand in for "never drawn" — and drawing it a
@@ -2518,6 +2521,19 @@ fn land_handled(ui: &mut Ui, core: &App, view: &mut View, lines: Vec<String>) {
 // them. `session` is None only when the run panicked and took its copy down.
 // What woke the loop this time round. One value out of the select rather than
 // a pair of optional locals, so what happened is read in one place.
+// One thing waiting for the lane in front to come free.
+enum Queued {
+    // What the door made of a submitted line.
+    Line(Intent),
+    // A round of the loop this lane is under, to be read like a typed line when
+    // its turn comes — which is why the goal is kept as text.
+    Round {
+        goal: String,
+        note: String,
+        round: Option<u64>,
+    },
+}
+
 // What the screen does to the lane itself, rather than asking the core to
 // answer something. A key can mean these and a line cannot: there is no
 // `/rewind` word, and `/new` and ctrl+l twice are one intent that goes the
@@ -2666,7 +2682,10 @@ fn snapshot(lane: &Lane, view: &View) -> Snapshot {
     lane.snapshot(
         &view.model,
         view.state.started.map(|s| s.elapsed()),
-        view.queued.len(),
+        view.queued
+            .iter()
+            .filter(|q| matches!(q, Queued::Line(_)))
+            .count(),
     )
 }
 
@@ -3174,7 +3193,7 @@ impl Tui {
                     .unwrap_or_default();
                 view_at(&mut self.views, self.core.lanes[lane].token())
                     .queued
-                    .push(Intent::LoopRound {
+                    .push(Queued::Round {
                         goal,
                         note,
                         round: Some(next as u64),
@@ -3268,7 +3287,7 @@ impl Tui {
             Fate::Queued => {
                 front_view(&mut self.views, self.core.lane())
                     .queued
-                    .push(intent);
+                    .push(Queued::Line(intent));
                 Wake::Nothing
             }
             Fate::Steered(text) => {
@@ -3277,7 +3296,7 @@ impl Tui {
                 let Some(steer) = self.core.lane().steer().cloned() else {
                     front_view(&mut self.views, self.core.lane())
                         .queued
-                        .push(intent);
+                        .push(Queued::Line(intent));
                     return Wake::Nothing;
                 };
                 // Spends the chance to unsend, exactly as the model's first
@@ -3358,7 +3377,10 @@ impl Tui {
             self.ui.flush(self.core.lane(), view);
             let running = self.core.lane().is_running();
             let anywhere = self.core.lanes.iter().any(|lane| lane.is_running());
-            // A queued intent waits for the lane it was aimed at to come free.
+            // Whether what is about to run is a loop's own round: the queue
+            // says so, and the run that ends decides whether the loop goes on.
+            let mut from_loop = false;
+            // A queued line waits for the lane it was aimed at to come free.
             let woke = if view.queued.is_empty() || running {
                 // Every branch must be cancel-safe: a loser is dropped mid-poll.
                 // `recv()` and `tick()` are; a blocking read gets its own thread.
@@ -3402,11 +3424,29 @@ impl Tui {
                 // One at a time, each still the intent it was read as. Joined
                 // as lines, a command and a prompt became one line and `read`
                 // saw only the first word.
-                Wake::Do(Asked::Core(
-                    front_view(&mut self.views, self.core.lane())
-                        .queued
-                        .remove(0),
-                ))
+                match front_view(&mut self.views, self.core.lane())
+                    .queued
+                    .remove(0)
+                {
+                    Queued::Line(intent) => Wake::Do(Asked::Core(intent)),
+                    Queued::Round { goal, note, round } => {
+                        // The loop that queued this may have been stopped since.
+                        // Running it then would be a turn nobody asked for, and
+                        // one that reads on screen as if it had been typed.
+                        if self.core.lane().looping().is_none() {
+                            continue;
+                        }
+                        from_loop = true;
+                        self.core.lane_mut().arm_round(round);
+                        let view = front_view(&mut self.views, self.core.lane());
+                        self.ui.submit(view, &goal);
+                        view.surface.scroll = 0;
+                        if !note.is_empty() {
+                            self.core.lane_mut().push_note(&note);
+                        }
+                        Wake::Do(Asked::Core(input::read(&goal)))
+                    }
+                }
             };
             // Out here, where all of `self` is free again.
             let asked = match woke {
@@ -3423,8 +3463,6 @@ impl Tui {
             self.core.lane_mut().arm_round(None);
             // What the surface answers for itself: the screen, the keyboard
             // and the process are not `App`'s to move.
-            // Whether the line about to run is a loop's own round.
-            let mut from_loop = false;
             let intent = match asked {
                 Asked::Own(deed) => {
                     self.carry(deed).await;
@@ -3432,23 +3470,6 @@ impl Tui {
                 }
                 // A loop's own round: echoed and read like a typed line, and
                 // marked so the turn it starts is the one the loop counts.
-                Asked::Core(Intent::LoopRound { goal, note, round }) => {
-                    // The loop that queued this may have been stopped since.
-                    // Running it then would be a turn nobody asked for, and
-                    // one that reads on screen as if it had been typed.
-                    if self.core.lane().looping().is_none() {
-                        continue;
-                    }
-                    from_loop = true;
-                    self.core.lane_mut().arm_round(round);
-                    let view = front_view(&mut self.views, self.core.lane());
-                    self.ui.submit(view, &goal);
-                    view.surface.scroll = 0;
-                    if !note.is_empty() {
-                        self.core.lane_mut().push_note(&note);
-                    }
-                    input::read(&goal)
-                }
                 // A key that means a command — `ctrl+l` twice is `/new` —
                 // arrives already read.
                 Asked::Core(ready) => ready,
@@ -3463,7 +3484,7 @@ impl Tui {
                     // it is a turn nobody asked for and it reads as a typed one.
                     front_view(&mut self.views, self.core.lane())
                         .queued
-                        .retain(|q| !matches!(q, Intent::LoopRound { .. }));
+                        .retain(|q| !matches!(q, Queued::Round { .. }));
                     match self.core.lane_mut().take_looping() {
                         // A loop really ended: that belongs in the transcript.
                         Some(l) => {
@@ -3497,7 +3518,7 @@ impl Tui {
                 self.core.lane_mut().loop_start(goal.clone());
                 front_view(&mut self.views, self.core.lane())
                     .queued
-                    .push(Intent::LoopRound {
+                    .push(Queued::Round {
                         goal,
                         note: String::new(),
                         round: None,
@@ -3966,7 +3987,11 @@ impl Tui {
         let back = self.core.lanes[lane].finish();
         view_at(&mut self.views, self.core.lanes[lane].token())
             .queued
-            .extend(back.unheard.into_iter().map(Intent::Prompt));
+            .extend(
+                back.unheard
+                    .into_iter()
+                    .map(|said| Queued::Line(Intent::Prompt(said))),
+            );
         let unsend = back.unsend;
 
         match done.kind {
@@ -6074,8 +6099,8 @@ mod tests {
         lane.loop_running();
         assert!(matches!(lane.loop_step(true, None), Some(Round::Quiet)));
 
-        // What a `LoopRound` still sitting in the queue would do on its way
-        // through: neither of these may bring the loop back.
+        // What a queued round would do on its way through if the queue ever let
+        // one past a stopped loop: neither of these may bring it back.
         lane.loop_running();
         wrote(&mut lane, "a.rs", "fn main() {}\n");
         assert!(lane.looping().is_none(), "no loop to mark as running");

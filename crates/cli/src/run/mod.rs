@@ -611,10 +611,11 @@ impl App {
         match intent {
             Intent::Bash(command) => Step::Bash(command),
             Intent::Prompt(send) => Step::Prompt { send, typed: None },
-            // The surface's, like `Submit`: arming a lane and re-submitting a
-            // line through `read` are both things only it can do, so it takes
-            // this before `run` is reached.
-            Intent::Loop(_) | Intent::LoopRound { .. } => Step::Handled(Vec::new()),
+            // The surface's: `/loop` arms the lane and queues its first round,
+            // both of which only it can do, so it takes this before `run` is
+            // reached. The arm stays so that a new intent has to say which side
+            // of this line it falls on.
+            Intent::Loop(_) => Step::Handled(Vec::new()),
             Intent::Quit => Step::Quit,
             Intent::Help => Step::Handled(help(&self.commands)),
             Intent::Keys => Step::Handled(self.keys.listing()),
