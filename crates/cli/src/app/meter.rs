@@ -3,6 +3,8 @@
 //! Nothing here draws: the tally is a reading taken from a run's events, and
 //! the snapshot is what a surface reads once it is time to say it.
 
+use crate::store::icons;
+
 use std::time::Duration;
 
 use llm::model::Pricing;
@@ -180,6 +182,24 @@ impl Tally {
         t
     }
 }
+
+// Enough about a model to choose between them: who serves it, how much it
+// holds, and what it costs where that is known.
+//
+// Takes the three pieces rather than a config entry, because the running model
+// may never have been one — a name passed through with default numbers has no
+// entry to read.
+pub(super) fn summary(format: &str, window: u32, p: &llm::model::Pricing) -> String {
+    let mut parts = vec![format.to_string(), format!("{}k", window / 1000)];
+    if p.input_per_mtok > 0.0 || p.output_per_mtok > 0.0 {
+        parts.push(format!(
+            "${:.2}/${:.2} per Mtok",
+            p.input_per_mtok, p.output_per_mtok
+        ));
+    }
+    parts.join(icons::PART_SEP)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

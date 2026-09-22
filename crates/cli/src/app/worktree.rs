@@ -5,6 +5,10 @@
 //! Git refuses to check one branch out twice, so the alternative to a branch
 //! per worktree is a detached HEAD — commits reachable only through the reflog.
 
+use super::App;
+use crate::input::Step;
+use crate::input::refused;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -300,6 +304,134 @@ pub fn remove(dir: &Path, name: &str) -> Result<Removed> {
         branch,
         note,
     })
+}
+
+impl App {
+    // `/worktree <name>`: create or reuse a checkout of this repository and
+    // move the session into it.
+    //
+    // Each tree keeps its own transcript rather than one transcript following
+    // the move: paths in it are workspace-relative, so under another root the
+    // same string names a different file, and the file locks and edit shifts
+    // are keyed by absolute path. Coming back therefore resumes what was being
+    // said in that tree, not an empty page.
+    pub(super) fn enter_worktree(&mut self, name: &str) -> Result<Step, String> {
+        let from = self.lane_mut().ctx.workspace.root().to_path_buf();
+        let tree = enter(&from, name).map_err(|e| refused("worktree", e))?;
+        // Built before the comparison: both sides are then canonical, and a
+        // path git and the workspace spell differently is still one directory.
+        let ws = tools::Workspace::new(&tree.path)
+            .and_then(|ws| ws.with_write_roots(&self.config.write_roots))
+            .map_err(|e| refused("worktree", anyhow::anyhow!("{}: {e}", tree.path.display())))?;
+        if ws.root() == from {
+            return Ok(Step::Flash(format!("already in {}", tree.name)));
+        }
+        // Against the root it belongs to, so before the move, not after. An
+        // empty session — nothing said yet — has nothing to keep, and one a run
+        // has is saved by the run.
+        if self.lane().session.as_ref().is_some_and(|s| !s.is_empty())
+            && let Err(e) = self.save()
+        {
+            tracing::warn!(target: "pi::session", error = %e, "the leaving session was not saved");
+        }
+        // Already open: the lane that holds it comes back whole. Nothing is
+        // said — the screen changing, bar included, says where you are.
+        if let Some(i) = self
+            .lanes
+            .iter()
+            .position(|lane| lane.ctx.workspace.root() == ws.root())
+        {
+            self.current = i;
+            self.in_force();
+            return Ok(Step::Handled(Vec::new()));
+        }
+        let said = self.open_lane(ws, (!tree.main).then(|| tree.name.clone()))?;
+        Ok(Step::Swap(said))
+    }
+    // `/worktree rm <name>`: remove the checkout `name` refers to — its
+    // directory, the branch it was on, and every transcript recorded under
+    // it. Git says no to a checkout with changes in it, and that refusal is
+    // passed on rather than forced past.
+    pub(super) fn remove_worktree(&mut self, name: &str) -> Result<Step, String> {
+        let from = self.lane().ctx.workspace.root().to_path_buf();
+        if let Some(target) = list(&from)
+            .ok()
+            .and_then(|trees| trees.into_iter().find(|t| !t.main && t.name == name))
+        {
+            let running = self.lanes.iter().enumerate().any(|(i, lane)| {
+                i != self.current
+                    && lane.ctx.workspace.root().starts_with(&target.path)
+                    && (lane.is_running() || lane.looping.is_some())
+            });
+            if running {
+                return Err(format!(
+                    "`{name}` is running in another lane of this run — stop it first"
+                ));
+            }
+        }
+        let removed = remove(&from, name).map_err(|e| refused("worktree", e))?;
+        for i in (0..self.lanes.len()).rev() {
+            if i != self.current
+                && self.lanes[i]
+                    .ctx
+                    .workspace
+                    .root()
+                    .starts_with(&removed.path)
+            {
+                self.remove_lane(i);
+            }
+        }
+        let dropped = self.store.drop_under(&removed.path);
+        let mut said = vec![
+            format!("removed {name}"),
+            removed.path.display().to_string(),
+        ];
+        if let Some(branch) = removed.branch {
+            said.push(format!("branch {branch} deleted"));
+        }
+        if let Some(note) = removed.note {
+            said.push(note);
+        }
+        if dropped > 0 {
+            said.push(format!("{dropped} session record(s) dropped"));
+        }
+        Ok(Step::Worktrees(said))
+    }
+    // The checkouts `/worktree` can move to, the repository's own first, the
+    // one the session is in marked.
+    pub(super) fn worktree_listing(&self) -> Vec<String> {
+        let here = self.lane().ctx.workspace.root();
+        let trees = match list(here) {
+            Ok(t) => t,
+            Err(e) => return vec![refused("worktree", e)],
+        };
+        // By containment rather than equality: a run started in a subdirectory
+        // is still in that checkout, and it is the one to mark.
+        let at = holding(&trees, here).map(|t| t.path.clone());
+        let width = trees
+            .iter()
+            .map(|t| unicode_width::UnicodeWidthStr::width(t.name.as_str()))
+            .max()
+            .unwrap_or(0);
+        let mut out: Vec<String> = trees
+            .iter()
+            .map(|t| {
+                let mark = if at.as_ref() == Some(&t.path) {
+                    "*"
+                } else {
+                    " "
+                };
+                let on = t.branch.as_deref().unwrap_or("detached HEAD");
+                format!("{mark} {}  {on}", crate::store::text::pad(&t.name, width))
+            })
+            .collect();
+        out.push(format!(
+            "/worktree <name> works in one, creating it under {}/ if it is not there",
+            DIR
+        ));
+        out.push("/worktree rm <name> removes one — its checkout, sessions and branch".into());
+        out
+    }
 }
 
 #[cfg(test)]

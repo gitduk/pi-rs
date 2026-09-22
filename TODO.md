@@ -22,7 +22,7 @@
   装配与调用点：
   - 根 `Cargo.toml` 加 `skills = { path = "crates/skills" }`；`crates/cli/Cargo.toml` 加 `skills.workspace = true`。
   - `crates/cli/src/main.rs:356` `tools::skills::discover` → `skills::discover`；`:370` `tools::skill::SkillTool::new` → `skills::Load::new`。
-  - `use tools::skills::Skill;` 有**四处**（计划里只列了三处）：`input/mod.rs:7`、`input/commands.rs:6`、`run/mod.rs:1074`（`#[cfg(test)]` 模块）、加 `input/mod.rs:211` 的 `instructions`。均已改。
+  - `use tools::skills::Skill;` 有**四处**（计划里只列了三处）：`input/mod.rs:7`、`input/commands.rs:6`、`app/mod.rs:1074`（`#[cfg(test)]` 模块）、加 `input/mod.rs:211` 的 `instructions`。均已改。
   - 测试 `crates/tools/tests/skill.rs` → `crates/skills/tests/skills.rs`（`tools/tests/common` 跨 crate 用不了，需自带一个小 `ctx()`；里面一处 `SkillTool::new` 同步改名）。
 
   验证：`cargo build`、`cargo test`、`cargo clippy --all-targets`（预期静默）、提交前 `cargo fmt`。
@@ -50,7 +50,7 @@
 
   注意 `MINE` 这张名单被好几个条目同时动：`brain`→`llm` 改一项，`hashline`/`syntax` 并入删两项，新拆出的 `skills`/`scripts`/`task` 各加一项。做这批改动时最后统一收一次。**已收**：现在是 `["pi", "agent", "llm", "tools", "task", "scripts", "skills", "wechat"]`，与 workspace 的 8 个 package 名逐一对应（`"cli"` 那个幽灵项和漏掉的 `wechat` 一并修好）。
 
-- [x] ~~**`Repl` 拆成 `App` + `Lanes` + `Settings`**~~：`App`/`Settings` 已落地；`Lanes` **决定不做**（复核：15 个方法里 12 个要 `store`/`config`/`settings`/`args`，拆出去只是把参数逐个下传，`lanes`/`current` 本来就是 `App` 的状态。同源的 `run/worktree.rs` 三个方法同理）。
+- [x] ~~**`Repl` 拆成 `App` + `Lanes` + `Settings`**~~：`App`/`Settings` 已落地；`Lanes` **决定不做**（复核：15 个方法里 12 个要 `store`/`config`/`settings`/`args`，拆出去只是把参数逐个下传，`lanes`/`current` 本来就是 `App` 的状态。同源的 `app/worktree.rs` 三个方法同理。**文件已按状态分开住**（`settings.rs`/`lanes.rs`/`status.rs`/`worktree.rs`，都是 `impl App`），拆的是文件不是类型）。
 
 - [x] **统一 turn/round 的口径**（**已做**）：`loop_max_turns` → `loop_max_rounds`、`lane::Turn` → `Run`（连同字段 `lane.turn` → `lane.run`）、删 `Segment::Turns`、修 5 处散文。细节见下面「turn 与 round：两个层级」。
 
@@ -89,12 +89,15 @@ crates/cli/src/              ✧ 应用
 │   ├── mod.rs      Intent / Step / read / expand
 │   ├── commands.rs Command、内建表、技能并入（原 repl.rs 的一部分）
 │   └── complete.rs ↔ tui/complete.rs
-├── run/            驱动：编排核心的多次运行
+├── app/            App：一个会话拥有的状态，和替它干活的那些作业
 │   ├── mod.rs      App（状态根 + `dispatch`；原 `Repl`）
-│   ├── lanes.rs    Lanes（lane 的增删改查；原 `Repl` 的一部分）
+│   ├── settings.rs 配置与它的面板：reload / settings / edit / revert / write_to_file
+│   ├── lanes.rs    lane 集合上的动词：开/删/切/恢复/保存（`impl App`，无新类型）
 │   ├── lane.rs     Lane / Run / Handback（不含 View；`Turn` → `Run` 见下）
+│   ├── status.rs   状态行的数字：status_lines / tokens_now / summary / demotion
 │   ├── looping.rs  ↔ 从 lane.rs 拆出：/loop 状态机（`loop` 是关键字）
 │   ├── meter.rs    ↔ 从 status.rs 拆出：Tally / Snapshot + cost 计算
+│   ├── tests.rs    `App` 的测试（原 mod.rs 尾部 490 行）
 │   ├── worktree.rs bash.rs subagent.rs wechat.rs
 ├── store/          磁盘与配置
 │   ├── session.rs  journal.rs
@@ -118,21 +121,21 @@ crates/cli/src/              ✧ 应用
 | `agent/event.rs` | `agent/event.rs` | 去掉 `cost` |
 | `cli/context.rs`（302 行） | `agent/src/context.rs` | **已做**（见下） |
 | `hashline/`（755 行）、`syntax/`（477 行） | `tools/` | **并入**（见下） |
-| `cli/repl.rs`（2458 行） | `input/` + `run/` | **已做**（`run/lanes.rs` 未拆，见「`Repl` 拆成三块」；`run/bash.rs` 是新增文件） |
-| `cli/lane.rs`（421 行） | `run/lane.rs` + `run/looping.rs` | **已做**（`View` 已剥，`Tally` 另落 `run/meter.rs`） |
-| `cli/status.rs`（429 行） | `run/meter.rs` + `ui/status.rs` | **已做**（词汇另落 `store/status.rs`） |
+| `cli/repl.rs`（2458 行） | `input/` + `run/` | **已做**（`app/lanes.rs` 未拆，见「`Repl` 拆成三块」；`app/bash.rs` 是新增文件） |
+| `cli/lane.rs`（421 行） | `app/lane.rs` + `app/looping.rs` | **已做**（`View` 已剥，`Tally` 另落 `app/meter.rs`） |
+| `cli/status.rs`（429 行） | `app/meter.rs` + `ui/status.rs` | **已做**（词汇另落 `store/status.rs`） |
 | `cli/tui/complete.rs` | `input/complete.rs` | **已做** |
 | `cli/{line,render,keys,icons}.rs`、`cli/tui/*` | `ui/` 下 | **已做**（随后 `icons`/`keys`/`text`/`theme`/`status` 词汇落 `store/`，`ui/` 只剩绘制） |
 | `cli/{session,journal,config,settings}.rs` | `store/` | **已做** |
 | `cli/{worktree,wechat,subagent}.rs` | `run/` | **已做**（`enter_worktree`/`remove_worktree`/`worktree_listing` 仍留 `App`，同 `Lanes` 的理由） |
 
-`cli/repl.rs`（2458 行）怎么切：`input/mod.rs` 收 `Intent`/`Fate`/`Step`/`Rewound`/`read`/`expand`；`input/commands.rs` 收 `Command`/`Source`/`commands()`（技能并入）/`Choice`/`Candidate`/`complete`；`run/mod.rs` 是 `App`（状态根：`store`/`keys`/`commands` + `lanes: Lanes` + `settings: Settings`，加 `dispatch(intent) -> Step` 与 `fate() -> Fate`）；`run/lanes.rs` 是 `Lanes`；`store/settings.rs` 收 `Settings` 本体（`file`/`claimed` + `reread`/`effective`/`rows`/`claim`/`drop_claim`/`claimed_value`/`file_value` + `mask_secret`，并进现有 `settings.rs`）——`edit`/`revert`/`write_to_file` 是包在它外面的一层，因为要走 `rebuild()` 落到 lane 上，所以留在 `App`；`config`/`args` 是 App 的（一个是解析后的配置，一个是命令行）；`run/bash.rs` 收 `Bashed`/`run_bash`/`bash_said`/`record_bash`（**新文件**，cli 现在没有 `bash.rs`）；`WechatCmd` 归 `input/`（它是 `Step::Wechat` 的载荷，`run/wechat.rs` 反过来从 `input` 取）；`run/worktree.rs` 收 `enter_worktree`/`remove_worktree`/`worktree_listing`（并进现有 `worktree.rs`）。
+`cli/repl.rs`（2458 行）怎么切：`input/mod.rs` 收 `Intent`/`Fate`/`Step`/`Rewound`/`read`/`expand`；`input/commands.rs` 收 `Command`/`Source`/`commands()`（技能并入）/`Choice`/`Candidate`/`complete`；`app/mod.rs` 是 `App`（状态根：`store`/`keys`/`commands` + `lanes: Lanes` + `settings: Settings`，加 `dispatch(intent) -> Step` 与 `fate() -> Fate`）；`app/lanes.rs` 是 `Lanes`；`store/settings.rs` 收 `Settings` 本体（`file`/`claimed` + `reread`/`effective`/`rows`/`claim`/`drop_claim`/`claimed_value`/`file_value` + `mask_secret`，并进现有 `settings.rs`）——`edit`/`revert`/`write_to_file` 是包在它外面的一层，因为要走 `rebuild()` 落到 lane 上，所以留在 `App`；`config`/`args` 是 App 的（一个是解析后的配置，一个是命令行）；`app/bash.rs` 收 `Bashed`/`run_bash`/`bash_said`/`record_bash`（**新文件**，cli 现在没有 `bash.rs`）；`WechatCmd` 归 `input/`（它是 `Step::Wechat` 的载荷，`app/wechat.rs` 反过来从 `input` 取）；`app/worktree.rs` 收 `enter_worktree`/`remove_worktree`/`worktree_listing`（并进现有 `worktree.rs`）。
 
 接线点，落地前先知道：
 
 - `render::Theme`、`status::Segment` 是**配置数据而非界面代码**（`config.rs:94-97` 持有），所以留在 `store/config.rs`，`ui/render.rs` 在上层依赖它。反过来的话 `store → ui` 就成了反向依赖。
 - `keys` 眼下挂在 `Lane` 上（`lane.rs` 有 `keys: Arc<Keys>`，`repl.rs` 也读）。按键表是界面词汇，`Lane` 不该有；拆完后 `Keys` 只出现在 `store/config`（产出）和 `ui`（消费）。
-- `tools::ToolOutput.spent: Totals`（`tools/src/lib.rs:265`）要跟着 cost 一起走：子代理回报改成 `Usage`，cost 由 `run/meter.rs` 在顶层算。这处会外溢到 `crates/tools`。
+- `tools::ToolOutput.spent: Totals`（`tools/src/lib.rs:265`）要跟着 cost 一起走：子代理回报改成 `Usage`，cost 由 `app/meter.rs` 在顶层算。这处会外溢到 `crates/tools`。
 - **`cli/context.rs` 上移到 `agent`**（**已做**：`agent/src/context.rs`，`agent::context::*`）。它是 standing 提示词的拼装：`workspace()` 拼 `<workspace path>`，`boundary()` 拼 `<write_paths>`（工作区 + 配置的额外写根，跟 tier 有关），`env()` 拼 `<env date/platform/shell/pi/tier>`，再加 `AGENTS.md` 正文（`context.rs:57-151`），`main.rs:431-447` 把它们追在 system prompt 末尾。三个连带：
   - `env()` 唯一的非-`tools` 外部依赖是 `journal::rfc3339`（`journal.rs:141`，连带 `civil` `:156`）。**已选后者**：`env(stamp, tier)` 收调用方的时钟读数，只取其中的「日」（`split_once('T')`），日历仍留在 cli；「一天而非一刻」这条契约留在 `env` 里，测试用两个相隔一小时的读数断言输出相同。
   - **agent 会第一次读盘**：现在 `crates/agent/src/` 里零 `std::fs`/`tokio::fs`，而 `context::from` 靠 `std::fs::read_to_string` 加祖先目录 walk。这与「核心只留一个循环」有点顶，但 system prompt 本来就是 agent 的东西（`agent::DEFAULT_SYSTEM` 已在里面）。
@@ -289,8 +292,8 @@ struct 名不必等于 wire name，这库里本来就不是：`ScriptTool::name(
 | 新的 | 拿什么 | 放哪 |
 |---|---|---|
 | `Settings` | `config`/`args`/`file`/`claimed`，加 `reload`/`adopt`/`rebuilt`/`effective`/`in_force`/`retarget` 与面板的 `setting_rows`/`edit`/`revert`/`write_to_file` | **已做** → `store/settings.rs`（`edit`/`revert`/`write_to_file` 留在 `App`，因为要走 `rebuild()` 落到 lane 上） |
-| `Lanes` | `lanes: Vec<Lane>`/`current`，加 `lane`/`lane_mut`/`open_lane`/`remove_lane`/`switch`/`fresh_session`/`adopt_session`/`resume`/`becomes`/`resume_listing`/`worktree_listing`/`enter_worktree`/`remove_worktree`/`save`/`save_lane`/`rewind_to`/`tokens_now*`/`status_lines`/`choices`/`listing` | **未做**。复核结论：这 15 个方法里 **12 个要 `self.store`/`config`/`settings`/`args`**，拆出去是把参数逐个往下传，不是状态切分——`lanes`/`current` 本来就是 `App` 的状态，切出来只是换个写字的地方。同源的 `run/worktree.rs` 那三个方法同理。等发话 |
-| `App` | `store`/`keys`/`commands` + `lanes: Lanes` + `settings: Settings`，加 `dispatch(Intent) -> Step` 与 `fate() -> Fate` | **已做** → `run/mod.rs`（`lanes: Vec<Lane>` 仍是字段，`Lanes` 没拆） |
+| `Lanes` | `lanes: Vec<Lane>`/`current`，加 `lane`/`lane_mut`/`open_lane`/`remove_lane`/`switch`/`fresh_session`/`adopt_session`/`resume`/`becomes`/`resume_listing`/`worktree_listing`/`enter_worktree`/`remove_worktree`/`save`/`save_lane`/`rewind_to`/`tokens_now*`/`status_lines`/`choices`/`listing` | **未做**。复核结论：这 15 个方法里 **12 个要 `self.store`/`config`/`settings`/`args`**，拆出去是把参数逐个往下传，不是状态切分——`lanes`/`current` 本来就是 `App` 的状态，切出来只是换个写字的地方。同源的 `app/worktree.rs` 那三个方法同理。等发话 |
+| `App` | `store`/`keys`/`commands` + `lanes: Lanes` + `settings: Settings`，加 `dispatch(Intent) -> Step` 与 `fate() -> Fate` | **已做** → `app/mod.rs`（`lanes: Vec<Lane>` 仍是字段，`Lanes` 没拆） |
 
 `App` 是状态根，`dispatch` 是它唯一真正的逻辑——匹配 `Intent` 那一处必须看得见全部状态，没有更小的地方可放，这是它存在的理由。
 
@@ -305,21 +308,36 @@ struct 名不必等于 wire name，这库里本来就不是：`ScriptTool::name(
 
 ## TUI 解耦：残留与三步（已定）
 
-「彻底」只能指**编译期单向**（`run`/`store`/`input` 不 import 界面，界面 import 它们）——`Event`/`Step`/`Intent` 本身就是耦合，核心不可能不知道界面存在，否则没法把决策交出去。
+「彻底」只能指**编译期单向**（`app`/`store`/`input` 不 import 界面，界面 import 它们）——`Event`/`Step`/`Intent` 本身就是耦合，核心不可能不知道界面存在，否则没法把决策交出去。
 
 方案切掉的是唯一一处**类型级**的反向边：全库 `crate::tui` 的引用只有 `lane.rs:18 use crate::tui::View`，`View` 移出 `Lane` 就够了。
 
-### 残留（按拆分后的落点列，不按现在的文件名）
+### 残留
+
+**已清零**（2026-09-22 实测）：全库没有一处反向引用，单向边在编译层面成立。
+
+```sh
+# 三条都应输出空
+rg -n '\bui::'  crates/cli/src -g '*.rs' | grep -v '^crates/cli/src/ui/' | grep -v main.rs
+rg -n '\bapp::' crates/cli/src -g '*.rs' | grep -v '^crates/cli/src/app/' | grep -v '^crates/cli/src/ui/' | grep -v main.rs
+rg -n '\bapp::' crates/cli/src/input -g '*.rs'
+```
+
+下面这张表列的落点是被两件事消化掉的：词汇（`theme`/`keys`/`status`/`icons`/`text`）落进 `store/`，以及 `app/status.rs` 自己拼字符串、不再问 `ui::render` 要成品。
+
+<details><summary>当年的预测表（留作对照）</summary>
 
 | 落点 | 反向引用 | 原处 |
 |---|---|---|
-| `run/mod.rs`（`status_lines`、`resume_listing`） | `render::spent`、`render::clip`、`render::pad` | `repl.rs:1322`/`:1769`/`:1785` |
-| `run/worktree.rs`（`worktree_listing`） | `render::pad` | `repl.rs:1740` |
-| `run/lanes.rs`（`Lane.keys`） | `keys::Keys` | `lane.rs:267` |
+| `app/mod.rs`（`status_lines`、`resume_listing`） | `render::spent`、`render::clip`、`render::pad` | `repl.rs:1322`/`:1769`/`:1785` |
+| `app/worktree.rs`（`worktree_listing`） | `render::pad` | `repl.rs:1740` |
+| `app/lanes.rs`（`Lane.keys`） | `keys::Keys` | `lane.rs:267` |
 | `input/commands.rs`（`gist`、`complete`） | `render::clip` | `repl.rs:131`、`:305` |
 | `store/settings.rs`（`open_panel`） | `icons::CHANGED_MARK` | `repl.rs:1476` |
-| `run/wechat.rs` | `render::clip`、`render::summarize` | `wechat.rs:223`、`:642` |
+| `app/wechat.rs` | `render::clip`、`render::summarize` | `wechat.rs:223`、`:642` |
 | `store/config.rs` | `keys::Keys`（`key_map()`）、`render::Theme`、`status::Segment` | `config.rs:94`、`:97`、`:219`、`:225` |
+
+</details>
 
 （`journal.rs` 用 `icons` 只在测试里，不算。）
 

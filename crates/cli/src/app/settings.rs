@@ -5,7 +5,8 @@
 
 use serde::Deserialize;
 
-use super::{App, summary};
+use super::App;
+use super::meter::summary;
 use crate::input::Step;
 use crate::input::commands::Choice;
 use crate::input::refused;

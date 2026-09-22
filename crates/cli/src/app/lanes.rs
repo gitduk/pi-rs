@@ -8,7 +8,9 @@
 use agent::Totals;
 use agent::session::Session;
 
-use super::{App, carries_reasoning, demotion, summary};
+use super::App;
+use super::meter::summary;
+use super::status::{carries_reasoning, demotion};
 use crate::app::lane::Lane;
 use crate::app::meter::Tally;
 use crate::input::commands::{RESUME_WIDTH, ago};
