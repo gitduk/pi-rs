@@ -183,59 +183,6 @@ impl Store {
         Self { root: root.into() }
     }
 
-    /// Re-file buckets written while `key_of` folded every separator to `-`.
-    /// That fold was lossy and collide-prone — `/a/b` and `/a-b` shared one
-    /// bucket — and the encoded key cannot be spelled backwards, so each
-    /// legacy bucket is read for the workspace its own transcripts record
-    /// and renamed to that workspace's key now. A child already present
-    /// under the target stays put and keeps its old bucket alive for it;
-    /// nothing is overwritten and nothing is deleted.
-    pub fn migrate_legacy_buckets(&self) {
-        let Ok(dirs) = std::fs::read_dir(&self.root) else {
-            return;
-        };
-        // A `%` in the name can only come from the encoded key: the old fold
-        // emitted `-` for it. Buckets whose name is the same under both keys
-        // re-file as a no-op.
-        let mut legacy: Vec<PathBuf> = dirs
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| {
-                p.is_dir()
-                    && !p
-                        .file_name()
-                        .is_some_and(|n| n.to_string_lossy().contains('%'))
-            })
-            .collect();
-        legacy.sort();
-        for bucket in legacy {
-            let transcripts = bucket_transcripts(&bucket);
-            let Some(ws) = workspace_of(&transcripts) else {
-                continue;
-            };
-            let target = self.root.join(tools::state::key_of(Path::new(&ws)));
-            if target == bucket {
-                continue;
-            }
-            let Ok(entries) = std::fs::read_dir(&bucket) else {
-                continue;
-            };
-            if std::fs::create_dir_all(&target).is_err() {
-                continue;
-            }
-            let mut collided = false;
-            for entry in entries.flatten() {
-                let dest = target.join(entry.file_name());
-                if dest.exists() || std::fs::rename(entry.path(), &dest).is_err() {
-                    collided = true;
-                }
-            }
-            if !collided {
-                let _ = std::fs::remove_dir(&bucket);
-            }
-        }
-    }
-
     // The directory one workspace's transcripts live in.
     fn dir_of(&self, workspace: &Path) -> PathBuf {
         self.root.join(tools::state::key_of(workspace))
@@ -448,9 +395,24 @@ impl Store {
             if recent {
                 continue;
             }
-            // One transcript answers for the bucket: they are grouped by the
-            // very path being asked about.
-            if workspace_of(&transcripts).is_some_and(|w| !Path::new(&w).is_dir()) {
+            // Per transcript, never per bucket: the key is a fold, so two
+            // trees `/a/b` and `/a-b` share one bucket, and one of them going
+            // away must not take the other's transcripts with it. A bucket
+            // goes whole only when every transcript in it was recorded under
+            // a path that is gone — which still takes a stale copy of recall
+            // with it, unreachable either way.
+            let mut all_gone = !transcripts.is_empty();
+            for transcript in &transcripts {
+                match workspace_of(std::slice::from_ref(transcript)) {
+                    Some(ws) if !Path::new(&ws).is_dir() => {
+                        if let Some(dir) = transcript.parent() {
+                            let _ = std::fs::remove_dir_all(dir);
+                        }
+                    }
+                    _ => all_gone = false,
+                }
+            }
+            if all_gone {
                 let _ = std::fs::remove_dir_all(&bucket);
             }
         }
@@ -613,6 +575,45 @@ mod tests {
             "nothing can reach a bucket whose tree went"
         );
     }
+    // Two trees whose names fold to one bucket share it, so pruning has to
+    // judge each transcript by the workspace it records. Judging the bucket
+    // by whichever transcript came first would take a live tree's sessions
+    // with the one that went.
+    #[test]
+    fn pruning_a_shared_bucket_spares_the_tree_that_is_still_there() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::new(tmp.path());
+        let log = log_with(vec![Message::user("hi")]);
+        // `…/w/t` and `…/w-t` fold alike; only the first is on disk.
+        let home = tempfile::tempdir().unwrap();
+        let live = home.path().join("w").join("t");
+        let gone = home.path().join("w-t");
+        std::fs::create_dir_all(&live).unwrap();
+        assert_eq!(
+            tools::state::key_of(&live),
+            tools::state::key_of(&gone),
+            "the two trees share a bucket"
+        );
+        store
+            .save("live", &live, "test-model", None, 7, &log)
+            .unwrap();
+        store
+            .save("gone", &gone, "test-model", None, 7, &log)
+            .unwrap();
+        assert_eq!(store.buckets().len(), 1, "one bucket, two workspaces");
+
+        store.prune_older_than(std::time::Duration::ZERO);
+
+        assert!(
+            store.load("live").is_ok(),
+            "the live tree keeps its session"
+        );
+        assert!(
+            store.load("gone").is_err(),
+            "the removed tree's session goes"
+        );
+    }
+
     // `/worktree rm` drops a tree's buckets outright — transcripts, journals
     // and recall — where the sweep only waits out the month of grace. A run
     // started in a subdirectory of the tree belongs to it too, and a sibling
@@ -638,11 +639,13 @@ mod tests {
         assert!(store.load("in-deep").is_err());
         assert!(store.load("in-sibling").is_ok());
     }
-    // Two trees whose names once folded to the same bucket key (`feature-x`
-    // and `feature/x`) now get distinct buckets, since slashes are encoded;
-    // removing one must leave the other's sessions alone.
+    // Two trees that fold to one bucket key (`feature-x` and `feature/x`)
+    // share that bucket, the way they do under Claude Code's project
+    // buckets. Removing one still must not take the other's sessions with
+    // it: which bucket a transcript sits in says nothing, the workspace it
+    // records says everything.
     #[test]
-    fn drop_under_spares_a_sibling_whose_key_differs_by_a_slash() {
+    fn drop_under_spares_a_sibling_that_folds_to_the_same_bucket() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::new(tmp.path().join("store"));
         let home = tempfile::tempdir().unwrap();
@@ -655,7 +658,7 @@ mod tests {
         store
             .save("theirs", &sibling, "test-model", None, 7, &log)
             .unwrap();
-        assert_ne!(tools::state::key_of(&tree), tools::state::key_of(&sibling));
+        assert_eq!(tools::state::key_of(&tree), tools::state::key_of(&sibling));
 
         assert_eq!(store.drop_under(&tree), 1);
         assert!(store.load("mine").is_err());
@@ -822,70 +825,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_bucket_from_the_separator_folding_key_is_refiled_at_migration() {
-        let tmp = tempfile::tempdir().unwrap();
-        let store = Store::new(tmp.path().join("store"));
-        let legacy = store.root.join("-w-t");
-        std::fs::create_dir_all(legacy.join("1787426708-1")).unwrap();
-        std::fs::write(
-            legacy.join("1787426708-1").join("session.json"),
-            r#"{"id":"1787426708-1","workspace":"/w/t","model":"m"}"#,
-        )
-        .unwrap();
-
-        store.migrate_legacy_buckets();
-
-        assert!(
-            store
-                .root
-                .join("%2Fw%2Ft")
-                .join("1787426708-1")
-                .join("session.json")
-                .is_file(),
-            "the transcript moves to the encoded key"
-        );
-        assert!(!legacy.exists(), "an emptied legacy bucket goes away");
-        let found = store.peek(std::path::Path::new("/w/t"));
-        assert_eq!(
-            found.len(),
-            1,
-            "the refiled session lists for its workspace"
-        );
-        assert_eq!(found[0].id, "1787426708-1");
-    }
-
-    #[test]
-    fn refiling_never_overwrites_what_the_target_already_holds() {
-        let tmp = tempfile::tempdir().unwrap();
-        let store = Store::new(tmp.path().join("store"));
-        let transcript =
-            |body: &str| format!(r#"{{"id":"{body}","workspace":"/w/t","model":"m"}}"#);
-        // The target bucket already holds session `new`; the legacy one holds
-        // `new` and `old`.
-        let target = store.root.join("%2Fw%2Ft");
-        std::fs::create_dir_all(target.join("new")).unwrap();
-        std::fs::write(target.join("new").join("session.json"), transcript("new")).unwrap();
-        let legacy = store.root.join("-w-t");
-        for id in ["new", "old"] {
-            std::fs::create_dir_all(legacy.join(id)).unwrap();
-            std::fs::write(legacy.join(id).join("session.json"), transcript(id)).unwrap();
-        }
-
-        store.migrate_legacy_buckets();
-
-        assert!(target.join("old").join("session.json").is_file());
-        assert_eq!(
-            std::fs::read_to_string(target.join("new").join("session.json")).unwrap(),
-            transcript("new"),
-            "the target's copy is left alone"
-        );
-        assert!(
-            legacy.join("new").join("session.json").is_file(),
-            "a collided child keeps its old bucket alive"
-        );
-    }
-
     // A session that never got a prompt still belongs in the resume index;
     // only its lack of a name distinguishes it.
     #[test]
@@ -927,7 +866,7 @@ mod tests {
 
         // A session is a directory in the bucket, holding the transcript and
         // the journal that recorded it.
-        let bucket = tmp.path().join("%2Fw").join("t").join("session.json");
+        let bucket = tmp.path().join("-w").join("t").join("session.json");
         assert!(
             bucket.is_file(),
             "session must be filed under its workspace bucket"

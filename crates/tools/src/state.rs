@@ -65,22 +65,19 @@ pub fn file_stem(id: &str) -> String {
 }
 
 /// A path as a single directory name, for grouping a machine's state by
-/// workspace: `/` and `%` percent-encoded (`%2F`, `%25`) so the map is
-/// injective, every other character a directory name may not take becoming
-/// `-`. Claude Code's project buckets fold every non-alphanumeric to `-`
-/// instead, which sends `/a/b` and `/a-b` to one bucket. Distinct from
-/// `file_stem` (which mints `_` for the same characters) because the two name
-/// different things: a file a session owns, and the bucket that groups them.
+/// workspace: every character that is not a letter or a digit becomes `-`, so
+/// `/home/u/pi-rs` is `-home-u-pi-rs`. Claude Code buckets its projects the
+/// same way, and that fold is not injective here either — `/a/b` and `/a-b`
+/// land in one bucket — which is accepted rather than solved: what a bucket
+/// holds is read off the workspace each transcript records, never off its
+/// name. Distinct from `file_stem` (which mints `_` for the same characters)
+/// because the two name different things: a file a session owns, and the
+/// bucket that groups them.
 pub fn key_of(path: &Path) -> String {
     path.display()
         .to_string()
         .chars()
-        .map(|c| match c {
-            '%' => "%25".to_string(),
-            '/' => "%2F".to_string(),
-            _ if c.is_ascii_alphanumeric() || c == '-' => c.to_string(),
-            _ => "-".to_string(),
-        })
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect()
 }
 #[cfg(test)]
@@ -88,17 +85,17 @@ mod tests {
     use super::{file_stem, key_of};
     use std::path::Path;
 
-    // The whole point of encoding the slash: paths that differ only in where
-    // their separators sit must not land in one bucket.
+    // A path folded to one directory name, and the fold is deliberately not
+    // injective: `/home/u/pi-rs` and `/home/u/pi/rs` share a bucket the way
+    // they do under Claude Code's project buckets. Accepted, because the
+    // transcripts inside carry the workspace each was recorded under and the
+    // bucket name is never read as the answer.
     #[test]
-    fn a_workspace_key_is_its_slash_path_with_separators_dashed() {
-        assert_eq!(
-            key_of(Path::new("/home/dev/pi-rs")),
-            "%2Fhome%2Fdev%2Fpi-rs"
-        );
-        assert_eq!(key_of(Path::new("/")), "%2F");
+    fn a_workspace_key_is_its_path_with_every_separator_dashed() {
+        assert_eq!(key_of(Path::new("/home/dev/pi-rs")), "-home-dev-pi-rs");
+        assert_eq!(key_of(Path::new("/")), "-");
         assert_eq!(key_of(Path::new(".")), "-");
-        assert_ne!(
+        assert_eq!(
             key_of(Path::new("/home/u/pi-rs")),
             key_of(Path::new("/home/u/pi/rs"))
         );
