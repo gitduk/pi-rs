@@ -108,10 +108,17 @@ crates/cli/src/              ✧ 应用
     ├── render.rs   只剩绘制（文本工具→ store/text.rs，配置类型→ store/theme.rs）
     ├── status.rs   ↔ 只有绘制：Segment 的 render / parts / line（词汇→ store/status.rs）
     ├── line.rs     行模式界面
-    └── tui/        mod.rs / editor.rs / panel.rs / row.rs / screen.rs
+    └── tui/        mod.rs（循环 + impl Tui）/ editor.rs / panel.rs / row.rs /
+                    screen.rs / scrollback.rs（转录被卷轴走读的那一面）/ tool.rs /
+                    view.rs（一个 lane 的屏幕状态）/ stream.rs（Event 变行）/ menu.rs /
+                    vim.rs / mouse.rs / term.rs（终端本身）
 ```
 
-~~`ui/` 里那三个还得再拆~~ **已做**（见「TUI 解耦」一节）：`icons`/`keys`/`text`/`theme`/`status` 都落到了 `store/`，`ui/` 只剩绘制。反向边已清零，方向严格单向：`store` → `input` → `run` → `ui`。
+~~`ui/` 里那三个还得再拆~~ **已做**（见「TUI 解耦」一节）：`icons`/`keys`/`text`/`theme`/`status` 都落到了 `store/`，`ui/` 只剩绘制。反向边已清零，方向严格单向：`store` → `input` → `app` → `ui`。
+
+`ui/tui/mod.rs` 从 6170 行拆到 3879 行（2026-09-22，六个提交）：卷轴与折叠 → `scrollback.rs`、跑着的工具行 → `tool.rs`、一个 lane 的屏幕状态 → `view.rs`、终端本身 → `term.rs`、模态键 → `vim.rs`、鼠标与命中测试 → `mouse.rs`、`impl Ui` 里「事件变行」与「菜单补全」两半 → `stream.rs`/`menu.rs`。剩下的是循环、`impl Tui` 对一次运行的起与收、外观与 lane 栏。切法一律按**事情**，不按「方法挂在谁身上」——后者在 `app/lanes.rs` 上试过，两个文件名只差一个 s，退了（见该目录的树）。
+
+TUI 的 77 个测试**留在一个 `mod tests` 里**：它们共用 `test_ui`/`frame`/`surface`/`block`/`text` 五个夹具，而这些夹具别的测试也在用（卷轴那 10 个只占 184 行、9%），搬出去要么复制夹具要么另造共享测试模块，两条都不划算。
 
 现有文件 → 新位置：
 
