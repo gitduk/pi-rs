@@ -490,7 +490,9 @@ fn sketch(path: &str, applied: &Applied) -> String {
     // and the count is what says how much was skimmed.
     let mut shown: Vec<Row> = Vec::with_capacity(rows.len());
     for run in rows.chunk_by(|a, b| a.is_kept() == b.is_kept()) {
-        if run.len() <= CONTEXT * 2 {
+        // The marker is a row of its own, so a run is worth folding only when
+        // the count and the rows it spares come to less than the run does.
+        if run.len() <= CONTEXT * 2 + 1 {
             shown.extend_from_slice(run);
             continue;
         }
