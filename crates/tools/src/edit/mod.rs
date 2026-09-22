@@ -512,6 +512,7 @@ fn sketch(path: &str, applied: &Applied) -> String {
         .iter()
         .map(|r| match r {
             Row::Line { sign, n, text } => format!("{sign}{n:>width$} {text}"),
+            Row::Elided(1) => format!("{}… 1 line", " ".repeat(width + 2)),
             Row::Elided(n) => format!("{}… {n} lines", " ".repeat(width + 2)),
         })
         .collect();
