@@ -608,3 +608,54 @@ async fn a_child_that_ran_out_of_time_is_still_checked() {
     // nobody can vouch for — which is the ending a check is most wanted at.
     assert!(out.contains("[verify `true`: exit 0]"), "{out}");
 }
+
+// Two calls in one turn: a turn whose blocks are indexed 0 and 1. The
+// accumulator folds by index, so the two must stay two all the way down.
+fn two_call_turn(a: (&str, &str), b: (&str, &str)) -> Vec<StreamEvent> {
+    let one = |i: usize, (id, args): (&str, &str)| {
+        vec![
+            StreamEvent::BlockStart {
+                index: i,
+                kind: BlockKind::ToolCall {
+                    id: Some(id.into()),
+                    name: "task".into(),
+                },
+            },
+            StreamEvent::ToolArgsDelta {
+                index: i,
+                delta: args.into(),
+            },
+        ]
+    };
+    let mut events = one(0, a);
+    events.extend(one(1, b));
+    events.push(StreamEvent::Done {
+        stop: StopReason::ToolUse,
+        usage: Usage {
+            input: 500,
+            output: 3,
+            ..Default::default()
+        },
+    });
+    events
+}
+
+// A turn that names two tasks runs two children. Everything above this is
+// written per call and every check in it is positional, so a fold that kept
+// only the first block would read as the model having asked for one job.
+#[tokio::test]
+async fn two_calls_in_one_turn_both_reach_the_child() {
+    let (_dir, agent, ctx, _seen, kept) = harness(vec![
+        two_call_turn(
+            ("c1", r#"{"description":"first","prompt":"first"}"#),
+            ("c2", r#"{"description":"second","prompt":"second"}"#),
+        ),
+        text_turn("one"),
+        text_turn("two"),
+        text_turn("three"),
+        text_turn("four"),
+    ]);
+    let _ = drive(&agent, &ctx, "go").await;
+    let sessions = kept.sessions.lock().unwrap();
+    assert_eq!(sessions.len(), 2, "both calls ran a child");
+}
