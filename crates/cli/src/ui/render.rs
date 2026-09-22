@@ -529,8 +529,11 @@ impl Renderer {
     /// goes to stderr.
     pub fn on(&mut self, event: Event) {
         // Before the arms and outside the `quiet` guards: a run still has to
-        // arrive at the right total when nothing about it was printed.
-        self.tally.on(&event, self.rates.get());
+        // arrive at the right total when nothing about it was printed. The
+        // rate is the surface's own: this reader sees the receiver, not the
+        // lane, and a pipe can only change models between runs.
+        self.tally.set_pricing(self.rates.get());
+        self.tally.on(&event);
         match &event {
             Event::ReasoningDelta(d) if !self.quiet => {
                 if !self.thinking {

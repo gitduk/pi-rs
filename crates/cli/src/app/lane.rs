@@ -365,19 +365,20 @@ impl Lane {
     /// Fold an event into the meter. The loop's facts arrive here and nowhere
     /// else: what a run has spent is only known from them.
     pub fn note(&mut self, event: &Event) {
-        self.tally.on(event, self.agent.spec.pricing);
+        self.tally.on(event);
     }
 
     /// Start the meter at what the session has already spent, so a resumed
-    /// tree does not read as a free run.
+    /// tree does not read as a free run, and pin the rate this run is priced
+    /// at: a `/model` answered mid-run does not reprice the turn in flight.
     pub fn seed_meter(&mut self) {
-        self.tally.seed(self.totals);
+        self.tally.seed(self.totals, self.agent.spec.pricing);
     }
 
     /// Charge what a run spent to the session, once it has reported it, at the
-    /// rate this lane's model is priced at.
+    /// rate that run was started on — the meter's own, pinned at its seed.
     pub fn charge(&mut self, spent: &llm::stream::Usage) {
-        let cost = self.agent.spec.pricing.cost(spent);
+        let cost = self.tally.pricing().cost(spent);
         self.totals.add(spent, cost);
     }
 
@@ -716,5 +717,42 @@ impl App {
         }
         let stored = self.store.load(id).map_err(|e| refused("resume", e))?;
         Ok(self.adopt_session(stored))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::app::tests::a_lane;
+    use llm::model::Pricing;
+    use llm::stream::Usage;
+
+    // `/model` is answered at once, a run included. The run it cuts across is
+    // still charged at the rate it started on, or the figure `/status` reports
+    // would be the price of a model that never ran those tokens.
+    #[test]
+    fn a_switch_mid_run_does_not_reprice_the_run_in_flight() {
+        let cheap = Pricing {
+            input_per_mtok: 3.0,
+            output_per_mtok: 15.0,
+            ..Default::default()
+        };
+        let dear = Pricing {
+            input_per_mtok: 30.0,
+            output_per_mtok: 150.0,
+            ..Default::default()
+        };
+
+        let mut lane = a_lane("s");
+        std::sync::Arc::make_mut(&mut lane.agent).spec.pricing = cheap;
+        lane.seed_meter();
+        // `/model`: the lane's own rate moves, this run's does not.
+        std::sync::Arc::make_mut(&mut lane.agent).spec.pricing = dear;
+        lane.charge(&Usage {
+            input: 1_000_000,
+            output: 1_000_000,
+            ..Default::default()
+        });
+
+        assert_eq!(lane.totals.cost, 3.0 + 15.0);
     }
 }

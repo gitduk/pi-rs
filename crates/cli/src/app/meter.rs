@@ -89,26 +89,45 @@ pub struct Tally {
     turns: usize,
     ctx: Option<(usize, usize)>,
     compactions: usize,
+    // The rate this run is priced at, pinned when the meter is seeded: every
+    // event and every charge of this run is costed at what its own model
+    // charges, whatever `/model` does to the lane meanwhile.
+    pricing: Pricing,
 }
 
 impl Tally {
-    /// Start a run's counts with the session's earlier runs already spent.
-    pub fn seed(&mut self, base: Totals) {
+    /// Start a run's counts with the session's earlier runs already spent,
+    /// and pin the rate this run is priced at. `/model` is answered at once,
+    /// so a turn that began on one model and ends after a switch is still
+    /// costed at what the model that ran it charges.
+    pub fn seed(&mut self, base: Totals, pricing: Pricing) {
         *self = Self::default();
         self.base = base;
+        self.pricing = pricing;
     }
 
-    /// Read one event for whatever number it carries, priced at the rate the
-    /// caller says is in force — one source of that answer, so the line and
-    /// the session total cannot disagree.
-    pub fn on(&mut self, event: &agent::Event, pricing: Pricing) {
+    /// The rate this run is priced at.
+    pub fn pricing(&self) -> Pricing {
+        self.pricing
+    }
+
+    /// State the rate from outside a run: a surface that reads a receiver of
+    /// its own knows when the model changed and the lane does not.
+    pub fn set_pricing(&mut self, pricing: Pricing) {
+        self.pricing = pricing;
+    }
+
+    /// Read one event for whatever number it carries, priced at the rate this
+    /// run was seeded with — one source of that answer, so the line and the
+    /// session total cannot disagree.
+    pub fn on(&mut self, event: &agent::Event) {
         match event {
             agent::Event::TurnStart { turn } => self.turns = *turn,
             // A retry sends a second one for the same turn: the count it
             // carries replaces the abandoned attempt's rather than joining it.
             agent::Event::Usage(usage) => self.turn = *usage,
             agent::Event::TurnEnd { usage } => {
-                self.settled.add(usage, pricing.cost(usage));
+                self.settled.add(usage, self.pricing.cost(usage));
                 self.turn = Usage::default();
             }
             agent::Event::Context { used, budget } => self.ctx = Some((*used, *budget)),
@@ -127,7 +146,7 @@ impl Tally {
             } => {
                 self.settled = Totals {
                     usage: *usage,
-                    cost: pricing.cost(usage),
+                    cost: self.pricing.cost(usage),
                 };
                 self.turn = Usage::default();
                 self.turns = *turns;
@@ -222,25 +241,29 @@ mod tests {
         }
     }
 
+    // A tally on the rate `priced()` states, which is what a run starts with.
+    fn seeded() -> Tally {
+        let mut t = Tally::default();
+        t.seed(Totals::default(), priced());
+        t
+    }
+
     // The running count is the turns that have reported plus the one in
     // flight, and a turn's own report supersedes what it had said so far.
     #[test]
     fn a_tally_carries_the_finished_turns_and_the_one_in_flight() {
-        let mut t = Tally::default();
-        t.on(&agent::Event::TurnStart { turn: 1 }, priced());
-        t.on(&agent::Event::Usage(usage(100, 5)), priced());
-        t.on(&agent::Event::Usage(usage(100, 20)), priced());
+        let mut t = seeded();
+        t.on(&agent::Event::TurnStart { turn: 1 });
+        t.on(&agent::Event::Usage(usage(100, 5)));
+        t.on(&agent::Event::Usage(usage(100, 20)));
         let mid = t.snapshot("m", None, None, 0);
         assert_eq!((mid.input, mid.output, mid.turns), (100, 20, 1));
 
-        t.on(
-            &agent::Event::TurnEnd {
-                usage: usage(100, 30),
-            },
-            priced(),
-        );
-        t.on(&agent::Event::TurnStart { turn: 2 }, priced());
-        t.on(&agent::Event::Usage(usage(400, 7)), priced());
+        t.on(&agent::Event::TurnEnd {
+            usage: usage(100, 30),
+        });
+        t.on(&agent::Event::TurnStart { turn: 2 });
+        t.on(&agent::Event::Usage(usage(400, 7)));
         let s = t.snapshot("m", None, None, 0);
         assert_eq!((s.input, s.output, s.turns), (500, 37, 2));
         // 100 in at 10/mtok, 30 out at 100/mtok. The turn in flight is not
@@ -253,23 +276,17 @@ mod tests {
     // the first and in no event at all.
     #[test]
     fn a_finished_run_states_the_total_rather_than_adding_to_it() {
-        let mut t = Tally::default();
-        t.on(&agent::Event::TurnStart { turn: 1 }, priced());
-        t.on(
-            &agent::Event::TurnEnd {
-                usage: usage(8_400, 390),
-            },
-            priced(),
-        );
-        t.on(
-            &agent::Event::Done {
-                turns: 2,
-                usage: usage(8_400, 390),
-                ctx: (72_400, 114_000),
-                compactions: 1,
-            },
-            priced(),
-        );
+        let mut t = seeded();
+        t.on(&agent::Event::TurnStart { turn: 1 });
+        t.on(&agent::Event::TurnEnd {
+            usage: usage(8_400, 390),
+        });
+        t.on(&agent::Event::Done {
+            turns: 2,
+            usage: usage(8_400, 390),
+            ctx: (72_400, 114_000),
+            compactions: 1,
+        });
         let s = t.snapshot("m", None, None, 0);
         // The run's word replaces the running tally rather than joining it:
         // the same turns counted twice would double every number here.
@@ -294,10 +311,10 @@ mod tests {
             },
             cost: 0.02,
         };
-        let mut t = Tally::default();
-        t.seed(base);
-        t.on(&agent::Event::TurnStart { turn: 1 }, priced());
-        t.on(&agent::Event::Usage(usage(100, 5)), priced());
+        let mut t = seeded();
+        t.seed(base, priced());
+        t.on(&agent::Event::TurnStart { turn: 1 });
+        t.on(&agent::Event::Usage(usage(100, 5)));
         let mid = t.snapshot("m", None, None, 0);
         assert_eq!((mid.input, mid.output, mid.cache_read), (100, 5, 0));
         assert_eq!(mid.cost, 0.0);
@@ -312,15 +329,12 @@ mod tests {
         );
         assert_eq!(session.cost, 0.02);
 
-        t.on(
-            &agent::Event::Done {
-                turns: 1,
-                usage: usage(200, 30),
-                ctx: (72_400, 114_000),
-                compactions: 0,
-            },
-            priced(),
-        );
+        t.on(&agent::Event::Done {
+            turns: 1,
+            usage: usage(200, 30),
+            ctx: (72_400, 114_000),
+            compactions: 0,
+        });
         let s = t.snapshot("m", None, None, 0);
         assert_eq!((s.input, s.output), (200, 30));
         assert_eq!(s.cost, 0.005);
@@ -336,20 +350,17 @@ mod tests {
         let quiet = Tally::default().snapshot("m", None, None, 0);
         assert_eq!((quiet.input, quiet.output), (0, 0));
 
-        let mut t = Tally::default();
-        t.on(&agent::Event::TurnStart { turn: 1 }, priced());
+        let mut t = seeded();
+        t.on(&agent::Event::TurnStart { turn: 1 });
         let started = t.snapshot("m", None, None, 0);
         assert_eq!((started.input, started.output), (0, 0));
 
-        t.on(
-            &agent::Event::Done {
-                turns: 3,
-                usage: Usage::default(),
-                ctx: (0, 0),
-                compactions: 0,
-            },
-            priced(),
-        );
+        t.on(&agent::Event::Done {
+            turns: 3,
+            usage: Usage::default(),
+            ctx: (0, 0),
+            compactions: 0,
+        });
         let s = t.snapshot("m", None, None, 0);
         assert_eq!(s.turns, 3);
         assert_eq!((s.input, s.output), (0, 0));

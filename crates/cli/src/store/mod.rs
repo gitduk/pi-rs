@@ -1,9 +1,11 @@
-//! 磁盘，以及配置所说的那些名字。
+//! The disk, and the names the config speaks.
 //!
-//! 这里住两样东西：一次运行读写的文件（`session.rs`、`journal.rs`、
-//! `config.rs`、`settings.rs`），和配置用的词汇——`theme.rs`、`keys.rs`、
-//! `status.rs`、`icons.rs`、`text.rs`。词汇放在这一层而不是 `ui/`，是因为它
-//! 们是设置被*称作*什么，不是被画成什么样：`ui/` 读这些名字，再决定长什么样。
+//! Two things live here: the files a run reads and writes (`session.rs`,
+//! `journal.rs`, `config.rs`, `settings.rs`), and the vocabulary a config is
+//! written in — `theme.rs`, `keys.rs`, `status.rs`, `icons.rs`, `text.rs`. The
+//! vocabulary is here rather than in `ui/` because it is what a setting is
+//! *called*, not how it is drawn: `ui/` reads these names and decides what they
+//! look like.
 
 pub mod config;
 pub mod icons;

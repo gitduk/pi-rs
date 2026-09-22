@@ -80,6 +80,9 @@ pub async fn run(mut core: App, tx: UnboundedSender<Event>, rates: Rates) -> Res
             }
             Step::Compact(focus) => match core.compact_now(focus.as_deref()).await {
                 Some((report, spent)) => {
+                    // A summariser is a model call like any other: it is
+                    // charged at the rate this surface is priced at.
+                    core.lane_mut().seed_meter();
                     core.lane_mut().charge(&spent);
 
                     println!("compacted {} → {} tokens", report.before, report.after);
@@ -119,6 +122,9 @@ async fn turn(
     // switch models — a line comes off stdin one at a time — so handing it the
     // rate here is the whole of keeping the two in step.
     rates.set(core.lane().agent.spec.pricing);
+    // The lane's meter is seeded from the same rate, so what the run is
+    // charged at the end is what the line prices while it runs.
+    core.lane_mut().seed_meter();
     // Lent for the length of the turn and put back after, the same shape the
     // terminal uses — here there is no loop to free, only one owner throughout.
     let Some(mut session) = core.lane_mut().session.take() else {
