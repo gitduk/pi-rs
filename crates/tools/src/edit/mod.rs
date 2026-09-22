@@ -395,7 +395,7 @@ fn echo(path: &str, before: &str, applied: &Applied) -> String {
                 continue;
             }
             rows[..ECHO_ENDS].iter().for_each(|r| out.push_str(r));
-            out.push_str(&format!("… {} lines\n", rows.len() - ECHO_ENDS * 2));
+            out.push_str(crate::rows::GAP);
             rows[rows.len() - ECHO_ENDS..]
                 .iter()
                 .for_each(|r| out.push_str(r));
@@ -452,13 +452,14 @@ fn blank_note(edits: &[usize]) -> String {
 }
 
 // One row of a sketch: a file row under the sign that says which side of the
-// edit it is on, or the count of the rows a long run of context left out.
+// edit it is on, or the mark standing where a long run of context was left
+// out.
 #[derive(Clone, Copy)]
 enum Row<'x> {
     // `n` numbers the row in the file it is read in: the old file for a row
     // that went, the new one for a row that came or stayed.
     Line { sign: char, n: usize, text: &'x str },
-    Elided(usize),
+    Elided,
 }
 
 impl<'x> Row<'x> {
@@ -605,24 +606,24 @@ fn sketch(path: &str, applied: &Applied) -> String {
     let count = |mark: char| rows.iter().filter(|r| r.has(mark)).count();
     let (plus, minus) = (count('+'), count('-'));
     // A run of context longer than the window either side of a change is shown
-    // at both its ends and counted in the middle, the way a reader skims it.
+    // at both its ends and elided in the middle, the way a reader skims it.
     let mut shown: Vec<Row> = Vec::with_capacity(rows.len());
     for run in rows.chunk_by(|a, b| a.is_kept() == b.is_kept()) {
         if !run[0].is_kept() || run.len() <= CONTEXT * 2 {
             shown.extend_from_slice(run);
         } else {
             shown.extend_from_slice(&run[..CONTEXT]);
-            shown.push(Row::Elided(run.len() - CONTEXT * 2));
+            shown.push(Row::Elided);
             shown.extend_from_slice(&run[run.len() - CONTEXT..]);
         }
     }
-    // Right-aligned so a three-digit row lines up with a two-digit one, and a
-    // counted run starts where the rows it stands for do.
+    // Right-aligned so a three-digit row lines up with a two-digit one, and
+    // the mark starts where the rows it stands for do.
     let width = shown
         .iter()
         .filter_map(|r| match r {
             Row::Line { n, .. } => Some(*n),
-            Row::Elided(_) => None,
+            Row::Elided => None,
         })
         .max()
         .map_or(1, |n| n.to_string().len());
@@ -630,7 +631,7 @@ fn sketch(path: &str, applied: &Applied) -> String {
         .iter()
         .map(|r| match r {
             Row::Line { sign, n, text } => format!("{sign}{n:>width$} {text}"),
-            Row::Elided(n) => format!("{}… {n} lines", " ".repeat(width + 2)),
+            Row::Elided => format!("{}…", " ".repeat(width + 2)),
         })
         .collect();
     std::iter::once(format!("{path} +{plus} -{minus}"))
