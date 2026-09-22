@@ -182,9 +182,11 @@ is true, and the second pass — the one you type yourself — is where the rest
 of it turns up. `/loop` is that second pass, decided by the tree instead. A
 round that wrote a file had work left; a round that wrote nothing did not, and
 the loop ends there. What counts is what `write` and `edit` touched — a change
-a shell command made is not in it, and a round of those alone ends the loop. The model is never asked, and never told it is in one:
-the line is re-submitted exactly as typed, so a skill under `/loop` runs the
-way it runs alone.
+a shell command made is not in it, and a round of those alone ends the loop.
+Each round carries a note naming it and saying that an unchanged round is how a
+loop ends; the goal itself is re-submitted exactly as typed, so a skill under
+`/loop` runs the way it runs alone. How much has changed is the model's to
+measure — the tree is right there.
 
 What it does not do is judge whether a goal was reached. `/loop find me an
 answer` is a loop with nothing to measure — those belong in the ordinary

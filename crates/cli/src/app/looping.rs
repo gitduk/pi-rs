@@ -16,8 +16,8 @@ pub struct Looping {
     /// time — a skill stays a skill, prose stays prose.
     pub goal: String,
     pub round: usize,
-    /// Read into every round's prompt: how far the loop has got, what it has
-    /// changed so far, and the standing licence to change nothing.
+    /// Read into every round's prompt: how far the loop has got, and the
+    /// standing licence to change nothing.
     pub note: String,
     // Fingerprints the tree has worn, oldest first, the starting state
     // included. The last one is the round that just ended; an earlier hit
@@ -28,8 +28,6 @@ pub struct Looping {
     prev: TreeState,
     // Consecutive rounds that changed fewer than `THIN_CHANGES` lines.
     thin: usize,
-    // Lines changed since the loop began, fed into the next round's prompt.
-    changed: usize,
     // Set when this loop puts a round in the queue, taken when that round
     // ends. A turn that did not come from here — a line typed between rounds
     // — also ends, and counting it would move the loop on something it never
@@ -170,7 +168,6 @@ impl Looping {
             seen: vec![seen],
             prev,
             thin: 0,
-            changed: 0,
             running: false,
         }
     }
@@ -204,18 +201,12 @@ impl Looping {
                 change += count_changes(&self.prev[path].bytes, b"");
             }
         }
-        self.changed += change;
-        let verb = if self.changed == 1 {
-            "line has"
-        } else {
-            "lines have"
-        };
+        // How much has changed is the model's to measure — the tree is right
+        // there, and a count kept here is one more thing to disagree with it.
         self.note = format!(
-            "This is loop round {}. {} {verb} changed across the tree so far. \
-             If nothing is left worth changing, change nothing — an unchanged round \
-             is the signal to stop.",
-            self.round + 1,
-            self.changed
+            "This is loop round {}. If nothing is left worth changing, change \
+             nothing — an unchanged round is the signal to stop.",
+            self.round + 1
         );
         let quiet = self.seen.last() == Some(&fingerprint);
         let oscillating = self.seen.contains(&fingerprint);
