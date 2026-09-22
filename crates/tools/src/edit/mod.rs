@@ -9,13 +9,10 @@ use crate::read::{MAX_BYTES, over_limit};
 use crate::rows::view_hash;
 use crate::{Ctx, EditError, Tier, Tool, ToolError, ToolOutput};
 
-// Rows of one run of changed rows shown before the rest are counted instead:
-// a sweep that took more than the model meant still shows up row by row.
-const CHANGED_RUN: usize = 40;
-// Rows kept either side of a change: of file the edit did not touch, in a
-// sketch; of landed rows, at each end of an echo past ECHO_LIMIT. Enough to
-// place it, few enough that the change stays the subject — and one number,
-// because "how much context" is one question however the rows are spelt.
+// Rows kept either side of a change, whether the change is what the edit did
+// or the rows it left standing: enough to place it, few enough that the change
+// stays the subject. A run longer than twice this is elided in the middle,
+// under the count of what went missing.
 const CONTEXT: usize = 4;
 // Rows either side of a landing the line diff will align; past that the
 // landing is shown whole, the alignment costing rows squared.
@@ -487,27 +484,19 @@ fn sketch(path: &str, applied: &Applied) -> String {
     // What the head says: the rows the edit moved, not the rows it shows.
     let count = |mark: char| rows.iter().filter(|r| r.has(mark)).count();
     let (plus, minus) = (count('+'), count('-'));
-    // Two kinds of run, two windows. A run of context is shown at both its
-    // ends — either one may be where the reader is looking, and the middle is
-    // the part nothing happened in. A run of changed rows is shown from its
-    // head only: its tail is the part past what the model meant to touch, and
-    // a count is what says how far past.
+    // Any run past the window is shown at both its ends with the count of
+    // what was left out between them — changed rows and context alike. Which
+    // side of an edit a row is on does not change how a reader skims past it,
+    // and the count is what says how much was skimmed.
     let mut shown: Vec<Row> = Vec::with_capacity(rows.len());
     for run in rows.chunk_by(|a, b| a.is_kept() == b.is_kept()) {
-        let (whole, head, tail) = if run[0].is_kept() {
-            (CONTEXT * 2, CONTEXT, CONTEXT)
-        } else {
-            (CHANGED_RUN, CHANGED_RUN, 0)
-        };
-        if run.len() <= whole {
+        if run.len() <= CONTEXT * 2 {
             shown.extend_from_slice(run);
             continue;
         }
-        shown.extend_from_slice(&run[..head]);
-        shown.push(Row::Elided(run.len() - head - tail));
-        if tail > 0 {
-            shown.extend_from_slice(&run[run.len() - tail..]);
-        }
+        shown.extend_from_slice(&run[..CONTEXT]);
+        shown.push(Row::Elided(run.len() - CONTEXT * 2));
+        shown.extend_from_slice(&run[run.len() - CONTEXT..]);
     }
     // Right-aligned so a three-digit row lines up with a two-digit one, and
     // the mark starts where the rows it stands for do.
