@@ -189,10 +189,16 @@ impl Surface {
         Self {
             scrollback: scrollback_from(session, paint, &mut folds),
             folds,
-            tail: session.entries().last().map(|e| e.id()),
+            tail: tail_of(session),
             ..Default::default()
         }
     }
+}
+
+// Where a transcript ends: the entry a surface that has drawn all of it has
+// adopted. A rebuild and a `!` both park the cursor here.
+pub(super) fn tail_of(session: &agent::session::Session) -> Option<EntryId> {
+    session.entries().last().map(|e| e.id())
 }
 
 impl View {

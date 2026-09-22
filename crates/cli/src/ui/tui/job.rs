@@ -6,7 +6,7 @@
 //! what a lane is charged, what the screen is told, which lane's line is drawn
 //! where — is here.
 
-use agent::session::{Entry as LogEntry, EntryId, Session};
+use agent::session::{Entry as LogEntry, Session};
 use agent::{AgentError, Event};
 use futures::FutureExt;
 use ratatui::text::{Line, Span};
@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::row::Row;
 use super::term::{Deafened, EXIT_GRACE, external_editor, scratch_file};
-use super::view::{Queued, front_view, view_at};
+use super::view::{Queued, front_view, tail_of, view_at};
 use super::{NO_TRANSCRIPT, Tui};
 use crate::app;
 use crate::input::Intent;
@@ -38,9 +38,6 @@ pub(super) enum Kind {
         // The output lines, derived by the same function the rebuild draws
         // with — plus the flash for a command that never ran.
         lines: Vec<String>,
-        // The transcript tail after the run filed its entry, so the surface's
-        // adoption cursor jumps past it.
-        tail: Option<EntryId>,
     },
     // A `/compact`, and what it shrank and spent. None means the transcript
     // already fit — or, with a cancelled `ran`, that nobody ever looked.
@@ -167,24 +164,15 @@ impl Tui {
                 } else {
                     Ok(llm::stream::Usage::default())
                 };
-                let tail = carried.entries().last().map(|e| e.id());
                 app::bash::record_bash(&mut carried, &command, out.text.clone());
-                (carried, ran, out.screen(), tail)
+                (carried, ran, out.screen())
             })
             .await;
             // A panic printed nothing anyone can still show; the empty lines
             // and the missing transcript say the same thing from both sides.
             let (kind, ran) = match out {
-                Some((carried, ran, lines, tail)) => {
-                    (Kind::Bash { lines, tail }, Some((carried, ran)))
-                }
-                None => (
-                    Kind::Bash {
-                        lines: Vec::new(),
-                        tail: None,
-                    },
-                    None,
-                ),
+                Some((carried, ran, lines)) => (Kind::Bash { lines }, Some((carried, ran))),
+                None => (Kind::Bash { lines: Vec::new() }, None),
             };
             let _ = done.send(Done { token, kind, ran });
         });
@@ -371,14 +359,9 @@ impl Tui {
         let was_turn = matches!(kind, Kind::Turn);
         // A `!` brings its lines home to be shown here; a turn's reached the
         // view as events, and a compact never arrives at this function.
-        let said = match kind {
-            Kind::Bash { lines, tail } => {
-                view_at(&mut self.views, self.core.lanes[lane].token())
-                    .surface
-                    .tail = tail;
-                Some(lines)
-            }
-            _ => None,
+        let (was_bash, said) = match kind {
+            Kind::Bash { lines } => (true, Some(lines)),
+            _ => (false, None),
         };
 
         // Only a run that came back says why it ended; the archive rebuild
@@ -427,6 +410,13 @@ impl Tui {
         // interrupted run lands as the spend the view showed.
         self.core.lanes[lane].charge_run(&out);
 
+        // A `!` draws its own rows as it lands, so its cursor is wherever the
+        // transcript that came home ends: the archive's end if it panicked.
+        if was_bash && let Some(session) = self.core.lanes[lane].session() {
+            view_at(&mut self.views, self.core.lanes[lane].token())
+                .surface
+                .tail = tail_of(session);
+        }
         // A `!` command's output comes home whole rather than as events, so
         // this is the only place it can reach the view that asked for it.
         if let Some(said) = said.filter(|lines| !lines.is_empty()) {

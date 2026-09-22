@@ -1593,6 +1593,18 @@ mod tests {
         screen::Piece::pieces(piece).iter().map(plain).collect()
     }
 
+    // The rows one lane's screen shows, the way a frame reads them.
+    fn lane_rows(tui: &mut super::Tui, token: u64) -> Vec<String> {
+        ScrollbackRows::new(
+            &view_at(&mut tui.views, token).surface.scrollback,
+            &Paint::new(false),
+            &[],
+            80,
+        )
+        .map(text)
+        .collect()
+    }
+
     // The rows of one result are painted once per width and handed out one at
     // a time, so a stale cache would show the narrow frame's clipping in the
     // wide one — and only below the head row, where the single-row case
@@ -2131,17 +2143,8 @@ mod tests {
 
         // By content, not by count: the banner this would lay over it is one
         // row too, so a length check cannot tell them apart.
-        let paint = Paint::new(false);
-        let rows: Vec<String> = ScrollbackRows::new(
-            &view_at(&mut tui.views, tui.core.lanes[1].token())
-                .surface
-                .scrollback,
-            &paint,
-            &[],
-            80,
-        )
-        .map(text)
-        .collect();
+        let token = tui.core.lanes[1].token();
+        let rows = lane_rows(&mut tui, token);
         assert!(
             rows.iter().any(|r| r.contains("what was said before")),
             "the transcript survives the switch: {rows:?}"
@@ -2162,7 +2165,6 @@ mod tests {
                     "bash",
                     super::job::Kind::Bash {
                         lines: vec!["out".into()],
-                        tail: None,
                     },
                 ),
                 ("compact", super::job::Kind::Compact(None)),
@@ -2207,6 +2209,46 @@ mod tests {
         }
     }
 
+    // A `!` that panicked brings no cursor home. Reading that as "nothing is
+    // drawn yet" laid the recovered transcript over the screen a second time.
+    #[tokio::test]
+    async fn a_panicked_bang_does_not_lay_its_transcript_down_again() {
+        use agent::session::{Prompt, Session};
+        let dir = tempfile::tempdir().expect("a checkout");
+        let mut tui = surface(dir.path());
+        let mut s = Session::new();
+        s.push_bash(Prompt {
+            text: "Ran `ls`\nfile".into(),
+            image: None,
+            shown: Some("!ls".into()),
+        });
+        tui.core.lane_mut().session = Some(s);
+        let token = tui.core.lane().token();
+        // The rows as the screen has them, and the archive as it was saved.
+        {
+            let session = tui.core.lane().session().expect("the transcript");
+            tui.ui.rebuild(view_at(&mut tui.views, token), session);
+        }
+        tui.core.save_lane(0).expect("saved");
+
+        // The job panicked: no lines, and no transcript came home.
+        tui.settle(super::job::Done {
+            token,
+            kind: super::job::Kind::Bash { lines: Vec::new() },
+            ran: None,
+        })
+        .await;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        tui.start_turn("the next question".into(), None, &tx);
+
+        let rows = lane_rows(&mut tui, token);
+        assert_eq!(
+            rows.iter().filter(|r| *r == "! ls").count(),
+            1,
+            "the recovered transcript is not laid down twice: {rows:?}"
+        );
+    }
+
     // A stopped command or turn does not inject a cancelled note to the model.
     #[tokio::test]
     async fn a_stopped_run_does_not_tell_the_model_a_request_was_cancelled() {
@@ -2234,7 +2276,6 @@ mod tests {
 
         let after_bash = stopped(super::job::Kind::Bash {
             lines: vec!["some output".into()],
-            tail: None,
         })
         .await;
         assert!(
