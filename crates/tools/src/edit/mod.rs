@@ -6,18 +6,16 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::read::{MAX_BYTES, over_limit};
-use crate::rows::{header, view_hash};
+use crate::rows::view_hash;
 use crate::{Ctx, EditError, Tier, Tool, ToolError, ToolOutput};
 
-// Bytes of landed rows echoed before showing a hunk's ends instead: forty rows
-// of `}` and forty of a wrapped call are the same budget only in bytes.
-const ECHO_LIMIT: usize = 2_000;
-// Rows kept at each end of a hunk once an echo is past ECHO_LIMIT.
-const ECHO_ENDS: usize = 3;
-// Rows a deletion lists before the rest are counted instead.
-const DELETED_ROWS: usize = 40;
-// Rows of file the edit did not touch that a sketch keeps either side of a
-// change: enough to place it, few enough that the change stays the subject.
+// Rows of one run of changed rows shown before the rest are counted instead:
+// a sweep that took more than the model meant still shows up row by row.
+const CHANGED_RUN: usize = 40;
+// Rows kept either side of a change: of file the edit did not touch, in a
+// sketch; of landed rows, at each end of an echo past ECHO_LIMIT. Enough to
+// place it, few enough that the change stays the subject — and one number,
+// because "how much context" is one question however the rows are spelt.
 const CONTEXT: usize = 4;
 // Rows either side of a landing the line diff will align; past that the
 // landing is shown whole, the alignment costing rows squared.
@@ -294,148 +292,32 @@ fn construct_extents(path: &str, source: &str) -> std::collections::HashMap<usiz
 }
 
 /// The report the model reads: where the edit landed, and what it displaced.
-fn echo(path: &str, before: &str, applied: &Applied) -> String {
-    let landed = &applied.landed;
-    let mut out = header(path);
-    // A block taken whole that was not meant is the miss worth naming: the
-    // extent, not the anchor, is what the model got wrong.
+// What the model is told besides the sketch: the landings that took more than
+// they meant, named by the block they covered. A whole block taken when only a
+// line was meant is the miss worth naming — the extent, not the anchor, is
+// what the model got wrong.
+fn notes(path: &str, before: &str, applied: &Applied) -> String {
     let old: Vec<&str> = before.lines().collect();
     let extents = construct_extents(path, before);
-    let resolved: Vec<Option<String>> = landed
-        .iter()
-        .map(|l| {
-            let (cs, ce) = *extents.get(&l.took_at)?;
-            let covered = old.get(cs - 1..ce)?;
-            (ce > cs
-                && l.took.len() == covered.len()
-                && l.took.iter().zip(covered).all(|(took, was)| took == was))
-            .then(|| {
-                format!(
-                    "  covered the block at lines {cs}-{ce}: `{}`\n",
-                    crop(covered[0], 60)
-                )
-            })
-        })
-        .collect();
-
-    if landed.iter().all(|l| l.gave() == 0) {
-        // A pure-deletion report lands nothing, and saying so describes what
-        // did not happen: what did is the deletion, and it needs saying.
-        let named: Vec<&String> = resolved.iter().flatten().collect();
-        if !named.is_empty() {
-            out.push('\n');
+    let mut out = String::new();
+    for l in &applied.landed {
+        let Some((cs, ce)) = extents.get(&l.took_at).copied() else {
+            continue;
+        };
+        let Some(covered) = old.get(cs - 1..ce) else {
+            continue;
+        };
+        if ce > cs
+            && l.took.len() == covered.len()
+            && l.took.iter().zip(covered).all(|(t, w)| t == w)
+        {
+            out.push_str(&format!(
+                "  covered the block at lines {cs}-{ce}: `{}`\n",
+                crop(covered[0], 60)
+            ));
         }
-        for what in named {
-            out.push_str(what);
-        }
-        let gone = before
-            .lines()
-            .count()
-            .saturating_sub(applied.content.lines().count());
-        out.push_str(&match gone {
-            0 => " nothing moved\n".to_string(),
-            1 => " removed 1 line\n".to_string(),
-            n => format!(" removed {n} lines\n"),
-        });
-        took_rows(landed, &mut out);
-        return out;
-    }
-
-    let added: usize = landed.iter().map(|l| l.gave()).sum();
-    if landed.iter().all(|l| l.took.is_empty()) {
-        // Nothing was displaced: the count is the only thing the rows below
-        // do not already say.
-        out.push_str(&match added {
-            1 => " added 1 line\n".to_string(),
-            n => format!(" added {n} lines\n"),
-        });
-    } else {
-        out.push('\n');
-    }
-    let lines: Vec<&str> = applied.content.lines().collect();
-    // Addressed the way a second edit would name it: the numbering moved, and
-    // a block that grew has a new end.
-    let spans = crate::rows::spans(path, &applied.content);
-    let row = |out: &mut String, n: usize| {
-        if let Some(text) = lines.get(n - 1) {
-            crate::rows::line(out, n, &spans, text);
-        }
-    };
-    // Rendered once, then measured, then assembled: not built whole and thrown
-    // away, and not rendered twice to measure, since a row costs an allocation.
-    let rendered: Vec<Vec<String>> = landed
-        .iter()
-        .map(|l| {
-            (l.start..=l.end)
-                .map(|n| {
-                    let mut r = String::new();
-                    row(&mut r, n);
-                    r
-                })
-                .collect()
-        })
-        .collect();
-    let total: usize = rendered.iter().flatten().map(String::len).sum::<usize>()
-        + resolved.iter().flatten().map(String::len).sum::<usize>();
-    if total <= ECHO_LIMIT {
-        for (rows, star) in rendered.iter().zip(&resolved) {
-            if let Some(what) = star {
-                out.push_str(what);
-            }
-            rows.iter().for_each(|r| out.push_str(r));
-        }
-    } else {
-        for (rows, star) in rendered.iter().zip(&resolved) {
-            if let Some(what) = star {
-                out.push_str(what);
-            }
-            // Whole anyway, where eliding would not actually save rows.
-            if rows.len() <= ECHO_ENDS * 2 + 1 {
-                rows.iter().for_each(|r| out.push_str(r));
-                continue;
-            }
-            rows[..ECHO_ENDS].iter().for_each(|r| out.push_str(r));
-            out.push_str(crate::rows::GAP);
-            rows[rows.len() - ECHO_ENDS..]
-                .iter()
-                .for_each(|r| out.push_str(r));
-        }
-    }
-    // A call that added rows may have taken some away as well, and those have
-    // no row in the new file to be named by: they are listed as they were.
-    let removed: usize = landed
-        .iter()
-        .filter(|l| l.gave() == 0)
-        .map(|l| l.took.len())
-        .sum();
-    if removed > 0 {
-        out.push_str(&match removed {
-            1 => " removed 1 line\n".to_string(),
-            n => format!(" removed {n} lines\n"),
-        });
-        took_rows(landed, &mut out);
     }
     out
-}
-
-// The rows a call took away, numbered as they were in the file it read.
-//
-// A hunk that gave nothing has no row in the new file to be named by, and a
-// sweep that took more than the model meant shows up row by row.
-fn took_rows(landed: &[Landed], out: &mut String) {
-    let took: Vec<&Landed> = landed.iter().filter(|l| l.gave() == 0).collect();
-    let total: usize = took.iter().map(|l| l.took.len()).sum();
-    let mut shown = 0usize;
-    for l in took {
-        for (i, row) in l.took.iter().enumerate() {
-            if shown == DELETED_ROWS {
-                out.push_str(&format!("  … and {} more rows\n", total - shown));
-                return;
-            }
-            out.push_str(&format!("{:>4} - {}\n", l.took_at + i, crop(row, 80)));
-            shown += 1;
-        }
-    }
 }
 
 // The note a deletion earns when it emptied a line and left the row standing.
@@ -452,14 +334,13 @@ fn blank_note(edits: &[usize]) -> String {
 }
 
 // One row of a sketch: a file row under the sign that says which side of the
-// edit it is on, or the mark standing where a long run of context was left
-// out.
+// edit it is on, or the count of the rows a long run left out.
 #[derive(Clone, Copy)]
 enum Row<'x> {
     // `n` numbers the row in the file it is read in: the old file for a row
     // that went, the new one for a row that came or stayed.
     Line { sign: char, n: usize, text: &'x str },
-    Elided,
+    Elided(usize),
 }
 
 impl<'x> Row<'x> {
@@ -579,11 +460,12 @@ fn untouched<'x>(out: &mut Vec<Row<'x>>, lines: &[&'x str], from: usize, to: usi
     out.extend((from..=to).map(|n| Row::kept(n, lines[n - 1])));
 }
 
-// What a person watching sees: the rows that went, the rows that came, and
-// enough of the rows that stayed to place them.
+// The rows an edit moved: what went under `-`, what came under `+`, and enough
+// of the rows that stayed to place them.
 //
-// Separate from the report the model reads, which is a set of addresses it can
-// edit against — "what changed" is a different question from "where next".
+// One rendering for two readers. The model gets these bytes and the surface
+// draws them, so a later reading of the transcript sees what the screen showed
+// at the time rather than a second opinion on the same edit.
 fn sketch(path: &str, applied: &Applied) -> String {
     let lines: Vec<&str> = applied.content.lines().collect();
     let mut rows: Vec<Row> = Vec::new();
@@ -605,16 +487,26 @@ fn sketch(path: &str, applied: &Applied) -> String {
     // What the head says: the rows the edit moved, not the rows it shows.
     let count = |mark: char| rows.iter().filter(|r| r.has(mark)).count();
     let (plus, minus) = (count('+'), count('-'));
-    // A run of context longer than the window either side of a change is shown
-    // at both its ends and elided in the middle, the way a reader skims it.
+    // Two kinds of run, two windows. A run of context is shown at both its
+    // ends — either one may be where the reader is looking, and the middle is
+    // the part nothing happened in. A run of changed rows is shown from its
+    // head only: its tail is the part past what the model meant to touch, and
+    // a count is what says how far past.
     let mut shown: Vec<Row> = Vec::with_capacity(rows.len());
     for run in rows.chunk_by(|a, b| a.is_kept() == b.is_kept()) {
-        if !run[0].is_kept() || run.len() <= CONTEXT * 2 {
-            shown.extend_from_slice(run);
+        let (whole, head, tail) = if run[0].is_kept() {
+            (CONTEXT * 2, CONTEXT, CONTEXT)
         } else {
-            shown.extend_from_slice(&run[..CONTEXT]);
-            shown.push(Row::Elided);
-            shown.extend_from_slice(&run[run.len() - CONTEXT..]);
+            (CHANGED_RUN, CHANGED_RUN, 0)
+        };
+        if run.len() <= whole {
+            shown.extend_from_slice(run);
+            continue;
+        }
+        shown.extend_from_slice(&run[..head]);
+        shown.push(Row::Elided(run.len() - head - tail));
+        if tail > 0 {
+            shown.extend_from_slice(&run[run.len() - tail..]);
         }
     }
     // Right-aligned so a three-digit row lines up with a two-digit one, and
@@ -623,7 +515,7 @@ fn sketch(path: &str, applied: &Applied) -> String {
         .iter()
         .filter_map(|r| match r {
             Row::Line { n, .. } => Some(*n),
-            Row::Elided => None,
+            Row::Elided(_) => None,
         })
         .max()
         .map_or(1, |n| n.to_string().len());
@@ -631,7 +523,7 @@ fn sketch(path: &str, applied: &Applied) -> String {
         .iter()
         .map(|r| match r {
             Row::Line { sign, n, text } => format!("{sign}{n:>width$} {text}"),
-            Row::Elided => format!("{}…", " ".repeat(width + 2)),
+            Row::Elided(n) => format!("{}… {n} lines", " ".repeat(width + 2)),
         })
         .collect();
     std::iter::once(format!("{path} +{plus} -{minus}"))
@@ -808,13 +700,19 @@ impl Tool for Edit {
             "edit applied"
         );
 
-        let mut report = echo(path, &content, &applied);
+        // Rendered once and read twice: what the model is answered with and
+        // what the surface draws are the same bytes, so whoever reads the
+        // transcript afterwards sees what the screen showed at the time.
+        let patch = sketch(path, &applied);
+        let mut report = notes(path, &content, &applied);
+        report.push_str(&patch);
+        report.push('\n');
         if !applied.left_blank.is_empty() {
             report.push_str(&blank_note(&applied.left_blank));
         }
         if stale {
             report.push_str(&format!("\nfile changed since your last view: {path}"));
         }
-        Ok(ToolOutput::text(report).with_preview(sketch(path, &applied)))
+        Ok(ToolOutput::text(report).with_preview(patch))
     }
 }

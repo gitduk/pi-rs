@@ -21,13 +21,6 @@ pub struct Landed {
     pub took_at: usize,
 }
 
-impl Landed {
-    /// How many lines this put in the file.
-    pub fn gave(&self) -> usize {
-        (self.end + 1).saturating_sub(self.start)
-    }
-}
-
 /// What an edit does where its anchor lands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Anchor {
