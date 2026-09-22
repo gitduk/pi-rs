@@ -473,10 +473,9 @@ fn body(
     scrollback: &[Row],
     reasoning: bool,
     partial: &str,
-    space: (usize, usize),
+    width: usize,
     paint: &Paint,
 ) -> Vec<Line<'static>> {
-    let (width, room) = space;
     if folds.holds(reasoning, scrollback) {
         // The block's count row in the scrollback already answers the fold
         // switch; the live placeholder is only for the moment before the
@@ -492,7 +491,9 @@ fn body(
     if partial.is_empty() {
         return Vec::new();
     }
-    let mut rows: Vec<Line<'static>> = if reasoning {
+    // All of it, not the rows the terminal has room for: this is the only copy
+    // until `close` lands it, and a scroll up has to reach its head.
+    if reasoning {
         let muted = Line::from(paint.span(&paint.theme.muted, partial));
         screen::fit(&muted, width)
     } else {
@@ -500,11 +501,7 @@ fn body(
             .into_iter()
             .flat_map(|line| screen::fit(&line, width))
             .collect()
-    };
-    if rows.len() > room {
-        rows.drain(..rows.len() - room);
     }
-    rows
 }
 
 // A tool call still running, shown as one animated row in the live region
@@ -1599,7 +1596,7 @@ impl Ui {
     // the status line. The editor draws separately, pinned to the bottom.
     // With the rows comes the count that leads them: the pending calls',
     // which a click opens — only the producer knows which rows those are.
-    fn live(&self, lane: &Lane, view: &View, room: usize) -> (Vec<Line<'static>>, usize) {
+    fn live(&self, lane: &Lane, view: &View) -> (Vec<Line<'static>>, usize) {
         let width = self.screen.usable();
         let mut rows: Vec<Line<'static>> = Vec::new();
 
@@ -1634,7 +1631,7 @@ impl Ui {
             &view.surface.scrollback,
             view.surface.stream.kind == StreamKind::Reasoning,
             &view.surface.stream.text,
-            (width, room),
+            width,
             &self.paint,
         ));
 
@@ -1790,7 +1787,7 @@ impl Ui {
         let hist_view = (self.screen.height as usize)
             .saturating_sub(editor_h + menu_h + bar_h)
             .max(1);
-        let (live, pending_rows) = self.live(lane, view, hist_view);
+        let (live, pending_rows) = self.live(lane, view);
 
         // While the view is scrolled up, rows the bottom gained fold back
         // into `scroll` — a sum of per-row cached heights, where a wrap
@@ -5478,7 +5475,7 @@ mod tests {
         let mut view = View::default();
         view.state.started = Some(std::time::Instant::now());
         assert!(
-            ui.live(&lane, &view, 10)
+            ui.live(&lane, &view)
                 .0
                 .iter()
                 .any(|r| icons::SPINNER_FRAMES.iter().any(|f| plain(r).contains(f))),
@@ -5487,7 +5484,7 @@ mod tests {
 
         lane.run = Run::Idle;
         assert!(
-            !ui.live(&lane, &view, 10)
+            !ui.live(&lane, &view)
                 .0
                 .iter()
                 .any(|r| icons::SPINNER_FRAMES.iter().any(|f| plain(r).contains(f))),
