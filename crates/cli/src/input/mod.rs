@@ -15,6 +15,18 @@ pub enum Intent {
     Prompt(String),
     // What `!` named.
     Bash(String),
+    // A word from the table.
+    Builtin(Builtin),
+    // Not a built-in word. It may name a skill and it may name nothing; the
+    // command table settles that, and `read` does not have it.
+    Other { word: String, args: String },
+}
+
+/// The words `read` answers by name. Grouped rather than spread among the kinds
+/// of input, so that the door reads four shapes and no more: prose, a shell
+/// command, one of these, or a word it does not know.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Builtin {
     Help,
     Keys,
     Status,
@@ -35,9 +47,6 @@ pub enum Intent {
     Wechat(String),
     // What to run over and over, or empty to stop the loop in force.
     Loop(String),
-    // Not a built-in word. It may name a skill and it may name nothing; the
-    // command table settles that, and `read` does not have it.
-    Other { word: String, args: String },
     // `/new`, and `ctrl+l` twice: a fresh session, the old one kept on disk,
     // and the screen rebuilt from the empty one. One variant, because they
     // are one intent however it was expressed.
@@ -83,31 +92,37 @@ impl Intent {
         match self {
             // Answered from the config, the key map or the lane's own tally
             // — none of which the run is holding.
-            Intent::Help | Intent::Keys | Intent::Status | Intent::Name(_) => Fate::Now,
-            Intent::Reload | Intent::Model(_) => Fate::Now,
+            Intent::Builtin(Builtin::Help | Builtin::Keys | Builtin::Status | Builtin::Name(_)) => {
+                Fate::Now
+            }
+            Intent::Builtin(Builtin::Reload | Builtin::Model(_)) => Fate::Now,
             // Bare, these only list what there is.
-            Intent::Resume(name) | Intent::Worktree(name) if name.trim().is_empty() => Fate::Now,
-            Intent::Resume(_) => Fate::Refused(
+            Intent::Builtin(Builtin::Resume(name) | Builtin::Worktree(name))
+                if name.trim().is_empty() =>
+            {
+                Fate::Now
+            }
+            Intent::Builtin(Builtin::Resume(_)) => Fate::Refused(
                 "/resume would replace the transcript this run is writing — esc first",
             ),
             // A lane of its own to move to, and the one being left keeps
             // working in the tree it was already in.
-            Intent::Worktree(_) => Fate::Now,
-            Intent::New => {
+            Intent::Builtin(Builtin::Worktree(_)) => Fate::Now,
+            Intent::Builtin(Builtin::New) => {
                 Fate::Refused("/new would replace the transcript this run is writing — esc first")
             }
-            Intent::Compact(_) => {
+            Intent::Builtin(Builtin::Compact(_)) => {
                 Fate::Refused("/compact rewrites the transcript this run is writing — esc first")
             }
             // An argument is a refusal, and a refusal answers now; bare opens
             // a panel, which wants the surface to itself.
-            Intent::Settings(rest) if !rest.trim().is_empty() => Fate::Now,
-            Intent::Settings(_) => Fate::Queued,
-            Intent::Wechat(_) => Fate::Now,
+            Intent::Builtin(Builtin::Settings(rest)) if !rest.trim().is_empty() => Fate::Now,
+            Intent::Builtin(Builtin::Settings(_)) => Fate::Queued,
+            Intent::Builtin(Builtin::Wechat(_)) => Fate::Now,
             Intent::Other { .. } => Fate::Queued,
             // Arms the lane and submits its first round like a typed line;
             // both want the lane free.
-            Intent::Loop(_) => Fate::Queued,
+            Intent::Builtin(Builtin::Loop(_)) => Fate::Queued,
             // Prose reaches the run that is already talking to the model:
             // waiting for it is what makes a correction arrive too late to be
             // one.
@@ -116,7 +131,7 @@ impl Intent {
             Intent::Bash(_) => Fate::Queued,
             // Both reach for the transcript, and the run is holding it.
             // Leaving is never refused: a hung run must not trap the user.
-            Intent::Quit => Fate::Now,
+            Intent::Builtin(Builtin::Quit) => Fate::Now,
         }
     }
 }
@@ -242,20 +257,20 @@ pub fn read(line: &str) -> Intent {
         return Intent::Prompt(line.to_string());
     }
     match word {
-        "/exit" | "/quit" => Intent::Quit,
-        "/help" => Intent::Help,
-        "/new" => Intent::New,
-        "/resume" => Intent::Resume(rest(line)),
-        "/keys" => Intent::Keys,
-        "/reload" => Intent::Reload,
-        "/status" => Intent::Status,
-        "/name" => Intent::Name(rest(line)),
-        "/compact" => Intent::Compact(rest(line)),
-        "/model" => Intent::Model(rest(line)),
-        "/worktree" => Intent::Worktree(rest(line)),
-        "/wechat" => Intent::Wechat(rest(line)),
-        "/loop" => Intent::Loop(rest(line)),
-        "/settings" => Intent::Settings(rest(line)),
+        "/exit" | "/quit" => Intent::Builtin(Builtin::Quit),
+        "/help" => Intent::Builtin(Builtin::Help),
+        "/new" => Intent::Builtin(Builtin::New),
+        "/resume" => Intent::Builtin(Builtin::Resume(rest(line))),
+        "/keys" => Intent::Builtin(Builtin::Keys),
+        "/reload" => Intent::Builtin(Builtin::Reload),
+        "/status" => Intent::Builtin(Builtin::Status),
+        "/name" => Intent::Builtin(Builtin::Name(rest(line))),
+        "/compact" => Intent::Builtin(Builtin::Compact(rest(line))),
+        "/model" => Intent::Builtin(Builtin::Model(rest(line))),
+        "/worktree" => Intent::Builtin(Builtin::Worktree(rest(line))),
+        "/wechat" => Intent::Builtin(Builtin::Wechat(rest(line))),
+        "/loop" => Intent::Builtin(Builtin::Loop(rest(line))),
+        "/settings" => Intent::Builtin(Builtin::Settings(rest(line))),
         other => Intent::Other {
             word: other.to_string(),
             args: rest(line),

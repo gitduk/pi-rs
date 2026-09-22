@@ -12,7 +12,7 @@ use agent::session::Session;
 use serde::Deserialize;
 
 use crate::input::commands::{Choice, Command, RESUME_WIDTH, ago, help};
-use crate::input::{Intent, Rewound, Step, WechatCmd, lines, refused, step_for};
+use crate::input::{Builtin, Intent, Rewound, Step, WechatCmd, lines, refused, step_for};
 use crate::run::lane::Lane;
 use crate::run::meter::Tally;
 use crate::store::config::{self, Config};
@@ -615,17 +615,17 @@ impl App {
             // both of which only it can do, so it takes this before `run` is
             // reached. The arm stays so that a new intent has to say which side
             // of this line it falls on.
-            Intent::Loop(_) => Step::Handled(Vec::new()),
-            Intent::Quit => Step::Quit,
-            Intent::Help => Step::Handled(help(&self.commands)),
-            Intent::Keys => Step::Handled(self.keys.listing()),
-            Intent::Reload => Step::Handled(self.reload()),
-            Intent::Status => Step::Handled(self.status_lines()),
-            Intent::New => {
+            Intent::Builtin(Builtin::Loop(_)) => Step::Handled(Vec::new()),
+            Intent::Builtin(Builtin::Quit) => Step::Quit,
+            Intent::Builtin(Builtin::Help) => Step::Handled(help(&self.commands)),
+            Intent::Builtin(Builtin::Keys) => Step::Handled(self.keys.listing()),
+            Intent::Builtin(Builtin::Reload) => Step::Handled(self.reload()),
+            Intent::Builtin(Builtin::Status) => Step::Handled(self.status_lines()),
+            Intent::Builtin(Builtin::New) => {
                 self.fresh_session();
                 Step::Swap(Vec::new())
             }
-            Intent::Resume(name) => {
+            Intent::Builtin(Builtin::Resume(name)) => {
                 if name.is_empty() {
                     Step::Handled(self.resume_listing())
                 } else {
@@ -635,7 +635,7 @@ impl App {
                     }
                 }
             }
-            Intent::Name(name) => {
+            Intent::Builtin(Builtin::Name(name)) => {
                 if name.is_empty() {
                     self.lane_mut().name = None;
                     lines(format!("{} is unnamed again", self.lane_mut().id))
@@ -645,13 +645,15 @@ impl App {
                     lines(said)
                 }
             }
-            Intent::Compact(focus) => Step::Compact(Some(focus).filter(|f| !f.is_empty())),
-            Intent::Model(name) => Step::Handled(if name.is_empty() {
+            Intent::Builtin(Builtin::Compact(focus)) => {
+                Step::Compact(Some(focus).filter(|f| !f.is_empty()))
+            }
+            Intent::Builtin(Builtin::Model(name)) => Step::Handled(if name.is_empty() {
                 self.listing()
             } else {
                 self.switch(&name)
             }),
-            Intent::Worktree(name) => {
+            Intent::Builtin(Builtin::Worktree(name)) => {
                 if name.is_empty() {
                     Step::Handled(self.worktree_listing())
                 } else {
@@ -670,13 +672,13 @@ impl App {
                 }
             }
             Intent::Other { word, args } => step_for(&self.commands, &word, &args),
-            Intent::Wechat(rest) => match rest.trim() {
+            Intent::Builtin(Builtin::Wechat(rest)) => match rest.trim() {
                 "" => Step::Wechat(WechatCmd::Status),
                 "on" => Step::Wechat(WechatCmd::On),
                 "off" => Step::Wechat(WechatCmd::Off),
                 other => Step::Flash(format!("unknown /wechat verb `{other}` — bare, on or off")),
             },
-            Intent::Settings(rest) => self.settings(&rest),
+            Intent::Builtin(Builtin::Settings(rest)) => self.settings(&rest),
         }
     }
 
@@ -1055,7 +1057,7 @@ impl App {
 mod tests {
 
     use crate::input::commands::{BUILTIN, Choice, Source, commands};
-    use crate::input::{Fate, Intent, read};
+    use crate::input::{Builtin, Fate, Intent, read};
     use agent::session::{Entry, Prompt, Session};
     use skills::Skill;
 
@@ -1214,10 +1216,10 @@ mod tests {
 
     #[test]
     fn a_key_and_a_line_that_mean_the_same_thing_are_one_intent() {
-        // `ctrl+l` twice returns `Intent::New` directly. This is the other
+        // `ctrl+l` twice returns `Intent::Builtin(Builtin::New)` directly. This is the other
         // half: the typed word lands on the same variant, so there is no
         // second value for `fate` to answer differently about.
-        assert_eq!(read("/new"), Intent::New);
+        assert_eq!(read("/new"), Intent::Builtin(Builtin::New));
     }
 
     #[test]
@@ -1225,15 +1227,15 @@ mod tests {
         // One intent for `/exit`, `/quit`, ctrl+d and a double ctrl+c — the
         // words are checked with the rest of the table — and it always
         // proceeds: a wedged run must not be able to trap the user.
-        assert!(matches!(Intent::Quit.fate(), Fate::Now));
+        assert!(matches!(Intent::Builtin(Builtin::Quit).fate(), Fate::Now));
     }
 
     #[test]
     fn reaching_for_the_transcript_is_refused_while_a_run_holds_it() {
         for intent in [
-            Intent::New,
-            Intent::Resume("1756240000-1".into()),
-            Intent::Compact(String::new()),
+            Intent::Builtin(Builtin::New),
+            Intent::Builtin(Builtin::Resume("1756240000-1".into())),
+            Intent::Builtin(Builtin::Compact(String::new())),
         ] {
             assert!(
                 matches!(intent.fate(), Fate::Refused(_)),
@@ -1245,13 +1247,13 @@ mod tests {
     #[test]
     fn what_the_run_is_not_standing_on_goes_through() {
         for intent in [
-            Intent::Status,
-            Intent::Help,
-            Intent::Keys,
-            Intent::Reload,
-            Intent::Model(String::new()),
-            Intent::Worktree("tree".into()),
-            Intent::Wechat("on".into()),
+            Intent::Builtin(Builtin::Status),
+            Intent::Builtin(Builtin::Help),
+            Intent::Builtin(Builtin::Keys),
+            Intent::Builtin(Builtin::Reload),
+            Intent::Builtin(Builtin::Model(String::new())),
+            Intent::Builtin(Builtin::Worktree("tree".into())),
+            Intent::Builtin(Builtin::Wechat("on".into())),
         ] {
             assert!(
                 matches!(intent.fate(), Fate::Now),
@@ -1264,7 +1266,7 @@ mod tests {
     fn what_wants_the_model_or_the_surface_waits() {
         for intent in [
             Intent::Bash("ls".into()),
-            Intent::Settings(String::new()),
+            Intent::Builtin(Builtin::Settings(String::new())),
             Intent::Other {
                 word: "/commit".into(),
                 args: String::new(),

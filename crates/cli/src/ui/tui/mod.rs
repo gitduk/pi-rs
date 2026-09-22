@@ -25,7 +25,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
 use crate::input::commands::{Candidate, Choice, Command};
-use crate::input::{self, Fate, Intent, Rewound, Step};
+use crate::input::{self, Builtin, Fate, Intent, Rewound, Step};
 use crate::run::lane::{Lane, Run};
 use crate::run::looping::Round;
 use crate::run::meter::Snapshot;
@@ -1698,7 +1698,7 @@ impl Ui {
     // checkout, `!forward` its previous. The ring walks the checkouts in
     // the order the bar shows them — the ones already open, in the order
     // they were opened — and puts the ones not open yet after them, in the
-    // order `run::worktree::list` reports. `Intent::Worktree` opens one that is
+    // order `run::worktree::list` reports. `Builtin::Worktree` opens one that is
     // not, which is the same thing the picker did when you chose an unopened
     // row.
     //
@@ -2118,7 +2118,7 @@ impl Ui {
             Some(action @ (Action::LaneNext | Action::LanePrev)) => {
                 let forward = action == Action::LaneNext;
                 return match self.step_checkout(lane, forward) {
-                    Some(name) => Asked::Core(Intent::Worktree(name)),
+                    Some(name) => Asked::Core(Intent::Builtin(Builtin::Worktree(name))),
                     None => {
                         self.flash("the only checkout there is");
                         Asked::Own(Deed::Nothing)
@@ -2129,7 +2129,7 @@ impl Ui {
                 let now = Instant::now();
                 if double_tap(&mut self.last_l, now) {
                     self.last_l = None;
-                    return Asked::Core(Intent::New);
+                    return Asked::Core(Intent::Builtin(Builtin::New));
                 }
                 return Asked::Own(Deed::Nothing);
             }
@@ -2137,7 +2137,7 @@ impl Ui {
                 // No `running` check: leaving is one intent whatever is in
                 // flight, and `admit` gives it one answer.
                 return if self.editor.is_empty() {
-                    Asked::Core(Intent::Quit)
+                    Asked::Core(Intent::Builtin(Builtin::Quit))
                 } else {
                     self.editor.delete();
                     Asked::Own(Deed::Nothing)
@@ -2473,7 +2473,7 @@ impl Ui {
     // twice inside the window — leave.
     fn interrupt_or_clear(&mut self, running: bool) -> Asked {
         if double_tap(&mut self.last_interrupt, Instant::now()) {
-            return Asked::Core(Intent::Quit);
+            return Asked::Core(Intent::Builtin(Builtin::Quit));
         }
         if running {
             return Asked::Own(Deed::Interrupt);
@@ -3477,7 +3477,7 @@ impl Tui {
             // A loop is the surface's: it arms the lane, then puts its goal
             // back through the door as a typed line — so what runs each round
             // is read exactly as it would be if it had been typed.
-            if let Intent::Loop(goal) = intent {
+            if let Intent::Builtin(Builtin::Loop(goal)) = intent {
                 let goal = goal.trim().to_string();
                 if goal.is_empty() {
                     // The round already queued goes with it: run after a stop,
@@ -3511,7 +3511,7 @@ impl Tui {
                     self.ui.flash(said);
                     continue;
                 }
-                if matches!(input::read(&goal), Intent::Loop(_)) {
+                if matches!(input::read(&goal), Intent::Builtin(Builtin::Loop(_))) {
                     self.ui.flash("a loop cannot be its own goal");
                     continue;
                 }
@@ -3527,7 +3527,8 @@ impl Tui {
             }
             // Bare `/settings` opens a panel rather than printing the
             // read-only list.
-            if matches!(intent, Intent::Settings(ref rest) if rest.trim().is_empty()) {
+            if matches!(intent, Intent::Builtin(Builtin::Settings(ref rest)) if rest.trim().is_empty())
+            {
                 let rows = self.core.setting_rows();
                 self.ui.panel = Some(Panel::new(rows, &self.core.config.vim));
                 continue;
@@ -4205,6 +4206,7 @@ mod tests {
         Asked, Deed, Folds, Intent, Panel, Row, ScrollbackRows, Target, View, absorb_growth,
         scrollback_from, view_at,
     };
+    use crate::input::Builtin;
     use crate::input::Fate;
     use crate::input::commands::{Choice, Command, Source};
     use crate::run::App;
@@ -5458,13 +5460,13 @@ mod tests {
 
         let next = ui.key(&lane, &mut view, typed('L'), false);
         assert!(
-            matches!(&next, Asked::Core(Intent::Worktree(name)) if name == "f1"),
+            matches!(&next, Asked::Core(Intent::Builtin(Builtin::Worktree(name))) if name == "f1"),
             "{next:?}"
         );
         lane.worktree = Some("f1".into());
         let prev = ui.key(&lane, &mut view, typed('H'), false);
         assert!(
-            matches!(&prev, Asked::Core(Intent::Worktree(name)) if name == "pi-rs"),
+            matches!(&prev, Asked::Core(Intent::Builtin(Builtin::Worktree(name))) if name == "pi-rs"),
             "{prev:?}"
         );
 
