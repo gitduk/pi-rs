@@ -165,9 +165,8 @@ pub enum Entry {
         at: u64,
         blocks: Vec<AssistantContent>,
     },
-    // A tool's result, and what the screen showed for it when that is more
-    // than the result's own first line — the rows an edit sketched, which the
-    // stored content does not hold.
+    // A tool's result, and the copy the screen drew for it — an edit's diff
+    // rows without its notes, a read's header that the content never carries.
     //
     // `preview` sits beside the result rather than inside it: `ToolResult` is
     // the wire type, and a screen-only field there would be one every encoder
@@ -531,8 +530,8 @@ impl Session {
         self.push_previewed(results.into_iter().map(|r| (r, None)).collect())
     }
 
-    /// The same, carrying what the screen showed for each — the rows an edit
-    /// sketched, which its stored content does not hold.
+    /// The same, carrying the copy the screen drew for each — an edit's diff
+    /// rows, which the rebuild must draw rather than read back from the result.
     pub fn push_previewed(&mut self, results: Vec<(ToolResult, Option<String>)>) -> Vec<EntryId> {
         results
             .into_iter()

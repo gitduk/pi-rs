@@ -768,9 +768,9 @@ impl Agent {
 
         let mut results = Vec::with_capacity(calls.len());
         for ((call, action), output) in calls.iter().zip(&actions).zip(outputs) {
-            // What the screen showed, when a tool sketched more than its stored
-            // content holds. The rebuild has no other way back to it.
-            let mut sketched = None;
+            // The copy the screen drew for this result, sent with it so a
+            // rebuild draws those bytes rather than reading the content again.
+            let mut preview = None;
             let result = match (action, output) {
                 (Action::Reject(why), _) => failed(call, why.clone(), None, failures, journal),
                 (_, Some(Err(ToolError::Cancelled))) => return Err(AgentError::Cancelled),
@@ -785,7 +785,7 @@ impl Agent {
                     // adoption's equality check gets both halves from one
                     // source; without it a multi-line error renders one way
                     // live and another after a rebuild.
-                    sketched = Some(body.clone());
+                    preview = Some(body.clone());
                     say(
                         tx,
                         Event::ToolEnd {
@@ -801,7 +801,7 @@ impl Agent {
                     // A nested run's spend belongs to the run that called it:
                     // folded in here, it reaches `Event::Done` and the return.
                     spent.add(&out.spent);
-                    sketched = out.preview.clone();
+                    preview = out.preview.clone();
                     say(
                         tx,
                         Event::ToolEnd {
@@ -822,7 +822,7 @@ impl Agent {
                 }
                 (_, None) => unreachable!("only rejected calls produce no output"),
             };
-            results.push((result, sketched));
+            results.push((result, preview));
         }
 
         Ok(results)
