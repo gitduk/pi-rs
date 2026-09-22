@@ -92,8 +92,9 @@ crates/cli/src/              ✧ 应用
 ├── app/            App：一个会话拥有的状态，和替它干活的那些作业
 │   ├── mod.rs      App（状态根 + `dispatch`；原 `Repl`）
 │   ├── settings.rs 配置与它的面板：reload / settings / edit / revert / write_to_file
-│   ├── lanes.rs    lane 集合上的动词：开/删/切/恢复/保存（`impl App`，无新类型）
-│   ├── lane.rs     Lane / Run / Handback（不含 View；`Turn` → `Run` 见下）
+│   │               以及 /model：switch / listing / choices / retarget
+│   ├── lane.rs     Lane / Run / Handback（不含 View），加 App 对 lane 的动词：
+│   │               开/删/新/改名/采纳/恢复/保存/rewind/compact（`impl App`，无新类型）
 │   ├── status.rs   状态行的数字：status_lines / tokens_now / summary / demotion
 │   ├── looping.rs  ↔ 从 lane.rs 拆出：/loop 状态机（`loop` 是关键字）
 │   ├── meter.rs    ↔ 从 status.rs 拆出：Tally / Snapshot + cost 计算

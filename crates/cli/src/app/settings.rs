@@ -1,5 +1,6 @@
-//! What `/settings` and `/reload` do to the App: the config in force, the
-//! claims this session laid over the file, and the rows the panel shows.
+//! What `/settings`, `/reload` and `/model` do to the App: the config in
+//! force, the claims this session laid over the file, the model the lane is
+//! running on, and the rows the panel shows.
 //!
 //! The value itself is `store/settings.rs`; this is what the App does to it.
 
@@ -7,6 +8,7 @@ use serde::Deserialize;
 
 use super::App;
 use super::meter::summary;
+use super::status::{carries_reasoning, demotion};
 use crate::input::Step;
 use crate::input::commands::Choice;
 use crate::input::refused;
@@ -282,5 +284,88 @@ impl App {
             out.push("nothing in ~/.pi/settings.toml yet".into());
         }
         Step::Handled(out)
+    }
+}
+
+impl App {
+    /// Move this session to another model.
+    ///
+    /// The transcript comes with it. Reasoning blocks carry the model that
+    /// produced them and every transport demotes one it did not write —
+    /// signature dropped, replayed as text or as `<think>` per the new model's
+    /// `thinking_replay` — so the history stays sendable instead of becoming a
+    /// 400 on the next turn. Nothing is rewritten on the way: switch back and
+    /// the original blocks are native again.
+    ///
+    /// What has been spent stays spent. Each turn was priced by the spec in
+    /// force when it ran, and the total is the sum of those, so a switch to a
+    /// dearer model does not reprice the cheap turns behind it.
+    pub fn switch(&mut self, name: &str) -> Vec<String> {
+        let dialled = match crate::dial(&self.args, &self.config, name, config::Origin::Command) {
+            Ok(d) => d,
+            Err(e) => {
+                let held = self.lane_mut().agent.spec.model.clone();
+                return vec![format!("still on {held} — {}", refused("switch", e))];
+            }
+        };
+        // Compared after resolving, not before: `find` accepts a model's
+        // `wire_id` as well as its table name, so the name typed and the id it
+        // lands on need not be the same string. Comparing the typed one would
+        // re-dial the model already running and then announce a reasoning
+        // demotion that never happened.
+        if dialled.spec.model == self.lane_mut().agent.spec.model {
+            return vec![format!("already on {}", self.lane_mut().agent.spec.model)];
+        }
+        let mut said: Vec<String> = dialled.warning.into_iter().chain(dialled.notes).collect();
+        let spec = &dialled.spec;
+        said.push(format!(
+            "now on {}{}{}",
+            spec.model,
+            icons::PART_SEP,
+            summary(spec.format.name(), spec.context_window, &spec.pricing)
+        ));
+        // An absent transcript is one a run has, and it is writing this
+        // model's reasoning into it as we speak — so say it either way.
+        if self
+            .lane_mut()
+            .session
+            .as_ref()
+            .is_none_or(carries_reasoning)
+        {
+            said.push(demotion(spec.replay_thinking).into());
+        }
+        tracing::info!(
+            target: "pi::session",
+            from = %self.lane_mut().agent.spec.model,
+            to = %spec.model,
+            format = spec.format.name(),
+            context_window = spec.context_window,
+            "model switched"
+        );
+        self.retarget(dialled.transport, dialled.spec);
+        said
+    }
+    // What `/model` on its own shows.
+    pub(super) fn listing(&self) -> Vec<String> {
+        let here = &self.lane().agent.spec.model;
+        let choices = self.choices();
+        if choices.is_empty() {
+            return vec![
+                format!("on {here}, and ~/.pi/settings.toml now defines no model to switch to"),
+                "see examples/pi.toml for what a [models.<name>] entry looks like".into(),
+            ];
+        }
+        let width = choices.iter().map(|c| c.name.len()).max().unwrap_or(0);
+        choices
+            .iter()
+            .map(|c| {
+                let mark = if &c.name == here {
+                    icons::CURRENT_ITEM
+                } else {
+                    " "
+                };
+                format!("{mark} {:width$}  {}", c.name, c.note)
+            })
+            .collect()
     }
 }

@@ -10,7 +10,6 @@
 
 pub mod bash;
 pub mod lane;
-pub mod lanes;
 pub mod looping;
 pub mod meter;
 pub mod settings;
