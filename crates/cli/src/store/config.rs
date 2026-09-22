@@ -728,7 +728,6 @@ pub fn load_project(workspace: &Path) -> Result<Project> {
 }
 
 fn parse(body: &str) -> Result<Config> {
-    migrated(body)?;
     let de = toml::de::Deserializer::parse(body)?;
     let config: Config = serde_path_to_error::deserialize(de)?;
     config.check_key()?;
@@ -742,73 +741,6 @@ fn parse(body: &str) -> Result<Config> {
     }
     config.key_map()?;
     Ok(config)
-}
-
-// The two shapes that came before this one. `deny_unknown_fields` would refuse
-// them too, but with "unknown field `provider`" — true, and no help at all to
-// someone holding a file that worked yesterday.
-fn migrated(body: &str) -> Result<()> {
-    // Matched as keys and tables, never as substrings: a comment that happens to
-    // say "wire" is not a config in the old shape, and refusing a valid file is
-    // worse than missing an invalid one.
-    let retired_key = |line: &str| {
-        ["wire", "wire_id", "api_key_env", "thinking_replay"]
-            .iter()
-            .any(|k| {
-                line.strip_prefix(k)
-                    .is_some_and(|rest| rest.trim_start().starts_with('='))
-            })
-    };
-    // `wire` and friends predate providers by a shape. Both generations land
-    // in the same place, so both are pointed there by one message.
-    let old_shape = body.lines().map(str::trim_start).any(|line| {
-        line.starts_with("[provider")
-            || line.starts_with("[defaults]")
-            || line.starts_with("[compat]")
-            || retired_key(line)
-    });
-    if !old_shape {
-        return Ok(());
-    }
-    bail!(
-        "this config names a provider. pi talks to one endpoint at a time, so
-the endpoint is the file itself and a model is just its own name:
-
-  base_url = \"https://…\"
-  api_key  = \"$YOUR_KEY\"       # a `$` reads the environment
-  format   = \"anthropic\"       # or \"openai\"
-  model    = \"claude-sonnet-5\" # what the endpoint calls it
-
-  [models.\"claude-sonnet-5\"]  # only where a default is wrong
-  context_window = 200_000
-
-what moved:
-  · [provider.p] base_url/format/api_key/cache_control → the top level
-  · [defaults] model/effort/tier/system                → the top level
-  · [provider.p.models.x]                              → [models.x]
-  · defaults.summarize_with                            → summarize_model
-  · a model's `model` key is gone: the table name is the model's own name,
-    so `-m` and the archive spell it the one way the endpoint does
-  · `provider.model` names are gone with it — `-m claude-sonnet-5`, not
-    `-m anthropic.sonnet`
-
-from the shape before that:
-  · wire                → format
-  · api_key_env = \"N\"  → api_key = \"$N\"
-  · wire_id             → gone; the table name is the model's own name
-  · thinking_replay     → replay_thinking; \"bare_prose\" is \"prose\",
-                          \"drop\" is \"off\", and \"signed\" is gone
-  · cache_breakpoints + [compat] long_cache_retention
-                        → cache_control = \"standard\" | \"long_ttl\"
-  · [compat] sampling_params    → accepts_temperature, on the model
-  · [compat] forced_tool_choice → can_force_tool, on the model
-  · every other [compat] key is gone: pi speaks the native Anthropic and
-    OpenAI Responses formats, and an endpoint that needs adjusting belongs
-    behind a gateway
-
-A second endpoint is no longer a config shape. Point base_url at the one you
-want, or keep two files and pass --config."
-    )
 }
 
 fn parse_project(body: &str) -> Result<Project> {
