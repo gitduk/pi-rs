@@ -982,6 +982,10 @@ struct Ui {
     // list comes back, which is what makes Esc mean "not that" rather than
     // "never again".
     dismissed_at: Option<String>,
+    // A line was submitted through the editor. The echo is this side's — the
+    // view is in hand — but the recall list is written by the surface, so it is
+    // told once per line rather than left to guess.
+    submitted: bool,
     // What `/model` can complete to. A copy rather than a borrow of the
     // config: the loop holds the session mutably while it draws.
     choices: Vec<Choice>,
@@ -1157,6 +1161,7 @@ impl Ui {
         Self {
             screen,
             keys,
+            submitted: false,
             choices,
             commands,
             lists,
@@ -1916,6 +1921,12 @@ impl Ui {
     // Accept a submitted input: echo it so the prompt survives the editor
     // being cleared, then fold the block that was current back to the switch
     // — the input pushes it out of current no matter what it turns out to be.
+    // Whether a line has been submitted since this was last asked: the surface
+    // catches the recall list up when it has.
+    fn took_submit(&mut self) -> bool {
+        std::mem::take(&mut self.submitted)
+    }
+
     fn submit(&mut self, view: &mut View, line: &str) {
         let rows = Row::prompt(line, &self.paint);
         view.surface.scrollback.extend(rows);
@@ -2043,11 +2054,13 @@ impl Ui {
                         if input::recallable(&line, &self.commands) {
                             self.editor.remember(&line);
                         }
-                        return if line.trim().is_empty() {
-                            Intent::None
-                        } else {
-                            Intent::Submit(line)
-                        };
+                        if line.trim().is_empty() {
+                            return Intent::None;
+                        }
+                        self.submit(view, &line);
+                        view.surface.scroll = 0;
+                        self.submitted = true;
+                        return input::read(&line);
                     }
                     Some(MenuEntry::File {
                         start,
@@ -2066,11 +2079,13 @@ impl Ui {
                         if input::recallable(&typed, &self.commands) {
                             self.editor.remember(&typed);
                         }
-                        return if typed.trim().is_empty() {
-                            Intent::None
-                        } else {
-                            Intent::Submit(typed)
-                        };
+                        if typed.trim().is_empty() {
+                            return Intent::None;
+                        }
+                        self.submit(view, &typed);
+                        view.surface.scroll = 0;
+                        self.submitted = true;
+                        return input::read(&typed);
                     }
                 }
             }
@@ -2872,6 +2887,9 @@ impl Tui {
     // row — a view scrolled up to read would otherwise stream output out of
     // sight — and the history is written per line rather than on the way out,
     // because quitting with two Ctrl-Cs skips every tidy exit path there is.
+    // Every door a line can be submitted through calls this — the keyboard and
+    // the phone alike — because a line the user cannot see they sent is one
+    // they send twice.
     fn echo_sent(&mut self, line: &str) {
         let view = front_view(&mut self.views, self.core.lane());
         self.ui.submit(view, line);
@@ -3167,10 +3185,6 @@ impl Tui {
                         .push(intent);
                     return Wake::Nothing;
                 };
-                // Echoed like any submitted line, and unlike a queued one:
-                // this is already on its way to the model, and a line the user
-                // cannot see they sent is one they send twice.
-                self.echo_sent(&text);
                 // Spends the chance to unsend, exactly as the model's first
                 // word does: esc now means stop. Without this, esc after a
                 // line was said takes the prompt back and the line — never
@@ -3263,7 +3277,12 @@ impl Tui {
                     }
                     key = self.events.recv() => match key {
                         Some(key) => {
-                            let intent = self.ui.key(self.core.lane(), front_view(&mut self.views, self.core.lane()), key, running);
+                            let lane = self.core.lane();
+                            let view = front_view(&mut self.views, lane);
+                            let intent = self.ui.key(lane, view, key, running);
+                            if self.ui.took_submit() {
+                                self.save_history();
+                            }
                             self.admit(intent)
                         }
                         None => Wake::Leave,
@@ -3273,7 +3292,8 @@ impl Tui {
                         // and its `/stop` is esc. Same intents, same gate, so
                         // they cannot drift apart.
                         Some(run::wechat::Inbound::Text { text }) => {
-                            self.admit(Intent::Submit(text))
+                            self.echo_sent(&text);
+                            self.admit(input::read(&text))
                         }
                         Some(run::wechat::Inbound::Stop) => self.admit(Intent::Interrupt),
                         Some(run::wechat::Inbound::Notice(text)) => {
@@ -3368,10 +3388,6 @@ impl Tui {
                         self.core.lane_mut().push_note(&note);
                     }
                     input::read(&goal)
-                }
-                Intent::Submit(line) => {
-                    self.echo_sent(&line);
-                    input::read(&line)
                 }
                 // A key that means a command — `ctrl+l` twice is `/new` —
                 // arrives already read.

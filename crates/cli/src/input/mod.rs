@@ -12,11 +12,6 @@ use crate::input::commands::{Command, Source};
 pub enum Intent {
     // Nothing for the loop: the press changed only what `Ui` owns.
     None,
-    // A line the user submitted, not yet read. The one raw variant, because
-    // the screen echoes the text and the queue holds it — parsing it at the
-    // door would throw away what both of them need. `read` says what it is.
-    Submit(String),
-
     // What `read` makes of a submitted line.
     // Prose for the model.
     Prompt(String),
@@ -156,9 +151,6 @@ impl Intent {
             Intent::Prompt(text) => Fate::Steered(text.clone()),
             // A `!` files its result in the transcript, which the run has.
             Intent::Bash(_) => Fate::Queued,
-            // The raw variant: its fate is the fate of what it turns out to be.
-            // `read` never answers `Submit`, so this ends.
-            Intent::Submit(line) => read(line).fate(),
             // Both reach for the transcript, and the run is holding it.
             Intent::OpenRewind | Intent::Rewind(_) => {
                 Fate::Refused("rewinding needs the transcript this run is writing — esc first")

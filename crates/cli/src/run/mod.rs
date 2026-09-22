@@ -615,8 +615,7 @@ impl App {
             // surface acts on them before it gets here. The arm earns its keep
             // anyway — it is what makes the exhaustiveness check bite, so a new
             // intent has to say which side of this line it falls on.
-            Intent::Submit(_)
-            | Intent::None
+            Intent::None
             | Intent::Interrupt
             | Intent::Unsend
             | Intent::OpenRewind
@@ -1234,24 +1233,6 @@ mod tests {
     }
 
     #[test]
-    fn a_submitted_line_inherits_the_fate_of_what_it_says() {
-        for line in [
-            "/new",
-            "/status",
-            "/compact keep this",
-            "fix the bug",
-            "!ls",
-            "/nope",
-        ] {
-            assert_eq!(
-                format!("{:?}", Intent::Submit(line.into()).fate()),
-                format!("{:?}", read(line).fate()),
-                "{line}"
-            );
-        }
-    }
-
-    #[test]
     fn leaving_is_never_refused() {
         // One intent for `/exit`, `/quit`, ctrl+d and a double ctrl+c — the
         // words are checked with the rest of the table — and it always
@@ -1320,16 +1301,13 @@ mod tests {
     fn prose_reaches_the_run_rather_than_waiting_for_it() {
         let said = "the bug is in parse.rs";
         assert!(matches!(Intent::Prompt(said.into()).fate(), Fate::Steered(text) if text == said));
-        // A raw line answers as whatever it reads as, so both doors agree.
+        // The line the door read says the same thing the word would.
         assert!(matches!(
-            Intent::Submit(said.into()).fate(),
+            read(said).fate(),
             Fate::Steered(text) if text == said
         ));
         // A slash word is not prose and still waits.
-        assert!(matches!(
-            Intent::Submit("/settings".into()).fate(),
-            Fate::Queued
-        ));
+        assert!(matches!(read("/settings").fate(), Fate::Queued));
     }
 
     // The transcript and the screen want different strings from a `!` line:
