@@ -611,19 +611,6 @@ impl App {
         match intent {
             Intent::Bash(command) => Step::Bash(command),
             Intent::Prompt(send) => Step::Prompt { send, typed: None },
-            // Unreachable by construction: `read` never makes these, and the
-            // surface acts on them before it gets here. The arm earns its keep
-            // anyway — it is what makes the exhaustiveness check bite, so a new
-            // intent has to say which side of this line it falls on.
-            Intent::None
-            | Intent::Interrupt
-            | Intent::Unsend
-            | Intent::OpenRewind
-            | Intent::Rewind(_)
-            | Intent::SettingEdit(..)
-            | Intent::SettingWrite(_)
-            | Intent::SettingRevert(_)
-            | Intent::EditExternally => Step::Handled(Vec::new()),
             // The surface's, like `Submit`: arming a lane and re-submitting a
             // line through `read` are both things only it can do, so it takes
             // this before `run` is reached.
@@ -1246,7 +1233,6 @@ mod tests {
             Intent::New,
             Intent::Resume("1756240000-1".into()),
             Intent::Compact(String::new()),
-            Intent::OpenRewind,
         ] {
             assert!(
                 matches!(intent.fate(), Fate::Refused(_)),
@@ -1264,11 +1250,6 @@ mod tests {
             Intent::Reload,
             Intent::Model(String::new()),
             Intent::Worktree("tree".into()),
-            Intent::Interrupt,
-            Intent::Unsend,
-            Intent::SettingEdit("a.b".into(), "1".into()),
-            Intent::SettingWrite("a.b".into()),
-            Intent::SettingRevert("a.b".into()),
             Intent::Wechat("on".into()),
         ] {
             assert!(

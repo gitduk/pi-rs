@@ -11,10 +11,10 @@ use ratatui::text::Line;
 
 use std::time::{Duration, Instant};
 
+use super::Deed;
 use super::Paint;
 use super::editor::Editor;
 use super::screen;
-use crate::input::Intent;
 use crate::store::icons;
 use crate::store::keys::Action;
 use crate::store::settings::SettingRow;
@@ -44,7 +44,7 @@ pub struct Panel {
 /// What the panel made of a press.
 pub enum Took {
     // Handled, and this is what it asks the loop for.
-    Intent(Intent),
+    Deed(Deed),
     // Handled, and the panel is done: the caller drops it.
     Close,
 }
@@ -155,10 +155,10 @@ impl Panel {
         if !changed {
             self.editing = None;
             self.refused = None;
-            return Took::Intent(Intent::None);
+            return Took::Deed(Deed::Nothing);
         }
         let path = self.rows[self.at].path.clone();
-        Took::Intent(Intent::SettingEdit(path, text))
+        Took::Deed(Deed::SettingEdit(path, text))
     }
 
     /// What this press does to the panel, or `Nothing` where the panel has no
@@ -183,33 +183,33 @@ impl Panel {
             match c {
                 'j' => {
                     self.down();
-                    return Took::Intent(Intent::None);
+                    return Took::Deed(Deed::Nothing);
                 }
                 'k' => {
                     self.up();
-                    return Took::Intent(Intent::None);
+                    return Took::Deed(Deed::Nothing);
                 }
                 'i' | 'e' => {
                     self.begin_edit();
-                    return Took::Intent(Intent::None);
+                    return Took::Deed(Deed::Nothing);
                 }
                 'q' => return Took::Close,
                 // Space writes the session value to the file, r takes it
                 // back; the settings panel owns both, on a changed row.
                 ' ' => {
-                    return Took::Intent(
+                    return Took::Deed(
                         self.rows
                             .get(self.at)
-                            .map(|r| Intent::SettingWrite(r.path.clone()))
-                            .unwrap_or(Intent::None),
+                            .map(|r| Deed::SettingWrite(r.path.clone()))
+                            .unwrap_or(Deed::Nothing),
                     );
                 }
                 'r' => {
-                    return Took::Intent(
+                    return Took::Deed(
                         self.rows
                             .get(self.at)
-                            .map(|r| Intent::SettingRevert(r.path.clone()))
-                            .unwrap_or(Intent::None),
+                            .map(|r| Deed::SettingRevert(r.path.clone()))
+                            .unwrap_or(Deed::Nothing),
                     );
                 }
                 _ => {}
@@ -222,18 +222,18 @@ impl Panel {
                 if self.editing.is_none() {
                     self.down();
                 }
-                Took::Intent(Intent::None)
+                Took::Deed(Deed::Nothing)
             }
             Some(Action::MenuPrevious) => {
                 if self.editing.is_none() {
                     self.up();
                 }
-                Took::Intent(Intent::None)
+                Took::Deed(Deed::Nothing)
             }
             Some(Action::MenuAccept) => {
                 if self.editing.is_none() {
                     self.begin_edit();
-                    return Took::Intent(Intent::None);
+                    return Took::Deed(Deed::Nothing);
                 }
                 self.submit_edit()
             }
@@ -243,7 +243,7 @@ impl Panel {
             Some(Action::MenuDismiss | Action::LineClear) => match self.editing.take() {
                 Some(_) => {
                     self.refused = None;
-                    Took::Intent(Intent::None)
+                    Took::Deed(Deed::Nothing)
                 }
                 None => Took::Close,
             },
@@ -289,7 +289,7 @@ impl Panel {
                 if closed {
                     return self.submit_edit();
                 }
-                Took::Intent(Intent::None)
+                Took::Deed(Deed::Nothing)
             }
         }
     }
@@ -419,8 +419,7 @@ fn wrap_edit(line: &str, lead_w: usize, caret: usize, width: usize) -> (Vec<Stri
 
 #[cfg(test)]
 mod tests {
-    use super::{Paint, Panel, Took};
-    use crate::input::Intent;
+    use super::{Deed, Paint, Panel, Took};
     use crate::store::keys::Action;
     use crate::store::settings::{SettingRow, row};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -438,9 +437,9 @@ mod tests {
         }
     }
 
-    fn intent(took: Took) -> Intent {
+    fn deed(took: Took) -> Deed {
         match took {
-            Took::Intent(i) => i,
+            Took::Deed(i) => i,
             Took::Close => panic!("the panel closed"),
         }
     }
@@ -482,7 +481,7 @@ mod tests {
             None,
             KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
         );
-        assert!(matches!(took, Took::Intent(Intent::None)), "not a revert");
+        assert!(matches!(took, Took::Deed(Deed::Nothing)), "not a revert");
         assert!(!matches!(
             p.press(
                 None,
@@ -531,8 +530,8 @@ mod tests {
         assert!(p.editing());
         assert_eq!(p.editing_value(), "flash", "pre-filled with what it holds");
         typed(&mut p, "yj");
-        match intent(typed_close(&mut p, 'k')) {
-            Intent::SettingEdit(path, value) => {
+        match deed(typed_close(&mut p, 'k')) {
+            Deed::SettingEdit(path, value) => {
                 assert_eq!((path.as_str(), value.as_str()), ("model", "flashy"));
             }
             other => panic!("kept {other:?}"),
@@ -546,12 +545,12 @@ mod tests {
         let mut p = Panel::new(settings(), &vim());
         typed(&mut p, "j");
         assert!(matches!(
-            intent(typed_close(&mut p, ' ')),
-            Intent::SettingWrite(ref path) if path == "model"
+            deed(typed_close(&mut p, ' ')),
+            Deed::SettingWrite(ref path) if path == "model"
         ));
         assert!(matches!(
-            intent(typed_close(&mut p, 'r')),
-            Intent::SettingRevert(ref path) if path == "model"
+            deed(typed_close(&mut p, 'r')),
+            Deed::SettingRevert(ref path) if path == "model"
         ));
     }
 
@@ -564,7 +563,7 @@ mod tests {
         typed(&mut p, "y");
         assert!(matches!(
             act(&mut p, Action::MenuDismiss),
-            Took::Intent(Intent::None)
+            Took::Deed(Deed::Nothing)
         ));
         assert!(!p.editing());
         assert_eq!(p.editing_value(), "flash", "the row as it was");
@@ -579,8 +578,8 @@ mod tests {
         act(&mut p, Action::MenuAccept);
         assert_eq!(p.editing_value(), "http://x", "pre-filled, untouched");
         assert!(matches!(
-            intent(act(&mut p, Action::MenuAccept)),
-            Intent::None
+            deed(act(&mut p, Action::MenuAccept)),
+            Deed::Nothing
         ));
         assert!(!p.editing());
     }
@@ -592,8 +591,8 @@ mod tests {
         act(&mut p, Action::MenuAccept);
         assert_eq!(p.editing_value(), "flash", "pre-filled with what it holds");
         typed(&mut p, "y");
-        match intent(act(&mut p, Action::MenuAccept)) {
-            Intent::SettingEdit(path, value) => {
+        match deed(act(&mut p, Action::MenuAccept)) {
+            Deed::SettingEdit(path, value) => {
                 assert_eq!((path.as_str(), value.as_str()), ("model", "flashy"));
             }
             other => panic!("committed {other:?}"),
@@ -617,8 +616,8 @@ mod tests {
         act(&mut p, Action::MenuAccept);
         typed(&mut p, "x");
         assert!(matches!(
-            intent(act(&mut p, Action::MenuAccept)),
-            Intent::SettingEdit(ref path, _) if path == "model"
+            deed(act(&mut p, Action::MenuAccept)),
+            Deed::SettingEdit(ref path, _) if path == "model"
         ));
     }
 
@@ -633,8 +632,8 @@ mod tests {
         act(&mut p, Action::MenuNext);
         typed(&mut p, "!");
         assert!(matches!(
-            intent(act(&mut p, Action::MenuAccept)),
-            Intent::SettingEdit(ref path, ref t) if path == "base_url" && t == "http://x!"
+            deed(act(&mut p, Action::MenuAccept)),
+            Deed::SettingEdit(ref path, ref t) if path == "base_url" && t == "http://x!"
         ));
     }
 
@@ -646,7 +645,7 @@ mod tests {
         act(&mut p, Action::MenuAccept);
         assert!(matches!(
             act(&mut p, Action::MenuDismiss),
-            Took::Intent(Intent::None)
+            Took::Deed(Deed::Nothing)
         ));
         assert!(!p.editing());
         assert!(matches!(act(&mut p, Action::MenuDismiss), Took::Close));
@@ -656,7 +655,7 @@ mod tests {
     fn a_browsing_panel_swallows_a_key_it_does_not_know() {
         let mut p = Panel::new(settings(), &vim());
         let press = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
-        assert!(matches!(p.press(None, press), Took::Intent(Intent::None)));
+        assert!(matches!(p.press(None, press), Took::Deed(Deed::Nothing)));
     }
 
     // The row being rewritten is the edit line: painted like the input, the

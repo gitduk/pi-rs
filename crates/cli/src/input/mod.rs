@@ -10,8 +10,6 @@ use crate::input::commands::{Command, Source};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Intent {
-    // Nothing for the loop: the press changed only what `Ui` owns.
-    None,
     // What `read` makes of a submitted line.
     // Prose for the model.
     Prompt(String),
@@ -60,30 +58,12 @@ pub enum Intent {
     // and the screen rebuilt from the empty one. One variant, because they
     // are one intent however it was expressed.
     New,
-    // Only a key can ask for these: there is no line that says them.
-    // The rewind selector wants everywhere the session can go back to.
-    OpenRewind,
-    // A row chosen from the rewind selector: the conversation rewinds there,
-    // and what the row was decides whether it is kept or unsent.
-    Rewind(agent::session::EntryId),
-    // The settings panel's edit line kept a value: the session takes it, and
-    // the file does not — `SettingWrite` is what moves it to the file.
-    SettingEdit(String, String),
-    // The panel's space: the session value replaces the file's line.
-    SettingWrite(String),
-    // The panel's r: the file's value takes the session back.
-    SettingRevert(String),
-    // The line being typed wants `$EDITOR`. The surface's own: the editor
-    // takes the terminal, which only the surface knows how to give away.
-    EditExternally,
-    // Esc caught a prompt on its way out: stop the run, then unsend it.
-    Unsend,
+    // Only a key can ask for these: there is no line that says them. They are
+    // not intents at all but the screen's own deeds, in `ui/tui` — a key that
+    // means a command, like `ctrl+l` twice for `/new`, arrives here read.
     // Leave now — `/exit`, `/quit`, `ctrl+d`, a double `ctrl+c`. One intent,
     // so the four of them cannot answer differently.
     Quit,
-
-    // A key or the phone.
-    Interrupt,
 }
 
 /// What a line may do while a turn is in flight.
@@ -152,24 +132,8 @@ impl Intent {
             // A `!` files its result in the transcript, which the run has.
             Intent::Bash(_) => Fate::Queued,
             // Both reach for the transcript, and the run is holding it.
-            Intent::OpenRewind | Intent::Rewind(_) => {
-                Fate::Refused("rewinding needs the transcript this run is writing — esc first")
-            }
-            // Claiming a value and writing one to the file both rebuild
-            // through `Arc::make_mut`, so a run in flight keeps the agent it
-            // started on.
-            Intent::SettingEdit(..) | Intent::SettingWrite(_) | Intent::SettingRevert(_) => {
-                Fate::Now
-            }
-            // The input line is the surface's, not the transcript's: a run in
-            // flight is writing the second and never reads the first.
-            Intent::EditExternally => Fate::Now,
-            // Guarded where they land rather than here: `stop_current` acts
-            // only on a lane that is actually running.
-            Intent::Interrupt | Intent::Unsend => Fate::Now,
             // Leaving is never refused: a hung run must not trap the user.
             Intent::Quit => Fate::Now,
-            Intent::None => Fate::Now,
         }
     }
 }

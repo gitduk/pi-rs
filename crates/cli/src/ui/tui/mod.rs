@@ -1935,14 +1935,14 @@ impl Ui {
             .fold_previous(&mut view.surface.scrollback);
     }
 
-    fn key(&mut self, lane: &Lane, view: &mut View, event: TermEvent, running: bool) -> Intent {
+    fn key(&mut self, lane: &Lane, view: &mut View, event: TermEvent, running: bool) -> Asked {
         let key = match event {
             TermEvent::Resize(w, h) => {
                 self.screen.resized(w, h);
                 // Re-measuring starts at the new width: the re-wrap is a
                 // change of layout, not output, and must not move the view.
                 view.surface.counted = None;
-                return Intent::None;
+                return Asked::Own(Deed::Nothing);
             }
             TermEvent::Paste(text) => {
                 self.last_esc = None;
@@ -1950,7 +1950,7 @@ impl Ui {
                     v.last = None;
                 }
                 self.editor.insert_str(&text.replace('\r', "\n"));
-                return Intent::None;
+                return Asked::Own(Deed::Nothing);
             }
             TermEvent::Mouse(mouse) => {
                 match mouse.kind {
@@ -1964,7 +1964,7 @@ impl Ui {
                     }
                     _ => {}
                 }
-                return Intent::None;
+                return Asked::Own(Deed::Nothing);
             }
             // Windows reports both press and release; acting on each would
             // double every keystroke. Any key other than Esc breaks the
@@ -1976,7 +1976,7 @@ impl Ui {
                 }
                 k
             }
-            _ => return Intent::None,
+            _ => return Asked::Own(Deed::Nothing),
         };
         let press = Press::of(key.code, key.modifiers);
         // The panel counts as a menu: its own keys are the Menu bindings, and
@@ -2011,10 +2011,10 @@ impl Ui {
         // whatever its own verbs mean; `panel.rs` is where a new one plugs in.
         if let Some(panel) = &mut self.panel {
             match panel.press(bound, key) {
-                Took::Intent(intent) => return intent,
+                Took::Deed(deed) => return Asked::Own(deed),
                 Took::Close => {
                     self.panel = None;
-                    return Intent::None;
+                    return Asked::Own(Deed::Nothing);
                 }
             }
         }
@@ -2043,7 +2043,7 @@ impl Ui {
                 match self.highlighted() {
                     Some(MenuEntry::Message { id, .. }) => {
                         self.rewind.clear();
-                        return Intent::Rewind(id);
+                        return Asked::Own(Deed::To(id));
                     }
                     Some(MenuEntry::Completion(c)) => {
                         let line = c.line;
@@ -2055,12 +2055,12 @@ impl Ui {
                             self.editor.remember(&line);
                         }
                         if line.trim().is_empty() {
-                            return Intent::None;
+                            return Asked::Own(Deed::Nothing);
                         }
                         self.submit(view, &line);
                         view.surface.scroll = 0;
                         self.submitted = true;
-                        return input::read(&line);
+                        return Asked::Core(input::read(&line));
                     }
                     Some(MenuEntry::File {
                         start,
@@ -2072,7 +2072,7 @@ impl Ui {
                         // Enter on a path applies it and stays: the prompt
                         // is not done until the user says so.
                         self.apply_file(start, end, &path, dir);
-                        return Intent::None;
+                        return Asked::Own(Deed::Nothing);
                     }
                     None => {
                         let typed = self.editor.take();
@@ -2080,45 +2080,45 @@ impl Ui {
                             self.editor.remember(&typed);
                         }
                         if typed.trim().is_empty() {
-                            return Intent::None;
+                            return Asked::Own(Deed::Nothing);
                         }
                         self.submit(view, &typed);
                         view.surface.scroll = 0;
                         self.submitted = true;
-                        return input::read(&typed);
+                        return Asked::Core(input::read(&typed));
                     }
                 }
             }
-            Some(Action::EditExternally) => return Intent::EditExternally,
+            Some(Action::EditExternally) => return Asked::Own(Deed::External),
             Some(Action::RunInterrupt) => {
                 // Esc before the model has moved means "I didn't mean to send
                 // that"; an empty editor, or unsending overwrites a line.
                 if self.editor.is_empty() && lane.is_running() && !view.state.committed {
-                    return Intent::Unsend;
+                    return Asked::Own(Deed::Unsend);
                 }
-                return Intent::Interrupt;
+                return Asked::Own(Deed::Interrupt);
             }
             Some(Action::Rewind) => {
                 // Double Esc with an empty line opens the rewind selector.
                 // The first press only arms it; the second, inside the
                 // window, asks the loop for the session's messages.
                 if !self.editor.is_empty() {
-                    return Intent::None;
+                    return Asked::Own(Deed::Nothing);
                 }
                 let now = Instant::now();
                 if double_tap(&mut self.last_esc, now) {
                     self.last_esc = None;
-                    return Intent::OpenRewind;
+                    return Asked::Own(Deed::Rewind);
                 }
-                return Intent::None;
+                return Asked::Own(Deed::Nothing);
             }
             Some(action @ (Action::LaneNext | Action::LanePrev)) => {
                 let forward = action == Action::LaneNext;
                 return match self.step_checkout(lane, forward) {
-                    Some(name) => Intent::Worktree(name),
+                    Some(name) => Asked::Core(Intent::Worktree(name)),
                     None => {
                         self.flash("the only checkout there is");
-                        Intent::None
+                        Asked::Own(Deed::Nothing)
                     }
                 };
             }
@@ -2126,18 +2126,18 @@ impl Ui {
                 let now = Instant::now();
                 if double_tap(&mut self.last_l, now) {
                     self.last_l = None;
-                    return Intent::New;
+                    return Asked::Core(Intent::New);
                 }
-                return Intent::None;
+                return Asked::Own(Deed::Nothing);
             }
             Some(Action::AppExit) => {
                 // No `running` check: leaving is one intent whatever is in
                 // flight, and `admit` gives it one answer.
                 return if self.editor.is_empty() {
-                    Intent::Quit
+                    Asked::Core(Intent::Quit)
                 } else {
                     self.editor.delete();
-                    Intent::None
+                    Asked::Own(Deed::Nothing)
                 };
             }
             _ => {}
@@ -2216,7 +2216,7 @@ impl Ui {
                 match self.highlighted() {
                     Some(MenuEntry::Message { id, .. }) => {
                         self.rewind.clear();
-                        return Intent::Rewind(id);
+                        return Asked::Own(Deed::To(id));
                     }
                     Some(MenuEntry::Completion(c)) => {
                         self.editor.set_line(&c.line);
@@ -2303,7 +2303,7 @@ impl Ui {
                 unreachable!("doubled keys are answered where they are typed")
             }
         }
-        Intent::None
+        Asked::Own(Deed::Nothing)
     }
 
     // Nudge the scrolled history window by `step` rows, up or down.
@@ -2468,19 +2468,19 @@ impl Ui {
     // One key, three meanings, and the escalation travels with the binding
     // rather than with Ctrl-C: stop the run, clear the line, or — pressed
     // twice inside the window — leave.
-    fn interrupt_or_clear(&mut self, running: bool) -> Intent {
+    fn interrupt_or_clear(&mut self, running: bool) -> Asked {
         if double_tap(&mut self.last_interrupt, Instant::now()) {
-            return Intent::Quit;
+            return Asked::Core(Intent::Quit);
         }
         if running {
-            return Intent::Interrupt;
+            return Asked::Own(Deed::Interrupt);
         }
         if self.editor.is_empty() {
             self.flash("press it again to quit");
         } else {
             self.editor.clear();
         }
-        Intent::None
+        Asked::Own(Deed::Nothing)
     }
 }
 // Scroll for the same window one frame later: growth since `last` folds
@@ -2518,9 +2518,62 @@ fn land_handled(ui: &mut Ui, core: &App, view: &mut View, lines: Vec<String>) {
 // them. `session` is None only when the run panicked and took its copy down.
 // What woke the loop this time round. One value out of the select rather than
 // a pair of optional locals, so what happened is read in one place.
+// What the screen does to the lane itself, rather than asking the core to
+// answer something. A key can mean these and a line cannot: there is no
+// `/rewind` word, and `/new` and ctrl+l twice are one intent that goes the
+// other way round. They are answered one step early — `admit` says whether the
+// run in flight allows them — and then carried out here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Deed {
+    // A key that moved the editor and nothing else.
+    Nothing,
+    // The line being typed wants `$EDITOR`. The surface's own: the editor takes
+    // the terminal, which only the surface knows how to give away.
+    External,
+    // The rewind selector wants everywhere the session can go back to: only
+    // the surface can put a screen over the transcript.
+    Rewind,
+    // A row chosen from it: the conversation rewinds there, and what the row
+    // was decides whether it is kept or unsent.
+    To(agent::session::EntryId),
+    // The settings panel's edit line kept a value: the session takes it, and
+    // the file does not — `SettingWrite` is what moves it to the file.
+    SettingEdit(String, String),
+    // The panel's space: the session value replaces the file's line.
+    SettingWrite(String),
+    // The panel's r: the file's value takes the session back.
+    SettingRevert(String),
+    // Stop the run: from esc, or from the phone's `/stop`.
+    Interrupt,
+    // Esc caught a prompt on its way out: stop the run, then unsend it.
+    Unsend,
+}
+
+impl Deed {
+    // Whether it may happen now. Only the two that rewrite the transcript
+    // care: the run in flight is writing it.
+    fn fate(&self) -> Fate {
+        match self {
+            Deed::Rewind | Deed::To(_) => {
+                Fate::Refused("rewinding needs the transcript this run is writing — esc first")
+            }
+            _ => Fate::Now,
+        }
+    }
+}
+
+// What a key asked for. The core answers an `Intent` however it arrived — the
+// keyboard, the phone, a typed line — and `Deed` is what the screen keeps for
+// itself, so the two never have to be told apart again downstream.
+#[derive(Debug)]
+enum Asked {
+    Core(Intent),
+    Own(Deed),
+}
+
 enum Wake {
     // Something to carry out, once the select's borrows are gone.
-    Do(Intent),
+    Do(Asked),
     // A turn ended and has to be settled, whichever lane it belongs to.
     Turn(Done),
     // Something only the screen cares about.
@@ -3164,12 +3217,54 @@ impl Tui {
     // run is in flight is state, and is read here; what an intent may do while
     // one is, is a property of the intent, and `fate` holds it. An idle lane
     // admits everything, which is why `fate` never has to mention idleness.
-    fn admit(&mut self, intent: Intent) -> Wake {
+    // The deeds the screen keeps for itself. They are here rather than in
+    // `dispatch` because only the surface can move the screen, the keyboard and
+    // the process — and only the surface knows which lane is in front.
+    async fn carry(&mut self, deed: Deed) {
+        match deed {
+            Deed::Nothing => {}
+            Deed::Interrupt => self.stop_current(false),
+            Deed::Unsend => self.stop_current(true),
+            Deed::Rewind => self.open_rewind(),
+            Deed::To(id) => self.rewind_turn(id),
+            Deed::SettingEdit(path, value) => {
+                let said = self.core.edit(&path, &value);
+                self.land_setting(said);
+            }
+            Deed::SettingWrite(path) => {
+                let said = self.core.write_to_file(&path);
+                self.land_setting(said);
+            }
+            Deed::SettingRevert(path) => {
+                let said = self.core.revert(&path);
+                self.land_lines(said);
+                self.reload_panel();
+            }
+            Deed::External => self.edit_externally().await,
+        }
+    }
+
+    fn admit(&mut self, asked: Asked) -> Wake {
+        let intent = match asked {
+            // A deed is the screen's own move: it is never queued and never
+            // steered, because waiting is one of the four answers about lines.
+            Asked::Own(deed) => match deed.fate() {
+                Fate::Refused(why) => {
+                    self.ui.flash(why);
+                    return Wake::Nothing;
+                }
+                Fate::Now => return Wake::Do(Asked::Own(deed)),
+                Fate::Queued | Fate::Steered(_) => {
+                    unreachable!("a deed waits for nothing")
+                }
+            },
+            Asked::Core(intent) => intent,
+        };
         if !self.core.lane().is_running() {
-            return Wake::Do(intent);
+            return Wake::Do(Asked::Core(intent));
         }
         match intent.fate() {
-            Fate::Now => Wake::Do(intent),
+            Fate::Now => Wake::Do(Asked::Core(intent)),
             Fate::Queued => {
                 front_view(&mut self.views, self.core.lane())
                     .queued
@@ -3293,9 +3388,9 @@ impl Tui {
                         // they cannot drift apart.
                         Some(run::wechat::Inbound::Text { text }) => {
                             self.echo_sent(&text);
-                            self.admit(input::read(&text))
+                            self.admit(Asked::Core(input::read(&text)))
                         }
-                        Some(run::wechat::Inbound::Stop) => self.admit(Intent::Interrupt),
+                        Some(run::wechat::Inbound::Stop) => self.admit(Asked::Own(Deed::Interrupt)),
                         Some(run::wechat::Inbound::Notice(text)) => {
                             self.ui.say(front_view(&mut self.views, self.core.lane()), text);
                             Wake::Nothing
@@ -3307,21 +3402,21 @@ impl Tui {
                 // One at a time, each still the intent it was read as. Joined
                 // as lines, a command and a prompt became one line and `read`
                 // saw only the first word.
-                Wake::Do(
+                Wake::Do(Asked::Core(
                     front_view(&mut self.views, self.core.lane())
                         .queued
                         .remove(0),
-                )
+                ))
             };
             // Out here, where all of `self` is free again.
-            let intent = match woke {
+            let asked = match woke {
                 Wake::Turn(done) => {
                     self.settle(done).await;
                     continue;
                 }
                 Wake::Nothing => continue,
                 Wake::Leave => break,
-                Wake::Do(intent) => intent,
+                Wake::Do(asked) => asked,
             };
             // A round number only rides the ask the loop's own round opens;
             // anything else this iteration does leaves it unset.
@@ -3330,49 +3425,14 @@ impl Tui {
             // and the process are not `App`'s to move.
             // Whether the line about to run is a loop's own round.
             let mut from_loop = false;
-            let intent = match intent {
-                Intent::None => continue,
-                Intent::Interrupt => {
-                    self.stop_current(false);
+            let intent = match asked {
+                Asked::Own(deed) => {
+                    self.carry(deed).await;
                     continue;
                 }
-                Intent::Unsend => {
-                    self.stop_current(true);
-                    continue;
-                }
-                Intent::OpenRewind => {
-                    self.open_rewind();
-                    continue;
-                }
-                Intent::Rewind(id) => {
-                    self.rewind_turn(id);
-                    continue;
-                }
-                Intent::SettingEdit(path, value) => {
-                    let said = self.core.edit(&path, &value);
-                    self.land_setting(said);
-                    continue;
-                }
-                Intent::SettingWrite(path) => {
-                    let said = self.core.write_to_file(&path);
-                    self.land_setting(said);
-                    continue;
-                }
-                Intent::SettingRevert(path) => {
-                    let said = self.core.revert(&path);
-                    self.land_lines(said);
-                    self.reload_panel();
-                    continue;
-                }
-                Intent::EditExternally => {
-                    self.edit_externally().await;
-                    continue;
-                }
-                // A submitted line is echoed and remembered, and only then
-                // read — the echo wants the text, which reading spends.
                 // A loop's own round: echoed and read like a typed line, and
                 // marked so the turn it starts is the one the loop counts.
-                Intent::LoopRound { goal, note, round } => {
+                Asked::Core(Intent::LoopRound { goal, note, round }) => {
                     // The loop that queued this may have been stopped since.
                     // Running it then would be a turn nobody asked for, and
                     // one that reads on screen as if it had been typed.
@@ -3391,7 +3451,7 @@ impl Tui {
                 }
                 // A key that means a command — `ctrl+l` twice is `/new` —
                 // arrives already read.
-                ready => ready,
+                Asked::Core(ready) => ready,
             };
             // A loop is the surface's: it arms the lane, then puts its goal
             // back through the door as a typed line — so what runs each round
@@ -4117,9 +4177,10 @@ impl Tui {
 #[cfg(test)]
 mod tests {
     use super::{
-        Folds, Intent, Panel, Row, ScrollbackRows, Target, View, absorb_growth, scrollback_from,
-        view_at,
+        Asked, Deed, Folds, Intent, Panel, Row, ScrollbackRows, Target, View, absorb_growth,
+        scrollback_from, view_at,
     };
+    use crate::input::Fate;
     use crate::input::commands::{Choice, Command, Source};
     use crate::run::App;
     use crate::run::lane::{Lane, Run};
@@ -4138,6 +4199,30 @@ mod tests {
     // looked one up — and `streaming_row` and `stream_fold` both do, taking the
     // last match, so two blocks sharing a number is two blocks the lookup
     // cannot tell apart.
+    #[test]
+    fn a_deed_says_whether_a_run_in_flight_allows_it() {
+        // Only the two that rewrite the transcript care: the run in flight is
+        // writing it. The rest are the screen's own and go through whenever
+        // they are asked for; the panel's three rebuild through
+        // `Arc::make_mut`, so a run in flight keeps the agent it started on.
+        assert!(matches!(Deed::Rewind.fate(), Fate::Refused(_)));
+        assert!(matches!(
+            Deed::To(agent::session::EntryId(1)).fate(),
+            Fate::Refused(_)
+        ));
+        for deed in [
+            Deed::Nothing,
+            Deed::External,
+            Deed::Interrupt,
+            Deed::Unsend,
+            Deed::SettingEdit("a.b".into(), "1".into()),
+            Deed::SettingWrite("a.b".into()),
+            Deed::SettingRevert("a.b".into()),
+        ] {
+            assert!(matches!(deed.fate(), Fate::Now), "{deed:?} should proceed");
+        }
+    }
+
     #[test]
     fn rebuilt_reasoning_blocks_get_ids_of_their_own() {
         use agent::session::Session;
@@ -4810,7 +4895,7 @@ mod tests {
         let intent = tui
             .ui
             .key(lane, view_at(&mut tui.views, token), typed('z'), false);
-        assert!(matches!(intent, Intent::None));
+        assert!(matches!(intent, Asked::Own(Deed::Nothing)));
         assert!(
             tui.ui.editor.is_empty(),
             "the editor did not take the keystroke"
@@ -5348,20 +5433,23 @@ mod tests {
 
         let next = ui.key(&lane, &mut view, typed('L'), false);
         assert!(
-            matches!(&next, Intent::Worktree(name) if name == "f1"),
+            matches!(&next, Asked::Core(Intent::Worktree(name)) if name == "f1"),
             "{next:?}"
         );
         lane.worktree = Some("f1".into());
         let prev = ui.key(&lane, &mut view, typed('H'), false);
         assert!(
-            matches!(&prev, Intent::Worktree(name) if name == "pi-rs"),
+            matches!(&prev, Asked::Core(Intent::Worktree(name)) if name == "pi-rs"),
             "{prev:?}"
         );
 
         // The lowercase pair no longer leaves the lane it is typed in.
         for lower in ['h', 'l'] {
             let intent = ui.key(&lane, &mut view, typed(lower), false);
-            assert!(matches!(intent, Intent::None), "`{lower}`: {intent:?}");
+            assert!(
+                matches!(intent, Asked::Own(Deed::Nothing)),
+                "`{lower}`: {intent:?}"
+            );
         }
 
         // And the window moves without the caret: scrolled up by J, back by K.
@@ -5403,7 +5491,7 @@ mod tests {
         view.state.committed = true;
         assert!(ui.menu().is_empty(), "an empty line completes to nothing");
         let intent = ui.key(&lane, &mut view, esc(), true);
-        assert!(matches!(intent, Intent::Interrupt), "{intent:?}");
+        assert!(matches!(intent, Asked::Own(Deed::Interrupt)), "{intent:?}");
 
         ui.editor.set_line("/ne");
         assert!(
@@ -5413,11 +5501,11 @@ mod tests {
 
         // First press: the list, and nothing asked of the loop.
         let intent = ui.key(&lane, &mut view, esc(), true);
-        assert!(matches!(intent, Intent::None), "{intent:?}");
+        assert!(matches!(intent, Asked::Own(Deed::Nothing)), "{intent:?}");
         assert!(ui.menu().is_empty(), "the list went");
         // Second: through where the list was, to the run.
         let intent = ui.key(&lane, &mut view, esc(), true);
-        assert!(matches!(intent, Intent::Interrupt), "{intent:?}");
+        assert!(matches!(intent, Asked::Own(Deed::Interrupt)), "{intent:?}");
 
         // Typing past the dismissal brings the list back, and Tab still
         // completes mid-run — the half of the menu the run never claimed.
@@ -5437,7 +5525,7 @@ mod tests {
             &crate::store::config::Vim::default(),
         ));
         let intent = ui.key(&lane, &mut view, esc(), true);
-        assert!(matches!(intent, Intent::None), "{intent:?}");
+        assert!(matches!(intent, Asked::Own(Deed::Nothing)), "{intent:?}");
         assert!(
             ui.panel.is_none(),
             "esc closed the panel rather than the run"
@@ -5557,7 +5645,7 @@ mod tests {
         ui.editor.set_line("look at @at_pro");
         let intent = ui.key(&lane, &mut view, key(KeyCode::Tab), false);
         assert_eq!(ui.editor.text(), "look at @at_probe.rs ");
-        assert!(matches!(intent, Intent::None));
+        assert!(matches!(intent, Asked::Own(Deed::Nothing)));
 
         // A directory keeps completing: no space, so the walk can descend.
         ui.editor.set_line("in @probe_d");
@@ -5568,7 +5656,7 @@ mod tests {
         ui.editor.set_line("look at @at_pro");
         let intent = ui.key(&lane, &mut view, key(KeyCode::Enter), false);
         assert_eq!(ui.editor.text(), "look at @at_probe.rs ");
-        assert!(matches!(intent, Intent::None));
+        assert!(matches!(intent, Asked::Own(Deed::Nothing)));
 
         // A changed query re-anchors the highlight on the best row: the
         // stale index sat on the worse of the two matches above.
