@@ -65,13 +65,12 @@ pub fn file_stem(id: &str) -> String {
 }
 
 /// A path as a single directory name, for grouping a machine's state by
-/// workspace. The same shape Claude Code uses for its project buckets:
-/// `%` and `/` are percent-encoded (`%25`, `%2F`) so two paths cannot
-/// collide by differing only in slashes, and every other character a
-/// directory name may not take becomes `-`, so `/home/u/pi-rs` is
-/// `%2Fhome%2Fu%2Fpi-rs`. Distinct from `file_stem` (which
-/// mints `_` for the same characters) because the two name different things:
-/// a file a session owns, and the bucket that groups them.
+/// workspace: `/` and `%` percent-encoded (`%2F`, `%25`) so the map is
+/// injective, every other character a directory name may not take becoming
+/// `-`. Claude Code's project buckets fold every non-alphanumeric to `-`
+/// instead, which sends `/a/b` and `/a-b` to one bucket. Distinct from
+/// `file_stem` (which mints `_` for the same characters) because the two name
+/// different things: a file a session owns, and the bucket that groups them.
 pub fn key_of(path: &Path) -> String {
     path.display()
         .to_string()
