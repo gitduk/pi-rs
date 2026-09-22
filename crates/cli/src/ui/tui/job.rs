@@ -364,7 +364,7 @@ impl Tui {
     //
     // The saving cannot wait — a lane the user never returns to still has to
     // have its work on disk — but nothing about drawing it does.
-    pub(super) async fn settle_run(&mut self, lane: usize, done: Done, unsend: bool) {
+    async fn settle_run(&mut self, lane: usize, done: Done, unsend: bool) {
         let Done { ran, kind, .. } = done;
         // Only a turn is a request the model was working on, and only a turn's
         // ending is worth telling it about.
@@ -456,7 +456,7 @@ impl Tui {
 
     // A `/compact` has finished: put the transcript back, and show what the
     // pass did — or say there was nothing to shrink.
-    pub(super) async fn settle_compact(&mut self, lane: usize, done: Done) {
+    async fn settle_compact(&mut self, lane: usize, done: Done) {
         let Done { ran, kind, .. } = done;
         let Kind::Compact(report) = kind else {
             unreachable!("only a compact settles here")
@@ -509,7 +509,7 @@ impl Tui {
     // never returned it, naming the job as `verb`. Says whether the lane now
     // holds something safe to write over its save — without one it refuses
     // work until `/new`, where exiting would cost every other lane its run.
-    pub(super) fn recover_session(&mut self, lane: usize, verb: &str) -> bool {
+    fn recover_session(&mut self, lane: usize, verb: &str) -> bool {
         let id = self.core.lanes[lane].id().to_string();
         match self.core.store.load(&id) {
             Ok(stored) => {

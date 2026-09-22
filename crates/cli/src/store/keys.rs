@@ -129,7 +129,7 @@ pub enum Action {
     EditExternally,
 }
 
-pub struct Binding {
+struct Binding {
     pub id: &'static str,
     pub action: Action,
     pub when: When,
@@ -145,7 +145,7 @@ pub struct Binding {
 use Action as A;
 use When as W;
 
-pub const BINDINGS: &[Binding] = &[
+const BINDINGS: &[Binding] = &[
     Binding {
         id: "edit.insert.newline",
         action: A::InsertNewline,

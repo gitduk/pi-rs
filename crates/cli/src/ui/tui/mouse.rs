@@ -21,14 +21,14 @@ impl Ui {
 
     // What the row at this screen row sits on: the history region names
     // the frame, the target names the block inside it.
-    pub(super) fn target_at(&self, row: u16) -> Option<Target> {
+    fn target_at(&self, row: u16) -> Option<Target> {
         self.row_targets
             .get(row.checked_sub(self.regions.history.y)? as usize)
             .copied()
     }
 
     /// The scrollback row the mouse is over, if the cursor is on its text.
-    pub(super) fn hovered_row(&self, view: &View, col: u16, row: u16) -> Option<usize> {
+    fn hovered_row(&self, view: &View, col: u16, row: u16) -> Option<usize> {
         let Target::Scrollback(idx) = self.target_at(row)? else {
             return None;
         };

@@ -1,3 +1,6 @@
+//! Transcripts on disk: where a session's file lives, what a resumed one is
+//! read back as, and the bucket layout that keeps two workspaces apart.
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};

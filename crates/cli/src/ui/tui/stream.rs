@@ -63,7 +63,7 @@ impl Ui {
     // The bar row while a flash is up, and the only place an expired one is
     // dropped — every frame passes through here, so nothing else has to
     // remember to clear it.
-    pub(super) fn flash_line(&mut self, width: usize) -> Option<Line<'static>> {
+    fn flash_line(&mut self, width: usize) -> Option<Line<'static>> {
         if self
             .flash
             .as_ref()
@@ -281,13 +281,7 @@ impl Ui {
     // Retire the pending line a `ToolEnd` parked in the live region, checking
     // it against the row the committed entry derives to. Equality is
     // expected; anything else is drift the old layout shipped silently.
-    pub(super) fn check_pending(
-        &self,
-        view: &mut View,
-        call: &str,
-        row: Option<&Row>,
-        width: usize,
-    ) {
+    fn check_pending(&self, view: &mut View, call: &str, row: Option<&Row>, width: usize) {
         let Some(at) = view.state.tools.iter().position(|t| t.id == call) else {
             return;
         };

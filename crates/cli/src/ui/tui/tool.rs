@@ -17,7 +17,7 @@ pub(super) struct RunTool {
 
 // The one row a still-running tool occupies. The frame is the animation;
 // `ToolEnd` and `abandon_tools` replace the row with a final line.
-pub(super) fn tool_row(frame: usize, name: &str, summary: &str) -> String {
+fn tool_row(frame: usize, name: &str, summary: &str) -> String {
     let frame = icons::SPINNER_FRAMES[frame % icons::SPINNER_FRAMES.len()];
     format!("{frame} {}", row::named(name, summary))
 }

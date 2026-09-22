@@ -77,7 +77,7 @@ impl Paint {
 }
 
 /// Render a ratatui Line into an ANSI-escaped string.
-pub fn line_to_ansi(line: &ratatui::text::Line<'_>) -> String {
+fn line_to_ansi(line: &ratatui::text::Line<'_>) -> String {
     let mut out = String::new();
     let mut params = String::new();
     let base_style = line.style;
@@ -264,7 +264,7 @@ pub fn render_markdown(text: &str, paint: &Paint) -> Vec<ratatui::text::Line<'st
 }
 
 /// The diff rows a sketched (folded) result shows under its head.
-pub const SKETCH_LIMIT: usize = 24;
+const SKETCH_LIMIT: usize = 24;
 /// The preview rows a folded result shows: the head plus the sketch limit.
 pub const SKETCHED_ROWS: usize = 1 + SKETCH_LIMIT;
 

@@ -102,7 +102,7 @@ impl Ui {
 
     // Splice the accepted @ path over the token the list grew from. A
     // directory keeps completing: no trailing space, the caret stays on it.
-    pub(super) fn apply_file(&mut self, start: usize, end: usize, path: &str, dir: bool) {
+    fn apply_file(&mut self, start: usize, end: usize, path: &str, dir: bool) {
         let token = if dir {
             format!("@{path}/")
         } else {
@@ -530,7 +530,7 @@ impl Ui {
     // One key, three meanings, and the escalation travels with the binding
     // rather than with Ctrl-C: stop the run, clear the line, or — pressed
     // twice inside the window — leave.
-    pub(super) fn interrupt_or_clear(&mut self, running: bool) -> Asked {
+    fn interrupt_or_clear(&mut self, running: bool) -> Asked {
         if double_tap(&mut self.last_interrupt, Instant::now()) {
             return Asked::Core(Intent::Builtin(Builtin::Quit));
         }

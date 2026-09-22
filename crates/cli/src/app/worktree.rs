@@ -15,7 +15,7 @@ use std::process::Command;
 use anyhow::{Result, bail};
 
 /// Where worktrees live, relative to the repository root.
-pub const DIR: &str = ".worktrees";
+const DIR: &str = ".worktrees";
 
 /// One checkout of the repository.
 #[derive(Debug, Clone)]
@@ -435,7 +435,7 @@ impl App {
 }
 
 #[cfg(test)]
-pub(crate) fn test_repo() -> tempfile::TempDir {
+fn test_repo() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let at = dir.path();
     checked(at, &["init", "-q", "--initial-branch=main", "."]).unwrap();

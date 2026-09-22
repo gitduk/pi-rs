@@ -76,7 +76,7 @@ impl Panel {
     }
 
     /// What is being typed, or the focused row's own text when nothing is.
-    pub fn editing_value(&self) -> &str {
+    fn editing_value(&self) -> &str {
         match &self.editing {
             Some(e) => e.text(),
             None => self.rows.get(self.at).map_or("", |r| r.value.as_str()),

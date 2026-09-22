@@ -53,7 +53,7 @@ impl Command {
 /// A word the table lists and nothing more: a skill, whose line `step_for`
 /// expands once the door has handed it on. A word the table does not have at
 /// all lands in the same place.
-pub(crate) fn hand_on(word: &str, args: String) -> Intent {
+fn hand_on(word: &str, args: String) -> Intent {
     Intent::Other {
         word: word.to_string(),
         args,

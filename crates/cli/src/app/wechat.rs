@@ -63,7 +63,7 @@ const MARKER_RESERVE: usize = 12;
 const PIECE_INTERVAL: Duration = Duration::from_millis(500);
 
 /// What `/wechat` alone reports when the bridge is idle.
-pub const OFF_MESSAGE: &str = "wechat: off — /wechat on to connect";
+const OFF_MESSAGE: &str = "wechat: off — /wechat on to connect";
 
 // The typing indicator's shared state: the ticket cache, serialized with
 // the on/off sends by the same lock.
@@ -773,7 +773,7 @@ impl Formatter {
     }
 }
 
-pub fn format_markdown(input: &str) -> String {
+fn format_markdown(input: &str) -> String {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);

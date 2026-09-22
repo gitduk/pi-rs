@@ -11,11 +11,11 @@ use tokio::sync::mpsc::UnboundedReceiver;
 // reaches the loop as just another channel.
 // What the reader waits on when nothing has been typed. `poll` returns the
 // moment a key arrives, so it costs idle wakeups and no latency.
-pub(super) const INPUT_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+const INPUT_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 
 // How long `park` waits to be told the reader stopped. Twice the poll: one
 // just entered has that long before it looks at the flag again.
-pub(super) const PARK_WAIT: std::time::Duration =
+const PARK_WAIT: std::time::Duration =
     std::time::Duration::from_millis(INPUT_POLL.as_millis() as u64 * 2);
 
 // How often `park` looks while it waits.
@@ -145,7 +145,7 @@ pub(super) fn external_editor() -> (String, Vec<String>) {
 
 // Split rather than run whole (`code -w`), and never through a shell, which
 // would make every character in it live. The price is that quoting cannot.
-pub(super) fn split_editor(raw: &str) -> (String, Vec<String>) {
+fn split_editor(raw: &str) -> (String, Vec<String>) {
     let mut parts = raw.split_whitespace();
     let program = parts.next().unwrap_or("vi").to_string();
     (program, parts.map(str::to_string).collect())

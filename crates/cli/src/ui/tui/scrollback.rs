@@ -80,7 +80,7 @@ impl Folds {
 
     // The block that was last stops being so: it folds back to the switch.
     // A new input and a new block both push it out of last.
-    pub(super) fn retire_last(&mut self, scrollback: &mut [Row]) {
+    fn retire_last(&mut self, scrollback: &mut [Row]) {
         if let Some(row) = last_folded(scrollback) {
             row.set_folded(self.folded);
         }
@@ -149,7 +149,7 @@ impl Folds {
 }
 
 // The newest reasoning block's entry in the scrollback, if any.
-pub(super) fn last_folded(scrollback: &mut [Row]) -> Option<&mut Row> {
+fn last_folded(scrollback: &mut [Row]) -> Option<&mut Row> {
     scrollback.iter_mut().rev().find(|r| r.block().is_some())
 }
 
@@ -277,7 +277,7 @@ impl<'a> ScrollbackRows<'a> {
         }
     }
 
-    pub(super) fn next_indexed(&mut self) -> Option<(Piece<'a>, usize)> {
+    fn next_indexed(&mut self) -> Option<(Piece<'a>, usize)> {
         if self.rows.is_empty() {
             return None;
         }
@@ -303,7 +303,7 @@ impl<'a> ScrollbackRows<'a> {
         None
     }
 
-    pub(super) fn next_back_indexed(&mut self) -> Option<(Piece<'a>, usize)> {
+    fn next_back_indexed(&mut self) -> Option<(Piece<'a>, usize)> {
         if self.rows.is_empty() {
             return None;
         }

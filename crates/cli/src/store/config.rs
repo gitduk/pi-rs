@@ -505,7 +505,7 @@ impl Config {
         self.api_key.as_deref().and_then(expand_key)
     }
 
-    pub fn apply_env(&mut self) {
+    fn apply_env(&mut self) {
         self.apply_env_unclaimed(&BTreeMap::new());
     }
 
@@ -513,7 +513,7 @@ impl Config {
         self.apply_env_with(|k| std::env::var(k).ok(), claimed);
     }
 
-    pub fn apply_env_with<F>(&mut self, mut lookup: F, claimed: &BTreeMap<String, toml::Value>)
+    fn apply_env_with<F>(&mut self, mut lookup: F, claimed: &BTreeMap<String, toml::Value>)
     where
         F: FnMut(&str) -> Option<String>,
     {
@@ -657,7 +657,7 @@ pub fn global_path() -> Option<PathBuf> {
 /// treating it as a project file too would hand it privileges the global file
 /// already has by other means — and hand every directory under `$HOME` outside
 /// a repo the same file as its "project" config.
-pub fn project_path(start: &Path, home: Option<&Path>) -> Option<PathBuf> {
+fn project_path(start: &Path, home: Option<&Path>) -> Option<PathBuf> {
     for dir in start.ancestors() {
         if home == Some(dir) {
             return None;

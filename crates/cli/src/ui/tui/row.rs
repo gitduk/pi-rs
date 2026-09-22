@@ -31,7 +31,7 @@ pub struct FoldedTool {
 }
 
 impl FoldedTool {
-    pub fn desc(&self) -> String {
+    fn desc(&self) -> String {
         let head = self.preview.lines().next().unwrap_or("").trim();
         if head.is_empty() {
             self.name.clone()
@@ -61,7 +61,7 @@ impl FoldedTools {
     }
 
     /// Whether one tool is the whole row. A batch reads as a count instead.
-    pub fn is_single(&self) -> bool {
+    fn is_single(&self) -> bool {
         self.0.len() == 1
     }
 
@@ -739,7 +739,7 @@ fn clip_to(s: &str, max_cols: usize) -> &str {
     s.trim_end()
 }
 
-pub fn tools_summary_header(
+fn tools_summary_header(
     tools: &FoldedTools,
     folded: bool,
     running: bool,
@@ -786,7 +786,7 @@ pub fn tools_summary_header(
     Line::from(spans)
 }
 
-pub fn tools_summary_rows(
+fn tools_summary_rows(
     tools: &FoldedTools,
     folded: bool,
     running: bool,
