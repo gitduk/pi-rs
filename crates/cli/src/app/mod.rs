@@ -11,10 +11,10 @@ use agent::session::Session;
 
 use serde::Deserialize;
 
+use crate::app::lane::Lane;
+use crate::app::meter::Tally;
 use crate::input::commands::{Choice, Command, RESUME_WIDTH, ago, help};
 use crate::input::{Builtin, Intent, Rewound, Step, WechatCmd, lines, refused, step_for};
-use crate::run::lane::Lane;
-use crate::run::meter::Tally;
 use crate::store::config::{self, Config};
 use crate::store::icons;
 use crate::store::journal;
@@ -81,7 +81,7 @@ impl App {
     // vary — a `/worktree` moves one, a `/model` the other — and the rest
     // never does.
     fn home(&self, root: std::path::PathBuf, model: String) -> std::sync::Arc<dyn agent::Home> {
-        crate::run::subagent::Filed::armed(self.store.clone(), root, model)
+        crate::app::subagent::Filed::armed(self.store.clone(), root, model)
     }
 
     pub fn lane_mut(&mut self) -> &mut Lane {
@@ -158,7 +158,7 @@ impl App {
             task_max_turns: resolved.max_turns,
             task_deadline: resolved.task_deadline,
         });
-        crate::run::subagent::hang(ag, home, &resolved.standing);
+        crate::app::subagent::hang(ag, home, &resolved.standing);
         self.lane_mut().context = resolved.context;
         self.lane_mut().standing = resolved.standing;
         // A skill can appear between one turn and the next, so the table of
@@ -388,7 +388,7 @@ impl App {
         let standing = self.lane().standing.clone();
         let ag = std::sync::Arc::make_mut(&mut self.lane_mut().agent);
         ag.retarget(transport, spec);
-        crate::run::subagent::hang(ag, home, &standing);
+        crate::app::subagent::hang(ag, home, &standing);
     }
 
     // What `/model` on its own shows.
@@ -784,7 +784,7 @@ impl App {
     // said in that tree, not an empty page.
     fn enter_worktree(&mut self, name: &str) -> Result<Step, String> {
         let from = self.lane_mut().ctx.workspace.root().to_path_buf();
-        let tree = crate::run::worktree::enter(&from, name).map_err(|e| refused("worktree", e))?;
+        let tree = crate::app::worktree::enter(&from, name).map_err(|e| refused("worktree", e))?;
         // Built before the comparison: both sides are then canonical, and a
         // path git and the workspace spell differently is still one directory.
         let ws = tools::Workspace::new(&tree.path)
@@ -821,7 +821,7 @@ impl App {
     // passed on rather than forced past.
     fn remove_worktree(&mut self, name: &str) -> Result<Step, String> {
         let from = self.lane().ctx.workspace.root().to_path_buf();
-        if let Some(target) = crate::run::worktree::list(&from)
+        if let Some(target) = crate::app::worktree::list(&from)
             .ok()
             .and_then(|trees| trees.into_iter().find(|t| !t.main && t.name == name))
         {
@@ -837,7 +837,7 @@ impl App {
             }
         }
         let removed =
-            crate::run::worktree::remove(&from, name).map_err(|e| refused("worktree", e))?;
+            crate::app::worktree::remove(&from, name).map_err(|e| refused("worktree", e))?;
         for i in (0..self.lanes.len()).rev() {
             if i != self.current
                 && self.lanes[i]
@@ -900,12 +900,12 @@ impl App {
             task_max_turns: resolved.max_turns,
             task_deadline: resolved.task_deadline,
         });
-        crate::run::subagent::hang(&mut ag, home, &resolved.standing);
+        crate::app::subagent::hang(&mut ag, home, &resolved.standing);
 
         // Built, not cloned from the lane being left: a `Ctx`'s tables key on
         // absolute paths in one tree, and none of that lane's describe this.
         self.lanes.push(Lane {
-            token: crate::run::lane::next_token(),
+            token: crate::app::lane::next_token(),
             agent: std::sync::Arc::new(ag),
             session: Some(Session::default()),
             id: String::new(),
@@ -925,7 +925,7 @@ impl App {
             pending: Vec::new(),
             looping: None,
             pending_round: None,
-            run: crate::run::lane::Run::Idle,
+            run: crate::app::lane::Run::Idle,
         });
         self.current = self.lanes.len() - 1;
         self.in_force();
@@ -949,13 +949,13 @@ impl App {
     // one the session is in marked.
     fn worktree_listing(&self) -> Vec<String> {
         let here = self.lane().ctx.workspace.root();
-        let trees = match crate::run::worktree::list(here) {
+        let trees = match crate::app::worktree::list(here) {
             Ok(t) => t,
             Err(e) => return vec![refused("worktree", e)],
         };
         // By containment rather than equality: a run started in a subdirectory
         // is still in that checkout, and it is the one to mark.
-        let at = crate::run::worktree::holding(&trees, here).map(|t| t.path.clone());
+        let at = crate::app::worktree::holding(&trees, here).map(|t| t.path.clone());
         let width = trees
             .iter()
             .map(|t| unicode_width::UnicodeWidthStr::width(t.name.as_str()))
@@ -975,7 +975,7 @@ impl App {
             .collect();
         out.push(format!(
             "/worktree <name> works in one, creating it under {}/ if it is not there",
-            crate::run::worktree::DIR
+            crate::app::worktree::DIR
         ));
         out.push("/worktree rm <name> removes one — its checkout, sessions and branch".into());
         out
@@ -1105,8 +1105,8 @@ mod tests {
 
     // A App whose file tree is the given TOML, enough for the `/settings`
     // surface to answer.
-    fn core_with_file(file: &str) -> crate::run::App {
-        crate::run::App {
+    fn core_with_file(file: &str) -> crate::app::App {
+        crate::app::App {
             store: crate::store::session::Store::new(
                 std::env::temp_dir().join("pi-settings-get-test"),
             ),
@@ -1120,7 +1120,7 @@ mod tests {
         }
     }
 
-    fn claimed_base_url() -> crate::run::App {
+    fn claimed_base_url() -> crate::app::App {
         let mut core = core_with_file(r#"base_url = "http://127.0.0.1:7896""#);
         core.settings
             .claim("base_url", "http://127.0.0.1:7897")
@@ -1309,12 +1309,12 @@ mod tests {
     }
 
     // One lane that has spent nothing, enough for `/settings` to answer.
-    fn a_lane(name: &str) -> crate::run::lane::Lane {
+    fn a_lane(name: &str) -> crate::app::lane::Lane {
         let dir = std::env::temp_dir();
         let ws = tools::Workspace::new(&dir).expect("a workspace");
-        let (events, inbox) = crate::run::lane::Lane::channel();
-        crate::run::lane::Lane {
-            token: crate::run::lane::next_token(),
+        let (events, inbox) = crate::app::lane::Lane::channel();
+        crate::app::lane::Lane {
+            token: crate::app::lane::next_token(),
             agent: std::sync::Arc::new(agent::Agent::new(
                 std::sync::Arc::new(Recording::default()),
                 test_spec("m"),
@@ -1334,7 +1334,7 @@ mod tests {
             pending: Vec::new(),
             looping: None,
             pending_round: None,
-            run: crate::run::lane::Run::Idle,
+            run: crate::app::lane::Run::Idle,
             keys: std::sync::Arc::new(crate::store::keys::Keys::default()),
             commands: std::sync::Arc::new(Vec::new()),
         }
@@ -1391,13 +1391,13 @@ mod tests {
         root: &std::path::Path,
         transport: std::sync::Arc<Recording>,
         model: &str,
-    ) -> crate::run::App {
+    ) -> crate::app::App {
         let ws = tools::Workspace::new(root).unwrap();
         let mut agent = agent::Agent::new(transport, test_spec(model));
         let store = crate::store::session::Store::new(root.join("state"));
-        crate::run::subagent::hang(
+        crate::app::subagent::hang(
             &mut agent,
-            crate::run::subagent::Filed::armed(
+            crate::app::subagent::Filed::armed(
                 crate::store::session::Store::new(root.join("state")),
                 root.to_path_buf(),
                 model.into(),
@@ -1406,10 +1406,10 @@ mod tests {
         );
 
         let keys = std::sync::Arc::new(crate::store::keys::Keys::default());
-        let commands = std::sync::Arc::new(Vec::<crate::run::Command>::new());
-        let (events, inbox) = crate::run::lane::Lane::channel();
-        let lane = crate::run::lane::Lane {
-            token: crate::run::lane::next_token(),
+        let commands = std::sync::Arc::new(Vec::<crate::app::Command>::new());
+        let (events, inbox) = crate::app::lane::Lane::channel();
+        let lane = crate::app::lane::Lane {
+            token: crate::app::lane::next_token(),
             agent: std::sync::Arc::new(agent),
             session: Some(agent::session::Session::default()),
             id: "s1".into(),
@@ -1426,11 +1426,11 @@ mod tests {
             pending: Vec::new(),
             looping: None,
             pending_round: None,
-            run: crate::run::lane::Run::Idle,
+            run: crate::app::lane::Run::Idle,
             keys: keys.clone(),
             commands: commands.clone(),
         };
-        crate::run::App {
+        crate::app::App {
             store,
             keys,
             config: std::sync::Arc::new(crate::store::config::Config::default()),
@@ -1443,7 +1443,7 @@ mod tests {
     }
 
     // What the child asked for, once.
-    async fn run_the_child(core: &crate::run::App) {
+    async fn run_the_child(core: &crate::app::App) {
         let task = core.lane().agent.registry.get(task::Task::NAME).unwrap();
         let ctx = tools::Ctx::new(core.lane().ctx.workspace.clone());
         task.execute(
@@ -1487,7 +1487,7 @@ mod tests {
 
     #[test]
     fn remove_worktree_closes_idle_lane_in_same_run() {
-        let dir = crate::run::worktree::test_repo();
+        let dir = crate::app::worktree::test_repo();
         let transport = std::sync::Arc::new(Recording::default());
         let mut core = a_repl(dir.path(), transport, "model-a");
 
@@ -1507,7 +1507,7 @@ mod tests {
 
     #[test]
     fn remove_worktree_updates_current_index_when_earlier_lane_is_closed() {
-        let dir = crate::run::worktree::test_repo();
+        let dir = crate::app::worktree::test_repo();
         let transport = std::sync::Arc::new(Recording::default());
         let mut core = a_repl(dir.path(), transport, "model-a");
 
@@ -1525,14 +1525,14 @@ mod tests {
 
     #[test]
     fn remove_worktree_refuses_when_another_lane_is_running() {
-        let dir = crate::run::worktree::test_repo();
+        let dir = crate::app::worktree::test_repo();
         let transport = std::sync::Arc::new(Recording::default());
         let mut core = a_repl(dir.path(), transport, "model-a");
 
         core.enter_worktree("fix-tools").unwrap();
         assert_eq!(core.lanes.len(), 2);
 
-        core.lanes[1].run = crate::run::lane::Run::Running {
+        core.lanes[1].run = crate::app::lane::Run::Running {
             cancel: tokio_util::sync::CancellationToken::new(),
             steer: None,
             unsend: false,

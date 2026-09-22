@@ -18,7 +18,7 @@ use llm::message::{ToolResult, ToolResultContent};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::run::meter::Snapshot;
+use crate::app::meter::Snapshot;
 use crate::store::icons;
 use crate::store::status::Segment;
 use crate::ui::render::{self, Paint};

@@ -17,8 +17,8 @@ use tokio_util::sync::CancellationToken;
 
 use tools::Ctx;
 
-use crate::run::looping::{Looping, Round};
-use crate::run::meter::{Snapshot, Tally};
+use crate::app::looping::{Looping, Round};
+use crate::app::meter::{Snapshot, Tally};
 
 /// Where this lane's run stands.
 ///

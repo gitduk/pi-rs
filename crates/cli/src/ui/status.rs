@@ -13,7 +13,7 @@
 
 use std::time::Duration;
 
-use crate::run::meter::Snapshot;
+use crate::app::meter::Snapshot;
 use crate::store::status::Segment;
 
 pub const SPIN: Duration = Duration::from_millis(90);

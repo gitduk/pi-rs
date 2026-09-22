@@ -487,12 +487,12 @@ pub struct Renderer {
     done: Vec<crate::store::status::Segment>,
     // Read off the same events the terminal reads, so a piped run ends on the
     // line the terminal would have shown it.
-    tally: crate::run::meter::Tally,
+    tally: crate::app::meter::Tally,
     model: String,
     /// What the model costs, so this surface prices the events it reads the
     /// same way the terminal's does — and so a model switched between runs
     /// prices the next one at its own rates.
-    rates: crate::run::meter::Rates,
+    rates: crate::app::meter::Rates,
     // The worktree this run is working in, for the segment that names it.
     worktree: Option<String>,
     thinking: bool,
@@ -508,14 +508,14 @@ impl Renderer {
         theme: Arc<Theme>,
         done: Vec<crate::store::status::Segment>,
         model: String,
-        rates: crate::run::meter::Rates,
+        rates: crate::app::meter::Rates,
         worktree: Option<String>,
     ) -> Self {
         Self {
             paint: Paint::with_theme(std::io::stderr().is_terminal(), theme),
             quiet,
             done,
-            tally: crate::run::meter::Tally::default(),
+            tally: crate::app::meter::Tally::default(),
             model,
             rates,
             worktree,
@@ -660,7 +660,7 @@ mod tests {
             std::sync::Arc::new(super::Theme::default()),
             crate::store::status::default_done(),
             String::new(),
-            crate::run::meter::Rates::default(),
+            crate::app::meter::Rates::default(),
             None,
         );
         r.on(agent::Event::TextDelta("There".into()));

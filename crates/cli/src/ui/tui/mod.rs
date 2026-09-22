@@ -24,12 +24,12 @@ use llm::message::{AssistantContent, ReasoningContent};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
+use crate::app::lane::{Lane, Run};
+use crate::app::looping::Round;
+use crate::app::meter::Snapshot;
+use crate::app::{self, App};
 use crate::input::commands::{Candidate, Choice, Command};
 use crate::input::{self, Builtin, Fate, Intent, Rewound, Step};
-use crate::run::lane::{Lane, Run};
-use crate::run::looping::Round;
-use crate::run::meter::Snapshot;
-use crate::run::{self, App};
 use crate::store::icons;
 use crate::store::keys::{Action, Keys, Layers, Menu, Mode, Press};
 use crate::store::session::{ResumeChoice, Store};
@@ -110,7 +110,7 @@ impl Lists {
     // there.
     fn worktrees(&self) -> &[Choice] {
         self.worktrees.get_or_init(|| {
-            run::worktree::list(&self.workspace)
+            app::worktree::list(&self.workspace)
                 .map(|trees| {
                     trees
                         .into_iter()
@@ -681,7 +681,7 @@ fn f_entry(entry: &LogEntry, paint: &Paint) -> Option<Vec<Row>> {
         LogEntry::Ask { ask, .. } => Some(Row::prompt(ask.shown_text(), paint)),
         LogEntry::Bash { run, .. } => {
             let mut rows = Row::prompt(run.shown_text(), paint);
-            rows.extend(run::bash::bash_said(&run.text).into_iter().map(Row::notice));
+            rows.extend(app::bash::bash_said(&run.text).into_iter().map(Row::notice));
             Some(rows)
         }
         // Machine prose, not the user's line: rebuilt in the muted voice of
@@ -1698,7 +1698,7 @@ impl Ui {
     // checkout, `!forward` its previous. The ring walks the checkouts in
     // the order the bar shows them — the ones already open, in the order
     // they were opened — and puts the ones not open yet after them, in the
-    // order `run::worktree::list` reports. `Builtin::Worktree` opens one that is
+    // order `app::worktree::list` reports. `Builtin::Worktree` opens one that is
     // not, which is the same thing the picker did when you chose an unopened
     // row.
     //
@@ -2660,7 +2660,7 @@ pub struct Tui {
     events: UnboundedReceiver<TermEvent>,
     // Stops the reader while a child holds the terminal.
     hold: Hold,
-    bridge: run::wechat::Bridge,
+    bridge: app::wechat::Bridge,
 }
 
 type Views = std::collections::BTreeMap<u64, View>;
@@ -2885,7 +2885,7 @@ fn drop_shared_history() {
 const HISTORY_KEEP: usize = 1_000;
 
 impl Tui {
-    pub fn new(mut core: App, keys: Arc<Keys>, bridge: run::wechat::Bridge) -> Result<Self> {
+    pub fn new(mut core: App, keys: Arc<Keys>, bridge: app::wechat::Bridge) -> Result<Self> {
         let paint = Paint::with_theme(true, Arc::new(core.config.theme.clone()));
         let mut ui = Ui::new(
             Screen::new()?,
@@ -2948,7 +2948,7 @@ impl Tui {
             ui,
             events: rx,
             hold: Hold::default(),
-            bridge: run::wechat::Bridge::new(),
+            bridge: app::wechat::Bridge::new(),
         }
     }
 
@@ -3408,12 +3408,12 @@ impl Tui {
                         // The phone types at the lane in front, like a hand,
                         // and its `/stop` is esc. Same intents, same gate, so
                         // they cannot drift apart.
-                        Some(run::wechat::Inbound::Text { text }) => {
+                        Some(app::wechat::Inbound::Text { text }) => {
                             self.echo_sent(&text);
                             self.admit(Asked::Core(input::read(&text, &self.core.commands)))
                         }
-                        Some(run::wechat::Inbound::Stop) => self.admit(Asked::Own(Deed::Interrupt)),
-                        Some(run::wechat::Inbound::Notice(text)) => {
+                        Some(app::wechat::Inbound::Stop) => self.admit(Asked::Own(Deed::Interrupt)),
+                        Some(app::wechat::Inbound::Notice(text)) => {
                             self.ui.say(front_view(&mut self.views, self.core.lane()), text);
                             Wake::Nothing
                         }
@@ -3899,7 +3899,7 @@ impl Tui {
         let done = done.clone();
         tokio::spawn(async move {
             let out = guard(async move {
-                let out = run::bash::run_bash(&ctx, &command).await;
+                let out = app::bash::run_bash(&ctx, &command).await;
                 // Esc that stopped the `!` is a cancelled run too; `ran` says
                 // so instead of a success that spent nothing.
                 let ran = if ctx.cancel.is_cancelled() {
@@ -3908,7 +3908,7 @@ impl Tui {
                     Ok(llm::stream::Usage::default())
                 };
                 let tail = carried.entries().last().map(|e| e.id());
-                run::bash::record_bash(&mut carried, &command, out.text.clone());
+                app::bash::record_bash(&mut carried, &command, out.text.clone());
                 (carried, ran, out.screen(), tail)
             })
             .await;
@@ -4209,12 +4209,12 @@ mod tests {
         Asked, Deed, Folds, Intent, Panel, Row, ScrollbackRows, Target, View, absorb_growth,
         scrollback_from, view_at,
     };
+    use crate::app::App;
+    use crate::app::lane::{Lane, Run};
+    use crate::app::looping::Round;
     use crate::input::Builtin;
     use crate::input::Fate;
     use crate::input::commands::{Choice, Command, Source};
-    use crate::run::App;
-    use crate::run::lane::{Lane, Run};
-    use crate::run::looping::Round;
     use crate::store::icons;
     use crate::store::keys::{Keys, Mode};
     use crate::store::session::Store;
@@ -4861,7 +4861,7 @@ mod tests {
         let (events, inbox) = Lane::channel();
         Lane {
             agent: std::sync::Arc::new(agent::Agent::new(std::sync::Arc::new(Mute), spec)),
-            token: crate::run::lane::next_token(),
+            token: crate::app::lane::next_token(),
             session: None,
             id: "s1".into(),
             created: 0,
@@ -5228,7 +5228,7 @@ mod tests {
     }
     // The Normal `L` walks the checkouts in a ring forward; `H` walks it
     // back. Every checkout on disk is in it, not only the open ones
-    // — the main one first, because that is the order `run::worktree::list`
+    // — the main one first, because that is the order `app::worktree::list`
     // reports and a lane in it carries no name.
     #[test]
     fn stepping_the_checkouts_walks_the_ring_and_wraps_both_ways() {

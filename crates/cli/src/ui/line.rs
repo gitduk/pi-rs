@@ -12,9 +12,9 @@ use anyhow::Result;
 use llm::stream::Usage;
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::app::App;
+use crate::app::meter::Rates;
 use crate::input::Step;
-use crate::run::App;
-use crate::run::meter::Rates;
 
 pub async fn run(mut core: App, tx: UnboundedSender<Event>, rates: Rates) -> Result<()> {
     let mut buffer = String::new();
@@ -59,9 +59,9 @@ pub async fn run(mut core: App, tx: UnboundedSender<Event>, rates: Rates) -> Res
                     .ctx
                     .clone()
                     .with_cancel(agent::cancel_on_interrupt());
-                let out = crate::run::bash::run_bash(&ctx, &command).await;
+                let out = crate::app::bash::run_bash(&ctx, &command).await;
                 if let Some(session) = core.lane_mut().session.as_mut() {
-                    crate::run::bash::record_bash(session, &command, out.text.clone());
+                    crate::app::bash::record_bash(session, &command, out.text.clone());
                 }
                 if let Err(e) = core.save() {
                     eprintln!("warning: the transcript was not saved: {e}");

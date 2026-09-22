@@ -9,17 +9,17 @@ use llm::request::Effort;
 use llm::transport::{Transport, anthropic::Anthropic, chat::ChatCompletions, openai::OpenAi};
 use tokio::sync::mpsc;
 
+use crate::app::{App, lane, subagent, wechat, worktree};
 use crate::input::commands::{Command, commands};
 use crate::input::expand;
-use crate::run::{App, lane, subagent, wechat, worktree};
 use crate::store::icons;
 use crate::store::settings::Settings;
 use crate::store::{config, journal, session};
 use crate::ui::{line, render, tui};
 use agent::context;
 
+mod app;
 mod input;
-mod run;
 mod store;
 mod ui;
 
@@ -469,7 +469,7 @@ fn paint(
     theme: std::sync::Arc<crate::store::theme::Theme>,
     done: Vec<crate::store::status::Segment>,
     model: String,
-    rates: crate::run::meter::Rates,
+    rates: crate::app::meter::Rates,
     worktree: Option<String>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -559,7 +559,7 @@ async fn main() -> Result<()> {
     // pause `Lists` exists to avoid.
     let worktree = worktree::current(&root);
     let model_id = dialled.spec.model.clone();
-    let rates = crate::run::meter::Rates::new(dialled.spec.pricing);
+    let rates = crate::app::meter::Rates::new(dialled.spec.pricing);
 
     let mut ag = agent::Agent::new(dialled.transport, dialled.spec);
     // Resolved here rather than lazily: a name that does not exist should be a
