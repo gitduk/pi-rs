@@ -81,8 +81,8 @@ impl App {
             system: std::mem::take(&mut resolved.system),
             tier: resolved.tier,
             effort: resolved.effort,
-            task_max_turns: resolved.max_turns,
-            task_deadline: resolved.task_deadline,
+            subagent_max_turns: resolved.max_turns,
+            subagent_deadline: resolved.subagent_deadline,
         });
         crate::app::subagent::hang(ag, home, &resolved.standing);
         self.lane_mut().context = resolved.context;
@@ -237,7 +237,7 @@ impl App {
     }
     // Point this lane at a new endpoint, and rebuild the subagent behind it.
     //
-    // `Task` holds a snapshot of the agent it was built from, so a retarget
+    // `Subagent` holds a snapshot of the agent it was built from, so a retarget
     // that stopped at the lane would leave the child on the old provider —
     // with the old key — while the status line named the new model.
     pub(super) fn retarget(

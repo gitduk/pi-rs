@@ -303,7 +303,7 @@ and refusing it to catch a typo is the worse trade.
 
 ## What it does
 
-**Tools.** `read` `write` `edit` `glob` `grep` `bash` `fetch` `skill` `task`.
+**Tools.** `read` `write` `edit` `glob` `grep` `bash` `fetch` `skill` `subagent`.
 Each declares a tier and `--tier` caps the run. `read`, `write` and `exec` are a
 ladder, each reaching further into this machine than the last; `net` sits beside
 them rather than above, because the outside world is a different direction —
@@ -374,7 +374,7 @@ other.
 |---|---|---|
 | `scripts` | 0.3k | user-defined tools: a script in a directory is a tool |
 | `skills` | 0.5k | skills: instructions a run can load on demand |
-| `task` | 0.5k | the subagent: a whole agent loop behind one tool call |
+| `subagent` | 0.5k | the subagent: a whole agent loop behind one tool call |
 | `llm` | 2.7k | messages, wires, streams, faults, estimates |
 | `agent` | 3.9k | the turn loop, compaction, the session |
 | `tools` | 5.0k | the tool set, the tiered workspace gate, and the tree-sitter outlines an edit anchors on |

@@ -62,13 +62,13 @@ tier   = "exec"                  # read | write | exec
 # a loop ends on its own when a round changes nothing, when a round undoes the
 # last one, or when rounds only nibble; this is the floor for a loop that keeps
 # changing files forever. Esc is always the brake.
-loop_max_turns = 10
+loop_max_rounds = 10
 
-# Cap the run at this many turns. Unset is unlimited.
+# Cap a subagent at this many turns. Unset is 50.
 # max_turns = 50
 
-# Default maximum turns for subagent tasks. Unset is 50.
-# task_max_turns = 50
+# Seconds a subagent may run silent before it is read as wedged. Unset is 1800.
+# subagent_deadline = 1800
 
 # How many times to retry a request the provider could not serve, and how many
 # seconds of silence before a stream counts as wedged. The second is generous

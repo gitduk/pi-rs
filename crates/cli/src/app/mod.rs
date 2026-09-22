@@ -474,14 +474,20 @@ mod tests {
 
     // What the child asked for, once.
     async fn run_the_child(core: &crate::app::App) {
-        let task = core.lane().agent.registry.get(task::Task::NAME).unwrap();
+        let subagent = core
+            .lane()
+            .agent
+            .registry
+            .get(subagent::Subagent::NAME)
+            .unwrap();
         let ctx = tools::Ctx::new(core.lane().ctx.workspace.clone());
-        task.execute(
-            serde_json::json!({ "description": "go", "prompt": "go" }),
-            &ctx,
-        )
-        .await
-        .unwrap();
+        subagent
+            .execute(
+                serde_json::json!({ "description": "go", "prompt": "go" }),
+                &ctx,
+            )
+            .await
+            .unwrap();
     }
 
     // `/model` retargets the lane's agent and rebuilds the subagent behind

@@ -389,7 +389,7 @@ struct JournalLayer {
 // level, which is precisely the kind of bug this file exists to catch.
 fn ours(level: LevelFilter) -> Targets {
     const MINE: [&str; 8] = [
-        "pi", "agent", "llm", "tools", "task", "scripts", "skills", "wechat",
+        "pi", "agent", "llm", "tools", "subagent", "scripts", "skills", "wechat",
     ];
     let theirs = if level == LevelFilter::TRACE {
         level
@@ -420,7 +420,7 @@ impl JournalLayer {
 }
 
 // The span path a record sits under, outermost first, with the session of
-// each run's own span in brackets: `turn[p]>tool>task[c]>turn[c]>tool`.
+// each run's own span in brackets: `turn[p]>tool>subagent[c]>turn[c]>tool`.
 // Parallel subagents share every span name; the bracketed id is what files
 // a record under the run that made it.
 fn path_of<S>(span: &tracing_subscriber::registry::SpanRef<'_, S>) -> String
@@ -792,24 +792,24 @@ mod tests {
 
     #[test]
     fn records_are_filed_under_the_run_that_made_them() {
-        // One parent turn calling three subagents, the span shape `task.rs`
+        // One parent turn calling three subagents, the span shape `subagent.rs`
         // makes. All three share every span name; the session is the id.
 
         let out = recorded(LogLevel::Info, || {
             let parent = tracing::info_span!(target: "pi::t", "turn", turn = 1, session = "p-1");
             let _parent = parent.enter();
             tracing::info!(target: "pi::t", "the parent's own record");
-            let tool = tracing::info_span!(target: "pi::t", "tool", name = "task", call = "c0");
+            let tool = tracing::info_span!(target: "pi::t", "tool", name = "subagent", call = "c0");
             let _tool = tool.enter();
             for n in 0..3 {
-                let id = format!("p-1-task-{n}");
-                let task = tracing::info_span!(target: "pi::t", "task", session = %id);
-                let _task = task.enter();
+                let id = format!("p-1-subagent-{n}");
+                let subagent = tracing::info_span!(target: "pi::t", "subagent", session = %id);
+                let _subagent = subagent.enter();
                 let turn = tracing::info_span!(target: "pi::t", "turn", turn = 1, session = %id);
                 let _turn = turn.enter();
                 tracing::info!(target: "pi::t", tool = "bash", "a subagent's record");
                 drop(_turn);
-                drop(_task);
+                drop(_subagent);
             }
             drop(_tool);
             drop(_parent);
@@ -821,13 +821,13 @@ mod tests {
         // Each child leaves three records, and every one carries its id in
         // the body and in the path that files it.
         for n in 0..3 {
-            let id = format!("p-1-task-{n}");
+            let id = format!("p-1-subagent-{n}");
             let recs = by_session(&id);
             assert_eq!(recs.len(), 3, "child {n} keeps its three records: {out:?}");
             for r in recs {
                 let path = r["in"].as_str().unwrap();
                 assert!(
-                    path.contains(&format!("task[{id}]")),
+                    path.contains(&format!("subagent[{id}]")),
                     "child {n} is filed under its own span: {path}"
                 );
             }
@@ -838,7 +838,7 @@ mod tests {
         assert_eq!(recs.len(), 3, "the parent keeps its own three: {out:?}");
         for r in recs {
             let path = r["in"].as_str().unwrap();
-            assert!(!path.contains("task-"), "the parent's records: {path}");
+            assert!(!path.contains("subagent-"), "the parent's records: {path}");
         }
     }
 

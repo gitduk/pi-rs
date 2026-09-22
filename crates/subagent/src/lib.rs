@@ -11,7 +11,7 @@ use agent::session::Session;
 use agent::{Agent, AgentError, Event, Home};
 use tracing::Instrument as _;
 
-const PROMPT: &str = include_str!("../prompts/task.md");
+const PROMPT: &str = include_str!("../prompts/subagent.md");
 
 // Ids only have to be distinct inside one process; the parent's own namespace
 // makes them distinct across runs.
@@ -20,7 +20,7 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 #[derive(serde::Deserialize)]
 struct Args {
     // Never read by the child — this is the caller's word to the screen and
-    // the journal, which otherwise show a delegated job as a bare `task`.
+    // the journal, which otherwise show a delegated job as a bare `subagent`.
     description: String,
     prompt: String,
     // Run after the child stops, in the same checkout. Never seen by the
@@ -61,9 +61,9 @@ enum Outcome {
 /// The caller sees a tool that takes prose and answers with prose. What happens
 /// in between is a second agent with a window of its own — which is the point:
 /// a long search costs the caller one paragraph instead of forty turns.
-pub struct Task {
-    // Cloned for each call and thrown away after. Its registry has no `task`
-    // of its own, so this does not nest.
+pub struct Subagent {
+    // Cloned for each call and thrown away after. Its registry has no
+    // `subagent` of its own, so this does not nest.
     agent: Arc<Agent>,
     home: Arc<dyn Home>,
     // Two limits, because they stop different things: turns stop a loop that
@@ -72,11 +72,11 @@ pub struct Task {
     deadline: Duration,
 }
 
-impl Task {
-    pub const NAME: &'static str = "task";
+impl Subagent {
+    pub const NAME: &'static str = "subagent";
 
     /// Build the subagent from the one that will call it: same transport, same
-    /// model, its own prompt, and no `task` in its registry.
+    /// model, its own prompt, and no `subagent` in its registry.
     ///
     /// `standing` is what the checkout says — the workspace anchor and the
     /// instruction files. It travels with the tree, not with the caller, and
@@ -88,9 +88,9 @@ impl Task {
         Self {
             agent: Arc::new(agent),
             home,
-            max_turns: parent.task_max_turns.unwrap_or(DEFAULT_MAX_TURNS),
+            max_turns: parent.subagent_max_turns.unwrap_or(DEFAULT_MAX_TURNS),
             deadline: parent
-                .task_deadline
+                .subagent_deadline
                 .unwrap_or_else(|| Duration::from_secs(1800)),
         }
     }
@@ -114,7 +114,7 @@ struct Heard {
 }
 
 #[async_trait]
-impl Tool for Task {
+impl Tool for Subagent {
     fn name(&self) -> &str {
         Self::NAME
     }
@@ -179,10 +179,11 @@ impl Tool for Task {
     }
 
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
-        let args: Args = tools::parse_args_hinted(args, "task takes `description` and `prompt`")?;
+        let args: Args =
+            tools::parse_args_hinted(args, "subagent takes `description` and `prompt`")?;
 
         let id = format!(
-            "{}-task-{}",
+            "{}-subagent-{}",
             ctx.spill_namespace(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         );
@@ -250,8 +251,8 @@ impl Tool for Task {
         // One span for the whole child, so the journal can file its records
         // under it rather than lose them among its siblings'.
         let child_span = tracing::info_span!(
-            target: "pi::task",
-            "task",
+            target: "pi::subagent",
+            "subagent",
             session = %child.spill_namespace(),
             description = %args.description,
         );
@@ -286,7 +287,7 @@ impl Tool for Task {
             // nothing more was sent.
             Err(why) if why.is_cancelled() => Heard::default(),
             Err(why) => {
-                tracing::error!(target: "pi::task", error = %why, "the accounting collector panicked");
+                tracing::error!(target: "pi::subagent", error = %why, "the accounting collector panicked");
                 lost = true;
                 Heard::default()
             }
@@ -322,7 +323,7 @@ impl Tool for Task {
                 } else {
                     String::new()
                 };
-                return Err(ToolError::Invalid(format!("task: {why}{uncounted}")));
+                return Err(ToolError::Invalid(format!("subagent: {why}{uncounted}")));
             }
         };
 
@@ -433,7 +434,7 @@ fn answer(
     }
     if lost {
         notes.push(
-            "[token accounting lost — the collector crashed, this subtask's spend is not counted]"
+            "[token accounting lost — the collector crashed, this subagent's spend is not counted]"
                 .to_string(),
         );
     }

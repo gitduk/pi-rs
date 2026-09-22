@@ -157,7 +157,7 @@ pub struct Args {
     #[arg(long, value_enum)]
     effort: Option<EffortArg>,
 
-    /// Cap subagent tasks at this many turns; the default is 50.
+    /// Cap a subagent at this many turns; the default is 50.
     #[arg(long)]
     max_turns: Option<usize>,
 
@@ -320,7 +320,7 @@ pub struct Resolved {
     pub tier: tools::Tier,
     pub effort: Effort,
     pub max_turns: Option<usize>,
-    pub task_deadline: Option<std::time::Duration>,
+    pub subagent_deadline: Option<std::time::Duration>,
     pub keys: crate::store::keys::Keys,
     /// The built-ins plus one command per skill. Here rather than in the App
     /// because a skill discovered at reload has to reach the prompt the same
@@ -451,8 +451,8 @@ pub fn resolve(
         tier,
         effort,
         max_turns: settled.max_turns,
-        task_deadline: config
-            .task_deadline
+        subagent_deadline: config
+            .subagent_deadline
             .map(|s| std::time::Duration::from_secs(s.max(1))),
         keys: config.key_map()?,
         commands,
@@ -583,8 +583,8 @@ async fn main() -> Result<()> {
         system: std::mem::take(&mut resolved.system),
         tier: resolved.tier,
         effort: resolved.effort,
-        task_max_turns: resolved.max_turns,
-        task_deadline: resolved.task_deadline,
+        subagent_max_turns: resolved.max_turns,
+        subagent_deadline: resolved.subagent_deadline,
     });
     subagent::hang(
         &mut ag,

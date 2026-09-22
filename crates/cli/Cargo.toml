@@ -14,7 +14,7 @@ path = "src/main.rs"
 [dependencies]
 futures = { workspace = true }
 agent.workspace = true
-task.workspace = true
+subagent.workspace = true
 scripts.workspace = true
 skills.workspace = true
 llm.workspace = true

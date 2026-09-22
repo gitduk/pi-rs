@@ -225,7 +225,7 @@ mod tests {
         // Parent and child reach the same root; the session only picks the
         // directory the spill is filed under.
         let child = Ctx::new(ws.clone())
-            .with_session("p-1-task-0")
+            .with_session("p-1-subagent-0")
             .with_spill_root(root.clone());
         let parent = Ctx::new(ws).with_session("p-1").with_spill_root(root);
 

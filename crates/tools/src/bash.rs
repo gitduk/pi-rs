@@ -126,7 +126,7 @@ pub struct Ran {
 /// SIGTERM-then-SIGKILL timeout capped at [`MAX_TIMEOUT_MS`], and the
 /// context's cancellation.
 ///
-/// Public because `task` runs a caller's check through it: a second
+/// Public because `subagent` runs a caller's check through it: a second
 /// implementation would be a second set of those clamps to keep right, and the
 /// one that drifts is the one nothing is watching.
 pub async fn run(

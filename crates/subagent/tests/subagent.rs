@@ -14,7 +14,7 @@ use common::spec;
 
 use agent::session::Session;
 use agent::{Agent, Home};
-use task::Task;
+use subagent::Subagent;
 use tools::{Ctx, FileLocks, Registry, Tier, Tool, ToolError, ToolOutput, Viewed, Workspace};
 
 struct Scripted {
@@ -205,9 +205,9 @@ fn rigged(
             seen: seen.clone(),
             trip: esc.then(|| ctx.cancel.clone()),
         });
-    parent.task_max_turns = Some(max_turns);
-    let task = Task::new(&parent, kept.clone(), STANDING).with_deadline(deadline);
-    parent.registry = parent.registry.clone().with(task);
+    parent.subagent_max_turns = Some(max_turns);
+    let subagent = Subagent::new(&parent, kept.clone(), STANDING).with_deadline(deadline);
+    parent.registry = parent.registry.clone().with(subagent);
     (dir, parent, ctx, seen, kept)
 }
 
@@ -227,7 +227,7 @@ async fn the_child_answers_into_the_parents_transcript() {
     let (_dir, agent, ctx, seen, kept) = harness(vec![
         call_turn(
             "c1",
-            "task",
+            "subagent",
             r#"{"description":"count the files","prompt":"count the files"}"#,
         ),
         call_turn("c2", "probe", "{}"),
@@ -255,7 +255,7 @@ async fn the_child_answers_into_the_parents_transcript() {
     );
     let ns = seen.namespace.lock().unwrap().clone().unwrap();
     assert!(
-        ns.contains("task"),
+        ns.contains("subagent"),
         "the child files under its own name: {ns}"
     );
     assert_ne!(ns, ctx.spill_namespace(), "and not the parent's");
@@ -264,7 +264,11 @@ async fn the_child_answers_into_the_parents_transcript() {
 #[tokio::test]
 async fn the_child_shares_the_tree_and_its_bookkeeping() {
     let (_dir, agent, ctx, seen, _kept) = harness(vec![
-        call_turn("c1", "task", r#"{"description":"look","prompt":"look"}"#),
+        call_turn(
+            "c1",
+            "subagent",
+            r#"{"description":"look","prompt":"look"}"#,
+        ),
         call_turn("c2", "probe", "{}"),
         text_turn("looked"),
         text_turn("done"),
@@ -294,13 +298,13 @@ async fn the_child_cannot_send_out_a_child_of_its_own() {
     let (_dir, agent, ctx, _seen, kept) = harness(vec![
         call_turn(
             "c1",
-            "task",
+            "subagent",
             r#"{"description":"delegate this","prompt":"delegate this"}"#,
         ),
         // The child tries to do the same thing to someone else.
         call_turn(
             "c2",
-            "task",
+            "subagent",
             r#"{"description":"no you","prompt":"no you"}"#,
         ),
         text_turn("could not"),
@@ -314,7 +318,7 @@ async fn the_child_cannot_send_out_a_child_of_its_own() {
     assert_eq!(sessions.len(), 1, "one child, and it spawned none");
     assert!(
         sessions[0].1.contains("no tool named"),
-        "the child was refused its own `task`: {}",
+        "the child was refused its own `subagent`: {}",
         sessions[0].1
     );
 }
@@ -332,7 +336,7 @@ async fn a_child_cut_off_by_a_limit_answers_rather_than_fails() {
             vec![
                 call_turn(
                     "c1",
-                    "task",
+                    "subagent",
                     r#"{"description":"go round","prompt":"go round"}"#,
                 ),
                 call_turn("c2", "sleeper", "{}"),
@@ -344,7 +348,11 @@ async fn a_child_cut_off_by_a_limit_answers_rather_than_fails() {
         (
             "the turn cap",
             vec![
-                call_turn("c1", "task", r#"{"description":"capped","prompt":"go"}"#),
+                call_turn(
+                    "c1",
+                    "subagent",
+                    r#"{"description":"capped","prompt":"go"}"#,
+                ),
                 call_turn(
                     "c2",
                     "write",
@@ -379,7 +387,7 @@ async fn a_child_cut_off_by_a_limit_answers_rather_than_fails() {
 async fn a_child_that_keeps_talking_outlives_the_deadline() {
     let mut turns = vec![call_turn(
         "c1",
-        "task",
+        "subagent",
         r#"{"description":"chatty","prompt":"keep going"}"#,
     )];
     for n in 0..24 {
@@ -402,7 +410,7 @@ async fn a_child_that_keeps_talking_outlives_the_deadline() {
 }
 
 #[test]
-fn the_task_schema_no_longer_offers_a_turn_cap() {
+fn the_subagent_schema_no_longer_offers_a_turn_cap() {
     let parent = Agent::new(
         Arc::new(Scripted {
             turns: vec![],
@@ -411,7 +419,7 @@ fn the_task_schema_no_longer_offers_a_turn_cap() {
         }),
         spec(),
     );
-    let schema = Task::new(&parent, Arc::new(Kept::default()), STANDING).schema();
+    let schema = Subagent::new(&parent, Arc::new(Kept::default()), STANDING).schema();
     // The ceiling is the user's word: the schema the caller model reads no
     // longer offers it a cap of its own to set.
     assert!(
@@ -428,7 +436,7 @@ async fn esc_reaches_through_the_child_and_ends_the_callers_turn() {
         vec![
             call_turn(
                 "c1",
-                "task",
+                "subagent",
                 r#"{"description":"long one","prompt":"long one"}"#,
             ),
             call_turn("c2", "probe", "{}"),
@@ -455,7 +463,7 @@ async fn esc_reaches_through_the_child_and_ends_the_callers_turn() {
 async fn the_child_gets_no_tool_the_parent_was_denied() {
     // The parent is built with `probe` only. The child is cloned from that,
     // so whatever the parent does not hold cannot be reached by delegating —
-    // which would otherwise make `task` a way around the parent's own limits.
+    // which would otherwise make `subagent` a way around the parent's own limits.
     // `write` is a real builtin: a child that fell back to the default
     // registry would resolve it (and fail on its missing arguments), which
     // is exactly what this assertion must never see.
@@ -468,7 +476,7 @@ async fn the_child_gets_no_tool_the_parent_was_denied() {
             turns: vec![
                 call_turn(
                     "c1",
-                    "task",
+                    "subagent",
                     r#"{"description":"try it","prompt":"try it"}"#,
                 ),
                 call_turn("c2", "write", "{}"),
@@ -487,7 +495,7 @@ async fn the_child_gets_no_tool_the_parent_was_denied() {
     parent.registry = parent
         .registry
         .clone()
-        .with(Task::new(&parent, kept.clone(), STANDING));
+        .with(Subagent::new(&parent, kept.clone(), STANDING));
 
     let _ = drive(&parent, &Ctx::new(ws), "go").await;
 
@@ -508,7 +516,7 @@ async fn the_child_is_told_what_the_checkout_says() {
     let mut parent = Agent::new(
         Arc::new(Scripted {
             turns: vec![
-                call_turn("c1", "task", r#"{"description":"go","prompt":"go"}"#),
+                call_turn("c1", "subagent", r#"{"description":"go","prompt":"go"}"#),
                 text_turn("done"),
                 text_turn("the subagent is done"),
             ],
@@ -521,7 +529,7 @@ async fn the_child_is_told_what_the_checkout_says() {
     parent.registry = parent
         .registry
         .clone()
-        .with(Task::new(&parent, kept.clone(), STANDING));
+        .with(Subagent::new(&parent, kept.clone(), STANDING));
 
     let _ = drive(&parent, &Ctx::new(ws), "go").await;
 
@@ -554,7 +562,7 @@ async fn what_the_child_wrote_comes_back_beside_what_it_says() {
         ),
         call_turn(
             "c1",
-            "task",
+            "subagent",
             r#"{"description":"add one","prompt":"add one"}"#,
         ),
         call_turn(
@@ -591,9 +599,9 @@ async fn a_child_that_ran_out_of_time_is_still_checked() {
         std::time::Duration::from_millis(50),
         false,
     );
-    let task =
-        Task::new(&parent, kept, STANDING).with_deadline(std::time::Duration::from_millis(50));
-    let out = task
+    let subagent =
+        Subagent::new(&parent, kept, STANDING).with_deadline(std::time::Duration::from_millis(50));
+    let out = subagent
         .execute(
             json!({ "description": "go", "prompt": "go", "verify": "true" }),
             &ctx,
@@ -618,7 +626,7 @@ fn two_call_turn(a: (&str, &str), b: (&str, &str)) -> Vec<StreamEvent> {
                 index: i,
                 kind: BlockKind::ToolCall {
                     id: Some(id.into()),
-                    name: "task".into(),
+                    name: "subagent".into(),
                 },
             },
             StreamEvent::ToolArgsDelta {
@@ -640,7 +648,7 @@ fn two_call_turn(a: (&str, &str), b: (&str, &str)) -> Vec<StreamEvent> {
     events
 }
 
-// A turn that names two tasks runs two children. Everything above this is
+// A turn that names two subagents runs two children. Everything above this is
 // written per call and every check in it is positional, so a fold that kept
 // only the first block would read as the model having asked for one job.
 #[tokio::test]

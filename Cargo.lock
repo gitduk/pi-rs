@@ -1720,7 +1720,7 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "skills",
- "task",
+ "subagent",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -2566,6 +2566,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "subagent"
+version = "1.23.4"
+dependencies = [
+ "agent",
+ "async-trait",
+ "futures",
+ "llm",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tools",
+ "tracing",
+]
+
+[[package]]
 name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2643,23 +2660,6 @@ dependencies = [
  "thiserror 2.0.20",
  "walkdir",
  "yaml-rust",
-]
-
-[[package]]
-name = "task"
-version = "1.23.4"
-dependencies = [
- "agent",
- "async-trait",
- "futures",
- "llm",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-util",
- "tools",
- "tracing",
 ]
 
 [[package]]

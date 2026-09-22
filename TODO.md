@@ -26,13 +26,13 @@
   - 测试 `crates/tools/tests/skill.rs` → `crates/skills/tests/skills.rs`（`tools/tests/common` 跨 crate 用不了，需自带一个小 `ctx()`；里面一处 `SkillTool::new` 同步改名）。
 
   验证：`cargo build`、`cargo test`、`cargo clippy --all-targets`（预期静默）、提交前 `cargo fmt`。
-  无环：`tools::Registry::builtin()` 本来就不含 skill 工具（注释已说明「`task` 和 `skill` 由能构造它们的一方事后挂上」），所以 `skills → tools` 单向，`tools` 永不反向依赖 `skills`。
+  无环：`tools::Registry::builtin()` 本来就不含 skill 工具（注释已说明「`subagent` 和 `skill` 由能构造它们的一方事后挂上」），所以 `skills → tools` 单向，`tools` 永不反向依赖 `skills`。
 
-  顺带改名：**`SkillTool` → `Load`**。理由：全库 `impl Tool for` 的类型名都是裸名动作（`Read`/`Write`/`Edit`/`Grep`/`Glob`/`Bash`/`Fetch`/`Judge`/`Task`），带 `Tool` 后缀的只有 `SkillTool` 和 `ScriptTool`；而且搬进 `crates/skills` 后会读成 `skills::SkillTool`。
+  顺带改名：**`SkillTool` → `Load`**。理由：全库 `impl Tool for` 的类型名都是裸名动作（`Read`/`Write`/`Edit`/`Grep`/`Glob`/`Bash`/`Fetch`/`Judge`/`Subagent`），带 `Tool` 后缀的只有 `SkillTool` 和 `ScriptTool`；而且搬进 `crates/skills` 后会读成 `skills::SkillTool`。
   `Load` 合这个模式，也正是工具描述的首句「Load a skill's instructions and follow them.」（**已改**；wire name 仍是 `skill`，实测 `Load::name()` 返回 `NAME`，`compact.rs` 的 `PROTECTED` 对得上）。wire name 保持 `skill` 不变（它在 `compact.rs` 的 `PROTECTED` 白名单里，不跟 struct 名挂钩——`ScriptTool::name()` 也是返回脚本自己的名字）。
   改动面：仅定义（`skill.rs:24`）、`main.rs:370`、`tests/skill.rs:29` 三处。
 
-- [x] **`Task`（子代理）从 `agent` 拆成 `crates/task`**（**已做**）。细节见下面「工具实现按域分家」。
+- [x] **`Subagent`（子代理）从 `agent` 拆成 `crates/subagent`**（**已做**）。细节见下面「工具实现按域分家」。
 
 - [x] **`ScriptTool` 拆成 `crates/scripts` 并改名 `Script`**（**已做**）。细节见下面「工具实现按域分家」。
 
@@ -48,7 +48,7 @@
   顺带同步 `README.md:375` 的 Layout 表。
   纯内部改名，对外行为不变。
 
-  注意 `MINE` 这张名单被好几个条目同时动：`brain`→`llm` 改一项，`hashline`/`syntax` 并入删两项，新拆出的 `skills`/`scripts`/`task` 各加一项。做这批改动时最后统一收一次。**已收**：现在是 `["pi", "agent", "llm", "tools", "task", "scripts", "skills", "wechat"]`，与 workspace 的 8 个 package 名逐一对应（`"cli"` 那个幽灵项和漏掉的 `wechat` 一并修好）。
+  注意 `MINE` 这张名单被好几个条目同时动：`brain`→`llm` 改一项，`hashline`/`syntax` 并入删两项，新拆出的 `skills`/`scripts`/`subagent` 各加一项。做这批改动时最后统一收一次。**已收**：现在是 `["pi", "agent", "llm", "tools", "subagent", "scripts", "skills", "wechat"]`，与 workspace 的 8 个 package 名逐一对应（`"cli"` 那个幽灵项和漏掉的 `wechat` 一并修好）。
 
 - [x] ~~**`Repl` 拆成 `App` + `Lanes` + `Settings`**~~：`App`/`Settings` 已落地；`Lanes` **决定不做**（复核：15 个方法里 12 个要 `store`/`config`/`settings`/`args`，拆出去只是把参数逐个下传，`lanes`/`current` 本来就是 `App` 的状态。同源的 `app/worktree.rs` 三个方法同理。**文件已按状态分开住**（`settings.rs`/`lanes.rs`/`status.rs`/`worktree.rs`，都是 `impl App`），拆的是文件不是类型）。
 
@@ -64,13 +64,13 @@ crates/
 ├── tools/      契约 + 文件系统域：Tool/Registry/Ctx/Tier、read/write/edit/grep/glob、bash、fetch、judge，加 spill/state/walk/workspace/output/parses/rows/blocks（rows/blocks 是 hashline 的落点）、edit/（编辑引擎）、syntax/（tree-sitter）
 ├── skills/     ✓ 已从 tools 拆出：技能发现 + `Load`
 ├── scripts/    ✓ 已从 tools 拆出：脚本发现 + `Script`
-├── task/       ✓ 已从 agent 拆出：子代理工具
+├── subagent/   ✓ 已从 agent 拆出：子代理工具
 ├── agent/      核心：纯循环 + 接缝
 ├── cli/        应用：输入 / 驱动 / 存储 / 界面
 └── wechat/    不动
 ```
 
-依赖方向单向收紧：`cli → {agent, scripts, skills, task, tools} → llm`，`llm` 不认识任何人；`skills → tools`、`scripts → tools`、`task → agent`，反向永远不成立。
+依赖方向单向收紧：`cli → {agent, scripts, skills, subagent, tools} → llm`，`llm` 不认识任何人；`skills → tools`、`scripts → tools`、`subagent → agent`，反向永远不成立。
 
 ```
 crates/agent/src/            ★ 核心
@@ -125,7 +125,7 @@ TUI 的 77 个测试**留在一个 `mod tests` 里**：它们共用 `test_ui`/`f
 | 现在 | 去 | 动作 |
 |---|---|---|
 | `agent/{compact,summarize,oneshot,approval}.rs` | `agent/ext/` | **已做**（外加 `lib.rs` 的 `Retry` → `ext/retry.rs`；`Approver`/`Decision`/`Steer` → 新 `seams.rs`） |
-| `agent/task.rs`（499 行） | `crates/task/` | **已做**（见下；`Home` 留在 agent 的 `seams.rs`，`Agent::hang` 删除、改由 cli 挂） |
+| `agent/task.rs`（499 行） | `crates/subagent/` | **已做**（见下；`Home` 留在 agent 的 `seams.rs`，`Agent::hang` 删除、改由 cli 挂） |
 | `agent/event.rs` | `agent/event.rs` | 去掉 `cost` |
 | `cli/context.rs`（302 行） | `agent/src/context.rs` | **已做**（见下） |
 | `hashline/`（755 行）、`syntax/`（477 行） | `tools/` | **并入**（见下） |
@@ -147,7 +147,7 @@ TUI 的 77 个测试**留在一个 `mod tests` 里**：它们共用 `test_ui`/`f
 - **`cli/context.rs` 上移到 `agent`**（**已做**：`agent/src/context.rs`，`agent::context::*`）。它是 standing 提示词的拼装：`workspace()` 拼 `<workspace path>`，`boundary()` 拼 `<write_paths>`（工作区 + 配置的额外写根，跟 tier 有关），`env()` 拼 `<env date/platform/shell/pi/tier>`，再加 `AGENTS.md` 正文（`context.rs:57-151`），`main.rs:431-447` 把它们追在 system prompt 末尾。三个连带：
   - `env()` 唯一的非-`tools` 外部依赖是 `journal::rfc3339`（`journal.rs:141`，连带 `civil` `:156`）。**已选后者**：`env(stamp, tier)` 收调用方的时钟读数，只取其中的「日」（`split_once('T')`），日历仍留在 cli；「一天而非一刻」这条契约留在 `env` 里，测试用两个相隔一小时的读数断言输出相同。
   - **agent 会第一次读盘**：现在 `crates/agent/src/` 里零 `std::fs`/`tokio::fs`，而 `context::from` 靠 `std::fs::read_to_string` 加祖先目录 walk。这与「核心只留一个循环」有点顶，但 system prompt 本来就是 agent 的东西（`agent::DEFAULT_SYSTEM` 已在里面）。
-  - `Setup.standing` / `Resolved.standing`（`agent/lib.rs` 的 `Setup`、`main.rs:322`、`:452`）会变形或消失；但 `Task::new(parent, home, standing)`（`task.rs:96`、`:99`）也吃这个字符串（子代理的 system 是 `{PROMPT}{standing}`），所以 agent 要么留一个 pub 的 standing 取用点，要么继续往下传算好的串。**本次选了「继续往下传」**——形状没动，留待「agent 自己算 standing」那一步。
+  - `Setup.standing` / `Resolved.standing`（`agent/lib.rs` 的 `Setup`、`main.rs:322`、`:452`）会变形或消失；但 `Subagent::new(parent, home, standing)`（`task.rs:96`、`:99`）也吃这个字符串（子代理的 system 是 `{PROMPT}{standing}`），所以 agent 要么留一个 pub 的 standing 取用点，要么继续往下传算好的串。**本次选了「继续往下传」**——形状没动，留待「agent 自己算 standing」那一步。
   - 版本号不用担心：`env!("CARGO_PKG_VERSION")` 在所有 crate 里一样（`version.workspace = true`，lockstep 发布）。
   - cli 仍需要**文件名列表**给 banner（`Resolved.context` → `View::opening`）——`context::load` 已经返回 `Loaded { text, files }`，接口够用。
 
@@ -162,7 +162,7 @@ TUI 的 77 个测试**留在一个 `mod tests` 里**：它们共用 `test_ui`/`f
 | `Read`/`Write`/`Edit`/`Grep`/`Glob` | `tools` | `tools`（不动，同域） |
 | `Bash`/`Fetch` | `tools` | `tools`（不动） |
 | `SkillTool`（→ `Load`） | `tools` | `skills`（**已做**） |
-| `Task`（子代理） | `agent` | `task`（**已做**） |
+| `Subagent`（子代理） | `agent` | `subagent`（**已做**） |
 | `Judge` | `tools` | `tools`（见下） |
 | `ScriptTool`（→ `Script`） | `tools` | `scripts`（**已做**） |
 
@@ -176,11 +176,11 @@ TUI 的 77 个测试**留在一个 `mod tests` 里**：它们共用 `test_ui`/`f
 - 调用点：`crates/cli/src/main.rs:388` `tools::script::discover_in` → `scripts::discover_in`（`:393` 的 `tools::Tool::name` 不变，trait 仍在 `tools`）。
 - 测试：`crates/tools/tests/` 里没有指向 `script.rs` 的（不用搬），但 `script.rs:234-259` **自带一个单测**（`an_inherited_name_is_never_shadowed`，用 `tempfile` 和 `tools::Workspace`）——它跟着走，所以 dev-deps 要 `tempfile`。
 
-新 crate `crates/task`：现 `crates/agent/src/task.rs`（499 行）整体挪出，依赖 `agent`/`tools`/`brain`。连带的接口放宽：
+新 crate `crates/subagent`：现 `crates/agent/src/task.rs`（499 行）整体挪出，依赖 `agent`/`tools`/`brain`。连带的接口放宽：
 
-- `agent::STOP_GRACE` 和 `agent::event::say` 由 `pub(crate)` 放宽为 `pub`（`Agent` 的 `system`/`registry`/`task_max_turns` 已经是 pub 字段）。`tools::bash::run`（`bash.rs:132`）本来就 pub，不用动。
-- `Agent::hang`（`lib.rs:203`）现在直接构造 `task::Task`，挪出后 agent 构造不了它。要么把 `hang` 改成通用的 `hang(tool: impl Tool)`（那它就是 `Registry::with`，可以删掉），要么整个挪到 cli。倾向前者。
-- `Home` 是核心向应用要的端口（`Setup.home: Arc<dyn Home>`），倾 **留在 `agent`**——但它是从**要搬走的那个文件里挖出来**的（定义在 `task.rs:21`），不是原地不动：得把 trait 切出来放 agent（如 `seams.rs`），由 `task` 实现。
+- `agent::STOP_GRACE` 和 `agent::event::say` 由 `pub(crate)` 放宽为 `pub`（`Agent` 的 `system`/`registry`/`subagent_max_turns` 已经是 pub 字段）。`tools::bash::run`（`bash.rs:132`）本来就 pub，不用动。
+- `Agent::hang`（`lib.rs:203`）现在直接构造 `subagent::Subagent`，挪出后 agent 构造不了它。要么把 `hang` 改成通用的 `hang(tool: impl Tool)`（那它就是 `Registry::with`，可以删掉），要么整个挪到 cli。倾向前者。
+- `Home` 是核心向应用要的端口（`Setup.home: Arc<dyn Home>`），倾 **留在 `agent`**——但它是从**要搬走的那个文件里挖出来**的（定义在 `task.rs:21`），不是原地不动：得把 trait 切出来放 agent（如 `seams.rs`），由 `subagent` 实现。
 - 两个文件跟着走：`crates/agent/tests/task.rs`（20.0K，`:16` 的 `use agent::task::{Home, Task}`；它用 `agent/tests/common` 的 `spec()`，跨 crate 拿不到，得自带一份）与 `crates/agent/prompts/task.md`（1.6K，`task.rs:15` 的 `include_str!("../prompts/task.md")`）。
 - cli 侧改路径：`cli/src/subagent.rs:11`、`repl.rs:383`、`repl.rs:2355`（`agent::task::Task::NAME`）。
 
@@ -188,7 +188,7 @@ TUI 的 77 个测试**留在一个 `mod tests` 里**：它们共用 `test_ui`/`f
 
 ### 工具类型命名（已定）
 
-规则：`impl Tool` 的类型名用**裸名，与模块同名**（`read::Read`、`grep::Grep`、`glob::Glob`、`bash::Bash`、`judge::Judge`、`task::Task`），不加 `Tool` 后缀。
+规则：`impl Tool` 的类型名用**裸名，与模块同名**（`read::Read`、`grep::Grep`、`glob::Glob`、`bash::Bash`、`judge::Judge`、`subagent::Subagent`），不加 `Tool` 后缀。
 
 现有两个例外，都改：
 
@@ -258,7 +258,7 @@ struct 名不必等于 wire name，这库里本来就不是：`ScriptTool::name(
 
 ### 已定
 
-- **turn** 只指「一次回复 + 工具结果」：`Event::TurnStart`/`TurnEnd`、`Done { turns }`、`max_turns`、`task_max_turns` 都已正确，**不动**。
+- **turn** 只指「一次回复 + 工具结果」：`Event::TurnStart`/`TurnEnd`、`Done { turns }`、`max_turns`、`subagent_max_turns` 都已正确，**不动**。
 - **round** 只指「一次提问 + 它引出的一切」：`Looping.round`、`Round` 枚举、`THIN_ROUNDS`、`pending_round`、`Intent::LoopRound`、`Entry::Ask.round`、`compact::round_starts` 都已正确，**不动**。
 - **改 `loop_max_turns` → `loop_max_rounds`**：全库唯一名不副实的键。
 - **`cli::lane::Turn` → `Run`**：运行状态机，与两层都不同义。

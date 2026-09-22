@@ -81,11 +81,11 @@ pub struct Agent {
     /// the working model's rate.
     pub summarizer: Option<(Arc<dyn Transport>, ModelSpec)>,
     pub retry: Retry,
-    /// Turn ceiling for subagent tasks. None defaults to 50.
-    pub task_max_turns: Option<usize>,
-    /// How long a subagent task may run silent before it is read as wedged.
+    /// Turn ceiling for a subagent. None defaults to 50.
+    pub subagent_max_turns: Option<usize>,
+    /// How long a subagent may run silent before it is read as wedged.
     /// None defaults to 1800 s.
-    pub task_deadline: Option<std::time::Duration>,
+    pub subagent_deadline: Option<std::time::Duration>,
 }
 
 // Per-tool failure streaks across one run, so a loop can be named. Keyed by
@@ -107,8 +107,8 @@ pub struct Setup {
     pub system: String,
     pub tier: Tier,
     pub effort: Effort,
-    pub task_max_turns: Option<usize>,
-    pub task_deadline: Option<std::time::Duration>,
+    pub subagent_max_turns: Option<usize>,
+    pub subagent_deadline: Option<std::time::Duration>,
 }
 
 impl Agent {
@@ -123,8 +123,8 @@ impl Agent {
             compaction: Policy::default(),
             summarizer: None,
             retry: Retry::default(),
-            task_max_turns: None,
-            task_deadline: None,
+            subagent_max_turns: None,
+            subagent_deadline: None,
         }
     }
 
@@ -144,8 +144,8 @@ impl Agent {
         self.approver = Arc::new(Ceiling(setup.tier));
         self.system = setup.system;
         self.effort = setup.effort;
-        self.task_max_turns = setup.task_max_turns;
-        self.task_deadline = setup.task_deadline;
+        self.subagent_max_turns = setup.subagent_max_turns;
+        self.subagent_deadline = setup.subagent_deadline;
     }
 
     /// A run nobody is talking to. What a subagent, a `--print` and a test all

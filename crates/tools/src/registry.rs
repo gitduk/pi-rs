@@ -23,7 +23,7 @@ impl Registry {
         Self::default()
     }
 
-    /// The tools an agent cannot work without. `task` and `skill` are not
+    /// The tools an agent cannot work without. `subagent` and `skill` are not
     /// among them: both are hung on afterwards, by whoever can build them.
     pub fn builtin() -> Self {
         Self::new()
