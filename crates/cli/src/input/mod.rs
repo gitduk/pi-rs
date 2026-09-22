@@ -35,9 +35,9 @@ pub enum Intent {
     Wechat(String),
     // What to run over and over, or empty to stop the loop in force.
     Loop(String),
-    // One round of a loop, put back through the door by the surface. Apart
-    // from `Submit` only so the turn it starts can be told from a line typed
-    // between rounds — `read` never answers it. `note` is the loop's word to
+    // One round of a loop, put back through the door by the surface — so that
+    // the turn it starts can be told from a line typed between rounds.
+    // `read` never answers it. `note` is the loop's word to
     // the model, filed as machine prose rather than glued to the goal, which
     // must stay what `read` would parse.
     LoopRound {
@@ -58,11 +58,11 @@ pub enum Intent {
     // and the screen rebuilt from the empty one. One variant, because they
     // are one intent however it was expressed.
     New,
-    // Only a key can ask for these: there is no line that says them. They are
-    // not intents at all but the screen's own deeds, in `ui/tui` — a key that
-    // means a command, like `ctrl+l` twice for `/new`, arrives here read.
     // Leave now — `/exit`, `/quit`, `ctrl+d`, a double `ctrl+c`. One intent,
-    // so the four of them cannot answer differently.
+    // so the four of them cannot answer differently. What a key can ask for
+    // and a line cannot is not here: those are the screen's own deeds, in
+    // `ui/tui`; a key that means a command, like `ctrl+l` twice for `/new`,
+    // arrives here already read.
     Quit,
 }
 
@@ -80,9 +80,8 @@ pub enum Fate {
     // Prose, while a run is working: it goes to the run rather than waiting
     // for it, and is read at the run's next turn boundary.
     //
-    // Carries the text because answering took a read of the line — `Submit`
-    // cannot say what it is without one — and reading it a second time at the
-    // door is how two readings drift apart.
+    // Carries the text because answering it took a read of the line, and
+    // reading the line a second time is how two readings drift apart.
     Steered(String),
     // Would move what the run stands on. Says this rather than doing it.
     Refused(&'static str),
