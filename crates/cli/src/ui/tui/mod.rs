@@ -885,14 +885,6 @@ impl Tui {
             .say_line(front_view(&mut self.views, self.core.lane()), line);
     }
 
-    // The one gate every input passes: a key, the phone, or an intent coming
-    // back off the queue, so two ways of asking the same thing cannot get two
-    // different answers.
-    //
-    // The answer is in two halves and they live apart on purpose: whether a
-    // run is in flight is state, and is read here; what an intent may do while
-    // one is, is a property of the intent, and `fate` holds it. An idle lane
-    // admits everything, which is why `fate` never has to mention idleness.
     // The deeds the screen keeps for itself. They are here rather than in
     // `dispatch` because only the surface can move the screen, the keyboard and
     // the process — and only the surface knows which lane is in front.
@@ -920,7 +912,19 @@ impl Tui {
         }
     }
 
+    // The one gate every input passes: a key, the phone, or an intent coming
+    // back off the queue, so two ways of asking the same thing cannot get two
+    // different answers.
+    //
+    // The answer is in two halves and they live apart on purpose: whether a
+    // run is in flight is state, and is read here; what a question may do
+    // while one is, is a property of the question, and `fate` holds it. An
+    // idle lane admits everything, which is why `fate` never has to mention
+    // idleness — and why it is asked only once a run is known to be there.
     fn admit(&mut self, asked: Asked) -> Wake {
+        if !self.core.lane().is_running() {
+            return Wake::Do(asked);
+        }
         let intent = match asked {
             // A deed is the screen's own move: it is never queued and never
             // steered, because waiting is one of the four answers about lines.
@@ -936,9 +940,6 @@ impl Tui {
             },
             Asked::Core(intent) => intent,
         };
-        if !self.core.lane().is_running() {
-            return Wake::Do(Asked::Core(intent));
-        }
         match intent.fate() {
             Fate::Now => Wake::Do(Asked::Core(intent)),
             Fate::Queued => {
@@ -1382,6 +1383,70 @@ mod tests {
         ] {
             assert!(matches!(deed.fate(), Fate::Now), "{deed:?} should proceed");
         }
+    }
+
+    // The other half of that answer, and the one the deed cannot give itself:
+    // `fate` is about a run in flight, so a lane with none admits the rewind
+    // whatever the deed says. Consulting it first refused every rewind there
+    // was — with the wording for a run that is not there.
+    #[tokio::test]
+    async fn an_idle_lane_opens_the_rewind_selector() {
+        use agent::session::Session;
+
+        let dir = tempfile::tempdir().expect("a checkout");
+        let mut tui = surface(dir.path());
+        assert!(
+            matches!(tui.admit(Asked::Own(Deed::Rewind)), super::Wake::Nothing),
+            "the run in flight refuses it"
+        );
+        assert!(tui.ui.flash.is_some(), "and says why");
+
+        // `esc` stopped the run and its job came home: the same lane, idle.
+        let mut session = Session::new();
+        session.prompt("the first question");
+        tui.ui.flash = None;
+        let token = tui.core.lanes[0].token();
+        tui.settle(super::job::Done {
+            token,
+            kind: super::job::Kind::Turn,
+            ran: Some((session, Ok(llm::stream::Usage::default()))),
+        })
+        .await;
+
+        // `esc esc` on the empty line, as the user presses it: the key has to
+        // arrive at the deed before the deed can be admitted.
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let esc = || super::TermEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let armed = tui.ui.key(
+            tui.core.lane(),
+            view_at(&mut tui.views, token),
+            esc(),
+            false,
+        );
+        assert!(
+            matches!(&armed, Asked::Own(Deed::Nothing)),
+            "the first press only arms it: {armed:?}"
+        );
+        let asked = tui.ui.key(
+            tui.core.lane(),
+            view_at(&mut tui.views, token),
+            esc(),
+            false,
+        );
+        assert!(
+            matches!(&asked, Asked::Own(Deed::Rewind)),
+            "the second opens the selector: {asked:?}"
+        );
+
+        let super::Wake::Do(Asked::Own(deed)) = tui.admit(asked) else {
+            panic!("an idle lane refused the rewind: {:?}", tui.ui.flash);
+        };
+        tui.carry(deed).await;
+        assert!(
+            !tui.ui.rewind.is_empty(),
+            "the selector opened on what the user said"
+        );
+        assert!(tui.ui.flash.is_none(), "and nothing was refused");
     }
 
     #[test]
