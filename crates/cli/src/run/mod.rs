@@ -1103,19 +1103,6 @@ mod tests {
         assert_eq!(offered[0].line, "/resume s1");
     }
 
-    #[test]
-    fn every_listed_command_actually_parses() {
-        // The table drives help and completion; a word that reached the list
-        // without reaching `parse` would offer to complete into nothing.
-        for c in BUILTIN {
-            assert!(
-                !matches!(read(&c.word), Intent::Other { .. } | Intent::Prompt(_)),
-                "{} is listed but does not parse",
-                c.word
-            );
-        }
-    }
-
     // A App whose file tree is the given TOML, enough for the `/settings`
     // surface to answer.
     fn core_with_file(file: &str) -> crate::run::App {
@@ -1219,7 +1206,7 @@ mod tests {
         // `ctrl+l` twice returns `Intent::Builtin(Builtin::New)` directly. This is the other
         // half: the typed word lands on the same variant, so there is no
         // second value for `fate` to answer differently about.
-        assert_eq!(read("/new"), Intent::Builtin(Builtin::New));
+        assert_eq!(read("/new", BUILTIN), Intent::Builtin(Builtin::New));
     }
 
     #[test]
@@ -1287,11 +1274,11 @@ mod tests {
         assert!(matches!(Intent::Prompt(said.into()).fate(), Fate::Steered(text) if text == said));
         // The line the door read says the same thing the word would.
         assert!(matches!(
-            read(said).fate(),
+            read(said, BUILTIN).fate(),
             Fate::Steered(text) if text == said
         ));
         // A slash word is not prose and still waits.
-        assert!(matches!(read("/settings").fate(), Fate::Queued));
+        assert!(matches!(read("/settings", BUILTIN).fate(), Fate::Queued));
     }
 
     // The transcript and the screen want different strings from a `!` line:

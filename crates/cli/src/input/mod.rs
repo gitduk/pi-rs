@@ -17,8 +17,8 @@ pub enum Intent {
     Bash(String),
     // A word from the table.
     Builtin(Builtin),
-    // Not a built-in word. It may name a skill and it may name nothing; the
-    // command table settles that, and `read` does not have it.
+    // Not a built-in word: the table's skill rows land here too, because what a
+    // skill *is* — a line to expand — is `step_for`'s to say, not the door's.
     Other { word: String, args: String },
 }
 
@@ -226,7 +226,7 @@ pub(crate) fn step_for(commands: &[Command], word: &str, args: &str) -> Step {
 /// mistake for an unrecoverable one. The model can ask what `/comit` meant; a
 /// user whose sentence was rejected has to reword it.
 pub fn expand(commands: &[Command], line: &str) -> Option<Result<String, String>> {
-    let Intent::Other { word, args } = read(line) else {
+    let Intent::Other { word, args } = read(line, commands) else {
         return None;
     };
     Some(expanded(skill_for(commands, &word)?, &args))
@@ -246,7 +246,7 @@ fn bash_command(line: &str) -> Option<&str> {
 /// something, and a line naming no command is prose for the model.
 ///
 /// `!` is read before the slash words, because a shell command is not one.
-pub fn read(line: &str) -> Intent {
+pub fn read(line: &str, commands: &[Command]) -> Intent {
     if let Some(command) = bash_command(line) {
         return Intent::Bash(command.to_string());
     }
@@ -256,24 +256,15 @@ pub fn read(line: &str) -> Intent {
     if !word.starts_with('/') {
         return Intent::Prompt(line.to_string());
     }
-    match word {
-        "/exit" | "/quit" => Intent::Builtin(Builtin::Quit),
-        "/help" => Intent::Builtin(Builtin::Help),
-        "/new" => Intent::Builtin(Builtin::New),
-        "/resume" => Intent::Builtin(Builtin::Resume(rest(line))),
-        "/keys" => Intent::Builtin(Builtin::Keys),
-        "/reload" => Intent::Builtin(Builtin::Reload),
-        "/status" => Intent::Builtin(Builtin::Status),
-        "/name" => Intent::Builtin(Builtin::Name(rest(line))),
-        "/compact" => Intent::Builtin(Builtin::Compact(rest(line))),
-        "/model" => Intent::Builtin(Builtin::Model(rest(line))),
-        "/worktree" => Intent::Builtin(Builtin::Worktree(rest(line))),
-        "/wechat" => Intent::Builtin(Builtin::Wechat(rest(line))),
-        "/loop" => Intent::Builtin(Builtin::Loop(rest(line))),
-        "/settings" => Intent::Builtin(Builtin::Settings(rest(line))),
-        other => Intent::Other {
-            word: other.to_string(),
-            args: rest(line),
+    let args = rest(line);
+    // The table is the only list of words there is: a built-in row says what it
+    // means, a skill's row hands the line on, and a word no row matches is the
+    // same nothing as a skill is, until `step_for` says otherwise.
+    match commands.iter().find(|c| c.word == word) {
+        Some(found) => (found.intent)(word, args),
+        None => Intent::Other {
+            word: word.to_string(),
+            args,
         },
     }
 }

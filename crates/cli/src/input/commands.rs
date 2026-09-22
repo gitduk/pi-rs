@@ -5,6 +5,7 @@ use std::borrow::Cow;
 
 use skills::Skill;
 
+use super::{Builtin, Intent};
 use crate::store::session::ResumeChoice;
 
 #[derive(Clone)]
@@ -26,23 +27,42 @@ pub struct Command {
     /// One line of it. A skill's description is written for the model and is
     /// routinely longer than a line, so it arrives here already cut down.
     pub help: Cow<'static, str>,
+    /// What the word means to the door. A skill's row carries [`hand_on`], the
+    /// same thing a word the table does not have gets.
+    pub intent: fn(&str, String) -> Intent,
     pub source: Source,
 }
 
 impl Command {
-    const fn builtin(word: &'static str, args: &'static str, help: &'static str) -> Self {
+    const fn builtin(
+        word: &'static str,
+        args: &'static str,
+        help: &'static str,
+        intent: fn(&str, String) -> Intent,
+    ) -> Self {
         Self {
             word: Cow::Borrowed(word),
             args,
             help: Cow::Borrowed(help),
+            intent,
             source: Source::Builtin,
         }
     }
 }
 
-// Every built-in command, once. `parse` still maps words to typed variants,
-// but the help text and the completion list are generated from here — a new
-// command that reached only one of the three was the bug this table prevents.
+/// A word the table lists and nothing more: a skill, whose line `step_for`
+/// expands once the door has handed it on. A word the table does not have at
+/// all lands in the same place.
+pub(crate) fn hand_on(word: &str, args: String) -> Intent {
+    Intent::Other {
+        word: word.to_string(),
+        args,
+    }
+}
+
+// Every built-in command, once: the word, what it takes, what it does, and what
+// it means. Help, completion and reading a line all come from here, so a word
+// that reached only one of them is not a bug this table can have.
 //
 // Nothing reads this directly except `commands`, which appends the skills to
 // it. What a run answers to is settled when the workspace is known, not when
@@ -52,60 +72,77 @@ pub(crate) const BUILTIN: &[Command] = &[
         "/new",
         "",
         "start a fresh session, keeping this one on disk",
+        |_, _| Intent::Builtin(Builtin::New),
     ),
     Command::builtin(
         "/resume",
         "[id]",
         "list this workspace's sessions, or switch to one",
+        |_, rest| Intent::Builtin(Builtin::Resume(rest)),
     ),
     Command::builtin(
         "/worktree",
         "[name]",
         "list this repository's worktrees, or work in one — rm removes one",
+        |_, rest| Intent::Builtin(Builtin::Worktree(rest)),
     ),
     Command::builtin(
         "/name",
         "[text]",
         "call this session something you will recognise",
+        |_, rest| Intent::Builtin(Builtin::Name(rest)),
     ),
     Command::builtin(
         "/model",
         "[name]",
         "list the models in ~/.pi/settings.toml, or move this session to one",
+        |_, rest| Intent::Builtin(Builtin::Model(rest)),
     ),
     Command::builtin(
         "/compact",
         "[focus]",
         "summarize everything but what you are working on now",
+        |_, rest| Intent::Builtin(Builtin::Compact(rest)),
     ),
     Command::builtin(
         "/loop",
         "[text]",
         "repeat a line while it keeps changing the tree; bare, stop one",
+        |_, rest| Intent::Builtin(Builtin::Loop(rest)),
     ),
     Command::builtin(
         "/reload",
         "",
         "re-read ~/.pi/settings.toml, the instructions and the skills",
+        |_, _| Intent::Builtin(Builtin::Reload),
     ),
     Command::builtin(
         "/status",
         "",
         "what this session stands on, has spent, and where it writes",
+        |_, _| Intent::Builtin(Builtin::Status),
     ),
     Command::builtin(
         "/keys",
         "",
         "what every key does, and the id to rebind it under",
+        |_, _| Intent::Builtin(Builtin::Keys),
     ),
-    Command::builtin("/help", "", "this list"),
-    Command::builtin("/settings", "", "open the settings panel"),
+    Command::builtin("/help", "", "this list", |_, _| {
+        Intent::Builtin(Builtin::Help)
+    }),
+    Command::builtin("/settings", "", "open the settings panel", |_, rest| {
+        Intent::Builtin(Builtin::Settings(rest))
+    }),
     Command::builtin(
         "/wechat",
         "[on|off]",
         "bridge this session to WeChat (scan a QR on first connect)",
+        |_, rest| Intent::Builtin(Builtin::Wechat(rest)),
     ),
-    Command::builtin("/exit", "", "leave (Ctrl-D does the same)"),
+    Command::builtin("/exit", "", "leave (Ctrl-D does the same)", |_, _| {
+        Intent::Builtin(Builtin::Quit)
+    }),
 ];
 
 // How wide a one-line description may be before it is cut.
@@ -149,6 +186,7 @@ pub fn commands(skills: &[Skill], notes: &mut Vec<String>) -> Vec<Command> {
             word: Cow::Owned(word),
             args: "[text]",
             help: Cow::Owned(gist(&skill.description)),
+            intent: hand_on,
             source: Source::Skill(skill.clone()),
         });
     }

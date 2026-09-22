@@ -2063,7 +2063,7 @@ impl Ui {
                         self.submit(view, &line);
                         view.surface.scroll = 0;
                         self.submitted = true;
-                        return Asked::Core(input::read(&line));
+                        return Asked::Core(input::read(&line, &self.commands));
                     }
                     Some(MenuEntry::File {
                         start,
@@ -2088,7 +2088,7 @@ impl Ui {
                         self.submit(view, &typed);
                         view.surface.scroll = 0;
                         self.submitted = true;
-                        return Asked::Core(input::read(&typed));
+                        return Asked::Core(input::read(&typed, &self.commands));
                     }
                 }
             }
@@ -3410,7 +3410,7 @@ impl Tui {
                         // they cannot drift apart.
                         Some(run::wechat::Inbound::Text { text }) => {
                             self.echo_sent(&text);
-                            self.admit(Asked::Core(input::read(&text)))
+                            self.admit(Asked::Core(input::read(&text, &self.core.commands)))
                         }
                         Some(run::wechat::Inbound::Stop) => self.admit(Asked::Own(Deed::Interrupt)),
                         Some(run::wechat::Inbound::Notice(text)) => {
@@ -3444,7 +3444,7 @@ impl Tui {
                         if !note.is_empty() {
                             self.core.lane_mut().push_note(&note);
                         }
-                        Wake::Do(Asked::Core(input::read(&goal)))
+                        Wake::Do(Asked::Core(input::read(&goal, &self.core.commands)))
                     }
                 }
             };
@@ -3511,7 +3511,10 @@ impl Tui {
                     self.ui.flash(said);
                     continue;
                 }
-                if matches!(input::read(&goal), Intent::Builtin(Builtin::Loop(_))) {
+                if matches!(
+                    input::read(&goal, &self.core.commands),
+                    Intent::Builtin(Builtin::Loop(_))
+                ) {
                     self.ui.flash("a loop cannot be its own goal");
                     continue;
                 }
@@ -5505,6 +5508,7 @@ mod tests {
             word: "/new".into(),
             args: "",
             help: "a fresh session".into(),
+            intent: |_, _| Intent::Builtin(Builtin::New),
             source: Source::Builtin,
         }]);
         let (_dir, lane) = a_running_lane();

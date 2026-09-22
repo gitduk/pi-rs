@@ -49,7 +49,7 @@ pub async fn run(mut core: App, tx: UnboundedSender<Event>, rates: Rates) -> Res
             continue;
         }
 
-        match core.dispatch(crate::input::read(line)) {
+        match core.dispatch(crate::input::read(line, &core.commands)) {
             Step::Quit => break,
             Step::Bash(command) => {
                 // Awaited in place: this surface has nothing else to serve
