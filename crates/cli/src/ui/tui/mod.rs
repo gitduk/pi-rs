@@ -149,8 +149,10 @@ struct Ui {
     // Where the frame's regions landed last. The click handler reads them
     // back: a screen row only means something inside a named region.
     regions: Regions,
-    // Whether the live region lists every pending call or only the newest
-    // with a count. A click on a pending row flips it; it outlives the calls.
+    // Whether the live block lists every call in flight it draws or only the
+    // newest with a count — the ones the summary row holds are drawn there
+    // whatever this says. A click on a pending row flips it; it outlives the
+    // calls.
     live_tools_shown: bool,
 }
 
@@ -166,17 +168,19 @@ fn lane_name(lane: &Lane) -> String {
     })
 }
 
-// How a lane shows in the bottom bar.
+// How a lane shows in the bottom bar: whether it is the one in front, how its
+// last run ended, or its plain name and nothing more. A run in flight shows
+// nothing here — the bar answers what a lane has finished, not what it is
+// doing, and a lane working out of sight is still just a lane.
 //
 // `Done`/`Failed` are unread marks, not history: the tool rows' ✓ stays for
 // good, this one goes the moment you look at the lane it belongs to.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Mark {
     Front,
-    Running,
     Done,
     Failed,
-    Idle,
+    Plain,
 }
 
 // One lane as the bar shows it, rebuilt before every draw — the bar is a view
@@ -265,27 +269,26 @@ impl Ui {
         crate::store::theme::style_to_ratatui(s)
     }
 
-    // The rows above the input line: running tools, the open stream, and
-    // the status line. The editor draws separately, pinned to the bottom.
-    // With the rows comes the count that leads them: the pending calls',
-    // which a click opens — only the producer knows which rows those are.
-    fn live(&self, lane: &Lane, view: &View) -> (Vec<Line<'static>>, usize) {
+    // The rows above the input line: the calls in flight the summary row is
+    // not drawing, the open stream, and the status line. The editor draws
+    // separately, pinned to the bottom. With the rows comes the count that
+    // leads them: the pending calls', which a click opens — only the producer
+    // knows which rows those are.
+    fn live(&self, lane: &Lane, view: &View, row_holds: bool) -> (Vec<Line<'static>>, usize) {
         let width = self.screen.usable();
         let mut rows: Vec<Line<'static>> = Vec::new();
 
-        // Every pending call holds a row: collapsed the newest with a count
-        // for the rest, opened one each, in the shape it will fold into.
+        // The calls that keep a line here: a foldable one does not while the
+        // summary row above is holding it. Collapsed the newest of them is
+        // named with a count for the rest, opened one each, in the shape it
+        // will fold into.
+        let shown = tool::drawn(&view.state.tools, row_holds);
         let mut pending = Vec::new();
         if self.live_tools_shown {
-            pending.extend(
-                view.state
-                    .tools
-                    .iter()
-                    .map(|t| pending_line(self.spinner, t)),
-            );
-        } else if let Some(t) = view.state.tools.last() {
-            let extra = if view.state.tools.len() > 1 {
-                format!(" (+{})", view.state.tools.len() - 1)
+            pending.extend(shown.iter().copied().map(|t| pending_line(self.spinner, t)));
+        } else if let Some(t) = shown.last() {
+            let extra = if shown.len() > 1 {
+                format!(" (+{})", shown.len() - 1)
             } else {
                 String::new()
             };
@@ -334,7 +337,6 @@ impl Ui {
         if self.tabs.len() < 2 {
             return None;
         }
-        let spin = icons::SPINNER_FRAMES[self.spinner % icons::SPINNER_FRAMES.len()];
         let theme = &self.paint.theme;
         let mut spans: Vec<Span<'static>> = Vec::new();
         for (i, tab) in self.tabs.iter().enumerate() {
@@ -343,10 +345,9 @@ impl Ui {
             }
             let (sign, style) = match tab.mark {
                 Mark::Front => ("", &theme.input),
-                Mark::Running => (spin, &theme.muted),
                 Mark::Done => (icons::DONE_MARK, &theme.status.ok),
                 Mark::Failed => (icons::FAIL_MARK, &theme.status.err),
-                Mark::Idle => ("", &theme.muted),
+                Mark::Plain => ("", &theme.muted),
             };
             let label = if sign.is_empty() {
                 tab.name.clone()
@@ -807,10 +808,9 @@ impl Tui {
                     Mark::Front
                 } else {
                     match lane.run() {
-                        Run::Running { .. } => Mark::Running,
                         Run::Ended { out: Ok(_), .. } => Mark::Done,
                         Run::Ended { out: Err(_), .. } => Mark::Failed,
-                        Run::Idle => Mark::Idle,
+                        Run::Running { .. } | Run::Idle => Mark::Plain,
                     }
                 },
                 name: lane_name(lane),
@@ -1635,11 +1635,7 @@ mod tests {
         );
         ui.flush(&lane, &mut view);
 
-        let tagged = ui
-            .row_targets
-            .iter()
-            .filter(|t| matches!(t, Target::PendingTools))
-            .count();
+        let tagged = live_pending_rows(&ui);
         assert_eq!(
             tagged, 3,
             "both rows of the wrapped one, and the row after it: {tagged}"
@@ -1682,6 +1678,262 @@ mod tests {
         assert!(ui.live_tools_shown, "the status line is no click target");
     }
 
+    // A call that will fold is drawn by the row it will fold into from the
+    // moment it starts: the row names it, spins for it and counts it, so
+    // nothing moves when its result lands — the line that used to sit under
+    // the row and jump up into it is gone.
+    #[test]
+    fn a_folding_call_is_drawn_by_the_row_it_will_join() {
+        let mut ui = test_ui(80, 24);
+        let (_dir, mut lane) = a_running_lane();
+        let mut view = View::default();
+        // One read lands, which opens the summary row.
+        read_started(&mut ui, &mut lane, &mut view, "a", "a.rs");
+        read_landed(&mut ui, &mut lane, &mut view, 7, "a", "a.rs");
+        // And a second starts, still out.
+        read_started(&mut ui, &mut lane, &mut view, "b", "b.rs");
+        ui.flush(&lane, &mut view);
+
+        let pending_rows = live_pending_rows(&ui);
+        assert_eq!(pending_rows, 0, "the row above draws every call");
+        let rows = drawn_rows(&view);
+        assert_eq!(rows.len(), 1, "the two calls are one row: {rows:?}");
+        assert!(
+            icons::SPINNER_FRAMES.iter().any(|f| rows[0].starts_with(f)),
+            "the row spins for the call it holds: {}",
+            rows[0]
+        );
+        assert!(
+            rows[0].ends_with(&format!("read b.rs {}{}", icons::ELLIPSIS, 2)),
+            "named for the call in flight, counted with the one that landed: {}",
+            rows[0]
+        );
+
+        // It lands: the same row, the same line, the mark now the check.
+        read_landed(&mut ui, &mut lane, &mut view, 8, "b", "b.rs");
+        ui.flush(&lane, &mut view);
+        assert_eq!(
+            drawn_rows(&view),
+            vec![format!(
+                "{} read b.rs {}{}",
+                icons::DONE_MARK,
+                icons::ELLIPSIS,
+                2
+            )],
+            "the line it was drawn with, and the mark it was waiting for"
+        );
+    }
+
+    // Two calls out at once hold a line each until one lands. The row that
+    // opens then takes the other: the same hand-over as a call that starts
+    // under a row already there, and the reason the row is read per frame
+    // rather than settled when the call starts.
+    #[test]
+    fn a_batch_in_flight_hands_its_remainder_to_the_row_that_opens() {
+        let mut ui = test_ui(80, 24);
+        let (_dir, mut lane) = a_running_lane();
+        let mut view = View::default();
+        read_started(&mut ui, &mut lane, &mut view, "a", "a.rs");
+        read_started(&mut ui, &mut lane, &mut view, "b", "b.rs");
+        ui.flush(&lane, &mut view);
+
+        // No row yet, so the batch is a line of its own: collapsed, the
+        // newest with a count for the rest.
+        assert_eq!(live_pending_rows(&ui), 1, "one line for two calls");
+        assert!(drawn_rows(&view).is_empty(), "nothing has landed yet");
+
+        // The first lands. Its row opens where the batch was drawn, and takes
+        // the call still out with it — no second line, and none to jump up.
+        read_landed(&mut ui, &mut lane, &mut view, 7, "a", "a.rs");
+        ui.flush(&lane, &mut view);
+        assert_eq!(
+            live_pending_rows(&ui),
+            0,
+            "the row took it rather than leaving a line under it"
+        );
+        let rows = drawn_rows(&view);
+        assert_eq!(rows.len(), 1, "one row, not two: {rows:?}");
+        assert!(
+            rows[0].ends_with(&format!("read b.rs {}{}", icons::ELLIPSIS, 2)),
+            "got: {}",
+            rows[0]
+        );
+    }
+
+    // A call that will not fold keeps its line in the live block: an edit's
+    // result is a row of its own, so its line sits where that row will land
+    // rather than in the summary row a check is about to leave behind.
+    #[test]
+    fn a_modifying_call_keeps_its_line() {
+        let mut ui = test_ui(80, 24);
+        let (_dir, mut lane) = a_running_lane();
+        let mut view = View::default();
+        read_started(&mut ui, &mut lane, &mut view, "a", "a.rs");
+        read_landed(&mut ui, &mut lane, &mut view, 7, "a", "a.rs");
+        ui.on_event(
+            &mut lane,
+            &mut view,
+            agent::Event::ToolStart {
+                id: "e".into(),
+                name: "edit".into(),
+                args: serde_json::json!({"path": "b.rs"}),
+            },
+        );
+        ui.flush(&lane, &mut view);
+
+        assert_eq!(live_pending_rows(&ui), 1, "the edit holds a row of its own");
+        let (live, _) = ui.live(&lane, &view, true);
+        assert!(
+            plain(&live[0]).contains("edit b.rs"),
+            "and that row is the edit's: {:?}",
+            plain(&live[0])
+        );
+        assert_eq!(
+            drawn_rows(&view),
+            vec![format!("{} read a.rs", icons::DONE_MARK)]
+        );
+    }
+
+    // A call that lands badly is never the row's: the row would name it, count
+    // it and wear its ✗, then drop all three when its own row landed under it
+    // — the move this change exists to remove, left standing on the one path
+    // where a call does not fold in.
+    #[test]
+    fn a_failing_call_never_joins_the_row() {
+        let mut ui = test_ui(80, 24);
+        let (_dir, mut lane) = a_running_lane();
+        let mut view = View::default();
+        read_started(&mut ui, &mut lane, &mut view, "a", "a.rs");
+        read_landed(&mut ui, &mut lane, &mut view, 7, "a", "a.rs");
+        read_started(&mut ui, &mut lane, &mut view, "b", "b.rs");
+        ui.flush(&lane, &mut view);
+        // Out and held: the row draws it.
+        assert_eq!(live_pending_rows(&ui), 0);
+
+        ui.on_event(
+            &mut lane,
+            &mut view,
+            agent::Event::ToolEnd {
+                id: "b".into(),
+                name: "read".into(),
+                is_error: true,
+                preview: "Error: no such file".into(),
+            },
+        );
+        ui.flush(&lane, &mut view);
+
+        // The row is back to what it keeps, and the ✗ holds the line its own
+        // row will take.
+        assert_eq!(live_pending_rows(&ui), 1, "the ✗ keeps a line here");
+        let (live, _) = ui.live(&lane, &view, true);
+        assert_eq!(
+            plain(&live[0]),
+            format!("{} read b.rs", icons::FAIL_MARK),
+            "its mark leads, with no frame left animating a call that is over"
+        );
+        assert_eq!(
+            drawn_rows(&view),
+            vec![format!("{} read a.rs", icons::DONE_MARK)],
+            "and the row never counted it"
+        );
+
+        // Filing it leaves the row where it was and puts the ✗ where its line
+        // was: nothing moved.
+        ui.on_event(
+            &mut lane,
+            &mut view,
+            agent::Event::Committed {
+                entries: vec![failed_entry(8, "b", "read", "Error: no such file")],
+            },
+        );
+        ui.flush(&lane, &mut view);
+        let rows = drawn_rows(&view);
+        assert_eq!(rows.len(), 2, "the row and the ✗ under it: {rows:?}");
+        assert_eq!(rows[0], format!("{} read a.rs", icons::DONE_MARK));
+        assert!(
+            rows[1].contains(&format!("{} read Error: no such file", icons::FAIL_MARK)),
+            "got: {}",
+            rows[1]
+        );
+    }
+
+    // The live rows the frame tagged as the calls in flight: what the surface
+    // drew for them, as the click sees it.
+    fn live_pending_rows(ui: &super::Ui) -> usize {
+        ui.row_targets
+            .iter()
+            .filter(|t| matches!(t, Target::PendingTools))
+            .count()
+    }
+
+    // A read's start, and the result the loop files under it: the two events
+    // that decide what the screen draws.
+    fn read_started(ui: &mut super::Ui, lane: &mut Lane, view: &mut View, call: &str, path: &str) {
+        ui.on_event(
+            lane,
+            view,
+            agent::Event::ToolStart {
+                id: call.into(),
+                name: "read".into(),
+                args: serde_json::json!({"path": path}),
+            },
+        );
+    }
+
+    fn read_landed(
+        ui: &mut super::Ui,
+        lane: &mut Lane,
+        view: &mut View,
+        id: u64,
+        call: &str,
+        path: &str,
+    ) {
+        ui.on_event(
+            lane,
+            view,
+            agent::Event::ToolEnd {
+                id: call.into(),
+                name: "read".into(),
+                is_error: false,
+                preview: path.into(),
+            },
+        );
+        ui.on_event(
+            lane,
+            view,
+            agent::Event::Committed {
+                entries: vec![tool_entry(id, call, "read", path)],
+            },
+        );
+    }
+
+    fn tool_entry(id: u64, call: &str, name: &str, preview: &str) -> agent::session::Entry {
+        use agent::session::{Entry, EntryId};
+        Entry::Tool {
+            id: EntryId(id),
+            at: 0,
+            result: llm::message::ToolResult::text(call, name, format!("the body of {call}")),
+            preview: Some(preview.into()),
+        }
+    }
+
+    fn failed_entry(id: u64, call: &str, name: &str, body: &str) -> agent::session::Entry {
+        use agent::session::{Entry, EntryId};
+        Entry::Tool {
+            id: EntryId(id),
+            at: 0,
+            result: llm::message::ToolResult::error(call, name, body),
+            preview: Some(body.into()),
+        }
+    }
+
+    // The rows the scrollback draws, one string each.
+    fn drawn_rows(view: &View) -> Vec<String> {
+        ScrollbackRows::new(&view.surface.scrollback, &Paint::new(false), &[], 80)
+            .map(text)
+            .collect()
+    }
+
     // A closed reasoning block of id `id` and `n` lines in the scrollback.
     fn block(id: u64, n: usize, folded: bool) -> Row {
         Row::reasoning(
@@ -1700,14 +1952,7 @@ mod tests {
 
     // The rows one lane's screen shows, the way a frame reads them.
     fn lane_rows(tui: &mut super::Tui, token: u64) -> Vec<String> {
-        ScrollbackRows::new(
-            &view_at(&mut tui.views, token).surface.scrollback,
-            &Paint::new(false),
-            &[],
-            80,
-        )
-        .map(text)
-        .collect()
+        drawn_rows(view_at(&mut tui.views, token))
     }
 
     // The rows of one result are painted once per width and handed out one at
@@ -2601,11 +2846,11 @@ mod tests {
         // first — the bar's order, which a step from fw-rm must follow.
         ui.tabs = vec![
             super::Tab {
-                mark: super::Mark::Idle,
+                mark: super::Mark::Plain,
                 name: "pi-rs".into(),
             },
             super::Tab {
-                mark: super::Mark::Idle,
+                mark: super::Mark::Plain,
                 name: "fw-rm".into(),
             },
             super::Tab {
@@ -2613,7 +2858,7 @@ mod tests {
                 name: "fix-mem".into(),
             },
             super::Tab {
-                mark: super::Mark::Idle,
+                mark: super::Mark::Plain,
                 name: "fix-input".into(),
             },
         ];
@@ -2689,6 +2934,49 @@ mod tests {
         tui.core.lanes[2].run = Run::Idle;
         tui.drop_vanished_lanes();
         assert_eq!(tui.core.lanes.len(), 2);
+    }
+
+    // The bar answers what a lane has finished, not what it is doing: a lane
+    // working out of sight wears its plain name and no frame, and only a run
+    // that ended wears a mark.
+    #[test]
+    fn only_a_finished_lane_wears_a_mark_in_the_bar() {
+        let dir = tempfile::tempdir().expect("a checkout");
+        let mut tui = surface(dir.path());
+        let (_run_dir, mut behind) = a_running_lane();
+        behind.worktree = Some("fix-mem".into());
+        tui.core.lanes.push(behind);
+        tui.refresh_tabs();
+
+        let marks = |tui: &super::Tui| tui.ui.tabs.iter().map(|t| t.mark).collect::<Vec<_>>();
+        assert_eq!(
+            marks(&tui),
+            vec![super::Mark::Front, super::Mark::Plain],
+            "a lane working out of sight is just a lane"
+        );
+        let bar = plain(&tui.ui.lane_bar(80).expect("two lanes keep a bar"));
+        assert!(
+            !icons::SPINNER_FRAMES.iter().any(|f| bar.contains(f)),
+            "and the bar does not animate it: {bar}"
+        );
+
+        tui.core.lanes[1].run = Run::Ended {
+            out: Ok(llm::stream::Usage::default()),
+            unsend: false,
+        };
+        tui.refresh_tabs();
+        assert_eq!(marks(&tui), vec![super::Mark::Front, super::Mark::Done]);
+        assert!(
+            plain(&tui.ui.lane_bar(80).expect("two lanes keep a bar")).contains(icons::DONE_MARK),
+            "a finished lane is what the mark is for"
+        );
+
+        tui.core.lanes[1].run = Run::Ended {
+            out: Err(agent::AgentError::Cancelled),
+            unsend: false,
+        };
+        tui.refresh_tabs();
+        assert_eq!(marks(&tui), vec![super::Mark::Front, super::Mark::Failed]);
     }
 
     // Nowhere to go is said, not walked to: one checkout has no next.
@@ -2936,7 +3224,7 @@ mod tests {
         let mut view = View::default();
         view.state.started = Some(std::time::Instant::now());
         assert!(
-            ui.live(&lane, &view)
+            ui.live(&lane, &view, false)
                 .0
                 .iter()
                 .any(|r| icons::SPINNER_FRAMES.iter().any(|f| plain(r).contains(f))),
@@ -2945,7 +3233,7 @@ mod tests {
 
         lane.run = Run::Idle;
         assert!(
-            !ui.live(&lane, &view)
+            !ui.live(&lane, &view, false)
                 .0
                 .iter()
                 .any(|r| icons::SPINNER_FRAMES.iter().any(|f| plain(r).contains(f))),

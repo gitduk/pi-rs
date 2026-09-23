@@ -1,11 +1,11 @@
 //! A run's events becoming rows: the text as it streams, the tool calls as
 //! they run and finish, and the block that closes when the turn does.
 use super::mouse::{Regions, Target};
-use super::row::Row;
+use super::row::{PendingTool, Row};
 use super::screen;
 use super::screen::Rows;
 use super::scrollback::{Piece, ScrollbackRows, absorb_growth, f_entry};
-use super::tool::{RunTool, is_modifying_tool, push_tool_row};
+use super::tool::{self, RunTool, push_tool_row};
 use super::view::{StreamKind, Surface, View, snapshot};
 use super::{FLASH, Ui};
 use crate::app::lane::Lane;
@@ -196,10 +196,12 @@ impl Ui {
                     view.surface.scrollback.push(Row::tally(snap));
                 }
             }
-            // A call's two events are one line here: the start takes a row in
-            // the live region (where the spinner can animate it), and the end
-            // scrolls that row up as its ✓/✗ line. Parallel calls each hold a
-            // row, matched back by id because they end out of order.
+            // A call's two events are one line here: the start either hands
+            // the call to the summary row above or takes a line in the live
+            // region (where the spinner can animate it), and the end settles
+            // that line to the ✗/✓ mark it lands with. Parallel calls each
+            // hold a place of their own, matched back by id because they end
+            // out of order.
             Event::ToolStart { id, name, args, .. } => {
                 self.close(view);
                 view.state.tools.push(RunTool {
@@ -216,9 +218,9 @@ impl Ui {
                 preview,
             } => {
                 self.close(view);
-                // Not a row yet: the line parks in the live region until the
-                // committed entries arrive, and adoption checks it against
-                // what the entry itself derives to.
+                // Not a row yet: the row the entry will adopt parks here
+                // until the committed entries arrive, and adoption checks it
+                // against what the entry itself derives to.
                 if let Some(t) = view.state.tools.iter_mut().find(|t| t.id == *id) {
                     t.done = Some(Row::result(!*is_error, name.clone(), preview.clone()));
                 }
@@ -279,9 +281,9 @@ impl Ui {
         }
     }
 
-    // Retire the pending line a `ToolEnd` parked in the live region, checking
-    // it against the row the committed entry derives to. Equality is
-    // expected; anything else is drift the old layout shipped silently.
+    // Retire the row a `ToolEnd` parked, checking it against the row the
+    // committed entry derives to. Equality is expected; anything else is
+    // drift the old layout shipped silently.
     fn check_pending(&self, view: &mut View, call: &str, row: Option<&Row>, width: usize) {
         let Some(at) = view.state.tools.iter().position(|t| t.id == call) else {
             return;
@@ -337,11 +339,34 @@ impl Ui {
         let hist_view = (self.screen.height as usize)
             .saturating_sub(editor_h + menu_h + bar_h)
             .max(1);
-        let (live, pending_rows) = self.live(lane, view);
+        // The summary row the calls in flight fold into, when it is the last
+        // thing in the scrollback: its line is where they show, so they are
+        // its to draw and the live block leaves them alone.
+        let last = view.surface.scrollback.len().checked_sub(1);
+        let row_holds = view
+            .surface
+            .scrollback
+            .last()
+            .is_some_and(Row::is_tools_summary);
+        let held = if row_holds {
+            tool::held(&view.state.tools)
+        } else {
+            Vec::new()
+        };
+        for (idx, row) in view.surface.scrollback.iter_mut().enumerate() {
+            // Only the last row takes them, and only the last row can be the
+            // summary they belong to: any other is handed nothing.
+            let flight: &[PendingTool] = if Some(idx) == last { &held } else { &[] };
+            row.update_live(self.hovered_scrollback == Some(idx), self.spinner, flight);
+        }
+        let (live, pending_rows) = self.live(lane, view, row_holds);
 
         // While the view is scrolled up, rows the bottom gained fold back
-        // into `scroll` — a sum of per-row cached heights, where a wrap
-        // counts for exactly the rows it takes.
+        // into `scroll` — a sum of per-row cached heights, where a wrap counts
+        // for exactly the rows it takes. Measured in rows, not lines: a line
+        // wider than the terminal is several rows, and counting lines here
+        // would put more rows in the area than fit — pushing the newest ones
+        // off the bottom, underneath the input, where nothing shows them.
         if view.surface.scroll > 0 {
             let total = view
                 .surface
@@ -355,32 +380,6 @@ impl Ui {
         } else {
             view.surface.counted = None;
         }
-        // Measured in rows, not lines: a line wider than the terminal wraps
-        // into several, and counting lines here would put more rows in the
-        // area than fit — pushing the newest ones off the bottom, underneath
-        // the input, where nothing shows them.
-        let last_tools_idx = view
-            .surface
-            .scrollback
-            .iter()
-            .rposition(|r| r.is_tools_summary());
-        let lane_running = lane.is_running();
-        // A summary row spins only while one of its tools is still in flight:
-        // a finished batch is history, and only the last row can still grow.
-        let summary_live = lane_running
-            && view
-                .state
-                .tools
-                .iter()
-                .any(|t| t.done.is_none() && !is_modifying_tool(&t.name))
-            && last_tools_idx.is_some_and(|i| i + 1 == view.surface.scrollback.len());
-
-        for (idx, row) in view.surface.scrollback.iter_mut().enumerate() {
-            let is_hovered = self.hovered_scrollback == Some(idx);
-            let is_running = summary_live && Some(idx) == last_tools_idx;
-            row.update_hover_state(is_running, is_hovered, self.spinner);
-        }
-
         let scrollback =
             ScrollbackRows::new(&view.surface.scrollback, &self.paint, &self.done, width)
                 .indexed()

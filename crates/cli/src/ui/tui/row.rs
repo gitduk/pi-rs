@@ -33,16 +33,57 @@ pub struct FoldedTool {
 
 impl FoldedTool {
     fn desc(&self) -> String {
-        let head = self.preview.lines().next().unwrap_or("").trim();
-        if head.is_empty() {
-            self.name.clone()
-        } else if head.starts_with(&self.name)
-            && head[self.name.len()..].starts_with(char::is_whitespace)
-        {
-            head.to_string()
-        } else {
-            format!("{} {head}", self.name)
-        }
+        desc_of(&self.name, &self.preview)
+    }
+}
+
+// A call still in flight, as the summary row that will fold it draws it: the
+// row is where the call lands, so it draws the call from the moment it starts.
+// The live block has no line of it then, and nothing jumps up when the result
+// arrives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingTool {
+    /// The call's name and leading argument, read the way the live line read
+    /// them — they already agree with the row the call will land as.
+    pub name: String,
+    pub preview: String,
+    /// Whether the call has landed yet. A call that lands badly is never the
+    /// row's — it is on its way to a line of its own — so what the row holds
+    /// is always a call it will keep.
+    pub landed: bool,
+}
+
+impl PendingTool {
+    fn desc(&self) -> String {
+        desc_of(&self.name, &self.preview)
+    }
+}
+
+// Whether the row still has a call out, which is when it spins. Any of them,
+// not the newest: the row is the only place a call in flight shows, so its
+// mark cannot settle while one is still running.
+fn spinning(pending: &[PendingTool]) -> bool {
+    pending.iter().any(|p| !p.landed)
+}
+
+// How many calls the row speaks for: the ones folded in and the ones it holds
+// while they are out. One is its own line, so the count is what decides
+// whether it has a body to unfold.
+fn calls(tools: &FoldedTools, pending: &[PendingTool]) -> usize {
+    tools.count() + pending.len()
+}
+
+// The tool and its leading argument, named the one way every row that shows a
+// tool names it: the name alone when there is nothing under it, and the name
+// dropped when the line already carries it.
+fn desc_of(name: &str, preview: &str) -> String {
+    let head = preview.lines().next().unwrap_or("").trim();
+    if head.is_empty() {
+        name.to_string()
+    } else if head.starts_with(name) && head[name.len()..].starts_with(char::is_whitespace) {
+        head.to_string()
+    } else {
+        format!("{name} {head}")
     }
 }
 
@@ -59,11 +100,6 @@ impl FoldedTools {
     /// The tool the head describes: the newest one folded in.
     pub fn last(&self) -> &FoldedTool {
         self.0.last().expect("a bundle holds a tool")
-    }
-
-    /// Whether one tool is the whole row. A batch reads as a count instead.
-    fn is_single(&self) -> bool {
-        self.0.len() == 1
     }
 
     pub fn count(&self) -> usize {
@@ -148,10 +184,10 @@ impl Height {
 }
 
 // The rendered rows of a tools summary, keyed by what they were painted at:
-// width, and the running/spinner frame that decides the leading mark.
-// Running rows must replace their frame as the spinner advances, which is
-// why the key is more than the width alone.
-type PaintedRows = Option<((usize, bool, usize), Vec<Line<'static>>)>;
+// width and the spinner frame. A spinning row must replace its frame as it
+// advances, and a row whose calls changed has its painted rows dropped, so
+// those two settle the key — nothing else can change what it renders.
+type PaintedRows = Option<((usize, usize), Vec<Line<'static>>)>;
 
 enum Kind {
     // One logical line of a prompt the user said: the border and the body kept
@@ -210,10 +246,14 @@ enum Kind {
         folded: bool,
     },
     // A bundle of read-only tool results folded together into a summary row.
+    //
+    // `pending` is the calls in flight this row draws: they are not in the
+    // scrollback yet, and the live block leaves them to the row, which is
+    // where they will land.
     ToolsSummary {
         tools: FoldedTools,
+        pending: Vec<PendingTool>,
         folded: bool,
-        running: bool,
         hovered: bool,
         spinner: usize,
         painted: RefCell<PaintedRows>,
@@ -275,8 +315,8 @@ impl Row {
     pub fn tools_summary(tools: FoldedTools) -> Self {
         Self::new(Kind::ToolsSummary {
             tools,
+            pending: Vec::new(),
             folded: true,
-            running: false,
             hovered: false,
             spinner: 0,
             painted: RefCell::new(None),
@@ -305,7 +345,7 @@ impl Row {
         match &self.0 {
             // One tool is its own summary line, so unfolding would only
             // repeat it.
-            Kind::ToolsSummary { tools, .. } => !tools.is_single(),
+            Kind::ToolsSummary { tools, pending, .. } => calls(tools, pending) > 1,
             Kind::Result { preview_lines, .. } => *preview_lines > render::SKETCHED_ROWS,
             _ => false,
         }
@@ -337,27 +377,45 @@ impl Row {
         }
     }
 
-    /// Update running, hovered, and spinner state for expandable rows.
-    pub fn update_hover_state(&mut self, running: bool, hovered: bool, spin: usize) {
+    /// Bring a row up to date before the frame is drawn: which row the mouse
+    /// is over, where the spinner is, and the calls in flight this row draws
+    /// for. A summary row spins for the calls it holds, so the two arrive
+    /// together rather than as a flag beside them.
+    pub fn update_live(&mut self, hovered: bool, spin: usize, held: &[PendingTool]) {
         match &mut self.0 {
             Kind::ToolsSummary {
-                running: r,
+                tools,
+                pending,
+                folded,
                 hovered: h,
                 spinner: s,
                 painted,
-                ..
             } => {
-                // The rendered rows key on (width, running, spinner);
-                // hovered restyles, never re-measures — drop the painted
-                // cache, keep the height.
-                let hover_changed = *h != hovered;
-                if *r != running || *h != hovered || *r && *s != spin {
-                    *r = running;
+                // A call starting, ending or landing rewrites the row's line
+                // and changes how many rows it counts for: both readings go.
+                if pending.as_slice() != held {
+                    *pending = held.to_vec();
+                    *painted.borrow_mut() = None;
+                    self.1.clear();
+                }
+                // A call it held can leave without landing in it — a failure
+                // goes to a line of its own — and one call is its own line,
+                // so a row left with one has to fold itself back: `toggle`
+                // refuses it then, and the body would repeat the header.
+                if !*folded && calls(tools, pending) <= 1 {
+                    *folded = true;
+                    *painted.borrow_mut() = None;
+                    self.1.clear();
+                }
+                // Hover restyles, so it drops the painted rows and keeps the
+                // height; the frame is in the key, so a tick repaints without
+                // help — and a row with nothing out has no frame to advance.
+                if *h != hovered {
                     *h = hovered;
+                    *painted.borrow_mut() = None;
+                }
+                if spinning(pending) && *s != spin {
                     *s = spin;
-                    if hover_changed {
-                        *painted.borrow_mut() = None;
-                    }
                 }
             }
             Kind::Result {
@@ -527,11 +585,16 @@ impl Row {
                     lines.len()
                 }
             }
-            Kind::ToolsSummary { tools, folded, .. } => {
+            Kind::ToolsSummary {
+                tools,
+                pending,
+                folded,
+                ..
+            } => {
                 if *folded {
                     1
                 } else {
-                    1 + tools.count()
+                    1 + calls(tools, pending)
                 }
             }
         }
@@ -628,20 +691,20 @@ impl Row {
             }
             Kind::ToolsSummary {
                 tools,
+                pending,
                 folded,
-                running,
                 hovered,
                 spinner,
                 painted,
             } => {
                 let mut painted = painted.borrow_mut();
                 let rows = match &mut *painted {
-                    Some((key, rows)) if *key == (width, *running, *spinner) => rows,
+                    Some((key, rows)) if *key == (width, *spinner) => rows,
                     slot => {
                         let rows = tools_summary_rows(
-                            tools, *folded, *running, *hovered, *spinner, paint, width,
+                            tools, pending, *folded, *hovered, *spinner, paint, width,
                         );
-                        &mut slot.insert(((width, *running, *spinner), rows)).1
+                        &mut slot.insert(((width, *spinner), rows)).1
                     }
                 };
                 (rows.get(i).cloned().unwrap_or_default(), None)
@@ -755,19 +818,24 @@ fn clip_to(s: &str, max_cols: usize) -> &str {
 
 fn tools_summary_header(
     tools: &FoldedTools,
+    pending: &[PendingTool],
     folded: bool,
-    running: bool,
     hovered: bool,
     spinner: usize,
     paint: &Paint,
     width: usize,
 ) -> Line<'static> {
-    // A finished batch wears a green check, an in-flight one spins — each
-    // its own span, so hover bolds instead of recolouring. Folded keeps the
-    // latest tool and its count; unfolded, the count would repeat the list.
-    let body = if folded && !tools.is_single() {
-        let digits = tools.count().to_string();
-        let desc = tools.last().desc();
+    // The row speaks for its newest call, ended or not — a call in flight is
+    // one of its tools already, so the line does not change under it when the
+    // result lands. Folded keeps that call and its count; unfolded, the count
+    // would repeat the list.
+    let desc = pending
+        .last()
+        .map(PendingTool::desc)
+        .unwrap_or_else(|| tools.last().desc());
+    let count = calls(tools, pending);
+    let body = if folded && count > 1 {
+        let digits = count.to_string();
         // The ellipsis is glued to the count — `…12` — with a space before
         // it and a column of air before the terminal edge. One leading
         // space after the check.
@@ -784,45 +852,61 @@ fn tools_summary_header(
         format!(" {shown} {}{digits}", icons::ELLIPSIS)
     } else {
         let room = width.saturating_sub(2).max(10);
-        format!(" {}", clip_to(&tools.last().desc(), room))
+        format!(" {}", clip_to(&desc, room))
     };
-    let mut spans: Vec<Span<'static>> = Vec::with_capacity(2);
-    if running {
-        spans.push(Span::raw(
-            icons::SPINNER_FRAMES[spinner % icons::SPINNER_FRAMES.len()],
-        ));
-    } else {
-        spans.push(paint.span_hovered(hovered, &paint.theme.status.ok, icons::DONE_MARK));
+    // Each half is its own span, so hover bolds instead of recolouring.
+    Line::from(vec![
+        summary_mark(pending, spinner, hovered, paint),
+        // The body keeps its own leading space: the running row has no
+        // mark-span to separate from it, and one space after the check is the
+        // look.
+        paint.span_hovered(hovered, &paint.theme.muted, body),
+    ])
+}
+
+// The mark a tools summary leads with: the frame while one of the calls it
+// holds is still out, and the check for a batch that has all landed.
+fn summary_mark(
+    pending: &[PendingTool],
+    spinner: usize,
+    hovered: bool,
+    paint: &Paint,
+) -> Span<'static> {
+    // The frame is the row's animation, so it wears no style.
+    if spinning(pending) {
+        return Span::raw(icons::SPINNER_FRAMES[spinner % icons::SPINNER_FRAMES.len()]);
     }
-    // The body keeps its own leading space: the running row has no mark-span
-    // to separate from it, and one space after the check is the look.
-    spans.push(paint.span_hovered(hovered, &paint.theme.muted, body));
-    Line::from(spans)
+    paint.span_hovered(hovered, &paint.theme.status.ok, icons::DONE_MARK)
 }
 
 fn tools_summary_rows(
     tools: &FoldedTools,
+    pending: &[PendingTool],
     folded: bool,
-    running: bool,
     hovered: bool,
     spinner: usize,
     paint: &Paint,
     width: usize,
 ) -> Vec<Line<'static>> {
-    let header = tools_summary_header(tools, folded, running, hovered, spinner, paint, width);
+    let header = tools_summary_header(tools, pending, folded, hovered, spinner, paint, width);
     if folded {
         return vec![header];
     }
-    let mut rows = Vec::with_capacity(1 + tools.count());
+    // The calls in flight are listed with the landed ones: the header counts
+    // them, and a body shorter than its own count reads as dropped rows.
+    let mut rows = Vec::with_capacity(1 + calls(tools, pending));
     rows.push(header);
-    // The header already wears the check; the tools it lists need no
-    // second one, and the indent keeps them under it.
+    // The header already wears the mark; the tools it lists need no second
+    // one, and the indent keeps them under it.
     let room = width.saturating_sub(2).max(10);
-    for tool in tools.iter() {
-        rows.push(Line::from(paint.span(
-            &paint.theme.muted,
-            format!("  {}", clip_to(&tool.desc(), room)),
-        )));
+    let descs = tools
+        .iter()
+        .map(FoldedTool::desc)
+        .chain(pending.iter().map(PendingTool::desc));
+    for desc in descs {
+        rows.push(Line::from(
+            paint.span(&paint.theme.muted, format!("  {}", clip_to(&desc, room))),
+        ));
     }
     rows
 }
@@ -848,30 +932,139 @@ mod tools_summary_tests {
         bundle
     }
 
-    // The rendered rows are cached by (width, running, spinner), so a running
-    // summary row must replace its frame as the spinner advances — a cache
-    // keyed by width alone would freeze the row on its first frame.
+    // A call in flight, as the row is handed one: `landed` says whether its
+    // result is in yet.
+    fn pending(name: &str, preview: &str, landed: bool) -> PendingTool {
+        PendingTool {
+            name: name.to_string(),
+            preview: preview.to_string(),
+            landed,
+        }
+    }
+
+    // The rendered rows are cached by (width, spinner), so a spinning summary
+    // row must replace its frame as the spinner advances — a cache keyed by
+    // width alone would freeze the row on its first frame.
     #[test]
-    fn a_running_summary_row_advances_through_the_paint_cache() {
+    fn a_spinning_summary_row_advances_through_the_paint_cache() {
+        let paint = Paint::new(true);
+        let mut row = Row::tools_summary(bundle(vec![tool("read", "a.rs")]));
+        let held = [pending("read", "b.rs", false)];
+
+        use crate::ui::tui::screen::plain;
+
+        row.update_live(false, 0, &held);
+        let f0 = plain(&row.line(0, &paint, &[], 80).0);
+        row.update_live(false, 1, &held);
+        let f1 = plain(&row.line(0, &paint, &[], 80).0);
+
+        // The call it holds leads, and the count is the batch it is already
+        // part of: one landed, one still out.
+        assert_eq!(
+            f0,
+            format!(
+                "{} read b.rs {}{}",
+                icons::SPINNER_FRAMES[0],
+                icons::ELLIPSIS,
+                2
+            )
+        );
+        assert_eq!(
+            f1,
+            format!(
+                "{} read b.rs {}{}",
+                icons::SPINNER_FRAMES[1],
+                icons::ELLIPSIS,
+                2
+            )
+        );
+        assert_ne!(f0, f1, "the running frame must advance, not freeze");
+    }
+
+    // Calls end in whatever order they end in, and the row is the only place
+    // one in flight shows: a call still out keeps the spinner on however the
+    // call it names ended.
+    #[test]
+    fn a_call_still_out_keeps_the_row_spinning() {
         let paint = Paint::new(true);
         let mut row = Row::tools_summary(bundle(vec![tool("read", "a.rs")]));
 
         use crate::ui::tui::screen::plain;
 
-        row.update_hover_state(true, false, 0);
-        let f0 = plain(&row.line(0, &paint, &[], 80).0);
-        row.update_hover_state(true, false, 1);
-        let f1 = plain(&row.line(0, &paint, &[], 80).0);
+        row.update_live(
+            false,
+            0,
+            &[
+                pending("bash", "cargo test", false),
+                pending("read", "b.rs", true),
+            ],
+        );
+        let line = plain(&row.line(0, &paint, &[], 80).0);
 
-        assert!(
-            f0.starts_with(&format!("{} read a.rs", icons::SPINNER_FRAMES[0])),
-            "got: {f0}"
+        assert_eq!(
+            line,
+            format!(
+                "{} read b.rs {}{}",
+                icons::SPINNER_FRAMES[0],
+                icons::ELLIPSIS,
+                3
+            ),
+            "it names the newest, and spins for the one still out"
         );
-        assert!(
-            f1.starts_with(&format!("{} read a.rs", icons::SPINNER_FRAMES[1])),
-            "got: {f1}"
+    }
+
+    // A call that has landed but is not adopted yet wears the mark it will
+    // land with, so the row it is drawn in does not change when it does.
+    #[test]
+    fn a_landed_batch_wears_its_own_mark() {
+        let paint = Paint::new(true);
+        let mut row = Row::tools_summary(bundle(vec![tool("read", "a.rs")]));
+
+        use crate::ui::tui::screen::plain;
+
+        row.update_live(false, 0, &[pending("read", "b.rs", true)]);
+        let landed = plain(&row.line(0, &paint, &[], 80).0);
+
+        assert_eq!(
+            landed,
+            format!("{} read b.rs {}{}", icons::DONE_MARK, icons::ELLIPSIS, 2)
         );
-        assert_ne!(f0, f1, "the running frame must advance, not freeze");
+    }
+
+    // A row the user unfolded can lose the call that made it unfoldable — a
+    // failure leaves for a line of its own, and the row stops being the last
+    // one in the scrollback — so it has to fold itself back: with one call
+    // left, `toggle` refuses and the body would repeat the header.
+    #[test]
+    fn a_row_left_with_one_call_folds_itself_back() {
+        let mut row = Row::tools_summary(bundle(vec![tool("read", "a.rs")]));
+        row.update_live(false, 0, &[pending("grep", "match 1", false)]);
+        assert!(row.is_expandable(), "two calls are a batch");
+        assert!(row.toggle_expand());
+        assert_eq!(row.len(), 3, "the header and both calls");
+
+        row.update_live(false, 0, &[]);
+        assert_eq!(row.len(), 1, "folded back to the one tool it holds");
+        assert!(!row.is_expandable());
+    }
+
+    // The row's line and its body both count what it holds: a body that
+    // listed only the landed tools would be shorter than the header's count.
+    #[test]
+    fn unfolding_a_summary_row_lists_the_calls_it_holds() {
+        let paint = Paint::new(false);
+        let mut row = Row::tools_summary(bundle(vec![tool("read", "a.rs")]));
+
+        use crate::ui::tui::screen::plain;
+
+        row.update_live(false, 0, &[pending("grep", "match 1", false)]);
+        assert!(row.is_expandable(), "one landed and one out is a batch");
+        assert!(row.toggle_expand());
+        assert_eq!(row.len(), 3, "the header and both calls");
+        let body = plain(&row.line(1, &paint, &[], 80).0);
+        let held = plain(&row.line(2, &paint, &[], 80).0);
+        assert_eq!(body.trim(), "read a.rs");
+        assert_eq!(held.trim(), "grep match 1");
     }
 
     #[test]
@@ -897,6 +1090,7 @@ mod tools_summary_tests {
         assert!(!row.toggle_expand());
         assert_eq!(row.len(), 1);
     }
+
     #[test]
     fn result_with_many_diff_lines_expands_and_collapses() {
         let mut preview = "crates/foo.rs +30 -0".to_string();

@@ -82,7 +82,8 @@ pub struct Surface {
 #[derive(Default)]
 pub struct State {
     // Calls in flight, plus ended calls whose entries are not adopted yet:
-    // their row parks in the live region; `abandon_tools` files the rest.
+    // their row parks until the commit checks it against what the entry
+    // itself derives to, and `abandon_tools` files the rest.
     pub(super) tools: Vec<RunTool>,
     // When the work in flight began, for the segment that times it. A clock
     // and nothing else: whether a run is on is `Lane::turn`'s to say, and one
