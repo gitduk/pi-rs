@@ -103,6 +103,9 @@ except the answer, which goes to stdout so it pipes.
 One loop owns the terminal for the whole session. Finished output is pushed
 *above* the live region and becomes ordinary scrollback — selectable,
 searchable, still there after exit. Only what is still changing is repainted.
+Pinned under it is the bar: the checkouts of this repository, the one in front
+among them, and the model in force at the end of the row — a row too narrow for
+them all drops from the ends and marks the gap with an `…`.
 
 Keys are rebindable. `/keys` lists every action with what it is bound to; an
 id under `[keys]` in `~/.pi/settings.toml` replaces that action's defaults:

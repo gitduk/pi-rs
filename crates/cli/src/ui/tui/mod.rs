@@ -72,7 +72,7 @@ const DOUBLE_TAP: std::time::Duration = std::time::Duration::from_millis(500);
 
 // How long a flash stays on the bar row: long enough to read a short line
 // without looking for it, short enough that a second try lands after it.
-const FLASH: std::time::Duration = std::time::Duration::from_secs(3);
+const FLASH: std::time::Duration = std::time::Duration::from_secs(1);
 
 // The bar's own row: present whatever the bar has to say, because a row that
 // came and went would take the transcript above it along on every key that
@@ -359,11 +359,20 @@ impl Ui {
         (rows, pending_rows)
     }
 
-    // The bar: one entry per checkout, in the order `refresh_tabs` builds. Too
-    // narrow for them all, it keeps the front one and marks each dropped end.
-    fn lane_bar(&self, width: usize) -> Option<Line<'static>> {
-        let front = self.tabs.iter().position(|t| t.mark == Mark::Front)?;
+    // The bar: one entry per checkout in `refresh_tabs` order, the lane's model
+    // last. Too narrow, the front one stays and each dropped end keeps its `…`.
+    fn lane_bar(&self, model: &str, width: usize) -> Option<Line<'static>> {
         let theme = &self.paint.theme;
+        let sep = self.tab_sep.width();
+        // The model is the row's end whatever else it holds, so its share comes
+        // off the checkouts' before they are fitted.
+        let model = (!model.is_empty()).then(|| self.paint.span(&theme.muted, model.to_string()));
+        let Some(front) = self.tabs.iter().position(|t| t.mark == Mark::Front) else {
+            return model.map(Line::from);
+        };
+        let strip = model
+            .as_ref()
+            .map_or(width, |m| width.saturating_sub(m.width() + sep));
         let items: Vec<Span<'static>> = self
             .tabs
             .iter()
@@ -387,7 +396,6 @@ impl Ui {
         let ell = dots.width();
         let n = items.len();
         let widths: Vec<usize> = items.iter().map(Span::width).collect();
-        let sep = self.tab_sep.width();
         // What the window would take on the row, the `…` a dropped end leaves
         // behind included.
         let fits = |lo: usize, hi: usize| {
@@ -395,7 +403,7 @@ impl Ui {
                 + (hi - lo) * sep
                 + if lo > 0 { ell + sep } else { 0 }
                 + if hi + 1 < n { sep + ell } else { 0 }
-                <= width
+                <= strip
         };
         let (mut lo, mut hi) = (0, n - 1);
         while !fits(lo, hi) && (lo < front || hi > front) {
@@ -434,6 +442,13 @@ impl Ui {
         if hi + 1 < n {
             spans.push(self.tab_sep.clone());
             spans.push(dots);
+        }
+        // A strip wider than its share is cut here: a front checkout too long
+        // for its share would otherwise eat the model rather than fold itself.
+        let mut spans = screen::fit(&Line::from(spans), strip).remove(0).spans;
+        if let Some(model) = model {
+            spans.push(self.tab_sep.clone());
+            spans.push(model);
         }
         screen::fit(&Line::from(spans), width).into_iter().next()
     }
@@ -2920,7 +2935,7 @@ mod tests {
 
     // The bar's row is the bar's whether or not it is saying anything: a row
     // that came and went would take the transcript above it along, and the
-    // newest line would sit a row lower for the three seconds a flash is up.
+    // newest line would sit a row lower for the second a flash is up.
     #[test]
     fn the_bar_keeps_its_row_when_a_flash_comes_and_goes() {
         let mut ui = test_ui(40, 8);
@@ -3206,7 +3221,7 @@ mod tests {
             vec![super::Mark::Front, super::Mark::Plain],
             "a lane working out of sight is just a lane"
         );
-        let bar = plain(&tui.ui.lane_bar(80).expect("two lanes keep a bar"));
+        let bar = plain(&tui.ui.lane_bar("", 80).expect("two lanes keep a bar"));
         assert!(
             !icons::SPINNER_FRAMES.iter().any(|f| bar.contains(f)),
             "and the bar does not animate it: {bar}"
@@ -3219,7 +3234,8 @@ mod tests {
         tui.refresh_tabs();
         assert_eq!(marks(&tui), vec![super::Mark::Front, super::Mark::Done]);
         assert!(
-            plain(&tui.ui.lane_bar(80).expect("two lanes keep a bar")).contains(icons::DONE_MARK),
+            plain(&tui.ui.lane_bar("", 80).expect("two lanes keep a bar"))
+                .contains(icons::DONE_MARK),
             "a finished lane is what the mark is for"
         );
 
@@ -4039,7 +4055,7 @@ mod tests {
 
     // The bar's row as text, without a screen to read it off.
     fn bar(ui: &super::Ui, width: usize) -> String {
-        ui.lane_bar(width)
+        ui.lane_bar("", width)
             .map(|l| l.to_string())
             .unwrap_or_default()
     }

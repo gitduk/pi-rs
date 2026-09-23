@@ -79,9 +79,9 @@ impl Ui {
     // The bar row, whatever it is saying: the flash while it is up, the bar's
     // own line otherwise, and a bare row when there is neither — never nothing,
     // so nothing above it moves.
-    fn bar_line(&mut self, width: usize) -> Line<'static> {
+    fn bar_line(&mut self, model: &str, width: usize) -> Line<'static> {
         self.flash_line(width)
-            .or_else(|| self.lane_bar(width))
+            .or_else(|| self.lane_bar(model, width))
             .unwrap_or_default()
     }
 
@@ -318,7 +318,7 @@ impl Ui {
         let keep = move |row: &Row| !browse || row.is_conversation();
         // A flash outranks the bar's own line: it is gone in a moment, where
         // that line is always a keystroke away.
-        let bar = self.bar_line(width);
+        let bar = self.bar_line(lane.model(), width);
         // The bar's row is not worth a terminal that cannot hold it, a row to
         // type on and a row of history: one that short keeps the other two, and
         // what is being typed keeps its row.
