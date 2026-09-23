@@ -26,7 +26,7 @@ use tools::Ctx;
 use super::App;
 use crate::app::looping::{Looping, Round};
 use crate::app::meter::{Snapshot, Tally};
-use crate::input::commands::{RESUME_WIDTH, ago};
+use crate::input::commands::ago;
 use crate::input::{Rewound, refused};
 use crate::store::config;
 use crate::store::icons;
@@ -659,18 +659,11 @@ impl App {
                 "one is saved here at the end of every turn".into(),
             ];
         }
-        // What a session is known by is its first question, not its id; a
-        // session with nothing said yet is not worth naming.
+        // What a session is known by is its own label — the name the user gave
+        // it, then its first question — never the id.
         let shown: Vec<(bool, String, u64)> = list
             .iter()
-            .map(|s| {
-                let text = if s.prompt.is_empty() {
-                    "(no question)".into()
-                } else {
-                    crate::store::text::clip(&s.prompt, RESUME_WIDTH)
-                };
-                (s.id == self.lane().id, text, s.created)
-            })
+            .map(|s| (s.id == self.lane().id, s.label(), s.created))
             .collect();
         let width = shown
             .iter()

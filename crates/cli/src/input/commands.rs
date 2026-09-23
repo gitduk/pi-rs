@@ -325,14 +325,17 @@ pub fn complete<'a>(
         // settled by the first word — only whitespace after it settles it.
         "/worktree" if typed.contains(char::is_whitespace) => Vec::new(),
         "/worktree" => worktree_candidates(worktrees(), "/worktree ", typed),
-        // A first question is a whole sentence, so the argument may keep several words.
+        // A first question is a whole sentence, and a session answers to the
+        // name it was given as well, and to its id.
         "/resume" => sessions()
             .iter()
             .filter(|s| {
-                !s.prompt.is_empty() && (s.prompt.starts_with(typed) || s.id.starts_with(typed))
+                let named = s.name.as_deref().is_some_and(|n| n.starts_with(typed));
+                (s.name.is_some() || !s.prompt.is_empty())
+                    && (named || s.prompt.starts_with(typed) || s.id.starts_with(typed))
             })
             .map(|s| Candidate {
-                show: crate::store::text::clip(&s.prompt, RESUME_WIDTH),
+                show: s.label(),
                 line: format!("/resume {}", s.id),
                 help: ago(s.created),
                 more: false,
@@ -341,9 +344,6 @@ pub fn complete<'a>(
         _ => Vec::new(),
     }
 }
-
-// How much of a session's first prompt a list row or completion shows.
-pub(crate) const RESUME_WIDTH: usize = 60;
 
 pub(crate) fn ago(secs: u64) -> String {
     let now = std::time::SystemTime::now()
