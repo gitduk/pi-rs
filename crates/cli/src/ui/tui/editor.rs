@@ -275,9 +275,11 @@ impl Editor {
         self.cursor = start;
     }
 
-    /// Older, unless the caret has somewhere to go within a multi-line buffer.
+    /// Older, unless the caret has a line of this buffer above it to walk
+    /// first. The buffer's first line is the end of that: nothing above it
+    /// belongs to this line, so what is above it is the entry before.
     pub fn up(&mut self) {
-        if self.text.contains('\n') {
+        if self.line_start() > 0 {
             return self.caret_up();
         }
         if self.at == 0 {
@@ -291,8 +293,10 @@ impl Editor {
         self.cursor = self.text.len();
     }
 
+    /// Newer, the same way down: the caret walks the lines of a multi-line
+    /// buffer until it stands on the last one.
     pub fn down(&mut self) {
-        if self.text.contains('\n') {
+        if self.line_end() < self.text.len() {
             return self.caret_down();
         }
         if self.at >= self.history.len() {
@@ -517,6 +521,26 @@ mod tests {
         // Still the same buffer: Up moved within it instead of recalling.
         assert_eq!(m.text, "one\ntwo");
         assert!(m.cursor < 4);
+    }
+
+    // The first line of a multi-line buffer has nothing above it to move
+    // through, so Up hands over to the entry before it — and the last line
+    // hands over to the one after, the way a single-line buffer does.
+    #[test]
+    fn a_multi_line_entry_is_walked_and_then_passed_on() {
+        let mut e = Editor::default();
+        e.remember("older");
+        e.remember("one\ntwo");
+        e.up();
+        assert_eq!(e.text, "one\ntwo");
+        e.up();
+        assert_eq!(e.cursor, 3, "within the entry, on its first line");
+        e.up();
+        assert_eq!(e.text, "older", "and past it to the entry before");
+        e.down();
+        assert_eq!(e.text, "one\ntwo");
+        e.down();
+        assert_eq!(e.text, "", "and past it back to the empty line");
     }
 
     #[test]
