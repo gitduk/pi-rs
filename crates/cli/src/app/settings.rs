@@ -81,7 +81,6 @@ impl App {
             system: std::mem::take(&mut resolved.system),
             tier: resolved.tier,
             effort: resolved.effort,
-            subagent_max_turns: resolved.max_turns,
             subagent_deadline: resolved.subagent_deadline,
         });
         crate::app::subagent::hang(ag, home, &resolved.standing);

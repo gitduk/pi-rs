@@ -108,15 +108,11 @@ pub struct Config {
     )]
     pub loop_max_rounds: Option<usize>,
 
-    /// Turn ceiling for a subagent. Unset reads as 50.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_turns: Option<usize>,
-
     /// How long a subagent may run silent, in seconds, before it is
-    /// read as wedged and stopped. Turns and this stop different things —
-    /// turns catch a loop that keeps failing, this catches a call that has
-    /// stopped speaking — and either ending is a stop. Clamped up to 1 s: a
-    /// zero would stop every subagent the moment it started. Unset reads as 1800.
+    /// read as wedged and stopped. A call that has stopped speaking is the one
+    /// thing that ends a subagent here; it is not stopped by a count. Clamped up
+    /// to 1 s: a zero would stop every subagent the moment it started. Unset
+    /// reads as 1800.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subagent_deadline: Option<u64>,
 
@@ -280,8 +276,6 @@ pub struct Project {
     /// A ceiling, applied downward only: a checkout may declare itself
     /// read-only, never hand itself the shell.
     pub max_tier: Option<TierArg>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_turns: Option<usize>,
 }
 
 fn default_context() -> u32 {
@@ -458,14 +452,12 @@ impl Origin {
 pub struct Flags {
     pub effort: Option<EffortArg>,
     pub tier: Option<TierArg>,
-    pub max_turns: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct Settled {
     pub effort: EffortArg,
     pub tier: TierArg,
-    pub max_turns: Option<usize>,
 }
 
 impl Config {
@@ -562,16 +554,7 @@ impl Config {
         }
         .unwrap_or(TierArg::Exec)
         .capped_by(project.max_tier.unwrap_or(TierArg::Exec));
-        let max_turns = if claimed.contains_key("max_turns") {
-            self.max_turns
-        } else {
-            flags.max_turns.or(project.max_turns).or(self.max_turns)
-        };
-        Settled {
-            effort,
-            tier,
-            max_turns,
-        }
+        Settled { effort, tier }
     }
 
     /// A resumed run stays on the model that produced the transcript, so `prior`
@@ -745,7 +728,7 @@ fn parse(body: &str) -> Result<Config> {
 
 fn parse_project(body: &str) -> Result<Project> {
     toml::from_str(body).context(
-        "a project .pi.toml may set only `model`, `effort`, `max_tier` and `max_turns` — \
+        "a project .pi.toml may set only `model`, `effort` and `max_tier` — \
          a checkout does not get to name a server, a key, or a system prompt",
     )
 }
@@ -928,7 +911,6 @@ output_per_mtok = 0
         let flags = Flags {
             effort: Some(EffortArg::High),
             tier: Some(TierArg::Exec),
-            max_turns: None,
         };
         let s = c.settle(&p, flags, &BTreeMap::new());
         assert!(matches!(s.effort, EffortArg::High));
@@ -944,7 +926,6 @@ output_per_mtok = 0
         let flags = Flags {
             effort: Some(EffortArg::High),
             tier: Some(TierArg::Exec),
-            max_turns: None,
         };
         // The panel claims the key this session: the tree already
         // carries it, so the flag and the project must both stand down.

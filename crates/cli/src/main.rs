@@ -157,10 +157,6 @@ pub struct Args {
     #[arg(long, value_enum)]
     effort: Option<EffortArg>,
 
-    /// Cap a subagent at this many turns; the default is 50.
-    #[arg(long)]
-    max_turns: Option<usize>,
-
     /// Override the model's context window, for a proxy whose real window is
     /// smaller than the config says.
     #[arg(long, value_name = "TOKENS")]
@@ -319,7 +315,6 @@ pub struct Resolved {
     pub standing: std::sync::Arc<str>,
     pub tier: tools::Tier,
     pub effort: Effort,
-    pub max_turns: Option<usize>,
     pub subagent_deadline: Option<std::time::Duration>,
     pub keys: crate::store::keys::Keys,
     /// The built-ins plus one command per skill. Here rather than in the App
@@ -407,7 +402,6 @@ pub fn resolve(
         config::Flags {
             effort: args.effort,
             tier: args.tier,
-            max_turns: args.max_turns,
         },
         claimed,
     );
@@ -450,7 +444,6 @@ pub fn resolve(
         standing: standing.into(),
         tier,
         effort,
-        max_turns: settled.max_turns,
         subagent_deadline: config
             .subagent_deadline
             .map(|s| std::time::Duration::from_secs(s.max(1))),
@@ -580,7 +573,6 @@ async fn main() -> Result<()> {
         system: std::mem::take(&mut resolved.system),
         tier: resolved.tier,
         effort: resolved.effort,
-        subagent_max_turns: resolved.max_turns,
         subagent_deadline: resolved.subagent_deadline,
     });
     subagent::hang(

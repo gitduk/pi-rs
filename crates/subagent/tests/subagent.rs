@@ -176,12 +176,11 @@ impl Home for Kept {
 // Parent and child share one scripted transport, so the turns run in the order
 // written: the parent's call, then the whole child, then the parent's answer.
 fn harness(turns: Vec<Vec<StreamEvent>>) -> (tempfile::TempDir, Agent, Ctx, Arc<Seen>, Arc<Kept>) {
-    rigged(turns, 20, std::time::Duration::from_secs(600), false)
+    rigged(turns, std::time::Duration::from_secs(600), false)
 }
 
 fn rigged(
     turns: Vec<Vec<StreamEvent>>,
-    max_turns: usize,
     deadline: std::time::Duration,
     esc: bool,
 ) -> (tempfile::TempDir, Agent, Ctx, Arc<Seen>, Arc<Kept>) {
@@ -205,7 +204,6 @@ fn rigged(
             seen: seen.clone(),
             trip: esc.then(|| ctx.cancel.clone()),
         });
-    parent.subagent_max_turns = Some(max_turns);
     let subagent = Subagent::new(&parent, kept.clone(), STANDING).with_deadline(deadline);
     parent.registry = parent.registry.clone().with(subagent);
     (dir, parent, ctx, seen, kept)
@@ -323,61 +321,38 @@ async fn the_child_cannot_send_out_a_child_of_its_own() {
     );
 }
 
-// A child that hits a limit — of time or of turns — still answers with
-// the work it did: the work done before the limit is still work, and the
-// caller's turn survives the answer. Handing it back as an error means
-// the caller paid for it and got nothing; handing it back as `Cancelled`
-// would end the caller's turn outright.
+// A child cut off by the deadline still answers with the work it did: the work
+// done before it is still work, and the caller's turn survives the answer.
+// Handing it back as an error means the caller paid for it and got nothing;
+// handing it back as `Cancelled` would end the caller's turn outright.
 #[tokio::test]
-async fn a_child_cut_off_by_a_limit_answers_rather_than_fails() {
-    for (which, turns, max_turns, deadline) in [
-        (
-            "the deadline",
-            vec![
-                call_turn(
-                    "c1",
-                    "subagent",
-                    r#"{"description":"go round","prompt":"go round"}"#,
-                ),
-                call_turn("c2", "sleeper", "{}"),
-                text_turn("it reported back"),
-            ],
-            20,
-            std::time::Duration::from_millis(50),
-        ),
-        (
-            "the turn cap",
-            vec![
-                call_turn(
-                    "c1",
-                    "subagent",
-                    r#"{"description":"capped","prompt":"go"}"#,
-                ),
-                call_turn(
-                    "c2",
-                    "write",
-                    r#"{"path":"child.txt","content":"first turn"}"#,
-                ),
-                call_turn("c3", "sleeper", "{}"),
-                text_turn("caller wraps up"),
-            ],
-            1,
-            std::time::Duration::from_secs(600),
-        ),
-    ] {
-        let (_dir, agent, ctx, _seen, _kept) = rigged(turns, max_turns, deadline, false);
-        let (session, out) = drive(&agent, &ctx, "go").await;
-        assert!(
-            out.is_ok(),
-            "{which}: the caller's turn survives a child that ran out: {out:?}"
-        );
-        let transcript = format!("{:?}", session.entries());
-        assert!(transcript.contains("unfinished"), "{which}: {transcript}");
-    }
+async fn a_child_cut_off_by_the_deadline_answers_rather_than_fails() {
+    let (_dir, agent, ctx, _seen, _kept) = rigged(
+        vec![
+            call_turn(
+                "c1",
+                "subagent",
+                r#"{"description":"go round","prompt":"go round"}"#,
+            ),
+            call_turn("c2", "sleeper", "{}"),
+            text_turn("it reported back"),
+        ],
+        std::time::Duration::from_millis(50),
+        false,
+    );
+    let (session, out) = drive(&agent, &ctx, "go").await;
+    assert!(
+        out.is_ok(),
+        "the caller's turn survives a child that ran out: {out:?}"
+    );
+    let transcript = format!("{:?}", session.entries());
+    assert!(transcript.contains("unfinished"), "{transcript}");
 }
 
 // The deadline bounds silence, not the run: a child that keeps the events
-// coming outlives it; the whole-run clock would have cut it off.
+// coming outlives it; the whole-run clock would have cut it off. It is also
+// the turn count that no longer bounds the run: twenty-five turns of child and
+// no ceiling to hit.
 //
 // Fifty milliseconds rather than three: the scripted turns are instant, so
 // what this measures is how long the scheduler may leave the child alone
@@ -400,7 +375,7 @@ async fn a_child_that_keeps_talking_outlives_the_deadline() {
     turns.push(text_turn("done"));
     turns.push(text_turn("wrapped"));
     let (_dir, agent, ctx, _seen, _kept) =
-        rigged(turns, 40, std::time::Duration::from_millis(50), false);
+        rigged(turns, std::time::Duration::from_millis(50), false);
     let (session, out) = drive(&agent, &ctx, "go").await;
 
     assert!(out.is_ok(), "progress kept the child alive: {out:?}");
@@ -410,7 +385,7 @@ async fn a_child_that_keeps_talking_outlives_the_deadline() {
 }
 
 #[test]
-fn the_subagent_schema_no_longer_offers_a_turn_cap() {
+fn the_subagent_takes_the_job_and_nothing_else() {
     let parent = Agent::new(
         Arc::new(Scripted {
             turns: vec![],
@@ -420,14 +395,16 @@ fn the_subagent_schema_no_longer_offers_a_turn_cap() {
         spec(),
     );
     let schema = Subagent::new(&parent, Arc::new(Kept::default()), STANDING).schema();
-    // The ceiling is the user's word: the schema the caller model reads no
-    // longer offers it a cap of its own to set.
-    assert!(
-        !schema["properties"]
-            .as_object()
-            .unwrap()
-            .contains_key("max_turns")
-    );
+    // No cap of the caller's to set: the child ends when it answers, when it
+    // stops saying anything, or when the caller's esc reaches it.
+    let mut args: Vec<&str> = schema["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    args.sort_unstable();
+    assert_eq!(args, ["description", "prompt", "verify"]);
 }
 
 #[tokio::test]
@@ -443,15 +420,14 @@ async fn esc_reaches_through_the_child_and_ends_the_callers_turn() {
             call_turn("c3", "sleeper", "{}"),
             text_turn("never gets here"),
         ],
-        20,
         std::time::Duration::from_secs(600),
         true,
     );
     let (_session, out) = drive(&agent, &ctx, "go").await;
 
     // The one mapping that must not be got wrong. `Cancelled` is the single
-    // error the loop never hands back to the model, so a cap answering with it
-    // would silently end the caller's turn — and Esc answering with anything
+    // error the loop never hands back to the model, so the watchdog answering
+    // with it would silently end the caller's turn — and Esc answering with anything
     // else would leave the caller talking to a model the user just stopped.
     assert!(
         matches!(out, Err(agent::AgentError::Cancelled)),
@@ -595,7 +571,6 @@ async fn what_the_child_wrote_comes_back_beside_what_it_says() {
 async fn a_child_that_ran_out_of_time_is_still_checked() {
     let (_dir, parent, ctx, _seen, kept) = rigged(
         vec![call_turn("c1", "sleeper", "{}"), text_turn("never")],
-        20,
         std::time::Duration::from_millis(50),
         false,
     );

@@ -81,8 +81,6 @@ pub struct Agent {
     /// the working model's rate.
     pub summarizer: Option<(Arc<dyn Transport>, ModelSpec)>,
     pub retry: Retry,
-    /// Turn ceiling for a subagent. None defaults to 50.
-    pub subagent_max_turns: Option<usize>,
     /// How long a subagent may run silent before it is read as wedged.
     /// None defaults to 1800 s.
     pub subagent_deadline: Option<std::time::Duration>,
@@ -107,7 +105,6 @@ pub struct Setup {
     pub system: String,
     pub tier: Tier,
     pub effort: Effort,
-    pub subagent_max_turns: Option<usize>,
     pub subagent_deadline: Option<std::time::Duration>,
 }
 
@@ -123,7 +120,6 @@ impl Agent {
             compaction: Policy::default(),
             summarizer: None,
             retry: Retry::default(),
-            subagent_max_turns: None,
             subagent_deadline: None,
         }
     }
@@ -144,7 +140,6 @@ impl Agent {
         self.approver = Arc::new(Ceiling(setup.tier));
         self.system = setup.system;
         self.effort = setup.effort;
-        self.subagent_max_turns = setup.subagent_max_turns;
         self.subagent_deadline = setup.subagent_deadline;
     }
 

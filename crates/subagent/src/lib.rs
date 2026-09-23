@@ -34,7 +34,6 @@ struct Args {
 // where this one rides along on every result and has to stay small. The tree
 // is what a caller reads for the whole manifest.
 const NAMED: usize = 20;
-const DEFAULT_MAX_TURNS: usize = 50;
 
 // What ran after the child, and how it went.
 struct Checked {
@@ -66,9 +65,8 @@ pub struct Subagent {
     // `subagent` of its own, so this does not nest.
     agent: Arc<Agent>,
     home: Arc<dyn Home>,
-    // Two limits, because they stop different things: turns stop a loop that
-    // keeps failing, the deadline stops one gone silent — a wedged call.
-    max_turns: usize,
+    // How long the child may run silent before it is read as wedged: the one
+    // brake here, and the only way a child ends that is not esc.
     deadline: Duration,
 }
 
@@ -88,7 +86,6 @@ impl Subagent {
         Self {
             agent: Arc::new(agent),
             home,
-            max_turns: parent.subagent_max_turns.unwrap_or(DEFAULT_MAX_TURNS),
             deadline: parent
                 .subagent_deadline
                 .unwrap_or_else(|| Duration::from_secs(1800)),
@@ -198,8 +195,6 @@ impl Tool for Subagent {
             .with_own_writes();
 
         let (tx, mut rx) = unbounded_channel();
-        let cap = self.max_turns.max(1);
-        let watch = stop.clone();
         // Every event resets the silence clock, whatever kind it is: an
         // event is the child moving, and moving is all the watchdog asks.
         let (ticked, ticking) = watch::channel(Instant::now());
@@ -211,9 +206,6 @@ impl Tool for Subagent {
                     Event::TurnStart { turn } => {
                         heard.turns = turn;
                         heard.text.clear();
-                        if turn > cap {
-                            watch.cancel();
-                        }
                     }
                     Event::TextDelta(text) => heard.text.push_str(&text),
                     Event::TurnEnd { usage } => heard.spent.add(&usage),
@@ -223,7 +215,7 @@ impl Tool for Subagent {
             heard
         });
         // The watchdog: silence for a whole deadline is a wedged call — a
-        // hung tool speaks no events. It trips the same token a cap or esc does.
+        // hung tool speaks no events. It trips the same token esc does.
         let wedged = Arc::new(AtomicBool::new(false));
         let watchdog_stop = stop.clone();
         let wedged_flag = wedged.clone();
@@ -256,8 +248,8 @@ impl Tool for Subagent {
             session = %child.spill_namespace(),
             description = %args.description,
         );
-        // The token ends the run — turn cap, watchdog, or esc — unwinding
-        // like an esc; one ignoring it is dropped after STOP_GRACE.
+        // The token ends the run — the watchdog or esc — unwinding like an
+        // esc; one ignoring it is dropped after STOP_GRACE.
         let ran = {
             let mut run = std::pin::pin!(
                 self.agent
@@ -299,15 +291,13 @@ impl Tool for Subagent {
             Ok(_) => None,
             // Esc, and only Esc: our own token being tripped leaves the
             // parent's alone. This is the one error the loop never hands back
-            // to the model, so telling them apart is what stops a cap from
-            // ending the caller's whole turn.
+            // to the model, so telling them apart is what stops a wedged child
+            // from ending the caller's whole turn.
             Err(AgentError::Cancelled) if ctx.cancel.is_cancelled() => {
                 return Err(ToolError::Cancelled);
             }
             Err(AgentError::Cancelled) => Some(if wedged.load(Ordering::Relaxed) {
                 format!("a call ran {}s with no progress", self.deadline.as_secs())
-            } else if heard.turns > cap {
-                format!("stopped at turn {} of {}", heard.turns, cap)
             } else {
                 format!("stopped after {}s", self.deadline.as_secs())
             }),
