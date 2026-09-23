@@ -251,9 +251,8 @@ impl Ui {
                 self.close(view);
                 self.adopt(view, entries);
             }
-            // A retry is transport news, not a step of the answer: the lane in
-            // front reads it on the bar, which `serve_lanes` sees to. What comes
-            // here is another lane's, replayed into its own transcript.
+            // A retry is transport news, not a step of the answer: here is one
+            // another lane met, replayed into its own transcript.
             _ => {
                 self.close(view);
                 if let Some(said) = render::describe(&event, &self.paint, self.screen.usable()) {
