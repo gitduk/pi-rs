@@ -18,20 +18,11 @@ use crate::store::status::Segment;
 
 pub const SPIN: Duration = Duration::from_millis(90);
 
-fn elapsed(d: Duration) -> String {
-    let s = d.as_secs();
-    if s < 60 {
-        format!("{s}s")
-    } else {
-        format!("{}m{:02}s", s / 60, s % 60)
-    }
-}
-
 impl Segment {
     /// What this part reads as, or None when the run has nothing to say for it.
     pub fn render(self, s: &Snapshot) -> Option<String> {
         Some(match self {
-            Segment::Elapsed => elapsed(s.elapsed?),
+            Segment::Elapsed => llm::count::elapsed(s.elapsed?),
             // Dashes say "a turn ran and the host stated nothing". A run
             // nothing has been spent on yet — no turn has stated a count —
             // drops the part instead of showing a row of zeros.

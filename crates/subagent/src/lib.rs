@@ -250,6 +250,7 @@ impl Tool for Subagent {
         );
         // The token ends the run — the watchdog or esc — unwinding like an
         // esc; one ignoring it is dropped after STOP_GRACE.
+        let started = Instant::now();
         let ran = {
             let mut run = std::pin::pin!(
                 self.agent
@@ -269,6 +270,9 @@ impl Tool for Subagent {
                 None => Err(AgentError::Unstopped),
             }
         };
+        // The child's own clock, and the spend's: the row reads it beside the
+        // counts as how long the job took.
+        let took = started.elapsed();
         watchdog.abort();
         // The collector ends when the last sender goes, and `run` held one.
         drop(tx);
@@ -365,7 +369,7 @@ impl Tool for Subagent {
         // run counts it — the surface never had a handle to drain.
         Ok(
             ToolOutput::text(answer(&heard, cut.as_deref(), lost, &wrote, check.as_ref()))
-                .with_preview(sketch(&args.description, &heard))
+                .with_preview(sketch(&args.description, &heard, took))
                 .with_spent(heard.spent),
         )
     }
@@ -374,12 +378,12 @@ impl Tool for Subagent {
 // The line a finished call leaves on the screen: the job it was, and in
 // brackets what it took. The job leads because several children run at once
 // and a bill alone names none of them; the brackets are what keep the bill
-// from reading as a second thing the caller asked for.
-fn sketch(description: &str, heard: &Heard) -> String {
+// from reading as a second thing the caller asked for. The clock, not a turn
+// count: the child is not bounded by turns.
+fn sketch(description: &str, heard: &Heard, took: Duration) -> String {
     let spent = format!(
-        "{} turn{} · {}",
-        heard.turns,
-        if heard.turns == 1 { "" } else { "s" },
+        "{} · {}",
+        llm::count::elapsed(took),
         llm::count::slash(heard.spent.input, heard.spent.output)
     );
     // Flattened, not trusted: this row is written one line at a time, and a

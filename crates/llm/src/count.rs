@@ -1,8 +1,10 @@
-//! Token counts, said the one way every surface says them.
+//! Figures the surfaces show, said the one way every surface says them.
 //!
-//! Here rather than in the CLI because the agent crate has a figure to show
+//! Here rather than in the CLI because the agent crate has figures to show
 //! too — a subagent's — and a count spelled `8400` beside one spelled `8.4k`
 //! reads as a different unit.
+
+use std::time::Duration;
 
 /// Thousands, one decimal. Exact counts are noise at this size and the line has
 /// to hold still while they climb.
@@ -30,4 +32,15 @@ pub fn in_out(input: u64, output: u64) -> String {
 /// unit and same dash as `in_out` — a narrower spelling, not another count.
 pub fn slash(input: u64, output: u64) -> String {
     format!("{}/{}", reported(input), reported(output))
+}
+
+/// How long something took, in the one wording every line that shows one uses:
+/// seconds, and the minutes once there are any.
+pub fn elapsed(d: Duration) -> String {
+    let s = d.as_secs();
+    if s < 60 {
+        format!("{s}s")
+    } else {
+        format!("{}m{:02}s", s / 60, s % 60)
+    }
 }
