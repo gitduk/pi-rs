@@ -7,6 +7,7 @@
 //! services three sources at once — the agent's events, the keyboard, and a
 //! timer for the spinner — so nothing has to be bolted on beside it.
 
+mod browse;
 mod editor;
 mod job;
 mod menu;
@@ -157,6 +158,9 @@ struct Ui {
     // whatever this says. A click on a pending row flips it; it outlives the
     // calls.
     live_tools_shown: bool,
+    // The conversation alone. The one thing on this surface that hides the
+    // editor rather than sitting over it; `browse.rs` draws it.
+    browsing: bool,
 }
 
 // What to call a checkout. The root answers to its directory name, as
@@ -261,6 +265,7 @@ impl Ui {
             hovered_scrollback: None,
             row_targets: Vec::new(),
             live_tools_shown: false,
+            browsing: false,
             regions: Regions::default(),
         }
     }
@@ -291,6 +296,9 @@ impl Ui {
     fn live(&self, lane: &Lane, view: &View, row_holds: bool) -> (Vec<Line<'static>>, usize) {
         let width = self.screen.usable();
         let mut rows: Vec<Line<'static>> = Vec::new();
+        // Browse mode shows the conversation and nothing that happened on the
+        // way to it: the calls in flight, the thinking and the spinner all go.
+        let thinking = view.surface.stream.kind == StreamKind::Reasoning;
 
         // The calls that keep a line here: a foldable one does not while the
         // summary row above is holding it. Collapsed the newest of them is
@@ -298,15 +306,17 @@ impl Ui {
         // will fold into.
         let shown = tool::drawn(&view.state.tools, row_holds);
         let mut pending = Vec::new();
-        if self.live_tools_shown {
-            pending.extend(shown.iter().copied().map(|t| pending_line(self.spinner, t)));
-        } else if let Some(t) = shown.last() {
-            let extra = if shown.len() > 1 {
-                format!(" (+{})", shown.len() - 1)
-            } else {
-                String::new()
-            };
-            pending.push(format!("{}{extra}", pending_line(self.spinner, t)));
+        if !self.browsing {
+            if self.live_tools_shown {
+                pending.extend(shown.iter().copied().map(|t| pending_line(self.spinner, t)));
+            } else if let Some(t) = shown.last() {
+                let extra = if shown.len() > 1 {
+                    format!(" (+{})", shown.len() - 1)
+                } else {
+                    String::new()
+                };
+                pending.push(format!("{}{extra}", pending_line(self.spinner, t)));
+            }
         }
         rows.extend(pending.into_iter().flat_map(|line| {
             let muted = Line::from(self.paint.span(&self.paint.theme.muted, line));
@@ -316,16 +326,20 @@ impl Ui {
         // count the rows the block takes, not the lines before they did.
         let pending_rows = rows.len();
 
-        rows.extend(body(
-            &view.surface.folds,
-            &view.surface.scrollback,
-            view.surface.stream.kind == StreamKind::Reasoning,
-            &view.surface.stream.text,
-            width,
-            &self.paint,
-        ));
+        rows.extend(if thinking && self.browsing {
+            Vec::new()
+        } else {
+            body(
+                &view.surface.folds,
+                &view.surface.scrollback,
+                thinking,
+                &view.surface.stream.text,
+                width,
+                &self.paint,
+            )
+        });
 
-        if lane.is_running() {
+        if lane.is_running() && !self.browsing {
             let mut parts = status::parts(&self.live, &snapshot(lane, view));
             // A run that is stopping says so; an ordinary running line needs
             // no word for it — the spinner is what says the turn is on.
@@ -2007,9 +2021,15 @@ mod tests {
 
     // The rows the scrollback draws, one string each.
     fn drawn_rows(view: &View) -> Vec<String> {
-        ScrollbackRows::new(&view.surface.scrollback, &Paint::new(false), &[], 80)
-            .map(text)
-            .collect()
+        ScrollbackRows::new(
+            &view.surface.scrollback,
+            &Paint::new(false),
+            &[],
+            80,
+            |_| true,
+        )
+        .map(text)
+        .collect()
     }
 
     // A closed reasoning block of id `id` and `n` lines in the scrollback.
@@ -2043,14 +2063,14 @@ mod tests {
         let long = "x".repeat(200);
         let rows = [Row::result(true, "edit", format!("head\n+12 {long}"))];
 
-        let narrow: Vec<String> = ScrollbackRows::new(&rows, &paint, &[], 40)
+        let narrow: Vec<String> = ScrollbackRows::new(&rows, &paint, &[], 40, |_| true)
             .map(text)
             .collect();
-        let wide: Vec<String> = ScrollbackRows::new(&rows, &paint, &[], 160)
+        let wide: Vec<String> = ScrollbackRows::new(&rows, &paint, &[], 160, |_| true)
             .map(text)
             .collect();
         // And back again: widening must not be the only direction that repaints.
-        let again: Vec<String> = ScrollbackRows::new(&rows, &paint, &[], 40)
+        let again: Vec<String> = ScrollbackRows::new(&rows, &paint, &[], 40, |_| true)
             .map(text)
             .collect();
 
@@ -2084,17 +2104,48 @@ mod tests {
         assert_ne!(mixed.prompt.panel.input, theme.prompt.panel.input);
     }
 
+    // What browse mode is built on: a row the caller does not want is passed
+    // over by its count alone, and the two walks have to agree about where the
+    // rows it does want are — the back walk especially, which starts inside
+    // the last row there is.
+    #[test]
+    fn a_filtered_window_reads_the_rows_it_keeps_and_skips_the_rest() {
+        let paint = Paint::new(false);
+        let mut rows = vec![Row::notice("a command printed this")];
+        rows.extend(Row::answer("the answer", &paint));
+        rows.push(Row::notice("and then a warning"));
+
+        let keep = |row: &Row| row.is_conversation();
+        let forwards: Vec<String> = ScrollbackRows::new(&rows, &paint, &[], 80, keep)
+            .map(text)
+            .collect();
+        assert_eq!(forwards, ["the answer"]);
+
+        let backwards: Vec<String> = ScrollbackRows::new(&rows, &paint, &[], 80, keep)
+            .rev()
+            .map(text)
+            .collect();
+        assert_eq!(backwards, ["the answer"], "the back walk too");
+
+        // Nothing kept at all leaves both walks with nothing, which is how a
+        // browse of a screen holding no conversation looks.
+        let none: Vec<String> = ScrollbackRows::new(&rows, &paint, &[], 80, |_| false)
+            .map(text)
+            .collect();
+        assert!(none.is_empty());
+    }
+
     #[test]
     fn an_empty_scrollback_iterates_to_nothing() {
         // Both walks index `rows[0]` before comparing their pointers, so an
         // empty scrollback panicked. The back walk kept doing it after the
         // front was fixed, and `screen::window` is the one that walks back.
         let paint = Paint::new(false);
-        let rows: Vec<String> = ScrollbackRows::new(&[], &paint, &[], 80)
+        let rows: Vec<String> = ScrollbackRows::new(&[], &paint, &[], 80, |_| true)
             .map(text)
             .collect();
         assert!(rows.is_empty());
-        let back: Vec<String> = ScrollbackRows::new(&[], &paint, &[], 80)
+        let back: Vec<String> = ScrollbackRows::new(&[], &paint, &[], 80, |_| true)
             .rev()
             .map(text)
             .collect();
@@ -2109,7 +2160,7 @@ mod tests {
             Row::notice("d".to_string()),
         ];
         let paint = Paint::new(false);
-        let rows = ScrollbackRows::new(&rows, &paint, &[], 80);
+        let rows = ScrollbackRows::new(&rows, &paint, &[], 80, |_| true);
         let (front, back): (Vec<_>, Vec<_>) = {
             let mut f = Vec::new();
             let mut b = Vec::new();
@@ -2521,6 +2572,27 @@ mod tests {
             tui.ui.editor.is_empty(),
             "the editor did not take the keystroke"
         );
+    }
+
+    // The panel can open onto a browse nobody left — a `/settings` queued
+    // during a run, or sent from the phone — and it is drawn over everything:
+    // a mode that swallowed its keys would leave a screen nobody can drive.
+    #[tokio::test]
+    async fn a_panel_opened_onto_browse_still_takes_the_keys() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let dir = tempfile::tempdir().expect("a checkout");
+        let mut tui = surface(dir.path());
+        let rows = vec![row("model", "flash", false)];
+        tui.ui.panel = Some(Panel::new(rows, &crate::store::config::Vim::default()));
+        tui.ui.browsing = true;
+        let token = tui.core.lane().token();
+        let lane = tui.core.lane_mut();
+        let esc = super::TermEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        let asked = tui.ui.key(lane, view_at(&mut tui.views, token), esc, false);
+        assert!(matches!(asked, Asked::Own(Deed::Nothing)));
+        assert!(tui.ui.panel.is_none(), "the panel took the esc and closed");
+        assert!(tui.ui.browsing, "and the browse behind it is still up");
     }
 
     // Recall belongs to the checkout, like the transcripts and the completion
@@ -3449,6 +3521,11 @@ mod tests {
         super::TermEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
     }
 
+    fn ctrl(c: char) -> super::TermEvent {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        super::TermEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL))
+    }
+
     fn mode(ui: &super::Ui) -> Option<Mode> {
         ui.vim.as_ref().map(|v| v.mode)
     }
@@ -3786,6 +3863,102 @@ mod tests {
         ui.flush(&lane, &mut view);
         assert_eq!(ui.editor.cursor(), 0, "and gg to its start");
         assert_eq!(view.surface.scroll, up, "the history stayed where it was");
+    }
+
+    // `ctrl+l` weighs the line: with text to lose one press clears it, with
+    // nothing there the session is what a press would replace, so it takes
+    // two. The press that cleared the line arms nothing toward the second.
+    #[test]
+    fn ctrl_l_clears_the_line_and_twice_starts_a_session() {
+        let mut ui = test_ui(80, 24);
+        let (_dir, lane) = a_running_lane();
+        let mut view = View::default();
+
+        ui.editor.set_line("half-typed");
+        let asked = ui.key(&lane, &mut view, ctrl('l'), false);
+        assert!(matches!(asked, Asked::Own(Deed::Nothing)), "{asked:?}");
+        assert!(ui.editor.is_empty(), "the line went on the one press");
+
+        // Pressed again while it is still empty: the clearing press left the
+        // double-tap unarmed, so this one only arms it.
+        let asked = ui.key(&lane, &mut view, ctrl('l'), false);
+        assert!(
+            matches!(asked, Asked::Own(Deed::Nothing)),
+            "the press that cleared the line started nothing: {asked:?}"
+        );
+    }
+
+    #[test]
+    fn an_empty_line_takes_two_presses_for_a_new_session() {
+        let mut ui = test_ui(80, 24);
+        let (_dir, lane) = a_running_lane();
+        let mut view = View::default();
+
+        let asked = ui.key(&lane, &mut view, ctrl('l'), false);
+        assert!(
+            matches!(asked, Asked::Own(Deed::Nothing)),
+            "the first press only arms it: {asked:?}"
+        );
+
+        let asked = ui.key(&lane, &mut view, ctrl('l'), false);
+        assert!(
+            matches!(asked, Asked::Core(Intent::Builtin(Builtin::New))),
+            "the second starts the session: {asked:?}"
+        );
+    }
+
+    // `ctrl+c` gave up clearing the line: it stops the run, and the second
+    // press inside the window is the one that leaves.
+    #[test]
+    fn ctrl_c_stops_the_run_and_leaves_the_line() {
+        let mut ui = test_ui(80, 24);
+        let (_dir, lane) = a_running_lane();
+        let mut view = View::default();
+
+        ui.editor.set_line("half-typed");
+        let asked = ui.key(&lane, &mut view, ctrl('c'), false);
+        assert!(matches!(asked, Asked::Own(Deed::Nothing)), "{asked:?}");
+        assert_eq!(
+            ui.editor.text(),
+            "half-typed",
+            "the line is not its to clear"
+        );
+    }
+
+    // `v` on an empty line opens the conversation view, and only there: with
+    // something on the line it is a letter vim made into a key of its own.
+    #[test]
+    fn v_opens_the_conversation_view_on_an_empty_line() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let esc = super::TermEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let mut ui = vim_ui();
+        let (_dir, lane) = a_running_lane();
+        let mut view = View::default();
+        ui.vim.as_mut().unwrap().mode = Mode::Normal;
+        view.surface.scrollback = (1..=40)
+            .flat_map(|n| Row::answer(&format!("answer {n}"), &ui.paint))
+            .collect();
+
+        // A line with something on it: `v` is Ignore, and nothing opens.
+        ui.editor.set_line("half-typed");
+        ui.key(&lane, &mut view, typed('v'), false);
+        assert!(!ui.browsing, "a line to command keeps its v");
+        assert_eq!(ui.editor.text(), "half-typed");
+
+        ui.editor.clear();
+        ui.key(&lane, &mut view, typed('v'), false);
+        assert!(ui.browsing);
+
+        // The keys in here are its own: `x` would delete a character in
+        // Normal, and `k` scrolls back rather than reaching for history.
+        ui.key(&lane, &mut view, typed('x'), false);
+        assert_eq!(ui.editor.text(), "", "nothing types into a hidden line");
+        ui.key(&lane, &mut view, typed('k'), false);
+        assert!(view.surface.scroll > 0, "k walked the conversation back");
+
+        ui.key(&lane, &mut view, esc, false);
+        assert!(!ui.browsing);
+        assert_eq!(view.surface.scroll, 0, "and leaves at the newest rows");
     }
 
     // Turning the keys off is the one thing that moves the mode without a

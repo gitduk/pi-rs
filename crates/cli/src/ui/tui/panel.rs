@@ -240,7 +240,7 @@ impl Panel {
             // An edit in progress goes first: the panel closes only once there
             // is nothing left inside it to cancel. Discarding lands back in
             // Normal mode with the row as it was.
-            Some(Action::MenuDismiss | Action::LineClear) => match self.editing.take() {
+            Some(Action::MenuDismiss | Action::AppCancel) => match self.editing.take() {
                 Some(_) => {
                     self.refused = None;
                     Took::Deed(Deed::Nothing)

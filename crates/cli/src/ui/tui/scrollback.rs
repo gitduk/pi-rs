@@ -249,15 +249,23 @@ impl<'a> DoubleEndedIterator for IndexedScrollbackRows<'a> {
 }
 
 impl<'a> ScrollbackRows<'a> {
+    /// The window's rows, and `keep` says which of them it is for: browse
+    /// mode shows the conversation alone. A dropped row is counted as having
+    /// no lines at all, which is the whole of the filter for the window — the
+    /// caller's own height tally filters for itself.
     pub(super) fn new(
         rows: &'a [Row],
         paint: &'a Paint,
         done: &'a [Segment],
         width: usize,
+        keep: impl Fn(&Row) -> bool,
     ) -> Self {
         let back = rows.len().saturating_sub(1);
-        let back_row = if rows.is_empty() { 0 } else { rows[back].len() };
-        let lens = rows.iter().map(|r| r.len()).collect();
+        let lens: Vec<usize> = rows
+            .iter()
+            .map(|r| if keep(r) { r.len() } else { 0 })
+            .collect();
+        let back_row = lens.get(back).copied().unwrap_or(0);
         Self {
             rows,
             width,

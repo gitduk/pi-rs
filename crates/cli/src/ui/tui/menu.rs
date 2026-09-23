@@ -170,7 +170,11 @@ impl Ui {
                 if let Some(v) = &mut self.vim {
                     v.last = None;
                 }
-                self.editor.insert_str(&text.replace('\r', "\n"));
+                // Browse mode hides the line: text pasted into it would land
+                // where nobody can see it, and be there on the way out.
+                if !self.browsing {
+                    self.editor.insert_str(&text.replace('\r', "\n"));
+                }
                 return Asked::Own(Deed::Nothing);
             }
             TermEvent::Mouse(mouse) => {
@@ -199,6 +203,13 @@ impl Ui {
             }
             _ => return Asked::Own(Deed::Nothing),
         };
+        // Browse mode takes the keyboard whole: its keys command where the
+        // view sits, and the editor's table has nothing on screen to aim at.
+        // A panel outranks it — one can open onto a browse the user never
+        // left, off the queue or the phone, and it is drawn over everything.
+        if self.browsing && self.panel.is_none() {
+            return self.browse_key(view, key);
+        }
         let press = Press::of(key.code, key.modifiers);
         // The panel counts as a menu: its own keys are the Menu bindings, and
         // `menu()` is empty while it is open, so the layer has to be forced on.
@@ -217,6 +228,9 @@ impl Ui {
                 menu,
                 run: running,
                 mode: self.vim.as_ref().map(|v| v.mode),
+                // Whether the line has anything on it, which the keys bound
+                // to an empty one read. Only Normal asks.
+                line_empty: self.editor.is_empty(),
             },
         );
 
@@ -256,7 +270,7 @@ impl Ui {
         }
 
         match bound {
-            Some(Action::LineClear) => return self.interrupt_or_clear(running),
+            Some(Action::AppCancel) => return self.interrupt_or_quit(running),
             Some(Action::LineSubmit) => {
                 // Enter while a menu is open runs what it highlights. The
                 // typed text is a prefix; the highlighted word is the intent.
@@ -343,11 +357,21 @@ impl Ui {
                     }
                 };
             }
-            Some(Action::AppClearScreen) => {
-                let now = Instant::now();
-                if double_tap(&mut self.last_l, now) {
+            Some(Action::LineClear) => {
+                // A line to lose goes on the one press; with nothing there,
+                // the session is what a press would replace, so it takes two.
+                if self.editor.is_empty() {
+                    let now = Instant::now();
+                    if double_tap(&mut self.last_l, now) {
+                        self.last_l = None;
+                        return Asked::Core(Intent::Builtin(Builtin::New));
+                    }
+                } else {
+                    // The armed half goes with the line: a quick second press
+                    // must not start a new session on the line this one just
+                    // cleared.
                     self.last_l = None;
-                    return Asked::Core(Intent::Builtin(Builtin::New));
+                    self.editor.clear();
                 }
                 return Asked::Own(Deed::Nothing);
             }
@@ -416,6 +440,7 @@ impl Ui {
             Some(Action::ScrollPageDown) => self.scroll_view(view, false, self.page_scroll_step()),
             Some(Action::ScrollHalfUp) => self.scroll_view(view, true, self.half_scroll_step()),
             Some(Action::ScrollHalfDown) => self.scroll_view(view, false, self.half_scroll_step()),
+            Some(Action::Browse) => self.browse(view),
             Some(Action::ThinkFold) => {
                 // The last block only: the one streaming, or the newest
                 // finished one when nothing is. The switch is left alone, so
@@ -512,11 +537,11 @@ impl Ui {
             }
             Some(
                 Action::LineClear
+                | Action::AppCancel
                 | Action::LineSubmit
                 | Action::RunInterrupt
                 | Action::AppExit
-                | Action::Rewind
-                | Action::AppClearScreen,
+                | Action::Rewind,
             ) => unreachable!("handled scrollback"),
             // No binding reaches for these: `dd` and `gg` are doubled keys
             // the `None` arm answers, so the table never sends them here.
@@ -527,21 +552,19 @@ impl Ui {
         Asked::Own(Deed::Nothing)
     }
 
-    // One key, three meanings, and the escalation travels with the binding
-    // rather than with Ctrl-C: stop the run, clear the line, or — pressed
-    // twice inside the window — leave.
-    fn interrupt_or_clear(&mut self, running: bool) -> Asked {
+    // One key, two meanings, and the escalation travels with the binding
+    // rather than with Ctrl-C: stop the run, or — pressed twice inside the
+    // window — leave.
+    fn interrupt_or_quit(&mut self, running: bool) -> Asked {
         if double_tap(&mut self.last_interrupt, Instant::now()) {
             return Asked::Core(Intent::Builtin(Builtin::Quit));
         }
         if running {
             return Asked::Own(Deed::Interrupt);
         }
-        if self.editor.is_empty() {
-            self.flash("press it again to quit");
-        } else {
-            self.editor.clear();
-        }
+        // The next press is the one that leaves, and saying so is what keeps
+        // this one from reading as a key that did nothing.
+        self.flash("press it again to quit");
         Asked::Own(Deed::Nothing)
     }
 }

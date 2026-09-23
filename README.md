@@ -109,7 +109,7 @@ id under `[keys]` in `~/.pi/settings.toml` replaces that action's defaults:
 
 ```toml
 [keys]
-"app.clear-screen" = "ctrl+g"
+"line.clear" = "ctrl+g"
 "move.line.start"  = ["home", "f5"]
 ```
 
@@ -152,8 +152,13 @@ question — and a checkout by its branch.
 Typing `@` completes workspace files the same way: `@src/ma` lands as
 `@src/main.rs`, a directory lands with its `/` left open for the next step.
 
-`/new` starts a fresh session, keeping this one on disk; `ctrl+l` twice does
-the same (once clears the screen). `/resume` lists the sessions saved for this
+In Normal mode with nothing typed, `v` reads the conversation alone — what was
+asked and what was answered, with the thinking, the calls and the input line
+itself out of the way. `j`/`k` walk it, and `Esc`, `q` or `v` leave.
+
+`/new` starts a fresh session, keeping this one on disk; `ctrl+l` clears the
+line, and with nothing left on it a second press inside the double-tap window
+starts a fresh session the same way. `/resume` lists the sessions saved for this
 workspace — one directory per project under `~/.pi/sessions/`, named by the
 path — newest first, each row the name you gave it followed by the first thing
 it was asked, and `/resume <id>` switches to one — the session you leave is

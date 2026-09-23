@@ -201,6 +201,10 @@ enum Kind {
         body: Line<'static>,
         band: Option<RStyle>,
     },
+    // What the model answered, one row per line the markdown handed over.
+    // Its own kind rather than a notice — a notice is a thing only the screen
+    // knew, and an answer is half of what the conversation is.
+    Answer(Line<'static>),
     // A painted line the screen alone knows about: the banner, a command's
     // output, a warning. Colour does not depend on width, so painting it
     // early costs nothing.
@@ -266,6 +270,12 @@ impl Row {
         Self(kind, Height::default())
     }
 
+    /// Whether this row is part of the conversation: what was said and what
+    /// was answered, which is what browse mode is for.
+    pub fn is_conversation(&self) -> bool {
+        matches!(&self.0, Kind::Said { .. } | Kind::Answer(_))
+    }
+
     /// Something only the screen ever knew. Free-form on purpose — no session
     /// entry answers for it, so nothing can drift.
     pub fn notice(line: impl Into<Line<'static>>) -> Self {
@@ -302,7 +312,7 @@ impl Row {
     pub fn answer(text: &str, paint: &Paint) -> Vec<Self> {
         render::render_markdown(text, paint)
             .into_iter()
-            .map(Self::notice)
+            .map(|text| Self::new(Kind::Answer(text)))
             .collect()
     }
 
@@ -564,7 +574,7 @@ impl Row {
     /// Wraps not counted; `height` is the screen-row count.
     pub fn len(&self) -> usize {
         match &self.0 {
-            Kind::Notice { .. } | Kind::Said { .. } | Kind::Tally(_) => 1,
+            Kind::Answer(_) | Kind::Notice { .. } | Kind::Said { .. } | Kind::Tally(_) => 1,
             Kind::Result {
                 preview_lines,
                 expanded,
@@ -646,6 +656,7 @@ impl Row {
     ) -> (Line<'static>, Option<Line<'static>>) {
         match &self.0 {
             Kind::Said { border, body, .. } => (body.clone(), Some(border.clone())),
+            Kind::Answer(text) => (text.clone(), None),
             Kind::Notice { text, times } if *times == 1 => (text.clone(), None),
             Kind::Notice { text, times } => {
                 // The count wears the muted style whatever the line it trails,
@@ -909,6 +920,38 @@ fn tools_summary_rows(
         ));
     }
     rows
+}
+
+#[cfg(test)]
+mod conversation_tests {
+    use super::*;
+
+    // Browse mode is the whole reason the answer has a kind of its own: it
+    // shows what was said and what was answered, and nothing the conversation
+    // passed through on its way.
+    #[test]
+    fn only_what_was_said_and_what_was_answered_is_the_conversation() {
+        let paint = Paint::new(false);
+        for row in Row::prompt("what is this", &paint)
+            .into_iter()
+            .chain(Row::answer("# it is this\nand that", &paint))
+        {
+            assert!(row.is_conversation());
+        }
+        let tools = FoldedTools::new(FoldedTool {
+            name: "read".into(),
+            preview: "src/main.rs".into(),
+        });
+        for row in [
+            Row::notice("a command printed this"),
+            Row::tally(Snapshot::default()),
+            Row::reasoning(1, vec![Line::from("thinking")], false),
+            Row::result(true, "read", "src/main.rs"),
+            Row::tools_summary(tools),
+        ] {
+            assert!(!row.is_conversation());
+        }
+    }
 }
 
 #[cfg(test)]
