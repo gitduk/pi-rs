@@ -94,7 +94,7 @@ pub(super) struct Regions {
     pub(super) history: Rect,
     // The completion list, or the open panel over it.
     pub(super) menu: Rect,
-    // The lane strip, or whatever flash took its row.
+    // The bar: the checkouts, or the flash that took its row.
     pub(super) bar: Rect,
     // The input line, pinned to the bottom.
     pub(super) editor: Rect,

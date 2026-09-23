@@ -7,7 +7,7 @@ use super::screen::Rows;
 use super::scrollback::{Piece, ScrollbackRows, absorb_growth, f_entry};
 use super::tool::{RunTool, is_modifying_tool, push_tool_row};
 use super::view::{StreamKind, Surface, View, snapshot};
-use super::{FLASH, Ui};
+use super::{BAR_H, FLASH, Ui};
 use crate::app::lane::Lane;
 use crate::ui::render;
 use crate::ui::status;
@@ -74,6 +74,15 @@ impl Ui {
         }
         let (text, _) = self.flash.as_ref()?;
         screen::fit(text, width).into_iter().next()
+    }
+
+    // The bar row, whatever it is saying: the flash while it is up, the bar's
+    // own line otherwise, and a bare row when there is neither — never nothing,
+    // so nothing above it moves.
+    fn bar_line(&mut self, width: usize) -> Line<'static> {
+        self.flash_line(width)
+            .or_else(|| self.lane_bar(width))
+            .unwrap_or_default()
     }
 
     // Where a finished row goes: a reasoning line into the streaming block's
@@ -299,10 +308,13 @@ impl Ui {
     pub(super) fn flush(&mut self, lane: &Lane, view: &mut View) {
         let menu = self.menu();
         let width = self.screen.usable();
-        // A flash outranks the lane strip: it is gone in a moment, where the
-        // strip is always a keystroke away.
-        let bar = self.flash_line(width).or_else(|| self.lane_bar(width));
-        let bar_h = usize::from(bar.is_some());
+        // A flash outranks the bar's own line: it is gone in a moment, where
+        // that line is always a keystroke away.
+        let bar = self.bar_line(width);
+        // The bar's row is not worth a terminal that cannot hold it, a row to
+        // type on and a row of history: one that short keeps the other two, and
+        // what is being typed keeps its row.
+        let bar_h = BAR_H.min((self.screen.height as usize).saturating_sub(2));
         let (input, caret) = self.editor.view(&self.paint, width);
         // A paste taller than the terminal must not push the editor area off
         // the bottom; the editor scrolls to keep the caret's row visible.
@@ -440,9 +452,7 @@ impl Ui {
                     &mut state,
                 );
             }
-            if let Some(bar) = &bar {
-                frame.render_widget(Rows(std::slice::from_ref(bar)), regions.bar);
-            }
+            frame.render_widget(Rows(std::slice::from_ref(&bar)), regions.bar);
             // Before the rows, so a span over the band keeps it: the columns the
             // input does not reach carry it too, one short of the edge.
             if let Some(band) = self.band {

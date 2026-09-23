@@ -636,6 +636,13 @@ impl Lists {
         })
     }
 
+    // What is known about the checkouts without asking git: `None` until
+    // something reads them, and nothing forks here either way. The bar reads
+    // this one, so a frame never waits for the list.
+    pub(super) fn worktrees_read(&self) -> Option<&[Choice]> {
+        self.worktrees.get().map(Vec::as_slice)
+    }
+
     // A turn or a switch can change what either list would say — a session
     // saved, a worktree the model added. Dropped rather than recomputed:
     // whoever asks next pays, and most of the time nobody does.

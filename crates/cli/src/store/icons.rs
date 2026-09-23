@@ -28,6 +28,7 @@ pub const PENDING_MARK: &str = "→"; // a tool call whose result has not landed
 pub const DONE_MARK: &str = "✓"; // a tool or lane that finished well
 pub const FAIL_MARK: &str = "✗"; // a failure, a denial, a refused edit
 pub const WARN_MARK: &str = "!"; // a warning line
+pub const UNOPENED_MARK: &str = "○"; // a checkout on the bar that no lane has open
 pub const COMPACT_RULE: &str = "───"; // the dashes a compaction banner wears
 
 // Menus and lists.

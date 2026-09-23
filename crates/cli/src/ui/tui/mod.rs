@@ -73,6 +73,11 @@ const DOUBLE_TAP: std::time::Duration = std::time::Duration::from_millis(500);
 // without looking for it, short enough that a second try lands after it.
 const FLASH: std::time::Duration = std::time::Duration::from_secs(3);
 
+// The bar's own row: present whatever the bar has to say, because a row that
+// came and went would take the transcript above it along on every key that
+// missed. Every terminal tall enough to hold it gives it this one.
+const BAR_H: usize = 1;
+
 // One text each: three and two call sites had their own copy of these, and a
 // reworded one would have drifted.
 const NO_TRANSCRIPT: &str = "this checkout has no transcript — /new or /resume first";
@@ -93,7 +98,7 @@ struct Ui {
     tty_bg: Option<(u8, u8, u8)>,
     // The same sigil for a `!` line, where the bang takes the icon's place.
     bang_prompt: Span<'static>,
-    // The lane bar's separator, painted once beside the two above it: the bar
+    // The bar's separator, painted once beside the two above it: the bar
     // is rebuilt every frame and this depends only on the theme.
     tab_sep: Span<'static>,
     // Which row of the open list is highlighted; kept rather than the list
@@ -137,9 +142,7 @@ struct Ui {
     // The segments each line shows, in the order the config named them.
     live: Vec<Segment>,
     done: Vec<Segment>,
-    // What the lane strip says, in lane order. Empty until there is a second
-    // lane, and the strip is absent with it — though a flash can still take
-    // that row.
+    // What the bar says, in ring order. Rebuilt before every draw.
     tabs: Vec<Tab>,
     // A note answering the last keypress, painted, and when it landed. It
     // takes the bar's row for `FLASH` and then goes — see `flash`.
@@ -166,10 +169,8 @@ fn lane_name(lane: &Lane) -> String {
     })
 }
 
-// How a lane shows in the bottom bar.
-//
-// `Done`/`Failed` are unread marks, not history: the tool rows' ✓ stays for
-// good, this one goes the moment you look at the lane it belongs to.
+// How a checkout shows on the bottom bar: its lane's state, or `Unopened` for a
+// checkout no lane has. `Done`/`Failed` are unread — they go when you look.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mark {
     Front,
@@ -177,10 +178,20 @@ enum Mark {
     Done,
     Failed,
     Idle,
+    Unopened,
 }
 
-// One lane as the bar shows it, rebuilt before every draw — the bar is a view
-// of state the surface does not own.
+impl Mark {
+    // Whether a checkout is wearing a mark someone may not have read. The bar
+    // drops a quiet one first — a ✓ or ✗ off the edge is a run that ended
+    // unseen.
+    fn quiet(self) -> bool {
+        matches!(self, Mark::Idle | Mark::Unopened)
+    }
+}
+
+// One checkout as the bar shows it, rebuilt before every draw — the bar is a
+// view of state the surface does not own.
 struct Tab {
     mark: Mark,
     name: String,
@@ -328,54 +339,98 @@ impl Ui {
         (rows, pending_rows)
     }
 
-    // The bottom bar, or None when there is nothing it could say. One lane is
-    // the whole surface, and a bar naming it is a row spent on nothing.
+    // The bar: one entry per checkout, in the order `refresh_tabs` builds. Too
+    // narrow for them all, it keeps the front one and marks each dropped end.
     fn lane_bar(&self, width: usize) -> Option<Line<'static>> {
-        if self.tabs.len() < 2 {
-            return None;
-        }
+        let front = self.tabs.iter().position(|t| t.mark == Mark::Front)?;
         let spin = icons::SPINNER_FRAMES[self.spinner % icons::SPINNER_FRAMES.len()];
         let theme = &self.paint.theme;
+        let items: Vec<Span<'static>> = self
+            .tabs
+            .iter()
+            .map(|tab| {
+                let (sign, style) = match tab.mark {
+                    Mark::Front => ("", &theme.input),
+                    Mark::Running => (spin, &theme.muted),
+                    Mark::Done => (icons::DONE_MARK, &theme.status.ok),
+                    Mark::Failed => (icons::FAIL_MARK, &theme.status.err),
+                    Mark::Idle => ("", &theme.muted),
+                    Mark::Unopened => (icons::UNOPENED_MARK, &theme.muted),
+                };
+                let label = if sign.is_empty() {
+                    tab.name.clone()
+                } else {
+                    format!("{sign} {}", tab.name)
+                };
+                self.paint.span(style, label)
+            })
+            .collect();
+        let dots = self.paint.span(&theme.muted, icons::ELLIPSIS);
+        let ell = dots.width();
+        let n = items.len();
+        let widths: Vec<usize> = items.iter().map(Span::width).collect();
+        let sep = self.tab_sep.width();
+        // What the window would take on the row, the `…` a dropped end leaves
+        // behind included.
+        let fits = |lo: usize, hi: usize| {
+            widths[lo..=hi].iter().sum::<usize>()
+                + (hi - lo) * sep
+                + if lo > 0 { ell + sep } else { 0 }
+                + if hi + 1 < n { sep + ell } else { 0 }
+                <= width
+        };
+        let (mut lo, mut hi) = (0, n - 1);
+        while !fits(lo, hi) && (lo < front || hi > front) {
+            let quiet = |at: usize| self.tabs[at].mark.quiet();
+            let (left, right) = (
+                (lo < front).then(|| quiet(lo)),
+                (hi > front).then(|| quiet(hi)),
+            );
+            // A quiet end goes before a marked one, and of two alike the one
+            // farther from the front; a tie goes right, which leaves the
+            // checkouts that opened earlier standing.
+            let drop_right = match (left, right) {
+                (Some(true), Some(false)) => false,
+                (Some(false), Some(true)) => true,
+                (None, _) => true,
+                (_, None) => false,
+                _ => hi - front >= front - lo,
+            };
+            if drop_right {
+                hi -= 1;
+            } else {
+                lo += 1;
+            }
+        }
         let mut spans: Vec<Span<'static>> = Vec::new();
-        for (i, tab) in self.tabs.iter().enumerate() {
-            if i > 0 {
+        if lo > 0 {
+            spans.push(dots.clone());
+            spans.push(self.tab_sep.clone());
+        }
+        for (i, item) in items.into_iter().enumerate().take(hi + 1).skip(lo) {
+            if i > lo {
                 spans.push(self.tab_sep.clone());
             }
-            let (sign, style) = match tab.mark {
-                Mark::Front => ("", &theme.input),
-                Mark::Running => (spin, &theme.muted),
-                Mark::Done => (icons::DONE_MARK, &theme.status.ok),
-                Mark::Failed => (icons::FAIL_MARK, &theme.status.err),
-                Mark::Idle => ("", &theme.muted),
-            };
-            let label = if sign.is_empty() {
-                tab.name.clone()
-            } else {
-                format!("{sign} {}", tab.name)
-            };
-            spans.push(self.paint.span(style, label));
+            spans.push(item);
+        }
+        if hi + 1 < n {
+            spans.push(self.tab_sep.clone());
+            spans.push(dots);
         }
         screen::fit(&Line::from(spans), width).into_iter().next()
     }
 
     // The checkout a step from this one, wrapping at either end — where the
-    // Normal `L`/`H` go. `forward` picks the ring's next
-    // checkout, `!forward` its previous. The ring walks the checkouts in
-    // the order the bar shows them — the ones already open, in the order
-    // they were opened — and puts the ones not open yet after them, in the
-    // order `app::worktree::list` reports. `Builtin::Worktree` opens one that is
-    // not, which is the same thing the picker did when you chose an unopened
-    // row.
-    //
-    // None when there is nowhere else to go.
+    // Normal `L`/`H` go; None when there is nowhere else to go. The ring is the
+    // order the bar shows, which the bar is built to carry whole.
     fn step_checkout(&self, lane: &Lane, forward: bool) -> Option<String> {
         let trees = self.lists.worktrees();
         let n = trees.len();
         if n < 2 {
             return None;
         }
-        // Open checkouts keep the bar's order, the rest of the disk follows
-        // in git's, and a tab that names no checkout is dropped.
+        // The bar's order, and a tab that names no checkout is dropped — a lane
+        // whose checkout went names nothing to step to.
         let mut order: Vec<&str> = Vec::with_capacity(n);
         for tab in &self.tabs {
             let name = tab.name.as_str();
@@ -383,6 +438,8 @@ impl Ui {
                 order.push(name);
             }
         }
+        // A bar that has not rebuilt since the disk changed leaves the ring
+        // short of it: the disk's own order is where the rest belongs.
         for tree in trees {
             if !order.contains(&tree.name.as_str()) {
                 order.push(&tree.name);
@@ -790,12 +847,12 @@ impl Tui {
         }
     }
 
-    // Rebuild the bottom bar from the lanes, before every draw. A run that
-    // ended out of sight has to reach the screen without anyone asking, and
-    // this is the only thing that looks.
+    // Rebuild the bar before every draw: a run that ended out of sight has to
+    // reach the screen without anyone asking, and a step walks the order this
+    // builds — the bar and the ring are one list.
     fn refresh_tabs(&mut self) {
         let current = self.core.current;
-        self.ui.tabs = self
+        let mut tabs: Vec<Tab> = self
             .core
             .lanes
             .iter()
@@ -816,6 +873,18 @@ impl Tui {
                 name: lane_name(lane),
             })
             .collect();
+        // The checkouts no lane has open, in git's order: the ring is not the
+        // lanes alone. `Lists` holds the read, one fork per list.
+        for tree in self.ui.lists.worktrees_read().unwrap_or_default() {
+            if tabs.iter().any(|t| t.name == tree.name) {
+                continue;
+            }
+            tabs.push(Tab {
+                mark: Mark::Unopened,
+                name: tree.name.clone(),
+            });
+        }
+        self.ui.tabs = tabs;
     }
 
     // Drop lanes whose checkout was deleted outside pi — idle ones only, a
@@ -1071,6 +1140,12 @@ impl Tui {
             self.refresh_tabs();
             let view = front_view(&mut self.views, self.core.lane());
             self.ui.flush(self.core.lane(), view);
+            // After the frame, not before it: a fork here would hold the
+            // screen blank. Read again whenever something dropped the list.
+            if self.ui.lists.worktrees_read().is_none() {
+                let _ = self.ui.lists.worktrees();
+                continue;
+            }
             let running = self.core.lane().is_running();
             let anywhere = self.core.lanes.iter().any(|lane| lane.is_running());
             // Whether what is about to run is a loop's own round: the queue
@@ -2236,8 +2311,8 @@ mod tests {
     }
 
     // A flash belongs to the lane it answered. Carried across a switch it
-    // names the wrong checkout, and it does it on the row the lane strip
-    // would have used to say which checkout you just landed in.
+    // names the wrong checkout, and it does it on the row the bar uses to say
+    // which checkout is in front.
     #[tokio::test]
     async fn a_flash_does_not_follow_the_surface_to_another_lane() {
         let dir = tempfile::tempdir().expect("a temp dir");
@@ -2521,6 +2596,108 @@ mod tests {
         ));
         ui.flush(&lane, &mut view);
         assert!(ui.flash.is_none(), "the expired flash was dropped");
+    }
+
+    // The bar's row is the bar's whether or not it is saying anything: a row
+    // that came and went would take the transcript above it along, and the
+    // newest line would sit a row lower for the three seconds a flash is up.
+    #[test]
+    fn the_bar_keeps_its_row_when_a_flash_comes_and_goes() {
+        let mut ui = test_ui(40, 8);
+        let (_dir, lane) = a_running_lane();
+        let mut view = View::default();
+        ui.tabs = vec![tab(super::Mark::Front, "main")];
+
+        ui.flush(&lane, &mut view);
+        let quiet = ui.regions.history.height;
+        assert_eq!(ui.regions.bar.height, 1, "the bar is a row of its own");
+
+        ui.flash("the only checkout there is");
+        ui.flush(&lane, &mut view);
+        assert_eq!(
+            ui.regions.history.height, quiet,
+            "a flash moves nothing above it"
+        );
+    }
+
+    // One lane is on the bar like any other. The row is spent whether or not
+    // it is saying something, and its name says which checkout is in front.
+    #[test]
+    fn one_lane_names_itself_on_the_bar() {
+        let mut ui = test_ui(40, 8);
+        ui.tabs = vec![tab(super::Mark::Front, "main")];
+        assert_eq!(bar(&ui, 39), "main");
+    }
+
+    // A strip wider than its row keeps the front lane — the one lane the row is
+    // there to name — and says with an `…` which ends it dropped.
+    #[test]
+    fn a_strip_too_wide_keeps_the_front_and_marks_the_ends() {
+        let mut ui = test_ui(20, 8);
+        ui.tabs = vec![
+            tab(super::Mark::Idle, "alpha"),
+            tab(super::Mark::Done, "beta"),
+            tab(super::Mark::Front, "gamma"),
+            tab(super::Mark::Failed, "delta"),
+            tab(super::Mark::Idle, "epsilon"),
+        ];
+        assert_eq!(bar(&ui, 20), "… · gamma · …");
+        assert_eq!(bar(&ui, 30), "… · ✓ beta · gamma · …");
+
+        // In front is in front: the first lane is never dropped, and a strip
+        // that runs out on one side alone says so on that side alone.
+        ui.tabs.rotate_left(2);
+        assert_eq!(bar(&ui, 20), "gamma · ✗ delta · …");
+    }
+
+    // A lane wearing a mark is saying something nobody has read yet: the bar
+    // drops the quiet entries first, so a ✓ or ✗ does not scroll off unseen.
+    #[test]
+    fn a_marked_lane_outlives_a_quiet_one() {
+        let mut ui = test_ui(24, 8);
+        ui.tabs = vec![
+            tab(super::Mark::Idle, "quietly-idle-here"),
+            tab(super::Mark::Front, "gamma"),
+            tab(super::Mark::Failed, "delta"),
+        ];
+        // Only an entry dropped will fit: the idle one goes, not the ✗.
+        assert_eq!(bar(&ui, 24), "… · gamma · ✗ delta");
+    }
+
+    // The bar carries the whole ring, the lanes' own and the disk's alike: a
+    // checkout no lane has open is on it as soon as the list has been read, so
+    // what `H`/`L` would reach is read off the bar before either is pressed.
+    #[test]
+    fn the_bar_lists_the_checkouts_no_lane_has_open() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut tui = surface(dir.path());
+        tui.core.lanes[0].worktree = Some("pi-rs".into());
+        tui.ui
+            .lists
+            .worktrees
+            .set(vec![
+                Choice {
+                    name: "pi-rs".into(),
+                    note: String::new(),
+                },
+                Choice {
+                    name: "fix-mem".into(),
+                    note: String::new(),
+                },
+                Choice {
+                    name: "fw-rm".into(),
+                    note: String::new(),
+                },
+            ])
+            .ok();
+        tui.refresh_tabs();
+
+        assert_eq!(bar(&tui.ui, 39), "pi-rs · ○ fix-mem · ○ fw-rm");
+        // And the order it lists them in is the order a step walks.
+        assert_eq!(
+            tui.ui.step_checkout(&tui.core.lanes[0], true).as_deref(),
+            Some("fix-mem")
+        );
     }
 
     // The same notice landing again with nothing between it and the last one
@@ -3350,6 +3527,21 @@ mod tests {
             super::Lists::new(Store::new(std::env::temp_dir()), std::env::temp_dir()),
             Paint::new(true),
         )
+    }
+
+    // A lane as the bar holds one.
+    fn tab(mark: super::Mark, name: &str) -> super::Tab {
+        super::Tab {
+            mark,
+            name: name.into(),
+        }
+    }
+
+    // The bar's row as text, without a screen to read it off.
+    fn bar(ui: &super::Ui, width: usize) -> String {
+        ui.lane_bar(width)
+            .map(|l| l.to_string())
+            .unwrap_or_default()
     }
 
     // ------------------------------------------------------------- looping
