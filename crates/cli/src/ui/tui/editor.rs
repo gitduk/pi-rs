@@ -276,11 +276,10 @@ impl Editor {
     }
 
     /// Older, unless the caret has a line of this buffer above it to walk
-    /// first. The buffer's first line is the end of that: nothing above it
-    /// belongs to this line, so what is above it is the entry before.
+    /// first.
     pub fn up(&mut self) {
-        if self.line_start() > 0 {
-            return self.caret_up();
+        if self.caret_up() {
+            return;
         }
         if self.at == 0 {
             return;
@@ -293,11 +292,11 @@ impl Editor {
         self.cursor = self.text.len();
     }
 
-    /// Newer, the same way down: the caret walks the lines of a multi-line
-    /// buffer until it stands on the last one.
+    /// Newer, over the lines below the caret first, as `up` walks the ones
+    /// above.
     pub fn down(&mut self) {
-        if self.line_end() < self.text.len() {
-            return self.caret_down();
+        if self.caret_down() {
+            return;
         }
         if self.at >= self.history.len() {
             return;
@@ -310,26 +309,30 @@ impl Editor {
         self.cursor = self.text.len();
     }
 
-    fn caret_up(&mut self) {
+    // The line above the caret, and whether there was one: the caller recalls
+    // an entry when there was not.
+    fn caret_up(&mut self) -> bool {
         let start = self.line_start();
         if start == 0 {
-            return;
+            return false;
         }
         let col = self.cursor - start;
         let prev = self.text[..start - 1].rfind('\n').map_or(0, |i| i + 1);
         self.cursor = floor_boundary(&self.text, (prev + col).min(start - 1));
+        true
     }
 
-    fn caret_down(&mut self) {
+    fn caret_down(&mut self) -> bool {
         let start = self.line_start();
         let col = self.cursor - start;
         let Some(nl) = self.text[self.cursor..].find('\n').map(|i| self.cursor + i) else {
-            return;
+            return false;
         };
         let next_end = self.text[nl + 1..]
             .find('\n')
             .map_or(self.text.len(), |i| nl + 1 + i);
         self.cursor = floor_boundary(&self.text, (nl + 1 + col).min(next_end));
+        true
     }
 
     /// The rows to paint and where the caret sits among them.
