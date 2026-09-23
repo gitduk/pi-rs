@@ -162,14 +162,23 @@ impl Vim {
             .is_some_and(|(p, at)| p == prev && now.duration_since(at) < self.window)
     }
 
+    // Was this press the second half of a doubled key? One that was not is the
+    // half the next one needs, which is what makes `dd` a pair and `d` nothing.
+    pub(super) fn completes(&mut self, c: char, now: Instant) -> bool {
+        if self.armed(c, now) {
+            return true;
+        }
+        self.last = Some((c, now));
+        false
+    }
+
     // What `c` does, and the mode change if it makes one.
     pub(super) fn typed(&mut self, c: char, now: Instant) -> Typed {
         if self.mode == Mode::Normal {
             if let Some(action) = Self::doubled(c) {
-                if self.armed(c, now) {
+                if self.completes(c, now) {
                     return Typed::Command(action);
                 }
-                self.last = Some((c, now));
             } else {
                 self.last = None;
             }

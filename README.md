@@ -154,7 +154,8 @@ Typing `@` completes workspace files the same way: `@src/ma` lands as
 
 In Normal mode with nothing typed, `v` reads the conversation alone — what was
 asked and what was answered, with the thinking, the calls and the input line
-itself out of the way. `j`/`k` walk it, and `Esc`, `q` or `v` leave.
+itself out of the way. `j`/`k` walk it a row, `J`/`K` half a screen, `G` and
+`gg` its two ends, and `Esc`, `q` or `v` leave.
 
 `/new` starts a fresh session, keeping this one on disk; `ctrl+l` clears the
 line, and with nothing left on it a second press inside the double-tap window

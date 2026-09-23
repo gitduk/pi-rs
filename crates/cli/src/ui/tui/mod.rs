@@ -3956,9 +3956,45 @@ mod tests {
         ui.key(&lane, &mut view, typed('k'), false);
         assert!(view.surface.scroll > 0, "k walked the conversation back");
 
+        // The window keys are the empty line's own: `K`/`J` half a screen,
+        // `G` and `gg` the conversation's two ends.
+        let (walked, half) = (view.surface.scroll, ui.half_scroll_step());
+        ui.key(&lane, &mut view, typed('K'), false);
+        assert_eq!(
+            view.surface.scroll,
+            walked + half,
+            "K is half a window back"
+        );
+        ui.key(&lane, &mut view, typed('J'), false);
+        assert_eq!(view.surface.scroll, walked, "and J undoes it");
+
+        // A lone `g` is half a pair: it moves nothing until the other half
+        // arrives.
+        ui.key(&lane, &mut view, typed('g'), false);
+        assert_eq!(view.surface.scroll, walked, "one g moves nothing");
+        ui.key(&lane, &mut view, typed('g'), false);
+        assert_eq!(view.surface.scroll, screen::TOP, "gg is the top");
+        ui.key(&lane, &mut view, typed('G'), false);
+        assert_eq!(view.surface.scroll, 0, "G is the newest rows");
+
+        // A key that is not the second `g` ends the pair: the `k` here scrolls
+        // its own row and leaves the `g` before it a first half, no pair.
+        ui.key(&lane, &mut view, typed('g'), false);
+        ui.key(&lane, &mut view, typed('k'), false);
+        ui.key(&lane, &mut view, typed('g'), false);
+        assert_eq!(view.surface.scroll, 1, "a k between them is not a gg");
+
+        // The half left armed in here goes with the mode: a `g` on each side
+        // of it is not a pair.
+        ui.key(&lane, &mut view, typed('g'), false);
         ui.key(&lane, &mut view, esc, false);
         assert!(!ui.browsing);
         assert_eq!(view.surface.scroll, 0, "and leaves at the newest rows");
+        ui.key(&lane, &mut view, typed('g'), false);
+        assert_eq!(
+            view.surface.scroll, 0,
+            "a g made after the mode is not its pair"
+        );
     }
 
     // Turning the keys off is the one thing that moves the mode without a

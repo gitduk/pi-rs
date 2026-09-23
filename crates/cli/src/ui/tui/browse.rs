@@ -5,10 +5,12 @@
 //! one, so nothing is rebuilt to enter or leave, and a run still streaming
 //! lands its answer in it.
 
+use std::time::Instant;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::view::View;
-use super::{Asked, Deed, Ui};
+use super::{Asked, Deed, Ui, screen};
 
 impl Ui {
     /// Take the conversation view up, on the newest rows.
@@ -37,6 +39,14 @@ impl Ui {
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
         let page = self.page_scroll_step();
+        let half = self.half_scroll_step();
+        // A key that is not the second `g` ends the pair it might be half of:
+        // `g`, `k`, `g` is three presses, not a `gg`.
+        if !matches!(key.code, KeyCode::Char('g') if bare)
+            && let Some(v) = &mut self.vim
+        {
+            v.last = None;
+        }
         match key.code {
             KeyCode::Down => self.scroll_view(view, false, 1),
             KeyCode::Up => self.scroll_view(view, true, 1),
@@ -44,10 +54,26 @@ impl Ui {
             KeyCode::PageUp => self.scroll_view(view, true, page),
             KeyCode::Char('j') if bare => self.scroll_view(view, false, 1),
             KeyCode::Char('k') if bare => self.scroll_view(view, true, 1),
+            KeyCode::Char('J') if bare => self.scroll_view(view, false, half),
+            KeyCode::Char('K') if bare => self.scroll_view(view, true, half),
+            KeyCode::Char('G') if bare => self.scroll_view(view, false, screen::TOP),
+            KeyCode::Char('g') if bare => self.doubled_g(view),
             KeyCode::Esc => self.leave_browse(view),
             KeyCode::Char('q' | 'v') if bare => self.leave_browse(view),
             _ => {}
         }
         Asked::Own(Deed::Nothing)
+    }
+
+    // The second `g` inside the doubled-key window reaches the top of the
+    // conversation; a lone one commands nothing, as it does nothing outside.
+    fn doubled_g(&mut self, view: &mut View) {
+        let doubled = self
+            .vim
+            .as_mut()
+            .is_some_and(|v| v.completes('g', Instant::now()));
+        if doubled {
+            self.scroll_view(view, true, screen::TOP);
+        }
     }
 }
