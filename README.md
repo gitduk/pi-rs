@@ -138,16 +138,17 @@ and one more for every skill on disk. Typing `/` opens a list of what the line
 could still become; `↑` `↓` pick, `Tab` accepts, `Esc` dismisses it until the
 next keystroke. `/model`, `/resume` and `/worktree` complete their arguments
 too: the model name is the tedious part the config already knows, a saved
-session is named by its first question, and a checkout by its branch.
+session answers to its own label — the name you gave it, or its first
+question — and a checkout by its branch.
 Typing `@` completes workspace files the same way: `@src/ma` lands as
 `@src/main.rs`, a directory lands with its `/` left open for the next step.
 
 `/new` starts a fresh session, keeping this one on disk; `ctrl+l` twice does
 the same (once clears the screen). `/resume` lists the sessions saved for this
 workspace — one directory per project under `~/.pi/sessions/`, named by the
-path — newest first, by the first thing each was asked, and `/resume <id>`
-switches to one — the session you leave is saved first, so nothing is lost on
-the way out.
+path — newest first, each row the name you gave it followed by the first thing
+it was asked, and `/resume <id>` switches to one — the session you leave is
+saved first, so nothing is lost on the way out.
 
 `/worktree <name>` works in another checkout of the same repository:
 `.worktrees/<name>`, on a branch of that name — created if it is not there and
@@ -198,7 +199,9 @@ rather than replacing it — the round already queued would otherwise run and be
 counted against the loop that did not ask for it. A loop runs in the checkout
 it was started in and only while that one is in front: `/worktree` away from it and its next round waits with
 the lane, like any queued line, until you come back.
-`/name` and `--name` label a session, because the ids are timestamps.
+`/name` and `--name` label a session, because the ids are timestamps: the
+label leads that session's row in `/resume`, and typing it completes to
+`/resume <id>`.
 
 `/model` on its own lists what `~/.pi/settings.toml` defines — wire, window,
 price — with a mark against the one running. `/model <name>` moves the session

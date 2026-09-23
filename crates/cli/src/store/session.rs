@@ -13,6 +13,8 @@ pub use agent::session::now;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::store::text::clip;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Stored {
     pub id: String,
@@ -64,6 +66,10 @@ struct Peek {
     model: String,
     #[serde(default)]
     created: u64,
+    /// What the user calls this session, by `/name` or `--name`. Shallow like
+    /// `created`: a listing shows it and never builds the transcript to say it.
+    #[serde(default)]
+    name: Option<String>,
     #[serde(default)]
     entries: Vec<PeekEntry>,
 }
@@ -103,13 +109,46 @@ impl Peek {
 }
 
 /// A saved session as the resume list and its completion see it: the id it is
-/// named by, and the first thing the user asked it, which is what it is known
-/// by.
+/// named by, the name the user gave it if any, and the first thing it was
+/// asked, which is what stands in for one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResumeChoice {
     pub id: String,
     pub prompt: String,
+    pub name: Option<String>,
     pub created: u64,
+}
+
+/// How much of a session's row a list or a completion shows.
+const RESUME_WIDTH: usize = 60;
+
+impl ResumeChoice {
+    /// What a row calls this session: the name the user gave it, then the
+    /// first thing it was asked. The name leads because it is the handle —
+    /// it was given precisely because a first question stops meaning anything
+    /// a week later — and the question follows as what the name was given to.
+    ///
+    /// Here rather than at each surface, because both offer the same sessions
+    /// and a row that read two ways is how a user picks the wrong one.
+    pub fn label(&self) -> String {
+        let prompt = self.prompt.trim();
+        let name = self
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty());
+        match name {
+            // Half the room at most, so a long name cannot crowd out the
+            // question and leave the row saying nothing about the session.
+            Some(name) if prompt.is_empty() => clip(name, RESUME_WIDTH),
+            Some(name) => clip(
+                &format!("{name} — {}", clip(prompt, RESUME_WIDTH / 2)),
+                RESUME_WIDTH,
+            ),
+            None if prompt.is_empty() => "(no question)".into(),
+            None => clip(prompt, RESUME_WIDTH),
+        }
+    }
 }
 
 impl Stored {
@@ -469,13 +508,14 @@ impl Store {
 
     /// Every session `/resume` can name for this workspace, newest first,
     /// reduced to what the list and its completion show: the id it is named
-    /// by and its first prompt.
+    /// by, the name the user gave it, and its first prompt.
     pub fn choices(&self, workspace: &Path) -> Vec<ResumeChoice> {
         self.peek(workspace)
             .into_iter()
             .map(|p| ResumeChoice {
                 prompt: p.opening().unwrap_or_default(),
                 id: p.id,
+                name: p.name,
                 created: p.created,
             })
             .collect()
@@ -707,6 +747,11 @@ mod tests {
         assert_eq!(back.model, "test-model");
         assert_eq!(back.name.as_deref(), Some("the flaky test"));
         assert_eq!(back.into_session(), log);
+
+        // The listing reads the name without opening the transcript: a field
+        // `Peek` does not name is a field the row would not have.
+        let listed = store.choices(std::path::Path::new("/w"));
+        assert_eq!(listed[0].name.as_deref(), Some("the flaky test"));
     }
 
     #[test]

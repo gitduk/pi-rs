@@ -120,13 +120,22 @@ impl App {
                 }
             }
             Intent::Builtin(Builtin::Name(name)) => {
-                if name.is_empty() {
+                let said = if name.is_empty() {
                     self.lane_mut().name = None;
-                    lines(format!("{} is unnamed again", self.lane_mut().id))
+                    format!("{} is unnamed again", self.lane_mut().id)
                 } else {
                     let said = format!("{} is now “{name}”", self.lane_mut().id);
                     self.lane_mut().name = Some(name);
-                    lines(said)
+                    said
+                };
+                // `/resume` reads its row off the file, so the name has to land
+                // now; a run in flight has the session away and saves it later.
+                match self.save() {
+                    Ok(()) => lines(said),
+                    Err(e) => Step::Handled(vec![
+                        said,
+                        format!("warning: the transcript was not saved: {e}"),
+                    ]),
                 }
             }
             Intent::Builtin(Builtin::Compact(focus)) => {
@@ -205,6 +214,7 @@ mod tests {
         let one = [crate::store::session::ResumeChoice {
             id: "s1".into(),
             prompt: "fix the flaky test".into(),
+            name: None,
             created: 0,
         }];
         let offered =
