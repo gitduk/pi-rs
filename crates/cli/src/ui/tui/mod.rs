@@ -770,8 +770,8 @@ impl Tui {
                     // replayed in one go: a run of them folded into one keeps
                     // it the size of what was written rather than of how many
                     // pieces it came in, and the view cannot tell the two apart.
-                    let mut held = self.core.lanes[at].take_pending();
-                    let folded = match (held.last_mut(), &event) {
+                    let lane = &mut self.core.lanes[at];
+                    let folded = match (lane.pending.last_mut(), &event) {
                         (Some(Event::TextDelta(prev)), Event::TextDelta(next)) => {
                             prev.push_str(next);
                             true
@@ -783,7 +783,7 @@ impl Tui {
                         _ => false,
                     };
                     if !folded {
-                        held.push(event);
+                        lane.pending.push(event);
                     }
                 }
             }
@@ -1393,6 +1393,7 @@ mod tests {
     use crate::store::theme::{Color, Theme};
     use crate::ui::render::Paint;
     use crate::ui::tui::screen::{self, plain};
+    use agent::Event;
     use ratatui::text::Line;
 
     // Both scrollback producers draw block ids from one counter. They used
@@ -2272,6 +2273,35 @@ mod tests {
         assert!(
             rows.iter().any(|r| r.contains("what was said before")),
             "the transcript survives the switch: {rows:?}"
+        );
+    }
+
+    // A lane out of front keeps what its run posts: the transcript holds it
+    // either way, but the view is only fed while the screen is on that lane.
+    #[tokio::test]
+    async fn what_a_lane_out_of_front_posted_waits_for_it() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut tui = surface(dir.path());
+        let lane = running_lane(dir.path());
+        let token = lane.token();
+        let sent = lane.sender().clone();
+        tui.core.lanes.push(lane);
+
+        sent.send(Event::Warning("said behind you".into()))
+            .expect("the lane is listening");
+        tui.serve_lanes().await;
+        assert!(
+            !tui.core.lanes[1].pending.is_empty(),
+            "a lane out of front threw away what its run posted"
+        );
+
+        // The screen moves to it, the way a checkout switch does.
+        tui.core.current = 1;
+        tui.reconcile(0);
+        let rows = lane_rows(&mut tui, token);
+        assert!(
+            rows.iter().any(|r| r.contains("said behind you")),
+            "what the lane posted never reached its screen: {rows:?}"
         );
     }
 
