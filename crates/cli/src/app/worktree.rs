@@ -30,6 +30,18 @@ pub struct Tree {
     pub main: bool,
 }
 
+impl Tree {
+    /// The branch to name beside this checkout, or None when naming it would
+    /// only repeat the worktree's own name back at the reader.
+    pub fn branch_note(&self) -> Option<&str> {
+        match self.branch.as_deref() {
+            Some(b) if b != self.name => Some(b),
+            Some(_) => None,
+            None => Some("detached HEAD"),
+        }
+    }
+}
+
 fn git(dir: &Path, args: &[&str]) -> Result<std::process::Output> {
     // -C rather than the inherited cwd: a stale working directory silently
     // resolves against the wrong repository.
@@ -421,8 +433,12 @@ impl App {
                 } else {
                     " "
                 };
-                let on = t.branch.as_deref().unwrap_or("detached HEAD");
-                format!("{mark} {}  {on}", crate::store::text::pad(&t.name, width))
+                let name = crate::store::text::pad(&t.name, width);
+                let on = t
+                    .branch_note()
+                    .map(|on| format!("  {on}"))
+                    .unwrap_or_default();
+                format!("{mark} {name}{on}").trim_end().to_string()
             })
             .collect();
         out.push(format!(

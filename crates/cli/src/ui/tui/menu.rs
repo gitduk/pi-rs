@@ -640,18 +640,17 @@ impl Lists {
             .get_or_init(|| self.store.choices(&self.workspace))
     }
 
-    // The checkouts named with the branch each is on. Empty outside a git
-    // repository, which is where it belongs: `/worktree` has nothing to offer
-    // there.
+    // The checkouts with the branch each is on, where that says more than the
+    // name. Empty outside a git repository, where there is nothing to offer.
     pub(super) fn worktrees(&self) -> &[Choice] {
         self.worktrees.get_or_init(|| {
             app::worktree::list(&self.workspace)
                 .map(|trees| {
                     trees
                         .into_iter()
-                        .map(|t| Choice {
-                            note: t.branch.unwrap_or_else(|| "detached HEAD".into()),
-                            name: t.name,
+                        .map(|t| {
+                            let note = t.branch_note().unwrap_or_default().to_string();
+                            Choice { name: t.name, note }
                         })
                         .collect()
                 })
