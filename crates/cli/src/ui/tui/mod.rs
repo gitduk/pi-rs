@@ -181,8 +181,8 @@ fn lane_name(lane: &Lane) -> String {
 // answers what a checkout has finished, not what it is doing, and one working
 // out of sight is still just a checkout.
 //
-// `Done`/`Failed` are unread marks, not history: the tool rows' ✓ stays for
-// good, this one goes the moment you look at the checkout it belongs to.
+// A lane that ended says so in colour and not in a glyph, and only until you
+// look at the checkout it belongs to — `Done`/`Failed` are unread, not history.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Mark {
     Front,
@@ -194,8 +194,8 @@ enum Mark {
 
 impl Mark {
     // Whether a checkout is wearing a mark someone may not have read. The bar
-    // drops a quiet one first — a ✓ or ✗ off the edge is a run that ended
-    // unseen.
+    // drops a quiet one first — a coloured name off the edge is a run that
+    // ended unseen.
     fn quiet(self) -> bool {
         matches!(self, Mark::Plain | Mark::Unopened)
     }
@@ -379,8 +379,10 @@ impl Ui {
             .map(|tab| {
                 let (sign, style) = match tab.mark {
                     Mark::Front => ("", &theme.input),
-                    Mark::Done => (icons::DONE_MARK, &theme.status.ok),
-                    Mark::Failed => (icons::FAIL_MARK, &theme.status.err),
+                    // Settled lanes are their colour alone: a glyph would repeat
+                    // what `Done`/`Failed` already say.
+                    Mark::Done => ("", &theme.status.ok),
+                    Mark::Failed => ("", &theme.status.err),
                     Mark::Plain => ("", &theme.muted),
                     Mark::Unopened => (icons::UNOPENED_MARK, &theme.muted),
                 };
@@ -854,6 +856,13 @@ impl Tui {
                 if at == self.core.current {
                     self.bridge.observe(&event).await;
                     let view = front_view(&mut self.views, self.core.lane());
+                    // A retry is transport news, not a step of the answer: it
+                    // takes the bar a moment, after the half-stream is landed.
+                    if matches!(event, Event::Retrying { .. }) {
+                        self.ui.close(view);
+                        self.ui.flash_event(&event);
+                        continue;
+                    }
                     self.ui.on_event(&mut self.core.lanes[at], view, event);
                 } else {
                     // Deltas arrive thousands at a time and the backlog is
@@ -897,6 +906,9 @@ impl Tui {
                     Mark::Front
                 } else {
                     match lane.run() {
+                        // A round of the loop already waits in this lane's
+                        // queue, so it is not a lane that finished.
+                        Run::Ended { out: Ok(_), .. } if self.round_waiting(lane) => Mark::Plain,
                         Run::Ended { out: Ok(_), .. } => Mark::Done,
                         Run::Ended { out: Err(_), .. } => Mark::Failed,
                         Run::Running { .. } | Run::Idle => Mark::Plain,
@@ -917,6 +929,16 @@ impl Tui {
             });
         }
         self.ui.tabs = tabs;
+    }
+
+    // Whether the lane's loop has another round waiting in its queue: the run
+    // that ended is then one round of a series, not the end of one.
+    fn round_waiting(&self, lane: &Lane) -> bool {
+        self.views.get(&lane.token()).is_some_and(|view| {
+            view.queued
+                .iter()
+                .any(|q| matches!(q, Queued::Round { .. }))
+        })
     }
 
     // Drop lanes whose checkout was deleted outside pi — idle ones only, a
@@ -964,9 +986,12 @@ impl Tui {
     }
 
     // Carry the lane's loop past a round that has just ended: queue the next
-    // one under a `loop round {n}` marker, or say why there is no next round
-    // when one ended it. A round the user cut speaks for itself — the notice
-    // is for the loop that went on, and for the one that ended on its own.
+    // one, or say why there is no next one. A round the user cut speaks for
+    // itself — the notice is for the loop that went on, and for the one that
+    // ended on its own.
+    //
+    // The bar takes the two true for a moment — a round beginning, and one that
+    // found nothing left to do. A stop nobody asked for keeps a row of its own.
     //
     // What decides is the tree, never the model: a round that changed a file
     // is a round whose work was not finished, and one that changed nothing
@@ -977,6 +1002,8 @@ impl Tui {
         let Some(round) = self.core.lanes[lane].loop_step(finished, cap) else {
             return;
         };
+        // Which of the two it is, before the match takes the round apart.
+        let fleeting = matches!(&round, Round::Again { .. } | Round::Quiet);
         let said = match round {
             Round::Again { goal, next } => {
                 // The round number and the running total reach the model as a
@@ -1004,8 +1031,13 @@ impl Tui {
                 format!("loop stopped at loop_max_rounds ({n}) — rounds were still changing files")
             }
         };
-        self.say_of(lane, said);
+        if fleeting {
+            self.flash_of(lane, said);
+        } else {
+            self.say_of(lane, said);
+        }
     }
+
     // News from a lane, onto the screen actually being watched rather than
     // into the lane it came from — where nobody would see it until they
     // switched. The `whose:` prefix is what makes that readable, and it is
@@ -1014,14 +1046,30 @@ impl Tui {
     fn say_of(&mut self, lane: usize, what: impl Into<Line<'static>>) {
         let mut line = what.into();
         if lane != self.core.current {
-            let whose = self.core.lanes[lane]
-                .worktree
-                .as_deref()
-                .unwrap_or("the main checkout");
-            line.spans.insert(0, Span::from(format!("{whose}: ")));
+            line.spans.insert(0, Span::from(self.whose(lane)));
         }
         self.ui
             .say_line(front_view(&mut self.views, self.core.lane()), line);
+    }
+
+    // The same news, on the bar for the few seconds it is worth rather than in
+    // the transcript for good.
+    fn flash_of(&mut self, lane: usize, what: impl Into<String>) {
+        let mut said = what.into();
+        if lane != self.core.current {
+            said.insert_str(0, &self.whose(lane));
+        }
+        self.ui.flash(said);
+    }
+
+    // What a lane's news is prefixed with when it belongs to a checkout other
+    // than the one in front: the name of the one it came from.
+    fn whose(&self, lane: usize) -> String {
+        let whose = self.core.lanes[lane]
+            .worktree
+            .as_deref()
+            .unwrap_or("the main checkout");
+        format!("{whose}: ")
     }
 
     // The deeds the screen keeps for itself. They are here rather than in
@@ -1485,7 +1533,9 @@ impl Tui {
 #[cfg(test)]
 mod tests {
     use super::scrollback::{Folds, ScrollbackRows, absorb_growth, scrollback_from};
-    use super::{Asked, Deed, Intent, Panel, Row, Target, View, following_terminal, view_at};
+    use super::{
+        Asked, Deed, Intent, Panel, Queued, Row, Target, View, following_terminal, view_at,
+    };
     use crate::app::App;
     use crate::app::lane::{Lane, Run};
     use crate::app::looping::Round;
@@ -2976,17 +3026,18 @@ mod tests {
             tab(super::Mark::Failed, "delta"),
             tab(super::Mark::Plain, "epsilon"),
         ];
-        assert_eq!(bar(&ui, 20), "… · gamma · …");
-        assert_eq!(bar(&ui, 30), "… · ✓ beta · gamma · …");
+        assert_eq!(bar(&ui, 20), "… · beta · gamma · …");
+        assert_eq!(bar(&ui, 30), "… · beta · gamma · delta · …");
 
         // In front is in front: the first lane is never dropped, and a strip
         // that runs out on one side alone says so on that side alone.
         ui.tabs.rotate_left(2);
-        assert_eq!(bar(&ui, 20), "gamma · ✗ delta · …");
+        assert_eq!(bar(&ui, 20), "gamma · delta · …");
     }
 
     // A lane wearing a mark is saying something nobody has read yet: the bar
-    // drops the quiet entries first, so a ✓ or ✗ does not scroll off unseen.
+    // drops the quiet entries first, so a coloured name does not scroll off
+    // unseen.
     #[test]
     fn a_marked_lane_outlives_a_quiet_one() {
         let mut ui = test_ui(24, 8);
@@ -2995,8 +3046,9 @@ mod tests {
             tab(super::Mark::Front, "gamma"),
             tab(super::Mark::Failed, "delta"),
         ];
-        // Only an entry dropped will fit: the idle one goes, not the ✗.
-        assert_eq!(bar(&ui, 24), "… · gamma · ✗ delta");
+        // Only an entry dropped will fit: the idle one goes, not the settled
+        // one the colour marks.
+        assert_eq!(bar(&ui, 24), "… · gamma · delta");
     }
 
     // The bar carries the whole ring, the lanes' own and the disk's alike: a
@@ -3233,11 +3285,6 @@ mod tests {
         };
         tui.refresh_tabs();
         assert_eq!(marks(&tui), vec![super::Mark::Front, super::Mark::Done]);
-        assert!(
-            plain(&tui.ui.lane_bar("", 80).expect("two lanes keep a bar"))
-                .contains(icons::DONE_MARK),
-            "a finished lane is what the mark is for"
-        );
 
         tui.core.lanes[1].run = Run::Ended {
             out: Err(agent::AgentError::Cancelled),
@@ -3245,6 +3292,40 @@ mod tests {
         };
         tui.refresh_tabs();
         assert_eq!(marks(&tui), vec![super::Mark::Front, super::Mark::Failed]);
+    }
+
+    // The loop going on is not the lane finishing: the round queued behind the
+    // one that ended is work this lane still has, so `Done` is not its mark.
+    #[test]
+    fn a_lane_with_a_round_waiting_has_not_finished() {
+        let dir = tempfile::tempdir().expect("a checkout");
+        let mut tui = surface(dir.path());
+        let (_run_dir, mut behind) = a_running_lane();
+        behind.worktree = Some("fix-mem".into());
+        behind.loop_start("go".into());
+        behind.run = Run::Ended {
+            out: Ok(llm::stream::Usage::default()),
+            unsend: false,
+        };
+        let token = behind.token();
+        tui.core.lanes.push(behind);
+        view_at(&mut tui.views, token).queued.push(Queued::Round {
+            goal: "go".into(),
+            note: String::new(),
+            round: Some(2),
+        });
+        tui.refresh_tabs();
+        assert_eq!(
+            tui.ui.tabs[1].mark,
+            super::Mark::Plain,
+            "the round in the queue is the loop going on"
+        );
+
+        // The round that ended was the loop's last: nothing waits behind it,
+        // and that is the lane the colour is for.
+        view_at(&mut tui.views, token).queued.clear();
+        tui.refresh_tabs();
+        assert_eq!(tui.ui.tabs[1].mark, super::Mark::Done);
     }
 
     // Nowhere to go is said, not walked to: one checkout has no next.

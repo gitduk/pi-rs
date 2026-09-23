@@ -25,7 +25,7 @@ pub const SAID_RULE: &str = PROMPT_BAR; // the rule beside a line the user said
 // The version line that opens the scrollback.
 pub const VERSION_BANNER: &str = concat!("π ", env!("CARGO_PKG_VERSION"));
 pub const PENDING_MARK: &str = "→"; // a tool call whose result has not landed
-pub const DONE_MARK: &str = "✓"; // a tool or lane that finished well
+pub const DONE_MARK: &str = "✓"; // a tool row that finished well
 pub const FAIL_MARK: &str = "✗"; // a failure, a denial, a refused edit
 pub const WARN_MARK: &str = "!"; // a warning line
 pub const UNOPENED_MARK: &str = "○"; // a checkout on the bar that no lane has open

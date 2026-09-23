@@ -460,17 +460,21 @@ pub fn describe(
             p.span(&p.theme.muted, clip(reason, room)),
         ]),
         Event::Compacted(r) => Line::from(p.span(&p.theme.muted, compaction_line(r))),
+        // Clipped whole, prefix and reason: a reason cut to the width alone
+        // lands in a bar that cuts it again, in silence and without the ellipsis.
         Event::Retrying {
             attempt,
             delay_ms,
             reason,
         } => Line::from(p.span(
             &p.theme.muted,
-            format!(
-                "retry {attempt} in {}{}{}",
-                fmt_delay(*delay_ms),
-                icons::PART_SEP,
-                clip(reason, room)
+            clip(
+                &format!(
+                    "retry {attempt} in {}{}{reason}",
+                    fmt_delay(*delay_ms),
+                    icons::PART_SEP
+                ),
+                room,
             ),
         )),
         Event::Warning(w) => Line::from(vec![
