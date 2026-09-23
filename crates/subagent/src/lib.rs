@@ -270,8 +270,8 @@ impl Tool for Subagent {
                 None => Err(AgentError::Unstopped),
             }
         };
-        // The child's own clock, and the spend's: the row reads it beside the
-        // counts as how long the job took.
+        // The child's own clock, read beside the counts on the row: how long
+        // the job took.
         let took = started.elapsed();
         watchdog.abort();
         // The collector ends when the last sender goes, and `run` held one.
@@ -301,9 +301,12 @@ impl Tool for Subagent {
                 return Err(ToolError::Cancelled);
             }
             Err(AgentError::Cancelled) => Some(if wedged.load(Ordering::Relaxed) {
-                format!("a call ran {}s with no progress", self.deadline.as_secs())
+                format!(
+                    "a call ran {} with no progress",
+                    llm::count::elapsed(self.deadline)
+                )
             } else {
-                format!("stopped after {}s", self.deadline.as_secs())
+                format!("stopped after {}", llm::count::elapsed(self.deadline))
             }),
             Err(why) => {
                 // The child's spend rode home on the collector, but an error

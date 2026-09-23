@@ -109,10 +109,9 @@ pub struct Config {
     pub loop_max_rounds: Option<usize>,
 
     /// How long a subagent may run silent, in seconds, before it is
-    /// read as wedged and stopped. A call that has stopped speaking is the one
-    /// thing that ends a subagent here; it is not stopped by a count. Clamped up
-    /// to 1 s: a zero would stop every subagent the moment it started. Unset
-    /// reads as 1800.
+    /// read as wedged and stopped — the one brake a subagent has of its own,
+    /// since nothing bounds one by turns. Clamped up to 1 s: a zero would stop
+    /// every subagent the moment it started. Unset reads as 1800.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subagent_deadline: Option<u64>,
 
