@@ -3,7 +3,8 @@
 
 use std::time::Instant;
 
-use super::{DOUBLE_TAP, Ui};
+use super::view::View;
+use super::{DOUBLE_TAP, Ui, screen};
 use crate::store::keys::{Action, Mode};
 
 impl Ui {
@@ -22,6 +23,19 @@ impl Ui {
     pub(super) fn change_line(&mut self) {
         self.editor.clear_line();
         self.leave_normal();
+    }
+
+    // `gg` and `G` command the line's buffer while there is a line to command;
+    // with the line empty they command the history's ends instead.
+    pub(super) fn buffer_ends(&mut self, view: &mut View, start: bool) {
+        if self.editor.is_empty() {
+            // One step past either end, which the window clamps back to it.
+            self.scroll_view(view, start, screen::TOP);
+        } else if start {
+            self.editor.buffer_start();
+        } else {
+            self.editor.buffer_end();
+        }
     }
 
     // Put the mode where it can be seen: the shape of the caret, and the
