@@ -350,9 +350,8 @@ async fn a_child_cut_off_by_the_deadline_answers_rather_than_fails() {
 }
 
 // The deadline bounds silence, not the run: a child that keeps the events
-// coming outlives it; the whole-run clock would have cut it off. It is also
-// the turn count that no longer bounds the run: twenty-five turns of child and
-// no ceiling to hit.
+// coming outlives it; the whole-run clock would have cut it off. Nor does a
+// turn count bound it any more: twenty-five child turns, and no ceiling to hit.
 //
 // Fifty milliseconds rather than three: the scripted turns are instant, so
 // what this measures is how long the scheduler may leave the child alone
