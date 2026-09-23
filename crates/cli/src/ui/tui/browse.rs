@@ -7,10 +7,11 @@
 
 use std::time::Instant;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent};
 
 use super::view::View;
 use super::{Asked, Deed, Ui, screen};
+use crate::store::keys;
 
 impl Ui {
     /// Take the conversation view up, on the newest rows.
@@ -35,9 +36,7 @@ impl Ui {
         self.last_esc = None;
         // The letters are bare ones, as the panel's vocabulary is: with a
         // modifier they are the menu's keys, which is nothing on this screen.
-        let bare = !key
-            .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let bare = keys::bare_letter(&key).is_some();
         let page = self.page_scroll_step();
         let half = self.half_scroll_step();
         // A key that is not the second `g` ends the pair it might be half of:

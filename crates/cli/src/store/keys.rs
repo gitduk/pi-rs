@@ -1,11 +1,11 @@
 //! What a key press means, and where that is written down.
 //!
 //! Two ideas, neither of them Pi's. First, the namespace is the object acted
-//! on — `edit.*` changes the buffer, `move.*` only the caret, `menu.*` the
-//! completion list — where Pi's `tui.` prefix says nothing, everything being
-//! tui. Second, and following from it, the namespace decides *when* a binding
-//! is live, so two actions may share a key as long as they are never live
-//! together. `up` is `menu.previous` while the list is open and
+//! on — `edit.*` changes the buffer, `move.*` only the caret, `menu.*` what is
+//! open over the editor — where Pi's `tui.` prefix says nothing, everything
+//! being tui. Second, and following from it, the namespace decides *when* a
+//! binding is live, so two actions may share a key as long as they are never
+//! live together. `up` is `menu.previous` while a list is open and
 //! `history.older` when it is not, which is not a conflict and cannot be
 //! expressed as one in a flat table.
 
@@ -31,7 +31,7 @@ pub enum Mode {
 /// the menu claims never reaches the editor underneath it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum When {
-    // The completion list is open.
+    // While something is up over the editor — see `Menu` for what counts.
     Menu,
     // A turn is in flight.
     Run,
@@ -51,8 +51,8 @@ pub enum When {
 pub enum Menu {
     #[default]
     Off,
-    // A completion list, the rewind selector, or a panel: the menu's
-    // movement and dismissal keys, and nothing more.
+    // A completion list, the rewind selector, a panel, or a command's reply:
+    // the menu's movement and dismissal keys, and nothing more.
     On,
 }
 
@@ -673,6 +673,20 @@ impl Press {
             },
             _ => Press { code, mods },
         }
+    }
+}
+
+/// The character a press types, when it types one on its own: a letter with
+/// `ctrl` or `alt` on it is the menu's key rather than the surface's own, which
+/// is the same rule every screen with a letter vocabulary reads — browse, the
+/// panel, a reply — so it is written down once, here.
+pub fn bare_letter(key: &crossterm::event::KeyEvent) -> Option<char> {
+    let bare = !key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+    match key.code {
+        KeyCode::Char(c) if bare => Some(c),
+        _ => None,
     }
 }
 

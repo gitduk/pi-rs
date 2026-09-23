@@ -625,7 +625,10 @@ impl Renderer {
 
 // Says what was given up, not just how much. A silent shrink looks like the
 // agent forgetting things for no reason.
-fn compaction_line(r: &agent::Report) -> String {
+//
+// Public because the scrollback draws it too: a rebuild must read the same
+// line the live event did, and one function is the only way to promise that.
+pub fn compaction_line(r: &agent::Report) -> String {
     let mut parts = Vec::new();
     if r.superseded > 0 {
         parts.push(format!("{} superseded", r.superseded));

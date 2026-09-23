@@ -15,13 +15,20 @@ use crate::store::keys::{Action, Layers, Menu, Press};
 use crate::store::session::ResumeChoice;
 use crate::store::session::Store;
 use agent::session::EntryId;
-use crossterm::event::{Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
+use crossterm::event::{Event as TermEvent, KeyCode, KeyEventKind, MouseEventKind};
 use ratatui::text::Line;
 use ratatui::text::Span;
 use ratatui::widgets::ListItem;
 use std::time::Instant;
 
 impl Ui {
+    // A panel or a reply is up: one of them owns the space the menu draws in,
+    // and the completion list waits. Also what puts the menu's own keys in
+    // force while one is open — see `Menu` in `store::keys`.
+    pub(super) fn overlay(&self) -> bool {
+        self.panel.is_some() || self.reply.is_some()
+    }
+
     // What the line could still become: a completion while a command word is
     // being typed, or — with the rewind selector open — the user messages a
     // conversation can be rewound to.
@@ -31,8 +38,7 @@ impl Ui {
     // are, so the word being typed is still worth completing. `esc` reaches
     // `run.interrupt` past the list — see `crate::store::keys::Menu`.
     pub(super) fn menu(&mut self) -> Vec<MenuEntry> {
-        if self.panel.is_some() {
-            // The panel owns this space; the completion list waits.
+        if self.overlay() {
             return Vec::new();
         }
         if !self.rewind.is_empty() {
@@ -178,6 +184,20 @@ impl Ui {
                 return Asked::Own(Deed::Nothing);
             }
             TermEvent::Mouse(mouse) => {
+                // A reply is the topmost thing here, as it is for the keys: the
+                // wheel is its scrolling while it is up, never the transcript's
+                // underneath it. Everything else the mouse does still lands
+                // where it is drawn — the reply covers the menu, not the
+                // history above it.
+                if self.reply.is_some() {
+                    let room = self.regions.menu.height as usize;
+                    let width = self.screen.usable();
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => return self.scrolled(-1, room, width),
+                        MouseEventKind::ScrollDown => return self.scrolled(1, room, width),
+                        _ => {}
+                    }
+                }
                 match mouse.kind {
                     MouseEventKind::ScrollUp => self.scroll_view(view, true, 1),
                     MouseEventKind::ScrollDown => self.scroll_view(view, false, 1),
@@ -205,17 +225,18 @@ impl Ui {
         };
         // Browse mode takes the keyboard whole: its keys command where the
         // view sits, and the editor's table has nothing on screen to aim at.
-        // A panel outranks it — one can open onto a browse the user never
-        // left, off the queue or the phone, and it is drawn over everything.
-        if self.browsing && self.panel.is_none() {
+        // A panel or a reply outranks it — either can open onto a browse the
+        // user never left, off the queue or the phone, and it is drawn over
+        // everything.
+        if self.browsing && !self.overlay() {
             return self.browse_key(view, key);
         }
         let press = Press::of(key.code, key.modifiers);
-        // The panel counts as a menu: its own keys are the Menu bindings, and
-        // `menu()` is empty while it is open, so the layer has to be forced on.
-        // The layer is computed before `action`, not inside it: `menu()` mutates
-        // the @-completion cache while `keys` stays borrowed.
-        let menu = if self.panel.is_some() {
+        // A panel or a reply counts as a menu: its own keys are the Menu
+        // bindings, and `menu()` is empty while it is open, so the layer has to
+        // be forced on. The layer is computed before `action`, not inside it:
+        // `menu()` mutates the @-completion cache while `keys` stays borrowed.
+        let menu = if self.overlay() {
             Menu::On
         } else if self.menu().is_empty() {
             Menu::Off
@@ -240,6 +261,19 @@ impl Ui {
             && let Some(v) = &mut self.vim
         {
             v.last = None;
+        }
+
+        // The reply is the topmost thing on this surface: while it is up its
+        // own keys are the only ones — but two presses mean what they mean
+        // wherever they are made. The line is still submitted, and `ctrl+c`
+        // still stops the run; either takes the reply down on its way, since
+        // the answer it was showing belongs to the line that is now spent.
+        if self.reply.is_some() {
+            if matches!(bound, Some(Action::LineSubmit | Action::AppCancel)) {
+                self.reply = None;
+            } else {
+                return self.reply_key(bound, key);
+            }
         }
 
         // The panel owns the menu keys while it is open, and answers with
@@ -511,11 +545,7 @@ impl Ui {
             // Unbound and printable is the one thing no table has to say —
             // except in Normal, where it is the table saying no.
             None => {
-                if let KeyCode::Char(c) = key.code
-                    && !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                {
+                if let Some(c) = crate::store::keys::bare_letter(&key) {
                     match self.vim.as_mut().map(|v| v.typed(c, Instant::now())) {
                         Some(Typed::Ignore) => {}
                         // The sequence's first half is already on screen: take

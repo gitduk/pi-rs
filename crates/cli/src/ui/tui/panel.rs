@@ -6,7 +6,7 @@
 //! (`j`, `i`, `q`, space, `r`) are a fixed vocabulary beside it. The cursor,
 //! the edit line and the dispatch are written here once.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::KeyEvent;
 use ratatui::text::Line;
 
 use std::time::{Duration, Instant};
@@ -175,10 +175,7 @@ impl Panel {
         // only: ctrl and alt keep a letter a letter, as they always did under
         // the bound table this vocabulary replaced.
         if self.browsing()
-            && let KeyCode::Char(c) = key.code
-            && !key
-                .modifiers
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            && let Some(c) = crate::store::keys::bare_letter(&key)
         {
             match c {
                 'j' => {
@@ -254,15 +251,7 @@ impl Panel {
                 // borrowed, so the two halves of the state never argue; and
                 // only an edit can arm one, so a browsing letter never leaves
                 // a half behind for a later edit to trip on.
-                let typed = if let KeyCode::Char(c) = key.code
-                    && !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                {
-                    Some(c)
-                } else {
-                    None
-                };
+                let typed = crate::store::keys::bare_letter(&key);
                 let closed = self.editing.is_some() && typed.is_some_and(|c| self.typed_char(c));
                 if let Some(e) = &mut self.editing {
                     match bound {

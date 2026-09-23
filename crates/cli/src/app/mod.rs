@@ -3,8 +3,9 @@
 //! `App` is the root — the store, the config in force, the key map, the command
 //! table, the settings, the checkouts open in this run — and what outlives a
 //! turn lives here or on a lane and nowhere else. Every verb lives with the
-//! state it moves: `settings.rs` for the config and its panel, `lanes.rs` for
-//! the set of checkouts, `lane.rs` for one of them, `status.rs` for what a
+//! state it moves: `settings.rs` for the config and its panel, `lane.rs` for
+//! the checkouts (all of them in one file: an `App` field holds the list, a
+//! `Lane` one of them), `status.rs` for what a
 //! reader is shown, `meter.rs` for what it cost. The jobs hang off the side:
 //! `bash.rs`, `looping.rs`, `subagent.rs`, `wechat.rs`.
 
@@ -365,6 +366,7 @@ mod tests {
             name: Some(name.to_string()),
             totals: agent::Totals::default(),
             tally: Default::default(),
+            held_screens: Vec::new(),
             context: Vec::new(),
             standing: std::sync::Arc::from(""),
             ctx: tools::Ctx::new(ws),
@@ -459,6 +461,7 @@ mod tests {
             standing: std::sync::Arc::from("standing"),
             totals: agent::Totals::default(),
             tally: Default::default(),
+            held_screens: Vec::new(),
             ctx: tools::Ctx::new(ws),
             worktree: None,
             events,

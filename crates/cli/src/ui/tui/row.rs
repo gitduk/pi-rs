@@ -19,11 +19,8 @@ use ratatui::style::Style as RStyle;
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::meter::Snapshot;
 use crate::store::icons;
-use crate::store::status::Segment;
 use crate::ui::render::{self, Paint};
-use crate::ui::status;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FoldedTool {
@@ -236,11 +233,6 @@ enum Kind {
         hovered: bool,
         painted: RefCell<Option<(usize, Vec<Line<'static>>)>>,
     },
-    // What a finished run left behind, kept as its numbers rather than as the
-    // string they render to. The segments the config asks for and the theme
-    // they are painted in both outlive the run, and a string frozen when it
-    // ended answers to neither.
-    Tally(Snapshot),
     // A block of reasoning that can be folded or unfolded.
     Reasoning {
         // Which block this row belongs to; the stream appends completed lines
@@ -276,13 +268,26 @@ impl Row {
         matches!(&self.0, Kind::Said { .. } | Kind::Answer(_))
     }
 
-    /// Something only the screen ever knew. Free-form on purpose — no session
-    /// entry answers for it, so nothing can drift.
+    /// Something only the screen ever knew, in the muted voice everything the
+    /// surface says for itself is said in: the tally line a run ends on, what
+    /// a lane answered, a warning about the turn. Free-form on purpose — a
+    /// session entry answers for one only where `push_screen` filed it, and
+    /// that entry holds the text, not the row.
     pub fn notice(line: impl Into<Line<'static>>) -> Self {
         Self::new(Kind::Notice {
             text: line.into(),
             times: 1,
         })
+    }
+
+    /// A run of plain text as notice rows, one per line: what the live stream
+    /// draws for a row it also files, and what a rebuild draws from the entry.
+    /// The two have to come out the same, so they come out of here — the
+    /// archived half is text, and nothing else knows how a screen row reads.
+    pub fn notice_lines(text: &str, paint: &Paint) -> Vec<Self> {
+        text.lines()
+            .map(|l| Self::notice(Line::from(paint.span(&paint.theme.muted, l))))
+            .collect()
     }
 
     /// Fold a repeat into this row, if it is the same notice: the scrollback
@@ -314,11 +319,6 @@ impl Row {
             .into_iter()
             .map(|text| Self::new(Kind::Answer(text)))
             .collect()
-    }
-
-    /// The line a finished run ends on.
-    pub fn tally(snap: Snapshot) -> Self {
-        Self::new(Kind::Tally(snap))
     }
 
     /// A bundle of read-only tool results folded together into a summary row.
@@ -574,7 +574,7 @@ impl Row {
     /// Wraps not counted; `height` is the screen-row count.
     pub fn len(&self) -> usize {
         match &self.0 {
-            Kind::Answer(_) | Kind::Notice { .. } | Kind::Said { .. } | Kind::Tally(_) => 1,
+            Kind::Answer(_) | Kind::Notice { .. } | Kind::Said { .. } => 1,
             Kind::Result {
                 preview_lines,
                 expanded,
@@ -610,21 +610,15 @@ impl Row {
         }
     }
 
-    /// Forget the remembered height: the text this row renders from changed
-    /// underneath it, without going through any constructor.
-    pub fn clear_height(&mut self) {
-        self.1.clear();
-    }
-
     /// Screen rows this row takes at `width`, wraps included, remembered by
     /// width until the content changes. The scrolled-up view's accounting
     /// reads these; a wrap is a row the count has to know about.
-    pub fn height(&self, paint: &Paint, done: &[Segment], width: usize) -> usize {
+    pub fn height(&self, paint: &Paint, width: usize) -> usize {
         if let Some(total) = self.1.total(width) {
             return total;
         }
         (0..self.len())
-            .map(|i| self.line_height(i, paint, done, width))
+            .map(|i| self.line_height(i, paint, width))
             .sum()
     }
 
@@ -632,11 +626,11 @@ impl Row {
     /// measurement `height` keeps. The window's walk reads one of these per
     /// line it passes, so a line it is not going to show is counted without
     /// being wrapped.
-    pub fn line_height(&self, i: usize, paint: &Paint, done: &[Segment], width: usize) -> usize {
+    pub fn line_height(&self, i: usize, paint: &Paint, width: usize) -> usize {
         if let Some(h) = self.1.line(width, i) {
             return h;
         }
-        let (line, border) = self.line(i, paint, done, width);
+        let (line, border) = self.line(i, paint, width);
         let h = super::screen::wrap(border.as_ref(), &line, width).len();
         self.1.set(width, i, h);
         h
@@ -651,7 +645,6 @@ impl Row {
         &self,
         i: usize,
         paint: &Paint,
-        done: &[Segment],
         width: usize,
     ) -> (Line<'static>, Option<Line<'static>>) {
         match &self.0 {
@@ -660,15 +653,11 @@ impl Row {
             Kind::Notice { text, times } if *times == 1 => (text.clone(), None),
             Kind::Notice { text, times } => {
                 // The count wears the muted style whatever the line it trails,
-                // so a repeated warning still reads as one warning and a tally.
+                // so a repeated warning still reads as one warning.
                 let mut spans = text.spans.clone();
                 spans.push(paint.span(&paint.theme.muted, format!(" ×{times}")));
                 (Line::from(spans), None)
             }
-            Kind::Tally(snap) => (
-                Line::from(paint.span(&paint.theme.muted, status::line(done, snap))),
-                None,
-            ),
             Kind::Result {
                 ok,
                 name,
@@ -944,7 +933,6 @@ mod conversation_tests {
         });
         for row in [
             Row::notice("a command printed this"),
-            Row::tally(Snapshot::default()),
             Row::reasoning(1, vec![Line::from("thinking")], false),
             Row::result(true, "read", "src/main.rs"),
             Row::tools_summary(tools),
@@ -997,9 +985,9 @@ mod tools_summary_tests {
         use crate::ui::tui::screen::plain;
 
         row.update_live(false, 0, &held);
-        let f0 = plain(&row.line(0, &paint, &[], 80).0);
+        let f0 = plain(&row.line(0, &paint, 80).0);
         row.update_live(false, 1, &held);
-        let f1 = plain(&row.line(0, &paint, &[], 80).0);
+        let f1 = plain(&row.line(0, &paint, 80).0);
 
         // The call it holds leads, and the count is the batch it is already
         // part of: one landed, one still out.
@@ -1042,7 +1030,7 @@ mod tools_summary_tests {
                 pending("read", "b.rs", true),
             ],
         );
-        let line = plain(&row.line(0, &paint, &[], 80).0);
+        let line = plain(&row.line(0, &paint, 80).0);
 
         assert_eq!(
             line,
@@ -1066,7 +1054,7 @@ mod tools_summary_tests {
         use crate::ui::tui::screen::plain;
 
         row.update_live(false, 0, &[pending("read", "b.rs", true)]);
-        let landed = plain(&row.line(0, &paint, &[], 80).0);
+        let landed = plain(&row.line(0, &paint, 80).0);
 
         assert_eq!(
             landed,
@@ -1104,8 +1092,8 @@ mod tools_summary_tests {
         assert!(row.is_expandable(), "one landed and one out is a batch");
         assert!(row.toggle_expand());
         assert_eq!(row.len(), 3, "the header and both calls");
-        let body = plain(&row.line(1, &paint, &[], 80).0);
-        let held = plain(&row.line(2, &paint, &[], 80).0);
+        let body = plain(&row.line(1, &paint, 80).0);
+        let held = plain(&row.line(2, &paint, 80).0);
         assert_eq!(body.trim(), "read a.rs");
         assert_eq!(held.trim(), "grep match 1");
     }
@@ -1162,23 +1150,18 @@ mod height_tests {
     #[test]
     fn a_rows_height_is_the_sum_of_its_lines() {
         let paint = Paint::new(false);
-        let done: Vec<Segment> = Vec::new();
         let row = Row::reasoning(1, vec![Line::from("abcdef"), Line::from("gh")], false);
         for width in [2usize, 4, 80] {
             let sum: usize = (0..row.len())
-                .map(|i| row.line_height(i, &paint, &done, width))
+                .map(|i| row.line_height(i, &paint, width))
                 .sum();
-            assert_eq!(sum, row.height(&paint, &done, width), "at width {width}");
+            assert_eq!(sum, row.height(&paint, width), "at width {width}");
         }
         // Asked a whole row at a time, then one line at a time: same answer.
         let fresh = Row::reasoning(1, vec![Line::from("abcdef"), Line::from("gh")], false);
-        assert_eq!(fresh.height(&paint, &done, 2), 4, "three rows and one");
-        assert_eq!(
-            fresh.line_height(0, &paint, &done, 2),
-            3,
-            "abcdef wraps to three"
-        );
-        assert_eq!(fresh.line_height(1, &paint, &done, 2), 1);
-        assert_eq!(fresh.height(&paint, &done, 2), 4);
+        assert_eq!(fresh.height(&paint, 2), 4, "three rows and one");
+        assert_eq!(fresh.line_height(0, &paint, 2), 3, "abcdef wraps to three");
+        assert_eq!(fresh.line_height(1, &paint, 2), 1);
+        assert_eq!(fresh.height(&paint, 2), 4);
     }
 }

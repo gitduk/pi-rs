@@ -36,10 +36,10 @@ pub struct View {
     // The round is not an `Intent`: nothing the door can read produces one, and
     // nothing in `App` answers one, so it lives with the queue it waits in.
     pub(super) queued: Vec<Queued>,
-    // Whether this lane's opening block has been built. A rebuild swaps the
-    // whole surface and does not touch this — neither an empty scrollback nor
-    // a zero `opened` can stand in for "never drawn" — and drawing it a
-    // second time would stack two banners on one lane.
+    // Whether this lane's opening block has been built. A rebuild builds the
+    // whole surface, banner not among it, and marks it drawn for that reason —
+    // neither an empty scrollback nor a zero `opened` can stand in for "never
+    // drawn" — and drawing it a second time would stack two banners on one lane.
     pub(super) drawn: bool,
     // The model in force. Copied in before the run borrows the agent, which
     // is what puts it out of reach for the rest of the turn.
@@ -200,6 +200,19 @@ impl Surface {
 // adopted. A rebuild and a `!` both park the cursor here.
 pub(super) fn tail_of(session: &agent::session::Session) -> Option<EntryId> {
     session.entries().last().map(|e| e.id())
+}
+
+// The screen of a lane nobody has drawn yet: the banner naming what it stands
+// on. Both callers that can be the first to a lane need it — the one that moves
+// it in front, and the one that says something into a lane nobody is looking at
+// — because a rebuild replaces a screen it finds undrawn, and the row said into
+// it would go with the old drawing.
+pub(super) fn opened<'a>(views: &'a mut Views, lane: &Lane, paint: &Paint) -> &'a mut View {
+    let view = view_at(views, lane.token());
+    if !view.drawn {
+        *view = View::opening(&lane.context, paint);
+    }
+    view
 }
 
 impl View {

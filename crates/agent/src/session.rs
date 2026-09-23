@@ -194,6 +194,16 @@ pub enum Entry {
         at: u64,
         record: Compaction,
     },
+    // A row the screen shows and the model never reads: a run's tally line, a
+    // warning about the turn. The surface words it, so this is the one entry
+    // whose text nobody else parses — and it is kept at all so that a rebuild
+    // draws the same screen the live path drew, which is the only way a row
+    // worth happening stays a row worth reading back.
+    Screen {
+        id: EntryId,
+        at: u64,
+        text: String,
+    },
 }
 
 impl Entry {
@@ -204,7 +214,8 @@ impl Entry {
             | Entry::Answer { id, .. }
             | Entry::Tool { id, .. }
             | Entry::Note { id, .. }
-            | Entry::Compaction { id, .. } => *id,
+            | Entry::Compaction { id, .. }
+            | Entry::Screen { id, .. } => *id,
         }
     }
 
@@ -215,7 +226,8 @@ impl Entry {
             | Entry::Answer { at, .. }
             | Entry::Tool { at, .. }
             | Entry::Note { at, .. }
-            | Entry::Compaction { at, .. } => *at,
+            | Entry::Compaction { at, .. }
+            | Entry::Screen { at, .. } => *at,
         }
     }
 
@@ -225,7 +237,10 @@ impl Entry {
         match self {
             Entry::Ask { .. } | Entry::Bash { .. } => Author::User,
             Entry::Answer { .. } => Author::Assistant,
-            Entry::Tool { .. } | Entry::Note { .. } | Entry::Compaction { .. } => Author::Agent,
+            Entry::Tool { .. }
+            | Entry::Note { .. }
+            | Entry::Compaction { .. }
+            | Entry::Screen { .. } => Author::Agent,
         }
     }
 
@@ -395,6 +410,13 @@ pub fn is_stopped_call(r: &ToolResult) -> bool {
 // What the model is told after a run that died for an unknown reason.
 const STOPPED_UNKNOWN: &str = "The previous run ended before it finished, for an unknown \
      reason. Treat the request it was working on as unresolved; the message below is what to act on.";
+
+// What the model reads. Everything else in the list is there for a view: the
+// record of a compaction pass, and a row only the screen ever knew.
+fn is_content(entry: &Entry) -> bool {
+    !matches!(entry, Entry::Compaction { .. } | Entry::Screen { .. })
+}
+
 fn stopped_note(err: Option<&str>) -> String {
     let Some(e) = err.map(str::trim).filter(|s| !s.is_empty()) else {
         return STOPPED_UNKNOWN.to_string();
@@ -519,6 +541,20 @@ impl Session {
             id,
             at,
             note: text.into(),
+        });
+        id
+    }
+
+    /// A row for the screen alone: a run's tally line, a warning about the
+    /// turn. Never content on the wire — the model is told what it needs in
+    /// prose it can act on, and a status line is not that. Kept so the rebuild
+    /// draws the same screen the live path drew.
+    pub fn push_screen(&mut self, text: impl Into<String>) -> EntryId {
+        let (id, at) = self.mint();
+        self.entries.push(Entry::Screen {
+            id,
+            at,
+            text: text.into(),
         });
         id
     }
@@ -714,10 +750,12 @@ impl Session {
         &self.entries
     }
 
+    /// Whether this session has anything the model would be told. The record of
+    /// a compaction and a row only the screen reads are both input to a view
+    /// rather than content, so a session holding one of them and nothing else
+    /// is empty — the same rule `view` reads them by.
     pub fn is_empty(&self) -> bool {
-        self.entries
-            .iter()
-            .all(|e| matches!(e, Entry::Compaction { .. }))
+        self.entries.iter().all(|e| !is_content(e))
     }
 
     fn dropped(&self) -> HashSet<EntryId> {
@@ -823,7 +861,7 @@ impl Session {
         let omissions = self.omissions();
         self.entries
             .iter()
-            .filter(|e| !matches!(e, Entry::Compaction { .. }))
+            .filter(|e| is_content(e))
             .filter(|e| !dropped.contains(&e.id()))
             .map(|entry| match omissions.get(&entry.id()) {
                 Some(notice) => Seen::Omitted { entry, notice },
@@ -1174,6 +1212,30 @@ mod tests {
                 "{why}: the newest prompt is last"
             );
         }
+    }
+
+    // A screen row is the one entry the model never reads. It is kept so the
+    // rebuild draws what the live path drew, and it stops there: a status line
+    // or a warning about the turn in the prompt would be context spent on
+    // numbers nothing can act on.
+    #[test]
+    fn a_screen_row_is_kept_and_never_read() {
+        let mut s = Session::new();
+        s.prompt("go");
+        let id = s.push_screen("12s · 1.2k/340 · $0.0123");
+
+        assert!(
+            s.entries().iter().any(|e| e.id() == id),
+            "the row is part of what happened"
+        );
+        assert!(
+            !s.view().iter().any(|seen| seen.id() == id),
+            "and not part of what the model is told"
+        );
+        // And it travels with the archive, so a rebuild after a resume has it.
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Session = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, s);
     }
 
     // The note is the session's words, not the user's: it stays out of the

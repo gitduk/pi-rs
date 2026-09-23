@@ -13,7 +13,6 @@ use super::screen;
 use super::tool::push_tool_row;
 use crate::app;
 use crate::store::icons;
-use crate::store::status::Segment;
 use crate::ui::render::{self, Paint};
 
 // Whether reasoning is folded to its count line, and which block the stream
@@ -163,9 +162,6 @@ pub(super) struct ScrollbackRows<'a> {
     // For the folded summary row, which is synthesized at draw time and so
     // carries no paint of its own.
     paint: &'a Paint,
-    // What a finished run's row spells itself out with, for the same reason:
-    // it is rendered here, not when the run ended.
-    done: &'a [Segment],
     // Next entry to read from the front, and the row offset inside it.
     front: (usize, usize),
     // Next entry to read from the back, and the row offset inside it.
@@ -186,7 +182,6 @@ pub(super) enum Piece<'a> {
         row: &'a Row,
         line: usize,
         paint: &'a Paint,
-        done: &'a [Segment],
         width: usize,
     },
     Live(screen::Ready<'a>),
@@ -199,9 +194,8 @@ impl screen::Piece for Piece<'_> {
                 row,
                 line,
                 paint,
-                done,
                 width,
-            } => row.line_height(*line, paint, done, *width),
+            } => row.line_height(*line, paint, *width),
             Piece::Live(line) => screen::Piece::height(line),
         }
     }
@@ -212,10 +206,9 @@ impl screen::Piece for Piece<'_> {
                 row,
                 line,
                 paint,
-                done,
                 width,
             } => {
-                let (line, border) = row.line(line, paint, done, width);
+                let (line, border) = row.line(line, paint, width);
                 let pieces = screen::wrap(border.as_ref(), &line, width);
                 // After the wrap, so every screen row a said line spans gets
                 // the band whole and the padding never wraps a row of its own.
@@ -256,7 +249,6 @@ impl<'a> ScrollbackRows<'a> {
     pub(super) fn new(
         rows: &'a [Row],
         paint: &'a Paint,
-        done: &'a [Segment],
         width: usize,
         keep: impl Fn(&Row) -> bool,
     ) -> Self {
@@ -270,7 +262,6 @@ impl<'a> ScrollbackRows<'a> {
             rows,
             width,
             paint,
-            done,
             front: (0, 0),
             back: (back, back_row),
             lens,
@@ -289,7 +280,6 @@ impl<'a> ScrollbackRows<'a> {
             row: &self.rows[idx],
             line,
             paint: self.paint,
-            done: self.done,
             width: self.width,
         }
     }
@@ -520,11 +510,11 @@ pub(super) fn f_entry(entry: &LogEntry, paint: &Paint) -> Option<Vec<Row>> {
         }
         // Machine prose, not the user's line: rebuilt in the muted voice of
         // a screen notice rather than under the prompt sigil.
-        LogEntry::Note { note, .. } => Some(
-            note.lines()
-                .map(|l| Row::notice(Line::from(paint.span(&paint.theme.muted, l))))
-                .collect(),
-        ),
+        LogEntry::Note { note, .. } => Some(Row::notice_lines(note, paint)),
+        // The same voice for the rows only the screen ever knew: a run's tally
+        // line, a warning about the turn. The surface worded them, so the
+        // rebuild draws the text it filed rather than wording it again.
+        LogEntry::Screen { text, .. } => Some(Row::notice_lines(text, paint)),
         LogEntry::Tool {
             result: r, preview, ..
         } => (!agent::session::is_stopped_call(r))
@@ -532,6 +522,7 @@ pub(super) fn f_entry(entry: &LogEntry, paint: &Paint) -> Option<Vec<Row>> {
         _ => None,
     }
 }
+
 // Scroll for the same window one frame later: growth since `last` folds
 // back into the offset so the window keeps its place; `None` re-bases.
 pub(super) fn absorb_growth(scroll: usize, last: Option<usize>, total: usize) -> usize {

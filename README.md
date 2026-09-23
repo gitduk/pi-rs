@@ -117,11 +117,13 @@ id under `[keys]` in `~/.pi/settings.toml` replaces that action's defaults:
 ```
 
 The namespace says what the action touches, and that is also what decides when
-it is live — `edit.*` and `move.*` whenever you are typing, `menu.*` only with
-the completion list open, `run.*` only during a turn. Two actions may share a
-key when they are never live together, which is how `up` is `menu.previous`
-with the list open and `history.older` without it. Sharing one *within* a
-context is refused at load, along with an unknown id or an unreadable binding.
+it is live — `edit.*` and `move.*` whenever you are typing, `menu.*` while
+something is open over the editor (a completion list, the rewind selector, the
+settings panel, or a command's answer), and `run.*` only during a turn. Two
+actions may share a key when they are never live together, which is how `up` is
+`menu.previous` with a list open and `history.older` without it. Sharing one
+*within* a context is refused at load, along with an unknown id or an unreadable
+binding.
 
 Colours are configurable the same way, under `[theme]` in
 `~/.pi/settings.toml`. Every key is a Style: a colour, text attributes, or
@@ -145,13 +147,14 @@ colour nor attribute.
 A key that is not one of those is refused at load, like a misspelled compat
 key.
 
-`/help` `/new` `/resume` `/name` `/model` `/worktree` `/compact` `/loop` `/reload` `/keys` `/status` `/wechat` `/exit`,
-and one more for every skill on disk. Typing `/` opens a list of what the line
-could still become; `↑` `↓` pick, `Tab` accepts, `Esc` dismisses it until the
-next keystroke. `/model`, `/resume` and `/worktree` complete their arguments
-too: the model name is the tedious part the config already knows, a saved
-session answers to its own label — the name you gave it, or its first
-question — and a checkout by its branch.
+`/help` `/new` `/resume` `/name` `/model` `/worktree` `/compact` `/loop`
+`/reload` `/keys` `/status` `/settings` `/wechat` `/exit`, and one more for
+every skill on disk. Typing `/` opens a list of what the line could still
+become; `↑` `↓` pick, `Tab` accepts, `Esc` dismisses it until the next
+keystroke. `/model`, `/resume` and `/worktree` complete their arguments too:
+the model name is the tedious part the config already knows, a saved session
+answers to its own label — the name you gave it, or its first question — and a
+checkout by its branch.
 Typing `@` completes workspace files the same way: `@src/ma` lands as
 `@src/main.rs`, a directory lands with its `/` left open for the next step.
 

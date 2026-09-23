@@ -18,6 +18,7 @@ use super::term::{Deafened, EXIT_GRACE, external_editor, scratch_file};
 use super::view::{Queued, front_view, tail_of, view_at};
 use super::{NO_TRANSCRIPT, Tui};
 use crate::app;
+use crate::app::looping::Cut;
 use crate::input::Intent;
 
 // What kind of job a finished `Done` was, carrying what only that kind
@@ -314,8 +315,16 @@ impl Tui {
         if !keep {
             let _ = std::fs::remove_file(&path);
         }
+        // `keep` is exactly "this message names the file": the two branches
+        // that leave one behind are the two the user has to act on, and a row
+        // in the transcript is what survives long enough to copy a path out
+        // of. The rest are a press's own answer.
         if let Some(line) = said {
-            self.ui.flash(line);
+            if keep {
+                self.say_of(self.core.current, line);
+            } else {
+                self.ui.flash(line);
+            }
         }
     }
 
@@ -384,6 +393,19 @@ impl Tui {
             ),
         };
 
+        // The lane in front drew every row the run left behind: its entries as
+        // they were committed, and whatever its ending filed as it was worded.
+        // So its cursor is the end of what came home — and it has to be, or the
+        // next turn's adopt draws those filed rows again, above the prompt it
+        // is answering. A lane off screen keeps its cursor: that is what the
+        // replay of its `pending` events goes by.
+        if ran_back && lane == self.core.current {
+            let tail = self.core.lanes[lane].session().and_then(tail_of);
+            view_at(&mut self.views, self.core.lanes[lane].token())
+                .surface
+                .tail = tail;
+        }
+
         // A panic never came back, and Esc that took the prompt back produced
         // nothing to misread as a task: neither has anything to tell. Nor does
         // a `!` the user stopped — the shell command was theirs, and calling
@@ -429,18 +451,39 @@ impl Tui {
 
         // Before the split below, so a round that ended off-screen still arms
         // the next one — it waits with the lane, like any queued line.
-        let finished = out.is_ok() && !unsend;
-        self.step_loop(lane, finished);
+        //
+        // A run that came back cancelled is the user's own stop, not a failure
+        // to report to the model. One that never came back has no outcome to
+        // read, so it is named the failure it is whatever stood in for one:
+        // `recover_session` has said what became of the transcript, and this
+        // says only what became of the loop.
+        let cut = if unsend {
+            Some(Cut::Unsent)
+        } else if !ran_back {
+            Some(Cut::Failed)
+        } else if cancelled {
+            Some(Cut::Stopped)
+        } else if out.is_err() {
+            Some(Cut::Failed)
+        } else {
+            None
+        };
+        let said = self.step_loop(lane, cut);
 
-        // Out of sight: what the run left to draw waits with it, and the lane
-        // says so in the bar until someone looks.
-        if lane != self.core.current {
+        if lane == self.core.current {
+            self.close_run(out);
+            if unsend && let Some(id) = self.core.lane().last_ask() {
+                self.rewind_turn(id);
+            }
+        } else {
+            // Out of sight: what the run left to draw waits with it, and the
+            // lane says so in the bar until someone looks.
             self.core.lanes[lane].end(out, unsend);
-            return;
         }
-        self.close_run(out);
-        if unsend && let Some(id) = self.core.lane().last_ask() {
-            self.rewind_turn(id);
+        // Last, and outside the split: a rewind rebuilds the whole surface, and
+        // a row landed before it would go with the old drawing.
+        if let Some(said) = said {
+            self.say_of(lane, said);
         }
     }
 
@@ -481,12 +524,11 @@ impl Tui {
         } else if back {
             let held = self.core.lanes[lane].agent().kept_tokens();
             let now = self.core.tokens_now_at(lane);
-            self.say_of(
-                lane,
-                format!(
-                    "nothing to compact — {now} tokens, all inside the {held} kept as working context"
-                ),
-            );
+            // `/compact` answered, and there was nothing to do: the answer to
+            // a command, not news about the lane.
+            self.ui.open_reply([format!(
+                "nothing to compact — {now} tokens, all inside the {held} kept as working context"
+            )]);
         }
         // The pass is over, so the clock stops. What it was driving — the
         // live region — already went with the turn.

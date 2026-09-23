@@ -24,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 use tools::Ctx;
 
 use super::App;
-use crate::app::looping::{Looping, Round};
+use crate::app::looping::{Cut, Looping, Round};
 use crate::app::meter::{Snapshot, Tally};
 use crate::input::commands::ago;
 use crate::input::{Rewound, refused};
@@ -109,6 +109,13 @@ pub struct Lane {
     /// from `totals` when a run arms and cleared when a session begins; the
     /// status lines read this run alone, and `/status` reads the session.
     pub tally: Tally,
+    /// Rows filed for the screen while a run had the transcript out. They wait
+    /// with it and land when it comes home: a run posts its last events just
+    /// before it ends, so the rows that outlive it are filed exactly while
+    /// there is nowhere to put them. They land after everything the run
+    /// committed — the surface drew them where they happened, and a rebuild
+    /// draws them at the end of the turn, which is the one place the two differ.
+    pub held_screens: Vec<String>,
 
     /// What the user calls this session, if anything.
     pub name: Option<String>,
@@ -212,13 +219,13 @@ impl Lane {
     ///
     /// The loop is taken out and only put back to go round again, so every
     /// ending drops it without a second place to remember that.
-    pub fn loop_step(&mut self, finished: bool, cap: Option<usize>) -> Option<Round> {
+    pub fn loop_step(&mut self, cut: Option<Cut>, cap: Option<usize>) -> Option<Round> {
         let mut looping = self.looping.take()?;
         if !looping.is_running() {
             self.looping = Some(looping);
             return None;
         }
-        let out = looping.step(&self.ctx, finished, cap);
+        let out = looping.step(&self.ctx, cut, cap);
         if matches!(out, Round::Again { .. }) {
             self.looping = Some(looping);
         }
@@ -395,7 +402,7 @@ impl Lane {
 
     // -------------------------------------------------------------- the loop
 
-    /// Take the loop off this lane: what `/loop` off, a round that ended it,
+    /// Take the loop off this lane: what bare `/loop`, a round that ended it,
     /// and a lane being left all mean.
     pub fn take_looping(&mut self) -> Option<Looping> {
         self.looping.take()
@@ -420,8 +427,14 @@ impl Lane {
         self.session.take()
     }
 
-    /// Take it back: the job has finished, or never started.
-    pub fn return_session(&mut self, session: Session) {
+    /// Take it back: the job has finished, or never started. Whatever was
+    /// filed for the screen while it was away lands here, in the order it was
+    /// drawn — the transcript a rebuild reads has to hold the rows the screen
+    /// was shown.
+    pub fn return_session(&mut self, mut session: Session) {
+        for text in self.held_screens.drain(..) {
+            session.push_screen(&text);
+        }
         self.session = Some(session);
     }
 
@@ -437,6 +450,24 @@ impl Lane {
     pub fn push_note(&mut self, note: &str) {
         if let Some(session) = self.session.as_mut() {
             session.push_note(note);
+        }
+    }
+
+    /// A row for this lane's screen and nothing else: the tally line a run
+    /// ends on, a warning about it. Filed rather than only drawn, so that
+    /// rebuilding the screen from the transcript draws it too — and held when
+    /// a run has the transcript, since that is when those rows are filed.
+    ///
+    /// The id comes back for the surface that drew the row: its cursor for what
+    /// it has drawn has to move past the entry, or the next adopt draws it a
+    /// second time. Nothing comes back for a held row, which is filed later.
+    pub fn push_screen(&mut self, text: &str) -> Option<EntryId> {
+        match self.session.as_mut() {
+            Some(session) => Some(session.push_screen(text)),
+            None => {
+                self.held_screens.push(text.to_string());
+                None
+            }
         }
     }
 }
@@ -529,6 +560,9 @@ impl App {
         // a new session starts both at nothing rather than the one just left.
         self.lane_mut().totals = Totals::default();
         self.lane_mut().tally = Tally::default();
+        // Rows filed for the screen of the session being left, still waiting on
+        // its run: they are about a run this one never had.
+        self.lane_mut().held_screens.clear();
         let id = self.lane().id.clone();
         let path = self
             .store
@@ -617,6 +651,7 @@ impl App {
             name: None,
             totals: Totals::default(),
             tally: Tally::default(),
+            held_screens: Vec::new(),
 
             context: resolved.context,
             standing: resolved.standing,
@@ -746,5 +781,44 @@ mod tests {
         });
 
         assert_eq!(lane.totals.cost, 3.0 + 15.0);
+    }
+
+    // A run holds the transcript for as long as it works, and the rows that
+    // outlive a run — the tally line, a warning about it — are filed exactly
+    // then. They wait for the transcript rather than being dropped: a rebuild
+    // draws what the transcript holds, so a row filed into nothing is a row
+    // `/resume` loses.
+    #[test]
+    fn a_row_filed_while_a_run_holds_the_transcript_lands_with_it() {
+        let mut lane = a_lane("s");
+        // A lane with a transcript at all: the test lane is built for
+        // `/settings` and carries none.
+        lane.return_session(agent::session::Session::default());
+        let held = lane.take_session().expect("the run has it");
+
+        lane.push_screen("3s · 1.2k/340 · $0.01");
+        lane.push_screen("! the reply came back short");
+        lane.push_screen("! settled");
+        lane.return_session(held);
+
+        let filed: Vec<&str> = lane
+            .session()
+            .expect("the run gave it back")
+            .entries()
+            .iter()
+            .filter_map(|e| match e {
+                agent::session::Entry::Screen { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            filed,
+            [
+                "3s · 1.2k/340 · $0.01",
+                "! the reply came back short",
+                "! settled"
+            ],
+            "in the order they were drawn"
+        );
     }
 }

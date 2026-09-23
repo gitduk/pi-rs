@@ -25,8 +25,14 @@ use crate::store::icons;
 pub enum Inbound {
     // A text message from the peer.
     Text { text: String },
-    // Something worth saying on the local terminal (status, errors, QR).
+    // Something worth saying on the local terminal and worth finding again: a
+    // status, an error, the QR. The QR has to stay long enough to be scanned,
+    // and a way out of a broken token has to stay readable, so the line lands
+    // in the scrollback rather than on the bar.
     Notice(String),
+    // The same, on the bar for a moment and no longer: news about the bridge
+    // itself that nobody reads twice.
+    Flash(String),
     // The peer typed `/stop` or `/esc`: interrupt the running turn now.
     Stop,
 }
@@ -464,7 +470,7 @@ impl Bridge {
                     s.context_token = None;
                     save(&s);
                     drop(s);
-                    let _ = tx.send(Inbound::Notice(
+                    let _ = tx.send(Inbound::Flash(
                         "wechat connected — polling for messages".into(),
                     ));
                     poll(client, state, tx, task_abort).await;

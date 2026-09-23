@@ -38,7 +38,7 @@ impl Ui {
         }
         // The mouse must cover the row's own text, not the empty rest of the
         // row: the click that expands it lands on the head line only.
-        let first = row.line(0, &self.paint, &[], self.screen.usable()).0;
+        let first = row.line(0, &self.paint, self.screen.usable()).0;
         ((col as usize) < first.width()).then_some(idx)
     }
 
@@ -92,7 +92,7 @@ pub(super) enum Target {
 pub(super) struct Regions {
     // The scrolled transcript, the live region's rows included.
     pub(super) history: Rect,
-    // The completion list, or the open panel over it.
+    // The completion list, the rewind selector, or the open panel over it.
     pub(super) menu: Rect,
     // The bar: the checkouts, or the flash that took its row.
     pub(super) bar: Rect,

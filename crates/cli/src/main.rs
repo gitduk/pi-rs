@@ -368,12 +368,15 @@ pub fn resolve(
     // tool in the set.
     if let Some(judge) = &config.judge {
         let endpoint = judge.endpoint();
+        // Named at startup because this one leaves the machine and costs
+        // money: a tool in the set the user did not ask for is worth saying
+        // out loud, and the endpoint says which account is paying.
+        notes.push(format!("judge: snap judgments via {endpoint}"));
         registry = registry.with(tools::judge::Judge::new(
-            endpoint.clone(),
+            endpoint,
             judge.key(),
             judge.model.clone(),
         ));
-        notes.push(format!("judge: snap judgments via {endpoint}"));
     }
 
     let (scripts, skipped) = context::home()
@@ -634,6 +637,7 @@ async fn main() -> Result<()> {
                 events,
                 inbox,
                 pending: Vec::new(),
+                held_screens: Vec::new(),
                 looping: None,
                 pending_round: None,
                 run: lane::Run::Idle,

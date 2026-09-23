@@ -294,9 +294,10 @@ pub enum Step {
     // and there is no detail to come back to, so a minute later the line says
     // nothing the screen does not already show.
     //
-    // The surface shows it on the bar for a moment and keeps it out of the
-    // scrollback — see `Ui::flash`. An error carrying detail is the other
-    // side of that line and stays in the transcript.
+    // Said where a one-line answer goes — printed in a pipe, put up as a reply
+    // on the terminal — and filed nowhere: there is nothing here a rebuild
+    // should draw. An error carrying detail is the other side of that line and
+    // stays in the transcript.
     Flash(String),
     // A `!` command to run. The surface runs and records it, because only it
     // can await; `run_bash` does the work and `record_bash` files it.

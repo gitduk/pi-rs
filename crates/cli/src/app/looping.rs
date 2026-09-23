@@ -29,7 +29,7 @@ pub struct Looping {
     // Consecutive rounds that changed fewer than `THIN_CHANGES` lines.
     thin: usize,
     // Set when this loop puts a round in the queue, taken when that round
-    // ends. A turn that did not come from here — a line typed between rounds
+    // ends. A run that did not come from here — a line typed between rounds
     // — also ends, and counting it would move the loop on something it never
     // ran.
     running: bool,
@@ -127,6 +127,21 @@ fn count_changes(prev: &[u8], now: &[u8]) -> usize {
     n + m - 2 * above[m]
 }
 
+/// What cut a round short of its own end.
+///
+/// The loop goes with the run on any of the three: what decides a round is the
+/// tree, and a round that was stopped, that failed, or that was taken back
+/// never left the tree the verdict the loop reads. Which of the three it was is
+/// the whole of what the screen has to say about it.
+pub enum Cut {
+    // Esc, or a stop asked for another way.
+    Stopped,
+    // The round died rather than finishing. Its error has a line of its own.
+    Failed,
+    // The prompt was taken back, so the round is the user's again.
+    Unsent,
+}
+
 /// What a loop does now that one of its rounds has ended.
 pub enum Round {
     // Run this line again, as round `next`.
@@ -143,7 +158,7 @@ pub enum Round {
     // `loop_max_rounds` reached, with rounds still changing the tree.
     Capped(usize),
     // Esc, an error, or a prompt taken back. The loop goes with the run.
-    Cut,
+    Cut(Cut),
 }
 
 impl Looping {
@@ -172,16 +187,16 @@ impl Looping {
         }
     }
 
-    /// What the loop does now that a round has ended. `finished` is whether
-    /// the run reached its own end rather than being cut short.
-    pub fn step(&mut self, ctx: &Ctx, finished: bool, cap: Option<usize>) -> Round {
+    /// What the loop does now that a round has ended. `cut` is what stopped the
+    /// round short, and `None` is a round that reached its own end.
+    pub fn step(&mut self, ctx: &Ctx, cut: Option<Cut>, cap: Option<usize>) -> Round {
         self.running = false;
         self.round += 1;
         // A cut round ends the loop without measuring the tree: esc may have
         // stopped the run mid-write, and where the tree stands now is not a
         // judgement anyone asked for.
-        if !finished {
-            return Round::Cut;
+        if let Some(cut) = cut {
+            return Round::Cut(cut);
         }
         let (fingerprint, now) = tree_mark(ctx, &self.prev);
         let mut change = 0usize;

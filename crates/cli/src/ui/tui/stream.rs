@@ -9,6 +9,7 @@ use super::tool::{self, RunTool, push_tool_row};
 use super::view::{StreamKind, Surface, View, snapshot};
 use super::{BAR_H, FLASH, Ui};
 use crate::app::lane::Lane;
+use crate::store::icons;
 use crate::ui::render;
 use crate::ui::status;
 use agent::Event;
@@ -211,9 +212,35 @@ impl Ui {
                 // Asked now rather than at every draw: a run whose segments
                 // all had nothing to say leaves no row, and a blank one is
                 // worse than none.
-                if !status::parts(&self.done, &snap).is_empty() {
-                    view.surface.scrollback.push(Row::tally(snap));
+                let parts = status::parts(&self.done, &snap);
+                if !parts.is_empty() {
+                    // Filed, not just drawn: the numbers are the run's own and
+                    // nothing else holds them, so a row that was not filed is
+                    // one a rebuild cannot draw.
+                    let line = parts.join(icons::PART_SEP);
+                    self.file_screen(lane, view, &line);
                 }
+            }
+            // A warning about the turn itself: the prompt was reshaped, the
+            // reply came back short, a field the host owes was never sent.
+            // Filed the same way — it is the answer being degraded, and a run
+            // that quietly came back smaller is exactly the one worth finding
+            // again later. It is not news to the model, which is why nothing
+            // goes to the wire. Drawn muted like its archived half is, rather
+            // than in `describe`'s red mark: the entry holds text, so a
+            // rebuild could not give the mark its colour back.
+            Event::Warning(w) => {
+                self.close(view);
+                let line = format!("{} {w}", icons::WARN_MARK);
+                self.file_screen(lane, view, &line);
+            }
+            // What the compaction gave up. The numbers live in the pass's own
+            // report and nowhere else — the record the session keeps holds what
+            // went, not what it cost — so they are filed as they were worded.
+            Event::Compacted(r) => {
+                self.close(view);
+                let line = render::compaction_line(r);
+                self.file_screen(lane, view, &line);
             }
             // A call's two events are one line here: the start either hands
             // the call to the summary row above or takes a line in the live
@@ -261,6 +288,21 @@ impl Ui {
                         .extend(said.into_iter().map(Row::notice));
                 }
             }
+        }
+    }
+
+    // A row for this lane's screen and nothing else: filed so a rebuild draws
+    // it too, and drawn here so it shows now. One function because the two
+    // halves have to be the same row — and because the cursor that says what
+    // this screen has drawn is this one's to move: the entry is drawn as it is
+    // filed, so an adopt that found it above the cursor would draw it again.
+    pub(super) fn file_screen(&self, lane: &mut Lane, view: &mut View, line: &str) {
+        let filed = lane.push_screen(line);
+        view.surface
+            .scrollback
+            .extend(Row::notice_lines(line, &self.paint));
+        if let Some(id) = filed {
+            view.surface.tail = Some(id);
         }
     }
 
@@ -313,8 +355,8 @@ impl Ui {
             return;
         };
         if let Some(row) = row {
-            let parked = pending.line(0, &self.paint, &[], width).0;
-            let derived = row.line(0, &self.paint, &[], width).0;
+            let parked = pending.line(0, &self.paint, width).0;
+            let derived = row.line(0, &self.paint, width).0;
             debug_assert_eq!(parked, derived, "a tool's two lines disagreed");
         }
     }
@@ -355,14 +397,20 @@ impl Ui {
         // it, and the scrolled history fills what is left. The caret's row
         // therefore depends only on the pinned rows, never on how the
         // history wraps.
-        // One space, one panel: they all draw over the menu, and the surface
-        // can hold only one of them at a time.
+        // One space, one thing in it: they all draw over the menu, and the
+        // surface can hold one at a time — the reply first, then the panel,
+        // then whatever the line is completing to.
         let panel = self.panel.as_ref().map(|p| p.view(&self.paint, width));
         let panel_h = panel.as_ref().map_or(0, |(r, _)| r.len());
         // Both branches leave the bar its row: a menu tall enough to take it
-        // would drop whatever that row is saying.
+        // would drop whatever that row is saying. The reply is asked for no
+        // more than that, and answers in rows rather than lines — it wraps
+        // what it shows itself, so the count and the drawing agree.
         let room = (self.screen.height as usize).saturating_sub(editor_h + bar_h + 1);
-        let menu_h = if panel.is_some() {
+        let reply = self.reply.as_ref().map(|r| r.view(room, width));
+        let menu_h = if let Some(reply) = &reply {
+            reply.len()
+        } else if panel.is_some() {
             panel_h.min(room)
         } else if menu.is_empty() {
             0
@@ -409,7 +457,7 @@ impl Ui {
                 .scrollback
                 .iter()
                 .filter(|r| keep(r))
-                .map(|r| r.height(&self.paint, &self.done, width))
+                .map(|r| r.height(&self.paint, width))
                 .sum::<usize>()
                 + live.len();
             view.surface.scroll = absorb_growth(view.surface.scroll, view.surface.counted, total);
@@ -417,15 +465,9 @@ impl Ui {
         } else {
             view.surface.counted = None;
         }
-        let scrollback = ScrollbackRows::new(
-            &view.surface.scrollback,
-            &self.paint,
-            &self.done,
-            width,
-            keep,
-        )
-        .indexed()
-        .map(|(item, idx)| (item, Target::Scrollback(idx)));
+        let scrollback = ScrollbackRows::new(&view.surface.scrollback, &self.paint, width, keep)
+            .indexed()
+            .map(|(item, idx)| (item, Target::Scrollback(idx)));
 
         // The pending-call rows lead the live block; a click on one opens or
         // closes the batch.
@@ -470,7 +512,9 @@ impl Ui {
                 Regions::layout(frame.area(), menu_h as u16, bar_h as u16, editor_h as u16);
             self.regions = regions;
             frame.render_widget(Rows(&rows), regions.history);
-            if let Some((panel, _)) = &panel {
+            if let Some(reply) = &reply {
+                frame.render_widget(Rows(reply), regions.menu);
+            } else if let Some((panel, _)) = &panel {
                 frame.render_widget(Rows(panel), regions.menu);
             } else if !items.is_empty() {
                 let mut state = ListState::default();
@@ -494,7 +538,9 @@ impl Ui {
                 );
             }
             frame.render_widget(Rows(&input_view), regions.editor);
-            if let Some((_, Some((row, col)))) = panel {
+            // The panel's caret, when the panel is the one being drawn: a
+            // reply over it would otherwise wear a caret at its own row.
+            if let Some((_, Some((row, col)))) = panel.filter(|_| reply.is_none()) {
                 if (row as usize) < menu_h {
                     frame.set_cursor_position((regions.menu.x + col, regions.menu.y + row));
                 }
@@ -508,8 +554,13 @@ impl Ui {
     // Rebuild the history from the transcript, forgetting everything the old
     // drawing showed: a rewind changes what the conversation is, and the
     // screen has to show the new one, not the old one with a note on it.
+    //
+    // Drawn, whatever the view was before: the banner went with the rest, and a
+    // lane read as never drawn would have a fresh opening block laid over this
+    // transcript the moment it came to the front.
     pub(super) fn rebuild(&mut self, view: &mut View, session: &agent::session::Session) {
         let folded = view.surface.folds.folded;
         view.surface = Surface::from(session, &self.paint, folded);
+        view.drawn = true;
     }
 }
