@@ -3192,6 +3192,45 @@ mod tests {
         assert_eq!(ui.editor.cursor(), ui.editor.text().len());
     }
 
+    // `gg` and `G` take the history's ends while the line is empty and the
+    // buffer's once anything is typed.
+    #[test]
+    fn an_empty_line_sends_gg_and_g_to_the_history_ends() {
+        let mut ui = vim_ui();
+        let (_dir, lane) = a_running_lane();
+        let mut view = View::default();
+        view.surface.scrollback = (1..=60).map(|n| Row::notice(format!("row {n}"))).collect();
+        ui.vim.as_mut().unwrap().mode = Mode::Normal;
+
+        ui.key(&lane, &mut view, typed('g'), false);
+        ui.key(&lane, &mut view, typed('g'), false);
+        ui.flush(&lane, &mut view);
+        let top = view.surface.scroll;
+        assert!(top > 0, "gg went back through the history: {top}");
+
+        ui.key(&lane, &mut view, typed('K'), false);
+        ui.flush(&lane, &mut view);
+        assert_eq!(view.surface.scroll, top, "gg is as far back as it goes");
+
+        ui.key(&lane, &mut view, typed('G'), false);
+        ui.flush(&lane, &mut view);
+        assert_eq!(view.surface.scroll, 0, "G came back to the newest rows");
+
+        // A line to command: the keys stay on it, and the history stays where
+        // the user scrolled it to.
+        ui.key(&lane, &mut view, typed('K'), false);
+        ui.flush(&lane, &mut view);
+        let up = view.surface.scroll;
+        ui.editor.set_line("ab\ncd");
+        ui.key(&lane, &mut view, typed('G'), false);
+        assert_eq!(ui.editor.cursor(), 5, "G runs to the text's end");
+        ui.key(&lane, &mut view, typed('g'), false);
+        ui.key(&lane, &mut view, typed('g'), false);
+        ui.flush(&lane, &mut view);
+        assert_eq!(ui.editor.cursor(), 0, "and gg to its start");
+        assert_eq!(view.surface.scroll, up, "the history stayed where it was");
+    }
+
     // Turning the keys off is the one thing that moves the mode without a
     // keystroke — otherwise switching back on would land in Normal with
     // nothing having asked to go there.

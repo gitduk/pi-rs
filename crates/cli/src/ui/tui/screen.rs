@@ -122,6 +122,10 @@ impl Piece for Ready<'_> {
     }
 }
 
+/// As far as the history goes: a scroll, or a step, no window is short of.
+/// The clamp below brings it back to the oldest rows the area can hold.
+pub const TOP: usize = usize::MAX;
+
 /// The window of rows to show: the last `room` rows of `lines`, with `scroll`
 /// rows held back from the bottom. The clamped scroll comes back with them.
 ///
@@ -137,7 +141,8 @@ pub fn window_tagged<T: Clone, P: Piece>(
     room: usize,
     scroll: usize,
 ) -> (Vec<(Line<'static>, T)>, usize) {
-    let want = room + scroll;
+    // A scroll of `TOP` must reach the clamp below, not overflow on the way.
+    let want = room.saturating_add(scroll);
     // Backwards on the counts alone: a line the window will not show costs its
     // height here, not the text it would take to build.
     let mut pending: Vec<(P, T)> = Vec::new();

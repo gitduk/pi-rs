@@ -85,8 +85,8 @@ pub enum Action {
     MoveLineStart,
     MoveLineEnd,
     MoveLineFirstNonBlank,
-    // The buffer's ends, not one line's. `G` is a press; the top has no
-    // single press — vim spells it `gg`, another doubled key.
+    // The ends of the whole text, or of the history when the line is empty.
+    // `G` is a press; the top is `gg`, vim's other doubled key.
     MoveBufferStart,
     MoveBufferEnd,
     HistoryOlder,
@@ -455,7 +455,7 @@ const BINDINGS: &[Binding] = &[
         action: A::MoveBufferEnd,
         when: W::Mode(Mode::Normal),
         keys: &["G"],
-        note: "",
+        note: "the history's end when the line is empty",
     },
     Binding {
         id: "normal.history.older",

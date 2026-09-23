@@ -409,7 +409,7 @@ impl Ui {
             Some(Action::MoveLineStart) => self.editor.home(),
             Some(Action::MoveLineEnd) => self.editor.end(),
             Some(Action::MoveLineFirstNonBlank) => self.editor.first_non_blank(),
-            Some(Action::MoveBufferEnd) => self.editor.buffer_end(),
+            Some(Action::MoveBufferEnd) => self.buffer_ends(view, false),
             Some(Action::HistoryOlder) => self.editor.up(),
             Some(Action::HistoryNewer) => self.editor.down(),
             Some(Action::ScrollPageUp) => self.scroll_view(view, true, self.page_scroll_step()),
@@ -503,7 +503,7 @@ impl Ui {
                         Some(Typed::Command(action)) => match action {
                             Action::DeleteLine => self.editor.delete_line(),
                             Action::ChangeLine => self.change_line(),
-                            Action::MoveBufferStart => self.editor.buffer_start(),
+                            Action::MoveBufferStart => self.buffer_ends(view, true),
                             _ => unreachable!("a doubled key names one of the three"),
                         },
                         Some(Typed::Insert) | None => self.editor.insert(c),
