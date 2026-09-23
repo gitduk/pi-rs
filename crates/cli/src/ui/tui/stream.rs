@@ -61,6 +61,16 @@ impl Ui {
         self.flash = Some((text, Instant::now()));
     }
 
+    // The bar's row for a retry, worded as a pipe words it and given the bar's
+    // own width, so `describe`'s clipping and its ellipsis are what is drawn.
+    pub(super) fn flash_event(&mut self, event: &Event) {
+        let row = render::describe(event, &self.paint, self.screen.usable())
+            .and_then(|rows| rows.into_iter().next());
+        if let Some(row) = row {
+            self.flash(row.to_string());
+        }
+    }
+
     // The bar row while a flash is up, and the only place an expired one is
     // dropped — every frame passes through here, so nothing else has to
     // remember to clear it.
@@ -241,6 +251,9 @@ impl Ui {
                 self.close(view);
                 self.adopt(view, entries);
             }
+            // A retry is transport news, not a step of the answer: the lane in
+            // front reads it on the bar, which `serve_lanes` sees to. What comes
+            // here is another lane's, replayed into its own transcript.
             _ => {
                 self.close(view);
                 if let Some(said) = render::describe(&event, &self.paint, self.screen.usable()) {

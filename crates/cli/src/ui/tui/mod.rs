@@ -839,6 +839,14 @@ impl Tui {
                 if at == self.core.current {
                     self.bridge.observe(&event).await;
                     let view = front_view(&mut self.views, self.core.lane());
+                    // A retry is transport news, not a step of the answer: it
+                    // takes the bar for a moment, after the abandoned attempt's
+                    // half-stream is landed. Another lane's keeps its own row.
+                    if matches!(event, Event::Retrying { .. }) {
+                        self.ui.close(view);
+                        self.ui.flash_event(&event);
+                        continue;
+                    }
                     self.ui.on_event(&mut self.core.lanes[at], view, event);
                 } else {
                     // Deltas arrive thousands at a time and the backlog is
@@ -949,9 +957,14 @@ impl Tui {
     }
 
     // Carry the lane's loop past a round that has just ended: queue the next
-    // one under a `loop round {n}` marker, or say why there is no next round
-    // when one ended it. A round the user cut speaks for itself — the notice
-    // is for the loop that went on, and for the one that ended on its own.
+    // one, or say why there is no next one. A round the user cut speaks for
+    // itself — the notice is for the loop that went on, and for the one that
+    // ended on its own.
+    //
+    // The bar takes what is true for a moment: a round beginning, or one that
+    // found nothing left to do. A stop nobody asked for is the loop's last
+    // word and keeps its own row, where it outlives the three seconds a flash
+    // gets.
     //
     // What decides is the tree, never the model: a round that changed a file
     // is a round whose work was not finished, and one that changed nothing
@@ -962,6 +975,8 @@ impl Tui {
         let Some(round) = self.core.lanes[lane].loop_step(finished, cap) else {
             return;
         };
+        // Which of the two it is, before the match takes the round apart.
+        let fleeting = matches!(&round, Round::Again { .. } | Round::Quiet);
         let said = match round {
             Round::Again { goal, next } => {
                 // The round number and the running total reach the model as a
@@ -989,8 +1004,13 @@ impl Tui {
                 format!("loop stopped at loop_max_rounds ({n}) — rounds were still changing files")
             }
         };
-        self.say_of(lane, said);
+        if fleeting {
+            self.flash_of(lane, said);
+        } else {
+            self.say_of(lane, said);
+        }
     }
+
     // News from a lane, onto the screen actually being watched rather than
     // into the lane it came from — where nobody would see it until they
     // switched. The `whose:` prefix is what makes that readable, and it is
@@ -999,14 +1019,30 @@ impl Tui {
     fn say_of(&mut self, lane: usize, what: impl Into<Line<'static>>) {
         let mut line = what.into();
         if lane != self.core.current {
-            let whose = self.core.lanes[lane]
-                .worktree
-                .as_deref()
-                .unwrap_or("the main checkout");
-            line.spans.insert(0, Span::from(format!("{whose}: ")));
+            line.spans.insert(0, Span::from(self.whose(lane)));
         }
         self.ui
             .say_line(front_view(&mut self.views, self.core.lane()), line);
+    }
+
+    // The same news, on the bar for the few seconds it is worth rather than in
+    // the transcript for good.
+    fn flash_of(&mut self, lane: usize, what: impl Into<String>) {
+        let mut said = what.into();
+        if lane != self.core.current {
+            said.insert_str(0, &self.whose(lane));
+        }
+        self.ui.flash(said);
+    }
+
+    // What a lane's news is prefixed with when it belongs to a checkout other
+    // than the one in front: the name of the one it came from.
+    fn whose(&self, lane: usize) -> String {
+        let whose = self.core.lanes[lane]
+            .worktree
+            .as_deref()
+            .unwrap_or("the main checkout");
+        format!("{whose}: ")
     }
 
     // The deeds the screen keeps for itself. They are here rather than in
