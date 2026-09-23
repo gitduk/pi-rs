@@ -9,8 +9,19 @@
 //! menu's selected row, `CURRENT_ITEM` the list's current row — a change
 //! reads as the place it lands.
 
+// The bar the prompt wears, on the input line and on the rows it lands as:
+// one shape, so what is being typed and what was said wear the same mark.
+pub const PROMPT_BAR: &str = "┃";
+
+/// The bar as every line that wears one writes it: the glyph and the column
+/// of air after it — written once, so the input line and the lines it lands
+/// as put their first character in the same place.
+pub fn bar(icon: &str) -> String {
+    format!("{icon} ")
+}
+
 // Rows of the scrollback.
-pub const SAID_RULE: &str = "▌"; // the rule beside a line the user said
+pub const SAID_RULE: &str = PROMPT_BAR; // the rule beside a line the user said
 // The version line that opens the scrollback.
 pub const VERSION_BANNER: &str = concat!("π ", env!("CARGO_PKG_VERSION"));
 pub const PENDING_MARK: &str = "→"; // a tool call whose result has not landed
@@ -26,8 +37,8 @@ pub const CHANGED_MARK: &str = "≠"; // a session value the file no longer hold
 
 // The input lines.
 pub const PIPE_SIGIL: &str = ""; // the prompt where there is no tui
-pub const INPUT_SIGIL: &str = MENU_SIGIL; // `theme.prompt.icon` default
-pub const INPUT_SIGIL_NORMAL: &str = MENU_SIGIL; // `theme.prompt.normal` default
+pub const INPUT_SIGIL: &str = PROMPT_BAR; // `theme.prompt.icon` default
+pub const INPUT_SIGIL_NORMAL: &str = PROMPT_BAR; // `theme.prompt.normal` default
 pub const BANG_SIGIL: &str = "!"; // the `!command` input prompt
 
 // Truncation and joins.

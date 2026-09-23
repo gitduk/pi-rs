@@ -15,6 +15,7 @@
 use std::cell::RefCell;
 
 use llm::message::{ToolResult, ToolResultContent};
+use ratatui::style::Style as RStyle;
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -153,16 +154,16 @@ impl Height {
 type PaintedRows = Option<((usize, bool, usize), Vec<Line<'static>>)>;
 
 enum Kind {
-    // One logical line of a prompt the user said: the border and the body
-    // kept apart, so wrapping can repeat the border on every screen row the
-    // body spans. A single border in the text would be cut at the first
-    // wrap — the bar would end mid-air and the rest of the line would run
-    // flush against the left edge.
+    // One logical line of a prompt the user said: the border and the body kept
+    // apart, so a wrap can repeat the border.
+    //
+    // `band` is the panel the whole screen row sits in: `prompt.panel.said`.
     Said {
         // The rule and its column: `SAID_RULE` in the prompt colour.
         border: Line<'static>,
         // The line's text, in the input style, without the border.
         body: Line<'static>,
+        band: Option<RStyle>,
     },
     // A painted line the screen alone knows about: the banner, a command's
     // output, a warning. Colour does not depend on width, so painting it
@@ -450,21 +451,24 @@ impl Row {
         ))
     }
 
-    // One logical line of a prompt the user said: the rule it wears, and the
-    // text under it. The border lives apart from the body so the screen can
-    // repeat it on every row the body wraps to — see `Kind::Said`.
-    fn said(border: Line<'static>, body: Line<'static>) -> Self {
-        Self::new(Kind::Said { border, body })
+    // One logical line of a prompt the user said: the rule it wears, the text
+    // under it, and the panel both sit in. The border lives apart from the body.
+    fn said(border: Line<'static>, body: Line<'static>, band: Option<RStyle>) -> Self {
+        Self::new(Kind::Said { border, body, band })
     }
 
-    /// A prompt's lines as the stream echoed them: a `!` keeps its own mark
-    /// and its continuation the plain indent, everything else wears the rule,
-    /// unbroken down every line of it.
+    /// A prompt's lines as the stream echoed them: the same bar the input
+    /// line wears, on a band one step off the one it was typed on, so a
+    /// landed line reads as the line that was typed.
     pub fn prompt(text: &str, paint: &Paint) -> Vec<Self> {
+        let band = paint.band(&paint.theme.prompt.panel.said);
         if text.starts_with('!') {
             // A `!` is a command, not something said: the bang takes the
             // prompt's place, and the lines under it keep the plain indent.
-            let bang = paint.span(&paint.theme.prompt.color, format!("{} ", icons::BANG_SIGIL));
+            let bang = paint.span(&paint.theme.prompt.color, icons::bar(icons::BANG_SIGIL));
+            // Measured, never assumed: the continuation rows indent under the
+            // bang by the columns the bang really takes.
+            let indent = Span::raw(" ".repeat(bang.width()));
             let mut rows = Vec::new();
             for (i, line) in text.lines().enumerate() {
                 let (prefix, body) = if i == 0 {
@@ -473,25 +477,26 @@ impl Row {
                         line.strip_prefix('!').unwrap_or(line).trim_start(),
                     )
                 } else {
-                    (Span::raw("  "), line)
+                    (indent.clone(), line)
                 };
-                rows.push(Self::notice(Line::from(vec![
-                    prefix,
-                    paint.span(&paint.theme.input, body),
-                ])));
+                rows.push(Self::said(
+                    Line::from(prefix),
+                    Line::from(paint.span(&paint.theme.input, body)),
+                    band,
+                ));
             }
             return rows;
         }
         // Unbroken down every line said: the icon marks what is being typed,
-        // and a landed line wearing it reads as another place to type. The
-        // border is kept apart from the body so wrapping can repeat it.
+        // and a landed line wearing it reads as another place to type.
         let border =
-            Line::from(paint.span(&paint.theme.prompt.color, format!("{} ", icons::SAID_RULE)));
+            Line::from(paint.span(&paint.theme.prompt.color, icons::bar(icons::SAID_RULE)));
         text.lines()
             .map(|line| {
                 Self::said(
                     border.clone(),
                     Line::from(paint.span(&paint.theme.input, line)),
+                    band,
                 )
             })
             .collect()
@@ -577,7 +582,7 @@ impl Row {
         width: usize,
     ) -> (Line<'static>, Option<Line<'static>>) {
         match &self.0 {
-            Kind::Said { border, body } => (body.clone(), Some(border.clone())),
+            Kind::Said { border, body, .. } => (body.clone(), Some(border.clone())),
             Kind::Notice { text, times } if *times == 1 => (text.clone(), None),
             Kind::Notice { text, times } => {
                 // The count wears the muted style whatever the line it trails,
@@ -641,6 +646,15 @@ impl Row {
                 };
                 (rows.get(i).cloned().unwrap_or_default(), None)
             }
+        }
+    }
+
+    /// The panel this row's screen rows sit in, if it sits in one: the colour
+    /// goes behind the row whole, past the text's own end.
+    pub fn band(&self) -> Option<RStyle> {
+        match &self.0 {
+            Kind::Said { band, .. } => *band,
+            _ => None,
         }
     }
 

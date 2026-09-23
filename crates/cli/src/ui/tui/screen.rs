@@ -18,6 +18,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::Style as RStyle;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use unicode_width::UnicodeWidthChar;
@@ -230,6 +231,22 @@ pub fn wrap(border: Option<&Line<'_>>, line: &Line<'_>, width: usize) -> Vec<Lin
             Line::from(spans)
         })
         .collect()
+}
+
+/// Lay one screen row in a band: its colour goes under every span — so the
+/// text keeps its own foreground — and fills the columns past the text, so a
+/// row reads as one rectangle rather than as text of uneven length.
+pub fn banded(line: Line<'static>, band: RStyle, width: usize) -> Line<'static> {
+    let used = line.width();
+    let mut spans: Vec<Span<'static>> = line
+        .spans
+        .into_iter()
+        .map(|s| Span::styled(s.content, band.patch(s.style)))
+        .collect();
+    if used < width {
+        spans.push(Span::styled(" ".repeat(width - used), band));
+    }
+    Line::from(spans)
 }
 
 // Write one fitted row into the buffer: one cell per character, styled by

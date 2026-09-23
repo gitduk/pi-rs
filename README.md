@@ -124,12 +124,21 @@ Colours are configurable the same way, under `[theme]` in
 `~/.pi/settings.toml`. Every key is a Style: a colour, text attributes, or
 both. `muted` `heading`
 `emphasis` `code` `input`, plus `diff.add` `diff.del`, `status.ok` `status.err`,
-`menu.selected` and `prompt.color` `prompt.icon`. A plain string is shorthand
-for a colour alone — `code = "#dd80ff"` (or the short `#f80`, same as
-`"38;2;221;128;255"`); a table takes the full form
+`menu.selected`, `prompt.color` and `prompt.panel.input` `prompt.panel.said`.
+A plain string is shorthand for a colour alone — `code = "#dd80ff"` (or the
+short `#f80`, same as `"38;2;221;128;255"`); a table takes the full form
 `{ color = …, sgr = ["bold", "italic"] }`. Attributes are names (bold, dim,
 italic, underline, blink, reverse, strike) or any SGR parameter list passed
-through. `prompt.icon` is the one value that is neither colour nor attribute.
+through. The line being typed sits on a band, `prompt.panel.input`, and every
+line it lands as sits on one too, `prompt.panel.said`; both follow the
+terminal — pi asks it for its background (xterm's `OSC 11`) and lifts that
+colour, three twelfths of the way to white for the live line and two for a
+landed one — so a band is the terminal's own canvas lit up rather than a grey
+laid over it. A terminal that will not say leaves opencode's two elevations,
+`#1e1e1e` and `#141414`, and a colour the config names itself is kept. `49` —
+SGR's default background — is the terminal's own, which is how a band comes
+off. `prompt.icon` and `prompt.normal` are the two values that are neither
+colour nor attribute.
 A key that is not one of those is refused at load, like a misspelled compat
 key.
 

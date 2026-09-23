@@ -13,6 +13,7 @@ use crate::ui::render;
 use crate::ui::status;
 use agent::Event;
 use agent::session::Entry as LogEntry;
+use ratatui::layout::Rect;
 use ratatui::text::Line;
 use ratatui::widgets::{List, ListState};
 use std::time::Instant;
@@ -441,6 +442,17 @@ impl Ui {
             }
             if let Some(bar) = &bar {
                 frame.render_widget(Rows(std::slice::from_ref(bar)), regions.bar);
+            }
+            // Before the rows, so a span over the band keeps it: the columns the
+            // input does not reach carry it too, one short of the edge.
+            if let Some(band) = self.band {
+                frame.buffer_mut().set_style(
+                    Rect {
+                        width: width as u16,
+                        ..regions.editor
+                    },
+                    band,
+                );
             }
             frame.render_widget(Rows(&input_view), regions.editor);
             if let Some((_, Some((row, col)))) = panel {

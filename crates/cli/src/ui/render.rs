@@ -14,7 +14,7 @@ use ratatui::text::{Line, Span};
 
 use crate::store::icons;
 use crate::store::text::{RESET, clip, summarize};
-use crate::store::theme::{Attr, Style, Theme, push_sep, style_to_ratatui};
+use crate::store::theme::{Attr, Color, Style, Theme, band_to_ratatui, push_sep, style_to_ratatui};
 
 /// Whether the surface being written to can carry colour, and the theme behind
 /// the codes it uses.
@@ -73,6 +73,12 @@ impl Paint {
             return self.span(style, body);
         }
         self.span(&style.adding(Attr::Bold), body)
+    }
+
+    /// The band `color` paints on this surface, or `None` on a surface that
+    /// carries no colour at all — the two are the same decision.
+    pub fn band(&self, color: &Color) -> Option<ratatui::style::Style> {
+        self.color.then(|| band_to_ratatui(color))
     }
 }
 

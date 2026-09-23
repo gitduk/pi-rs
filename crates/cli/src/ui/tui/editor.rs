@@ -18,7 +18,7 @@ pub struct Editor {
     // The styled first-row sigil, so the theme can restyle it.
     prompt: Span<'static>,
     // The same sigil for a `!` line: the bang takes the prompt's place, so
-    // `! cmd` reads as a command rather than `› ! cmd`.
+    // `! cmd` reads as a command rather than `┃ ! cmd`.
     prompt_bang: Span<'static>,
 }
 
@@ -337,7 +337,7 @@ impl Editor {
     /// first; the prompt's width is measured, never assumed.
     pub fn view(&self, paint: &Paint, width: usize) -> (Vec<Line<'static>>, (u16, u16)) {
         // A line starting with `!` is a shell command; the bang takes the
-        // prompt's place so the line reads `! cmd` rather than `› ! cmd`.
+        // prompt's place so the line reads `! cmd` rather than `┃ ! cmd`.
         let bang = self.text.starts_with('!');
         let body = if bang {
             &self.text[1..]
@@ -451,7 +451,6 @@ fn floor_boundary(s: &str, mut i: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{Editor, Paint};
-    use ratatui::text::Span;
     // A painter the view tests share: colourless, so the rows they assert
     // on carry no escape sequences.
     fn paint() -> Paint {
@@ -459,12 +458,13 @@ mod tests {
     }
 
     // An editor with the two painted sigils a real Ui would set, so view
-    // tests see the prompt a user would.
+    // tests see the prompt a user would — widths included.
     fn typed(s: &str) -> Editor {
         let mut e = Editor::default();
+        let paint = paint();
         e.set_prompts(
-            Span::from(format!("{} ", crate::store::icons::INPUT_SIGIL)),
-            Span::from(format!("{} ", crate::store::icons::BANG_SIGIL)),
+            crate::ui::tui::Ui::paint_prompt(&paint, crate::store::icons::INPUT_SIGIL),
+            crate::ui::tui::Ui::paint_prompt(&paint, crate::store::icons::BANG_SIGIL),
         );
         e.insert_str(s);
         e

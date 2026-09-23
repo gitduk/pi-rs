@@ -216,7 +216,16 @@ impl screen::Piece for Piece<'_> {
                 width,
             } => {
                 let (line, border) = row.line(line, paint, done, width);
-                screen::wrap(border.as_ref(), &line, width)
+                let pieces = screen::wrap(border.as_ref(), &line, width);
+                // After the wrap, so every screen row a said line spans gets
+                // the band whole and the padding never wraps a row of its own.
+                match row.band() {
+                    Some(band) => pieces
+                        .into_iter()
+                        .map(|piece| screen::banded(piece, band, width))
+                        .collect(),
+                    None => pieces,
+                }
             }
             Piece::Live(line) => screen::Piece::pieces(line),
         }

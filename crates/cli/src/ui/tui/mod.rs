@@ -38,8 +38,10 @@ use crate::store::icons;
 use crate::store::keys::Keys;
 use crate::store::status::{Segment, default_done, default_live};
 use crate::store::theme::Style as ThemeStyle;
+use crate::store::theme::{Theme, panels_for};
 use crate::ui::render::Paint;
 use crate::ui::status;
+use crate::ui::tty;
 use editor::Editor;
 use panel::Panel;
 use ratatui::style::Style as RStyle;
@@ -83,6 +85,12 @@ struct Ui {
     paint: Paint,
     // The prompt sigil, shared by the editor and the echoed lines.
     prompt: Span<'static>,
+    // The band behind the input line, painted before its rows so the columns
+    // the text does not reach carry it too.
+    band: Option<RStyle>,
+    // The terminal's own background, asked for once at startup: the prompt's
+    // bands are a lift of it, and a terminal that will not say leaves both be.
+    tty_bg: Option<(u8, u8, u8)>,
     // The same sigil for a `!` line, where the bang takes the icon's place.
     bang_prompt: Span<'static>,
     // The lane bar's separator, painted once beside the two above it: the bar
@@ -200,6 +208,7 @@ impl Ui {
     ) -> Self {
         let prompt = Self::paint_prompt(&paint, &paint.theme.prompt.icon);
         let bang_prompt = Self::paint_prompt(&paint, icons::BANG_SIGIL);
+        let band = paint.band(&paint.theme.prompt.panel.input);
         let mut editor = Editor::default();
         editor.set_prompts(prompt.clone(), bang_prompt.clone());
         Self {
@@ -213,6 +222,8 @@ impl Ui {
             tab_sep: Self::paint_sep(&paint),
             paint,
             prompt,
+            band,
+            tty_bg: None,
             bang_prompt,
             last_l: None,
             picked: None,
@@ -245,8 +256,8 @@ impl Ui {
     }
 
     // The prompt sigil as the terminal shows it, colour and all.
-    fn paint_prompt(paint: &Paint, icon: &str) -> Span<'static> {
-        paint.span(&paint.theme.prompt.color, format!("{icon} "))
+    pub(super) fn paint_prompt(paint: &Paint, icon: &str) -> Span<'static> {
+        paint.span(&paint.theme.prompt.color, icons::bar(icon))
     }
 
     // A theme style, as ratatui sees it.
@@ -399,6 +410,7 @@ impl Ui {
         self.paint.theme = theme;
         self.bang_prompt = Self::paint_prompt(&self.paint, icons::BANG_SIGIL);
         self.tab_sep = Self::paint_sep(&self.paint);
+        self.band = self.paint.band(&self.paint.theme.prompt.panel.input);
         self.show_mode();
         // The opening block is painted once at construction; rebuild it so a
         // /reload lands on the new theme instead of the old.
@@ -419,14 +431,11 @@ impl Ui {
         // Likewise the completion list: /reload is allowed to define models —
         // and skills — the last one did not.
         self.choices = core.choices();
-        // The theme is the one that is not a copy — the opening block is
-        // painted in it — so it takes the view it was painted into.
-        if self.paint.theme.as_ref() != &core.config.theme {
-            self.set_theme(
-                view,
-                &core.lane().context,
-                Arc::new(core.config.theme.clone()),
-            );
+        // The theme takes the view it was painted into — the opening block is
+        // painted in it — and every copy takes the terminal's band.
+        let theme = following_terminal(&core.config.theme, self.tty_bg);
+        if self.paint.theme.as_ref() != &theme {
+            self.set_theme(view, &core.lane().context, Arc::new(theme));
         }
         if !Arc::ptr_eq(&self.commands, &core.commands) {
             self.commands = core.commands.clone();
@@ -442,6 +451,24 @@ impl Ui {
             row.clear_height();
         }
     }
+}
+
+// The config's theme with the prompt's bands following the terminal, unless the
+// config named a band itself — a file that wanted a fixed colour wrote one.
+fn following_terminal(theme: &Theme, bg: Option<(u8, u8, u8)>) -> Theme {
+    let mut theme = theme.clone();
+    let Some(bg) = bg else {
+        return theme;
+    };
+    let panels = panels_for(bg);
+    let default = crate::store::theme::Panel::default();
+    if theme.prompt.panel.input == default.input {
+        theme.prompt.panel.input = panels.input;
+    }
+    if theme.prompt.panel.said == default.said {
+        theme.prompt.panel.said = panels.said;
+    }
+    theme
 }
 
 // What a `Step::Handled` leaves behind: its lines, and whatever the command
@@ -543,15 +570,26 @@ pub struct Tui {
 
 impl Tui {
     pub fn new(mut core: App, keys: Arc<Keys>, bridge: app::wechat::Bridge) -> Result<Self> {
-        let paint = Paint::with_theme(true, Arc::new(core.config.theme.clone()));
+        // The screen first, for raw mode: the answer to the background query
+        // carries no newline, so a cooked read would wait for one forever.
+        let screen = Screen::new()?;
+        let asked = tty::background();
+        let paint = Paint::with_theme(
+            true,
+            Arc::new(following_terminal(&core.config.theme, asked.bg)),
+        );
         let mut ui = Ui::new(
-            Screen::new()?,
+            screen,
             keys,
             core.choices(),
             core.commands.clone(),
             Lists::new(core.store.clone(), core.lane_mut().root().to_path_buf()),
             paint,
         );
+        ui.tty_bg = asked.bg;
+        // Asking the terminal read it, so it is typed in here: the keyboard
+        // reader would never see those bytes again.
+        ui.editor.insert_str(&asked.typed);
         ui.at_root = core.lane().root().to_path_buf();
         ui.live = core.config.status.live.clone();
         ui.done = core.config.status.done.clone();
@@ -1340,7 +1378,7 @@ impl Tui {
 #[cfg(test)]
 mod tests {
     use super::scrollback::{Folds, ScrollbackRows, absorb_growth, scrollback_from};
-    use super::{Asked, Deed, Intent, Panel, Row, Target, View, view_at};
+    use super::{Asked, Deed, Intent, Panel, Row, Target, View, following_terminal, view_at};
     use crate::app::App;
     use crate::app::lane::{Lane, Run};
     use crate::app::looping::Round;
@@ -1352,6 +1390,7 @@ mod tests {
     use crate::store::session::Store;
     use crate::store::settings::row;
     use crate::store::status::Segment;
+    use crate::store::theme::{Color, Theme};
     use crate::ui::render::Paint;
     use crate::ui::tui::screen::{self, plain};
     use ratatui::text::Line;
@@ -1699,6 +1738,26 @@ mod tests {
             narrow[1]
         );
         assert_eq!(narrow, again, "the narrow frame came back different");
+    }
+
+    // A band the config named itself outlives the terminal's, and a terminal
+    // that would not say changes nothing. Read on every config adopted.
+    #[test]
+    fn a_configured_band_outlives_the_terminals() {
+        let bg = Some((13, 17, 23));
+        let mut theme = Theme::default();
+        let derived = following_terminal(&theme, bg);
+        assert_ne!(derived.prompt.panel.input, theme.prompt.panel.input);
+        assert_eq!(
+            following_terminal(&theme, None),
+            theme,
+            "no answer, no lift"
+        );
+
+        theme.prompt.panel.said = Color::Rgb(1, 2, 3);
+        let mixed = following_terminal(&theme, bg);
+        assert_eq!(mixed.prompt.panel.said, Color::Rgb(1, 2, 3));
+        assert_ne!(mixed.prompt.panel.input, theme.prompt.panel.input);
     }
 
     #[test]

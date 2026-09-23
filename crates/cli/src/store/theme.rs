@@ -378,7 +378,11 @@ impl Serialize for Style {
 /// `status.ok` share a code by default but stay separate so one can change
 /// without dragging the other along. `muted`, `heading` and `emphasis` are the
 /// text attributes markdown rendering opens; everything else is one Style each.
-/// `prompt.icon` is the single value that is neither colour nor attribute.
+/// `prompt.icon` and `prompt.normal` are the values that are neither colour
+/// nor attribute: a sigil is a shape. `prompt.panel.input` and
+/// `prompt.panel.said` are `Color`s rather than `Style`s — the bands the
+/// prompt sits on, written in the background slot — and they follow the
+/// terminal: whatever the config leaves unset is lifted from its background.
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -470,6 +474,28 @@ pub struct Prompt {
     /// caret.
     #[serde(default = "default_normal_icon")]
     pub normal: String,
+    /// The bands the prompt paints: the input line, and the lines it lands
+    /// as. Two shades, the live one the brighter.
+    #[serde(default)]
+    pub panel: Panel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Panel {
+    #[serde(default = "default_panel_input")]
+    pub input: Color,
+    #[serde(default = "default_panel_said")]
+    pub said: Color,
+}
+
+impl Default for Panel {
+    fn default() -> Self {
+        Self {
+            input: default_panel_input(),
+            said: default_panel_said(),
+        }
+    }
 }
 
 fn default_normal_icon() -> String {
@@ -482,6 +508,7 @@ impl Default for Prompt {
             color: default_prompt_color(),
             icon: default_icon(),
             normal: default_normal_icon(),
+            panel: Panel::default(),
         }
     }
 }
@@ -514,7 +541,19 @@ fn default_selected() -> Style {
     Style::attrs(&[Attr::Reverse])
 }
 fn default_prompt_color() -> Style {
-    Style::color(Color::Rgb(0, 255, 255))
+    // opencode's build agent colour, which is what its input line and its
+    // user messages both wear.
+    Style::color(Color::Rgb(92, 156, 245))
+}
+
+// The bands for a terminal that will not say what its background is:
+// opencode's `backgroundPanel` and `backgroundElement`, the live one brighter.
+fn default_panel_input() -> Color {
+    Color::Rgb(30, 30, 30)
+}
+
+fn default_panel_said() -> Color {
+    Color::Rgb(20, 20, 20)
 }
 
 // The input body: the terminal's own foreground until a config colours it.
@@ -559,4 +598,52 @@ fn hex_digit(b: u8) -> Result<u8> {
 /// entry, and every style renders the same here as in a painted row.
 pub fn style_to_ratatui(s: &Style) -> ratatui::style::Style {
     parse_sgr(s.codes(), ratatui::style::Style::default())
+}
+
+/// The band a panel colour paints: the same colour written in the background
+/// slot, through the same parser, so a bare code — SGR's `49` — means the same
+/// here as it does anywhere else.
+pub fn band_to_ratatui(c: &Color) -> ratatui::style::Style {
+    let params = match c {
+        Color::Basic(n) => n.to_string(),
+        Color::Indexed(n) => format!("48;5;{n}"),
+        Color::Rgb(r, g, b) => format!("48;2;{r};{g};{b}"),
+    };
+    parse_sgr(&params, ratatui::style::Style::default())
+}
+
+/// The two bands for a terminal whose background is `bg`: opencode's own
+/// lift, every channel scaled by one factor, so a band keeps the background's
+/// hue rather than greying it out — which is what makes it read as that canvas
+/// lit up instead of as a slab laid over it. A landed line is two twelfths of
+/// the way towards white and the live one three; a light background goes the
+/// other way, towards black.
+pub fn panels_for(bg: (u8, u8, u8)) -> Panel {
+    let (r, g, b) = (f64::from(bg.0), f64::from(bg.1), f64::from(bg.2));
+    let lum = 0.299 * r + 0.587 * g + 0.114 * b;
+    let dark = lum <= 127.5;
+    let step = |twelfths: f64| {
+        let factor = twelfths / 12.0;
+        let scaled = if dark && lum >= 10.0 {
+            let ratio = (lum + (255.0 - lum) * factor * 0.4) / lum;
+            (r * ratio, g * ratio, b * ratio)
+        } else if dark {
+            // So close to black that scaling it would leave it black: the
+            // band is the lift alone, with no hue of its own to keep.
+            let v = factor * 0.4 * 255.0;
+            (v, v, v)
+        } else if lum > 245.0 {
+            let v = 255.0 - factor * 0.4 * 255.0;
+            (v, v, v)
+        } else {
+            let ratio = 1.0 - factor * 0.4;
+            (r * ratio, g * ratio, b * ratio)
+        };
+        let byte = |v: f64| v.clamp(0.0, 255.0).floor() as u8;
+        Color::Rgb(byte(scaled.0), byte(scaled.1), byte(scaled.2))
+    };
+    Panel {
+        input: step(3.0),
+        said: step(2.0),
+    }
 }
