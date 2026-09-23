@@ -37,6 +37,10 @@ pub enum When {
     Run,
     // Only in that mode, and only while vim keys are on at all.
     Mode(Mode),
+    // Normal with nothing on the line. Tried before `Mode`, so a key that
+    // names the empty line wins over the layer that holds either way: the
+    // history and the session are all an empty one has left to reach.
+    NormalEmpty,
     // Always — in both modes, so the thirty bindings that were here before
     // vim existed keep working under it.
     Editor,
@@ -62,6 +66,9 @@ pub struct Layers {
     /// representations: a separate `vim: bool` beside a `Mode` would make
     /// "off, but in Normal" expressible and meaningless.
     pub mode: Option<Mode>,
+    /// Whether the line has anything on it. Read only in Normal, by the keys
+    /// that command the history instead when there is nothing to command.
+    pub line_empty: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -92,6 +99,7 @@ pub enum Action {
     HistoryOlder,
     HistoryNewer,
     LineSubmit,
+    // The line, cleared; twice quickly with nothing to clear, a new session.
     LineClear,
     MenuAccept,
     MenuNext,
@@ -99,12 +107,17 @@ pub enum Action {
     MenuDismiss,
     RunInterrupt,
     Rewind,
+    // The conversation alone: the thinking, the calls and the editor itself
+    // out of the way. `v` with nothing on the line.
+    Browse,
     ScrollPageUp,
     ScrollPageDown,
     ScrollHalfUp,
     ScrollHalfDown,
     AppExit,
-    AppClearScreen,
+    // The run in flight stopped; twice quickly with nothing to stop, the app
+    // leaves.
+    AppCancel,
     LanePrev,
     LaneNext,
     ThinkFold,
@@ -255,8 +268,8 @@ const BINDINGS: &[Binding] = &[
         id: "line.clear",
         action: A::LineClear,
         when: W::Editor,
-        keys: &["ctrl+c"],
-        note: "twice quickly to quit, and it stops a run",
+        keys: &["ctrl+l"],
+        note: "the line; twice quickly with nothing on it, a new session",
     },
     Binding {
         id: "menu.accept",
@@ -336,11 +349,11 @@ const BINDINGS: &[Binding] = &[
         note: "only when the line is empty",
     },
     Binding {
-        id: "app.clear-screen",
-        action: A::AppClearScreen,
+        id: "app.cancel",
+        action: A::AppCancel,
         when: W::Editor,
-        keys: &["ctrl+l"],
-        note: "twice to start a new session",
+        keys: &["ctrl+c"],
+        note: "stops the run in flight; twice quickly to quit",
     },
     Binding {
         id: "think.fold",
@@ -393,6 +406,13 @@ const BINDINGS: &[Binding] = &[
         when: W::Mode(Mode::Normal),
         keys: &["J"],
         note: "half a window on, as ctrl+f does",
+    },
+    Binding {
+        id: "normal.browse",
+        action: A::Browse,
+        when: W::NormalEmpty,
+        keys: &["v"],
+        note: "the conversation alone, with nothing on the line",
     },
     Binding {
         id: "normal.move.char.left",
@@ -792,7 +812,7 @@ impl Keys {
 
     /// What this press means, given what is on screen.
     pub fn action(&self, press: Press, layers: Layers) -> Option<Action> {
-        let mut live = Vec::with_capacity(4);
+        let mut live = Vec::with_capacity(5);
         // Over the run, which costs `esc` — the one key `menu.dismiss` and
         // `run.interrupt` both claim. It costs it only for a press: dismissing
         // records the line it happened at, so the list is gone by the next
@@ -805,6 +825,11 @@ impl Keys {
             live.push(When::Run);
         }
         if let Some(mode) = layers.mode {
+            // The line's own layer first: a key that names the empty line wins
+            // over the layer that holds whether or not there is one.
+            if mode == Mode::Normal && layers.line_empty {
+                live.push(When::NormalEmpty);
+            }
             live.push(When::Mode(mode));
         }
         live.push(When::Editor);
@@ -895,7 +920,8 @@ mod tests {
                 Layers {
                     menu: Menu::On,
                     run: true,
-                    mode: None
+                    mode: None,
+                    line_empty: false,
                 }
             ),
             Some(Action::MenuDismiss)
@@ -927,7 +953,8 @@ mod tests {
                         Layers {
                             menu: Menu::Off,
                             run: true,
-                            mode
+                            mode,
+                            line_empty: false,
                         }
                     ),
                     Some(Action::RunInterrupt),
@@ -981,7 +1008,10 @@ mod tests {
         // only thing that would notice.
         let k = Keys::default();
         for b in BINDINGS {
-            if b.when == W::Mode(Mode::Normal) {
+            // Both halves of Normal: this is about what Normal does to the
+            // bindings that were here before vim, and the modal keys are not
+            // among them.
+            if matches!(b.when, W::Mode(Mode::Normal) | W::NormalEmpty) {
                 continue;
             }
             for spec in b.keys {
@@ -994,6 +1024,7 @@ mod tests {
                     },
                     run: b.when == W::Run,
                     mode: None,
+                    line_empty: false,
                 };
                 assert_eq!(
                     k.action(press, insert),
@@ -1060,6 +1091,47 @@ mod tests {
         };
         assert_eq!(k.action(press("h"), normal), Some(Action::MoveCharLeft));
         assert_eq!(k.action(press("l"), normal), Some(Action::MoveCharRight));
+    }
+
+    // The two control keys are live in both modes, so binding them is
+    // `Editor`'s: one loses the line, the other the run.
+    #[test]
+    fn clearing_the_line_and_cancelling_are_two_keys() {
+        let k = Keys::default();
+        for mode in [None, Some(Mode::Insert), Some(Mode::Normal)] {
+            let layers = Layers {
+                mode,
+                ..Layers::default()
+            };
+            assert_eq!(k.action(press("ctrl+l"), layers), Some(Action::LineClear));
+            assert_eq!(k.action(press("ctrl+c"), layers), Some(Action::AppCancel));
+        }
+    }
+
+    // `v` names the state of the line, not the mode: with nothing on it there
+    // is a whole conversation to show, and with something on it the key is the
+    // character vim made it.
+    #[test]
+    fn browse_is_the_empty_lines_v() {
+        let k = Keys::default();
+        let normal = |line_empty| Layers {
+            mode: Some(Mode::Normal),
+            line_empty,
+            ..Layers::default()
+        };
+        assert_eq!(k.action(press("v"), normal(true)), Some(Action::Browse));
+        assert_eq!(k.action(press("v"), normal(false)), None);
+        // And not with the keys off, where `v` is a letter.
+        assert_eq!(
+            k.action(
+                press("v"),
+                Layers {
+                    line_empty: true,
+                    ..Layers::default()
+                }
+            ),
+            None
+        );
     }
 
     #[test]

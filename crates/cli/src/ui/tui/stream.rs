@@ -299,11 +299,23 @@ impl Ui {
     pub(super) fn flush(&mut self, lane: &Lane, view: &mut View) {
         let menu = self.menu();
         let width = self.screen.usable();
+        // Browse mode is the conversation alone: the thinking, the calls, the
+        // notices and the editor itself all go, and one predicate says so.
+        // The tally that follows the scroll and the window that draws it read
+        // the same one, so a scrolled-up browse measures what it shows.
+        let browse = self.browsing;
+        let keep = move |row: &Row| !browse || row.is_conversation();
         // A flash outranks the lane strip: it is gone in a moment, where the
         // strip is always a keystroke away.
         let bar = self.flash_line(width).or_else(|| self.lane_bar(width));
         let bar_h = usize::from(bar.is_some());
-        let (input, caret) = self.editor.view(&self.paint, width);
+        // Nothing to type on, so nothing to pin to the bottom: the rows the
+        // editor would have taken go to the history.
+        let (input, caret) = if browse {
+            (Vec::new(), (0, 0))
+        } else {
+            self.editor.view(&self.paint, width)
+        };
         // A paste taller than the terminal must not push the editor area off
         // the bottom; the editor scrolls to keep the caret's row visible.
         let editor_h = input
@@ -347,6 +359,7 @@ impl Ui {
                 .surface
                 .scrollback
                 .iter()
+                .filter(|r| keep(r))
                 .map(|r| r.height(&self.paint, &self.done, width))
                 .sum::<usize>()
                 + live.len();
@@ -381,10 +394,15 @@ impl Ui {
             row.update_hover_state(is_running, is_hovered, self.spinner);
         }
 
-        let scrollback =
-            ScrollbackRows::new(&view.surface.scrollback, &self.paint, &self.done, width)
-                .indexed()
-                .map(|(item, idx)| (item, Target::Scrollback(idx)));
+        let scrollback = ScrollbackRows::new(
+            &view.surface.scrollback,
+            &self.paint,
+            &self.done,
+            width,
+            keep,
+        )
+        .indexed()
+        .map(|(item, idx)| (item, Target::Scrollback(idx)));
 
         // The pending-call rows lead the live block; a click on one opens or
         // closes the batch.
@@ -459,7 +477,7 @@ impl Ui {
                 if (row as usize) < menu_h {
                     frame.set_cursor_position((regions.menu.x + col, regions.menu.y + row));
                 }
-            } else if self.panel.is_none() {
+            } else if self.panel.is_none() && !self.browsing {
                 let caret_row = regions.editor.y + caret_in_view as u16;
                 frame.set_cursor_position((caret.1, caret_row));
             }
