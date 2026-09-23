@@ -943,8 +943,10 @@ impl Tui {
 
     // Drop lanes whose checkout was deleted outside pi — idle ones only, a
     // running or looping lane still answering to the index it was given.
+    //
+    // Silent: the lane going off the bar is what says the checkout is gone.
     fn drop_vanished_lanes(&mut self) {
-        let mut gone: Vec<(usize, String)> = Vec::new();
+        let mut gone: Vec<usize> = Vec::new();
         // Back to front, stopping at a working lane: removing one before it
         // would shift the index a run in flight reports back by. That lane's
         // turn over, the next pass drops what this one left.
@@ -955,29 +957,18 @@ impl Tui {
             if at == self.core.current {
                 continue;
             }
-            let Some(name) = lane.worktree() else {
-                continue;
-            };
-            if lane.root().exists() {
+            // Only a lane with a checkout of its own can go this way: the one
+            // pi was started in is no worktree, and one still on disk stands.
+            if lane.worktree().is_none() || lane.root().exists() {
                 continue;
             }
-            gone.push((at, name.to_string()));
+            gone.push(at);
         }
         if gone.is_empty() {
             return;
         }
-        let names = gone
-            .iter()
-            .map(|(_, n)| format!("`{n}`"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let is_are = if gone.len() == 1 { "is" } else { "are" };
-        let lane_word = if gone.len() == 1 { "lane" } else { "lanes" };
-        self.ui.flash(format!(
-            "{names} {is_are} gone from disk — closing the {lane_word}"
-        ));
         // Already highest first, so earlier indices stay put while they go.
-        for (at, _) in gone {
+        for at in gone {
             self.core.remove_lane(at);
         }
         // The ring's list is cached; a vanished checkout must not stay in it
@@ -3218,6 +3209,10 @@ mod tests {
         tui.drop_vanished_lanes();
         assert_eq!(tui.core.lanes.len(), 1);
         assert_eq!(tui.core.current, 0);
+        assert!(
+            tui.ui.flash.is_none(),
+            "the lane leaving the bar is the whole notice"
+        );
         assert!(
             tui.ui.lists.worktrees().is_empty(),
             "the stale ring entry went too"
