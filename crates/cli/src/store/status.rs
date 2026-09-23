@@ -41,7 +41,8 @@ impl Default for Lines {
 }
 
 /// The live line when the config names nothing: elapsed, the counts, the cache
-/// read so far, context, queued work, and the worktree.
+/// read so far, context, and queued work. What the lane is rather than what it
+/// did — its model, its checkout — is the bar's, not this line's.
 pub fn default_live() -> Vec<Segment> {
     vec![
         Segment::Elapsed,
@@ -49,19 +50,18 @@ pub fn default_live() -> Vec<Segment> {
         Segment::Cache,
         Segment::Ctx,
         Segment::Queued,
-        Segment::Worktree,
     ]
 }
 
-/// The same for the done line — `in/out · cached · $cost` as it stood, with
-/// context and compaction added.
+/// The same for the done line — elapsed, then `in/out · cached · $cost` as it
+/// stood, with context and compaction added.
 pub fn default_done() -> Vec<Segment> {
     vec![
+        Segment::Elapsed,
         Segment::InOut,
         Segment::Cache,
         Segment::Ctx,
         Segment::Compacted,
         Segment::Cost,
-        Segment::Worktree,
     ]
 }
