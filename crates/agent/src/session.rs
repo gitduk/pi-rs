@@ -137,15 +137,9 @@ pub enum Entry {
     // round: a question and everything that answered it go together or not at
     // all. Never omitted — what someone asked is not the answer's spare
     // context.
-    //
-    // `round` numbers a `/loop` round: `None` is a hand-typed line — including
-    // the loop's first round, which is the `/loop goal` line itself; `Some(n)`
-    // is one of the loop's automatic rounds, n ≥ 2.
     Ask {
         id: EntryId,
         at: u64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        round: Option<u64>,
         ask: Prompt,
     },
     // A `!` command with its output. `run.text` is what the model reads (the
@@ -455,7 +449,7 @@ impl Session {
                     let mut pending: Option<Prompt> = None;
                     let flush = |log: &mut Self, pending: &mut Option<Prompt>| {
                         if let Some(ask) = pending.take() {
-                            log.push_ask(ask, None);
+                            log.push_ask(ask);
                         }
                     };
                     for b in content {
@@ -506,21 +500,18 @@ impl Session {
         (id, now())
     }
 
-    /// Text from the person at the keyboard, opening no loop round.
+    /// Text from the person at the keyboard.
     pub fn prompt(&mut self, text: impl Into<String>) -> EntryId {
-        self.push_ask(
-            Prompt {
-                text: text.into(),
-                image: None,
-                shown: None,
-            },
-            None,
-        )
+        self.push_ask(Prompt {
+            text: text.into(),
+            image: None,
+            shown: None,
+        })
     }
 
-    fn push_ask(&mut self, ask: Prompt, round: Option<u64>) -> EntryId {
+    fn push_ask(&mut self, ask: Prompt) -> EntryId {
         let (id, at) = self.mint();
-        self.entries.push(Entry::Ask { id, at, round, ask });
+        self.entries.push(Entry::Ask { id, at, ask });
         id
     }
 
@@ -621,12 +612,7 @@ impl Session {
     /// `shown` is what the user typed, when that differs from what the model
     /// is sent — a `!cmd` line becomes the command *and its output*, and the
     /// screen has to show the line, not the transcript of running it.
-    pub fn send_prompt(
-        &mut self,
-        prompt: impl Into<String>,
-        shown: Option<String>,
-        round: Option<u64>,
-    ) {
+    pub fn send_prompt(&mut self, prompt: impl Into<String>, shown: Option<String>) {
         let answered: HashSet<&str> = self
             .entries
             .iter()
@@ -660,7 +646,7 @@ impl Session {
             image: None,
             shown,
         };
-        self.push_ask(ask, round);
+        self.push_ask(ask);
     }
 
     /// Everywhere the conversation can be rewound to, in session order.
@@ -1020,16 +1006,13 @@ mod tests {
             ToolResult::text("c1", "read", "a"),
             ToolResult::text("c2", "grep", "b"),
         ]);
-        s.push_ask(
-            Prompt {
-                text: "and now this".into(),
-                image: Some(Image::Url {
-                    url: "http://x/i.png".into(),
-                }),
-                shown: None,
-            },
-            None,
-        );
+        s.push_ask(Prompt {
+            text: "and now this".into(),
+            image: Some(Image::Url {
+                url: "http://x/i.png".into(),
+            }),
+            shown: None,
+        });
 
         let msgs = s.context();
         assert_eq!(msgs.len(), s.view().len());
@@ -1193,8 +1176,8 @@ mod tests {
                 Some(stopped_note(Some("stream: died"))),
             ),
         ] {
-            s.send_prompt("and now this", None, None);
-            s.send_prompt("and still this", None, None);
+            s.send_prompt("and now this", None);
+            s.send_prompt("and still this", None);
 
             let entries = s.entries();
             match &note {
@@ -1245,7 +1228,7 @@ mod tests {
         let mut s = Session::new();
         s.prompt("version up");
         s.mark_stopped(StopCause::Other);
-        s.send_prompt("delete the branch", None, None);
+        s.send_prompt("delete the branch", None);
 
         let entries = s.entries();
         let note = entries[1].id();
@@ -1279,7 +1262,7 @@ mod tests {
         s.mark_stopped(StopCause::User);
         s.rollback_before(ask);
 
-        s.send_prompt("a fresh start", None, None);
+        s.send_prompt("a fresh start", None);
 
         let entries = s.entries();
         assert_eq!(entries.len(), 1, "only the new prompt follows the rewind");
@@ -1298,7 +1281,7 @@ mod tests {
             name: "bash".into(),
             args: serde_json::json!({ "command": "cargo check" }),
         })]);
-        s.send_prompt("actually do this", None, None);
+        s.send_prompt("actually do this", None);
 
         let entries = s.entries();
         assert_eq!(
@@ -1362,24 +1345,5 @@ mod tests {
         };
         assert_eq!(content.len(), 2);
         assert!(matches!(&content[1], UserContent::Text(t) if t.text.contains("<earlier-work>")));
-    }
-    // The loop's round marker rides the ask it opens: `None` is a hand-typed
-    // line (the loop's first round included), `Some(n)` an automatic one.
-    #[test]
-    fn a_loop_round_is_numbered_on_the_ask_it_opens() {
-        let mut s = Session::new();
-        s.prompt("the task");
-        s.send_prompt("loop round two", None, Some(2));
-        s.send_prompt("typed by hand", None, None);
-
-        let rounds: Vec<Option<u64>> = s
-            .entries()
-            .iter()
-            .filter_map(|e| match e {
-                Entry::Ask { round, .. } => Some(*round),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(rounds, vec![None, Some(2), None]);
     }
 }

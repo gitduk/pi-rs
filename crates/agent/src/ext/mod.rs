@@ -3,6 +3,7 @@
 
 pub mod approval;
 pub mod compact;
+pub mod compactor;
 pub(crate) mod oneshot;
 pub mod retry;
 pub mod summarize;

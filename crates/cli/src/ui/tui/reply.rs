@@ -16,11 +16,15 @@ use ratatui::text::Line;
 use super::screen::fit;
 use super::{Asked, Deed, Ui};
 use crate::store::icons;
-use crate::store::keys::{self, Action};
+use crate::store::keys::Action;
+use crate::store::listing::Listing;
+use crate::ui::listing;
 
-/// The lines a command printed, and where the window over them starts.
+/// The rows a command answered with, and where the window over them starts.
 pub struct Reply {
-    lines: Vec<Line<'static>>,
+    /// Rows rather than lines: the width a row has to fit in is known at the
+    /// drawing, not where the answer was built.
+    content: Listing,
     // The first line drawn. Clamped against the room the menu has — told to
     // the reply at each press, and again at each draw — so a resize or a
     // shorter terminal cannot leave the window past the end of the reply.
@@ -28,8 +32,8 @@ pub struct Reply {
 }
 
 impl Reply {
-    pub fn new(lines: Vec<Line<'static>>) -> Self {
-        Self { lines, first: 0 }
+    pub fn new(content: Listing) -> Self {
+        Self { content, first: 0 }
     }
 
     /// The rows a reply takes on screen: a line wider than the surface is a
@@ -38,9 +42,9 @@ impl Reply {
     /// the room this is given is a row count — a wrapped line is one the count
     /// would miss, and the menu would then draw over the bar.
     fn rows(&self, width: usize) -> Vec<Line<'static>> {
-        self.lines
-            .iter()
-            .flat_map(|line| fit(line, width))
+        listing::lines(&self.content)
+            .into_iter()
+            .flat_map(|line| fit(&Line::from(line), width))
             .collect()
     }
 
@@ -59,7 +63,7 @@ impl Reply {
             out.pop();
             let shown = out.len();
             out.push(Line::from(format!(
-                "  {}-{} of {}{}esc close, j/k scroll",
+                "  {}-{} of {}{}esc close, ↓/↑ scroll",
                 start + 1,
                 start + shown,
                 rows.len(),
@@ -77,31 +81,34 @@ impl Reply {
     }
 }
 
+/// Whether a press is the reply's to read: the keys the table binds for a menu,
+/// which are the keys every other list on this surface answers to, plus the two
+/// presses that mean what they mean wherever they are made.
+///
+/// Letters are deliberately not among them. A reply is an answer drawn over the
+/// menu, not a mode over the keyboard, and a letter it read for itself would be
+/// a letter missing from the line being typed underneath it.
+pub(super) fn owns(bound: Option<Action>, _key: KeyEvent) -> bool {
+    const OWN: [Action; 6] = [
+        Action::MenuNext,
+        Action::MenuPrevious,
+        Action::MenuDismiss,
+        Action::MenuAccept,
+        Action::LineSubmit,
+        Action::AppCancel,
+    ];
+    bound.is_some_and(|a| OWN.contains(&a))
+}
+
 impl Ui {
-    /// What a press does while a reply is up. It is the topmost thing on the
-    /// surface, so there is nothing else a key could mean here except the two
-    /// the caller has already taken: the line being submitted and `ctrl+c`.
-    /// The ways out are the ways the menu's other lists leave — `esc` and
-    /// `tab` — with the browsing `q` beside them for the hand already there.
-    pub(super) fn reply_key(&mut self, bound: Option<Action>, key: KeyEvent) -> Asked {
+    /// What a press does while a reply is up: the menu's own keys, which are
+    /// the ones `owns` lets through — nothing else reaches here.
+    pub(super) fn reply_key(&mut self, bound: Option<Action>, _key: KeyEvent) -> Asked {
         let room = self.regions.menu.height as usize;
         // The width the drawing wraps at, not the terminal's own: a row this
         // counts as one and the painter wraps into two is a row at the end of
         // the reply that nothing can scroll to.
         let width = self.screen.usable();
-        // The letters are bare ones, as they are in the panel: with a modifier
-        // they are the menu's keys, which is nothing on this screen.
-        if let Some(c) = keys::bare_letter(&key) {
-            match c {
-                'j' => return self.scrolled(1, room, width),
-                'k' => return self.scrolled(-1, room, width),
-                'q' => {
-                    self.reply = None;
-                    return Asked::Own(Deed::Nothing);
-                }
-                _ => {}
-            }
-        }
         match bound {
             Some(Action::MenuDismiss | Action::MenuAccept) => self.reply = None,
             Some(Action::MenuNext) => return self.scrolled(1, room, width),
@@ -129,19 +136,18 @@ impl Ui {
     /// nothing when there is nothing to say. It takes down whatever was there
     /// either way: an answer that was not given is not the answer to this line,
     /// and the last one left standing would read as if it were.
-    pub(super) fn open_reply(&mut self, lines: impl IntoIterator<Item = impl Into<Line<'static>>>) {
-        let lines: Vec<Line<'static>> = lines.into_iter().map(Into::into).collect();
-        self.reply = (!lines.is_empty()).then(|| Reply::new(lines));
+    pub(super) fn open_reply(&mut self, content: Listing) {
+        self.reply = (!content.is_empty()).then(|| Reply::new(content));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::Reply;
-    use ratatui::text::Line;
+    use crate::store::listing::Listing;
 
     fn reply(n: usize) -> Reply {
-        Reply::new((1..=n).map(|i| Line::from(format!("line {i}"))).collect())
+        Reply::new(Listing::say((1..=n).map(|i| format!("line {i}"))))
     }
 
     // A width wide enough that nothing in these replies wraps: what is under
@@ -170,7 +176,7 @@ mod tests {
         let rows = shown(&reply(4), 3);
         assert_eq!(rows.len(), 3, "the window is the room it was given");
         assert_eq!(rows[0], "line 1");
-        assert_eq!(rows[2], "  1-2 of 4  ·  esc close, j/k scroll");
+        assert_eq!(rows[2], "  1-2 of 4  ·  esc close, ↓/↑ scroll");
     }
 
     // A line wider than the surface is a row it wraps to, and the count is of
@@ -178,7 +184,7 @@ mod tests {
     // menu has, and the rows it pushes out are the bar's.
     #[test]
     fn a_wrapped_row_counts_as_one() {
-        let reply = Reply::new(vec![Line::from("x".repeat(30)), Line::from("last")]);
+        let reply = Reply::new(Listing::say(["x".repeat(30), "last".into()]));
         // Ten columns: the long line is three rows of them, the short one is
         // one, and a menu with four rows shows all four.
         assert_eq!(reply.view(4, 10).len(), 4);
@@ -187,7 +193,7 @@ mod tests {
         let tight = reply.view(3, 10);
         let rows: Vec<String> = tight.iter().map(|l| l.to_string()).collect();
         assert_eq!(rows.len(), 3);
-        assert_eq!(rows[2], "  1-2 of 4  ·  esc close, j/k scroll");
+        assert_eq!(rows[2], "  1-2 of 4  ·  esc close, ↓/↑ scroll");
     }
 
     // Scrolling stops with the last line on the bottom row: one more press

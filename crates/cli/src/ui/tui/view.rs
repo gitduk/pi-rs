@@ -134,11 +134,7 @@ pub(super) enum Queued {
     Line(Intent),
     // A round of the loop this lane is under, to be read like a typed line when
     // its turn comes — which is why the goal is kept as text.
-    Round {
-        goal: String,
-        note: String,
-        round: Option<u64>,
-    },
+    Round { goal: String, note: String },
 }
 
 pub(super) type Views = std::collections::BTreeMap<u64, View>;

@@ -14,6 +14,7 @@ use crate::input::commands::Choice;
 use crate::input::refused;
 use crate::store::config::{self, Config};
 use crate::store::icons;
+use crate::store::listing::{Listing, Row};
 use crate::store::settings::{self, mask_secret};
 
 impl App {
@@ -267,22 +268,28 @@ impl App {
     fn open_panel(&mut self) -> Step {
         // The TUI intercepts bare `/settings` before it reaches here; the
         // line surface can only list.
-        let mut out = Vec::new();
-        for row in self.setting_rows() {
-            let mut line = format!("{} = {}", row.path, mask_secret(&row.path, &row.value));
-            if row.changed {
-                line.push_str(&format!(" {}", icons::CHANGED_MARK));
-                if let Some(file) = self.settings.file_value(&row.path) {
-                    let file = mask_secret(&row.path, &settings::render(file));
-                    line.push_str(&format!(" file: {file}"));
+        let rows: Vec<Row> = self
+            .setting_rows()
+            .into_iter()
+            .map(|row| {
+                // The mark and the file belong to this value rather than to the
+                // row: what they say is that this one was claimed, and what the
+                // file holds instead.
+                let mut value = format!("= {}", mask_secret(&row.path, &row.value));
+                if row.changed {
+                    value.push_str(&format!(" {}", icons::CHANGED_MARK));
+                    if let Some(file) = self.settings.file_value(&row.path) {
+                        let file = mask_secret(&row.path, &settings::render(file));
+                        value.push_str(&format!(" file: {file}"));
+                    }
                 }
-            }
-            out.push(line);
+                Row::new([row.path, value])
+            })
+            .collect();
+        if rows.is_empty() {
+            return Step::Handled(Listing::say(["nothing in ~/.pi/settings.toml yet"]));
         }
-        if out.is_empty() {
-            out.push("nothing in ~/.pi/settings.toml yet".into());
-        }
-        Step::Handled(out)
+        Step::Handled(Listing::of(rows))
     }
 }
 

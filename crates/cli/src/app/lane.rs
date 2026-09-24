@@ -150,9 +150,6 @@ pub struct Lane {
     pub commands: std::sync::Arc<Vec<crate::input::commands::Command>>,
     /// The `/loop` this lane is under, if any.
     pub looping: Option<Looping>,
-    /// The `/loop` round waiting in the queue, taken by the run it arms: the
-    /// ask it opens records which automatic round it is.
-    pub pending_round: Option<u64>,
 }
 
 impl Lane {
@@ -408,18 +405,6 @@ impl Lane {
         self.looping.take()
     }
 
-    /// Arm the round the loop queued — or none, when the line about to run is
-    /// not one of a loop's own.
-    pub fn arm_round(&mut self, round: Option<u64>) {
-        self.pending_round = round;
-    }
-
-    /// Take that round back: a job is starting, or the loop it belonged to is
-    /// gone.
-    pub fn take_round(&mut self) -> Option<u64> {
-        self.pending_round.take()
-    }
-
     // -------------------------------------------------------- the transcript
 
     /// Lend the transcript to a job for the length of its run.
@@ -663,7 +648,6 @@ impl App {
             inbox,
             pending: Vec::new(),
             looping: None,
-            pending_round: None,
             run: crate::app::lane::Run::Idle,
         });
         self.current = self.lanes.len() - 1;

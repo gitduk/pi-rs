@@ -6,6 +6,18 @@
 //! each of them.
 
 use llm::model::{CacheControl, Format, ModelSpec, Pricing, ReplayThinking, ThinkingControl};
+use llm::transport::Transport;
+use std::sync::Arc;
+
+/// Put the compactor that ships on an agent: `writer` for a summarizer with a
+/// model of its own, `None` for the model doing the work.
+///
+/// An `Agent::new` starts on the identity compactor, which never shrinks
+/// anything — that is the seam's contract rather than an accident — so a test
+/// about compaction has to say which one it means.
+pub fn compacting(agent: &mut agent::Agent, writer: Option<(Arc<dyn Transport>, ModelSpec)>) {
+    agent.compactor = Arc::new(agent::Summarizing::new(writer, agent.retry.idle));
+}
 
 /// `replay_thinking` is `Tagged` deliberately: on a spec that drops prior
 /// reasoning the estimate counts it as nothing, and a fixture built out of

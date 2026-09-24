@@ -38,6 +38,7 @@ use crate::input::commands::{Choice, Command};
 use crate::input::{self, Builtin, Fate, Intent, Rewound, Step};
 use crate::store::icons;
 use crate::store::keys::Keys;
+use crate::store::listing::Listing;
 use crate::store::status::{Segment, default_done, default_live};
 use crate::store::theme::Style as ThemeStyle;
 use crate::store::theme::{Theme, panels_for};
@@ -567,8 +568,8 @@ fn following_terminal(theme: &Theme, bg: Option<(u8, u8, u8)>) -> Theme {
 // What a `Step::Handled` leaves behind: its lines as the reply, and whatever
 // the command changed under the surface. A free function because a run in
 // flight lands them from inside its own borrow, where `self` is in pieces.
-fn land_handled(ui: &mut Ui, core: &App, view: &mut View, lines: Vec<String>) {
-    ui.open_reply(lines);
+fn land_handled(ui: &mut Ui, core: &App, view: &mut View, rows: Listing) {
+    ui.open_reply(rows);
     ui.adopt_config(core, view);
 }
 
@@ -738,8 +739,8 @@ impl Tui {
         }
     }
 
-    // A line the surface has taken from the user: onto the screen, at the
-    // newest row, and into the history file.
+    // A line whose answer will land under it: onto the screen, at the newest
+    // row, and into the history file.
     //
     // One place rather than one per door. A fresh turn starts at the newest
     // row — a view scrolled up to read would otherwise stream output out of
@@ -748,6 +749,10 @@ impl Tui {
     // Every door a line can be submitted through calls this — the keyboard and
     // the phone alike — because a line the user cannot see they sent is one
     // they send twice.
+    //
+    // Which lines those are is `Intent::echoed`'s to say: a command answers
+    // over the menu in the reply, which is dismissed rather than kept, and a
+    // row left above an answer that never comes is the question standing alone.
     fn echo_sent(&mut self, line: &str) {
         let view = front_view(&mut self.views, self.core.lane());
         self.ui.submit(view, line);
@@ -832,16 +837,16 @@ impl Tui {
 
     // A handled command's lines are its answer, and the answer goes to the
     // reply — the screen is not a log of what the user typed at the interface.
-    fn land_lines(&mut self, lines: Vec<String>) {
+    fn land_lines(&mut self, rows: Listing) {
         land_handled(
             &mut self.ui,
             &self.core,
             front_view(&mut self.views, self.core.lane()),
-            lines,
+            rows,
         );
     }
 
-    fn land_swap(&mut self, said: Vec<String>) {
+    fn land_swap(&mut self, said: Listing) {
         if let Some(session) = self.core.lane().session() {
             self.ui
                 .rebuild(front_view(&mut self.views, self.core.lane()), session);
@@ -998,7 +1003,7 @@ impl Tui {
         let cap = self.core.config.loop_cap();
         let round = self.core.lanes[lane].loop_step(cut, cap)?;
         let said = match round {
-            Round::Again { goal, next } => {
+            Round::Again { goal } => {
                 // How far the loop has got reaches the model as a note, not
                 // glued to the goal: the goal must stay exactly what `read`
                 // would parse. The note is the row this round lands as.
@@ -1009,11 +1014,7 @@ impl Tui {
                     .unwrap_or_default();
                 view_at(&mut self.views, self.core.lanes[lane].token())
                     .queued
-                    .push(Queued::Round {
-                        goal,
-                        note,
-                        round: Some(next as u64),
-                    });
+                    .push(Queued::Round { goal, note });
                 return None;
             }
             Round::Cut(Cut::Stopped) => "loop stopped — the round was cut short".to_string(),
@@ -1057,7 +1058,7 @@ impl Tui {
             }
             Deed::SettingRevert(path) => {
                 let said = self.core.revert(&path);
-                self.land_lines(said);
+                self.land_lines(Listing::say(said));
                 self.reload_panel();
             }
             Deed::External => self.edit_externally().await,
@@ -1125,7 +1126,7 @@ impl Tui {
             // A command refused because a run is in flight. It was typed, so
             // its refusal is that command's answer.
             Fate::Refused(why) => {
-                self.ui.open_reply([why]);
+                self.ui.open_reply(Listing::say([why]));
                 Wake::Nothing
             }
         }
@@ -1238,8 +1239,11 @@ impl Tui {
                         // and its `/stop` is esc. Same intents, same gate, so
                         // they cannot drift apart.
                         Some(app::wechat::Inbound::Text { text }) => {
-                            self.echo_sent(&text);
-                            self.admit(Asked::Core(input::read(&text, &self.core.commands)))
+                            let intent = input::read(&text, &self.core.commands);
+                            if intent.echoed() {
+                                self.echo_sent(&text);
+                            }
+                            self.admit(Asked::Core(intent))
                         }
                         Some(app::wechat::Inbound::Stop) => self.admit(Asked::Own(Deed::Interrupt)),
                         // The QR, an error, a way out of one: on the lane the
@@ -1265,7 +1269,7 @@ impl Tui {
                     .remove(0)
                 {
                     Queued::Line(intent) => Wake::Do(Asked::Core(intent)),
-                    Queued::Round { goal, note, round } => {
+                    Queued::Round { goal, note } => {
                         // The loop that queued this may have been stopped since.
                         // Running it then would be a turn nobody asked for, and
                         // one that reads on screen as if it had been typed.
@@ -1273,7 +1277,6 @@ impl Tui {
                             continue;
                         }
                         from_loop = true;
-                        self.core.lane_mut().arm_round(round);
                         let view = front_view(&mut self.views, self.core.lane());
                         self.ui.submit(view, &goal);
                         view.surface.scroll = 0;
@@ -1294,9 +1297,6 @@ impl Tui {
                 Wake::Leave => break,
                 Wake::Do(asked) => asked,
             };
-            // A round number only rides the ask the loop's own round opens;
-            // anything else this iteration does leaves it unset.
-            self.core.lane_mut().arm_round(None);
             // What the surface answers for itself: the screen, the keyboard
             // and the process are not `App`'s to move.
             let intent = match asked {
@@ -1330,10 +1330,10 @@ impl Tui {
                                 .say(front_view(&mut self.views, self.core.lane()), said);
                         }
                         // Nothing ended — a note about the line, not the lane.
-                        None => self.ui.open_reply([concat!(
+                        None => self.ui.open_reply(Listing::say([concat!(
                             "no loop here — /loop <line> runs one again while ",
                             "it keeps changing files"
-                        )]),
+                        )])),
                     }
                     continue;
                 }
@@ -1344,14 +1344,15 @@ impl Tui {
                         "`{}` is already looping here — /loop to stop it first",
                         l.goal
                     );
-                    self.ui.open_reply([said]);
+                    self.ui.open_reply(Listing::say([said]));
                     continue;
                 }
                 if matches!(
                     input::read(&goal, &self.core.commands),
                     Intent::Builtin(Builtin::Loop(_))
                 ) {
-                    self.ui.open_reply(["a loop cannot be its own goal"]);
+                    self.ui
+                        .open_reply(Listing::say(["a loop cannot be its own goal"]));
                     continue;
                 }
                 self.core.lane_mut().loop_start(goal.clone());
@@ -1360,7 +1361,6 @@ impl Tui {
                     .push(Queued::Round {
                         goal,
                         note: String::new(),
-                        round: None,
                     });
                 continue;
             }
@@ -1396,7 +1396,7 @@ impl Tui {
                 Step::Quit => break,
                 // A refusal is an answer: it was asked for by a line, so it
                 // goes where every other answer does.
-                Step::Flash(line) => self.ui.open_reply([line]),
+                Step::Flash(line) => self.ui.open_reply(Listing::say([line])),
                 Step::Bash(command) => self.start_bash(command, &done_tx),
                 Step::Swap(said) => self.land_swap(said),
                 Step::Worktrees(lines) => {
@@ -1419,7 +1419,7 @@ impl Tui {
                         },
                         input::WechatCmd::Off => self.bridge.off(),
                     };
-                    self.ui.open_reply(said);
+                    self.ui.open_reply(Listing::say(said));
                 }
                 // What was submitted while the run worked is taken up by the
                 // top of this loop, one entry at a time and each read as what
@@ -1524,6 +1524,7 @@ mod tests {
     use crate::input::commands::{Choice, Command, Source};
     use crate::store::icons;
     use crate::store::keys::{Keys, Mode};
+    use crate::store::listing::Listing;
     use crate::store::session::Store;
     use crate::store::settings::row;
     use crate::store::status::Segment;
@@ -2558,7 +2559,6 @@ mod tests {
             inbox,
             pending: Vec::new(),
             looping: None,
-            pending_round: None,
             // What every `start_*` leaves behind while its job runs.
             run: Run::Running {
                 cancel: tokio_util::sync::CancellationToken::new(),
@@ -2602,7 +2602,7 @@ mod tests {
     async fn an_empty_reply_is_not_opened() {
         let dir = tempfile::tempdir().expect("a checkout");
         let mut tui = surface(dir.path());
-        tui.ui.open_reply(Vec::<Line<'static>>::new());
+        tui.ui.open_reply(Listing::default());
         assert!(tui.ui.reply.is_none());
     }
 
@@ -2614,7 +2614,7 @@ mod tests {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let dir = tempfile::tempdir().expect("a checkout");
         let mut tui = surface(dir.path());
-        tui.ui.open_reply(["/help answered this"]);
+        tui.ui.open_reply(Listing::say(["/help answered this"]));
 
         let token = tui.core.lane().token();
         let esc = super::TermEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -2623,6 +2623,72 @@ mod tests {
             .key(tui.core.lane(), view_at(&mut tui.views, token), esc, false);
         assert!(matches!(asked, Asked::Own(Deed::Nothing)), "{asked:?}");
         assert!(tui.ui.reply.is_none(), "the esc closed it");
+    }
+
+    // A command is not echoed onto the screen: its answer is the reply over the
+    // menu, which is dismissed rather than kept, so the line would be left
+    // above an answer that never comes. A line that opens a turn still is —
+    // the turn streams its rows under it, and a line nobody can see they sent
+    // is one they send twice.
+    #[tokio::test]
+    async fn a_command_is_not_echoed_and_a_prompt_is() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let dir = tempfile::tempdir().expect("a checkout");
+        let mut tui = surface(dir.path());
+        // The real table, or `/keys` is a word the door does not know and the
+        // line is read as a prompt — which is a different test.
+        let table = std::sync::Arc::new(crate::input::commands::commands(&[], &mut Vec::new()));
+        tui.core.commands = table.clone();
+        tui.ui.commands = table;
+        let token = tui.core.lane().token();
+        let rows = |tui: &mut super::Tui| view_at(&mut tui.views, token).surface.scrollback.len();
+        let enter = || super::TermEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let before = rows(&mut tui);
+        tui.ui.editor.set_line("/keys");
+        let lane = tui.core.lane_mut();
+        tui.ui
+            .key(lane, view_at(&mut tui.views, token), enter(), false);
+        assert_eq!(rows(&mut tui), before, "a command leaves no row");
+
+        let before = rows(&mut tui);
+        tui.ui.editor.set_line("what changed?");
+        let lane = tui.core.lane_mut();
+        tui.ui
+            .key(lane, view_at(&mut tui.views, token), enter(), false);
+        assert_eq!(
+            rows(&mut tui),
+            before + 1,
+            "a prompt is one, answered under"
+        );
+    }
+
+    // A reply is an answer over the menu, not a mode over the keyboard: it
+    // reads the menu's own keys and nothing else, so a letter typed over it
+    // takes it down on the way past and lands in the editor. A letter it read
+    // for itself would be a letter missing from the line being typed.
+    #[tokio::test]
+    async fn a_reply_reads_the_menus_keys_and_yields_everything_else() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let dir = tempfile::tempdir().expect("a checkout");
+        let mut tui = surface(dir.path());
+        tui.ui.open_reply(Listing::say(["/status answered this"]));
+        let token = tui.core.lane().token();
+
+        // The menu's own: the window moves and the reply stays up.
+        let down = super::TermEvent::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let lane = tui.core.lane_mut();
+        tui.ui
+            .key(lane, view_at(&mut tui.views, token), down, false);
+        assert!(tui.ui.reply.is_some(), "a menu key is the reply's");
+
+        // Not the menu's: a letter meant for the next line comes down here, and
+        // is left for the caller to read as what it was typed as.
+        let j = super::TermEvent::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        let lane = tui.core.lane_mut();
+        let asked = tui.ui.key(lane, view_at(&mut tui.views, token), j, false);
+        assert!(tui.ui.reply.is_none(), "the letter took it down");
+        assert!(matches!(asked, Asked::Own(Deed::Nothing)), "{asked:?}");
     }
 
     // Enter is not the reply's to swallow: the line is sent, and the answer the
@@ -2636,7 +2702,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a checkout");
         let mut tui = surface(dir.path());
         tui.ui.editor.set_line("/help");
-        tui.ui.open_reply(["/status answered this"]);
+        tui.ui.open_reply(Listing::say(["/status answered this"]));
 
         let token = tui.core.lane().token();
         let enter = super::TermEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -2651,7 +2717,7 @@ mod tests {
         assert!(tui.ui.took_submit(), "and the line it was written for went");
         assert!(tui.ui.editor.is_empty(), "taken off the line");
 
-        tui.ui.open_reply(["/status answered this"]);
+        tui.ui.open_reply(Listing::say(["/status answered this"]));
         let ctrl_c =
             super::TermEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
         let lane = tui.core.lane_mut();
@@ -2957,7 +3023,7 @@ mod tests {
                     .session
                     .take()
                     .expect("the transcript back");
-                back.send_prompt(String::from("now something else"), None::<String>, None);
+                back.send_prompt(String::from("now something else"), None::<String>);
                 format!("{:?}", back.entries())
             }
         };
@@ -2991,7 +3057,7 @@ mod tests {
                 args: serde_json::json!({ "command": "cargo check" }),
             },
         )]);
-        session.send_prompt("do something else", None::<String>, None);
+        session.send_prompt("do something else", None::<String>);
 
         // The rebuild filter drops the repaired stopped tool entry.
         let stopped_entry = &session.entries()[2];
@@ -3390,7 +3456,6 @@ mod tests {
         view_at(&mut tui.views, token).queued.push(Queued::Round {
             goal: "go".into(),
             note: String::new(),
-            round: Some(2),
         });
         tui.refresh_tabs();
         assert_eq!(
@@ -3618,7 +3683,7 @@ mod tests {
             .core
             .edit("status.live", r#"["model"]"#)
             .expect("the edit lands");
-        tui.land_lines(said);
+        tui.land_lines(Listing::say(said));
         assert_eq!(tui.ui.live, vec![Segment::Model]);
 
         // The file door: the session value goes to the file the config is
@@ -3637,7 +3702,7 @@ mod tests {
             .core
             .write_to_file("status.done")
             .expect("the write lands");
-        tui.land_lines(said);
+        tui.land_lines(Listing::say(said));
         assert_eq!(tui.ui.done, vec![Segment::Cost]);
     }
 
@@ -4241,8 +4306,8 @@ mod tests {
         wrote(&mut lane, "a.rs", "fn main() {}\n");
         let again = lane.loop_step(None, None).expect("a loop is in force");
         assert!(
-            matches!(&again, Round::Again { goal, next: 2 } if goal == "/code-review high"),
-            "the goal goes back verbatim, as the round it now is",
+            matches!(&again, Round::Again { goal } if goal == "/code-review high"),
+            "the goal goes back verbatim",
         );
 
         // The same file again, with different content — what a loop like this
@@ -4257,7 +4322,7 @@ mod tests {
         );
         assert!(matches!(
             lane.loop_step(None, None),
-            Some(Round::Again { next: 3, .. })
+            Some(Round::Again { .. })
         ));
 
         // Nothing changed: a pass with nothing to do has nothing to do next

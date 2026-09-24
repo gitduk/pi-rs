@@ -139,6 +139,9 @@ impl Ui {
             .collect()
     }
 
+    // The line the surface took from the user, onto the screen: the row its
+    // answer will land under. Called from `Tui::echo_sent` and nowhere else,
+    // because only the answer knows whether there is anything to land under.
     pub(super) fn submit(&mut self, view: &mut View, line: &str) {
         let rows = Row::prompt(line, &self.paint);
         view.surface.scrollback.extend(rows);
@@ -147,9 +150,6 @@ impl Ui {
             .fold_previous(&mut view.surface.scrollback);
     }
 
-    // Accept a submitted input: echo it so the prompt survives the editor
-    // being cleared, then fold the block that was current back to the switch
-    // — the input pushes it out of current no matter what it turns out to be.
     // Whether a line has been submitted since this was last asked: the surface
     // catches the recall list up when it has.
     pub(super) fn took_submit(&mut self) -> bool {
@@ -263,11 +263,15 @@ impl Ui {
             v.last = None;
         }
 
-        // The reply is the topmost thing on this surface: while it is up its
-        // own keys are the only ones — but two presses mean what they mean
-        // wherever they are made. The line is still submitted, and `ctrl+c`
-        // still stops the run; either takes the reply down on its way, since
-        // the answer it was showing belongs to the line that is now spent.
+        // The reply is an answer drawn over the menu, not a mode over the
+        // keyboard. The keys it reads are its own — its scrolling, its
+        // dismissal, and the presses that mean what they mean wherever they are
+        // made — and a key that is none of them is someone typing the next
+        // line, which takes it down on the way past. Held for every press, a
+        // reply would swallow the letters of whatever was typed over it.
+        if self.reply.is_some() && !super::reply::owns(bound, key) {
+            self.reply = None;
+        }
         if self.reply.is_some() {
             if matches!(bound, Some(Action::LineSubmit | Action::AppCancel)) {
                 self.reply = None;
@@ -326,10 +330,13 @@ impl Ui {
                         if line.trim().is_empty() {
                             return Asked::Own(Deed::Nothing);
                         }
-                        self.submit(view, &line);
-                        view.surface.scroll = 0;
+                        let intent = input::read(&line, &self.commands);
+                        if intent.echoed() {
+                            self.submit(view, &line);
+                            view.surface.scroll = 0;
+                        }
                         self.submitted = true;
-                        return Asked::Core(input::read(&line, &self.commands));
+                        return Asked::Core(intent);
                     }
                     Some(MenuEntry::File {
                         start,
@@ -351,10 +358,13 @@ impl Ui {
                         if typed.trim().is_empty() {
                             return Asked::Own(Deed::Nothing);
                         }
-                        self.submit(view, &typed);
-                        view.surface.scroll = 0;
+                        let intent = input::read(&typed, &self.commands);
+                        if intent.echoed() {
+                            self.submit(view, &typed);
+                            view.surface.scroll = 0;
+                        }
                         self.submitted = true;
-                        return Asked::Core(input::read(&typed, &self.commands));
+                        return Asked::Core(intent);
                     }
                 }
             }

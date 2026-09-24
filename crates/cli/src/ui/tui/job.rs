@@ -20,6 +20,7 @@ use super::{NO_TRANSCRIPT, Tui};
 use crate::app;
 use crate::app::looping::Cut;
 use crate::input::Intent;
+use crate::store::listing::Listing;
 
 // What kind of job a finished `Done` was, carrying what only that kind
 // leaves behind — so no arm can be built holding another's.
@@ -101,8 +102,7 @@ impl Tui {
             self.ui.flash(NO_TRANSCRIPT);
             return;
         };
-        let round = self.core.lane_mut().take_round();
-        carried.send_prompt(prompt, typed, round);
+        carried.send_prompt(prompt, typed);
         // The repair results and the stop note the send filed are entries
         // now: derive their rows like any commit, so they show without a
         // rebuild. The ask itself stays unadopted — the door echoed it.
@@ -149,7 +149,7 @@ impl Tui {
         };
         let cancel = CancellationToken::new();
         let ctx = self.core.lane_mut().ctx_for(cancel.clone());
-        // Committed forecloses `Intent::Unsend`, the only writer of
+        // Committed forecloses `Deed::Unsend`, the only writer of
         // `Run::Running.unsend`, which a `!` has no prompt to honour.
         self.arm_view(true);
 
@@ -526,9 +526,9 @@ impl Tui {
             let now = self.core.tokens_now_at(lane);
             // `/compact` answered, and there was nothing to do: the answer to
             // a command, not news about the lane.
-            self.ui.open_reply([format!(
+            self.ui.open_reply(Listing::say([format!(
                 "nothing to compact — {now} tokens, all inside the {held} kept as working context"
-            )]);
+            )]));
         }
         // The pass is over, so the clock stops. What it was driving — the
         // live region — already went with the turn.

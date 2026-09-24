@@ -660,7 +660,7 @@ mod budget {
         // The whole point of asking for it: the user knows a phase ended, and
         // no budget can tell. This transcript is far under the window.
         let mut a = agent_with(1_000_000, 32_000);
-        a.summarizer = Some((Arc::new(Empty), spec()));
+        crate::common::compacting(&mut a, Some((Arc::new(Empty), spec())));
         let mut s = bulky_session();
         let before = llm::estimate::tokens(&s.context(), &spec());
         assert!(before < a.budget(), "the automatic pass would decline this");

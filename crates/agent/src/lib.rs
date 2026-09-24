@@ -24,8 +24,9 @@ use event::say;
 pub use event::{Event, Totals};
 pub use ext::approval::Ceiling;
 pub use ext::compact::{Policy, Report};
+pub use ext::compactor::Summarizing;
 pub use ext::retry::Retry;
-pub use seams::{Approver, Decision, Home, Steer};
+pub use seams::{Approver, Compactor, Decision, Fitted, Home, Steer, Untouched, Working};
 
 pub const DEFAULT_SYSTEM: &str = include_str!("../prompts/system.md");
 
@@ -71,15 +72,11 @@ pub struct Agent {
     pub spec: ModelSpec,
     pub registry: Registry,
     pub approver: Arc<dyn Approver>,
+    /// What shrinks the transcript when it outgrows the window. The identity
+    /// until something is installed — see `Compactor`.
+    pub compactor: Arc<dyn Compactor>,
     pub system: String,
     pub effort: Effort,
-    pub compaction: Policy,
-    /// Who writes the summary, when it is not the model doing the work. The
-    /// job is large input, small output and little judgement, so it need not be
-    /// the expensive one. Its own transport all the same: the spec that priced
-    /// a turn has to be the one that ran it, or a cheap summary is billed at
-    /// the working model's rate.
-    pub summarizer: Option<(Arc<dyn Transport>, ModelSpec)>,
     pub retry: Retry,
     /// How long a subagent may run silent before it is read as wedged.
     /// None defaults to 1800 s.
@@ -115,10 +112,9 @@ impl Agent {
             spec,
             registry: Registry::builtin(),
             approver: Arc::new(Ceiling(tools::Tier::Exec)),
+            compactor: Arc::new(seams::Untouched),
             system: DEFAULT_SYSTEM.to_string(),
             effort: Effort::Off,
-            compaction: Policy::default(),
-            summarizer: None,
             retry: Retry::default(),
             subagent_deadline: None,
         }
@@ -206,12 +202,14 @@ impl Agent {
 
             let done = loop {
                 budget = ((hard.unwrap_or_else(|| self.budget()) as f64) * scale) as usize;
-                let (messages, shrunk) = self
-                    .maybe_compact(session, budget, squeezes > 0, &mut totals, tx)
+                let fitted = self
+                    .compactor
+                    .compact(session, self.working(), budget, squeezes > 0, tx)
                     .instrument(span.clone())
                     .await;
-                sent = messages;
-                if shrunk {
+                totals.add(&fitted.spent);
+                sent = fitted.context;
+                if fitted.changed {
                     compactions += 1;
                 }
                 used = llm::estimate::tokens(&sent, &self.spec);
@@ -377,63 +375,11 @@ impl Agent {
         unreachable!("an unlimited run can only leave by returning inside the loop")
     }
 
-    // Shrink the transcript to `budget` if it is over, recording what went,
-    // and hand back what to send.
-    //
-    // The context comes back rather than being rebuilt by the caller: this has
-    // to build one to measure, and when nothing changed that is exactly the
-    // one to send. Building it twice a turn walked every entry and cloned
-    // every block for an answer already in hand.
-    async fn maybe_compact(
-        &self,
-        session: &mut Session,
-        budget: usize,
-        urgent: bool,
-        totals: &mut Usage,
-        tx: &UnboundedSender<Event>,
-    ) -> (Vec<Message>, bool) {
-        let measured = session.context();
-        let policy = &self.compaction;
-        if llm::estimate::tokens(&measured, &self.spec) <= budget {
-            return (measured, false);
-        }
-        // Holding the working tail back is a preference; fitting at all is not.
-        // Once the provider has refused the request, the tail yields.
-        let policy = ext::compact::Policy {
-            protect_tail: if urgent { 0 } else { self.tail_within(budget) },
-            ..*policy
-        };
-        let (mut record, mut report) = ext::compact::plan(session, &self.spec, budget, &policy);
-        if !record.dropped.is_empty() {
-            let used = self
-                .retire_span(session, &mut record, None)
-                .instrument(tracing::info_span!(target: "pi::compact", "summarize"))
-                .await;
-            report.summarized = record.summary.is_some();
-            totals.add(&used);
-        }
-        // A pass that reclaimed nothing is not news; reporting it every turn
-        // buries the ones that did.
-        if !report.touched() {
-            return (measured, false);
-        }
-        session.record(record);
-        say(tx, Event::Compacted(report));
-        // It changed, so the measurement above is stale.
-        (session.context(), true)
-    }
-
-    /// What a manual compaction leaves alone.
+    /// What a manual compaction leaves alone, against this agent's window: the
+    /// compactor's answer to how much of the end it will not touch. The surface
+    /// says so to whoever asked for a compaction.
     pub fn kept_tokens(&self) -> usize {
-        self.tail_within(self.budget())
-    }
-
-    // The working tail to hold back, against a transcript budget of `budget`.
-    //
-    // A flat 16k is a seventh of a 114k budget and more than a 9k one holds,
-    // and a tail the size of the budget leaves the drop tier nothing to take.
-    fn tail_within(&self, budget: usize) -> usize {
-        self.compaction.protect_tail.min(budget / 4)
+        self.compactor.kept_tokens(self.budget())
     }
 
     /// Compact now, at the user's word rather than the window's.
@@ -443,71 +389,26 @@ impl Agent {
     /// am in the middle of". Unlike the automatic pass it runs even when the
     /// transcript already fits: the point is that the user knows a phase has
     /// ended, which no budget can tell.
+    ///
+    /// Asked of the compactor with the rest of what a pass needs; a compactor
+    /// that does nothing answers `None`.
     pub async fn compact_now(
         &self,
         session: &mut Session,
         focus: Option<&str>,
-    ) -> Option<(ext::compact::Report, Usage)> {
-        let base = self.compaction;
-        let tail = self.tail_within(self.budget());
-        let policy = ext::compact::Policy {
-            protect_tail: tail,
-            ..base
-        };
-        let (mut record, mut report) = ext::compact::plan(session, &self.spec, tail, &policy);
-        let mut spent = Usage::default();
-        if !record.dropped.is_empty() {
-            let used = self
-                .retire_span(session, &mut record, focus)
-                .instrument(tracing::info_span!(target: "pi::compact", "summarize"))
-                .await;
-            report.summarized = record.summary.is_some();
-            spent.add(&used);
-        }
-        if !report.touched() {
-            return None;
-        }
-        session.record(record);
-        Some((report, spent))
+    ) -> Option<(Report, Usage)> {
+        self.compactor
+            .compact_now(session, self.working(), self.budget(), focus)
+            .await
     }
 
-    // Ask what the span being dropped is worth, and to whom.
-    //
-    // A summary that carries this session's work forward, folding in any
-    // summary already in force and retiring it.
-    //
-    // A failure is not fatal: the entries still go. Losing the summary costs
-    // context; failing the turn costs the whole run.
-    //
-    // Returns the tokens only. What they cost is the surface's arithmetic —
-    // see `run/meter.rs` — so a summarizer on a cheaper model is billed at the
-    // run's rate rather than its own. Worth saying out loud: it is why the
-    // number on the status line is an estimate, not an invoice.
-    async fn retire_span(
-        &self,
-        session: &Session,
-        record: &mut session::Compaction,
-        focus: Option<&str>,
-    ) -> llm::stream::Usage {
-        let (transport, spec) = match &self.summarizer {
-            Some((t, s)) => (&**t, s),
-            None => (&*self.transport, &self.spec),
-        };
-        let history =
-            ext::summarize::render(&session.summaries(), &session.entries_for(&record.dropped));
-
-        match ext::summarize::run(transport, spec, history, focus, self.retry.idle).await {
-            Ok((text, used)) => {
-                record.summary = Some(text);
-                // The new summary covers what the old one did, so the entry
-                // carrying the old one leaves the view.
-                record.dropped.extend(session.summary_entries());
-                used
-            }
-            Err(e) => {
-                tracing::warn!(target: "pi::compact", error = %e, "summarizing dropped history failed");
-                llm::stream::Usage::default()
-            }
+    /// The model doing the work and the wire it goes out on, for whatever needs
+    /// both: the compactor writes its summary with them when it has none of its
+    /// own.
+    fn working(&self) -> Working<'_> {
+        Working {
+            transport: &*self.transport,
+            spec: &self.spec,
         }
     }
 

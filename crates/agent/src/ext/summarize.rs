@@ -132,7 +132,6 @@ mod tests {
         Entry::Ask {
             id: EntryId(0),
             at: 0,
-            round: None,
             ask: Prompt {
                 text: text.into(),
                 image: None,

@@ -7,6 +7,7 @@ pub mod complete;
 use skills::Skill;
 
 use crate::input::commands::{Command, Source};
+use crate::store::listing::Listing;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Intent {
@@ -81,6 +82,18 @@ pub enum Fate {
 }
 
 impl Intent {
+    /// Whether the surface shows the line this was read from, above the answer.
+    ///
+    /// It does when the answer lands under it: a turn streams rows below the
+    /// line, and a `!` command's output is filed as one. It does not when the
+    /// answer is a command's, which goes to the reply over the menu — the reply
+    /// is dismissed rather than kept, so a row left behind would be a question
+    /// standing with no answer under it. The line is still in the recall list
+    /// either way, and still in the history file.
+    pub fn echoed(&self) -> bool {
+        !matches!(self, Intent::Builtin(_))
+    }
+
     /// Exhaustive on purpose, with no catch-all arm: an intent added without an
     /// answer here should fail to compile rather than default to one.
     ///
@@ -312,16 +325,17 @@ pub enum Step {
     // Starts or stops the wechat bridge. Needs the network, so the surface
     // runs it and reports — the same rule as `Compact`.
     Wechat(WechatCmd),
-    // Dealt with here; these lines are what there is to show for it. Returned
-    // rather than printed because one surface prints and the other paints.
-    Handled(Vec<String>),
+    // Dealt with here; this is what there is to show for it. Returned rather
+    // than laid out because one surface prints and the other paints, and the
+    // rows are the same for both.
+    Handled(Listing),
     // The session was replaced — a `/new` or a `/resume` — so the surface
-    // has to rebuild its view from the new one, not just show the lines.
-    Swap(Vec<String>),
+    // has to rebuild its view from the new one, not just show the rows.
+    Swap(Listing),
     // The set of worktrees changed under the surface — a removal — so it
-    // shows the lines and forgets the cached list, which would keep naming
+    // shows the rows and forgets the cached list, which would keep naming
     // the checkout that just went.
-    Worktrees(Vec<String>),
+    Worktrees(Listing),
     Quit,
 }
 
@@ -337,5 +351,5 @@ pub enum WechatCmd {
 }
 
 pub(crate) fn lines(text: impl Into<String>) -> Step {
-    Step::Handled(text.into().lines().map(str::to_string).collect())
+    Step::Handled(Listing::say(text.into().lines()))
 }

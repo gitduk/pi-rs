@@ -418,7 +418,7 @@ async fn cancellation_during_stream_saves_partial_assistant_response() {
     }
 
     // A subsequent prompt does not produce consecutive ask entries
-    session.send_prompt("second prompt", None, None);
+    session.send_prompt("second prompt", None);
     let msgs = session.context();
     assert_eq!(msgs.len(), 3, "user -> assistant -> user");
     assert!(matches!(msgs[0], llm::message::Message::User { .. }));
@@ -524,11 +524,14 @@ async fn a_summary_on_another_model_still_counts_toward_the_run() {
 
     let delegated = wire();
     let mut a = Agent::new(delegated.clone(), main.clone());
-    a.summarizer = Some((wire(), cheap));
+    common::compacting(&mut a, Some((wire(), cheap)));
     let cheaply = drive(&a, &ctx, "read it repeatedly").await.1.unwrap();
 
     let itself = wire();
-    let b = Agent::new(itself.clone(), main);
+    let mut b = Agent::new(itself.clone(), main);
+    // No summarizer of its own: the summary is written by the model doing the
+    // work, which is the thing under test.
+    common::compacting(&mut b, None);
     let dearly = drive(&b, &ctx, "read it repeatedly").await.1.unwrap();
 
     assert!(
@@ -562,7 +565,8 @@ async fn dropped_history_comes_back_as_a_summary_on_the_opening_turn() {
     spec.context_window = 24_000;
     spec.max_output_tokens = 2_000;
 
-    let a = Agent::new(transport.clone(), spec);
+    let mut a = Agent::new(transport.clone(), spec);
+    common::compacting(&mut a, None);
 
     let (session, out, events) = drive(&a, &ctx, "read it repeatedly").await;
     out.unwrap();
@@ -625,7 +629,8 @@ async fn a_summarizer_that_fails_drops_the_history_without_failing_the_turn() {
     let mut spec = spec();
     spec.context_window = 24_000;
     spec.max_output_tokens = 2_000;
-    let a = Agent::new(Arc::new(Broken(AtomicUsize::new(0))), spec);
+    let mut a = Agent::new(Arc::new(Broken(AtomicUsize::new(0))), spec);
+    common::compacting(&mut a, None);
 
     let (_session, out, events) = drive(&a, &ctx, "read it repeatedly").await;
     // Losing the summary costs context; failing the turn costs the whole run.
@@ -859,6 +864,7 @@ async fn an_overflow_refusal_shrinks_the_transcript_and_retries() {
         });
 
         let mut a = Agent::new(picky.clone(), spec());
+        common::compacting(&mut a, None);
         fast_retry(&mut a);
         a.spec.context_window = window;
         let mut session = Session::from_messages(fat_history());

@@ -9,10 +9,14 @@
 //! `history.older` when it is not, which is not a conflict and cannot be
 //! expressed as one in a flat table.
 
+mod text;
+
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Result, bail};
 use crossterm::event::{KeyCode, KeyModifiers};
+
+use text::parse;
 
 /// Which of the two modal states the editor is in. Exclusive: exactly one
 /// holds at a time, which is why it is a value of its own rather than two
@@ -584,56 +588,6 @@ const BINDINGS: &[Binding] = &[
     },
 ];
 
-impl Keys {
-    /// What is bound right now, as lines. A rebindable system with no way to
-    /// see the ids is one nobody can rebind.
-    ///
-    /// No column says which mode a binding belongs to, because the ids do:
-    /// `normal.` is on every one of them that needed telling apart.
-    pub fn listing(&self) -> Vec<String> {
-        let width = BINDINGS.iter().map(|b| b.id.len()).max().unwrap_or(0);
-        BINDINGS
-            .iter()
-            .map(|b| {
-                let mut keys: Vec<String> = self
-                    .who
-                    .iter()
-                    .filter(|(_, id)| **id == b.id)
-                    .map(|((_, p), _)| show(*p))
-                    .collect();
-                keys.sort();
-                let note = if b.note.is_empty() {
-                    String::new()
-                } else {
-                    format!("{}{}", crate::store::icons::KEY_NOTE_SEP, b.note)
-                };
-                format!("{:width$}  {}{note}", b.id, keys.join(", "))
-            })
-            .collect()
-    }
-}
-
-// A press written the way a config would write it.
-fn show(p: Press) -> String {
-    let mut out = String::new();
-    for (m, name) in [
-        (KeyModifiers::CONTROL, "ctrl+"),
-        (KeyModifiers::ALT, "alt+"),
-        (KeyModifiers::SHIFT, "shift+"),
-    ] {
-        if p.mods.contains(m) {
-            out.push_str(name);
-        }
-    }
-    out.push_str(&match p.code {
-        KeyCode::Char(' ') => "space".into(),
-        KeyCode::Char(c) => c.to_string(),
-        KeyCode::F(n) => format!("f{n}"),
-        other => format!("{other:?}").to_lowercase(),
-    });
-    out
-}
-
 /// A key press, normalized.
 ///
 /// Shift folds into a bare character rather than being dropped: `A`,
@@ -688,70 +642,6 @@ pub fn bare_letter(key: &crossterm::event::KeyEvent) -> Option<char> {
         KeyCode::Char(c) if bare => Some(c),
         _ => None,
     }
-}
-
-fn named(word: &str) -> Option<KeyCode> {
-    Some(match word {
-        "enter" | "return" => KeyCode::Enter,
-        "tab" => KeyCode::Tab,
-        "backtab" => KeyCode::BackTab,
-        "backspace" => KeyCode::Backspace,
-        "delete" | "del" => KeyCode::Delete,
-        "insert" => KeyCode::Insert,
-        "esc" | "escape" => KeyCode::Esc,
-        "space" => KeyCode::Char(' '),
-        "up" => KeyCode::Up,
-        "down" => KeyCode::Down,
-        "left" => KeyCode::Left,
-        "right" => KeyCode::Right,
-        "home" => KeyCode::Home,
-        "end" => KeyCode::End,
-        "pageup" => KeyCode::PageUp,
-        "pagedown" => KeyCode::PageDown,
-        other => {
-            let n: u8 = other.strip_prefix('f')?.parse().ok()?;
-            if !(1..=12).contains(&n) {
-                return None;
-            }
-            KeyCode::F(n)
-        }
-    })
-}
-
-/// `ctrl+shift+y`, `alt+left`, `f5`, `?`, `D`.
-///
-/// Modifier names and key names are read case-insensitively; a bare
-/// character is not, because `D` and `d` are two presses.
-pub fn parse(spec: &str) -> Result<Press> {
-    let mut mods = KeyModifiers::NONE;
-    let mut rest = spec.trim();
-    // Split on the first `+` only while something follows it, so `+` and
-    // `ctrl++` name the key itself.
-    while let Some((head, tail)) = rest.split_once('+').filter(|(_, t)| !t.is_empty()) {
-        match head.to_ascii_lowercase().as_str() {
-            "ctrl" | "control" => mods |= KeyModifiers::CONTROL,
-            "alt" | "opt" | "option" | "meta" => mods |= KeyModifiers::ALT,
-            "shift" => mods |= KeyModifiers::SHIFT,
-            _ => break,
-        }
-        rest = tail;
-    }
-    if rest.is_empty() {
-        bail!("`{spec}` names no key");
-    }
-    let code = match named(&rest.to_ascii_lowercase()) {
-        Some(c) => c,
-        None => {
-            let mut chars = rest.chars();
-            match (chars.next(), chars.next()) {
-                (Some(c), None) => KeyCode::Char(c),
-                _ => {
-                    bail!("`{spec}` is not a key; try ctrl+w, alt+left, f5, or a single character")
-                }
-            }
-        }
-    };
-    Ok(Press::of(code, mods))
 }
 
 /// Every binding in force, resolved once at startup.
@@ -894,7 +784,7 @@ mod tests {
     }
     use super::*;
 
-    fn press(s: &str) -> Press {
+    pub(super) fn press(s: &str) -> Press {
         parse(s).unwrap()
     }
 
@@ -1279,14 +1169,6 @@ mod tests {
     }
 
     #[test]
-    fn a_capital_survives_the_round_trip_through_the_listing() {
-        // `/keys` prints presses with `show`, and what it prints has to be
-        // what a config can type back in.
-        for spec in ["D", "d", "ctrl+shift+t", "shift+enter", "$", "f5"] {
-            assert_eq!(press(&show(press(spec))), press(spec), "{spec}");
-        }
-    }
-    #[test]
     fn a_shift_riding_press_falls_back_to_the_bare_key() {
         // `ctrl+shift+w` is its own press only on the terminals that report
         // the shift; on the ones that swallow it, it is `ctrl+w`. The lookup
@@ -1324,43 +1206,12 @@ mod tests {
     }
 
     #[test]
-    fn a_plus_is_a_key_like_any_other() {
-        assert_eq!(press("+").code, KeyCode::Char('+'));
-        assert_eq!(
-            press("ctrl++"),
-            Press::of(KeyCode::Char('+'), KeyModifiers::CONTROL)
-        );
-    }
-
-    #[test]
-    fn nonsense_is_refused_with_a_hint() {
-        assert!(parse("").is_err());
-        assert!(parse("ctrl+").is_err());
-        assert!(parse("f13").is_err());
-        let e = parse("ctrl+nope").unwrap_err().to_string();
-        assert!(e.contains("try ctrl+w"), "{e}");
-    }
-
-    #[test]
     fn every_action_is_reachable() {
         // An action with no binding is dead code that reads as a feature.
         let k = Keys::default();
         let bound: std::collections::HashSet<_> = k.map.values().copied().collect();
         for b in BINDINGS {
             assert!(bound.contains(&b.action), "{} reaches nothing", b.id);
-        }
-    }
-    #[test]
-    fn the_listing_writes_keys_the_way_a_config_would() {
-        let rows = Keys::default().listing().join("\n");
-        assert!(rows.contains("edit.delete.word-back"), "{rows}");
-        // Round-trips: the keys shown can be pasted back into [keys].
-        for row in Keys::default().listing() {
-            let keys = row.split(crate::store::icons::KEY_NOTE_SEP).next().unwrap();
-            let keys = keys.split_once("  ").expect("id then keys").1;
-            for spec in keys.trim().split(", ") {
-                assert!(parse(spec).is_ok(), "cannot re-read `{spec}`");
-            }
         }
     }
 }

@@ -23,6 +23,7 @@ use crate::app::lane::Lane;
 use crate::input::commands::{Command, help};
 use crate::input::{Builtin, Intent, Step, WechatCmd, lines, step_for};
 use crate::store::config;
+use crate::store::listing::Listing;
 use crate::store::session::Store;
 use crate::store::settings::Settings;
 
@@ -100,23 +101,23 @@ impl App {
             // both of which only it can do, so it takes this before `run` is
             // reached. The arm stays so that a new intent has to say which side
             // of this line it falls on.
-            Intent::Builtin(Builtin::Loop(_)) => Step::Handled(Vec::new()),
+            Intent::Builtin(Builtin::Loop(_)) => Step::Handled(Listing::default()),
             Intent::Builtin(Builtin::Quit) => Step::Quit,
-            Intent::Builtin(Builtin::Help) => Step::Handled(help(&self.commands)),
+            Intent::Builtin(Builtin::Help) => Step::Handled(Listing::say(help(&self.commands))),
             Intent::Builtin(Builtin::Keys) => Step::Handled(self.keys.listing()),
-            Intent::Builtin(Builtin::Reload) => Step::Handled(self.reload()),
-            Intent::Builtin(Builtin::Status) => Step::Handled(self.status_lines()),
+            Intent::Builtin(Builtin::Reload) => Step::Handled(Listing::say(self.reload())),
+            Intent::Builtin(Builtin::Status) => Step::Handled(Listing::say(self.status_lines())),
             Intent::Builtin(Builtin::New) => {
                 self.fresh_session();
-                Step::Swap(Vec::new())
+                Step::Swap(Listing::default())
             }
             Intent::Builtin(Builtin::Resume(name)) => {
                 if name.is_empty() {
-                    Step::Handled(self.resume_listing())
+                    Step::Handled(Listing::say(self.resume_listing()))
                 } else {
                     match self.resume(&name) {
-                        Ok(said) => Step::Swap(said),
-                        Err(why) => Step::Handled(vec![why]),
+                        Ok(said) => Step::Swap(Listing::say(said)),
+                        Err(why) => Step::Handled(Listing::say([why])),
                     }
                 }
             }
@@ -133,23 +134,26 @@ impl App {
                 // now; a run in flight has the session away and saves it later.
                 match self.save() {
                     Ok(()) => lines(said),
-                    Err(e) => Step::Handled(vec![
+                    Err(e) => Step::Handled(Listing::say([
                         said,
                         format!("warning: the transcript was not saved: {e}"),
-                    ]),
+                    ])),
                 }
             }
             Intent::Builtin(Builtin::Compact(focus)) => {
                 Step::Compact(Some(focus).filter(|f| !f.is_empty()))
             }
-            Intent::Builtin(Builtin::Model(name)) => Step::Handled(if name.is_empty() {
-                self.listing()
-            } else {
-                self.switch(&name)
-            }),
+            Intent::Builtin(Builtin::Model(name)) => {
+                let rows = if name.is_empty() {
+                    self.listing()
+                } else {
+                    self.switch(&name)
+                };
+                Step::Handled(Listing::say(rows))
+            }
             Intent::Builtin(Builtin::Worktree(name)) => {
                 if name.is_empty() {
-                    Step::Handled(self.worktree_listing())
+                    Step::Handled(Listing::say(self.worktree_listing()))
                 } else {
                     // `rm` + a name removes the tree; a bare `rm` still names
                     // a tree of its own, so only the two-word form is the verb.
@@ -161,7 +165,7 @@ impl App {
                     };
                     match step {
                         Ok(step) => step,
-                        Err(why) => Step::Handled(vec![why]),
+                        Err(why) => Step::Handled(Listing::say([why])),
                     }
                 }
             }
@@ -375,7 +379,6 @@ mod tests {
             inbox,
             pending: Vec::new(),
             looping: None,
-            pending_round: None,
             run: crate::app::lane::Run::Idle,
             keys: std::sync::Arc::new(crate::store::keys::Keys::default()),
             commands: std::sync::Arc::new(Vec::new()),
@@ -468,7 +471,6 @@ mod tests {
             inbox,
             pending: Vec::new(),
             looping: None,
-            pending_round: None,
             run: crate::app::lane::Run::Idle,
             keys: keys.clone(),
             commands: commands.clone(),

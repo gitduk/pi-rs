@@ -8,6 +8,7 @@
 use super::App;
 use crate::input::Step;
 use crate::input::refused;
+use crate::store::listing::Listing;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -355,10 +356,10 @@ impl App {
         {
             self.current = i;
             self.in_force();
-            return Ok(Step::Handled(Vec::new()));
+            return Ok(Step::Handled(Listing::default()));
         }
         let said = self.open_lane(ws, (!tree.main).then(|| tree.name.clone()))?;
-        Ok(Step::Swap(said))
+        Ok(Step::Swap(Listing::say(said)))
     }
     // `/worktree rm <name>`: remove the checkout `name` refers to — its
     // directory, the branch it was on, and every transcript recorded under
@@ -407,7 +408,7 @@ impl App {
         if dropped > 0 {
             said.push(format!("{dropped} session record(s) dropped"));
         }
-        Ok(Step::Worktrees(said))
+        Ok(Step::Worktrees(Listing::say(said)))
     }
     // The checkouts `/worktree` can move to, the repository's own first, the
     // one the session is in marked.

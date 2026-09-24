@@ -6,6 +6,7 @@
 //! read back.
 
 pub mod line;
+pub mod listing;
 pub mod render;
 pub mod status;
 pub mod tty;

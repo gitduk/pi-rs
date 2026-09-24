@@ -107,6 +107,13 @@ Pinned under it is the bar: the checkouts of this repository, the one in front
 among them, and the model in force at the end of the row — a row too narrow for
 them all drops from the ends and marks the gap with an `…`.
 
+A slash command answers over the menu instead of into the scrollback: the rows
+are dismissed rather than kept, because what a command says is not part of the
+conversation the model reads. The line that asked for it is not echoed either —
+a row above an answer that never comes is a question standing alone. The answer
+reads the menu's own keys and nothing else, so typing over it takes it down on
+the way past and the letters land in the editor, where they were going.
+
 Keys are rebindable. `/keys` lists every action with what it is bound to; an
 id under `[keys]` in `~/.pi/settings.toml` replaces that action's defaults:
 

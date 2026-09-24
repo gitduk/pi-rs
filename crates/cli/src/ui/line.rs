@@ -73,8 +73,8 @@ pub async fn run(mut core: App, tx: UnboundedSender<Event>, rates: Rates) -> Res
             // There is no bar row to hold it here, and nothing repaints: a
             // flash is simply printed, like every other answer on this surface.
             Step::Flash(line) => println!("{line}"),
-            Step::Swap(lines) | Step::Handled(lines) | Step::Worktrees(lines) => {
-                for line in lines {
+            Step::Swap(rows) | Step::Handled(rows) | Step::Worktrees(rows) => {
+                for line in super::listing::lines(&rows) {
                     println!("{line}");
                 }
             }
@@ -130,7 +130,7 @@ async fn turn(
     let Some(mut session) = core.lane_mut().session.take() else {
         return Usage::default();
     };
-    session.send_prompt(prompt, typed, None);
+    session.send_prompt(prompt, typed);
     let ctx = core
         .lane_mut()
         .ctx

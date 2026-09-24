@@ -558,19 +558,24 @@ async fn main() -> Result<()> {
     // Resolved here rather than lazily: a name that does not exist should be a
     // startup error, not a surprise the first time history gets long enough to
     // compact.
-    if let Some(name) = &config.summarize_model
-        && name != &model_id
-    {
-        let summarizer = dial(&args, &config, name, config::Origin::Global)
-            .with_context(|| format!("summarize_model = \"{name}\""))?;
-        ag.summarizer = Some((summarizer.transport, summarizer.spec));
-    }
+    let writer = match &config.summarize_model {
+        Some(name) if name != &model_id => {
+            let summarizer = dial(&args, &config, name, config::Origin::Global)
+                .with_context(|| format!("summarize_model = \"{name}\""))?;
+            Some((summarizer.transport, summarizer.spec))
+        }
+        _ => None,
+    };
     if let Some(n) = config.retries {
         ag.retry.attempts = n;
     }
     if let Some(secs) = config.idle_timeout {
         ag.retry.idle = std::time::Duration::from_secs(secs.max(1));
     }
+    // Installed last: the compactor watches its own stream by the run's idle
+    // timeout, which the config just above has settled. Without one the
+    // transcript is never shrunk — see `agent::Compactor`.
+    ag.compactor = Arc::new(agent::Summarizing::new(writer, ag.retry.idle));
     ag.apply(agent::Setup {
         registry: std::mem::take(&mut resolved.registry),
         system: std::mem::take(&mut resolved.system),
@@ -639,7 +644,6 @@ async fn main() -> Result<()> {
                 pending: Vec::new(),
                 held_screens: Vec::new(),
                 looping: None,
-                pending_round: None,
                 run: lane::Run::Idle,
                 tally: Default::default(),
                 keys: key_map.clone(),
@@ -698,7 +702,7 @@ async fn main() -> Result<()> {
     // Always through the log: a loaded session whose view happens to be empty
     // still has history worth keeping, and `resume` handles an empty session.
     let mut session = carried;
-    session.send_prompt(prompt, None, None);
+    session.send_prompt(prompt, None);
     let outcome = ag.run(&mut session, &ctx, &tx).await;
 
     session.note_outcome(&outcome);
