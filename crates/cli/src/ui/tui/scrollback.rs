@@ -11,7 +11,7 @@ use super::THINKING;
 use super::row::Row;
 use super::screen;
 use super::tool::push_tool_row;
-use crate::app;
+use crate::core;
 use crate::store::icons;
 use crate::ui::render::{self, Paint};
 
@@ -505,7 +505,11 @@ pub(super) fn f_entry(entry: &LogEntry, paint: &Paint) -> Option<Vec<Row>> {
         LogEntry::Ask { ask, .. } => Some(Row::prompt(ask.shown_text(), paint)),
         LogEntry::Bash { run, .. } => {
             let mut rows = Row::prompt(run.shown_text(), paint);
-            rows.extend(app::bash::bash_said(&run.text).into_iter().map(Row::notice));
+            rows.extend(
+                core::bash::bash_said(&run.text)
+                    .into_iter()
+                    .map(Row::notice),
+            );
             Some(rows)
         }
         // Machine prose, not the user's line: rebuilt in the muted voice of

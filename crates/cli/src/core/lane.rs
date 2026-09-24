@@ -1,8 +1,8 @@
 //! One checkout being worked in: its run state machine, its transcript, and
-//! what the App does to the lanes it holds — opening one, removing one,
+//! what the Core does to the lanes it holds — opening one, removing one,
 //! starting a session in it, saving it, resuming another.
 //!
-//! The verbs stay on `App` because most of them read the store, the config and
+//! The verbs stay on `Core` because most of them read the store, the config and
 //! the settings it holds; a `Lanes` type would be those four passed down one
 //! at a time.
 
@@ -23,9 +23,9 @@ use tokio_util::sync::CancellationToken;
 
 use tools::Ctx;
 
-use super::App;
-use crate::app::looping::{Cut, Looping, Round};
-use crate::app::meter::{Snapshot, Tally};
+use super::Core;
+use crate::core::looping::{Cut, Looping, Round};
+use crate::core::meter::{Snapshot, Tally};
 use crate::input::commands::ago;
 use crate::input::{Rewound, refused};
 use crate::store::config;
@@ -457,7 +457,7 @@ impl Lane {
     }
 }
 
-impl App {
+impl Core {
     pub fn remove_lane(&mut self, at: usize) -> Lane {
         let lane = self.lanes.remove(at);
         if at < self.current || self.current >= self.lanes.len() {
@@ -623,12 +623,12 @@ impl App {
             effort: resolved.effort,
             subagent_deadline: resolved.subagent_deadline,
         });
-        crate::app::subagent::hang(&mut ag, home, &resolved.standing);
+        crate::core::subagent::hang(&mut ag, home, &resolved.standing);
 
         // Built, not cloned from the lane being left: a `Ctx`'s tables key on
         // absolute paths in one tree, and none of that lane's describe this.
         self.lanes.push(Lane {
-            token: crate::app::lane::next_token(),
+            token: crate::core::lane::next_token(),
             agent: std::sync::Arc::new(ag),
             session: Some(Session::default()),
             id: String::new(),
@@ -648,7 +648,7 @@ impl App {
             inbox,
             pending: Vec::new(),
             looping: None,
-            run: crate::app::lane::Run::Idle,
+            run: crate::core::lane::Run::Idle,
         });
         self.current = self.lanes.len() - 1;
         self.in_force();
@@ -733,7 +733,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use crate::app::tests::a_lane;
+    use crate::core::tests::a_lane;
     use llm::model::Pricing;
     use llm::stream::Usage;
 

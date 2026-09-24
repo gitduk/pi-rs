@@ -6,10 +6,10 @@
 
 use agent::Totals;
 
-use super::App;
+use super::Core;
 use crate::store::journal;
 
-impl App {
+impl Core {
     // What this run stands on, in one place: the tail of the system prompt as
     // the model receives it, the two files a person opens when a run goes
     // wrong, and what the session has spent. The instruction files are named

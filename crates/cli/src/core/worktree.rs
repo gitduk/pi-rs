@@ -5,7 +5,7 @@
 //! Git refuses to check one branch out twice, so the alternative to a branch
 //! per worktree is a detached HEAD — commits reachable only through the reflog.
 
-use super::App;
+use super::Core;
 use crate::input::Step;
 use crate::input::refused;
 use crate::store::listing::Listing;
@@ -319,7 +319,7 @@ pub fn remove(dir: &Path, name: &str) -> Result<Removed> {
     })
 }
 
-impl App {
+impl Core {
     // `/worktree <name>`: create or reuse a checkout of this repository and
     // move the session into it.
     //
@@ -467,7 +467,7 @@ fn test_repo() -> tempfile::TempDir {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::tests::{Recording, a_repl};
+    use crate::core::tests::{Recording, a_repl};
 
     fn repo() -> tempfile::TempDir {
         test_repo()
@@ -738,7 +738,7 @@ mod tests {
 
     #[test]
     fn remove_worktree_closes_idle_lane_in_same_run() {
-        let dir = crate::app::worktree::test_repo();
+        let dir = crate::core::worktree::test_repo();
         let transport = std::sync::Arc::new(Recording::default());
         let mut core = a_repl(dir.path(), transport, "model-a");
 
@@ -758,7 +758,7 @@ mod tests {
 
     #[test]
     fn remove_worktree_updates_current_index_when_earlier_lane_is_closed() {
-        let dir = crate::app::worktree::test_repo();
+        let dir = crate::core::worktree::test_repo();
         let transport = std::sync::Arc::new(Recording::default());
         let mut core = a_repl(dir.path(), transport, "model-a");
 
@@ -776,14 +776,14 @@ mod tests {
 
     #[test]
     fn remove_worktree_refuses_when_another_lane_is_running() {
-        let dir = crate::app::worktree::test_repo();
+        let dir = crate::core::worktree::test_repo();
         let transport = std::sync::Arc::new(Recording::default());
         let mut core = a_repl(dir.path(), transport, "model-a");
 
         core.enter_worktree("fix-tools").unwrap();
         assert_eq!(core.lanes.len(), 2);
 
-        core.lanes[1].run = crate::app::lane::Run::Running {
+        core.lanes[1].run = crate::core::lane::Run::Running {
             cancel: tokio_util::sync::CancellationToken::new(),
             steer: None,
             unsend: false,

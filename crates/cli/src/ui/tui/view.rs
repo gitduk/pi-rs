@@ -9,9 +9,9 @@ use agent::session::EntryId;
 use super::row::Row;
 use super::scrollback::{Folds, scrollback_from};
 use super::tool::RunTool;
-use crate::app::App;
-use crate::app::lane::Lane;
-use crate::app::meter::Snapshot;
+use crate::core::Core;
+use crate::core::lane::Lane;
+use crate::core::meter::Snapshot;
 use crate::input::Intent;
 use crate::ui::render::Paint;
 
@@ -34,7 +34,7 @@ pub struct View {
     // way out would ask a question that has already been answered.
     // A line waiting for the lane, or a round of the loop this lane is under.
     // The round is not an `Intent`: nothing the door can read produces one, and
-    // nothing in `App` answers one, so it lives with the queue it waits in.
+    // nothing in `Core` answers one, so it lives with the queue it waits in.
     pub(super) queued: Vec<Queued>,
     // Whether this lane's opening block has been built. A rebuild builds the
     // whole surface, banner not among it, and marks it drawn for that reason —
@@ -170,7 +170,7 @@ pub(super) fn front_view<'a>(views: &'a mut Views, lane: &Lane) -> &'a mut View 
 // Drop the screens of lanes that are gone. A lane can be removed without the
 // surface being told — `/worktree` removes one to leave it — so this reads the
 // lane list rather than tracking it.
-pub(super) fn prune_views(core: &App, views: &mut Views) {
+pub(super) fn prune_views(core: &Core, views: &mut Views) {
     views.retain(|token, _| core.lanes.iter().any(|lane| lane.token() == *token));
 }
 

@@ -17,8 +17,8 @@ use super::row::Row;
 use super::term::{Deafened, EXIT_GRACE, external_editor, scratch_file};
 use super::view::{Queued, front_view, tail_of, view_at};
 use super::{NO_TRANSCRIPT, Tui};
-use crate::app;
-use crate::app::looping::Cut;
+use crate::core;
+use crate::core::looping::Cut;
 use crate::input::Intent;
 use crate::store::listing::Listing;
 
@@ -157,7 +157,7 @@ impl Tui {
         let done = done.clone();
         tokio::spawn(async move {
             let out = guard(async move {
-                let out = app::bash::run_bash(&ctx, &command).await;
+                let out = core::bash::run_bash(&ctx, &command).await;
                 // Esc that stopped the `!` is a cancelled run too; `ran` says
                 // so instead of a success that spent nothing.
                 let ran = if ctx.cancel.is_cancelled() {
@@ -165,7 +165,7 @@ impl Tui {
                 } else {
                     Ok(llm::stream::Usage::default())
                 };
-                app::bash::record_bash(&mut carried, &command, out.text.clone());
+                core::bash::record_bash(&mut carried, &command, out.text.clone());
                 (carried, ran, out.screen())
             })
             .await;

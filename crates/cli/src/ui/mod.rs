@@ -2,7 +2,7 @@
 //! drawing helpers, what the terminal says about itself, and the full-screen
 //! surface.
 //!
-//! This is the top of the tree: it reads `app` and `store`, and nothing here is
+//! This is the top of the tree: it reads `core` and `store`, and nothing here is
 //! read back.
 
 pub mod line;

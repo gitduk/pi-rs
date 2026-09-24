@@ -1,12 +1,12 @@
-//! What `/settings`, `/reload` and `/model` do to the App: the config in
+//! What `/settings`, `/reload` and `/model` do to the Core: the config in
 //! force, the claims this session laid over the file, the model the lane is
 //! running on, and the rows the panel shows.
 //!
-//! The value itself is `store/settings.rs`; this is what the App does to it.
+//! The value itself is `store/settings.rs`; this is what the Core does to it.
 
 use serde::Deserialize;
 
-use super::App;
+use super::Core;
 use super::meter::summary;
 use super::status::{carries_reasoning, demotion};
 use crate::input::Step;
@@ -17,7 +17,7 @@ use crate::store::icons;
 use crate::store::listing::{Listing, Row};
 use crate::store::settings::{self, mask_secret};
 
-impl App {
+impl Core {
     /// Re-read the config and everything it decides.
     ///
     /// Whole or not at all: on any failure nothing changes, which is why the
@@ -84,7 +84,7 @@ impl App {
             effort: resolved.effort,
             subagent_deadline: resolved.subagent_deadline,
         });
-        crate::app::subagent::hang(ag, home, &resolved.standing);
+        crate::core::subagent::hang(ag, home, &resolved.standing);
         self.lane_mut().context = resolved.context;
         self.lane_mut().standing = resolved.standing;
         // A skill can appear between one turn and the next, so the table of
@@ -252,7 +252,7 @@ impl App {
         let standing = self.lane().standing.clone();
         let ag = std::sync::Arc::make_mut(&mut self.lane_mut().agent);
         ag.retarget(transport, spec);
-        crate::app::subagent::hang(ag, home, &standing);
+        crate::core::subagent::hang(ag, home, &standing);
     }
     // `/settings`. The panel is the whole surface: bare opens it, and anything
     // after the word is refused rather than half-remembered as a verb.
@@ -293,7 +293,7 @@ impl App {
     }
 }
 
-impl App {
+impl Core {
     /// Move this session to another model.
     ///
     /// The transcript comes with it. Reasoning blocks carry the model that
@@ -378,12 +378,12 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use crate::app::tests::a_lane;
+    use crate::core::tests::a_lane;
 
-    // A App whose file tree is the given TOML, enough for the `/settings`
+    // A Core whose file tree is the given TOML, enough for the `/settings`
     // surface to answer.
-    fn core_with_file(file: &str) -> crate::app::App {
-        crate::app::App {
+    fn core_with_file(file: &str) -> crate::core::Core {
+        crate::core::Core {
             store: crate::store::session::Store::new(
                 std::env::temp_dir().join("pi-settings-get-test"),
             ),
@@ -397,7 +397,7 @@ mod tests {
         }
     }
 
-    fn claimed_base_url() -> crate::app::App {
+    fn claimed_base_url() -> crate::core::Core {
         let mut core = core_with_file(r#"base_url = "http://127.0.0.1:7896""#);
         core.settings
             .claim("base_url", "http://127.0.0.1:7897")

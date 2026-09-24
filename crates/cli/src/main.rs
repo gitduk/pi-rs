@@ -9,7 +9,7 @@ use llm::request::Effort;
 use llm::transport::{Transport, anthropic::Anthropic, chat::ChatCompletions, openai::OpenAi};
 use tokio::sync::mpsc;
 
-use crate::app::{App, lane, subagent, wechat, worktree};
+use crate::core::{Core, lane, subagent, wechat, worktree};
 use crate::input::commands::{Command, commands};
 use crate::input::expand;
 use crate::store::icons;
@@ -18,7 +18,7 @@ use crate::store::{config, journal, session};
 use crate::ui::{line, render, tui};
 use agent::context;
 
-mod app;
+mod core;
 mod input;
 mod store;
 mod ui;
@@ -317,7 +317,7 @@ pub struct Resolved {
     pub effort: Effort,
     pub subagent_deadline: Option<std::time::Duration>,
     pub keys: crate::store::keys::Keys,
-    /// The built-ins plus one command per skill. Here rather than in the App
+    /// The built-ins plus one command per skill. Here rather than in the Core
     /// because a skill discovered at reload has to reach the prompt the same
     /// way everything else the config decides does.
     pub commands: Vec<Command>,
@@ -465,7 +465,7 @@ fn paint(
     theme: std::sync::Arc<crate::store::theme::Theme>,
     done: Vec<crate::store::status::Segment>,
     model: String,
-    rates: crate::app::meter::Rates,
+    rates: crate::core::meter::Rates,
     worktree: Option<String>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -552,7 +552,7 @@ async fn main() -> Result<()> {
     // pause `Lists` exists to avoid.
     let worktree = worktree::current(&root);
     let model_id = dialled.spec.model.clone();
-    let rates = crate::app::meter::Rates::new(dialled.spec.pricing);
+    let rates = crate::core::meter::Rates::new(dialled.spec.pricing);
 
     let mut ag = agent::Agent::new(dialled.transport, dialled.spec);
     // Resolved here rather than lazily: a name that does not exist should be a
@@ -608,14 +608,14 @@ async fn main() -> Result<()> {
     let resumed = carried.context().len();
 
     let Some(prompt) = prompt else {
-        // Before `id` moves into the App: the context borrows it to name the
+        // Before `id` moves into the Core: the context borrows it to name the
         // session its spills belong to.
         // Held on the lane as well as in force: a switch back to this tree has
         // to put its own key map and command table back, not the last one's.
         let commands = std::sync::Arc::new(resolved.commands);
         let ctx = tools::Ctx::new(workspace).with_session(&id);
         let (events, inbox) = lane::Lane::channel();
-        let core = App {
+        let core = Core {
             store,
             keys: key_map.clone(),
             config: config.clone(),

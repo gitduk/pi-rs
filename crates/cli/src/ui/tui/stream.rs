@@ -8,7 +8,7 @@ use super::scrollback::{Piece, ScrollbackRows, absorb_growth, f_entry};
 use super::tool::{self, RunTool, push_tool_row};
 use super::view::{StreamKind, Surface, View, snapshot};
 use super::{BAR_H, FLASH, Ui};
-use crate::app::lane::Lane;
+use crate::core::lane::Lane;
 use crate::store::icons;
 use crate::ui::render;
 use crate::ui::status;

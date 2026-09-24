@@ -24,7 +24,7 @@ pub struct Bashed {
 /// Run what `!` named. Same runner, workspace and timeout as the model's own
 /// `bash` tool; `ctx` carries the token that lets Esc stop it.
 ///
-/// Free of `App` so the surface can spawn it: holding `&mut App` across the
+/// Free of `Core` so the surface can spawn it: holding `&mut Core` across the
 /// await pinned the whole loop, which is what left the `!` path with an event
 /// loop of its own. Recording the result is the caller's, and needs no await.
 pub async fn run_bash(ctx: &tools::Ctx, command: &str) -> Bashed {

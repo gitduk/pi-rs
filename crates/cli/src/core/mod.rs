@@ -1,10 +1,10 @@
 //! The state a session owns, and the verbs that move it.
 //!
-//! `App` is the root — the store, the config in force, the key map, the command
+//! `Core` is the root — the store, the config in force, the key map, the command
 //! table, the settings, the checkouts open in this run — and what outlives a
 //! turn lives here or on a lane and nowhere else. Every verb lives with the
 //! state it moves: `settings.rs` for the config and its panel, `lane.rs` for
-//! the checkouts (all of them in one file: an `App` field holds the list, a
+//! the checkouts (all of them in one file: a `Core` field holds the list, a
 //! `Lane` one of them), `status.rs` for what a
 //! reader is shown, `meter.rs` for what it cost. The jobs hang off the side:
 //! `bash.rs`, `looping.rs`, `subagent.rs`, `wechat.rs`.
@@ -19,7 +19,7 @@ pub mod subagent;
 pub mod wechat;
 pub mod worktree;
 
-use crate::app::lane::Lane;
+use crate::core::lane::Lane;
 use crate::input::commands::{Command, help};
 use crate::input::{Builtin, Intent, Step, WechatCmd, lines, step_for};
 use crate::store::config;
@@ -32,7 +32,7 @@ use crate::store::settings::Settings;
 ///
 /// Both surfaces hold one and differ only in how they read a line and where
 /// they put what comes back.
-pub struct App {
+pub struct Core {
     pub store: Store,
     /// Held so `/keys` can show what is actually in force, overrides included.
     pub keys: std::sync::Arc<crate::store::keys::Keys>,
@@ -59,7 +59,7 @@ pub struct App {
     pub current: usize,
 }
 
-impl App {
+impl Core {
     // Put the lane in front's key map and command table in force. A skill
     // belongs to one tree and not another, and so does a rebound key;
     // leaving the last lane's in place had this one answering to another
@@ -79,7 +79,7 @@ impl App {
     // vary — a `/worktree` moves one, a `/model` the other — and the rest
     // never does.
     fn home(&self, root: std::path::PathBuf, model: String) -> std::sync::Arc<dyn agent::Home> {
-        crate::app::subagent::Filed::armed(self.store.clone(), root, model)
+        crate::core::subagent::Filed::armed(self.store.clone(), root, model)
     }
 
     pub fn lane_mut(&mut self) -> &mut Lane {
@@ -87,7 +87,7 @@ impl App {
     }
 }
 
-impl App {
+impl Core {
     /// Carry out an intent, or say what the surface must do to carry it out.
     ///
     /// Exhaustive with no catch-all, like `Intent::fate`: the arms a surface
@@ -354,12 +354,12 @@ mod tests {
     }
 
     // One lane that has spent nothing, enough for `/settings` to answer.
-    pub(super) fn a_lane(name: &str) -> crate::app::lane::Lane {
+    pub(super) fn a_lane(name: &str) -> crate::core::lane::Lane {
         let dir = std::env::temp_dir();
         let ws = tools::Workspace::new(&dir).expect("a workspace");
-        let (events, inbox) = crate::app::lane::Lane::channel();
-        crate::app::lane::Lane {
-            token: crate::app::lane::next_token(),
+        let (events, inbox) = crate::core::lane::Lane::channel();
+        crate::core::lane::Lane {
+            token: crate::core::lane::next_token(),
             agent: std::sync::Arc::new(agent::Agent::new(
                 std::sync::Arc::new(Recording::default()),
                 test_spec("m"),
@@ -379,7 +379,7 @@ mod tests {
             inbox,
             pending: Vec::new(),
             looping: None,
-            run: crate::app::lane::Run::Idle,
+            run: crate::core::lane::Run::Idle,
             keys: std::sync::Arc::new(crate::store::keys::Keys::default()),
             commands: std::sync::Arc::new(Vec::new()),
         }
@@ -436,13 +436,13 @@ mod tests {
         root: &std::path::Path,
         transport: std::sync::Arc<Recording>,
         model: &str,
-    ) -> crate::app::App {
+    ) -> crate::core::Core {
         let ws = tools::Workspace::new(root).unwrap();
         let mut agent = agent::Agent::new(transport, test_spec(model));
         let store = crate::store::session::Store::new(root.join("state"));
-        crate::app::subagent::hang(
+        crate::core::subagent::hang(
             &mut agent,
-            crate::app::subagent::Filed::armed(
+            crate::core::subagent::Filed::armed(
                 crate::store::session::Store::new(root.join("state")),
                 root.to_path_buf(),
                 model.into(),
@@ -451,10 +451,10 @@ mod tests {
         );
 
         let keys = std::sync::Arc::new(crate::store::keys::Keys::default());
-        let commands = std::sync::Arc::new(Vec::<crate::app::Command>::new());
-        let (events, inbox) = crate::app::lane::Lane::channel();
-        let lane = crate::app::lane::Lane {
-            token: crate::app::lane::next_token(),
+        let commands = std::sync::Arc::new(Vec::<crate::core::Command>::new());
+        let (events, inbox) = crate::core::lane::Lane::channel();
+        let lane = crate::core::lane::Lane {
+            token: crate::core::lane::next_token(),
             agent: std::sync::Arc::new(agent),
             session: Some(agent::session::Session::default()),
             id: "s1".into(),
@@ -471,11 +471,11 @@ mod tests {
             inbox,
             pending: Vec::new(),
             looping: None,
-            run: crate::app::lane::Run::Idle,
+            run: crate::core::lane::Run::Idle,
             keys: keys.clone(),
             commands: commands.clone(),
         };
-        crate::app::App {
+        crate::core::Core {
             store,
             keys,
             config: std::sync::Arc::new(crate::store::config::Config::default()),
@@ -488,7 +488,7 @@ mod tests {
     }
 
     // What the child asked for, once.
-    async fn run_the_child(core: &crate::app::App) {
+    async fn run_the_child(core: &crate::core::Core) {
         let subagent = core
             .lane()
             .agent

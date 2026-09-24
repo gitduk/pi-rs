@@ -6,8 +6,8 @@ use super::row::Row;
 use super::view::View;
 use super::vim::{Typed, double_tap};
 use super::{Asked, Deed, Ui};
-use crate::app;
-use crate::app::lane::Lane;
+use crate::core;
+use crate::core::lane::Lane;
 use crate::input::Builtin;
 use crate::input::commands::{Candidate, Choice};
 use crate::input::{self, Intent};
@@ -684,7 +684,7 @@ impl Lists {
     // name. Empty outside a git repository, where there is nothing to offer.
     pub(super) fn worktrees(&self) -> &[Choice] {
         self.worktrees.get_or_init(|| {
-            app::worktree::list(&self.workspace)
+            core::worktree::list(&self.workspace)
                 .map(|trees| {
                     trees
                         .into_iter()
