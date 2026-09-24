@@ -570,7 +570,6 @@ impl Transport for OpenAi {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::request::Effort;
 
     fn spec() -> ModelSpec {
         ModelSpec {
@@ -584,41 +583,6 @@ mod tests {
 
     fn body(req: Request) -> Value {
         build_body(&spec(), &req)
-    }
-
-    // Scaffolding, not an assertion: dumps a request body to `$PI_SNAP` for
-    // eyeballing against a live endpoint, and is a no-op without it.
-    #[test]
-    fn tmp_dump_live_body() {
-        let Ok(dir) = std::env::var("PI_SNAP") else {
-            return;
-        };
-        let model = std::env::var("PI_MODEL").unwrap();
-        let mut s = spec();
-        s.model = model;
-        s.max_output_tokens = 128;
-        let req = Request {
-            system: Some("You are terse.".into()),
-            messages: vec![Message::user(
-                "Read the file a.rs using the read tool, then say done.",
-            )],
-            tools: vec![crate::request::ToolDef {
-                name: "read".into(),
-                description: "Read a file from disk".into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": { "path": { "type": "string" } },
-                    "required": ["path"],
-                }),
-            }],
-            effort: Effort::Off,
-            ..Default::default()
-        };
-        std::fs::write(
-            format!("{dir}/live_body.json"),
-            serde_json::to_vec_pretty(&build_body(&s, &req)).unwrap(),
-        )
-        .unwrap();
     }
 
     // ─── decoding ────────────────────────────────────────────────────────
