@@ -20,6 +20,9 @@ cargo build --release          # target/release/pi
 Nothing to install and nothing to configure at build time. There is no
 `PATH` entry created for you; symlink it where you want it.
 
+`cargo test` runs everything; `cargo clippy --all-targets` is expected to
+be silent.
+
 ## Release
 
 Releases are built and published locally, not on CI. Git has no `post-push`
@@ -401,22 +404,7 @@ since you sent it, which is the figure you can act on — while `/status` counts
 the session behind it; one tally feeds both, so neither can drift from the
 other.
 
-## Layout
-
-| crate | | |
-|---|---|---|
-| `scripts` | 0.3k | user-defined tools: a script in a directory is a tool |
-| `skills` | 0.5k | skills: instructions a run can load on demand |
-| `subagent` | 0.5k | the subagent: a whole agent loop behind one tool call |
-| `llm` | 2.7k | messages, wires, streams, faults, estimates |
-| `agent` | 3.9k | the turn loop, compaction, the session |
-| `tools` | 5.0k | the tool set, the tiered workspace gate, and the tree-sitter outlines an edit anchors on |
-| `pi` | 6.2k | terminal, config, sessions, the journal |
-
-~18k lines, 412 tests. `cargo test` runs everything; `cargo clippy
---all-targets` is expected to be silent.
-
 ## Not built
 
-MCP, subagents, LSP, message-level cache breakpoints, session branching
+MCP, LSP, message-level cache breakpoints, session branching
 (the log carries ids for it; nothing uses them yet), `Ctrl-Z` suspend.
