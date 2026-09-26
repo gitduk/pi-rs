@@ -23,6 +23,12 @@ pub fn session_dir(workspace: &Path, id: &str) -> Option<PathBuf> {
     sessions().map(|s| s.join(key_of(workspace)).join(file_stem(id)))
 }
 
+/// The journal inside that directory. Named here for the same reason: `cli`
+/// writes it, the agent points at it, and the sweep looks for it by name — one
+/// of the three renaming it alone would leave the other two addressing a file
+/// that is not there.
+pub const JOURNAL_FILE: &str = "journal.jsonl";
+
 /// Write bytes where only this user can read them, whole or not at all.
 ///
 /// Under a temp name and renamed, so the final path never carries the wrong

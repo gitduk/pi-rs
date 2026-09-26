@@ -3,6 +3,7 @@
 
 use super::row::{self, PendingTool, Row};
 use crate::store::icons;
+use crate::store::text::named;
 
 // A tool call still running. Its line is drawn by the summary row it will fold
 // into when there is one, and by the live block when there is not.
@@ -19,7 +20,7 @@ pub(super) struct RunTool {
 // name and leading argument follow it.
 fn tool_row(frame: usize, name: &str, summary: &str) -> String {
     let frame = icons::SPINNER_FRAMES[frame % icons::SPINNER_FRAMES.len()];
-    format!("{frame} {}", row::named(name, summary))
+    format!("{frame} {}", crate::store::text::named(name, summary))
 }
 
 // The line a call holds in the live block: the frame while it runs, and the
@@ -41,7 +42,7 @@ pub(super) fn pending_line(spinner: usize, t: &RunTool) -> String {
             } else {
                 icons::FAIL_MARK
             },
-            row::named(&t.name, &t.summary)
+            named(&t.name, &t.summary)
         ),
         None => tool_row(spinner, &t.name, &t.summary),
     }

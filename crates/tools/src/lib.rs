@@ -404,6 +404,13 @@ impl Ctx {
         self
     }
 
+    /// Where over-long outputs land. A child context keeps its parent's: the
+    /// two have to agree, or a `spill:<ns>/<n>` the child prints names a file
+    /// its caller cannot resolve.
+    pub fn spill_root(&self) -> &std::path::Path {
+        &self.spill_root
+    }
+
     /// The session this context runs in, when it has one.
     pub fn session(&self) -> Option<&str> {
         self.session.as_deref()
@@ -467,8 +474,8 @@ impl Ctx {
         self
     }
 
-    /// Hold this while mutating `path`. Keyed on the resolved path, so two
-    /// spellings of one file serialize together.
+    /// Hold this while mutating `path`. Keyed on the resolved path, not the
+    /// inode: a hard link is cut by the rename every write does (see `write`).
     pub async fn lock_file(&self, path: &std::path::Path) -> tokio::sync::OwnedMutexGuard<()> {
         let lock = {
             let mut map = self.file_locks.lock().expect("file locks poisoned");

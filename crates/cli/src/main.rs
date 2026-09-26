@@ -15,7 +15,7 @@ use crate::input::expand;
 use crate::store::icons;
 use crate::store::settings::Settings;
 use crate::store::{config, journal, session};
-use crate::ui::{line, render, tui};
+use crate::ui::{render, tui};
 use agent::context;
 
 mod core;
@@ -114,7 +114,7 @@ pub struct Args {
     /// Print the version and exit.
     #[arg(short = 'v', long, action = clap::ArgAction::Version)]
     version: Option<bool>,
-    /// The prompt. Reads stdin when omitted.
+    /// The prompt. Reads stdin when omitted. Runs once and keeps nothing.
     prompt: Option<String>,
 
     /// Defaults and locally-defined models. Defaults to ~/.pi/settings.toml.
@@ -165,11 +165,6 @@ pub struct Args {
     /// Replace the built-in system prompt.
     #[arg(long)]
     system: Option<String>,
-
-    /// Keep the conversation open instead of running once. Implied by a bare
-    /// `pi` at a terminal.
-    #[arg(short, long)]
-    interactive: bool,
 
     /// Ignore the skills on disk.
     #[arg(long)]
@@ -285,14 +280,37 @@ pub fn dial(
     })
 }
 
+/// The summarizer's own connection, when the config names a model for it: a
+/// second dial, because a summary is a model call like any other and a cheaper
+/// model for it is the point of the setting.
+pub fn summary_writer(
+    args: &Args,
+    config: &config::Config,
+    working: &str,
+) -> Result<Option<(Arc<dyn Transport>, ModelSpec)>> {
+    match &config.summarize_model {
+        Some(name) if name != working => {
+            let summarizer = dial(args, config, name, config::Origin::Global)
+                .with_context(|| format!("summarize_model = \"{name}\""))?;
+            Ok(Some((summarizer.transport, summarizer.spec)))
+        }
+        _ => Ok(None),
+    }
+}
+
 // The prompt, or None when the run should ask for one.
 fn read_prompt(args: &Args) -> Result<Option<String>> {
     if let Some(p) = &args.prompt {
+        // An ask with no text in it is a message the provider refuses, and its
+        // wording helps nobody. Said here, where the prompt still can be.
+        if p.trim().is_empty() {
+            bail!("the prompt is empty — say what to do");
+        }
         return Ok(Some(p.clone()));
     }
     // A bare `pi` at a terminal means "talk to me"; piped in, it means the
-    // prompt is on stdin.
-    if args.interactive || std::io::stdin().is_terminal() {
+    // prompt is on stdin. Interactive needs a terminal, which `main` checks.
+    if std::io::stdin().is_terminal() {
         return Ok(None);
     }
     let mut body = String::new();
@@ -305,22 +323,22 @@ fn read_prompt(args: &Args) -> Result<Option<String>> {
 
 /// Everything the config and the workspace decide, as opposed to what the
 /// command line fixed for the whole run. `/reload` recomputes exactly this.
+#[derive(Clone)]
 pub struct Resolved {
-    pub registry: tools::Registry,
-    pub system: String,
-    /// The tail of `system` that belongs to the run rather than to the
+    /// What the agent runs on: the tools, the prompt, the ceiling, the effort.
+    /// A subagent derives its own from this one.
+    pub brief: std::sync::Arc<agent::Briefing>,
+    /// The tail of the prompt that belongs to the run rather than to the
     /// assistant: the workspace anchor, what the run is, and the instruction
     /// files. Kept apart because the subagent has its own prompt but the same
     /// tree, the same machine and the same tier.
     pub standing: std::sync::Arc<str>,
-    pub tier: tools::Tier,
-    pub effort: Effort,
-    pub subagent_deadline: Option<std::time::Duration>,
-    pub keys: crate::store::keys::Keys,
+    /// The key table this tree asked for, defaults included.
+    pub keys: std::sync::Arc<crate::store::keys::Keys>,
     /// The built-ins plus one command per skill. Here rather than in the Core
     /// because a skill discovered at reload has to reach the prompt the same
     /// way everything else the config decides does.
-    pub commands: Vec<Command>,
+    pub commands: std::sync::Arc<Vec<Command>>,
     /// Worth saying once, at startup and at each reload.
     pub notes: Vec<String>,
     /// The instruction files folded into the system prompt, named as a person
@@ -442,34 +460,62 @@ pub fn resolve(
     system.push_str(&standing);
 
     Ok(Resolved {
-        registry,
-        system,
+        brief: std::sync::Arc::new(agent::Briefing {
+            registry,
+            system,
+            effort,
+            approver: std::sync::Arc::new(agent::Ceiling(tier)),
+            subagent_deadline: config
+                .subagent_deadline
+                .map(|s| std::time::Duration::from_secs(s.max(1))),
+        }),
         standing: standing.into(),
-        tier,
-        effort,
-        subagent_deadline: config
-            .subagent_deadline
-            .map(|s| std::time::Duration::from_secs(s.max(1))),
-        keys: config.key_map()?,
-        commands,
+        keys: std::sync::Arc::new(config.key_map()?),
+        commands: std::sync::Arc::new(commands),
         notes,
         context,
     })
 }
 
-// Renders events by printing them, for every surface that is not the terminal
-// one. Its own task so a slow write never holds the run up.
+// Conventional exit code for a process killed by SIGINT.
+const INTERRUPTED: i32 = 130;
+
+// First Ctrl-C cancels the run; a second one leaves. The terminal's own policy,
+// which is why it sits here rather than in the agent: it writes to stderr and
+// ends the process.
+//
+// `tokio::signal::ctrl_c` replaces SIGINT's default action for the whole
+// process and never restores it, so a handler that only fires once leaves no
+// way out at all — the second press has to do the killing itself.
+fn cancel_on_interrupt() -> tokio_util::sync::CancellationToken {
+    let token = tokio_util::sync::CancellationToken::new();
+    let child = token.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_err() {
+            return;
+        }
+        child.cancel();
+        eprintln!("\ninterrupting — press Ctrl-C again to quit");
+        if tokio::signal::ctrl_c().await.is_ok() {
+            std::process::exit(INTERRUPTED);
+        }
+    });
+    token
+}
+
+// Renders a one-shot run's events by printing them. Its own task so a slow
+// write never holds the run up.
 fn paint(
     mut rx: mpsc::UnboundedReceiver<agent::Event>,
     quiet: bool,
     theme: std::sync::Arc<crate::store::theme::Theme>,
     done: Vec<crate::store::status::Segment>,
     model: String,
-    rates: crate::core::meter::Rates,
+    pricing: llm::model::Pricing,
     worktree: Option<String>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut r = render::Renderer::new(quiet, theme, done, model, rates, worktree);
+        let mut r = render::Renderer::new(quiet, theme, done, model, pricing, worktree);
         while let Some(event) = rx.recv().await {
             r.on(event);
         }
@@ -508,24 +554,24 @@ async fn main() -> Result<()> {
         _ => None,
     };
 
-    // A resumed session keeps its journal too, so the whole of it reads as one
-    // file however many runs it took.
+    // What this run keeps: an interactive session, or one the user named with
+    // `-c`/`--resume`. A one-shot prompt leaves nothing behind, not even a log.
+    let keeps = prior.is_some() || prompt.is_none();
+
+    // The one surface needs the terminal at both ends: keys come in one side,
+    // the repaint goes out the other. Asked before the journal and the session
+    // directory are made, so a run that cannot start leaves neither behind.
+    if prompt.is_none() && !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
+        bail!(
+            "interactive mode needs a terminal on both stdin and stdout \
+             — give a prompt to run once instead"
+        );
+    }
+
     let id = prior
         .as_ref()
         .map(|p| p.id.clone())
         .unwrap_or_else(session::new_id);
-    journal::install(
-        &store.journal_path(workspace.root(), &id),
-        journal::level_from_env(),
-    );
-    journal::opening(
-        &id,
-        &args,
-        &config,
-        &project,
-        workspace.root(),
-        prior.as_ref(),
-    );
 
     let Some((named, named_by)) = config.model(
         &project,
@@ -536,7 +582,7 @@ async fn main() -> Result<()> {
     };
     let dialled = dial(&args, &config, &named, named_by)?;
 
-    let mut resolved = resolve(&args, &workspace, &config, &project, &BTreeMap::new())?;
+    let resolved = resolve(&args, &workspace, &config, &project, &BTreeMap::new())?;
     // Ahead of the quiet check on purpose: see `Dialled::warning`.
     if let Some(warning) = &dialled.warning {
         eprintln!("\x1b[{}m{warning}\x1b[0m", config.theme.muted.codes());
@@ -552,48 +598,45 @@ async fn main() -> Result<()> {
     // pause `Lists` exists to avoid.
     let worktree = worktree::current(&root);
     let model_id = dialled.spec.model.clone();
-    let rates = crate::core::meter::Rates::new(dialled.spec.pricing);
 
     let mut ag = agent::Agent::new(dialled.transport, dialled.spec);
     // Resolved here rather than lazily: a name that does not exist should be a
     // startup error, not a surprise the first time history gets long enough to
     // compact.
-    let writer = match &config.summarize_model {
-        Some(name) if name != &model_id => {
-            let summarizer = dial(&args, &config, name, config::Origin::Global)
-                .with_context(|| format!("summarize_model = \"{name}\""))?;
-            Some((summarizer.transport, summarizer.spec))
-        }
-        _ => None,
-    };
-    if let Some(n) = config.retries {
-        ag.retry.attempts = n;
+    let writer = summary_writer(&args, &config, &model_id)?;
+    // A resumed session keeps its journal too, so the whole of it reads as one
+    // file however many runs it took. Installed after every step that can
+    // refuse to start and before the run: a start that refuses leaves no
+    // session directory behind, and one that goes ahead has its log from the
+    // first turn.
+    if keeps {
+        journal::install(
+            &store.journal_path(workspace.root(), &id),
+            journal::level_from_env(),
+        );
+        journal::opening(
+            &id,
+            &args,
+            &config,
+            &project,
+            workspace.root(),
+            prior.as_ref(),
+        );
     }
-    if let Some(secs) = config.idle_timeout {
-        ag.retry.idle = std::time::Duration::from_secs(secs.max(1));
-    }
+    let retry = config.retry();
     // Installed last: the compactor watches its own stream by the run's idle
-    // timeout, which the config just above has settled. Without one the
-    // transcript is never shrunk — see `agent::Compactor`.
-    ag.compactor = Arc::new(agent::Summarizing::new(writer, ag.retry.idle));
-    ag.apply(agent::Setup {
-        registry: std::mem::take(&mut resolved.registry),
-        system: std::mem::take(&mut resolved.system),
-        tier: resolved.tier,
-        effort: resolved.effort,
-        subagent_deadline: resolved.subagent_deadline,
-    });
-    subagent::hang(
-        &mut ag,
-        subagent::Filed::armed(store.clone(), root.clone(), model_id.clone()),
-        &resolved.standing,
-    );
-    // After `Agent::apply`, which has taken what the agent needs: this takes a
-    // field out of what is left.
-    let key_map = std::sync::Arc::new(resolved.keys);
-
-    let (tx, rx) = mpsc::unbounded_channel();
-    let quiet = args.quiet;
+    // timeout, which `Config::retry` just settled. Without one the transcript
+    // is never shrunk — see `agent::Compactor`.
+    ag.compactor = Arc::new(agent::Summarizing::new(writer, retry.idle));
+    let home = if keeps {
+        subagent::Filed::armed(store.clone(), root.clone(), model_id.clone())
+    } else {
+        subagent::nowhere()
+    };
+    // Armed here rather than field by field: the brief the lane keeps and the
+    // one the agent runs on are the same value, subagent tool and all.
+    let resolved = lane::arm(&mut ag, Arc::new(resolved), home, retry);
+    let key_map = resolved.keys.clone();
 
     // An explicit --name renames a resumed session; otherwise it keeps its own.
     let name = args
@@ -609,70 +652,36 @@ async fn main() -> Result<()> {
 
     let Some(prompt) = prompt else {
         // Before `id` moves into the Core: the context borrows it to name the
-        // session its spills belong to.
-        // Held on the lane as well as in force: a switch back to this tree has
-        // to put its own key map and command table back, not the last one's.
-        let commands = std::sync::Arc::new(resolved.commands);
+        // session its spills belong to. `commands` is what the Core shows for
+        // the front lane; the lane's own copy travels in `resolved`.
+        let commands = resolved.commands.clone();
         let ctx = tools::Ctx::new(workspace).with_session(&id);
-        let (events, inbox) = lane::Lane::channel();
+        let mut first = lane::Lane::opened(lane::Opening {
+            id,
+            created,
+            name,
+            worktree,
+            ..lane::Opening::new(Arc::new(ag), resolved, ctx)
+        });
+        first.return_session(carried);
         let core = Core {
             store,
             keys: key_map.clone(),
             config: config.clone(),
             args: args.clone(),
-            commands: commands.clone(),
+            commands,
             settings: Settings::new(
                 config::load_tree(args.config.as_deref())
                     .unwrap_or_else(|_| toml::Value::Table(Default::default())),
             ),
             current: 0,
-            lanes: vec![lane::Lane {
-                token: lane::next_token(),
-                agent: std::sync::Arc::new(ag),
-                session: Some(carried),
-                id,
-                created,
-                name,
-                totals: agent::Totals::default(),
-
-                context: resolved.context,
-                standing: resolved.standing,
-                worktree: worktree.clone(),
-                ctx,
-                events,
-                inbox,
-                pending: Vec::new(),
-                held_screens: Vec::new(),
-                looping: None,
-                run: lane::Run::Idle,
-                tally: Default::default(),
-                keys: key_map.clone(),
-                commands,
-            }],
+            lanes: vec![first],
         };
-        // The live region needs the terminal at both ends: keys come in one
-        // side and the repaint goes out the other. Missing either, there is
-        // nothing to hold still, and printing a line at a time is right.
-        if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-            let out = tui::Tui::new(core, key_map, wechat::Bridge::new())?
-                .run()
-                .await;
-            // Subagents handed their transcripts to a background save; wait
-            // for those to land before the runtime goes with them.
-            subagent::flush().await;
-            return out;
-        }
-        let painter = paint(
-            rx,
-            quiet,
-            std::sync::Arc::new(config.theme.clone()),
-            config.status.done.clone(),
-            model_id.clone(),
-            rates.clone(),
-            worktree.clone(),
-        );
-        let out = line::run(core, tx, rates).await;
-        let _ = painter.await;
+        let out = tui::Tui::new(core, key_map, wechat::Bridge::new())?
+            .run()
+            .await;
+        // Subagents handed their transcripts to a background save; wait
+        // for those to land before the runtime goes with them.
         subagent::flush().await;
         return out;
     };
@@ -686,24 +695,30 @@ async fn main() -> Result<()> {
         None => prompt,
     };
 
+    // Built here, past the interactive return above: the one-shot path is the
+    // only one that prints what a run emits.
+    let (tx, rx) = mpsc::unbounded_channel();
+    let quiet = args.quiet;
     let painter = paint(
         rx,
         quiet,
         std::sync::Arc::new(config.theme.clone()),
         config.status.done.clone(),
         model_id.clone(),
-        rates,
+        ag.spec().pricing,
         worktree.clone(),
     );
-    let ctx = tools::Ctx::new(workspace)
-        .with_session(&id)
-        .with_cancel(agent::cancel_on_interrupt());
+    let mut ctx = tools::Ctx::new(workspace).with_cancel(cancel_on_interrupt());
+    // Without a session the spills land in the temp dir rather than `~/.pi`.
+    if keeps {
+        ctx = ctx.with_session(&id);
+    }
 
     // Always through the log: a loaded session whose view happens to be empty
     // still has history worth keeping, and `resume` handles an empty session.
     let mut session = carried;
     session.send_prompt(prompt, None);
-    let outcome = ag.run(&mut session, &ctx, &tx).await;
+    let outcome = ag.run(&mut session, &ctx, &tx, &retry).await;
 
     session.note_outcome(&outcome);
 
@@ -711,21 +726,23 @@ async fn main() -> Result<()> {
     let _ = painter.await;
 
     // Saved whichever way the run ended: an aborted turn is exactly the one
-    // worth resuming.
-    match store.save(&id, &root, &model_id, name.as_deref(), created, &session) {
-        Ok(_) if !args.quiet => {
-            let called = name.as_deref().map_or(String::new(), |n| format!(" “{n}”"));
-            let carried = if resumed > 0 {
-                format!("{}resumed {resumed} messages", icons::PART_SEP)
-            } else {
-                String::new()
-            };
-            eprintln!(
-                "session {id}{called}{carried} — continue with `pi -c` or `pi --resume {id}`"
-            );
+    // worth resuming. A one-shot has no session to save.
+    if keeps {
+        match store.save(&id, &root, &model_id, name.as_deref(), created, &session) {
+            Ok(_) if !args.quiet => {
+                let called = name.as_deref().map_or(String::new(), |n| format!(" “{n}”"));
+                let carried = if resumed > 0 {
+                    format!("{}resumed {resumed} messages", icons::PART_SEP)
+                } else {
+                    String::new()
+                };
+                eprintln!(
+                    "session {id}{called}{carried} — continue with `pi -c` or `pi --resume {id}`"
+                );
+            }
+            Err(e) => eprintln!("{}", core::not_saved(&e)),
+            _ => {}
         }
-        Err(e) => eprintln!("warning: the transcript was not saved: {e}"),
-        _ => {}
     }
 
     // Above both ways out below: one exits the process outright, and a stopped
@@ -735,7 +752,7 @@ async fn main() -> Result<()> {
     // A run the user stopped is not a failure of the run; scripts should be
     // able to tell the two apart.
     if matches!(outcome, Err(agent::AgentError::Cancelled)) {
-        std::process::exit(130);
+        std::process::exit(INTERRUPTED);
     }
 
     // Said only when there is something to diagnose. A successful run that

@@ -27,11 +27,14 @@ use crate::store::listing::Listing;
 use crate::store::session::Store;
 use crate::store::settings::Settings;
 
+/// What every surface says when the transcript did not reach the disk: one
+/// sentence, so a reworded copy cannot make one failure read as two.
+pub(crate) fn not_saved(e: &impl std::fmt::Display) -> String {
+    format!("warning: the transcript was not saved: {e}")
+}
+
 /// Everything a run holds that outlives any one turn of it, and the one place
 /// an intent is answered.
-///
-/// Both surfaces hold one and differ only in how they read a line and where
-/// they put what comes back.
 pub struct Core {
     pub store: Store,
     /// Held so `/keys` can show what is actually in force, overrides included.
@@ -65,8 +68,8 @@ impl Core {
     // leaving the last lane's in place had this one answering to another
     // tree's.
     fn in_force(&mut self) {
-        self.keys = self.lane().keys.clone();
-        self.commands = self.lane().commands.clone();
+        self.keys = self.lane().resolved.keys.clone();
+        self.commands = self.lane().resolved.commands.clone();
     }
 
     /// The checkout in front. Indexing is safe by construction: `lanes` is
@@ -134,10 +137,7 @@ impl Core {
                 // now; a run in flight has the session away and saves it later.
                 match self.save() {
                     Ok(()) => lines(said),
-                    Err(e) => Step::Handled(Listing::say([
-                        said,
-                        format!("warning: the transcript was not saved: {e}"),
-                    ])),
+                    Err(e) => Step::Handled(Listing::say([said, not_saved(&e)])),
                 }
             }
             Intent::Builtin(Builtin::Compact(focus)) => {
@@ -176,7 +176,12 @@ impl Core {
                 "off" => Step::Wechat(WechatCmd::Off),
                 other => Step::Flash(format!("unknown /wechat verb `{other}` — bare, on or off")),
             },
-            Intent::Builtin(Builtin::Settings(rest)) => self.settings(&rest),
+            // Only the bare word opens the panel; an argument is refused
+            // rather than half-remembered as a verb.
+            Intent::Builtin(Builtin::Settings(rest)) if rest.trim().is_empty() => Step::Panel,
+            Intent::Builtin(Builtin::Settings(_)) => {
+                Step::Flash("settings are edited in the panel — bare /settings opens it".into())
+            }
         }
     }
 }
@@ -357,32 +362,19 @@ mod tests {
     pub(super) fn a_lane(name: &str) -> crate::core::lane::Lane {
         let dir = std::env::temp_dir();
         let ws = tools::Workspace::new(&dir).expect("a workspace");
-        let (events, inbox) = crate::core::lane::Lane::channel();
-        crate::core::lane::Lane {
-            token: crate::core::lane::next_token(),
-            agent: std::sync::Arc::new(agent::Agent::new(
-                std::sync::Arc::new(Recording::default()),
-                test_spec("m"),
-            )),
-            session: None,
+        let agent = std::sync::Arc::new(agent::Agent::new(
+            std::sync::Arc::new(Recording::default()),
+            test_spec("m"),
+        ));
+        crate::core::lane::Lane::opened(crate::core::lane::Opening {
             id: name.into(),
-            created: 0,
             name: Some(name.to_string()),
-            totals: agent::Totals::default(),
-            tally: Default::default(),
-            held_screens: Vec::new(),
-            context: Vec::new(),
-            standing: std::sync::Arc::from(""),
-            ctx: tools::Ctx::new(ws),
-            worktree: None,
-            events,
-            inbox,
-            pending: Vec::new(),
-            looping: None,
-            run: crate::core::lane::Run::Idle,
-            keys: std::sync::Arc::new(crate::store::keys::Keys::default()),
-            commands: std::sync::Arc::new(Vec::new()),
-        }
+            ..crate::core::lane::Opening::new(
+                agent,
+                crate::core::lane::a_resolved(""),
+                tools::Ctx::new(ws),
+            )
+        })
     }
 
     // A transport that records the model each request asks for, and answers
@@ -440,41 +432,28 @@ mod tests {
         let ws = tools::Workspace::new(root).unwrap();
         let mut agent = agent::Agent::new(transport, test_spec(model));
         let store = crate::store::session::Store::new(root.join("state"));
-        crate::core::subagent::hang(
+        let resolved = crate::core::lane::arm(
             &mut agent,
+            crate::core::lane::a_resolved("standing"),
             crate::core::subagent::Filed::armed(
                 crate::store::session::Store::new(root.join("state")),
                 root.to_path_buf(),
                 model.into(),
             ),
-            "standing",
+            agent::Retry::default(),
         );
 
-        let keys = std::sync::Arc::new(crate::store::keys::Keys::default());
-        let commands = std::sync::Arc::new(Vec::<crate::core::Command>::new());
-        let (events, inbox) = crate::core::lane::Lane::channel();
-        let lane = crate::core::lane::Lane {
-            token: crate::core::lane::next_token(),
-            agent: std::sync::Arc::new(agent),
-            session: Some(agent::session::Session::default()),
+        let keys = resolved.keys.clone();
+        let commands = resolved.commands.clone();
+        let mut lane = crate::core::lane::Lane::opened(crate::core::lane::Opening {
             id: "s1".into(),
-            created: 0,
-            name: None,
-            context: Vec::new(),
-            standing: std::sync::Arc::from("standing"),
-            totals: agent::Totals::default(),
-            tally: Default::default(),
-            held_screens: Vec::new(),
-            ctx: tools::Ctx::new(ws),
-            worktree: None,
-            events,
-            inbox,
-            pending: Vec::new(),
-            looping: None,
-            run: crate::core::lane::Run::Idle,
-            keys: keys.clone(),
-            commands: commands.clone(),
-        };
+            ..crate::core::lane::Opening::new(
+                std::sync::Arc::new(agent),
+                resolved,
+                tools::Ctx::new(ws),
+            )
+        });
+        lane.return_session(agent::session::Session::default());
         crate::core::Core {
             store,
             keys,
@@ -492,6 +471,7 @@ mod tests {
         let subagent = core
             .lane()
             .agent
+            .brief
             .registry
             .get(subagent::Subagent::NAME)
             .unwrap();

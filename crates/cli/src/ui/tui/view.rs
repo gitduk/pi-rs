@@ -206,7 +206,7 @@ pub(super) fn tail_of(session: &agent::session::Session) -> Option<EntryId> {
 pub(super) fn opened<'a>(views: &'a mut Views, lane: &Lane, paint: &Paint) -> &'a mut View {
     let view = view_at(views, lane.token());
     if !view.drawn {
-        *view = View::opening(&lane.context, paint);
+        *view = View::opening(&lane.resolved.context, paint);
     }
     view
 }

@@ -151,54 +151,22 @@ fn resolvable(node: Node) -> bool {
 }
 
 // Whether `node` displaces `best` as the construct opening on their shared row.
-//
-// One spelling of the rule for both walks below. They prune differently — one
-// row against every row — but a row's answer may not depend on which asked.
 fn widest(best: Option<Node>, node: Node, root: Node) -> bool {
     node != root
         && resolvable(node)
         && best.is_none_or(|b| node.end_byte() - node.start_byte() > b.end_byte() - b.start_byte())
 }
 
-/// The construct that opens at `line`, as an inclusive 1-based range.
-///
-/// Resolves to the *largest* node starting on that row: `fn foo() {` belongs to
-/// the whole function, not to its name. A row that opens nothing — a lone `}`,
-/// a blank line — yields None rather than a guess. Annotations count as part of
-/// what they annotate, so the range covers them whichever row is named.
-pub fn block(lang: Lang, content: &str, line: usize) -> Option<(usize, usize)> {
-    let tree = parse(lang, content)?;
-    let row = line.checked_sub(1)?;
-
-    let mut best: Option<Node> = None;
-    let mut cursor = tree.walk();
-    let root = tree.root_node();
-    let mut stack = vec![root];
-    while let Some(node) = stack.pop() {
-        // The root starts on row 0, so line 1 would otherwise resolve to the
-        // entire file — a block op that replaces everything.
-        if node.start_position().row == row && widest(best, node, root) {
-            best = Some(node);
-        }
-        // A node ending before the row, or starting after it, holds nothing useful.
-        if node.end_position().row >= row && node.start_position().row <= row {
-            stack.extend(node.children(&mut cursor));
-        }
-    }
-
-    let e = extent(lang, best?, content);
-    Some((e.start, e.end))
-}
-
-/// What [`block`] answers for every row, in one parse: each row that opens a
-/// construct, mapped to that construct's full extent.
+/// Every row that opens a construct, in one parse: each mapped to that
+/// construct's full extent, annotations included.
 pub fn extents(lang: Lang, content: &str) -> HashMap<usize, (usize, usize)> {
     let Some(tree) = parse(lang, content) else {
         return HashMap::new();
     };
     let root = tree.root_node();
-    // `block` picks the largest node opening on a row; the same node is found
-    // here by keeping the widest per row while the walk passes through.
+    // The widest node per row: `#[inline]` is a construct of its own and also
+    // part of the function under it, and the wider one is what a caller naming
+    // that row is after.
     let mut best: HashMap<usize, Node> = HashMap::new();
     let mut cursor = root.walk();
     let mut stack = vec![root];
@@ -295,10 +263,10 @@ fn visit(
         }
         let kind = child.kind();
         let container = lang.containers().contains(&kind);
-        // The same answer `block` gives for this row, so a skeleton entry and
-        // the patch that acts on it can never name different things. Computed
-        // only where it can be used: the walk passes through far more nodes
-        // than it lists.
+        // The same `extent` a patch resolves this row through, so a skeleton
+        // entry and the block an edit takes cannot name different things.
+        // Computed only where it can be used: the walk passes through far more
+        // nodes than it lists.
         let candidate = lang.declarations().contains(&kind);
         let span = candidate.then(|| extent(lang, child, src));
         let listed = span.filter(|e| shown != Some((e.start, e.end)));

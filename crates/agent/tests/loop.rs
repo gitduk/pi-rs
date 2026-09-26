@@ -15,7 +15,7 @@ mod common;
 use common::spec;
 
 use agent::session::Session;
-use agent::{Agent, AgentError, Ceiling, Event, Retry, Steer};
+use agent::{Agent, AgentError, Briefing, Ceiling, Event, Retry, Steer};
 use tools::{Concurrency, Ctx, Registry, Tier, Tool, ToolError, ToolOutput, Workspace};
 
 // Replays one scripted event list per turn, so the loop is exercised without
@@ -114,12 +114,28 @@ fn wired(turns: Vec<Vec<StreamEvent>>) -> (tempfile::TempDir, Agent, Ctx, Arc<Sc
     (dir, agent, Ctx::new(ws), wire)
 }
 
+// The brief is one value behind an `Arc`; a test that rewrites part of it takes
+// the copy the same way the CLI does.
+fn brief(a: &mut Agent) -> &mut Briefing {
+    std::sync::Arc::make_mut(&mut a.brief)
+}
+
 async fn drive(
     agent: &Agent,
     ctx: &Ctx,
     prompt: &str,
 ) -> (Session, Result<llm::stream::Usage, AgentError>, Vec<Event>) {
-    drive_steered(agent, ctx, prompt, &Steer::default()).await
+    drive_retrying(agent, ctx, prompt, &Retry::default()).await
+}
+
+// The same, on a schedule the test decides.
+async fn drive_retrying(
+    agent: &Agent,
+    ctx: &Ctx,
+    prompt: &str,
+    retry: &Retry,
+) -> (Session, Result<llm::stream::Usage, AgentError>, Vec<Event>) {
+    drive_steered(agent, ctx, prompt, &Steer::default(), retry).await
 }
 
 // The same, with a mailbox the test can speak into while the run works.
@@ -128,10 +144,11 @@ async fn drive_steered(
     ctx: &Ctx,
     prompt: &str,
     steer: &Steer,
+    retry: &Retry,
 ) -> (Session, Result<llm::stream::Usage, AgentError>, Vec<Event>) {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut session = Session::with_prompt(prompt);
-    let out = agent.steered(&mut session, ctx, &tx, steer).await;
+    let out = agent.steered(&mut session, ctx, &tx, steer, retry).await;
     drop(tx);
     let mut events = Vec::new();
     while let Some(e) = rx.recv().await {
@@ -221,7 +238,7 @@ async fn a_denied_tier_comes_back_as_a_result_not_an_abort() {
         call_turn(&[("t1", "bash", r#"{"command":"echo hi"}"#)]),
         text_turn("understood"),
     ]);
-    a.approver = Arc::new(Ceiling(Tier::Read));
+    brief(&mut a).approver = Arc::new(Ceiling(Tier::Read));
     let (session, out, events) = drive(&a, &ctx, "run it").await;
     out.unwrap();
 
@@ -280,7 +297,7 @@ async fn parallel_results_follow_call_order_not_completion_order() {
         call_turn(&[("t1", "slow", "{}"), ("t2", "fast", "{}")]),
         text_turn("ok"),
     ]);
-    a.registry = Registry::new()
+    brief(&mut a).registry = Registry::new()
         .with(Sleeper {
             name: "slow",
             delay_ms: 120,
@@ -319,7 +336,7 @@ async fn an_exclusive_call_forces_the_batch_to_run_serially() {
         call_turn(&[("t1", "solo", "{}"), ("t2", "other", "{}")]),
         text_turn("ok"),
     ]);
-    a.registry = Registry::new()
+    brief(&mut a).registry = Registry::new()
         .with(Sleeper {
             name: "solo",
             delay_ms: 80,
@@ -669,16 +686,20 @@ fn flaky(times: usize, err: fn() -> llm::BrainError) -> Arc<Flaky> {
     })
 }
 
-fn fast_retry(a: &mut Agent) {
-    a.retry.base = std::time::Duration::from_millis(1);
-    a.retry.max = std::time::Duration::from_millis(4);
+// Short enough that a test's retries land inside the test.
+fn fast_retry() -> Retry {
+    Retry {
+        base: std::time::Duration::from_millis(1),
+        max: std::time::Duration::from_millis(4),
+        ..Retry::default()
+    }
 }
 
 #[tokio::test]
 async fn a_throttled_request_is_retried_until_it_lands() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
-    let mut a = Agent::new(
+    let a = Agent::new(
         flaky(2, || llm::BrainError::Api {
             format: "anthropic",
             status: 429,
@@ -686,9 +707,9 @@ async fn a_throttled_request_is_retried_until_it_lands() {
         }),
         spec(),
     );
-    fast_retry(&mut a);
+    let retry = fast_retry();
 
-    let (session, out, events) = drive(&a, &ctx, "go").await;
+    let (session, out, events) = drive_retrying(&a, &ctx, "go", &retry).await;
     out.unwrap();
     assert_eq!(session.context()[1].text(), "recovered");
 
@@ -725,11 +746,11 @@ async fn retries_stop_at_the_attempt_budget() {
     for (kind, err, attempts) in cases {
         let dir = tempfile::tempdir().unwrap();
         let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
-        let mut a = Agent::new(flaky(99, *err), spec());
-        fast_retry(&mut a);
-        a.retry.attempts = *attempts;
+        let a = Agent::new(flaky(99, *err), spec());
+        let mut retry = fast_retry();
+        retry.attempts = *attempts;
 
-        let (_s, out, events) = drive(&a, &ctx, "go").await;
+        let (_s, out, events) = drive_retrying(&a, &ctx, "go", &retry).await;
         assert!(out.is_err(), "{kind}: {out:?}");
         assert_eq!(
             events
@@ -760,13 +781,13 @@ impl Transport for Wedged {
 async fn a_stream_that_stops_sending_does_not_hold_the_turn_open() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
-    let mut a = Agent::new(Arc::new(Wedged), spec());
-    fast_retry(&mut a);
-    a.retry.attempts = 1;
-    a.retry.idle = std::time::Duration::from_millis(120);
+    let a = Agent::new(Arc::new(Wedged), spec());
+    let mut retry = fast_retry();
+    retry.attempts = 1;
+    retry.idle = std::time::Duration::from_millis(120);
 
     let started = std::time::Instant::now();
-    let (_s, out, events) = drive(&a, &ctx, "go").await;
+    let (_s, out, events) = drive_retrying(&a, &ctx, "go", &retry).await;
 
     assert!(out.is_err(), "{out:?}");
     assert!(
@@ -865,11 +886,11 @@ async fn an_overflow_refusal_shrinks_the_transcript_and_retries() {
 
         let mut a = Agent::new(picky.clone(), spec());
         common::compacting(&mut a, None);
-        fast_retry(&mut a);
-        a.spec.context_window = window;
+        let retry = fast_retry();
+        std::sync::Arc::make_mut(&mut a.model).spec.context_window = window;
         let mut session = Session::from_messages(fat_history());
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let out = a.run(&mut session, &ctx, &tx).await;
+        let out = a.run(&mut session, &ctx, &tx, &retry).await;
         drop(tx);
         let mut events = Vec::new();
         while let Some(e) = rx.recv().await {
@@ -952,17 +973,17 @@ async fn a_named_window_supersedes_the_guesswork_that_preceded_it() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
 
-    let mut a = Agent::new(
+    let a = Agent::new(
         Arc::new(Mixed {
             calls: AtomicUsize::new(0),
             limit: 40_000,
         }),
         spec(),
     );
-    fast_retry(&mut a);
+    let retry = fast_retry();
     let mut session = Session::from_messages(vec![Message::user("the task")]);
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let out = a.run(&mut session, &ctx, &tx).await;
+    let out = a.run(&mut session, &ctx, &tx, &retry).await;
     drop(tx);
     let mut events = Vec::new();
     while let Some(e) = rx.recv().await {
@@ -1127,7 +1148,7 @@ async fn a_coded_tool_error_reaches_the_model_with_its_code() {
         call_turn(&[("t1", "timeouter", "{}")]),
         text_turn("ok"),
     ]);
-    a.registry = Registry::new().with(Timeouter);
+    brief(&mut a).registry = Registry::new().with(Timeouter);
 
     let (session, out, _) = drive(&a, &ctx, "go").await;
     out.unwrap();
@@ -1146,7 +1167,7 @@ async fn a_coded_tool_error_reaches_the_model_with_its_code() {
 async fn a_line_said_mid_run_lands_after_the_results_it_interrupted() {
     let (_d, mut a, ctx, wire) =
         wired(vec![call_turn(&[("t1", "slow", "{}")]), text_turn("noted")]);
-    a.registry = Registry::new().with(Sleeper {
+    brief(&mut a).registry = Registry::new().with(Sleeper {
         name: "slow",
         delay_ms: 0,
         exclusive: false,
@@ -1154,7 +1175,7 @@ async fn a_line_said_mid_run_lands_after_the_results_it_interrupted() {
     let steer = Steer::default();
     *wire.interject.lock().unwrap() = Some((0, steer.clone(), "look at parse.rs".into()));
 
-    let (session, out, _) = drive_steered(&a, &ctx, "go", &steer).await;
+    let (session, out, _) = drive_steered(&a, &ctx, "go", &steer, &Retry::default()).await;
     out.unwrap();
     assert!(steer.is_empty(), "the run took what was said");
 
@@ -1187,7 +1208,7 @@ async fn a_line_said_while_the_model_finished_keeps_the_run_going() {
     let steer = Steer::default();
     *wire.interject.lock().unwrap() = Some((0, steer.clone(), "one more thing".into()));
 
-    let (session, out, events) = drive_steered(&a, &ctx, "go", &steer).await;
+    let (session, out, events) = drive_steered(&a, &ctx, "go", &steer, &Retry::default()).await;
     out.unwrap();
 
     assert!(

@@ -16,7 +16,10 @@ use std::sync::Arc;
 /// anything — that is the seam's contract rather than an accident — so a test
 /// about compaction has to say which one it means.
 pub fn compacting(agent: &mut agent::Agent, writer: Option<(Arc<dyn Transport>, ModelSpec)>) {
-    agent.compactor = Arc::new(agent::Summarizing::new(writer, agent.retry.idle));
+    agent.compactor = Arc::new(agent::Summarizing::new(
+        writer,
+        agent::Retry::default().idle,
+    ));
 }
 
 /// `replay_thinking` is `Tagged` deliberately: on a spec that drops prior

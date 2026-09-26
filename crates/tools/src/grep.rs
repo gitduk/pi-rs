@@ -282,7 +282,7 @@ impl Tool for Grep {
         }
 
         // One per hit file, so a body over budget drops whole sections: a row
-        // parted from the `[path#TAG]` above it has no tag for an edit to name.
+        // parted from the `[path]` above it names nothing to edit.
         let mut sections: Vec<String> = Vec::new();
         let mut shown = 0usize;
         for h in &hits {

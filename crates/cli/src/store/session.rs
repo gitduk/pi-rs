@@ -195,26 +195,38 @@ pub fn new_id() -> String {
     format!("{}-{}-{nth}", now(), std::process::id())
 }
 
-// The transcripts one bucket holds, one per session in that workspace.
+// The transcript one session directory holds. Named once: four readers look
+// it up, and one of them naming it differently is a session that quietly
+// stops being found.
+const TRANSCRIPT: &str = "session.json";
+
+// The transcripts one bucket holds, one per session in that workspace. The
+// bucket also holds `history`, which is a file, and asking for a transcript
+// inside each entry is what skips it.
 fn bucket_transcripts(bucket: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(bucket) else {
         return Vec::new();
     };
     entries
         .flatten()
-        .map(|e| e.path().join("session.json"))
+        .map(|e| e.path().join(TRANSCRIPT))
         .filter(|p| p.is_file())
         .collect()
 }
 
-// Which workspace a bucket belongs to, read off its first transcript: the
-// bucket name is a lossy encoding of the path and would guess wrong.
+// The workspace a transcript says it was saved under, or None when it cannot
+// be read. The record inside the file is the authority on who a session
+// belongs to; the bucket name only encodes the path, and lossily.
+fn belongs(transcript: &Path) -> Option<Belongs> {
+    let text = std::fs::read_to_string(transcript).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+// Which workspace a bucket belongs to, read off its first transcript.
 fn workspace_of(transcripts: &[PathBuf]) -> Option<String> {
-    transcripts.iter().find_map(|p| {
-        let text = std::fs::read_to_string(p).ok()?;
-        let belongs: Belongs = serde_json::from_str(&text).ok()?;
-        Some(belongs.workspace)
-    })
+    transcripts
+        .iter()
+        .find_map(|p| belongs(p).map(|b| b.workspace))
 }
 
 impl Store {
@@ -244,7 +256,7 @@ impl Store {
     pub fn journal_path(&self, workspace: &Path, id: &str) -> PathBuf {
         self.dir_of(workspace)
             .join(tools::state::file_stem(id))
-            .join("journal.jsonl")
+            .join(tools::state::JOURNAL_FILE)
     }
 
     /// The tree every bucket sits in, for the sweeps that walk all of them.
@@ -275,7 +287,7 @@ impl Store {
     pub fn path_of(&self, workspace: &Path, id: &str) -> PathBuf {
         self.dir_of(workspace)
             .join(tools::state::file_stem(id))
-            .join("session.json")
+            .join(TRANSCRIPT)
     }
 
     /// `created` is the caller's because it is set once and never changes.
@@ -336,7 +348,7 @@ impl Store {
         let mut match_: Option<PathBuf> = None;
         if let Ok(entries) = std::fs::read_dir(&self.root) {
             for entry in entries.flatten() {
-                let candidate = entry.path().join(&stem).join("session.json");
+                let candidate = entry.path().join(&stem).join(TRANSCRIPT);
                 if candidate.is_file() {
                     match_ = Some(candidate);
                     break;
@@ -360,17 +372,9 @@ impl Store {
     // under their workspace's key as usual.
     fn peek(&self, workspace: &Path) -> Vec<Peek> {
         let want = workspace.display().to_string();
-        let mut found: Vec<Peek> = std::fs::read_dir(self.dir_of(workspace))
+        let mut found: Vec<Peek> = bucket_transcripts(&self.dir_of(workspace))
             .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|entry| {
-                // The bucket also holds `history`, which is a file and so is
-                // skipped by asking for a transcript inside it.
-                let path = entry.path().join("session.json");
-                if !path.is_file() {
-                    return None;
-                }
+            .filter_map(|path| {
                 let body = std::fs::read_to_string(&path).ok()?;
                 match serde_json::from_str::<Peek>(&body) {
                     Ok(peek) => (peek.workspace == want).then_some(peek),
@@ -473,10 +477,7 @@ impl Store {
             let mut owed: Vec<&Path> = Vec::new();
             let mut shared = false;
             for transcript in &transcripts {
-                let Ok(text) = std::fs::read_to_string(transcript) else {
-                    continue;
-                };
-                let Ok(belongs) = serde_json::from_str::<Belongs>(&text) else {
+                let Some(belongs) = belongs(transcript) else {
                     continue;
                 };
                 if Path::new(&belongs.workspace).starts_with(root) {

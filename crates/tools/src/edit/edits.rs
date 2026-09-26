@@ -6,6 +6,7 @@
 //! line numbers the echo reports.
 
 use super::crop;
+use std::collections::BTreeMap;
 use std::ops::Range;
 
 /// Where one edit landed, for the report the model reads.
@@ -175,6 +176,10 @@ pub fn apply(path: &str, content: &str, edits: &[Edit]) -> Result<Applied, Refus
     let crlf = body.contains("\r\n");
     let lines: Vec<&str> = body.lines().collect();
 
+    // Built on the first block anchor and kept for the rest: one parse however
+    // many whole-block edits the patch holds, and none at all when it holds
+    // just text, which is the common case.
+    let mut opens: Option<BTreeMap<usize, (usize, usize)>> = None;
     let mut placed: Vec<Placed> = Vec::new();
     for (index, edit) in edits.iter().enumerate() {
         let anchor = edit.anchor.text();
@@ -192,7 +197,8 @@ pub fn apply(path: &str, content: &str, edits: &[Edit]) -> Result<Applied, Refus
         }
 
         if edit.whole_block {
-            let (span, whole) = block(path, body, &lines, anchor, index)?;
+            let opens = opens.get_or_insert_with(|| crate::blocks::by_row(path, body));
+            let (span, whole) = block(path, opens, body, &lines, anchor, index)?;
             let text = match edit.anchor {
                 Anchor::Replace(_) => splice(&whole, &edit.new, ending(crlf)),
                 _ => translate(&edit.new, crlf),
@@ -340,7 +346,7 @@ fn point(p: &Placed) -> bool {
     p.span.start == p.span.end
 }
 
-fn split_bom(content: &str) -> (&str, &str) {
+pub(super) fn split_bom(content: &str) -> (&str, &str) {
     match content.strip_prefix('\u{FEFF}') {
         Some(rest) => ("\u{FEFF}", rest),
         None => ("", content),
@@ -437,26 +443,44 @@ fn splice(region: &str, new: &str, term: &str) -> String {
 /// prints stripped, since that is what gets copied back into it.
 fn block(
     path: &str,
+    // The rows that name a block, in row order, off one parse of the content.
+    opens: &BTreeMap<usize, (usize, usize)>,
     body: &str,
     lines: &[&str],
     anchor: &str,
     index: usize,
 ) -> Result<(Range<usize>, String), Refusal> {
     // The address a view prints leaves the line's own indentation on the
-    // text, which a prefix match against a trimmed opening line does not want.
-    let needle = without_address(anchor)
-        .unwrap_or_else(|| anchor.trim())
-        .trim();
-    let opens = crate::blocks::openings(path, body);
-    let hits: Vec<usize> = opens
-        .iter()
-        .copied()
-        .filter(|n| {
-            lines
-                .get(n - 1)
-                .is_some_and(|l| l.trim().starts_with(needle))
-        })
-        .collect();
+    // text, which a prefix match against a trimmed opening line does not want —
+    // and the row it names is the one thing that tells two blocks opening on the
+    // same text apart, which is the whole reason the view prints it.
+    let addressed = address(anchor).or_else(|| address(anchor.trim_start()));
+    let (needle, named) = match addressed.filter(|(_, rest)| !rest.trim().is_empty()) {
+        Some((row, rest)) => (rest.trim(), Some(row)),
+        None => (anchor.trim(), None),
+    };
+    // One hit per block, not per row: every row an annotation spans names the
+    // same block, so two of them matching is not two candidates — the first row
+    // that names a block stands for it, and no later anchor could tell them
+    // apart anyway.
+    let mut seen: Vec<(usize, usize)> = Vec::new();
+    let mut hits: Vec<usize> = Vec::new();
+    for row in opens.keys().copied() {
+        if named.is_some_and(|at| at != row) {
+            continue;
+        }
+        if !lines
+            .get(row - 1)
+            .is_some_and(|l| l.trim().starts_with(needle))
+        {
+            continue;
+        }
+        let span = opens[&row];
+        if !seen.contains(&span) {
+            seen.push(span);
+            hits.push(row);
+        }
+    }
     let at = match hits.len() {
         1 => hits[0],
         0 => {
@@ -464,7 +488,7 @@ fn block(
                 path: path.to_string(),
                 index,
                 text: needle.to_string(),
-                available: openings(lines, &opens),
+                available: openings(lines, opens),
             });
         }
         n => {
@@ -476,13 +500,8 @@ fn block(
             });
         }
     };
-    let (start, end) =
-        crate::blocks::extent_of(path, body, at).ok_or_else(|| Refusal::NoBlock {
-            path: path.to_string(),
-            index,
-            text: needle.to_string(),
-            available: " — the line it names opens no resolvable block".to_string(),
-        })?;
+    // Every row a hit is drawn from is a key of `opens`, so the map holds it.
+    let (start, end) = opens[&at];
 
     // The blank lines a block is followed by separate it from the next one:
     // they belong to the gap, not to what the anchor named.
@@ -497,14 +516,21 @@ fn block(
 }
 
 // The refusal hands over what the file does open, since the fix is copying one
-// of these back into the anchor.
-fn openings(lines: &[&str], opens: &[usize]) -> String {
-    let mut rows: Vec<&str> = opens
-        .iter()
-        .filter_map(|n| lines.get(n - 1))
-        .map(|l| l.trim())
-        .collect();
-    rows.dedup();
+// of these back into the anchor. One line per block, off the row that block
+// opens on: a row inside an annotation names the same block and would offer a
+// line that is not the opening a patch writes.
+fn openings(lines: &[&str], opens: &BTreeMap<usize, (usize, usize)>) -> String {
+    let mut starts: Vec<usize> = opens.values().map(|(start, _)| *start).collect();
+    starts.sort_unstable();
+    starts.dedup();
+    let mut rows: Vec<&str> = Vec::new();
+    for n in starts {
+        if let Some(text) = lines.get(n - 1).map(|l| l.trim())
+            && !rows.contains(&text)
+        {
+            rows.push(text);
+        }
+    }
     if rows.is_empty() {
         return String::new();
     }
@@ -521,20 +547,24 @@ fn openings(lines: &[&str], opens: &[usize]) -> String {
     }
 }
 
-/// The `120-145:` a view prints in front of a line, split off — what a model
-/// copies back along with the line itself.
-fn address(text: &str) -> Option<&str> {
+/// The `120-145:` a view prints in front of a line, split off — the row it names
+/// first, and the text after it, which is what a model copies back along with
+/// the line itself.
+fn address(text: &str) -> Option<(usize, &str)> {
     let (head, rest) = text.split_once(':')?;
-    let digits = head
-        .split('-')
-        .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
-    digits.then_some(rest)
+    let mut parts = head.split('-');
+    let first = parts.next()?;
+    let digit = |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
+    if !digit(first) || !parts.all(digit) {
+        return None;
+    }
+    Some((first.parse().ok()?, rest))
 }
 
 /// The anchor with that address taken off, when something is left to match:
 /// an address on its own names no text, and nothing matches everywhere.
 fn without_address(text: &str) -> Option<&str> {
-    let rest = address(text).or_else(|| address(text.trim_start()))?;
+    let (_, rest) = address(text).or_else(|| address(text.trim_start()))?;
     (!rest.trim().is_empty()).then_some(rest)
 }
 
@@ -569,7 +599,7 @@ fn candidates(path: &str, body: &str, lines: &[&str], hits: &[Range<usize>]) -> 
     // Spelled out for the first few and counted for the rest: an anchor that
     // names a thousand rows is answered with a prefix, not a thousand lines.
     const SHOWN: usize = 8;
-    let extents = crate::blocks::extents(path, body);
+    let extents = crate::blocks::spans(path, body);
     let mut out: Vec<String> = hits
         .iter()
         .take(SHOWN)

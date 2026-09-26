@@ -576,7 +576,7 @@ pub fn prune(sessions: &Path) {
             continue;
         };
         for entry in entries.flatten() {
-            let path = entry.path().join("journal.jsonl");
+            let path = entry.path().join(tools::state::JOURNAL_FILE);
             let old = path
                 .metadata()
                 .and_then(|m| m.modified())
@@ -585,6 +585,12 @@ pub fn prune(sessions: &Path) {
                 .is_some_and(|age| age > KEEP);
             if old {
                 let _ = std::fs::remove_file(&path);
+                // And the directory with it, when the journal was the last thing
+                // in it: a session that never got as far as a transcript — a run
+                // that could not start, or one that said nothing — leaves a
+                // directory nothing else in the tree can take, since a bucket
+                // only goes when it is empty.
+                let _ = std::fs::remove_dir(entry.path());
             }
         }
     }
@@ -687,6 +693,41 @@ pub fn switched(path: &Path, id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A session directory whose journal was the last thing in it is one nothing
+    // else can take: the transcript sweep only removes a bucket that is empty,
+    // and a bucket holding a directory never is.
+    #[test]
+    fn an_old_journal_takes_its_directory_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path();
+        let empty = sessions.join("-w").join("said-nothing");
+        let lived = sessions.join("-w").join("had-a-transcript");
+        for d in [&empty, &lived] {
+            std::fs::create_dir_all(d).unwrap();
+            let journal = d.join(tools::state::JOURNAL_FILE);
+            std::fs::write(&journal, b"{}\n").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&journal)
+                .unwrap()
+                .set_modified(SystemTime::now() - Duration::from_secs(15 * 24 * 60 * 60))
+                .unwrap();
+        }
+        std::fs::write(lived.join("session.json"), b"{}").unwrap();
+
+        prune(sessions);
+
+        assert!(
+            !empty.exists(),
+            "a session with nothing but an old journal goes whole"
+        );
+        assert!(
+            lived.exists(),
+            "and one with a transcript keeps its directory"
+        );
+        assert!(!lived.join(tools::state::JOURNAL_FILE).exists());
+    }
 
     #[test]
     fn secrets_go_and_the_names_of_secrets_stay() {

@@ -1,5 +1,5 @@
 //! Drawing: what a painted span is, how a theme's style becomes one, and the
-//! line-mode renderer that writes rows into a pipe.
+//! renderer that writes a one-shot run's rows.
 //!
 //! What a config names is below this (`store/theme.rs`), and so is what a
 //! string occupies (`store/text.rs`); what is here puts the two on a screen.
@@ -10,10 +10,11 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use agent::Event;
+use llm::model::Pricing;
 use ratatui::text::{Line, Span};
 
 use crate::store::icons;
-use crate::store::text::{RESET, clip, summarize};
+use crate::store::text::{RESET, clip, named, summarize};
 use crate::store::theme::{Attr, Color, Style, Theme, band_to_ratatui, push_sep, style_to_ratatui};
 
 /// Whether the surface being written to can carry colour, and the theme behind
@@ -104,7 +105,7 @@ fn line_to_ansi(line: &ratatui::text::Line<'_>) -> String {
     out
 }
 
-/// The pipe-side form of a described event: each line on its own row.
+/// The printed form of a described event: each line on its own row.
 fn lines_to_ansi(lines: &[ratatui::text::Line<'_>]) -> String {
     lines
         .iter()
@@ -422,16 +423,16 @@ fn fmt_delay(ms: u64) -> String {
     }
 }
 
-/// The wording for every event that occupies a whole line.
-///
-/// Both surfaces call this: a tool call has to read the same in a pipe as in
-/// the terminal, and two copies of the wording would drift on the first edit.
-/// None is the caller's to place: the two deltas, which are a fragment rather
-/// than a line, and `Done`, which is a status line the surface composes itself.
 /// A run's line for one event, and for a tool that offers one, the rows of
 /// detail under it — one `Line` per screen row, because the caller decides
 /// what a row is: the interactive surface repaints a region and hands them
 /// over one at a time.
+///
+/// Both renderers call this, over the same naming (`store::text::named`): a
+/// tool call reads the same either way, and a second copy of the wording would
+/// drift on the first edit. `None` is the caller's to place — the two deltas,
+/// which are a fragment rather than a line, and `Done`, which is a status line
+/// the surface composes itself.
 pub fn describe(
     event: &Event,
     p: &Paint,
@@ -439,10 +440,12 @@ pub fn describe(
 ) -> Option<Vec<ratatui::text::Line<'static>>> {
     let room = width.saturating_sub(2).max(20);
     let line = match event {
+        // The name and its argument in one span, through the same naming every
+        // other line that shows a call uses: this one is not a place to spell a
+        // tool differently.
         Event::ToolStart { name, args, .. } => Line::from(vec![
             p.span(&p.theme.muted, icons::PENDING_MARK),
-            Span::raw(format!(" {name} ")),
-            p.span(&p.theme.muted, summarize(args)),
+            Span::raw(format!(" {}", named(name, &summarize(args)))),
         ]),
         Event::ToolEnd {
             name,
@@ -482,8 +485,8 @@ pub fn describe(
             Span::raw(" "),
             p.span(&p.theme.muted, w),
         ]),
-        // Done is a status line rather than an event's wording, and the two
-        // surfaces render it from their own configured segments.
+        // Done is a status line rather than an event's wording, and each
+        // renderer composes it from its own configured segments.
         _ => return None,
     };
     Some(vec![line])
@@ -492,17 +495,14 @@ pub fn describe(
 pub struct Renderer {
     paint: Paint,
     quiet: bool,
-    // The segments this surface ends a run with. A pipe times nothing and
-    // queues nothing, so `elapsed` and `queued` have nothing to say here.
+    // The segments this renderer ends a run with. A one-shot run times nothing
+    // and queues nothing, so `elapsed` and `queued` have nothing to say here.
     done: Vec<crate::store::status::Segment>,
-    // Read off the same events the terminal reads, so a piped run ends on the
-    // line the terminal would have shown it.
+    // Read off the same events the terminal reads, so a one-shot run ends on
+    // the line the terminal would have shown it.
     tally: crate::core::meter::Tally,
     model: String,
-    /// What the model costs, so this surface prices the events it reads the
-    /// same way the terminal's does — and so a model switched between runs
-    /// prices the next one at its own rates.
-    rates: crate::core::meter::Rates,
+
     // The worktree this run is working in, for the segment that names it.
     worktree: Option<String>,
     thinking: bool,
@@ -518,16 +518,19 @@ impl Renderer {
         theme: Arc<Theme>,
         done: Vec<crate::store::status::Segment>,
         model: String,
-        rates: crate::core::meter::Rates,
+        pricing: Pricing,
         worktree: Option<String>,
     ) -> Self {
+        // Priced once: a one-shot run cannot switch models, so the rate the
+        // events are added up at is the rate it started with.
+        let mut tally = crate::core::meter::Tally::default();
+        tally.set_pricing(pricing);
         Self {
             paint: Paint::with_theme(std::io::stderr().is_terminal(), theme),
             quiet,
             done,
-            tally: crate::core::meter::Tally::default(),
+            tally,
             model,
-            rates,
             worktree,
             thinking: false,
             out_dirty: false,
@@ -538,11 +541,6 @@ impl Renderer {
     /// Answer text goes to stdout so it pipes; everything else is progress and
     /// goes to stderr.
     pub fn on(&mut self, event: Event) {
-        // Before the arms and outside the `quiet` guards: a run still has to
-        // arrive at the right total when nothing about it was printed. The
-        // rate is the surface's own: this reader sees the receiver, not the
-        // lane, and a pipe can only change models between runs.
-        self.tally.set_pricing(self.rates.get());
         self.tally.on(&event);
         match &event {
             Event::ReasoningDelta(d) if !self.quiet => {
@@ -676,7 +674,7 @@ mod tests {
             std::sync::Arc::new(super::Theme::default()),
             crate::store::status::default_done(),
             String::new(),
-            crate::core::meter::Rates::default(),
+            llm::model::Pricing::default(),
             None,
         );
         r.on(agent::Event::TextDelta("There".into()));

@@ -391,6 +391,54 @@ async fn two_edits_to_one_file_in_the_same_turn_do_not_clobber_each_other() {
     assert!(after.contains("THREE"), "{after:?}");
 }
 
+// A `whole_block` anchor names a block by one of its rows — the declaration, or
+// an annotation above it. Both are the same block: the annotated construct, not
+// the annotation on its own, and not two candidates that are really one.
+#[tokio::test]
+async fn a_whole_block_anchor_resolves_through_its_annotation() {
+    let (_d, c) = ctx();
+    let path = c.workspace.root().join("a.rs");
+    std::fs::write(&path, "#[inline]\nfn f() {\n    1\n}\n").unwrap();
+    view(&c, "a.rs").await;
+
+    tools::edit::Edit
+        .execute(
+            json!({ "path": "a.rs", "edits": [
+                { "old_string": "fn f() {", "new_string": "fn f() {\n    2\n}", "whole_block": true }
+            ]}),
+            &c,
+        )
+        .await
+        .expect("the declaration names its own block");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "fn f() {\n    2\n}\n",
+        "the annotation above the block goes with it"
+    );
+}
+
+#[tokio::test]
+async fn a_whole_block_anchor_may_name_the_annotation() {
+    let (_d, c) = ctx();
+    let path = c.workspace.root().join("a.rs");
+    std::fs::write(&path, "#[inline]\nfn f() {\n    1\n}\n").unwrap();
+    view(&c, "a.rs").await;
+
+    tools::edit::Edit
+        .execute(
+            json!({ "path": "a.rs", "edits": [
+                { "old_string": "#[inline]", "new_string": "#[inline]\nfn f() {\n    2\n}", "whole_block": true }
+            ]}),
+            &c,
+        )
+        .await
+        .expect("the annotation names the block it annotates");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "#[inline]\nfn f() {\n    2\n}\n"
+    );
+}
+
 // Over the cap the view is cut to a locator, and the spill file holds what
 // the result dropped — nothing is lost. A short output takes no spill at all:
 // no locator in the view, no file left behind.
@@ -565,6 +613,90 @@ async fn a_run_with_its_own_record_writes_nothing_into_its_parents() {
     );
 }
 
+// The skeleton is drawn from the same stripped text the rest of a view is: a
+// mark left on row 1 is part of the text a later anchor copies, and an anchor
+// carrying it can never match.
+#[tokio::test]
+async fn an_outline_does_not_show_the_byte_order_mark() {
+    let (_d, c) = ctx();
+    std::fs::write(
+        c.workspace.root().join("a.rs"),
+        "\u{FEFF}fn f() {}\nfn g() {}\n",
+    )
+    .unwrap();
+
+    let out = tools::read::Read
+        .execute(json!({ "path": "a.rs", "outline": true }), &c)
+        .await
+        .unwrap();
+    assert!(!out.flatten().contains('\u{FEFF}'), "{}", out.flatten());
+}
+
+// Two blocks can open on the same text, and the address a view prints in front
+// of a line is what tells them apart — the row it names is the one block the
+// model pointed at, and asking for more of the opening line cannot help.
+#[tokio::test]
+async fn a_whole_block_anchor_may_name_the_row_it_meant() {
+    let (_d, c) = ctx();
+    let path = c.workspace.root().join("a.rs");
+    std::fs::write(&path, "fn f() {\n    1\n}\n\nfn f() {\n    2\n}\n").unwrap();
+    view(&c, "a.rs").await;
+
+    // Without the address the two are one text, and the answer says so.
+    let refused = tools::edit::Edit
+        .execute(
+            json!({ "path": "a.rs", "edits": [
+                { "old_string": "fn f() {", "new_string": "fn f() {\n    9\n}", "whole_block": true }
+            ]}),
+            &c,
+        )
+        .await;
+    assert!(
+        refused.is_err(),
+        "two blocks open on that line: {refused:?}"
+    );
+
+    tools::edit::Edit
+        .execute(
+            json!({ "path": "a.rs", "edits": [
+                { "old_string": "5:fn f() {", "new_string": "fn f() {\n    3\n}", "whole_block": true }
+            ]}),
+            &c,
+        )
+        .await
+        .expect("the address names the block it means");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "fn f() {\n    1\n}\n\nfn f() {\n    3\n}\n"
+    );
+}
+
+// A row inside an annotation and the row of the declaration name one block:
+// matching both is not two candidates, and no longer anchor could tell them
+// apart — the block was simply unreachable by `whole_block`.
+#[tokio::test]
+async fn a_whole_block_anchor_matching_two_rows_of_one_annotation_is_not_ambiguous() {
+    let (_d, c) = ctx();
+    let path = c.workspace.root().join("a.rs");
+    std::fs::write(&path, "/**\nfn f() {\n*/\nfn f() {\n    1\n}\n").unwrap();
+    view(&c, "a.rs").await;
+
+    tools::edit::Edit
+        .execute(
+            json!({ "path": "a.rs", "edits": [
+                { "old_string": "fn f() {", "new_string": "fn f() {\n    2\n}", "whole_block": true }
+            ]}),
+            &c,
+        )
+        .await
+        .expect("two rows of one annotation name one block");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "fn f() {\n    2\n}\n",
+        "the whole block goes, annotation included"
+    );
+}
+
 // The mark is stripped from the view so an anchor copied from it matches, and
 // it survives on disk: the edit must not quietly destroy it.
 #[tokio::test]
@@ -573,11 +705,14 @@ async fn a_byte_order_mark_survives_an_edit() {
     let path = c.workspace.root().join("a.rs");
     std::fs::write(&path, "\u{FEFF}fn f() {}\n").unwrap();
 
-    read_then_edit(&c, "a.rs", "fn f() {}", "fn g() {}")
+    let said = read_then_edit(&c, "a.rs", "fn f() {}", "fn g() {}")
         .await
         .unwrap();
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
         "\u{FEFF}fn g() {}\n"
     );
+    // And the report is shown without it, like every other view of the file: a
+    // row carrying an invisible character is one no anchor can be copied into.
+    assert!(!said.contains('\u{FEFF}'), "{said}");
 }

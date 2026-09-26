@@ -1,6 +1,6 @@
-//! Every glyph the surfaces draw, in one place. Change a shape here and
-//! every surface that wears it follows — a symbol copied through six
-//! modules reads as six different things and drifts on the first edit.
+//! Every glyph the surface draws, in one place. Change a shape here and every
+//! place that wears it follows — a symbol copied through six modules reads as
+//! six different things and drifts on the first edit.
 //!
 //! The two prompt sigils are shapes too; their defaults live here. They are
 //! additionally config, so a user's `settings.toml` may override either.
@@ -37,7 +37,6 @@ pub const CURRENT_ITEM: &str = "●"; // the current row in `/model` and `/resum
 pub const CHANGED_MARK: &str = "≠"; // a session value the file no longer holds
 
 // The input lines.
-pub const PIPE_SIGIL: &str = ""; // the prompt where there is no tui
 pub const INPUT_SIGIL: &str = PROMPT_BAR; // `theme.prompt.icon` default
 pub const INPUT_SIGIL_NORMAL: &str = PROMPT_BAR; // `theme.prompt.normal` default
 pub const BANG_SIGIL: &str = "!"; // the `!command` input prompt

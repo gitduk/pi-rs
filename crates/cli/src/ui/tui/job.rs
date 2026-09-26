@@ -129,10 +129,13 @@ impl Tui {
         let sent = self.core.lane_mut().sender().clone();
         let token = self.core.lane().token();
         let done = done.clone();
+        // Read where the run starts, not carried on the agent: a `/reload`
+        // between two turns reaches the next one this way.
+        let retry = self.core.config.retry();
         // The run's own handle on the mailbox; the lane keeps the other.
         let heard = steer.clone();
         tokio::spawn(async move {
-            let out = guard(agent.steered(&mut carried, &ctx, &sent, &heard)).await;
+            let out = guard(agent.steered(&mut carried, &ctx, &sent, &heard, &retry)).await;
             let _ = done.send(Done {
                 token,
                 kind: Kind::Turn,
@@ -418,7 +421,7 @@ impl Tui {
         // keeping. Not when the transcript never came back, though — the empty
         // one standing in for it would land on top of what is on disk.
         if recovered && let Err(e) = self.core.save_lane(lane) {
-            self.say_of(lane, format!("warning: the transcript was not saved: {e}"));
+            self.say_of(lane, core::not_saved(&e));
         }
         // The save put the session on disk, the one `/resume` is likeliest to
         // want back; make the completion list see it.
@@ -511,7 +514,7 @@ impl Tui {
                 .sender()
                 .send(Event::Compacted(report));
             if back && let Err(e) = self.core.save_lane(lane) {
-                self.say_of(lane, format!("warning: the transcript was not saved: {e}"));
+                self.say_of(lane, core::not_saved(&e));
             }
             self.refresh_sessions();
         } else if stopped {

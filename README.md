@@ -98,8 +98,14 @@ pi -C ~/some-repo --tier read  # elsewhere, read-only
 pi --tier net                  # read the tree and the web, write and run nothing
 ```
 
-Interactive is the default at a terminal. Everything is printed to stderr
-except the answer, which goes to stdout so it pipes.
+Interactive is the default at a terminal: the whole screen — the answer, the
+tool lines, the bar — is drawn there. A one-shot run prints the answer to
+stdout so it pipes, and everything else to stderr.
+
+A one-shot run keeps nothing: no transcript, no journal, nothing under
+`~/.pi`. That is what makes it one-shot — there is nothing to come back to.
+`-c` and `--resume` are the exception: naming a session makes the prompt
+belong to it, and what the run produces is saved there.
 
 ### The terminal
 
@@ -270,7 +276,10 @@ holds the call as it went on the wire, which the transcript does not. A run
 opens the journal of the session it starts on —
 `--resume` included — and `/resume` or `/new` switches it to the session now
 in charge, so the whole of a session reads as one file across the runs that
-touched it.
+touched it. A one-shot prompt has no session, so it opens no journal: `PI_LOG`
+has nothing to write to.
+
+It is the other half of the transcript: the transcript holds every
 message, tool call and result, so the journal holds what never reaches a
 message — which config was read, what went on the wire and what came back, how
 long each turn and each tool took, why an edit was refused, what the loop

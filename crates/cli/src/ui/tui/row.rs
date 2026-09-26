@@ -20,6 +20,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::store::icons;
+use crate::store::text::named;
 use crate::ui::render::{self, Paint};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -778,18 +779,6 @@ impl Row {
             rows.extend(context.iter().map(|f| muted(&format!("- {f}"))));
         }
         rows
-    }
-}
-
-/// A tool call named the way every row that shows one names it: the tool, and
-/// its leading argument when it has one. The prefix is the caller's — a spinner
-/// while it runs, an arrow once it is abandoned — and that is the only part
-/// that differs.
-pub fn named(name: &str, summary: &str) -> String {
-    if summary.is_empty() {
-        name.to_string()
-    } else {
-        format!("{name} {summary}")
     }
 }
 

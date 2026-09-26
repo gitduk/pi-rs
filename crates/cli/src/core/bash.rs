@@ -1,8 +1,8 @@
 //! What a `!` command ran, and what came back.
 //!
 //! The runner is the model's own `bash` tool: same workspace, same timeout,
-//! same rewrite. What is here is the part the surfaces share — the two
-//! derivations that must not drift between the live row and the rebuilt one.
+//! same rewrite. What is here is the two derivations that must not drift
+//! between the live row and the rebuilt one.
 
 use agent::session::Session;
 use tools::{Tool, ToolError};

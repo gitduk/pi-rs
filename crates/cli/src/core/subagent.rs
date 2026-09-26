@@ -31,16 +31,24 @@ pub(crate) async fn flush() {
     }
 }
 
-/// Hang the subagent tool off an agent, replacing any it already carries.
+/// Hang the subagent tool on `brief`, and hand back the brief that now carries
+/// it.
 ///
-/// **Call it after `Agent::apply`.** `Subagent` clones the agent it is handed, so
-/// anything set afterwards reaches this run and none of the children it spawns
-/// — which is how the startup path once gave the parent its retry policy and
-/// the child none. And it has to be after, because the child is cloned from an
-/// agent that is already finished.
-pub fn hang(agent: &mut Agent, home: Arc<dyn Home>, standing: &str) {
-    let subagent = Subagent::new(agent, home, standing);
-    agent.registry = std::mem::take(&mut agent.registry).with(subagent);
+/// A new `Arc` when someone else holds the old one — the child does — so the
+/// copy a subagent runs on keeps the registry it was derived from, and the one
+/// the lane keeps has the tool in it.
+pub fn hang_on(
+    agent: &Agent,
+    brief: Arc<agent::Briefing>,
+    home: Arc<dyn Home>,
+    standing: &str,
+    retry: agent::Retry,
+) -> Arc<agent::Briefing> {
+    let subagent = Subagent::new(agent, brief.clone(), home, standing, retry);
+    let mut armed = brief;
+    let patch = Arc::make_mut(&mut armed);
+    patch.registry = std::mem::take(&mut patch.registry).with(subagent);
+    armed
 }
 
 pub struct Filed {
@@ -58,6 +66,18 @@ impl Filed {
     pub fn armed(store: Store, root: std::path::PathBuf, model: String) -> Arc<dyn Home> {
         Arc::new(Self { store, root, model })
     }
+}
+
+/// A run with nowhere to file: a one-shot keeps no transcript, so the subagents
+/// it calls keep none either.
+pub fn nowhere() -> Arc<dyn Home> {
+    Arc::new(Nowhere)
+}
+
+struct Nowhere;
+
+impl Home for Nowhere {
+    fn keep(&self, _id: &str, _session: Session) {}
 }
 
 impl Home for Filed {

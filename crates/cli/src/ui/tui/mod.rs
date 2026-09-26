@@ -535,7 +535,7 @@ impl Ui {
         // painted in it — and every copy takes the terminal's band.
         let theme = following_terminal(&core.config.theme, self.tty_bg);
         if self.paint.theme.as_ref() != &theme {
-            self.set_theme(view, &core.lane().context, Arc::new(theme));
+            self.set_theme(view, &core.lane().resolved.context, Arc::new(theme));
         }
         if !Arc::ptr_eq(&self.commands, &core.commands) {
             self.commands = core.commands.clone();
@@ -686,7 +686,7 @@ impl Tui {
         ui.live = core.config.status.live.clone();
         ui.done = core.config.status.done.clone();
         ui.set_vim(&core.config.vim);
-        let context = core.lane().context.clone();
+        let context = core.lane().resolved.context.clone();
         let mut opening = View::opening(&context, &ui.paint);
         opening.model = core.lane().model().to_string();
         let mut views = Views::new();
@@ -818,7 +818,7 @@ impl Tui {
             self.close_run(out);
             // Esc asked for the prompt back before the screen moved on. The
             // asking does not go stale because the answer arrived late.
-            if unsend && let Some(id) = self.core.lane().session().and_then(|s| s.last_ask()) {
+            if unsend && let Some(id) = self.core.lane().last_ask() {
                 self.rewind_turn(id);
             }
         }
@@ -828,10 +828,7 @@ impl Tui {
         // screen already has them, rather than left for a turn that may never
         // come.
         if heard && let Err(e) = self.core.save_lane(self.core.current) {
-            self.say_of(
-                self.core.current,
-                format!("warning: the transcript was not saved: {e}"),
-            );
+            self.say_of(self.core.current, core::not_saved(&e));
         }
     }
 
@@ -847,10 +844,10 @@ impl Tui {
     }
 
     fn land_swap(&mut self, said: Listing) {
-        if let Some(session) = self.core.lane().session() {
-            self.ui
-                .rebuild(front_view(&mut self.views, self.core.lane()), session);
-        }
+        // A swap lands carrying its own transcript: the lane it moves to was
+        // opened with one, so this reads something even when the lane being
+        // left has a run writing it.
+        self.rebuild_front();
         // `at` forgets both lists, so it stands in for `refresh_sessions`: a
         // swap that did not move repeats the root, and drops them either way.
         self.ui.lists.at(self.core.lane_mut().root());
@@ -1030,6 +1027,20 @@ impl Tui {
         Some(said.into())
     }
 
+    // The front lane's screen out of its transcript: what a swap and a rewind
+    // both need, and neither has anything to add to it.
+    //
+    // A lane whose transcript a job took and could not read back has nothing to
+    // rebuild from. That state is named — `NO_TRANSCRIPT` — rather than fatal,
+    // so the screen is left as it stands.
+    fn rebuild_front(&mut self) {
+        let Some(session) = self.core.lane().session() else {
+            return;
+        };
+        self.ui
+            .rebuild(front_view(&mut self.views, self.core.lane()), session);
+    }
+
     // A lane's news goes into that lane's own screen, never the one in front:
     // it is read back beside the conversation it happened to. A lane never
     // drawn gets its opening block first, so `reconcile` cannot replace the row.
@@ -1156,6 +1167,12 @@ impl Tui {
                 }
             }
         }
+    }
+
+    // The panel owns the screen until it is dismissed.
+    fn open_panel(&mut self) {
+        let rows = self.core.setting_rows();
+        self.ui.panel = Some(Panel::new(rows, &self.core.config.vim));
     }
 
     // Re-read the open panel's rows after a commit changed them underneath.
@@ -1364,14 +1381,6 @@ impl Tui {
                     });
                 continue;
             }
-            // Bare `/settings` opens a panel rather than printing the
-            // read-only list.
-            if matches!(intent, Intent::Builtin(Builtin::Settings(ref rest)) if rest.trim().is_empty())
-            {
-                let rows = self.core.setting_rows();
-                self.ui.panel = Some(Panel::new(rows, &self.core.config.vim));
-                continue;
-            }
             let was = self.core.current;
             let step = self.core.dispatch(intent);
             self.reconcile(was);
@@ -1404,6 +1413,7 @@ impl Tui {
                     // A checkout went; the cached list would go on offering it.
                     self.ui.lists.forget();
                 }
+                Step::Panel => self.open_panel(),
                 Step::Handled(lines) => self.land_lines(lines),
                 Step::Compact(focus) => self.start_compact(focus, &done_tx),
                 Step::Wechat(cmd) => {
@@ -1445,10 +1455,8 @@ impl Tui {
                 // whole view from it, so the screen returns to the node the
                 // conversation did instead of keeping the forgotten turns.
                 // It clears anything said before it: hence the notice after.
-                if let Some(session) = self.core.lane().session() {
-                    self.ui
-                        .rebuild(front_view(&mut self.views, self.core.lane()), session);
-                }
+                // A rewind is refused while a run has the transcript.
+                self.rebuild_front();
                 let said = match outcome {
                     Rewound::Unsent(_) if !self.ui.editor.is_empty() => {
                         "unsent — the line you were typing stands; Up recalls it".to_string()
@@ -1462,9 +1470,8 @@ impl Tui {
                     Rewound::Kept | Rewound::Nothing => {
                         let at = self
                             .core
-                            .lane_mut()
-                            .session
-                            .as_ref()
+                            .lane()
+                            .session()
                             .and_then(|s| s.last_node())
                             .map(|n| crate::store::text::clip(n.show(), 60))
                             .filter(|t| !t.is_empty())
@@ -1479,7 +1486,7 @@ impl Tui {
             Err(e) => {
                 self.ui.say(
                     front_view(&mut self.views, self.core.lane()),
-                    format!("warning: the transcript was not saved: {e}"),
+                    core::not_saved(&e),
                 );
             }
         }
@@ -1488,13 +1495,14 @@ impl Tui {
     // Open the rewind selector on what the user said: a rewind takes a prompt
     // back, and an answer is a place the conversation carries on from.
     fn open_rewind(&mut self) {
-        let rows: Vec<MenuEntry> = self
-            .core
-            .lane_mut()
-            .session
-            .as_ref()
-            .map(|s| s.rewind_nodes())
-            .unwrap_or_default()
+        // A lane whose transcript a job took and could not read back has
+        // nothing to go back to; said, not panicked.
+        let Some(session) = self.core.lane().session() else {
+            self.ui.flash(NOTHING_TO_REWIND);
+            return;
+        };
+        let rows: Vec<MenuEntry> = session
+            .rewind_nodes()
             .into_iter()
             .map(|node| MenuEntry::Message {
                 id: node.id(),

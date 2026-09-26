@@ -15,9 +15,11 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
+# Only the tests drive a run with a cancellation token of their own; the loop
+# itself reads the one on `Ctx`.
+tokio-util.workspace = true
 tempfile = "3"

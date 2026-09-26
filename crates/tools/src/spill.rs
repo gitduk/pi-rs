@@ -43,10 +43,21 @@ pub fn shared() -> PathBuf {
         .join("spill")
 }
 
-/// Where spills live when no session is in force — tests and embedders never
-/// touch the user's state.
+/// Where spills live when no session is in force: a one-shot run, which keeps
+/// nothing and so has no tree of its own to put them in.
+///
+/// Per process rather than one fixed name. The temp directory is world-writable,
+/// so a fixed name there is one somebody else can hold first — and `allocate`
+/// cannot harden a directory this process does not own, so the `0700` would
+/// quietly not take effect and the namespace under it would be shared with
+/// whoever did hold it. A name already taken is skipped, whatever took it.
 pub fn temp() -> PathBuf {
-    std::env::temp_dir().join("pi-spill")
+    let base = std::env::temp_dir();
+    let free = |dir: &PathBuf| std::fs::symlink_metadata(dir).is_err();
+    (0..64)
+        .map(|n| base.join(format!("pi-spill-{}-{n}", std::process::id())))
+        .find(free)
+        .unwrap_or_else(|| base.join("pi-spill"))
 }
 
 /// Resolve an opaque `spill:<ns>/<n>` locator to the file it names. Both parts
@@ -184,7 +195,23 @@ pub fn fit(ctx: &Ctx, items: &[String], unit: &str, notice: &str) -> Result<Stri
 
 #[cfg(test)]
 mod tests {
-    use super::{locate, prune};
+    // The root is one this process can call its own: a name that is already
+    // held is skipped rather than used, or the `0700` below would be asked of a
+    // directory this process does not own.
+    #[test]
+    fn a_temp_root_already_held_is_skipped() {
+        let held = temp();
+        std::fs::create_dir_all(&held).unwrap();
+        let next = temp();
+        assert_ne!(next, held, "a name already taken is not ours to use");
+        assert!(
+            std::fs::symlink_metadata(&next).is_err(),
+            "and the one it picks is free"
+        );
+        let _ = std::fs::remove_dir(&held);
+    }
+
+    use super::{locate, prune, temp};
     use crate::ToolError;
 
     #[test]

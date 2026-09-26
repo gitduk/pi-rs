@@ -187,7 +187,7 @@ async fn a_panicked_bang_does_not_lay_its_transcript_down_again() {
         image: None,
         shown: Some("!ls".into()),
     });
-    tui.core.lane_mut().session = Some(s);
+    tui.core.lane_mut().return_session(s);
     let token = tui.core.lane().token();
     // The rows as the screen has them, and the archive as it was saved.
     {
@@ -195,6 +195,10 @@ async fn a_panicked_bang_does_not_lay_its_transcript_down_again() {
         tui.ui.rebuild(view_at(&mut tui.views, token), session);
     }
     tui.core.save_lane(0).expect("saved");
+
+    // The job took the transcript and panicked with it, the way `start_bash`
+    // lends one out. Nothing comes back but the archive on disk.
+    let _ = tui.core.lane_mut().take_session();
 
     // The job panicked: no lines, and no transcript came home.
     tui.settle(crate::ui::tui::job::Done {
@@ -231,8 +235,7 @@ async fn a_stopped_run_does_not_tell_the_model_a_request_was_cancelled() {
             })
             .await;
             let mut back = tui.core.lanes[0]
-                .session
-                .take()
+                .take_session()
                 .expect("the transcript back");
             back.send_prompt(String::from("now something else"), None::<String>);
             format!("{:?}", back.entries())
@@ -761,6 +764,38 @@ async fn a_settings_change_to_the_status_segments_reaches_the_surface() {
     assert_eq!(tui.ui.done, vec![Segment::Cost]);
 }
 
+// A reload reaches everything the config installed, not only the values the
+// lanes read directly. The compactor is the one object here: it holds the
+// summarizer's own connection, so a `summarize_model` that changed has to be
+// dialled again rather than left as the one the run started with.
+#[test]
+fn a_reload_installs_a_new_compactor() {
+    let dir = tempfile::tempdir().expect("a checkout");
+    let mut tui = surface(dir.path());
+    let file = dir.path().join("settings.toml");
+    std::fs::write(
+        &file,
+        "base_url = \"http://127.0.0.1:1/v1\"\nformat = \"openai\"\nsummarize_model = \"cheap\"\n",
+    )
+    .expect("a settings file");
+    let mut args = <crate::Args as clap::Parser>::parse_from(["pi"]);
+    args.config = Some(file.display().to_string());
+    tui.core.args = std::sync::Arc::new(args);
+
+    let before = tui.core.lane().agent().compactor.clone();
+    let said = tui.core.reload();
+
+    assert!(
+        !said.iter().any(|s| s.starts_with("nothing reloaded")),
+        "{said:?}"
+    );
+    let after = tui.core.lane().agent().compactor.clone();
+    assert!(
+        !std::sync::Arc::ptr_eq(&before, &after),
+        "a reload installs a compactor built from what the file now says"
+    );
+}
+
 // Leaving with a run in flight cancels it and waits for the transcript to
 // come home, rather than writing down the state from before the run started.
 #[tokio::test]
@@ -806,4 +841,66 @@ fn vanished_lane(name: &str) -> Lane {
     lane.worktree = Some(name.into());
     std::fs::remove_dir_all(lane.root()).expect("the checkout goes");
     lane
+}
+
+// A lane whose transcript is gone — a job that panicked and could not read its
+// own back — cannot resume what it is running: answering "no switch" leaves the
+// user waiting for a screen that never comes back, with nothing said. The
+// refusal is an answer like any other.
+#[test]
+fn resuming_an_own_id_with_no_transcript_says_so() {
+    let dir = tempfile::tempdir().expect("a checkout");
+    let mut tui = surface(dir.path());
+    let id = tui.core.lane().id.clone();
+    assert!(
+        tui.core.lane().session().is_none(),
+        "there is nothing to switch to"
+    );
+
+    let step = tui.core.dispatch(Intent::Builtin(Builtin::Resume(id)));
+
+    assert!(
+        matches!(step, crate::input::Step::Handled(_)),
+        "the refusal is a listing, not a swap: {step:?}"
+    );
+}
+
+// `fate()` says `Now` only for what may run while a run has the transcript.
+// This is that claim, kept for the intents whose whole effect is this call: each
+// is dispatched against a lane holding a transcript, and none may read it away
+// or hand one back. `/reload`, `/worktree` and `/wechat` are `Now` too, and are
+// exercised where their effects are.
+#[test]
+fn a_now_intent_runs_with_the_transcript_a_run_has() {
+    let dir = tempfile::tempdir().expect("a checkout");
+    let (lane_dir, running) = a_running_lane();
+    let mut tui = surface(dir.path());
+    switch_to(&mut tui, running);
+
+    // A transcript to be kept: the claim is about what these leave behind, and a
+    // lane born without one could not tell the two answers apart.
+    let mut session = agent::session::Session::new();
+    session.prompt("the first question");
+    tui.core.lane_mut().return_session(session);
+
+    for intent in [
+        Intent::Builtin(Builtin::Help),
+        Intent::Builtin(Builtin::Keys),
+        Intent::Builtin(Builtin::Status),
+        Intent::Builtin(Builtin::Name("n".into())),
+        Intent::Builtin(Builtin::Model(String::new())),
+        Intent::Builtin(Builtin::Resume(String::new())),
+        Intent::Builtin(Builtin::Settings("x".into())),
+    ] {
+        assert!(
+            matches!(intent.fate(), crate::input::Fate::Now),
+            "{intent:?} is no longer `Now`"
+        );
+        let _ = tui.core.dispatch(intent);
+        assert!(
+            tui.core.lane().session().is_some(),
+            "a `Now` intent may not take the transcript, or hand one back"
+        );
+    }
+    drop(lane_dir);
 }

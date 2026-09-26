@@ -102,6 +102,37 @@ async fn an_idle_lane_opens_the_rewind_selector() {
     assert!(tui.ui.flash.is_none(), "and nothing was refused");
 }
 
+// A job that panicked and could not read its transcript back leaves the lane
+// idle with nothing in it — the state `NO_TRANSCRIPT` names, and one the run
+// in flight is not there to explain. `esc esc` still arrives, because `fate`
+// only guards a run, so the answer has to be a thing said rather than a panic.
+#[tokio::test]
+async fn the_rewind_of_a_lane_with_no_transcript_says_so() {
+    let dir = tempfile::tempdir().expect("a checkout");
+    let mut tui = surface(dir.path());
+
+    // Nothing came home, and nothing was saved to read back: the session has
+    // never been written.
+    tui.settle(crate::ui::tui::job::Done {
+        token: tui.core.lanes[0].token(),
+        kind: crate::ui::tui::job::Kind::Turn,
+        ran: None,
+    })
+    .await;
+    tui.ui.flash = None;
+    assert!(
+        tui.core.lane().session().is_none(),
+        "the transcript is gone"
+    );
+
+    let crate::ui::tui::Wake::Do(Asked::Own(deed)) = tui.admit(Asked::Own(Deed::Rewind)) else {
+        panic!("an idle lane refused the rewind: {:?}", tui.ui.flash);
+    };
+    tui.carry(deed).await;
+
+    assert!(tui.ui.rewind.is_empty(), "there is nothing to go back to");
+}
+
 // A command that answered with nothing opens nothing: `/new`, `/worktree`
 // to a checkout already open and the `/loop` that only arms a lane all come
 // through here empty, and an overlay the user has to dismiss for nothing is

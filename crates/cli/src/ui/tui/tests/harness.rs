@@ -1,5 +1,5 @@
 use crate::core::Core;
-use crate::core::lane::{Lane, Run};
+use crate::core::lane::Lane;
 use crate::store::keys::{Keys, Mode};
 use crate::store::session::Store;
 use crate::ui::render::Paint;
@@ -92,34 +92,17 @@ pub(super) fn running_lane(dir: &std::path::Path) -> Lane {
         replay_thinking: llm::model::ReplayThinking::Tagged,
         pricing: llm::model::Pricing::default(),
     };
-    let (events, inbox) = Lane::channel();
-    Lane {
-        agent: std::sync::Arc::new(agent::Agent::new(std::sync::Arc::new(Mute), spec)),
-        token: crate::core::lane::next_token(),
-        session: None,
+    let mut lane = Lane::opened(crate::core::lane::Opening {
         id: "s1".into(),
-        created: 0,
-        name: None,
-        totals: agent::Totals::default(),
-        tally: Default::default(),
-        held_screens: Vec::new(),
-        context: Vec::new(),
-        standing: std::sync::Arc::from(""),
-        ctx: tools::Ctx::new(ws),
-        worktree: None,
-        events,
-        inbox,
-        pending: Vec::new(),
-        looping: None,
-        // What every `start_*` leaves behind while its job runs.
-        run: Run::Running {
-            cancel: tokio_util::sync::CancellationToken::new(),
-            steer: None,
-            unsend: false,
-        },
-        keys: std::sync::Arc::new(Keys::default()),
-        commands: std::sync::Arc::new(Vec::new()),
-    }
+        ..crate::core::lane::Opening::new(
+            std::sync::Arc::new(agent::Agent::new(std::sync::Arc::new(Mute), spec)),
+            crate::core::lane::a_resolved(""),
+            tools::Ctx::new(ws),
+        )
+    });
+    // What every `start_*` leaves behind while its job runs.
+    lane.begin(tokio_util::sync::CancellationToken::new(), None);
+    lane
 }
 
 pub(super) fn surface(dir: &std::path::Path) -> crate::ui::tui::Tui {

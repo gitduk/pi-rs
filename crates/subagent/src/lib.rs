@@ -8,7 +8,7 @@ use tokio::sync::{mpsc::unbounded_channel, watch};
 use tools::{Ctx, Tier, Tool, ToolError, ToolOutput, bash};
 
 use agent::session::Session;
-use agent::{Agent, AgentError, Event, Home};
+use agent::{Agent, AgentError, Briefing, Event, Home, Retry};
 use tracing::Instrument as _;
 
 const PROMPT: &str = include_str!("../prompts/subagent.md");
@@ -68,6 +68,9 @@ pub struct Subagent {
     // How long the child may run silent before it is read as wedged: the one
     // brake here, and the only way a child ends that is not esc.
     deadline: Duration,
+    // The retry schedule the child runs on, handed in when the tool is hung:
+    // a tool has no way to reach the config where it is called.
+    retry: Retry,
 }
 
 impl Subagent {
@@ -79,16 +82,36 @@ impl Subagent {
     /// `standing` is what the checkout says — the workspace anchor and the
     /// instruction files. It travels with the tree, not with the caller, and
     /// the child edits that same tree.
-    pub fn new(parent: &Agent, home: Arc<dyn Home>, standing: &str) -> Self {
-        let mut agent = parent.clone();
-        agent.registry = std::mem::take(&mut agent.registry).without(Self::NAME);
-        agent.system = format!("{PROMPT}{standing}");
+    ///
+    /// `brief` is the one the child runs on: the parent's with its prompt
+    /// replaced and itself taken out of the registry. Handed in rather than
+    /// read off the agent, so the caller can arm the parent and the child from
+    /// one value — the parent's own brief is still the old one at this point,
+    /// which is why the deadline is read from this argument and not from it.
+    pub fn new(
+        parent: &Agent,
+        brief: Arc<Briefing>,
+        home: Arc<dyn Home>,
+        standing: &str,
+        retry: Retry,
+    ) -> Self {
+        let deadline = brief
+            .subagent_deadline
+            .unwrap_or_else(|| Duration::from_secs(1800));
+        let mut child = brief;
+        let patch = Arc::make_mut(&mut child);
+        patch.registry = std::mem::take(&mut patch.registry).without(Self::NAME);
+        patch.system = format!("{PROMPT}{standing}");
+        let agent = Agent {
+            model: parent.model.clone(),
+            brief: child,
+            compactor: parent.compactor.clone(),
+        };
         Self {
             agent: Arc::new(agent),
             home,
-            deadline: parent
-                .subagent_deadline
-                .unwrap_or_else(|| Duration::from_secs(1800)),
+            deadline,
+            retry,
         }
     }
 
@@ -178,6 +201,13 @@ impl Tool for Subagent {
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
         let args: Args =
             tools::parse_args_hinted(args, "subagent takes `description` and `prompt`")?;
+        // An ask with no text in it is a message every provider refuses; say so
+        // here, where the caller can still change it.
+        if args.prompt.trim().is_empty() {
+            return Err(ToolError::Invalid(
+                "the subagent's `prompt` is empty — say what it should do".into(),
+            ));
+        }
 
         let id = format!(
             "{}-subagent-{}",
@@ -186,12 +216,20 @@ impl Tool for Subagent {
         );
         // Per field, not wholesale: the tree, the locks and the renumbering are
         // shared because parent and child edit the same files, while the
-        // transcript, its spills and the token are the child's own.
+        // transcript, its own name among the spills and the token are the
+        // child's own.
+        //
+        // Its own name, not its own tree: `with_session` files a run's spills
+        // under the durable root, and a child's tree has to be the parent's —
+        // a one-shot run spills to the temp directory, and a locator the child
+        // prints is one the parent then has to resolve.
         let stop = ctx.cancel.child_token();
+        let root = ctx.spill_root().to_path_buf();
         let child = ctx
             .clone()
             .with_cancel(stop.clone())
             .with_session(&id)
+            .with_spill_root(root)
             .with_own_writes();
 
         let (tx, mut rx) = unbounded_channel();
@@ -254,7 +292,7 @@ impl Tool for Subagent {
         let ran = {
             let mut run = std::pin::pin!(
                 self.agent
-                    .run(&mut session, &child, &tx)
+                    .run(&mut session, &child, &tx, &self.retry)
                     .instrument(child_span)
             );
             let grace_stop = stop.clone();

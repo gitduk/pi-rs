@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::blocks::by_row;
 use crate::read::{MAX_BYTES, over_limit};
 use crate::rows::view_hash;
 use crate::{Ctx, EditError, Tier, Tool, ToolError, ToolOutput};
@@ -282,13 +283,6 @@ fn crop(s: &str, max: usize) -> String {
     t
 }
 
-// The constructs a view of the file opens with, keyed by first line.
-fn construct_extents(path: &str, source: &str) -> std::collections::HashMap<usize, (usize, usize)> {
-    crate::syntax::Lang::of(path).map_or_else(std::collections::HashMap::new, |l| {
-        crate::syntax::extents(l, source)
-    })
-}
-
 /// The report the model reads: where the edit landed, and what it displaced.
 // What the model is told besides the sketch: the landings that took more than
 // they meant, named by the block they covered. A whole block taken when only a
@@ -296,7 +290,7 @@ fn construct_extents(path: &str, source: &str) -> std::collections::HashMap<usiz
 // what the model got wrong.
 fn notes(path: &str, before: &str, applied: &Applied) -> String {
     let old: Vec<&str> = before.lines().collect();
-    let extents = construct_extents(path, before);
+    let extents = by_row(path, before);
     let mut out = String::new();
     for l in &applied.landed {
         let Some((cs, ce)) = extents.get(&l.took_at).copied() else {
@@ -465,7 +459,9 @@ fn untouched<'x>(out: &mut Vec<Row<'x>>, lines: &[&'x str], from: usize, to: usi
 // draws them, so a later reading of the transcript sees what the screen showed
 // at the time rather than a second opinion on the same edit.
 fn sketch(path: &str, applied: &Applied) -> String {
-    let lines: Vec<&str> = applied.content.lines().collect();
+    // Shown without the mark, like every other view of the file: a row carrying
+    // an invisible character is a row an anchor copied from it cannot match.
+    let lines: Vec<&str> = edits::split_bom(&applied.content).1.lines().collect();
     let mut rows: Vec<Row> = Vec::new();
     let mut next = 1usize;
     for l in &applied.landed {
@@ -708,7 +704,11 @@ impl Tool for Edit {
         // what the surface draws are the same bytes, so whoever reads the
         // transcript afterwards sees what the screen showed at the time.
         let patch = sketch(path, &applied);
-        let mut report = notes(path, &content, &applied);
+        // Counted in the text the patch resolved against: `apply` strips the
+        // byte-order mark, so a block starting on the first row would compare
+        // unequal line for line and lose its note.
+        let (_, body) = edits::split_bom(&content);
+        let mut report = notes(path, body, &applied);
         report.push_str(&patch);
         report.push('\n');
         if !applied.left_blank.is_empty() {

@@ -21,10 +21,10 @@ impl Core {
     // under way is counted rather than waiting for it to end.
     pub(super) fn status_lines(&self) -> Vec<String> {
         let lane = self.lane();
-        let mut out = standing_head(&lane.standing);
-        if !lane.context.is_empty() {
+        let mut out = standing_head(&lane.resolved.standing);
+        if !lane.resolved.context.is_empty() {
             out.push("context:".into());
-            out.extend(lane.context.iter().map(|c| format!("- {c}")));
+            out.extend(lane.resolved.context.iter().map(|c| format!("- {c}")));
         }
         out.push(match journal::path() {
             Some(p) => format!("journal: {}", p.display()),
@@ -44,20 +44,15 @@ impl Core {
         }
         out
     }
-    /// What the transcript occupies now, for the line that says why there was
-    /// nothing to compact. Zero while a run has it.
-    pub fn tokens_now(&self) -> usize {
-        self.tokens_now_at(self.current)
-    }
-    /// The same for a named lane: a compaction that finishes after the screen
-    /// has moved on still has to say what it found.
+    /// What a named lane's transcript occupies now, for the line that says why
+    /// there was nothing to compact. Zero while a run has it.
     pub fn tokens_now_at(&self, at: usize) -> usize {
         let Some(lane) = self.lanes.get(at) else {
             return 0;
         };
-        lane.session
-            .as_ref()
-            .map_or(0, |s| llm::estimate::tokens(&s.context(), &lane.agent.spec))
+        lane.session().map_or(0, |s| {
+            llm::estimate::tokens(&s.context(), lane.agent.spec())
+        })
     }
 }
 

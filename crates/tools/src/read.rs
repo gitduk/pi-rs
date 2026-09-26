@@ -320,7 +320,7 @@ impl Tool for Read {
         let ranged = args.offset.is_some() || args.limit.is_some();
         let wants_outline = args.outline.unwrap_or(!ranged && all.len() > OUTLINE_OVER);
         if wants_outline && let Some(lang) = crate::syntax::Lang::of(&rel) {
-            let items = crate::syntax::outline(lang, content);
+            let items = crate::syntax::outline(lang, shown);
             if !items.is_empty() {
                 // From the items already in hand: asking `rows::spans` here
                 // would parse the file a second time for the same answer.

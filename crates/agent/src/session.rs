@@ -760,11 +760,26 @@ impl Session {
     // block are `block_omissions`, and mixing them would let a block notice
     // hide an entry that is still shown in full.
     fn omissions(&self) -> HashMap<EntryId, &str> {
+        // An assistant turn is never omitted — its `tool_use` blocks have to
+        // stay for the answers to them to be legal, so `context` sends it whole
+        // and a block-level omission is the most it can carry. A whole-entry
+        // record naming one is read that way too: the record is not validated
+        // when the transcript is loaded, and a planner that priced such a turn
+        // as its notice alone would plan against a total the request never
+        // reaches.
+        let answers: HashSet<EntryId> = self
+            .entries
+            .iter()
+            .filter(|e| matches!(e, Entry::Answer { .. }))
+            .map(Entry::id)
+            .collect();
         let mut out = HashMap::new();
         for e in &self.entries {
             if let Entry::Compaction { record, .. } = e {
                 for el in record.omissions.iter().filter(|o| o.block.is_none()) {
-                    out.insert(el.entry, el.notice.as_str());
+                    if !answers.contains(&el.entry) {
+                        out.insert(el.entry, el.notice.as_str());
+                    }
                 }
             }
         }
@@ -930,7 +945,7 @@ impl Session {
                 first_user = false;
                 for s in &summaries {
                     content.push(UserContent::Text(Text {
-                        text: format!("<earlier-work>\n{s}\n</earlier-work>"),
+                        text: injected_summary(s),
                     }));
                 }
             }
@@ -938,6 +953,12 @@ impl Session {
         }
         out
     }
+}
+
+/// One summary as `context` sends it. Named here because the estimate of a
+/// transcript has to count the same bytes, wrapper included.
+pub fn injected_summary(s: &str) -> String {
+    format!("<earlier-work>\n{s}\n</earlier-work>")
 }
 
 /// The wire blocks one entry projects to. Empty for what never reaches the

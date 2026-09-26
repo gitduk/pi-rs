@@ -171,6 +171,19 @@ pub fn pad(s: &str, width: usize) -> String {
     format!("{s}{}", " ".repeat(width.saturating_sub(w)))
 }
 
+/// A tool and the argument its summary picked out, with the prefix the caller
+/// draws left off: a spinner while it runs, ⚙ on the phone, a mark once it has
+/// ended. The row a finished call lands as names it from the other side — the
+/// head of its result, through `tui::row`'s own rule — because what came back
+/// is not what was asked for.
+pub fn named(name: &str, summary: &str) -> String {
+    if summary.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name} {summary}")
+    }
+}
+
 /// The one argument worth showing in a progress line.
 pub fn summarize(args: &serde_json::Value) -> String {
     // Order is priority: `pattern` beats `path` because a grep carries both,

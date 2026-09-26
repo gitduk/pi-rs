@@ -1,6 +1,5 @@
-//! What `/settings`, `/reload` and `/model` do to the Core: the config in
-//! force, the claims this session laid over the file, the model the lane is
-//! running on, and the rows the panel shows.
+//! What `/reload` and `/model` do to the Core, and the rows the settings panel
+//! shows: the config in force, the claims this session laid over it, the model.
 //!
 //! The value itself is `store/settings.rs`; this is what the Core does to it.
 
@@ -9,12 +8,10 @@ use serde::Deserialize;
 use super::Core;
 use super::meter::summary;
 use super::status::{carries_reasoning, demotion};
-use crate::input::Step;
 use crate::input::commands::Choice;
 use crate::input::refused;
 use crate::store::config::{self, Config};
 use crate::store::icons;
-use crate::store::listing::{Listing, Row};
 use crate::store::settings::{self, mask_secret};
 
 impl Core {
@@ -59,7 +56,7 @@ impl Core {
             Ok(p) => p,
             Err(e) => return failed(e),
         };
-        let mut resolved = match crate::resolve(
+        let resolved = match crate::resolve(
             &self.args,
             &self.lane().ctx.workspace,
             &config,
@@ -75,23 +72,20 @@ impl Core {
         // One `make_mut`: a run in flight holds the other reference, so this
         // is where the copy is taken, and taking it four times copies thrice
         // over.
-        let home = self.home(root.clone(), self.lane().agent.spec.model.clone());
+        let home = self.home(root.clone(), self.lane().agent.spec().model.clone());
+        // The one thing here that is an object rather than a value: the
+        // compactor holds the summarizer's own connection, so it is rebuilt
+        // here or `summarize_model` and `idle_timeout` never follow a reload.
+        let retry = config.retry();
+        let writer = crate::summary_writer(&self.args, &config, &self.lane().agent.spec().model)
+            .map_err(|e| format!("nothing reloaded — {}", refused("summarize_model", e)))?;
         let ag = std::sync::Arc::make_mut(&mut self.lane_mut().agent);
-        ag.apply(agent::Setup {
-            registry: std::mem::take(&mut resolved.registry),
-            system: std::mem::take(&mut resolved.system),
-            tier: resolved.tier,
-            effort: resolved.effort,
-            subagent_deadline: resolved.subagent_deadline,
-        });
-        crate::core::subagent::hang(ag, home, &resolved.standing);
-        self.lane_mut().context = resolved.context;
-        self.lane_mut().standing = resolved.standing;
+        ag.compactor = std::sync::Arc::new(agent::Summarizing::new(writer, retry.idle));
+        let resolved = crate::core::lane::arm(ag, std::sync::Arc::new(resolved), home, retry);
         // A skill can appear between one turn and the next, so the table of
-        // what a slash answers to is recomputed like everything else here —
-        // onto the lane it belongs to, then into force.
-        self.lane_mut().keys = std::sync::Arc::new(resolved.keys);
-        self.lane_mut().commands = std::sync::Arc::new(resolved.commands);
+        // what a slash answers to travels with everything else here — onto the
+        // lane it belongs to, then into force.
+        self.lane_mut().resolved = resolved;
         self.in_force();
         // The running model is deliberately not re-dialled: a reload re-reads
         // preferences, and which model this session is on was a decision, not a
@@ -105,10 +99,10 @@ impl Core {
         match crate::dial(
             &self.args,
             &self.config,
-            &self.lane().agent.spec.model,
+            &self.lane().agent.spec().model,
             config::Origin::Command,
         ) {
-            Ok(dialled) if dialled.spec != self.lane().agent.spec => {
+            Ok(dialled) if dialled.spec != *self.lane().agent.spec() => {
                 self.retarget(dialled.transport, dialled.spec);
                 notes.extend(
                     dialled
@@ -124,7 +118,7 @@ impl Core {
             Ok(_) => {}
             Err(e) => notes.push(format!(
                 "`{}` not re-dialled — {}",
-                self.lane_mut().agent.spec.model,
+                self.lane_mut().agent.spec().model,
                 e
             )),
         }
@@ -133,8 +127,8 @@ impl Core {
             models = self.config.names().len(),
             rebound_keys = self.config.keys.len(),
             commands = self.commands.len(),
-            effort = ?self.lane().agent.effort,
-            system_bytes = self.lane().agent.system.len(),
+            effort = ?self.lane().agent.brief.effort,
+            system_bytes = self.lane().agent.brief.system.len(),
             "reloaded"
         );
         Ok(notes)
@@ -145,10 +139,10 @@ impl Core {
         self.rebuilt().unwrap_or_else(|why| vec![why])
     }
     // The file's rows with the session's claims on top — what the panel
-    // shows and the read-only list prints. Path by path rather than one
-    // overlaid tree, so a claim the file can no longer address (an ancestor
-    // the file has turned into a non-table) still answers, with the file's
-    // own value beside it for the mark.
+    // shows. Path by path rather than one overlaid tree, so a claim the file
+    // can no longer address (an ancestor the file has turned into a
+    // non-table) still answers, with the file's own value beside it for the
+    // mark.
     pub fn setting_rows(&self) -> Vec<settings::SettingRow> {
         self.settings.rows()
     }
@@ -249,47 +243,14 @@ impl Core {
             self.lane().ctx.workspace.root().to_path_buf(),
             spec.model.clone(),
         );
-        let standing = self.lane().standing.clone();
+        let resolved = self.lane().resolved.clone();
+        let retry = self.config.retry();
         let ag = std::sync::Arc::make_mut(&mut self.lane_mut().agent);
         ag.retarget(transport, spec);
-        crate::core::subagent::hang(ag, home, &standing);
-    }
-    // `/settings`. The panel is the whole surface: bare opens it, and anything
-    // after the word is refused rather than half-remembered as a verb.
-    pub(super) fn settings(&mut self, rest: &str) -> Step {
-        if rest.trim().is_empty() {
-            self.open_panel()
-        } else {
-            Step::Flash("settings are edited in the panel — bare /settings opens it".into())
-        }
-    }
-    // The bare `/settings`: the TUI's panel, or a read-only list when this
-    // is not a terminal.
-    fn open_panel(&mut self) -> Step {
-        // The TUI intercepts bare `/settings` before it reaches here; the
-        // line surface can only list.
-        let rows: Vec<Row> = self
-            .setting_rows()
-            .into_iter()
-            .map(|row| {
-                // The mark and the file belong to this value rather than to the
-                // row: what they say is that this one was claimed, and what the
-                // file holds instead.
-                let mut value = format!("= {}", mask_secret(&row.path, &row.value));
-                if row.changed {
-                    value.push_str(&format!(" {}", icons::CHANGED_MARK));
-                    if let Some(file) = self.settings.file_value(&row.path) {
-                        let file = mask_secret(&row.path, &settings::render(file));
-                        value.push_str(&format!(" file: {file}"));
-                    }
-                }
-                Row::new([row.path, value])
-            })
-            .collect();
-        if rows.is_empty() {
-            return Step::Handled(Listing::say(["nothing in ~/.pi/settings.toml yet"]));
-        }
-        Step::Handled(Listing::of(rows))
+        // The child is built from this agent, so the tool is hung again for it
+        // to run on the model this session just moved to.
+        let resolved = crate::core::lane::arm(ag, resolved, home, retry);
+        self.lane_mut().resolved = resolved;
     }
 }
 
@@ -310,7 +271,7 @@ impl Core {
         let dialled = match crate::dial(&self.args, &self.config, name, config::Origin::Command) {
             Ok(d) => d,
             Err(e) => {
-                let held = self.lane_mut().agent.spec.model.clone();
+                let held = self.lane_mut().agent.spec().model.clone();
                 return vec![format!("still on {held} — {}", refused("switch", e))];
             }
         };
@@ -319,8 +280,8 @@ impl Core {
         // lands on need not be the same string. Comparing the typed one would
         // re-dial the model already running and then announce a reasoning
         // demotion that never happened.
-        if dialled.spec.model == self.lane_mut().agent.spec.model {
-            return vec![format!("already on {}", self.lane_mut().agent.spec.model)];
+        if dialled.spec.model == self.lane_mut().agent.spec().model {
+            return vec![format!("already on {}", self.lane_mut().agent.spec().model)];
         }
         let mut said: Vec<String> = dialled.warning.into_iter().chain(dialled.notes).collect();
         let spec = &dialled.spec;
@@ -332,17 +293,12 @@ impl Core {
         ));
         // An absent transcript is one a run has, and it is writing this
         // model's reasoning into it as we speak — so say it either way.
-        if self
-            .lane_mut()
-            .session
-            .as_ref()
-            .is_none_or(carries_reasoning)
-        {
+        if self.lane().session().is_none_or(carries_reasoning) {
             said.push(demotion(spec.replay_thinking).into());
         }
         tracing::info!(
             target: "pi::session",
-            from = %self.lane_mut().agent.spec.model,
+            from = %self.lane_mut().agent.spec().model,
             to = %spec.model,
             format = spec.format.name(),
             context_window = spec.context_window,
@@ -353,7 +309,7 @@ impl Core {
     }
     // What `/model` on its own shows.
     pub(super) fn listing(&self) -> Vec<String> {
-        let here = &self.lane().agent.spec.model;
+        let here = &self.lane().agent.spec().model;
         let choices = self.choices();
         if choices.is_empty() {
             return vec![

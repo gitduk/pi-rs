@@ -1,5 +1,5 @@
 use agent::ext::compact::plan;
-use agent::session::{Prompt, Session};
+use agent::session::{Compaction, Entry, Omission, Prompt, Seen, Session};
 use agent::{Policy, Report};
 use llm::estimate;
 
@@ -681,7 +681,7 @@ mod budget {
         let s = bulky_session();
         let budget = a.budget();
         assert!(
-            llm::estimate::tokens(&s.context(), &a.spec) > budget,
+            llm::estimate::tokens(&s.context(), a.spec()) > budget,
             "the transcript has to start over budget for this to mean anything"
         );
 
@@ -689,7 +689,7 @@ mod budget {
             protect_tail: a.kept_tokens(),
             ..agent::Policy::default()
         };
-        let (_record, report) = agent::ext::compact::plan(&s, &a.spec, budget, &policy);
+        let (_record, report) = agent::ext::compact::plan(&s, a.spec(), budget, &policy);
         assert!(
             !report.still_over,
             "the tail left nothing to reclaim: {report:?}"
@@ -703,7 +703,7 @@ mod budget {
         let a = agent_with(200_000, 32_000);
         let s = Session::with_prompt("hello");
         let (record, r) =
-            agent::ext::compact::plan(&s, &a.spec, a.budget(), &agent::Policy::default());
+            agent::ext::compact::plan(&s, a.spec(), a.budget(), &agent::Policy::default());
         assert!(!r.touched());
         assert_eq!(
             record,
@@ -743,6 +743,126 @@ fn the_planner_and_the_sender_count_the_same_transcript() {
         );
     }
     s.prompt("and now this");
+
+    let (_record, report) = plan(&s, &spec(), usize::MAX, &Policy::default());
+    assert_eq!(
+        report.before,
+        estimate::tokens(&s.context(), &spec()),
+        "the two estimates have drifted apart again"
+    );
+}
+
+// The summaries still in force are sent as text in the first user message, and
+// the planner has to count them: leaving them out reads a transcript as smaller
+// than the request it is about to make, so the compaction fires a turn late —
+// after the provider has already refused one.
+#[test]
+fn the_planner_and_the_sender_count_the_summaries_the_same() {
+    let mut s = Session::new();
+    s.prompt("go");
+    s.push_assistant(vec![AssistantContent::Text(llm::message::Text {
+        text: big(600),
+    })]);
+    s.prompt("and now this");
+    s.record(Compaction {
+        summary: Some("earlier: the first question, and what came of it".to_string()),
+        ..Compaction::default()
+    });
+
+    let (_record, report) = plan(&s, &spec(), usize::MAX, &Policy::default());
+    assert_eq!(
+        report.before,
+        estimate::tokens(&s.context(), &spec()),
+        "the two estimates have drifted apart again"
+    );
+}
+
+// An assistant turn is never omitted: its `tool_use` blocks have to stay for
+// the answers to them to be legal, so the sender carries the whole turn however
+// the record reads. One naming a turn — a transcript written elsewhere, since
+// the id list is not validated when one is loaded — used to leave the planner
+// pricing a turn the request still held: "fits" against a total it never
+// reaches.
+#[test]
+fn an_omission_naming_an_assistant_turn_is_read_the_same_by_both() {
+    let mut s = Session::new();
+    s.prompt("go");
+    s.push_assistant(vec![AssistantContent::Text(llm::message::Text {
+        text: big(600),
+    })]);
+    s.prompt("and now this");
+
+    let id = s
+        .view()
+        .iter()
+        .find_map(|seen| match seen {
+            Seen::As(Entry::Answer { .. }) => Some(seen.id()),
+            _ => None,
+        })
+        .expect("the answer is in the view");
+    s.record(Compaction {
+        omissions: vec![Omission {
+            entry: id,
+            block: None,
+            notice: "[omitted: the turn was rolled up]".into(),
+        }],
+        ..Compaction::default()
+    });
+
+    assert!(
+        matches!(
+            s.view().iter().find(|seen| seen.id() == id),
+            Some(Seen::As(_))
+        ),
+        "the turn is sent whole, so it is not the view that omits it"
+    );
+    let (_record, report) = plan(&s, &spec(), usize::MAX, &Policy::default());
+    assert_eq!(
+        report.before,
+        estimate::tokens(&s.context(), &spec()),
+        "the two estimates have drifted apart again"
+    );
+}
+
+// The same invariant over an entry the view has already replaced. A result
+// standing in as a notice is still a `tool_result` on the wire — the answering
+// `tool_use` has to find it — so the planner prices the block it will be sent
+// in, not the notice alone. It used to price the notice alone, and so read a
+// transcript as smaller than the request it was about to make.
+#[test]
+fn the_planner_and_the_sender_count_an_omitted_result_the_same() {
+    let mut s = Session::new();
+    s.prompt("go");
+    s.push_assistant(vec![AssistantContent::ToolCall(ToolCall {
+        id: "c1".into(),
+        name: "grep".into(),
+        args: json!({ "pattern": "x" }),
+    })]);
+    s.push_results(vec![ToolResult::text("c1", "grep", big(9_000))]);
+    s.prompt("and now this");
+
+    // The result as a notice, the way a pass that only had room for content —
+    // and not for whole rounds — leaves it.
+    let id = s
+        .view()
+        .iter()
+        .find_map(|seen| match seen {
+            Seen::As(Entry::Tool { .. }) => Some(seen.id()),
+            _ => None,
+        })
+        .expect("the result is in the view");
+    s.record(Compaction {
+        omissions: vec![Omission {
+            entry: id,
+            block: None,
+            notice: "[omitted: the body was rolled up]".into(),
+        }],
+        ..Compaction::default()
+    });
+    assert!(matches!(
+        s.view().iter().find(|seen| seen.id() == id),
+        Some(Seen::Omitted { .. })
+    ));
 
     let (_record, report) = plan(&s, &spec(), usize::MAX, &Policy::default());
     assert_eq!(

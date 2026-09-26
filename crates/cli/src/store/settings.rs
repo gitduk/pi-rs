@@ -36,9 +36,9 @@ pub fn leaves(tree: &toml::Value) -> Vec<(String, String)> {
     out
 }
 
-/// One leaf as the panel and the read-only list show it: the value in force
-/// for the session, and whether the file still holds something else — which
-/// is what the panel's write and revert act on.
+/// One leaf as the panel shows it: the value in force for the session, and
+/// whether the file still holds something else — which is what the panel's
+/// write and revert act on.
 pub struct SettingRow {
     pub path: String,
     pub value: String,
@@ -122,11 +122,11 @@ impl Settings {
         self.claimed.remove(path).is_some()
     }
 
-    /// The file's rows with the session's claims on top — what the panel shows
-    /// and the read-only list prints. Path by path rather than one overlaid
-    /// tree, so a claim the file can no longer address (an ancestor the file
-    /// has turned into a non-table) still answers, with the file's own value
-    /// beside it for the mark.
+    /// The file's rows with the session's claims on top — what the panel
+    /// shows. Path by path rather than one overlaid tree, so a claim the file
+    /// can no longer address (an ancestor the file has turned into a
+    /// non-table) still answers, with the file's own value beside it for the
+    /// mark.
     pub fn rows(&self) -> Vec<SettingRow> {
         let mut rows: BTreeMap<String, String> = leaves(&self.file).into_iter().collect();
         for (path, claimed) in &self.claimed {
@@ -146,8 +146,8 @@ impl Settings {
     }
 }
 
-/// What the panel and the read-only list show in place of a value the journal
-/// redacts: whether there is one, never which.
+/// What the panel shows in place of a value the journal redacts: whether there
+/// is one, never which.
 pub(crate) fn mask_secret(path: &str, value: &str) -> String {
     if crate::store::journal::secret(crate::store::journal::leaf(path)) {
         match value {

@@ -13,7 +13,7 @@ mod common;
 use common::spec;
 
 use agent::session::Session;
-use agent::{Agent, Home};
+use agent::{Agent, Home, Retry};
 use subagent::Subagent;
 use tools::{Ctx, FileLocks, Registry, Tier, Tool, ToolError, ToolOutput, Viewed, Workspace};
 
@@ -96,6 +96,7 @@ struct Seen {
     viewed: std::sync::Mutex<Option<Viewed>>,
     root: std::sync::Mutex<Option<std::path::PathBuf>>,
     namespace: std::sync::Mutex<Option<String>>,
+    spill: std::sync::Mutex<Option<std::path::PathBuf>>,
 }
 
 struct Probe {
@@ -124,6 +125,7 @@ impl Tool for Probe {
         *self.seen.viewed.lock().unwrap() = Some(ctx.viewed.clone());
         *self.seen.root.lock().unwrap() = Some(ctx.workspace.root().to_path_buf());
         *self.seen.namespace.lock().unwrap() = Some(ctx.spill_namespace().to_string());
+        *self.seen.spill.lock().unwrap() = Some(ctx.spill_root().to_path_buf());
         if let Some(trip) = &self.trip {
             trip.cancel();
         }
@@ -197,15 +199,23 @@ fn rigged(
         }),
         spec(),
     );
-    parent.registry = Registry::new()
+    std::sync::Arc::make_mut(&mut parent.brief).registry = Registry::new()
         .with(Sleeper)
         .with(tools::write::Write)
         .with(Probe {
             seen: seen.clone(),
             trip: esc.then(|| ctx.cancel.clone()),
         });
-    let subagent = Subagent::new(&parent, kept.clone(), STANDING).with_deadline(deadline);
-    parent.registry = parent.registry.clone().with(subagent);
+    let subagent = Subagent::new(
+        &parent,
+        parent.brief.clone(),
+        kept.clone(),
+        STANDING,
+        Retry::default(),
+    )
+    .with_deadline(deadline);
+    let registry = parent.brief.registry.clone().with(subagent);
+    std::sync::Arc::make_mut(&mut parent.brief).registry = registry;
     (dir, parent, ctx, seen, kept)
 }
 
@@ -216,7 +226,7 @@ async fn drive(
 ) -> (Session, Result<llm::stream::Usage, agent::AgentError>) {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let mut session = Session::with_prompt(prompt);
-    let out = agent.run(&mut session, ctx, &tx).await;
+    let out = agent.run(&mut session, ctx, &tx, &Retry::default()).await;
     (session, out)
 }
 
@@ -289,6 +299,15 @@ async fn the_child_shares_the_tree_and_its_bookkeeping() {
         seen.viewed.lock().unwrap().as_ref().unwrap(),
         &ctx.viewed
     ));
+    // And the tree its spills land in, which is the fourth thing that cannot
+    // differ: a `spill:<ns>/<n>` the child prints is a name the parent has to
+    // resolve, and a one-shot run's spills belong in the temp directory its
+    // parent chose rather than in the one a session would use.
+    assert_eq!(
+        seen.spill.lock().unwrap().clone().unwrap(),
+        ctx.spill_root(),
+        "the child spills where its parent does, under its own name",
+    );
 }
 
 #[tokio::test]
@@ -393,7 +412,14 @@ fn the_subagent_takes_the_job_and_nothing_else() {
         }),
         spec(),
     );
-    let schema = Subagent::new(&parent, Arc::new(Kept::default()), STANDING).schema();
+    let schema = Subagent::new(
+        &parent,
+        parent.brief.clone(),
+        Arc::new(Kept::default()),
+        STANDING,
+        Retry::default(),
+    )
+    .schema();
     // No cap of the caller's to set: the child ends when it answers, when it
     // stops saying anything, or when the caller's esc reaches it.
     let mut args: Vec<&str> = schema["properties"]
@@ -463,14 +489,18 @@ async fn the_child_gets_no_tool_the_parent_was_denied() {
         }),
         spec(),
     );
-    parent.registry = Registry::new().with(Probe {
+    std::sync::Arc::make_mut(&mut parent.brief).registry = Registry::new().with(Probe {
         seen: seen.clone(),
         trip: None,
     });
-    parent.registry = parent
-        .registry
-        .clone()
-        .with(Subagent::new(&parent, kept.clone(), STANDING));
+    let registry = parent.brief.registry.clone().with(Subagent::new(
+        &parent,
+        parent.brief.clone(),
+        kept.clone(),
+        STANDING,
+        Retry::default(),
+    ));
+    std::sync::Arc::make_mut(&mut parent.brief).registry = registry;
 
     let _ = drive(&parent, &Ctx::new(ws), "go").await;
 
@@ -500,11 +530,16 @@ async fn the_child_is_told_what_the_checkout_says() {
         }),
         spec(),
     );
-    parent.system = format!("You are a coding agent.{STANDING}");
-    parent.registry = parent
-        .registry
-        .clone()
-        .with(Subagent::new(&parent, kept.clone(), STANDING));
+    std::sync::Arc::make_mut(&mut parent.brief).system =
+        format!("You are a coding agent.{STANDING}");
+    let registry = parent.brief.registry.clone().with(Subagent::new(
+        &parent,
+        parent.brief.clone(),
+        kept.clone(),
+        STANDING,
+        Retry::default(),
+    ));
+    std::sync::Arc::make_mut(&mut parent.brief).registry = registry;
 
     let _ = drive(&parent, &Ctx::new(ws), "go").await;
 
@@ -573,8 +608,14 @@ async fn a_child_that_ran_out_of_time_is_still_checked() {
         std::time::Duration::from_millis(50),
         false,
     );
-    let subagent =
-        Subagent::new(&parent, kept, STANDING).with_deadline(std::time::Duration::from_millis(50));
+    let subagent = Subagent::new(
+        &parent,
+        parent.brief.clone(),
+        kept,
+        STANDING,
+        Retry::default(),
+    )
+    .with_deadline(std::time::Duration::from_millis(50));
     let out = subagent
         .execute(
             json!({ "description": "go", "prompt": "go", "verify": "true" }),

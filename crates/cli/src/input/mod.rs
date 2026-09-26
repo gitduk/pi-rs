@@ -97,10 +97,8 @@ impl Intent {
     /// Exhaustive on purpose, with no catch-all arm: an intent added without an
     /// answer here should fail to compile rather than default to one.
     ///
-    /// What it cannot check is an existing arm's body: `Reload` and `Model` are
-    /// `Now` because they write through `Arc::make_mut`, not because anything
-    /// says so. An arm that starts reading `lane.session` breaks this quietly —
-    /// the session is away for the length of a run.
+    /// What it cannot check is an arm's body: `Reload` and `Model` are `Now`
+    /// because they write through `Arc::make_mut`, not because a rule says so.
     pub fn fate(&self) -> Fate {
         match self {
             // Answered from the config, the key map or the lane's own tally
@@ -307,10 +305,10 @@ pub enum Step {
     // and there is no detail to come back to, so a minute later the line says
     // nothing the screen does not already show.
     //
-    // Said where a one-line answer goes — printed in a pipe, put up as a reply
-    // on the terminal — and filed nowhere: there is nothing here a rebuild
-    // should draw. An error carrying detail is the other side of that line and
-    // stays in the transcript.
+    // Said where a one-line answer goes — the reply over the editor — and
+    // filed nowhere: there is nothing here a rebuild should draw. An error
+    // carrying detail is the other side of that line and stays in the
+    // transcript.
     Flash(String),
     // A `!` command to run. The surface runs and records it, because only it
     // can await; `run_bash` does the work and `record_bash` files it.
@@ -325,9 +323,11 @@ pub enum Step {
     // Starts or stops the wechat bridge. Needs the network, so the surface
     // runs it and reports — the same rule as `Compact`.
     Wechat(WechatCmd),
+    // The settings panel wants the surface to itself, and only a surface with
+    // one can answer: bare `/settings` asks for it, an argument is a `Flash`.
+    Panel,
     // Dealt with here; this is what there is to show for it. Returned rather
-    // than laid out because one surface prints and the other paints, and the
-    // rows are the same for both.
+    // than laid out: the surface decides how wide the columns are.
     Handled(Listing),
     // The session was replaced — a `/new` or a `/resume` — so the surface
     // has to rebuild its view from the new one, not just show the rows.

@@ -342,7 +342,7 @@ impl Core {
         // Against the root it belongs to, so before the move, not after. An
         // empty session — nothing said yet — has nothing to keep, and one a run
         // has is saved by the run.
-        if self.lane().session.as_ref().is_some_and(|s| !s.is_empty())
+        if self.lane().session().is_some_and(|s| !s.is_empty())
             && let Err(e) = self.save()
         {
             tracing::warn!(target: "pi::session", error = %e, "the leaving session was not saved");

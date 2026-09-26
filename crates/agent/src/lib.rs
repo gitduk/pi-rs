@@ -8,8 +8,7 @@ use llm::request::{Effort, Request};
 use llm::stream::{Accumulator, InvalidToolArgs, StreamEvent, Usage};
 use llm::transport::Transport;
 use tokio::sync::mpsc::UnboundedSender;
-use tokio_util::sync::CancellationToken;
-use tools::{Concurrency, Ctx, Registry, Tier, ToolError, ToolOutput};
+use tools::{Concurrency, Ctx, Registry, ToolError, ToolOutput};
 use tracing::Instrument as _;
 
 use crate::session::Session;
@@ -66,21 +65,34 @@ pub enum AgentError {
     Unstopped,
 }
 
+/// The wire a lane talks on, and the model on the other end. Swapped whole by
+/// `/model`, which moves nothing else about a run.
 #[derive(Clone)]
-pub struct Agent {
+pub struct Model {
     pub transport: Arc<dyn Transport>,
     pub spec: ModelSpec,
+}
+
+/// What a run is allowed to do and what it is told. Rebuilt whole by `/reload`
+/// and by an opened checkout; a subagent derives its own from its caller's.
+#[derive(Clone)]
+pub struct Briefing {
     pub registry: Registry,
-    pub approver: Arc<dyn Approver>,
-    /// What shrinks the transcript when it outgrows the window. The identity
-    /// until something is installed — see `Compactor`.
-    pub compactor: Arc<dyn Compactor>,
     pub system: String,
     pub effort: Effort,
-    pub retry: Retry,
+    pub approver: Arc<dyn Approver>,
     /// How long a subagent may run silent before it is read as wedged.
     /// None defaults to 1800 s.
     pub subagent_deadline: Option<std::time::Duration>,
+}
+
+#[derive(Clone)]
+pub struct Agent {
+    pub model: Arc<Model>,
+    pub brief: Arc<Briefing>,
+    /// What shrinks the transcript when it outgrows the window. The identity
+    /// until something is installed — see `Compactor`.
+    pub compactor: Arc<dyn Compactor>,
 }
 
 // Per-tool failure streaks across one run, so a loop can be named. Keyed by
@@ -95,60 +107,59 @@ enum Action {
     Reject(String),
     Run(Arc<dyn tools::Tool>),
 }
-/// Everything the config and the workspace decide, in one bundle for
-/// [`Agent::apply`] to put onto an agent.
-pub struct Setup {
-    pub registry: Registry,
-    pub system: String,
-    pub tier: Tier,
-    pub effort: Effort,
-    pub subagent_deadline: Option<std::time::Duration>,
-}
-
 impl Agent {
     pub fn new(transport: Arc<dyn Transport>, spec: ModelSpec) -> Self {
         Self {
-            transport,
-            spec,
-            registry: Registry::builtin(),
-            approver: Arc::new(Ceiling(tools::Tier::Exec)),
+            model: Arc::new(Model { transport, spec }),
+            brief: Arc::new(Briefing {
+                registry: Registry::builtin(),
+                system: DEFAULT_SYSTEM.to_string(),
+                effort: Effort::Off,
+                approver: Arc::new(Ceiling(tools::Tier::Exec)),
+                subagent_deadline: None,
+            }),
             compactor: Arc::new(seams::Untouched),
-            system: DEFAULT_SYSTEM.to_string(),
-            effort: Effort::Off,
-            retry: Retry::default(),
-            subagent_deadline: None,
         }
+    }
+
+    /// The model this agent runs: the wire and the facts about it.
+    pub fn spec(&self) -> &ModelSpec {
+        &self.model.spec
     }
 
     /// Point the same run at a different host, and the budget at that host's.
     pub fn retarget(&mut self, transport: Arc<dyn Transport>, spec: ModelSpec) {
-        self.transport = transport;
-        self.spec = spec;
-    }
-    /// Put everything the config and workspace decide onto this agent: the
-    /// tools, the ceiling, the system prompt, the effort.
-    ///
-    /// What a run answers to is one of those things, and a caller that wants a
-    /// subagent hang it off the registry afterwards — see `run/subagent.rs`,
-    /// where the tool and the snapshot it takes of this agent can both see it.
-    pub fn apply(&mut self, setup: Setup) {
-        self.registry = setup.registry;
-        self.approver = Arc::new(Ceiling(setup.tier));
-        self.system = setup.system;
-        self.effort = setup.effort;
-        self.subagent_deadline = setup.subagent_deadline;
+        self.model = Arc::new(Model { transport, spec });
     }
 
-    /// A run nobody is talking to. What a subagent, a `--print` and a test all
+    /// Put what the config and the workspace decided onto this agent: the
+    /// tools, the ceiling, the system prompt, the effort — as one value.
+    ///
+    /// Swapped whole rather than written field by field: a run in flight keeps
+    /// the brief it started on, and a reader sees one or the other, never half
+    /// of each. A caller that wants a subagent hangs it on the brief first —
+    /// see `cli/src/core/subagent.rs`.
+    pub fn apply(&mut self, brief: Arc<Briefing>) {
+        self.brief = brief;
+    }
+
+    /// A run nobody is talking to. What a subagent, a one-shot and a test all
     /// want: named for what it is rather than passed an empty mailbox at every
     /// call site.
+    ///
+    /// `retry` is the schedule for a request the provider could not serve. Read
+    /// where the run starts rather than kept on the agent, so a `/reload` that
+    /// changed it reaches the next run without anything having to refresh a
+    /// copy.
     pub async fn run(
         &self,
         session: &mut Session,
         ctx: &Ctx,
         tx: &UnboundedSender<Event>,
+        retry: &Retry,
     ) -> Result<Usage, AgentError> {
-        self.steered(session, ctx, tx, &Steer::default()).await
+        self.steered(session, ctx, tx, &Steer::default(), retry)
+            .await
     }
 
     /// The same run, with somewhere for the user to speak into while it works.
@@ -158,6 +169,7 @@ impl Agent {
         ctx: &Ctx,
         tx: &UnboundedSender<Event>,
         steer: &Steer,
+        retry: &Retry,
     ) -> Result<Usage, AgentError> {
         let mut totals = Usage::default();
         // How many times a tool has failed in a row, so a loop can be named —
@@ -212,7 +224,7 @@ impl Agent {
                 if fitted.changed {
                     compactions += 1;
                 }
-                used = llm::estimate::tokens(&sent, &self.spec);
+                used = llm::estimate::tokens(&sent, &self.model.spec);
                 say(tx, Event::Context { used, budget });
                 tracing::debug!(
                     target: "pi::loop",
@@ -223,21 +235,21 @@ impl Agent {
                     squeezes,
                     scale,
                     hard = hard.unwrap_or(0),
-                    effort = ?self.effort,
+                    effort = ?self.brief.effort,
                     "sending"
                 );
                 let req = Request {
-                    system: Some(self.system.clone()),
+                    system: Some(self.brief.system.clone()),
                     messages: sent,
-                    tools: self.registry.defs(),
+                    tools: self.brief.registry.defs(),
                     max_output_tokens: None,
                     temperature: None,
-                    effort: self.effort,
+                    effort: self.brief.effort,
                     tool_choice: Default::default(),
                 };
 
                 match self
-                    .stream_turn(&req, ctx, tx)
+                    .stream_turn(&req, ctx, tx, retry)
                     .instrument(span.clone())
                     .await
                 {
@@ -298,7 +310,7 @@ impl Agent {
             // Two providers accept an oversized request instead of refusing it:
             // one silently, one by truncating and then having no room to answer.
             // Both look like success and neither can be caught before the fact.
-            let window = self.spec.context_window as usize;
+            let window = self.model.spec.context_window as usize;
             let silently_truncated = done.usage.input as usize > window
                 || (done.stop == llm::StopReason::MaxTokens && done.usage.output == 0);
             if silently_truncated && scale > SQUEEZE.powi(MAX_SQUEEZE as i32) {
@@ -343,7 +355,7 @@ impl Agent {
                         // Re-measured rather than reused: `used` is what went
                         // out, and the reply landed in the session since.
                         ctx: (
-                            llm::estimate::tokens(&session.context(), &self.spec),
+                            llm::estimate::tokens(&session.context(), &self.model.spec),
                             budget,
                         ),
                         compactions,
@@ -407,8 +419,8 @@ impl Agent {
     /// own.
     fn working(&self) -> Working<'_> {
         Working {
-            transport: &*self.transport,
-            spec: &self.spec,
+            transport: &*self.model.transport,
+            spec: &self.model.spec,
         }
     }
 
@@ -416,7 +428,7 @@ impl Agent {
     /// tool schemas all share the window with it, so each is subtracted before
     /// the transcript gets to claim what is left.
     pub fn budget(&self) -> usize {
-        self.budget_within(self.spec.context_window as usize)
+        self.budget_within(self.model.spec.context_window as usize)
     }
 
     // The same accounting against a window the provider named instead of the
@@ -425,9 +437,9 @@ impl Agent {
         // A spec may declare an output cap larger than the window it is being
         // used against — an overridden window, a proxy, a stale entry. Reserving
         // it verbatim would leave the transcript nothing at all.
-        let reply = (self.spec.max_output_tokens as usize).min(window / 4);
-        let fixed = llm::estimate::text(&self.system)
-            + llm::estimate::tool_defs(&self.registry.defs())
+        let reply = (self.model.spec.max_output_tokens as usize).min(window / 4);
+        let fixed = llm::estimate::text(&self.brief.system)
+            + llm::estimate::tool_defs(&self.brief.registry.defs())
             + reply
             + SAFETY_MARGIN;
         // Even an unworkable configuration leaves a floor: stripping the
@@ -441,10 +453,11 @@ impl Agent {
         req: &Request,
         ctx: &Ctx,
         tx: &UnboundedSender<Event>,
+        retry: &Retry,
     ) -> Result<llm::stream::Completion, (AgentError, Option<llm::stream::Completion>)> {
         let mut attempt = 0usize;
         loop {
-            let (err, partial) = match self.attempt(req, ctx, tx).await {
+            let (err, partial) = match self.attempt(req, ctx, tx, retry).await {
                 Ok(done) => return Ok(done),
                 Err(err) => err,
             };
@@ -456,7 +469,7 @@ impl Agent {
                 other => return Err((other, partial)),
             };
 
-            if attempt >= self.retry.attempts || llm::classify(&e) != llm::Fault::Transient {
+            if attempt >= retry.attempts || llm::classify(&e) != llm::Fault::Transient {
                 // The classification, not just the error: "why was this not
                 // retried" is answerable from the fault and from nothing else.
                 tracing::error!(
@@ -470,7 +483,7 @@ impl Agent {
             }
 
             attempt += 1;
-            let delay = self.retry.delay(attempt);
+            let delay = retry.delay(attempt);
             say(
                 tx,
                 Event::Retrying {
@@ -493,14 +506,15 @@ impl Agent {
         req: &Request,
         ctx: &Ctx,
         tx: &UnboundedSender<Event>,
+        retry: &Retry,
     ) -> Result<llm::stream::Completion, (AgentError, Option<llm::stream::Completion>)> {
         // A fresh accumulator per attempt: half a stream must not bleed into
         // the message the retry produces.
-        let mut acc = Accumulator::new(self.spec.model.clone());
-        let idle = self.retry.idle;
+        let mut acc = Accumulator::new(self.model.spec.model.clone());
+        let idle = retry.idle;
 
         let mut stream = tokio::select! {
-            r = leashed(idle, self.transport.stream(&self.spec, req)) => match r {
+            r = leashed(idle, self.model.transport.stream(&self.model.spec, req)) => match r {
                 Ok(r) => r.map_err(|e| (AgentError::from(e), None))?,
                 Err(e) => return Err((AgentError::Brain(e), None)),
             },
@@ -544,7 +558,7 @@ impl Agent {
         // reporter itself, and said here rather than only in the journal: a
         // turn that quietly came back smaller looks exactly like an ordinary
         // one, which is the whole reason it needs saying.
-        for gap in self.transport.gaps() {
+        for gap in self.model.transport.gaps() {
             say(tx, Event::Warning(gap));
         }
 
@@ -571,7 +585,7 @@ impl Agent {
         let journal = ctx
             .session()
             .and_then(|id| tools::state::session_dir(ctx.workspace.root(), id))
-            .map(|d| d.join("journal.jsonl"));
+            .map(|d| d.join(tools::state::JOURNAL_FILE));
         let journal = journal.as_deref();
         let actions: Vec<Action> = calls
             .iter()
@@ -592,14 +606,14 @@ impl Agent {
                         invalid.error,
                     ));
                 }
-                let Some(tool) = self.registry.get(&c.name) else {
+                let Some(tool) = self.brief.registry.get(&c.name) else {
                     return Action::Reject(format!(
                         "no tool named `{}`; available: {}",
                         c.name,
-                        self.registry.names().join(", ")
+                        self.brief.registry.names().join(", ")
                     ));
                 };
-                match self.approver.approve(&c.name, tool.tier(), &c.args) {
+                match self.brief.approver.approve(&c.name, tool.tier(), &c.args) {
                     Decision::Allow => Action::Run(tool),
                     Decision::Deny(why) => Action::Reject(why),
                 }
@@ -852,30 +866,6 @@ async fn leashed<T>(
     tokio::time::timeout(idle, fut)
         .await
         .map_err(|_| wedged(idle))
-}
-
-// Conventional exit code for a process killed by SIGINT.
-const INTERRUPTED: i32 = 130;
-
-/// First Ctrl-C cancels; a second one leaves.
-///
-/// `tokio::signal::ctrl_c` replaces SIGINT's default action for the whole
-/// process and never restores it, so a handler that only fires once leaves no
-/// way out at all — the second press has to do the killing itself.
-pub fn cancel_on_interrupt() -> CancellationToken {
-    let token = CancellationToken::new();
-    let child = token.clone();
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_err() {
-            return;
-        }
-        child.cancel();
-        eprintln!("\ninterrupting — press Ctrl-C again to quit");
-        if tokio::signal::ctrl_c().await.is_ok() {
-            std::process::exit(INTERRUPTED);
-        }
-    });
-    token
 }
 
 #[cfg(test)]

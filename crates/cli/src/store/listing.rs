@@ -8,10 +8,9 @@
 
 /// A read-only answer, as rows of cells.
 ///
-/// Cells rather than lines because the layout belongs to whoever draws it: a
-/// pipe pads nothing and a terminal lines the columns up, and neither width is
-/// knowable where the answer is built — the answer outlives the frame it was
-/// made in, and there are two surfaces.
+/// Cells rather than lines because the layout belongs to whoever draws it: how
+/// wide the columns end up is not knowable where the answer is built, and the
+/// answer outlives the frame it was made in.
 ///
 /// One shape for every such answer — `/keys`, `/help`, `/resume`, `/worktree`,
 /// `/model`, `/status` — because they differ in what the cells say, not in how

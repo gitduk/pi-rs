@@ -5,7 +5,8 @@ use llm::model::ModelSpec;
 use serde_json::Value;
 
 use crate::session::{
-    Compaction, Entry, EntryId, Omission, Seen, Session, oversized_args, user_block,
+    Compaction, Entry, EntryId, Omission, Seen, Session, injected_summary, oversized_args,
+    user_block,
 };
 
 // Tools whose results describe current state rather than an action taken. Only
@@ -144,10 +145,22 @@ impl<'a> Item<'a> {
     }
 
     fn omit(&mut self, notice: String) {
-        self.tokens = estimate::MESSAGE_OVERHEAD + estimate::text(&notice);
+        self.tokens = omitted_tokens(self.entry, &notice);
         self.notice = Some(notice);
         self.fresh = true;
     }
+}
+
+/// What an entry costs once the view has replaced it with a notice. A result
+/// keeps its block: the notice goes inside the `tool_result` the answering
+/// `tool_use` still has to match, and a planner that priced the notice alone
+/// was planning against a total the request never reached.
+fn omitted_tokens(entry: &Entry, notice: &str) -> usize {
+    estimate::MESSAGE_OVERHEAD
+        + match entry {
+            Entry::Tool { result, .. } => estimate::omitted_result(result, notice),
+            _ => estimate::text(notice),
+        }
 }
 
 // Per entry, not per wire message: several user entries merge into one
@@ -229,7 +242,7 @@ pub fn plan(
             Seen::Omitted { entry, notice } => Item {
                 id: entry.id(),
                 entry,
-                tokens: estimate::MESSAGE_OVERHEAD + estimate::text(notice),
+                tokens: omitted_tokens(entry, notice),
                 notice: Some((*notice).to_string()),
                 fresh: false,
                 gone: false,
@@ -247,7 +260,15 @@ pub fn plan(
         })
         .collect();
 
-    let before: usize = items.iter().map(|i| i.tokens).sum();
+    // And the summaries `context` puts into the first user message: the view
+    // does not hold them, so a planner that stops at the items reads a
+    // transcript as smaller than the request it is about to make.
+    let summaries: usize = session
+        .summaries()
+        .iter()
+        .map(|s| estimate::text(&injected_summary(s)))
+        .sum();
+    let before: usize = items.iter().map(|i| i.tokens).sum::<usize>() + summaries;
     let mut record = Compaction {
         tokens_before: before,
         ..Default::default()

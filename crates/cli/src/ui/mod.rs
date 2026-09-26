@@ -1,11 +1,9 @@
-//! Everything that faces the terminal: the mode that reads a line, the
-//! drawing helpers, what the terminal says about itself, and the full-screen
-//! surface.
+//! Everything that faces the terminal: the drawing helpers, what the terminal
+//! says about itself, and the full-screen surface.
 //!
 //! This is the top of the tree: it reads `core` and `store`, and nothing here is
 //! read back.
 
-pub mod line;
 pub mod listing;
 pub mod render;
 pub mod status;

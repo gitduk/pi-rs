@@ -10,20 +10,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
 
-pub fn next_token() -> u64 {
+fn next_token() -> u64 {
     NEXT_TOKEN.fetch_add(1, Ordering::Relaxed)
 }
 
 use std::path::Path;
+use std::sync::Arc;
 
 use agent::session::{EntryId, Session};
-use agent::{Agent, Event, Steer, Totals};
+use agent::{Agent, Event, Home, Steer, Totals};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio_util::sync::CancellationToken;
 
 use tools::Ctx;
 
 use super::Core;
+use crate::Resolved;
 use crate::core::looping::{Cut, Looping, Round};
 use crate::core::meter::{Snapshot, Tally};
 use crate::input::commands::ago;
@@ -92,10 +94,10 @@ pub struct Lane {
     /// `/reload` write through `Arc::make_mut`, so a run in flight keeps the
     /// agent it started on — which is what they meant all along.
     pub agent: std::sync::Arc<Agent>,
-    /// The transcript, or None while a run has it — it is lent out for the
-    /// length of a run. An empty session left in its place would read like a
-    /// session with nothing in it, which is a different thing to anyone asking.
-    pub session: Option<Session>,
+    /// The transcript, or None while a run has it. Private: a run borrows it
+    /// through `take_session` and gives it back through `return_session`;
+    /// `fresh_session` and `adopt_session` are the only others that write it.
+    session: Option<Session>,
     pub id: String,
     /// When this session began. Held rather than read back: it is set once and
     /// never changes, and going to disk for it made every save parse the whole
@@ -119,14 +121,11 @@ pub struct Lane {
 
     /// What the user calls this session, if anything.
     pub name: Option<String>,
-    /// The instruction files this run stands on, named as a person would.
-    /// Shown under the banner; rebuilt by `/reload` like everything else the
-    /// config decides.
-    pub context: Vec<String>,
-    /// What this checkout tells an agent, verbatim — the tail of the system
-    /// prompt that came from the tree. Held so a subagent rebuilt after
-    /// `/model` gets the same one the lane was armed with.
-    pub standing: std::sync::Arc<str>,
+    /// What this checkout and the config decide: the agent's brief, the key map
+    /// in force, the command table, the instruction files. One value, swapped
+    /// whole by `/reload` and by an opened checkout.
+    pub resolved: Arc<Resolved>,
+
     /// Carried across turns: the file locks and edit shifts outlive any one run.
     pub ctx: Ctx,
     /// Which worktree the session is in, or None in the repository's own
@@ -143,19 +142,112 @@ pub struct Lane {
     pub pending: Vec<Event>,
     /// Where this lane's run stands.
     pub run: Run,
-    /// What a slash answers to here, and the key map in force. Both are what
-    /// this root's config and skills resolved to, so they travel with the lane
-    /// rather than with the run — a tree switched back to answers to its own.
-    pub keys: std::sync::Arc<crate::store::keys::Keys>,
-    pub commands: std::sync::Arc<Vec<crate::input::commands::Command>>,
     /// The `/loop` this lane is under, if any.
     pub looping: Option<Looping>,
 }
 
+/// Arm an agent for one checkout: hang the subagent tool on the brief, put that
+/// brief on the agent, and hand back the bundle the lane keeps.
+///
+/// The one place a lane's brief is assembled, which is what keeps startup,
+/// `/reload` and an opened checkout from arming an agent differently. The
+/// compactor is not in here: it holds the summarizer's own connection, so the
+/// two callers that own one install it on the agent first, and a checkout
+/// opened later inherits it by cloning that agent.
+pub fn arm(
+    agent: &mut Agent,
+    resolved: Arc<Resolved>,
+    home: Arc<dyn Home>,
+    retry: agent::Retry,
+) -> Arc<Resolved> {
+    let brief = crate::core::subagent::hang_on(
+        agent,
+        resolved.brief.clone(),
+        home,
+        &resolved.standing,
+        retry,
+    );
+    agent.apply(brief.clone());
+    let mut resolved = resolved;
+    Arc::make_mut(&mut resolved).brief = brief;
+    resolved
+}
+
+/// The half of a lane the config decides, for tests that build one directly —
+/// the one fixture, since a lane cannot be opened without it.
+#[cfg(test)]
+pub(crate) fn a_resolved(standing: &str) -> Arc<Resolved> {
+    Arc::new(Resolved {
+        brief: Arc::new(agent::Briefing {
+            registry: tools::Registry::builtin(),
+            system: String::new(),
+            effort: llm::request::Effort::Off,
+            approver: Arc::new(agent::Ceiling(tools::Tier::Exec)),
+            subagent_deadline: None,
+        }),
+        standing: standing.into(),
+        keys: Arc::new(crate::store::keys::Keys::default()),
+        commands: Arc::new(Vec::new()),
+        notes: Vec::new(),
+        context: Vec::new(),
+    })
+}
+
+/// What a lane is opened with. The rest is the empty state every lane starts
+/// in, transcript included: `return_session` is what installs one.
+pub struct Opening {
+    pub agent: std::sync::Arc<Agent>,
+    pub resolved: Arc<Resolved>,
+    pub ctx: Ctx,
+    pub id: String,
+    pub created: u64,
+    pub name: Option<String>,
+    pub worktree: Option<String>,
+}
+
+impl Opening {
+    /// The three a lane cannot be without; the rest is left undecided.
+    pub fn new(agent: std::sync::Arc<Agent>, resolved: Arc<Resolved>, ctx: Ctx) -> Self {
+        Self {
+            agent,
+            resolved,
+            ctx,
+            id: String::new(),
+            created: 0,
+            name: None,
+            worktree: None,
+        }
+    }
+}
 impl Lane {
+    /// A lane before anything has run in it: its own channel, and no transcript
+    /// until one is handed back with `return_session`.
+    pub fn opened(parts: Opening) -> Self {
+        let (events, inbox) = Self::channel();
+        Self {
+            token: next_token(),
+            agent: parts.agent,
+            session: None,
+            id: parts.id,
+            created: parts.created,
+            totals: Totals::default(),
+            tally: Tally::default(),
+            held_screens: Vec::new(),
+            name: parts.name,
+            resolved: parts.resolved,
+            ctx: parts.ctx,
+            worktree: parts.worktree,
+            events,
+            inbox,
+            pending: Vec::new(),
+            run: Run::Idle,
+            looping: None,
+        }
+    }
+
     /// A lane is born with its own channel: nothing else can post to it, and
     /// nothing it posts can land on another screen.
-    pub fn channel() -> (UnboundedSender<Event>, UnboundedReceiver<Event>) {
+    fn channel() -> (UnboundedSender<Event>, UnboundedReceiver<Event>) {
         unbounded_channel()
     }
 
@@ -309,7 +401,9 @@ impl Lane {
         self.looping.as_ref()
     }
 
-    /// The transcript, for a surface that only reads it.
+    /// The transcript, or `None` while a run has it. Both readers answer that
+    /// way: the states a lane can be in are named (`NO_TRANSCRIPT`,
+    /// `NOTHING_TO_REWIND`) rather than one of them being a panic.
     pub fn session(&self) -> Option<&Session> {
         self.session.as_ref()
     }
@@ -336,7 +430,7 @@ impl Lane {
 
     /// The model this lane's runs ask for.
     pub fn model(&self) -> &str {
-        &self.agent.spec.model
+        &self.agent.spec().model
     }
 
     /// The agent these runs go through, for what only it knows.
@@ -376,7 +470,7 @@ impl Lane {
     /// tree does not read as a free run, and pin the rate this run is priced
     /// at: a `/model` answered mid-run does not reprice the turn in flight.
     pub fn seed_meter(&mut self) {
-        self.tally.seed(self.totals, self.agent.spec.pricing);
+        self.tally.seed(self.totals, self.agent.spec().pricing);
     }
 
     /// Charge what a run spent to the session, once it has reported it, at the
@@ -417,6 +511,10 @@ impl Lane {
     /// drawn — the transcript a rebuild reads has to hold the rows the screen
     /// was shown.
     pub fn return_session(&mut self, mut session: Session) {
+        assert!(
+            self.session.is_none(),
+            "a lane holds one transcript: a second would drop the first"
+        );
         for text in self.held_screens.drain(..) {
             session.push_screen(&text);
         }
@@ -483,27 +581,12 @@ impl Core {
         self.store.save(
             &lane.id,
             lane.ctx.workspace.root(),
-            &lane.agent.spec.model,
+            &lane.agent.spec().model,
             lane.name.as_deref(),
             lane.created,
             session,
         )?;
         Ok(())
-    }
-    /// Shrink the transcript, or None when there was nothing to shrink — and
-    /// likewise when a run has it, which is why `/compact` is refused then.
-    ///
-    /// Here rather than at each surface: both asked the agent directly, and
-    /// both had to reach past the lane for the session to do it.
-    pub async fn compact_now(
-        &mut self,
-        focus: Option<&str>,
-    ) -> Option<(agent::Report, llm::stream::Usage)> {
-        // One borrow of the lane, two of its fields: they are disjoint, and
-        // asking twice would not be.
-        let lane = self.lane_mut();
-        let session = lane.session.as_mut()?;
-        lane.agent.compact_now(session, focus).await
     }
     /// Rewind the conversation to an entry and write the shorter transcript
     /// back.
@@ -602,7 +685,7 @@ impl Core {
         let root = ws.root().to_path_buf();
         let failed = |e| format!("nothing opened — {}", refused("worktree", e));
         let project = config::load_project(&root).map_err(failed)?;
-        let mut resolved = crate::resolve(
+        let resolved = crate::resolve(
             &self.args,
             &ws,
             &self.config,
@@ -611,45 +694,19 @@ impl Core {
         )
         .map_err(failed)?;
 
-        let (events, inbox) = Lane::channel();
         // The model travels; what the root decides does not. A switch changes
         // trees, and which model is answering was a decision made elsewhere.
-        let home = self.home(root.clone(), self.lane().agent.spec.model.clone());
+        let home = self.home(root.clone(), self.lane().agent.spec().model.clone());
         let mut ag = (*self.lane().agent).clone();
-        ag.apply(agent::Setup {
-            registry: std::mem::take(&mut resolved.registry),
-            system: std::mem::take(&mut resolved.system),
-            tier: resolved.tier,
-            effort: resolved.effort,
-            subagent_deadline: resolved.subagent_deadline,
-        });
-        crate::core::subagent::hang(&mut ag, home, &resolved.standing);
+        let resolved = arm(&mut ag, Arc::new(resolved), home, self.config.retry());
 
         // Built, not cloned from the lane being left: a `Ctx`'s tables key on
         // absolute paths in one tree, and none of that lane's describe this.
-        self.lanes.push(Lane {
-            token: crate::core::lane::next_token(),
-            agent: std::sync::Arc::new(ag),
-            session: Some(Session::default()),
-            id: String::new(),
-            created: 0,
-            name: None,
-            totals: Totals::default(),
-            tally: Tally::default(),
-            held_screens: Vec::new(),
-
-            context: resolved.context,
-            standing: resolved.standing,
-            ctx: tools::Ctx::new(ws),
-            keys: std::sync::Arc::new(resolved.keys),
-            commands: std::sync::Arc::new(resolved.commands),
+        let ctx = tools::Ctx::new(ws);
+        self.lanes.push(Lane::opened(Opening {
             worktree,
-            events,
-            inbox,
-            pending: Vec::new(),
-            looping: None,
-            run: crate::core::lane::Run::Idle,
-        });
+            ..Opening::new(Arc::new(ag), resolved, ctx)
+        }));
         self.current = self.lanes.len() - 1;
         self.in_force();
 
@@ -712,7 +769,17 @@ impl Core {
     pub(super) fn resume(&mut self, id: &str) -> Result<Vec<String>, String> {
         // Resuming the session already running is no switch; going through
         // would only zero the totals the bar is mid-way through showing.
+        //
+        // Unless there is nothing there to resume: a job that panicked and could
+        // not read its transcript back leaves the lane's own id naming a session
+        // the archive does not hold, and "no switch" would answer that with a
+        // screen that never comes back.
         if id == self.lane().id {
+            if self.lane().session().is_none() {
+                return Err(
+                    "this checkout's transcript is gone — /new starts a session here".to_string(),
+                );
+            }
             return Ok(Vec::new());
         }
         // The session being left has to survive too, or /resume throws it
@@ -737,6 +804,13 @@ mod tests {
     use llm::model::Pricing;
     use llm::stream::Usage;
 
+    // A lane's model is one value behind two `Arc`s; a test that reprices it
+    // takes the copies the same way `/model` does.
+    fn price(lane: &mut crate::core::lane::Lane, pricing: Pricing) {
+        let agent = std::sync::Arc::make_mut(&mut lane.agent);
+        std::sync::Arc::make_mut(&mut agent.model).spec.pricing = pricing;
+    }
+
     // `/model` is answered at once, a run included. The run it cuts across is
     // still charged at the rate it started on, or the figure `/status` reports
     // would be the price of a model that never ran those tokens.
@@ -754,10 +828,10 @@ mod tests {
         };
 
         let mut lane = a_lane("s");
-        std::sync::Arc::make_mut(&mut lane.agent).spec.pricing = cheap;
+        price(&mut lane, cheap);
         lane.seed_meter();
         // `/model`: the lane's own rate moves, this run's does not.
-        std::sync::Arc::make_mut(&mut lane.agent).spec.pricing = dear;
+        price(&mut lane, dear);
         lane.charge(&Usage {
             input: 1_000_000,
             output: 1_000_000,

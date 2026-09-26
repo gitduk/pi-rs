@@ -62,8 +62,8 @@ impl Ui {
         self.flash = Some((text, Instant::now()));
     }
 
-    // The bar's row for a retry, worded as a pipe words it and given the bar's
-    // own width, so `describe`'s clipping and its ellipsis are what is drawn.
+    // The bar's row for a retry, worded as the one-shot renderer words it and
+    // given the bar's own width, so `describe`'s clipping and ellipsis are drawn.
     pub(super) fn flash_event(&mut self, event: &Event) {
         let row = render::describe(event, &self.paint, self.screen.usable())
             .and_then(|rows| rows.into_iter().next());
