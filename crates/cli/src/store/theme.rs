@@ -116,10 +116,8 @@ impl Color {
                 _ => bail!("`#{hex}` is not a 3- or 6-digit hex colour"),
             };
             let mut rgb = [0u8; 3];
-            for (i, pair) in expanded.chunks_exact(2).enumerate() {
-                let hi = hex_digit(pair[0])?;
-                let lo = hex_digit(pair[1])?;
-                rgb[i] = hi << 4 | lo;
+            for (i, &[hi, lo]) in expanded.as_chunks::<2>().0.iter().enumerate() {
+                rgb[i] = hex_digit(hi)? << 4 | hex_digit(lo)?;
             }
             return Ok(Color::Rgb(rgb[0], rgb[1], rgb[2]));
         }
@@ -645,5 +643,21 @@ pub fn panels_for(bg: (u8, u8, u8)) -> Panel {
     Panel {
         input: step(3.0),
         said: step(2.0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Color;
+
+    #[test]
+    fn a_hex_colour_parses_in_both_lengths() {
+        assert_eq!(
+            Color::parse("#58a6ff").unwrap(),
+            Color::Rgb(0x58, 0xa6, 0xff)
+        );
+        assert_eq!(Color::parse("#fa0").unwrap(), Color::Rgb(0xff, 0xaa, 0x00));
+        assert!(Color::parse("#12345g").is_err());
+        assert!(Color::parse("#1234").is_err());
     }
 }

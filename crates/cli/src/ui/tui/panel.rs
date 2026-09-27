@@ -269,10 +269,11 @@ impl Panel {
                         _ if closed => {
                             e.backspace();
                         }
-                        _ if let Some(c) = typed => {
-                            e.insert(c);
+                        _ => {
+                            if let Some(c) = typed {
+                                e.insert(c);
+                            }
                         }
-                        _ => {}
                     }
                 }
                 if closed {

@@ -450,6 +450,10 @@ impl Agent {
     }
 
     // Run one request, retrying while the provider says it is a passing problem.
+    #[allow(
+        clippy::result_large_err,
+        reason = "Ok carries a Completion too; boxing Err would not shrink the Result"
+    )]
     async fn stream_turn(
         &self,
         req: &Request,
@@ -503,6 +507,10 @@ impl Agent {
 
     // One attempt. Deltas reach the renderer as they arrive, so a retry shows
     // as a false start — which the Retrying event is there to explain.
+    #[allow(
+        clippy::result_large_err,
+        reason = "Ok carries a Completion too; boxing Err would not shrink the Result"
+    )]
     async fn attempt(
         &self,
         req: &Request,
