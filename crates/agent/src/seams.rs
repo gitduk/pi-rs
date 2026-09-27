@@ -15,7 +15,7 @@ use llm::stream::Usage;
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::UnboundedSender;
-use tools::Tier;
+use tool::Tier;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decision {

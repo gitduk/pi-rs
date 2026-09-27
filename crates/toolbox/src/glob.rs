@@ -1,0 +1,155 @@
+use async_trait::async_trait;
+use serde::Deserialize;
+use serde_json::{Value, json};
+use std::time::SystemTime;
+
+use crate::walk::{globs, root_of, walker};
+use tool::{Ctx, Tier, Tool, ToolError, ToolOutput, output, spill};
+
+const DEFAULT_LIMIT: usize = 200;
+
+#[derive(Deserialize)]
+struct Args {
+    pattern: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+pub struct Glob;
+
+#[async_trait]
+impl Tool for Glob {
+    fn name(&self) -> &str {
+        "glob"
+    }
+
+    fn description(&self) -> &str {
+        "Find files by path pattern, newest first. Respects .gitignore. A pattern \
+         with no `/` matches at any depth, so `*.rs` finds every Rust file. Use \
+         grep when you need to match file contents, and either of them before \
+         running find in bash: they already know what to ignore."
+    }
+
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "pattern": { "type": "string", "description": "e.g. `*.rs`, `src/**/mod.rs`" },
+                "path": { "type": "string", "description": "Subdirectory to search; an absolute path may leave the workspace. Default the workspace root." },
+                "limit": { "type": "integer", "description": "Max paths. Default 200." },
+            },
+            "required": ["pattern"],
+            "additionalProperties": false,
+        })
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::Read
+    }
+
+    async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
+        let args: Args = tool::parse_args(args)?;
+        let root = root_of(&ctx.workspace, &args.path, self.tier())?;
+        let set = globs(std::slice::from_ref(&args.pattern))?
+            .ok_or_else(|| ToolError::Invalid("empty pattern".into()))?;
+        let limit = args.limit.unwrap_or(DEFAULT_LIMIT).max(1);
+        let ws = ctx.workspace.clone();
+        let cancel = ctx.cancel.clone();
+        let budget = output::Budget::new();
+
+        // The walk is blocking IO; running it on the async runtime would stall
+        // every other tool in the same turn.
+        let (found, clipped, cancelled, unreadable) = tokio::task::spawn_blocking(move || {
+            let mut hits: Vec<(SystemTime, String)> = Vec::new();
+            let (mut clipped, mut cancelled) = (false, false);
+            let mut unreadable: Vec<String> = Vec::new();
+            for (seen, entry) in walker(&ws, &root, None).build().enumerate() {
+                // A walk error is not a non-match: an unreadable directory is
+                // kept and named, so silence never reads as "no such file".
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(e) => {
+                        unreadable.push(e.to_string());
+                        continue;
+                    }
+                };
+                // A blocking task cannot be aborted from outside; checking here
+                // is what makes Esc land during the walk at all.
+                if seen % 512 == 0 && cancel.is_cancelled() {
+                    cancelled = true;
+                    break;
+                }
+                if !entry.file_type().is_some_and(|t| t.is_file()) {
+                    continue;
+                }
+                if !set.is_match(entry.path()) {
+                    continue;
+                }
+                let mtime = entry
+                    .metadata()
+                    .and_then(|m| m.modified().map_err(Into::into))
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
+                let path = ws.display(entry.path());
+                // The budget ends the sweep, not a count: one tree of huge
+                // paths and one of many are bounded by the same line.
+                if !budget.admits(path.len()) {
+                    clipped = true;
+                    break;
+                }
+                hits.push((mtime, path));
+            }
+            // Newest first: an agent hunting the file it just touched wants the
+            // recent end, and the tail is what a limit should drop.
+            hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            (hits, clipped, cancelled, unreadable)
+        })
+        .await
+        .map_err(|e| ToolError::Invalid(format!("walk failed: {e}")))?;
+        if cancelled {
+            return Err(ToolError::Cancelled);
+        }
+
+        if found.is_empty() {
+            return Ok(ToolOutput::useless(if unreadable.is_empty() {
+                format!("no file matches `{}`", args.pattern)
+            } else {
+                format!(
+                    "no file matches `{}`; {} entries could not be read, first: {}",
+                    args.pattern,
+                    unreadable.len(),
+                    unreadable[0]
+                )
+            }));
+        }
+
+        let total = found.len();
+        let rows: Vec<String> = found
+            .iter()
+            .take(limit)
+            .map(|(_, path)| format!("{path}\n"))
+            .collect();
+        let mut notice = if clipped {
+            format!("… stopped at {total} paths; narrow the pattern\n")
+        } else if total > rows.len() {
+            format!(
+                "… {} more; narrow the pattern or raise limit\n",
+                total - rows.len()
+            )
+        } else {
+            String::new()
+        };
+        if !unreadable.is_empty() {
+            notice.push_str(&format!(
+                "… {} entries could not be read, first: {}\n",
+                unreadable.len(),
+                unreadable[0]
+            ));
+        }
+        // The pattern leads, the count is ranked under it: a row saying only
+        // how many files came back names nothing the caller can recognise.
+        Ok(ToolOutput::text(spill::fit(ctx, &rows, "paths", &notice)?)
+            .with_preview(format!("{} [{total} files]", args.pattern)))
+    }
+}

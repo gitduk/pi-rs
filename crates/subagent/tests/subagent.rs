@@ -15,7 +15,7 @@ use common::spec;
 use agent::session::Session;
 use agent::{Agent, Home, Retry};
 use subagent::Subagent;
-use tools::{Ctx, FileLocks, Registry, Tier, Tool, ToolError, ToolOutput, Viewed, Workspace};
+use tool::{Ctx, FileLocks, Registry, Tier, Tool, ToolError, ToolOutput, Viewed, Workspace};
 
 struct Scripted {
     turns: Vec<Vec<StreamEvent>>,
@@ -201,7 +201,7 @@ fn rigged(
     );
     std::sync::Arc::make_mut(&mut parent.brief).registry = Registry::new()
         .with(Sleeper)
-        .with(tools::write::Write)
+        .with(toolbox::write::Write)
         .with(Probe {
             seen: seen.clone(),
             trip: esc.then(|| ctx.cancel.clone()),

@@ -21,7 +21,8 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
- "tools",
+ "tool",
+ "toolbox",
  "tracing",
 ]
 
@@ -1715,7 +1716,6 @@ dependencies = [
  "llm",
  "pulldown-cmark",
  "ratatui",
- "scripts",
  "serde",
  "serde_json",
  "serde_path_to_error",
@@ -1726,7 +1726,8 @@ dependencies = [
  "tokio-util",
  "toml",
  "toml_edit 0.22.27",
- "tools",
+ "tool",
+ "toolbox",
  "tracing",
  "tracing-subscriber",
  "tui-markdown",
@@ -2304,17 +2305,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
-name = "scripts"
-version = "1.23.4"
-dependencies = [
- "async-trait",
- "serde_json",
- "tempfile",
- "tokio",
- "tools",
-]
-
-[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2495,7 +2485,7 @@ dependencies = [
  "serde_yaml_ng",
  "tempfile",
  "tokio",
- "tools",
+ "tool",
 ]
 
 [[package]]
@@ -2578,7 +2568,8 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
- "tools",
+ "tool",
+ "toolbox",
  "tracing",
 ]
 
@@ -2983,13 +2974,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
-name = "tools"
+name = "tool"
+version = "1.23.4"
+dependencies = [
+ "async-trait",
+ "llm",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "toolbox"
 version = "1.23.4"
 dependencies = [
  "async-trait",
  "filetime",
  "globset",
- "grep-matcher",
  "grep-regex",
  "grep-searcher",
  "ignore",
@@ -2998,11 +3003,11 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "serde_path_to_error",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
- "tokio-util",
+ "toml",
+ "tool",
  "tracing",
  "tree-sitter",
  "tree-sitter-go",

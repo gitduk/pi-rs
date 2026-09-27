@@ -9,7 +9,7 @@ description = "The agent loop: turns, tools, subagents, compaction"
 [dependencies]
 async-trait.workspace = true
 llm.workspace = true
-tools.workspace = true
+tool.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -19,6 +19,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
+toolbox.workspace = true
 # Only the tests drive a run with a cancellation token of their own; the loop
 # itself reads the one on `Ctx`.
 tokio-util.workspace = true

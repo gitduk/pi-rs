@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc::unbounded_channel, watch};
-use tools::{Ctx, Tier, Tool, ToolError, ToolOutput, bash};
+use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};
+use toolbox::bash;
 
 use agent::session::Session;
 use agent::{Agent, AgentError, Briefing, Event, Home, Retry};
@@ -200,7 +201,7 @@ impl Tool for Subagent {
 
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
         let args: Args =
-            tools::parse_args_hinted(args, "subagent takes `description` and `prompt`")?;
+            tool::parse_args_hinted(args, "subagent takes `description` and `prompt`")?;
         // An ask with no text in it is a message every provider refuses; say so
         // here, where the caller can still change it.
         if args.prompt.trim().is_empty() {

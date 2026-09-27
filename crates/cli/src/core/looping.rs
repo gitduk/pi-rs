@@ -5,7 +5,7 @@
 //! it would be answered every time; measured, a round that changed nothing is
 //! the end of the loop and not a matter of opinion.
 
-use tools::Ctx;
+use tool::Ctx;
 
 /// A `/loop` in force on one lane.
 ///

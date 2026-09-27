@@ -7,7 +7,7 @@ rust-version.workspace = true
 description = "Skills: instructions a run can load on demand"
 
 [dependencies]
-tools.workspace = true
+tool.workspace = true
 llm.workspace = true
 async-trait.workspace = true
 serde.workspace = true

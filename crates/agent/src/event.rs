@@ -1,5 +1,5 @@
 // Kept here so the agent's public name (`agent::Totals`) survives the move:
-// the type now lives in `llm`, where `tools` can carry it on a `ToolOutput`.
+// the type now lives in `llm`, where `tool` can carry it on a `ToolOutput`.
 use llm::stream::Usage;
 pub use llm::totals::Totals;
 

@@ -1,6 +1,6 @@
 use serde_json::json;
 use skills::{Load, discover_from};
-use tools::{Ctx, Tool, ToolError, Workspace};
+use tool::{Ctx, Tool, ToolError, Workspace};
 
 // A workspace of its own, so the gate under test is this call's and not
 // whoever is running the suite's.

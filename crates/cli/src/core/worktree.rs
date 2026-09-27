@@ -333,7 +333,7 @@ impl Core {
         let tree = enter(&from, name).map_err(|e| refused("worktree", e))?;
         // Built before the comparison: both sides are then canonical, and a
         // path git and the workspace spell differently is still one directory.
-        let ws = tools::Workspace::new(&tree.path)
+        let ws = tool::Workspace::new(&tree.path)
             .and_then(|ws| ws.with_write_roots(&self.config.write_roots))
             .map_err(|e| refused("worktree", anyhow::anyhow!("{}: {e}", tree.path.display())))?;
         if ws.root() == from {

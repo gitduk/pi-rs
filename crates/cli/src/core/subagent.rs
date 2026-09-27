@@ -31,8 +31,8 @@ pub(crate) async fn flush() {
     }
 }
 
-/// Hang the subagent tool on `brief`, and hand back the brief that now carries
-/// it.
+/// Offer the subagent tool to `brief`, and hand back the brief that now carries
+/// it — unless a tool already holds the name, which keeps it.
 ///
 /// A new `Arc` when someone else holds the old one — the child does — so the
 /// copy a subagent runs on keeps the registry it was derived from, and the one
@@ -47,7 +47,7 @@ pub fn hang_on(
     let subagent = Subagent::new(agent, brief.clone(), home, standing, retry);
     let mut armed = brief;
     let patch = Arc::make_mut(&mut armed);
-    patch.registry = std::mem::take(&mut patch.registry).with(subagent);
+    patch.registry.offer(Arc::new(subagent));
     armed
 }
 

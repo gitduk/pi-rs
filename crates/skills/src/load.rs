@@ -3,8 +3,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{Skill, body};
-use tools::read::{MAX_BYTES, over_limit};
-use tools::{Ctx, Tier, Tool, ToolError, ToolOutput};
+use tool::limit::{MAX_BYTES, over_limit};
+use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};
 
 const NAME: &str = "skill";
 
@@ -148,7 +148,7 @@ impl Tool for Load {
     }
 
     async fn execute(&self, args: Value, _ctx: &Ctx) -> Result<ToolOutput, ToolError> {
-        let args: Args = tools::parse_args(args)?;
+        let args: Args = tool::parse_args(args)?;
         let skill = self.find(&args.name)?;
 
         let Some(rel) = args.file else {

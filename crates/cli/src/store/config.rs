@@ -642,7 +642,7 @@ fn home() -> Option<PathBuf> {
 
 /// Where the user's own config lives when they have not said otherwise.
 pub fn global_path() -> Option<PathBuf> {
-    tools::state::dir().map(|root| root.join("settings.toml"))
+    tool::state::dir().map(|root| root.join("settings.toml"))
 }
 
 /// The nearest project file at or above `start`, stopping at the repository
@@ -794,7 +794,7 @@ pub fn write(path: &Path, dotted: &str, value: toml::Value) -> Result<()> {
     table.insert(&last, toml_edit::Item::Value(to_edit_value(&value)));
     // Keys live here; `write_private` is the shared atomic write, pid-suffixed
     // temp and all, so two writers cannot clobber each other's temp file.
-    tools::state::write_private(path, doc.to_string().as_bytes())?;
+    tool::state::write_private(path, doc.to_string().as_bytes())?;
     Ok(())
 }
 

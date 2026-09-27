@@ -16,7 +16,7 @@ use common::spec;
 
 use agent::session::Session;
 use agent::{Agent, AgentError, Briefing, Ceiling, Event, Retry, Steer};
-use tools::{Concurrency, Ctx, Registry, Tier, Tool, ToolError, ToolOutput, Workspace};
+use tool::{Concurrency, Ctx, Registry, Tier, Tool, ToolError, ToolOutput, Workspace};
 
 // Replays one scripted event list per turn, so the loop is exercised without
 // a network.
@@ -110,8 +110,15 @@ fn wired(turns: Vec<Vec<StreamEvent>>) -> (tempfile::TempDir, Agent, Ctx, Arc<Sc
     let dir = tempfile::tempdir().unwrap();
     let ws = Workspace::new(dir.path()).unwrap();
     let wire = Scripted::new(turns);
-    let agent = Agent::new(wire.clone(), spec());
+    let agent = tooled(wire.clone(), spec());
     (dir, agent, Ctx::new(ws), wire)
+}
+
+// A run with the tools a real one carries: `Agent::new` starts with none.
+fn tooled(transport: Arc<dyn Transport>, spec: ModelSpec) -> Agent {
+    let mut a = Agent::new(transport, spec);
+    brief(&mut a).registry = toolbox::builtin();
+    a
 }
 
 // The brief is one value behind an `Arc`; a test that rewrites part of it takes
@@ -415,7 +422,7 @@ async fn cancellation_during_stream_saves_partial_assistant_response() {
     let wire = Arc::new(PartialStream {
         cancel: ctx.cancel.clone(),
     });
-    let agent = Agent::new(wire, spec());
+    let agent = tooled(wire, spec());
 
     let (mut session, out, _) = drive(&agent, &ctx, "first prompt").await;
     assert!(matches!(out, Err(AgentError::Cancelled)), "{out:?}");
@@ -540,12 +547,12 @@ async fn a_summary_on_another_model_still_counts_toward_the_run() {
     cheap.model = "cheap".into();
 
     let delegated = wire();
-    let mut a = Agent::new(delegated.clone(), main.clone());
+    let mut a = tooled(delegated.clone(), main.clone());
     common::compacting(&mut a, Some((wire(), cheap)));
     let cheaply = drive(&a, &ctx, "read it repeatedly").await.1.unwrap();
 
     let itself = wire();
-    let mut b = Agent::new(itself.clone(), main);
+    let mut b = tooled(itself.clone(), main);
     // No summarizer of its own: the summary is written by the model doing the
     // work, which is the thing under test.
     common::compacting(&mut b, None);
@@ -582,7 +589,7 @@ async fn dropped_history_comes_back_as_a_summary_on_the_opening_turn() {
     spec.context_window = 24_000;
     spec.max_output_tokens = 2_000;
 
-    let mut a = Agent::new(transport.clone(), spec);
+    let mut a = tooled(transport.clone(), spec);
     common::compacting(&mut a, None);
 
     let (session, out, events) = drive(&a, &ctx, "read it repeatedly").await;
@@ -646,7 +653,7 @@ async fn a_summarizer_that_fails_drops_the_history_without_failing_the_turn() {
     let mut spec = spec();
     spec.context_window = 24_000;
     spec.max_output_tokens = 2_000;
-    let mut a = Agent::new(Arc::new(Broken(AtomicUsize::new(0))), spec);
+    let mut a = tooled(Arc::new(Broken(AtomicUsize::new(0))), spec);
     common::compacting(&mut a, None);
 
     let (_session, out, events) = drive(&a, &ctx, "read it repeatedly").await;
@@ -699,7 +706,7 @@ fn fast_retry() -> Retry {
 async fn a_throttled_request_is_retried_until_it_lands() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
-    let a = Agent::new(
+    let a = tooled(
         flaky(2, || llm::BrainError::Api {
             format: "anthropic",
             status: 429,
@@ -746,7 +753,7 @@ async fn retries_stop_at_the_attempt_budget() {
     for (kind, err, attempts) in cases {
         let dir = tempfile::tempdir().unwrap();
         let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
-        let a = Agent::new(flaky(99, *err), spec());
+        let a = tooled(flaky(99, *err), spec());
         let mut retry = fast_retry();
         retry.attempts = *attempts;
 
@@ -781,7 +788,7 @@ impl Transport for Wedged {
 async fn a_stream_that_stops_sending_does_not_hold_the_turn_open() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
-    let a = Agent::new(Arc::new(Wedged), spec());
+    let a = tooled(Arc::new(Wedged), spec());
     let mut retry = fast_retry();
     retry.attempts = 1;
     retry.idle = std::time::Duration::from_millis(120);
@@ -884,7 +891,7 @@ async fn an_overflow_refusal_shrinks_the_transcript_and_retries() {
             refusals: AtomicUsize::new(0),
         });
 
-        let mut a = Agent::new(picky.clone(), spec());
+        let mut a = tooled(picky.clone(), spec());
         common::compacting(&mut a, None);
         let retry = fast_retry();
         std::sync::Arc::make_mut(&mut a.model).spec.context_window = window;
@@ -973,7 +980,7 @@ async fn a_named_window_supersedes_the_guesswork_that_preceded_it() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
 
-    let a = Agent::new(
+    let a = tooled(
         Arc::new(Mixed {
             calls: AtomicUsize::new(0),
             limit: 40_000,
@@ -1013,7 +1020,7 @@ async fn a_call_that_keeps_returning_the_same_thing_is_named() {
     let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
 
     let same = || call_turn(&[("t", "read", r#"{"path":"a.txt"}"#)]);
-    let a = Agent::new(
+    let a = tooled(
         Scripted::new(vec![same(), same(), same(), same(), text_turn("gave up")]),
         spec(),
     );
@@ -1056,7 +1063,7 @@ async fn a_refusal_repeated_is_named_sooner_whether_the_args_repeat_or_drift() {
             turns.push(call_turn(&[("t", "edit", &anchor(i))]));
         }
         turns.push(text_turn("gave up"));
-        let a = Agent::new(Scripted::new(turns), spec());
+        let a = tooled(Scripted::new(turns), spec());
 
         let (session, out, _) = drive(&a, &ctx, "edit it forever").await;
         out.unwrap();
@@ -1090,7 +1097,7 @@ async fn a_call_whose_answer_changes_resets_the_count() {
     let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
 
     let same = || call_turn(&[("t", "read", r#"{"path":"a.txt"}"#)]);
-    let a = Agent::new(
+    let a = tooled(
         Scripted::new(vec![same(), same(), same(), text_turn("ok")]),
         spec(),
     );

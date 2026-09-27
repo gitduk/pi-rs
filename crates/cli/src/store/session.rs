@@ -180,7 +180,7 @@ impl Default for Store {
     // project's, and a stray file in a repo is one the user has to clean up.
     fn default() -> Self {
         Self::new(
-            tools::state::dir()
+            tool::state::dir()
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join("sessions"),
         )
@@ -236,7 +236,7 @@ impl Store {
 
     // The directory one workspace's transcripts live in.
     fn dir_of(&self, workspace: &Path) -> PathBuf {
-        self.root.join(tools::state::key_of(workspace))
+        self.root.join(tool::state::key_of(workspace))
     }
 
     /// What `k` recalls in this workspace. Beside the transcripts rather than
@@ -255,8 +255,8 @@ impl Store {
     /// bucket left its logs behind for a fortnight.
     pub fn journal_path(&self, workspace: &Path, id: &str) -> PathBuf {
         self.dir_of(workspace)
-            .join(tools::state::file_stem(id))
-            .join(tools::state::JOURNAL_FILE)
+            .join(tool::state::file_stem(id))
+            .join(tool::state::JOURNAL_FILE)
     }
 
     /// The tree every bucket sits in, for the sweeps that walk all of them.
@@ -286,7 +286,7 @@ impl Store {
     /// goes wrong.
     pub fn path_of(&self, workspace: &Path, id: &str) -> PathBuf {
         self.dir_of(workspace)
-            .join(tools::state::file_stem(id))
+            .join(tool::state::file_stem(id))
             .join(TRANSCRIPT)
     }
 
@@ -344,7 +344,7 @@ impl Store {
     /// knowing which workspace saved it. Sessions saved before the bucketed
     /// layout sit flat under the root; the search falls back to that path.
     pub fn load(&self, id: &str) -> Result<Stored> {
-        let stem = tools::state::file_stem(id);
+        let stem = tool::state::file_stem(id);
         let mut match_: Option<PathBuf> = None;
         if let Ok(entries) = std::fs::read_dir(&self.root) {
             for entry in entries.flatten() {
@@ -546,10 +546,10 @@ mod tests {
     #[test]
     fn an_id_cannot_walk_out_of_the_directory_it_names_a_file_in() {
         assert_eq!(
-            tools::state::file_stem("../../etc/cron.d/x"),
+            tool::state::file_stem("../../etc/cron.d/x"),
             "______etc_cron_d_x"
         );
-        assert_eq!(tools::state::file_stem(".."), "__");
+        assert_eq!(tool::state::file_stem(".."), "__");
     }
 
     use super::*;
@@ -631,8 +631,8 @@ mod tests {
         let gone = home.path().join("w-t");
         std::fs::create_dir_all(&live).unwrap();
         assert_eq!(
-            tools::state::key_of(&live),
-            tools::state::key_of(&gone),
+            tool::state::key_of(&live),
+            tool::state::key_of(&gone),
             "the two trees share a bucket"
         );
         store
@@ -699,7 +699,7 @@ mod tests {
         store
             .save("theirs", &sibling, "test-model", None, 7, &log)
             .unwrap();
-        assert_eq!(tools::state::key_of(&tree), tools::state::key_of(&sibling));
+        assert_eq!(tool::state::key_of(&tree), tool::state::key_of(&sibling));
 
         assert_eq!(store.drop_under(&tree), 1);
         assert!(store.load("mine").is_err());

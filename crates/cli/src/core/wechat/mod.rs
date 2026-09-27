@@ -719,7 +719,7 @@ fn boundary(rest: &str, budget: usize) -> (usize, usize) {
 }
 
 fn state_path() -> Option<PathBuf> {
-    tools::state::dir().map(|d| d.join("wechat.json"))
+    tool::state::dir().map(|d| d.join("wechat.json"))
 }
 
 fn load() -> Option<State> {
@@ -737,7 +737,7 @@ fn save(state: &State) {
         let _ = std::fs::create_dir_all(dir);
     }
     if let Ok(body) = serde_json::to_vec_pretty(state) {
-        let _ = tools::state::write_private(&path, &body);
+        let _ = tool::state::write_private(&path, &body);
     }
 }
 

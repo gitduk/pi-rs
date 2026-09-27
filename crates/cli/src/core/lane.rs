@@ -22,7 +22,7 @@ use agent::{Agent, Event, Home, Steer, Totals};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio_util::sync::CancellationToken;
 
-use tools::Ctx;
+use tool::Ctx;
 
 use super::Core;
 use crate::Resolved;
@@ -154,6 +154,9 @@ pub struct Lane {
 /// compactor is not in here: it holds the summarizer's own connection, so the
 /// two callers that own one install it on the agent first, and a checkout
 /// opened later inherits it by cloning that agent.
+///
+/// The bundle keeps the brief without the subagent: the tool is offered, not
+/// forced, so a re-arm after `/model` must not find the old one holding the name.
 pub fn arm(
     agent: &mut Agent,
     resolved: Arc<Resolved>,
@@ -167,9 +170,7 @@ pub fn arm(
         &resolved.standing,
         retry,
     );
-    agent.apply(brief.clone());
-    let mut resolved = resolved;
-    Arc::make_mut(&mut resolved).brief = brief;
+    agent.apply(brief);
     resolved
 }
 
@@ -179,10 +180,10 @@ pub fn arm(
 pub(crate) fn a_resolved(standing: &str) -> Arc<Resolved> {
     Arc::new(Resolved {
         brief: Arc::new(agent::Briefing {
-            registry: tools::Registry::builtin(),
+            registry: toolbox::builtin(),
             system: String::new(),
             effort: llm::request::Effort::Off,
-            approver: Arc::new(agent::Ceiling(tools::Tier::Exec)),
+            approver: Arc::new(agent::Ceiling(tool::Tier::Exec)),
             subagent_deadline: None,
         }),
         standing: standing.into(),
@@ -679,7 +680,7 @@ impl Core {
     // whose config or skills will not resolve leaves the run where it was.
     pub(super) fn open_lane(
         &mut self,
-        ws: tools::Workspace,
+        ws: tool::Workspace,
         worktree: Option<String>,
     ) -> Result<Vec<String>, String> {
         let root = ws.root().to_path_buf();
@@ -702,7 +703,7 @@ impl Core {
 
         // Built, not cloned from the lane being left: a `Ctx`'s tables key on
         // absolute paths in one tree, and none of that lane's describe this.
-        let ctx = tools::Ctx::new(ws);
+        let ctx = tool::Ctx::new(ws);
         self.lanes.push(Lane::opened(Opening {
             worktree,
             ..Opening::new(Arc::new(ag), resolved, ctx)

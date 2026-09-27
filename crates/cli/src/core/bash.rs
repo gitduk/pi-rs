@@ -5,7 +5,7 @@
 //! between the live row and the rebuilt one.
 
 use agent::session::Session;
-use tools::{Tool, ToolError};
+use tool::{Tool, ToolError};
 
 /// What a `!` command left behind, kept apart because the two are easy to
 /// confuse: one is written to the transcript, the other drawn on the screen.
@@ -27,12 +27,12 @@ pub struct Bashed {
 /// Free of `Core` so the surface can spawn it: holding `&mut Core` across the
 /// await pinned the whole loop, which is what left the `!` path with an event
 /// loop of its own. Recording the result is the caller's, and needs no await.
-pub async fn run_bash(ctx: &tools::Ctx, command: &str) -> Bashed {
+pub async fn run_bash(ctx: &tool::Ctx, command: &str) -> Bashed {
     let refused = |flash: String| Bashed {
         text: String::new(),
         flash: Some(flash),
     };
-    let out = match tools::bash::Bash
+    let out = match toolbox::bash::Bash
         .execute(serde_json::json!({ "command": command }), ctx)
         .await
     {

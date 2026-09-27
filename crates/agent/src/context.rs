@@ -65,11 +65,11 @@ pub fn workspace(root: &Path) -> String {
 /// exec tools enforce exactly this set; the model needs it spelled out before
 /// it picks a tool for a path outside the workspace, so the escape refusal is
 /// not the first it hears of the boundary.
-pub fn boundary(ws: &tools::Workspace, tier: tools::Tier) -> String {
+pub fn boundary(ws: &tool::Workspace, tier: tool::Tier) -> String {
     let extras = ws.write_roots();
     // Nothing to say when the run may not write at all, or when the workspace
     // is the whole boundary — the `<workspace>` tag already names that.
-    if !tools::Tier::Write.under(tier) || extras.is_empty() {
+    if !tool::Tier::Write.under(tier) || extras.is_empty() {
         return String::new();
     }
     let mut out = format!(
@@ -83,7 +83,7 @@ pub fn boundary(ws: &tools::Workspace, tier: tools::Tier) -> String {
         "\n</write_paths>\n\nPaths inside these directories are writable; elsewhere write and \
 edit refuse.",
     );
-    if tools::Tier::Exec.under(tier) {
+    if tool::Tier::Exec.under(tier) {
         // Said only where it holds: a run capped below `exec` may not run `sh`.
         out.push_str(" bash can still write anywhere its redirections name.");
     }
@@ -100,7 +100,7 @@ edit refuse.",
 /// `stamp` is the caller's clock reading, as a timestamp; only its day is
 /// used, so that two runs an hour apart still share one cached prefix. The
 /// reading is the caller's because a calendar is not the loop's business.
-pub fn env(stamp: &str, tier: tools::Tier) -> String {
+pub fn env(stamp: &str, tier: tool::Tier) -> String {
     let day = stamp.split_once('T').map_or(stamp, |(day, _)| day);
     // `sh`, not `$SHELL`: the bash tool runs `Command::new("sh")` whatever the
     // login shell is, and the tool's own name is what misleads about it.
@@ -148,7 +148,7 @@ pub fn paths(workspace: &Path, home: Option<&Path>, root: Option<&Path>) -> Vec<
 }
 
 pub fn load(workspace: &Path) -> Loaded {
-    from(workspace, home().as_deref(), tools::state::dir().as_deref())
+    from(workspace, home().as_deref(), tool::state::dir().as_deref())
 }
 
 // The same, against a stated home and pi root rather than this process's.
@@ -195,38 +195,38 @@ mod tests {
     fn the_write_block_claims_only_what_the_ceiling_allows() {
         let dir = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
-        let ws = tools::Workspace::new(dir.path())
+        let ws = tool::Workspace::new(dir.path())
             .unwrap()
             .with_write_roots(&[outside.path()])
             .unwrap();
 
-        assert!(boundary(&ws, tools::Tier::Read).is_empty());
-        assert!(boundary(&ws, tools::Tier::Net).is_empty());
+        assert!(boundary(&ws, tool::Tier::Read).is_empty());
+        assert!(boundary(&ws, tool::Tier::Net).is_empty());
 
         // Printed as `resolve` admits it, which an existing tempdir may spell
         // differently once its links are gone.
         let shown = outside.path().canonicalize().unwrap();
         let shown = shown.to_str().unwrap();
-        let write = boundary(&ws, tools::Tier::Write);
+        let write = boundary(&ws, tool::Tier::Write);
         assert!(write.contains(shown), "{write}");
         assert!(!write.contains("bash"), "{write}");
-        assert!(boundary(&ws, tools::Tier::Exec).contains("bash"));
+        assert!(boundary(&ws, tool::Tier::Exec).contains("bash"));
 
         // No write root beyond the workspace: `<workspace>` already names the
         // whole boundary, so there is nothing to add.
-        let bare = tools::Workspace::new(dir.path()).unwrap();
-        assert!(boundary(&bare, tools::Tier::Exec).is_empty());
+        let bare = tool::Workspace::new(dir.path()).unwrap();
+        assert!(boundary(&bare, tool::Tier::Exec).is_empty());
     }
 
     // The block rides the cached prompt prefix, so its one moving part, the
     // date, has to move once a day — not on every run.
     #[test]
     fn the_env_date_moves_once_a_day_not_every_run() {
-        let got = env("2026-09-21T12:00:00.000Z", tools::Tier::Read);
+        let got = env("2026-09-21T12:00:00.000Z", tool::Tier::Read);
         assert!(got.contains("date=\"2026-09-21\""), "{got}");
         // Two readings an hour apart name the same day, and so the same block.
-        assert_eq!(got, env("2026-09-21T13:00:00.000Z", tools::Tier::Read));
-        assert_ne!(got, env("2026-09-22T12:00:00.000Z", tools::Tier::Read));
+        assert_eq!(got, env("2026-09-21T13:00:00.000Z", tool::Tier::Read));
+        assert_ne!(got, env("2026-09-22T12:00:00.000Z", tool::Tier::Read));
     }
 
     #[test]

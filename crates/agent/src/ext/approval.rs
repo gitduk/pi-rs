@@ -2,7 +2,7 @@
 
 use crate::seams::{Approver, Decision};
 use serde_json::Value;
-use tools::Tier;
+use tool::Tier;
 
 /// Allows every tier this ceiling reaches. Not a comparison: `Tier` is a
 /// lattice, and `write` and `net` sit beside each other rather than in order.
@@ -28,7 +28,7 @@ mod tests {
     use super::Ceiling;
     use crate::seams::{Approver, Decision};
     use serde_json::json;
-    use tools::Tier;
+    use tool::Tier;
 
     fn allowed(ceiling: Tier, tier: Tier) -> bool {
         matches!(

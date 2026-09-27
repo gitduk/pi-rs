@@ -361,7 +361,7 @@ mod tests {
     // One lane that has spent nothing, enough for `/settings` to answer.
     pub(super) fn a_lane(name: &str) -> crate::core::lane::Lane {
         let dir = std::env::temp_dir();
-        let ws = tools::Workspace::new(&dir).expect("a workspace");
+        let ws = tool::Workspace::new(&dir).expect("a workspace");
         let agent = std::sync::Arc::new(agent::Agent::new(
             std::sync::Arc::new(Recording::default()),
             test_spec("m"),
@@ -372,7 +372,7 @@ mod tests {
             ..crate::core::lane::Opening::new(
                 agent,
                 crate::core::lane::a_resolved(""),
-                tools::Ctx::new(ws),
+                tool::Ctx::new(ws),
             )
         })
     }
@@ -429,7 +429,7 @@ mod tests {
         transport: std::sync::Arc<Recording>,
         model: &str,
     ) -> crate::core::Core {
-        let ws = tools::Workspace::new(root).unwrap();
+        let ws = tool::Workspace::new(root).unwrap();
         let mut agent = agent::Agent::new(transport, test_spec(model));
         let store = crate::store::session::Store::new(root.join("state"));
         let resolved = crate::core::lane::arm(
@@ -450,7 +450,7 @@ mod tests {
             ..crate::core::lane::Opening::new(
                 std::sync::Arc::new(agent),
                 resolved,
-                tools::Ctx::new(ws),
+                tool::Ctx::new(ws),
             )
         });
         lane.return_session(agent::session::Session::default());
@@ -475,7 +475,7 @@ mod tests {
             .registry
             .get(subagent::Subagent::NAME)
             .unwrap();
-        let ctx = tools::Ctx::new(core.lane().ctx.workspace.clone());
+        let ctx = tool::Ctx::new(core.lane().ctx.workspace.clone());
         subagent
             .execute(
                 serde_json::json!({ "description": "go", "prompt": "go" }),

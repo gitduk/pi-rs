@@ -76,7 +76,7 @@ pub(super) fn running_lane(dir: &std::path::Path) -> Lane {
             Ok(Box::pin(futures::stream::empty()))
         }
     }
-    let ws = tools::Workspace::new(dir).expect("a workspace");
+    let ws = tool::Workspace::new(dir).expect("a workspace");
     let spec = llm::model::ModelSpec {
         model: "m".into(),
         base_url: "http://localhost".into(),
@@ -97,7 +97,7 @@ pub(super) fn running_lane(dir: &std::path::Path) -> Lane {
         ..crate::core::lane::Opening::new(
             std::sync::Arc::new(agent::Agent::new(std::sync::Arc::new(Mute), spec)),
             crate::core::lane::a_resolved(""),
-            tools::Ctx::new(ws),
+            tool::Ctx::new(ws),
         )
     });
     // What every `start_*` leaves behind while its job runs.

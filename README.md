@@ -2,7 +2,7 @@
 
 A coding agent that stays inside one directory.
 
-Rust, six crates, no framework. It reads and edits files, runs commands,
+Rust, eight crates, no framework. It reads and edits files, runs commands,
 searches, and compacts its own transcript when the window fills.
 One binary, `pi`.
 

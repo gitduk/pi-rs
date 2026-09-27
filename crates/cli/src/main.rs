@@ -53,8 +53,8 @@ impl FormatArg {
     }
 }
 
-/// `tools::Tier` as the command line and the config files spell it. Not
-/// ordered, because the tiers are not: see `tools::Tier`.
+/// `tool::Tier` as the command line and the config files spell it. Not
+/// ordered, because the tiers are not: see `tool::Tier`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TierArg {
@@ -64,33 +64,33 @@ pub enum TierArg {
     Net,
 }
 
-impl From<TierArg> for tools::Tier {
+impl From<TierArg> for tool::Tier {
     fn from(arg: TierArg) -> Self {
         match arg {
-            TierArg::Read => tools::Tier::Read,
-            TierArg::Write => tools::Tier::Write,
-            TierArg::Exec => tools::Tier::Exec,
-            TierArg::Net => tools::Tier::Net,
+            TierArg::Read => tool::Tier::Read,
+            TierArg::Write => tool::Tier::Write,
+            TierArg::Exec => tool::Tier::Exec,
+            TierArg::Net => tool::Tier::Net,
         }
     }
 }
 
-impl From<tools::Tier> for TierArg {
-    fn from(tier: tools::Tier) -> Self {
+impl From<tool::Tier> for TierArg {
+    fn from(tier: tool::Tier) -> Self {
         match tier {
-            tools::Tier::Read => TierArg::Read,
-            tools::Tier::Write => TierArg::Write,
-            tools::Tier::Exec => TierArg::Exec,
-            tools::Tier::Net => TierArg::Net,
+            tool::Tier::Read => TierArg::Read,
+            tool::Tier::Write => TierArg::Write,
+            tool::Tier::Exec => TierArg::Exec,
+            tool::Tier::Net => TierArg::Net,
         }
     }
 }
 
 impl TierArg {
-    /// A project ceiling applied downward. `tools::Tier` owns the rule, which
+    /// A project ceiling applied downward. `tool::Tier` owns the rule, which
     /// is not `min`: `write` and `net` have no order between them.
     pub fn capped_by(self, other: Self) -> Self {
-        tools::Tier::from(self).capped_by(other.into()).into()
+        tool::Tier::from(self).capped_by(other.into()).into()
     }
 }
 
@@ -347,11 +347,24 @@ pub struct Resolved {
     pub context: Vec<String>,
 }
 
+/// Offer `tool` to the set, saying so when an earlier source holds its name.
+fn offer(
+    registry: &mut tool::Registry,
+    notes: &mut Vec<String>,
+    source: &str,
+    tool: Arc<dyn tool::Tool>,
+) {
+    let name = tool.name().to_string();
+    if !registry.offer(tool) {
+        notes.push(format!("tool skipped — {source} {name}: the name is taken"));
+    }
+}
+
 /// Fails whole or not at all. A half-applied config is worse than a stale one,
 /// which is why `/reload` computes all of this before touching anything.
 pub fn resolve(
     args: &Args,
-    workspace: &tools::Workspace,
+    workspace: &tool::Workspace,
     config: &config::Config,
     project: &config::Project,
     claimed: &BTreeMap<String, toml::Value>,
@@ -359,7 +372,8 @@ pub fn resolve(
     let root = workspace.root();
     let mut notes = Vec::new();
 
-    let mut registry = tools::Registry::builtin();
+    // Sources offer their tools in order, built-ins first.
+    let mut registry = toolbox::builtin();
     let skills = if args.no_skills {
         Vec::new()
     } else {
@@ -379,7 +393,7 @@ pub fn resolve(
     let commands = commands(&skills, &mut notes);
     let tool = skills::Load::new(skills);
     if !tool.is_empty() {
-        registry = registry.with(tool);
+        offer(&mut registry, &mut notes, "skill", Arc::new(tool));
     }
 
     // A judgment endpoint is opt-in by section: no `[judge]` in the file, no
@@ -390,32 +404,16 @@ pub fn resolve(
         // money: a tool in the set the user did not ask for is worth saying
         // out loud, and the endpoint says which account is paying.
         notes.push(format!("judge: snap judgments via {endpoint}"));
-        registry = registry.with(tools::judge::Judge::new(
-            endpoint,
-            judge.key(),
-            judge.model.clone(),
-        ));
+        let judge = toolbox::judge::Judge::new(endpoint, judge.key(), judge.model.clone());
+        offer(&mut registry, &mut notes, "judge", Arc::new(judge));
     }
 
     let (scripts, skipped) = context::home()
-        .map(|home| scripts::discover_in(&home.join(".pi/tools")))
+        .map(|home| toolbox::scripts::discover_in(&home.join(".pi/tools")))
         .unwrap_or_default();
     notes.extend(skipped.iter().map(|p| format!("tool skipped — {p}")));
-    let mut user_tools: Vec<String> = Vec::new();
     for script in scripts {
-        let name = tools::Tool::name(&script);
-        if user_tools.contains(&name.to_string()) {
-            notes.push(format!(
-                "tool skipped — {name} is provided by another user tool"
-            ));
-            continue;
-        }
-        user_tools.push(name.to_string());
-        if registry.get(name).is_some() {
-            notes.push(format!("tool skipped — {name} shadows a built-in tool"));
-            continue;
-        }
-        registry = registry.with(script);
+        offer(&mut registry, &mut notes, "user script", Arc::new(script));
     }
 
     let settled = config.settle(
@@ -426,7 +424,7 @@ pub fn resolve(
         },
         claimed,
     );
-    let tier = tools::Tier::from(settled.tier);
+    let tier = tool::Tier::from(settled.tier);
     let effort = match settled.effort {
         EffortArg::Off => Effort::Off,
         EffortArg::Low => Effort::Low,
@@ -529,7 +527,7 @@ async fn main() -> Result<()> {
     let prompt = read_prompt(&args)?;
     let config = Arc::new(config::load(args.config.as_deref())?);
 
-    let workspace = tools::Workspace::new(&args.cwd)
+    let workspace = tool::Workspace::new(&args.cwd)
         .and_then(|ws| ws.with_write_roots(&config.write_roots))
         .with_context(|| format!("cannot use {} as a workspace", args.cwd))?;
     let project = config::load_project(workspace.root())?;
@@ -655,7 +653,7 @@ async fn main() -> Result<()> {
         // session its spills belong to. `commands` is what the Core shows for
         // the front lane; the lane's own copy travels in `resolved`.
         let commands = resolved.commands.clone();
-        let ctx = tools::Ctx::new(workspace).with_session(&id);
+        let ctx = tool::Ctx::new(workspace).with_session(&id);
         let mut first = lane::Lane::opened(lane::Opening {
             id,
             created,
@@ -708,7 +706,7 @@ async fn main() -> Result<()> {
         ag.spec().pricing,
         worktree.clone(),
     );
-    let mut ctx = tools::Ctx::new(workspace).with_cancel(cancel_on_interrupt());
+    let mut ctx = tool::Ctx::new(workspace).with_cancel(cancel_on_interrupt());
     // Without a session the spills land in the temp dir rather than `~/.pi`.
     if keeps {
         ctx = ctx.with_session(&id);

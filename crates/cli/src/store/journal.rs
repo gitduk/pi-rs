@@ -16,9 +16,9 @@
 //! Records are filed under a `pi::` target — `pi::loop`, `pi::wire`, `pi::tool`
 //! and so on — which is what `ev` carries and what a reader filters on. A call
 //! that states no target takes its module path instead and still arrives,
-//! because every crate in this workspace is on the list too: a diagnostic that
-//! goes missing for want of a convention is the failure this file exists to
-//! prevent. What is left out below `trace` is the dependencies.
+//! because what counts as ours is where the code lives, not what it is named:
+//! a diagnostic that goes missing for want of a convention is the failure this
+//! file exists to prevent. What is left out below `trace` is the dependencies.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -30,7 +30,7 @@ use serde_json::{Map, Value};
 use tracing::field::{Field, Visit};
 use tracing::level_filters::LevelFilter;
 use tracing::{Event, Metadata, Subscriber};
-use tracing_subscriber::filter::Targets;
+use tracing_subscriber::filter::{FilterFn, filter_fn};
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
 
@@ -383,22 +383,26 @@ struct JournalLayer {
 // level is also the one place a dependency's own account is worth having,
 // which is where the line lifts.
 //
-// "Ours" is every crate in the workspace as well as the `pi::` namespace, so a
-// `tracing` call that forgets the target convention is still recorded. The
-// alternative — matching `pi::` alone — drops such a call silently at every
-// level, which is precisely the kind of bug this file exists to catch.
-fn ours(level: LevelFilter) -> Targets {
-    const MINE: [&str; 8] = [
-        "pi", "agent", "llm", "tools", "subagent", "scripts", "skills", "wechat",
-    ];
+// "Ours" is whatever the workspace compiled, known by where its source lives:
+// no list of crates to join, and no target a call could forget to name.
+fn ours(level: LevelFilter) -> FilterFn<impl Fn(&Metadata<'_>) -> bool> {
     let theirs = if level == LevelFilter::TRACE {
         level
     } else {
         LevelFilter::OFF
     };
-    Targets::new()
-        .with_targets(MINE.map(|t| (t, level)))
-        .with_default(theirs)
+    filter_fn(move |meta| {
+        // The `pi::` convention still holds where a build has remapped paths.
+        let mine = from_workspace(meta.file()) || meta.target().starts_with("pi::");
+        let cap = if mine { level } else { theirs };
+        cap >= *meta.level()
+    })
+}
+
+// Cargo passes rustc a member's path relative, a dependency's absolute. Path
+// remapping (`--remap-path-prefix`, `trim-paths`) voids this; a test guards it.
+fn from_workspace(file: Option<&str>) -> bool {
+    file.is_some_and(|f| Path::new(f).is_relative())
 }
 
 impl JournalLayer {
@@ -576,7 +580,7 @@ pub fn prune(sessions: &Path) {
             continue;
         };
         for entry in entries.flatten() {
-            let path = entry.path().join(tools::state::JOURNAL_FILE);
+            let path = entry.path().join(tool::state::JOURNAL_FILE);
             let old = path
                 .metadata()
                 .and_then(|m| m.modified())
@@ -705,7 +709,7 @@ mod tests {
         let lived = sessions.join("-w").join("had-a-transcript");
         for d in [&empty, &lived] {
             std::fs::create_dir_all(d).unwrap();
-            let journal = d.join(tools::state::JOURNAL_FILE);
+            let journal = d.join(tool::state::JOURNAL_FILE);
             std::fs::write(&journal, b"{}\n").unwrap();
             std::fs::File::options()
                 .write(true)
@@ -726,7 +730,7 @@ mod tests {
             lived.exists(),
             "and one with a transcript keeps its directory"
         );
-        assert!(!lived.join(tools::state::JOURNAL_FILE).exists());
+        assert!(!lived.join(tool::state::JOURNAL_FILE).exists());
     }
 
     #[test]
@@ -799,19 +803,26 @@ mod tests {
         assert_eq!(out[0]["msg"], "hi");
     }
 
+    // A dependency's record cannot be staged from here, so the rule is checked
+    // on the paths it decides by.
     #[test]
-    fn a_dependencys_records_arrive_only_at_trace() {
-        let three = || {
-            tracing::info!(target: "pi::t", "mine");
-            // A workspace crate that forgot the `pi::` convention: still ours.
-            tracing::info!(target: "tools::grep", "mine too");
-            tracing::info!(target: "hyper::pool", "theirs");
-        };
-        let at_info = recorded(LogLevel::Info, three);
-        assert_eq!(at_info.len(), 2);
-        assert_eq!(at_info[1]["ev"], "tools::grep");
+    fn a_dependencys_records_are_told_apart_by_path() {
+        assert!(from_workspace(Some("crates/cli/src/store/journal.rs")));
+        assert!(!from_workspace(Some(
+            "/home/u/.cargo/registry/src/index/hyper-1.0.0/src/pool.rs"
+        )));
+        assert!(!from_workspace(None));
+    }
 
-        assert_eq!(recorded(LogLevel::Trace, three).len(), 3);
+    // Whatever target a call names, a record from this workspace is ours. Fails
+    // the day cargo stops passing members' paths relative.
+    #[test]
+    fn our_own_records_arrive_whatever_their_target() {
+        let out = recorded(LogLevel::Info, || {
+            tracing::info!(target: "pi::t", "mine");
+            tracing::info!(target: "hyper::pool", "a borrowed name, still mine");
+        });
+        assert_eq!(out.len(), 2);
     }
 
     #[test]

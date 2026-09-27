@@ -8,7 +8,7 @@ use llm::request::{Effort, Request};
 use llm::stream::{Accumulator, InvalidToolArgs, StreamEvent, Usage};
 use llm::transport::Transport;
 use tokio::sync::mpsc::UnboundedSender;
-use tools::{Concurrency, Ctx, Registry, ToolError, ToolOutput};
+use tool::{Concurrency, Ctx, Registry, ToolError, ToolOutput};
 use tracing::Instrument as _;
 
 use crate::session::Session;
@@ -105,17 +105,19 @@ type Failures = HashMap<(String, String), usize>;
 // the result list aligned with the call list even when nothing executes.
 enum Action {
     Reject(String),
-    Run(Arc<dyn tools::Tool>),
+    Run(Arc<dyn tool::Tool>),
 }
 impl Agent {
+    /// An agent with no tools: whoever assembles it installs a registry on
+    /// the brief, as the identity compactor waits for a real one.
     pub fn new(transport: Arc<dyn Transport>, spec: ModelSpec) -> Self {
         Self {
             model: Arc::new(Model { transport, spec }),
             brief: Arc::new(Briefing {
-                registry: Registry::builtin(),
+                registry: Registry::new(),
                 system: DEFAULT_SYSTEM.to_string(),
                 effort: Effort::Off,
-                approver: Arc::new(Ceiling(tools::Tier::Exec)),
+                approver: Arc::new(Ceiling(tool::Tier::Exec)),
                 subagent_deadline: None,
             }),
             compactor: Arc::new(seams::Untouched),
@@ -584,8 +586,8 @@ impl Agent {
         // the context is what moves with it.
         let journal = ctx
             .session()
-            .and_then(|id| tools::state::session_dir(ctx.workspace.root(), id))
-            .map(|d| d.join(tools::state::JOURNAL_FILE));
+            .and_then(|id| tool::state::session_dir(ctx.workspace.root(), id))
+            .map(|d| d.join(tool::state::JOURNAL_FILE));
         let journal = journal.as_deref();
         let actions: Vec<Action> = calls
             .iter()
@@ -659,7 +661,7 @@ impl Agent {
                     match action {
                         Action::Reject(_) => None,
                         Action::Run(t) => {
-                            Some(tools::output::gated(t.as_ref(), call.args.clone(), ctx).await)
+                            Some(tool::output::gated(t.as_ref(), call.args.clone(), ctx).await)
                         }
                     }
                 }

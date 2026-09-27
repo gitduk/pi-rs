@@ -10,10 +10,10 @@ license = "MIT"
 
 [workspace.dependencies]
 llm = { path = "crates/llm" }
-tools = { path = "crates/tools" }
+tool = { path = "crates/tool" }
+toolbox = { path = "crates/toolbox" }
 agent = { path = "crates/agent" }
 subagent = { path = "crates/subagent" }
-scripts = { path = "crates/scripts" }
 skills = { path = "crates/skills" }
 wechat = { path = "crates/wechat" }
 
@@ -24,6 +24,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_path_to_error = "0.1"
 serde_yaml_ng = "0.10"
+toml = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
 tokio-util = "0.7"
@@ -33,7 +34,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "registry"] }
 ignore = "0.4"
 globset = "0.4"
-grep-matcher = "0.1"
 grep-regex = "0.1"
 grep-searcher = "0.1"
 clap = { version = "4", features = ["derive", "env"] }
