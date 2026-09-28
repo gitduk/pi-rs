@@ -1,7 +1,7 @@
-//! WeChat as a channel: the login, the long-poll, and the
-//! `~/.pi/wechat.json` state file, over the protocol client beside it.
+//! WeChat as a channel: the login, the long-poll, and the state file the host
+//! names, over the protocol client beside it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 
@@ -13,10 +13,12 @@ use crate::Update;
 use crate::markdown::format_markdown;
 use channel::{Channel, Inbound, Inbox};
 
-// What persists between runs, under the pi root. One peer per session in
-// this build, so the reply address and the context token are single slots.
+// What persists between runs, in the file the host named. One peer per session
+// in this build, so the reply address and the context token are single slots.
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 struct State {
+    #[serde(skip)]
+    file: Option<PathBuf>,
     token: Option<String>,
     base_url: String,
     peer: Option<String>,
@@ -48,8 +50,11 @@ impl WeChat {
     /// The word `/wechat` answers to; the command table reads it from here.
     pub const NAME: &'static str = "wechat";
 
-    pub fn new() -> Self {
-        let state = load().unwrap_or_default();
+    /// `file` is where the login and the reply address persist between runs;
+    /// without one they last only as long as the process.
+    pub fn new(file: Option<PathBuf>) -> Self {
+        let mut state = file.as_deref().and_then(load).unwrap_or_default();
+        state.file = file;
         let client = crate::Client::new(base_of(&state));
         Self {
             state: Arc::new(Mutex::new(state)),
@@ -68,12 +73,6 @@ impl WeChat {
             *client = crate::Client::new(base);
         }
         client.clone()
-    }
-}
-
-impl Default for WeChat {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -360,12 +359,7 @@ fn backoff(failures: &mut u32) -> Duration {
     }
 }
 
-fn state_path() -> Option<PathBuf> {
-    tool::state::dir().map(|d| d.join("wechat.json"))
-}
-
-fn load() -> Option<State> {
-    let path = state_path()?;
+fn load(path: &Path) -> Option<State> {
     let body = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&body).ok()
 }
@@ -374,12 +368,12 @@ fn load() -> Option<State> {
 // login either way: through the same private write, so the file is 0600 and a
 // crash mid-save leaves the last good copy rather than half of this one.
 fn save(state: &State) {
-    let Some(path) = state_path() else { return };
+    let Some(path) = &state.file else { return };
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
     if let Ok(body) = serde_json::to_vec_pretty(state) {
-        let _ = tool::state::write_private(&path, &body);
+        let _ = tool::state::write_private(path, &body);
     }
 }
 

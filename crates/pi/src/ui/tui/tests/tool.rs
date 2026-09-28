@@ -1,9 +1,11 @@
 use crate::core::lane::Lane;
 use crate::store::icons;
 use crate::ui::render::Paint;
+use crate::ui::tui::View;
+use crate::ui::tui::mouse::Target;
+use crate::ui::tui::row::Row;
 use crate::ui::tui::screen::plain;
 use crate::ui::tui::scrollback::{Folds, scrollback_from};
-use crate::ui::tui::{Row, Target, View};
 
 use super::harness::*;
 

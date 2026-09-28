@@ -225,7 +225,7 @@ async fn main() -> Result<()> {
         // session its spills belong to. `commands` is what the Core shows for
         // the front lane; the lane's own copy travels in `resolved`.
         let commands = resolved.commands.clone();
-        let ctx = tool::Ctx::new(workspace).with_session(&id);
+        let ctx = tool::Ctx::new(workspace).with_session(&id, store::spill_root());
         let mut first = lane::Lane::opened(lane::Opening {
             id,
             created,
@@ -247,7 +247,9 @@ async fn main() -> Result<()> {
             current: 0,
             lanes: vec![first],
         };
-        let drivers = driver::Drivers::new(vec![Arc::new(wechat::WeChat::new())]);
+        let drivers = driver::Drivers::new(vec![Arc::new(wechat::WeChat::new(
+            store::dir().map(|d| d.join("wechat.json")),
+        ))]);
         let out = tui::Tui::new(core, key_map, drivers)?.run().await;
         // Subagents handed their transcripts to a background save; wait
         // for those to land before the runtime goes with them.
@@ -280,7 +282,7 @@ async fn main() -> Result<()> {
     let mut ctx = tool::Ctx::new(workspace).with_cancel(cancel_on_interrupt());
     // Without a session the spills land in the temp dir rather than `~/.pi`.
     if keeps {
-        ctx = ctx.with_session(&id);
+        ctx = ctx.with_session(&id, store::spill_root());
     }
 
     // Always through the log: a loaded session whose view happens to be empty

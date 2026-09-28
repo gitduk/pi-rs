@@ -642,7 +642,7 @@ fn home() -> Option<PathBuf> {
 
 /// Where the user's own config lives when they have not said otherwise.
 pub fn global_path() -> Option<PathBuf> {
-    tool::state::dir().map(|root| root.join("settings.toml"))
+    super::dir().map(|root| root.join("settings.toml"))
 }
 
 /// The nearest project file at or above `start`, stopping at the repository

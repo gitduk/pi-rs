@@ -1,7 +1,8 @@
 use crate::store::theme::{Color, Theme};
 use crate::ui::render::Paint;
+use crate::ui::tui::row::Row;
 use crate::ui::tui::scrollback::{Folds, ScrollbackRows};
-use crate::ui::tui::{Row, View, following_terminal};
+use crate::ui::tui::{View, following_terminal};
 use ratatui::text::Line;
 
 use super::harness::*;

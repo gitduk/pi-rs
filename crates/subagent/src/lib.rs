@@ -220,17 +220,14 @@ impl Tool for Subagent {
         // transcript, its own name among the spills and the token are the
         // child's own.
         //
-        // Its own name, not its own tree: `with_session` files a run's spills
-        // under the durable root, and a child's tree has to be the parent's —
-        // a one-shot run spills to the temp directory, and a locator the child
-        // prints is one the parent then has to resolve.
+        // Its own name, not its own tree: a one-shot parent spills to the temp
+        // directory, and a locator the child prints is one the parent resolves.
         let stop = ctx.cancel.child_token();
         let root = ctx.spill_root().to_path_buf();
         let child = ctx
             .clone()
             .with_cancel(stop.clone())
-            .with_session(&id)
-            .with_spill_root(root)
+            .with_session(&id, root)
             .with_own_writes();
 
         let (tx, mut rx) = unbounded_channel();

@@ -182,7 +182,7 @@ pub(super) fn history_of(store: &Store, workspace: &std::path::Path) -> Vec<Stri
 // — every project's lines in one list — so there is nothing in it worth
 // carrying into the buckets that replace it.
 pub(super) fn drop_shared_history() {
-    if let Some(old) = tool::state::dir().map(|d| d.join("history")) {
+    if let Some(old) = crate::store::dir().map(|d| d.join("history")) {
         let _ = std::fs::remove_file(&old);
         let _ = std::fs::remove_dir_all(&old);
     }

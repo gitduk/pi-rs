@@ -147,8 +147,9 @@ pub fn paths(workspace: &Path, home: Option<&Path>, root: Option<&Path>) -> Vec<
     out
 }
 
-pub fn load(workspace: &Path) -> Loaded {
-    from(workspace, home().as_deref(), tool::state::dir().as_deref())
+/// `root` is the host's own directory, whose file is the personal one.
+pub fn load(workspace: &Path, root: Option<&Path>) -> Loaded {
+    from(workspace, home().as_deref(), root)
 }
 
 // The same, against a stated home and pi root rather than this process's.

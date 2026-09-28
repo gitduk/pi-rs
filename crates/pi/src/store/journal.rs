@@ -48,6 +48,10 @@ const FILE_CAP: u64 = 64 * 1024 * 1024;
 // "it did something odd on Monday", short enough not to accumulate.
 const KEEP: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 
+/// The journal inside each session's directory, named once for the store that
+/// writes it and the sweep that looks for it by name.
+pub const JOURNAL_FILE: &str = "journal.jsonl";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 #[clap(rename_all = "lowercase")]
 pub enum LogLevel {
@@ -580,7 +584,7 @@ pub fn prune(sessions: &Path) {
             continue;
         };
         for entry in entries.flatten() {
-            let path = entry.path().join(tool::state::JOURNAL_FILE);
+            let path = entry.path().join(JOURNAL_FILE);
             let old = path
                 .metadata()
                 .and_then(|m| m.modified())
@@ -709,7 +713,7 @@ mod tests {
         let lived = sessions.join("-w").join("had-a-transcript");
         for d in [&empty, &lived] {
             std::fs::create_dir_all(d).unwrap();
-            let journal = d.join(tool::state::JOURNAL_FILE);
+            let journal = d.join(JOURNAL_FILE);
             std::fs::write(&journal, b"{}\n").unwrap();
             std::fs::File::options()
                 .write(true)
@@ -730,7 +734,7 @@ mod tests {
             lived.exists(),
             "and one with a transcript keeps its directory"
         );
-        assert!(!lived.join(tool::state::JOURNAL_FILE).exists());
+        assert!(!lived.join(JOURNAL_FILE).exists());
     }
 
     #[test]

@@ -144,7 +144,7 @@ pub fn resolve(
     // request a provider will cache.
     let mut context = Vec::new();
     if !pinned.no_context_files {
-        let loaded = context::load(root);
+        let loaded = context::load(root, crate::store::dir().as_deref());
         context = loaded
             .files
             .iter()

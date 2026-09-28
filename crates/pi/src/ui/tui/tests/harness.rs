@@ -3,9 +3,10 @@ use crate::core::lane::Lane;
 use crate::store::keys::{Keys, Mode};
 use crate::store::session::Store;
 use crate::ui::render::Paint;
+use crate::ui::tui::View;
+use crate::ui::tui::row::Row;
 use crate::ui::tui::screen::{self, plain};
 use crate::ui::tui::scrollback::{ScrollbackRows, absorb_growth};
-use crate::ui::tui::{Row, View};
 use ratatui::text::Line;
 
 // The rows the scrollback draws, one string each.

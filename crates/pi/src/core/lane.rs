@@ -642,7 +642,11 @@ impl Core {
     fn becomes(&mut self, talk: Conversation) {
         let lane = self.lane_mut();
         lane.talk = talk;
-        lane.checkout.ctx = lane.checkout.ctx.clone().with_session(&lane.talk.id);
+        lane.checkout.ctx = lane
+            .checkout
+            .ctx
+            .clone()
+            .with_session(&lane.talk.id, crate::store::spill_root());
         let path = self
             .store
             .journal_path(self.lane().root(), &self.lane().talk.id);

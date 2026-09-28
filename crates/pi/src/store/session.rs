@@ -180,7 +180,7 @@ impl Default for Store {
     // project's, and a stray file in a repo is one the user has to clean up.
     fn default() -> Self {
         Self::new(
-            tool::state::dir()
+            super::dir()
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join("sessions"),
         )
@@ -198,6 +198,23 @@ pub fn new_id() -> String {
 // The transcript one session directory holds. Named once: four readers look
 // it up, and one of them naming it differently is a session that quietly
 // stops being found.
+/// A path as a single directory name, for grouping a machine's state by
+/// workspace: every character that is not a letter or a digit becomes `-`, so
+/// `/home/u/pi-rs` is `-home-u-pi-rs`. Claude Code buckets its projects the
+/// same way, and that fold is not injective here either — `/a/b` and `/a-b`
+/// land in one bucket — which is accepted rather than solved: what a bucket
+/// holds is read off the workspace each transcript records, never off its
+/// name. Distinct from `file_stem` (which mints `_` for the same characters)
+/// because the two name different things: a file a session owns, and the
+/// bucket that groups them.
+pub fn key_of(path: &Path) -> String {
+    path.display()
+        .to_string()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
 const TRANSCRIPT: &str = "session.json";
 // Beside a session's transcript: the subagents its turns called, one file each.
 const SUBAGENTS: &str = "subagents";
@@ -283,7 +300,7 @@ impl Store {
 
     // The directory one workspace's transcripts live in.
     fn dir_of(&self, workspace: &Path) -> PathBuf {
-        self.root.join(tool::state::key_of(workspace))
+        self.root.join(key_of(workspace))
     }
 
     /// What `k` recalls in this workspace. Beside the transcripts rather than
@@ -303,7 +320,7 @@ impl Store {
     pub fn journal_path(&self, workspace: &Path, id: &str) -> PathBuf {
         self.dir_of(workspace)
             .join(tool::state::file_stem(id))
-            .join(tool::state::JOURNAL_FILE)
+            .join(super::journal::JOURNAL_FILE)
     }
 
     /// The tree every bucket sits in, for the sweeps that walk all of them.
@@ -582,6 +599,8 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    use super::key_of;
+
     #[test]
     fn two_ids_minted_in_one_second_are_still_two_ids() {
         // Same second, same pid: everything but the counter is equal.
@@ -675,11 +694,7 @@ mod tests {
         let live = home.path().join("w").join("t");
         let gone = home.path().join("w-t");
         std::fs::create_dir_all(&live).unwrap();
-        assert_eq!(
-            tool::state::key_of(&live),
-            tool::state::key_of(&gone),
-            "the two trees share a bucket"
-        );
+        assert_eq!(key_of(&live), key_of(&gone), "the two trees share a bucket");
         store
             .save("live", &live, "test-model", None, 7, &log)
             .unwrap();
@@ -744,7 +759,7 @@ mod tests {
         store
             .save("theirs", &sibling, "test-model", None, 7, &log)
             .unwrap();
-        assert_eq!(tool::state::key_of(&tree), tool::state::key_of(&sibling));
+        assert_eq!(key_of(&tree), key_of(&sibling));
 
         assert_eq!(store.drop_under(&tree), 1);
         assert!(store.load("mine").is_err());
@@ -873,6 +888,23 @@ mod tests {
             "other"
         );
         assert!(store.latest(std::path::Path::new("/nowhere")).is_err());
+    }
+
+    // A path folded to one directory name, and the fold is deliberately not
+    // injective: `/home/u/pi-rs` and `/home/u/pi/rs` share a bucket the way
+    // they do under Claude Code's project buckets. Accepted, because the
+    // transcripts inside carry the workspace each was recorded under and the
+    // bucket name is never read as the answer.
+    #[test]
+    fn a_workspace_key_is_its_path_with_every_separator_dashed() {
+        use std::path::Path;
+        assert_eq!(key_of(Path::new("/home/dev/pi-rs")), "-home-dev-pi-rs");
+        assert_eq!(key_of(Path::new("/")), "-");
+        assert_eq!(key_of(Path::new(".")), "-");
+        assert_eq!(
+            key_of(Path::new("/home/u/pi-rs")),
+            key_of(Path::new("/home/u/pi/rs"))
+        );
     }
 
     #[test]

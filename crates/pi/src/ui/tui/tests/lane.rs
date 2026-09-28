@@ -5,8 +5,9 @@ use crate::store::icons;
 use crate::store::keys::Mode;
 use crate::store::listing::Listing;
 use crate::store::status::Segment;
+use crate::ui::tui::row::Row;
 use crate::ui::tui::screen::plain;
-use crate::ui::tui::{Asked, Deed, Intent, Origin, Row, View, view_at};
+use crate::ui::tui::{Asked, Deed, Intent, Origin, View, view_at};
 use agent::Event;
 
 use super::harness::*;
@@ -348,7 +349,7 @@ fn a_flash_is_transient_and_stays_out_of_the_transcript() {
     let (text, _) = ui.flash.take().expect("a flash is up");
     ui.flash = Some((
         text,
-        crate::ui::tui::Instant::now()
+        std::time::Instant::now()
             .checked_sub(crate::ui::tui::FLASH)
             .expect("a clock"),
     ));

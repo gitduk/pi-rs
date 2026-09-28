@@ -332,15 +332,17 @@ impl Ctx {
         self
     }
 
-    /// Name the session, and with it the directory its spills are filed
-    /// under. The root itself is shared by every session — a subagent's
-    /// spills sit under its own name in that same tree, so the parent can
-    /// read them back — and a resumed session keeps its id so its new spills
-    /// rejoin the old ones.
-    pub fn with_session(mut self, id: impl Into<String>) -> Self {
-        let ns = state::file_stem(&id.into());
-        self.session = Some(ns.clone());
-        self.spill_root = spill::shared();
+    /// Name the session, and the durable `spill_root` its spills are filed
+    /// under by that name. Every session shares one root — a subagent's spills
+    /// sit under its own name in the same tree, so the parent can read them
+    /// back — and a resumed session keeps its id so new spills rejoin the old.
+    pub fn with_session(
+        mut self,
+        id: impl Into<String>,
+        spill_root: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        self.session = Some(state::file_stem(&id.into()));
+        self.spill_root = spill_root.into();
         self
     }
 

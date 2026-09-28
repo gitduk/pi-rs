@@ -1,7 +1,8 @@
 use crate::input::Builtin;
 use crate::store::keys::Mode;
+use crate::ui::tui::row::Row;
 use crate::ui::tui::screen::{self};
-use crate::ui::tui::{Asked, Deed, Intent, Row, View, view_at};
+use crate::ui::tui::{Asked, Deed, Intent, View, view_at};
 
 use super::harness::*;
 
@@ -110,7 +111,7 @@ fn a_j_left_behind_does_not_arm_a_later_k() {
     let mut view = View::default();
 
     ui.key(&lane, &mut view, typed('j'), false);
-    let stale = crate::ui::tui::Instant::now() - std::time::Duration::from_secs(1);
+    let stale = std::time::Instant::now() - std::time::Duration::from_secs(1);
     ui.vim.as_mut().unwrap().last = Some(('j', stale));
     ui.key(&lane, &mut view, typed('k'), false);
 

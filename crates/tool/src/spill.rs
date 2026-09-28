@@ -32,17 +32,6 @@ impl SpillRef {
     }
 }
 
-/// The root every session shares: the pi state directory's `spill` tree.
-/// Spills land under it in each session's own directory — parent and child
-/// reach the same root, so a locator minted inside a subagent's run resolves
-/// from its parent's. Without a state directory (no `$PI_HOME`/`$HOME`) the
-/// process temp directory stands in.
-pub fn shared() -> PathBuf {
-    state::dir()
-        .unwrap_or_else(|| std::env::temp_dir().join("pi-spill"))
-        .join("spill")
-}
-
 /// Where spills live when no session is in force: a one-shot run, which keeps
 /// nothing and so has no tree of its own to put them in.
 ///
@@ -269,10 +258,8 @@ mod tests {
         let ws = Workspace::new(dir.path()).unwrap();
         // Parent and child reach the same root; the session only picks the
         // directory the spill is filed under.
-        let child = Ctx::new(ws.clone())
-            .with_session("p-1-subagent-0")
-            .with_spill_root(root.clone());
-        let parent = Ctx::new(ws).with_session("p-1").with_spill_root(root);
+        let child = Ctx::new(ws.clone()).with_session("p-1-subagent-0", root.clone());
+        let parent = Ctx::new(ws).with_session("p-1", root);
 
         let big = "x".repeat(super::MAX_OUTPUT + 1);
         let spilled = super::write(&child, &big).unwrap().expect("over the cap");
