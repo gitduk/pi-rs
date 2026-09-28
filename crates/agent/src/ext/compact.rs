@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use llm::estimate;
 use llm::model::ModelSpec;
 use serde_json::Value;
+use tool::names;
 
 use crate::session::{
     Compaction, Entry, EntryId, Omission, Seen, Session, injected_summary, oversized_args,
@@ -13,14 +14,14 @@ use crate::session::{
 // these supersede: an `edit` result records something that happened, and the
 // record stays true however many later edits land — but only the newest file
 // read is worth carrying.
-const SUPERSEDABLE: &[&str] = &["read", "grep", "glob"];
+const SUPERSEDABLE: &[&str] = &[names::READ, names::GREP, names::GLOB];
 
 // Results that must survive compaction whatever the budget says.
 //
 // A skill body is instructions the agent is in the middle of following.
 // Omitting it saves tokens and breaks the task — omp protects these for the
 // same reason.
-const PROTECTED: &[&str] = &["skill"];
+const PROTECTED: &[&str] = &[names::SKILL];
 
 // What stands in for an argument the model no longer sees. Written into the
 // record as well as the view, so an archive says what went without the reader
@@ -213,7 +214,7 @@ fn supersede_key(name: &str, args: &Value) -> Option<String> {
     // A whole-file read supersedes an earlier ranged read of the same path, so
     // the key deliberately ignores offset and limit.
     match args.get("path").and_then(Value::as_str) {
-        Some(path) if name == "read" => Some(format!("read\0{path}")),
+        Some(path) if name == names::READ => Some(format!("{}\0{path}", names::READ)),
         _ => Some(format!("{name}\0{args}")),
     }
 }

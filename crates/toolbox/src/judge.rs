@@ -175,7 +175,7 @@ impl Question {
 #[async_trait]
 impl Tool for Judge {
     fn name(&self) -> &str {
-        "judge"
+        tool::names::JUDGE
     }
 
     fn description(&self) -> &str {

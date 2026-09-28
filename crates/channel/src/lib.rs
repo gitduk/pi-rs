@@ -4,6 +4,8 @@
 //! what its messages may hold — and nothing else. What gets said back, and
 //! when, is the surface's to decide, written once for every platform.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::mpsc::error::SendError;
@@ -50,6 +52,11 @@ pub trait Channel: Send + Sync {
     /// Bytes one outbound message may hold. Bytes because they never
     /// undercount: a platform that limits characters is safe under it too.
     fn limit(&self) -> usize;
+    /// The pause between pieces of one split message. A burst is what a rate
+    /// limiter watches for; the default is short enough that nobody notices.
+    fn pace(&self) -> Duration {
+        Duration::from_millis(500)
+    }
     /// The model's markdown, as this platform can show it.
     fn format(&self, markdown: &str) -> String;
     /// Log in if needed, then receive until `abort` fires. Progress, the

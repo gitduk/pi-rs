@@ -56,7 +56,10 @@ impl Tree {
 fn git(dir: &Path, args: &[&str]) -> Result<std::process::Output> {
     // -C rather than the inherited cwd: a stale working directory silently
     // resolves against the wrong repository.
+    // No advice: git's refusal is shown as git wrote it, and hints are not
+    // part of any reason. Older gits ignore the variable and add a hint.
     let out = Command::new("git")
+        .env("GIT_ADVICE", "0")
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -67,16 +70,15 @@ fn git(dir: &Path, args: &[&str]) -> Result<std::process::Output> {
 
 fn stderr_of(out: &std::process::Output) -> String {
     let text = String::from_utf8_lossy(&out.stderr);
-    // Git's advice follows the reason it refused, and is never the reason.
-    let line = text
+    let said: Vec<&str> = text
         .lines()
         .map(str::trim)
-        .rfind(|l| !l.is_empty() && !l.starts_with("hint:"))
-        .unwrap_or("");
-    if line.is_empty() {
+        .filter(|l| !l.is_empty())
+        .collect();
+    if said.is_empty() {
         "git failed".to_string()
     } else {
-        line.to_string()
+        said.join("; ")
     }
 }
 
@@ -314,19 +316,18 @@ pub fn remove(dir: &Path, name: &str) -> Result<Removed> {
     if !removed.status.success() {
         bail!("{}", stderr_of(&removed));
     }
-    // With the checkout gone the branch it held is free — unless it was
-    // deleted behind git's back, which leaves nothing to delete.
+    // With the checkout gone the branch it held is free — unless it has no
+    // ref (an orphan with no commit yet), which leaves nothing to delete.
     let mut branch = None;
     let mut note = None;
-    if let Some(on) = &tree.branch {
+    if let Some(on) = &tree.branch
+        && branch_exists(&root, on)?
+    {
         let dropped = git(&root, &["branch", "-d", on])?;
         if dropped.status.success() {
             branch = Some(on.clone());
         } else {
-            let why = stderr_of(&dropped);
-            if !why.contains("not found") {
-                note = Some(format!("branch {on} was left — {why}"));
-            }
+            note = Some(format!("branch {on} was left — {}", stderr_of(&dropped)));
         }
     }
     Ok(Removed {
@@ -717,7 +718,7 @@ mod tests {
     #[test]
     fn an_unmerged_branch_outlives_its_checkout() {
         // Its commits exist nowhere else: the checkout goes, the branch stays,
-        // and the receipt gives git's reason rather than its advice.
+        // and the receipt gives git's reason and none of its advice.
         let dir = repo();
         let tree = enter(dir.path(), "one").unwrap();
         checked(&tree.path, &["commit", "-q", "--allow-empty", "-m", "work"]).unwrap();
@@ -727,6 +728,24 @@ mod tests {
         assert!(branch_exists(dir.path(), "one").unwrap());
         let note = removed.note.expect("the receipt says why");
         assert!(note.contains("not fully merged"), "{note}");
+        assert!(!note.contains("branch -D"), "no advice: {note}");
+    }
+
+    #[test]
+    fn an_unborn_branch_leaves_nothing_to_delete_or_say() {
+        // An orphan checkout names a branch that has no commit, so no ref.
+        let dir = repo();
+        let path = home(dir.path()).unwrap().join("two");
+        let at = path.to_string_lossy().into_owned();
+        checked(
+            dir.path(),
+            &["worktree", "add", "--orphan", "-b", "two", &at],
+        )
+        .unwrap();
+        let removed = remove(dir.path(), "two").unwrap();
+        assert!(!path.exists());
+        assert_eq!(removed.branch, None);
+        assert_eq!(removed.note, None);
     }
 
     #[test]

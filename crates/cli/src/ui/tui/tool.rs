@@ -49,7 +49,7 @@ pub(super) fn pending_line(spinner: usize, t: &RunTool) -> String {
 }
 
 fn is_modifying_tool(name: &str) -> bool {
-    matches!(name, "edit" | "write")
+    name == ::tool::names::EDIT || name == ::tool::names::WRITE
 }
 
 // Whether the summary row draws for this call: the row is where a foldable

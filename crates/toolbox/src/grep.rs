@@ -63,7 +63,7 @@ pub struct Grep;
 #[async_trait]
 impl Tool for Grep {
     fn name(&self) -> &str {
-        "grep"
+        tool::names::GREP
     }
 
     fn description(&self) -> &str {

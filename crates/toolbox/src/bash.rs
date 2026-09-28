@@ -21,7 +21,7 @@ pub struct Bash;
 #[async_trait]
 impl Tool for Bash {
     fn name(&self) -> &str {
-        "bash"
+        tool::names::BASH
     }
 
     fn description(&self) -> &str {
@@ -144,16 +144,8 @@ pub async fn run(
             body.push_str(&format!("{}\n", s.note()));
         }
     }
-    // The note travels with the output; the exit line does not — `code` says
-    // that, and a caller that renders it as well would say it twice.
-    if code != 0 && git_lock(&stderr.text) {
-        // Two lanes committing at once collide on shared `.git/*.lock`;
-        // the raw fatal reads as a broken repository, not a busy one.
-        body.push_str(
-            "note: git could not take a `.lock` — another lane or process is writing \
-             this repository; let it finish and retry\n",
-        );
-    }
+    // No exit line in the body: `code` says that, and a caller that renders
+    // it as well would say it twice.
     Ok(Ran { code, body })
 }
 
@@ -164,26 +156,4 @@ fn section(label: &str, s: &output::Captured) -> String {
         return String::new();
     }
     format!("<{label}>\n{body}\n</{label}>\n")
-}
-
-// Whether a failed run tripped over git's own locking.
-fn git_lock(stderr: &str) -> bool {
-    (stderr.contains(".lock") && stderr.contains("fatal"))
-        || stderr.contains("Another git process seems to be running")
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn a_git_lock_failure_is_recognised() {
-        let index = "fatal: Unable to create '/w/.git/index.lock': File exists.";
-        let head =
-            "fatal: cannot lock ref 'HEAD': Unable to create '/w/.git/HEAD.lock': File exists.";
-        let other = "Another git process seems to be running in this repository";
-        let not = "fatal: not a git repository (or any of the parent directories): .git";
-        for busy in [index, head, other] {
-            assert!(super::git_lock(busy), "{busy}");
-        }
-        assert!(!super::git_lock(not));
-    }
 }

@@ -24,6 +24,7 @@ where
 }
 
 pub mod limit;
+pub mod names;
 pub mod output;
 pub mod registry;
 pub mod spill;

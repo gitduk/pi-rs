@@ -170,7 +170,7 @@ fn redirect_verdict(attempt: reqwest::redirect::Attempt) -> reqwest::redirect::A
 #[async_trait]
 impl Tool for Fetch {
     fn name(&self) -> &str {
-        "fetch"
+        tool::names::FETCH
     }
 
     fn description(&self) -> &str {

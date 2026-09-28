@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 use super::Transport;
-use super::{Gaps, Shared};
+use super::{FAILED, Gaps, Shared};
 use crate::error::{BrainError, Result};
 use crate::message::{
     AssistantContent, Image, Message, Reasoning, ReasoningContent, Replay, Text, ToolCall,
@@ -42,11 +42,6 @@ fn check_format(spec: &ModelSpec) -> Result<()> {
         ))),
     }
 }
-// The one thing the wire cannot say. A `function_call_output` has no
-// `is_error` — `status` is the item's own generation state — so a failure
-// that is not marked in the text reads to the model as a result.
-const FAILED: &str = "[tool error]";
-
 fn encode_image(img: &Image) -> Value {
     let url = match img {
         Image::Url { url } => url.clone(),

@@ -5,7 +5,6 @@
 mod wechat;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use agent::Event;
 use channel::{Channel, Inbound, Inbox};
@@ -20,11 +19,6 @@ pub use wechat::WeChat;
 // Room held back for the `(n/m)` marker so a piece plus its marker still fits
 // the budget. Ten bytes at three digits a side, rounded up.
 const MARKER_RESERVE: usize = 12;
-
-// The pause between pieces of one split message. A platform may rate-limit,
-// and a burst is what a rate limiter watches for; at this length the reader
-// cannot tell.
-const PIECE_INTERVAL: Duration = Duration::from_millis(500);
 
 /// One channel and the turn it owes an answer to.
 pub struct Relay {
@@ -183,7 +177,7 @@ impl Relay {
                 }
                 if i > 0 {
                     tokio::select! {
-                        () = tokio::time::sleep(PIECE_INTERVAL) => {}
+                        () = tokio::time::sleep(channel.pace()) => {}
                         () = stop.cancelled() => break,
                     }
                 }
@@ -357,6 +351,9 @@ mod tests {
         }
         fn limit(&self) -> usize {
             40
+        }
+        fn pace(&self) -> std::time::Duration {
+            std::time::Duration::ZERO
         }
         fn format(&self, markdown: &str) -> String {
             markdown.to_string()

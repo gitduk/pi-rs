@@ -172,7 +172,7 @@ pub struct Read;
 #[async_trait]
 impl Tool for Read {
     fn name(&self) -> &str {
-        "read"
+        tool::names::READ
     }
 
     fn description(&self) -> &str {

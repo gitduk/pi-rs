@@ -6,7 +6,7 @@ use crate::{Skill, body};
 use tool::limit::{MAX_BYTES, over_limit};
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};
 
-const NAME: &str = "skill";
+const NAME: &str = tool::names::SKILL;
 
 #[derive(Deserialize)]
 struct Args {

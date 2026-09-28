@@ -75,7 +75,7 @@ pub struct Subagent {
 }
 
 impl Subagent {
-    pub const NAME: &'static str = "subagent";
+    pub const NAME: &'static str = tool::names::SUBAGENT;
 
     /// Build the subagent from the one that will call it: same transport, same
     /// model, its own prompt, and no `subagent` in its registry.

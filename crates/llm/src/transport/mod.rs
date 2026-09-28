@@ -14,6 +14,10 @@ pub mod anthropic;
 pub mod chat;
 pub mod openai;
 
+// The one thing the OpenAI-shaped wires cannot say: a tool result there has no
+// `is_error`, so a failure not marked in its text reads to the model as a result.
+const FAILED: &str = "[tool error]";
+
 /// One exchange, from the request going out to the response coming back.
 ///
 /// Both wires go through this rather than calling a set of logging helpers at

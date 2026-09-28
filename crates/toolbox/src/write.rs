@@ -126,7 +126,7 @@ pub(crate) async fn atomic_write(path: &Path, content: &[u8]) -> std::io::Result
 #[async_trait]
 impl Tool for Write {
     fn name(&self) -> &str {
-        "write"
+        tool::names::WRITE
     }
 
     fn description(&self) -> &str {

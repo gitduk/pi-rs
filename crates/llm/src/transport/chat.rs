@@ -12,7 +12,7 @@ use eventsource_stream::Eventsource;
 use futures::stream::{BoxStream, StreamExt};
 use serde_json::{Value, json};
 
-use super::{Shared, Transport};
+use super::{FAILED, Shared, Transport};
 use crate::error::{BrainError, Result};
 use crate::message::{AssistantContent, Image, Message, Replay, ToolResult, UserContent, tagged};
 use crate::model::{Format, ModelSpec, ThinkingControl};
@@ -44,11 +44,6 @@ fn check_format(spec: &ModelSpec) -> Result<()> {
         ))),
     }
 }
-
-// The one thing the wire cannot say. A tool message has no `is_error` — the
-// result body is plain text — so a failure that is not marked in the text
-// reads to the model as a result.
-const FAILED: &str = "[tool error]";
 
 fn encode_image(img: &Image) -> Value {
     let url = match img {

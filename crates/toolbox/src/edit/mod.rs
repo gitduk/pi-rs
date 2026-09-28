@@ -557,7 +557,7 @@ pub struct Edit;
 #[async_trait]
 impl Tool for Edit {
     fn name(&self) -> &str {
-        "edit"
+        tool::names::EDIT
     }
 
     fn description(&self) -> &str {

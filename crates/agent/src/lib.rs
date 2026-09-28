@@ -764,7 +764,7 @@ impl Agent {
 // call that keeps coming back malformed must keep being counted until the model
 // actually changes approach.
 fn note_success(call: &ToolCall, failures: &mut Failures) {
-    if call.name != "edit" {
+    if call.name != tool::names::EDIT {
         failures.retain(|(name, _), _| name != &call.name);
     }
 }

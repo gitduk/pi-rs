@@ -22,7 +22,7 @@ pub struct Glob;
 #[async_trait]
 impl Tool for Glob {
     fn name(&self) -> &str {
-        "glob"
+        tool::names::GLOB
     }
 
     fn description(&self) -> &str {
