@@ -238,7 +238,7 @@ mod tests {
         let repo = home.join("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         write(&repo.join("AGENTS.md"), "repo");
-        let deep = repo.join("crates/cli");
+        let deep = repo.join("crates/pi");
         write(&deep.join("AGENTS.md"), "crate");
 
         let got = paths(&deep, Some(&home), Some(&root));

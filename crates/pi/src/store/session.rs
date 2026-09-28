@@ -669,7 +669,7 @@ mod tests {
             store.save(id, at, "test-model", None, 7, &log).unwrap();
         };
         let tree = home.path().join(".worktrees").join("feature-one");
-        let deep = tree.join("crates/cli");
+        let deep = tree.join("crates/pi");
         let sibling = home.path().join(".worktrees").join("feature-two");
         save("in-tree", &tree);
         save("in-deep", &deep);

@@ -140,7 +140,7 @@ impl Agent {
     /// Swapped whole rather than written field by field: a run in flight keeps
     /// the brief it started on, and a reader sees one or the other, never half
     /// of each. A caller that wants a subagent hangs it on the brief first —
-    /// see `cli/src/core/subagent.rs`.
+    /// see `pi/src/core/subagent.rs`.
     pub fn apply(&mut self, brief: Arc<Briefing>) {
         self.brief = brief;
     }

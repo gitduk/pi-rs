@@ -653,7 +653,7 @@ mod tests {
     fn a_subdirectory_is_held_by_the_checkout_it_is_in() {
         let dir = repo();
         let tree = enter(dir.path(), "one").unwrap();
-        let deep = tree.path.join("crates/cli");
+        let deep = tree.path.join("crates/pi");
         std::fs::create_dir_all(&deep).unwrap();
         let trees = list(dir.path()).unwrap();
         // Equality would miss: the run is below the checkout's root.

@@ -807,7 +807,7 @@ mod tests {
     // on the paths it decides by.
     #[test]
     fn a_dependencys_records_are_told_apart_by_path() {
-        assert!(from_workspace(Some("crates/cli/src/store/journal.rs")));
+        assert!(from_workspace(Some("crates/pi/src/store/journal.rs")));
         assert!(!from_workspace(Some(
             "/home/u/.cargo/registry/src/index/hyper-1.0.0/src/pool.rs"
         )));

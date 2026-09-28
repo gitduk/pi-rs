@@ -2,8 +2,8 @@
 //! the two long-polling calls that treat a client-side timeout as the normal
 //! empty result rather than an error.
 //!
-//! Everything here is protocol only — no session, no persistence. The bridge
-//! in `crates/cli` owns state and decides what a message means.
+//! Everything here is protocol only — no session, no persistence. The channel
+//! in `adapter` owns state and decides what a message means.
 
 use std::time::Duration;
 
