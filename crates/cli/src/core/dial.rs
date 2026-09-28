@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use llm::model::{Format, ModelSpec};
 use llm::transport::{Transport, anthropic::Anthropic, chat::ChatCompletions, openai::OpenAi};
 
-use crate::args::Args;
+use crate::args::Pinned;
 use crate::store::config;
 
 // `configured` is the config's `api_key`; the environment variable is the
@@ -64,7 +64,7 @@ fn unknown(model: &str, named_by: config::Origin) -> String {
 /// worth four lines naming its endpoint and protocol, and every other field
 /// already defaults to claiming nothing.
 pub fn dial(
-    args: &Args,
+    pinned: &Pinned,
     config: &config::Config,
     model: &str,
     named_by: config::Origin,
@@ -72,10 +72,10 @@ pub fn dial(
     let mut spec = config
         .find(model)
         .with_context(|| unknown(model, named_by))?;
-    if let Some(url) = &args.base_url {
+    if let Some(url) = &pinned.base_url {
         spec.base_url = config::expand_base_url(url);
     }
-    if let Some(window) = args.context {
+    if let Some(window) = pinned.context {
         spec.context_window = window;
     }
 
@@ -96,7 +96,8 @@ pub fn dial(
         .as_deref()
         .filter(|k| !k.starts_with('$'))
         .and_then(|_| {
-            args.config
+            pinned
+                .config
                 .clone()
                 .map(std::path::PathBuf::from)
                 .or_else(config::global_path)
@@ -115,13 +116,13 @@ pub fn dial(
 /// second dial, because a summary is a model call like any other and a cheaper
 /// model for it is the point of the setting.
 pub fn summary_writer(
-    args: &Args,
+    pinned: &Pinned,
     config: &config::Config,
     working: &str,
 ) -> Result<Option<(Arc<dyn Transport>, ModelSpec)>> {
     match &config.summarize_model {
         Some(name) if name != working => {
-            let summarizer = dial(args, config, name, config::Origin::Global)
+            let summarizer = dial(pinned, config, name, config::Origin::Global)
                 .with_context(|| format!("summarize_model = \"{name}\""))?;
             Ok(Some((summarizer.transport, summarizer.spec)))
         }

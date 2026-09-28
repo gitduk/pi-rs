@@ -148,9 +148,10 @@ async fn main() -> Result<()> {
     ) else {
         bail!("no model to run. Define one in ~/.pi/settings.toml — see examples/pi.toml.");
     };
-    let dialled = dial(&args, &config, &named, named_by)?;
+    let pinned = args.pinned();
+    let dialled = dial(&pinned, &config, &named, named_by)?;
 
-    let resolved = resolve(&args, &workspace, &config, &project, &BTreeMap::new())?;
+    let resolved = resolve(&pinned, &workspace, &config, &project, &BTreeMap::new())?;
     // Ahead of the quiet check on purpose: see `Dialled::warning`.
     if let Some(warning) = &dialled.warning {
         eprintln!("\x1b[{}m{warning}\x1b[0m", config.theme.muted.codes());
@@ -171,7 +172,7 @@ async fn main() -> Result<()> {
     // Resolved here rather than lazily: a name that does not exist should be a
     // startup error, not a surprise the first time history gets long enough to
     // compact.
-    let writer = summary_writer(&args, &config, &model_id)?;
+    let writer = summary_writer(&pinned, &config, &model_id)?;
     // A resumed session keeps its journal too, so the whole of it reads as one
     // file however many runs it took. Installed after every step that can
     // refuse to start and before the run: a start that refuses leaves no
@@ -236,7 +237,7 @@ async fn main() -> Result<()> {
             store,
             keys: key_map.clone(),
             config: config.clone(),
-            args: args.clone(),
+            pinned: pinned.clone(),
             commands,
             settings: Settings::new(
                 config::load_tree(args.config.as_deref())

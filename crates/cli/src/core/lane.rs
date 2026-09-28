@@ -732,7 +732,7 @@ impl Core {
         let failed = |e| format!("nothing opened — {}", refused("worktree", e));
         let project = config::load_project(&root).map_err(failed)?;
         let resolved = crate::core::resolve::resolve(
-            &self.args,
+            &self.pinned,
             &ws,
             &self.config,
             &project,

@@ -29,7 +29,7 @@ impl Core {
     /// replaced.
     pub fn reload(&mut self) -> Vec<String> {
         // Re-read the file tree; the claimed overrides stay.
-        if let Err(e) = self.settings.reread(self.args.config.as_deref()) {
+        if let Err(e) = self.settings.reread(self.pinned.config.as_deref()) {
             return vec![format!("nothing reloaded — {}", refused("reload", e))];
         }
         let mut said = self.rebuild();
@@ -57,7 +57,7 @@ impl Core {
             Err(e) => return failed(e),
         };
         let resolved = match crate::core::resolve::resolve(
-            &self.args,
+            &self.pinned,
             self.lane().workspace(),
             &config,
             &project,
@@ -78,7 +78,7 @@ impl Core {
         // here or `summarize_model` and `idle_timeout` never follow a reload.
         let retry = config.retry();
         let writer = crate::core::dial::summary_writer(
-            &self.args,
+            &self.pinned,
             &config,
             &self.lane().agent().spec().model,
         )
@@ -102,7 +102,7 @@ impl Core {
         // --context overrides keep applying exactly as they do at startup.
         let mut notes = Vec::new();
         match crate::core::dial::dial(
-            &self.args,
+            &self.pinned,
             &self.config,
             &self.lane().agent().spec().model,
             config::Origin::Command,
@@ -204,7 +204,7 @@ impl Core {
             return Ok(vec![format!("{path}: the session and the file agree")]);
         };
         let file = self
-            .args
+            .pinned
             .config
             .as_deref()
             .map(std::path::PathBuf::from)
@@ -213,7 +213,7 @@ impl Core {
         config::write(&file, path, value.clone()).map_err(|e| format!("{e:#}"))?;
         self.settings.drop_claim(path);
         self.settings
-            .reread(self.args.config.as_deref())
+            .reread(self.pinned.config.as_deref())
             .map_err(|e| format!("{e:#}"))?;
         let mut said = self.rebuild();
         said.push(format!(
@@ -269,7 +269,7 @@ impl Core {
     /// dearer model does not reprice the cheap turns behind it.
     pub fn switch(&mut self, name: &str) -> Vec<String> {
         let dialled = match crate::core::dial::dial(
-            &self.args,
+            &self.pinned,
             &self.config,
             name,
             config::Origin::Command,
@@ -353,7 +353,7 @@ mod tests {
             ),
             keys: std::sync::Arc::new(crate::store::keys::Keys::default()),
             config: std::sync::Arc::new(crate::store::config::Config::default()),
-            args: std::sync::Arc::new(<crate::args::Args as clap::Parser>::parse_from(["pi"])),
+            pinned: crate::args::Pinned::default(),
             commands: std::sync::Arc::new(Vec::new()),
             settings: crate::store::settings::Settings::new(toml::from_str(file).unwrap()),
             lanes: vec![a_lane("s")],

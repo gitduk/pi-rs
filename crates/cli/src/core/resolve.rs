@@ -8,7 +8,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use llm::request::Effort;
 
-use crate::args::{Args, EffortArg};
+use crate::args::{EffortArg, Pinned};
 use crate::input::commands::{Command, commands};
 use crate::store::{config, journal};
 use agent::context;
@@ -55,7 +55,7 @@ fn offer(
 /// Fails whole or not at all. A half-applied config is worse than a stale one,
 /// which is why `/reload` computes all of this before touching anything.
 pub fn resolve(
-    args: &Args,
+    pinned: &Pinned,
     workspace: &tool::Workspace,
     config: &config::Config,
     project: &config::Project,
@@ -66,7 +66,7 @@ pub fn resolve(
 
     // Sources offer their tools in order, built-ins first.
     let mut registry = toolbox::builtin();
-    let skills = if args.no_skills {
+    let skills = if pinned.no_skills {
         Vec::new()
     } else {
         let found = skills::discover(root);
@@ -116,8 +116,8 @@ pub fn resolve(
     let settled = config.settle(
         &project.clone(),
         config::Flags {
-            effort: args.effort,
-            tier: args.tier,
+            effort: pinned.effort,
+            tier: pinned.tier,
         },
         claimed,
     );
@@ -129,7 +129,7 @@ pub fn resolve(
         EffortArg::High => Effort::High,
     };
 
-    let mut system = match args.system.as_ref().or(config.system.as_ref()) {
+    let mut system = match pinned.system.as_ref().or(config.system.as_ref()) {
         Some(path) => std::fs::read_to_string(path)
             .with_context(|| format!("cannot read system prompt {path}"))?,
         None => agent::DEFAULT_SYSTEM.to_string(),
@@ -143,7 +143,7 @@ pub fn resolve(
     // they do not change within a run, and the system prompt is the part of the
     // request a provider will cache.
     let mut context = Vec::new();
-    if !args.no_context_files {
+    if !pinned.no_context_files {
         let loaded = context::load(root);
         context = loaded
             .files

@@ -779,9 +779,7 @@ async fn a_settings_change_to_the_status_segments_reaches_the_surface() {
     // one. The list it writes is another, to tell the two apart.
     let file = dir.path().join("settings.toml");
     std::fs::write(&file, "").expect("an empty settings file");
-    let mut args = <crate::args::Args as clap::Parser>::parse_from(["pi"]);
-    args.config = Some(file.display().to_string());
-    tui.core.args = std::sync::Arc::new(args);
+    tui.core.pinned.config = Some(file.display().to_string());
     tui.core
         .settings
         .claim("status.done", "[\"cost\"]")
@@ -808,9 +806,7 @@ fn a_reload_installs_a_new_compactor() {
         "base_url = \"http://127.0.0.1:1/v1\"\nformat = \"openai\"\nsummarize_model = \"cheap\"\n",
     )
     .expect("a settings file");
-    let mut args = <crate::args::Args as clap::Parser>::parse_from(["pi"]);
-    args.config = Some(file.display().to_string());
-    tui.core.args = std::sync::Arc::new(args);
+    tui.core.pinned.config = Some(file.display().to_string());
 
     let before = tui.core.lane().agent().compactor.clone();
     let said = tui.core.reload();

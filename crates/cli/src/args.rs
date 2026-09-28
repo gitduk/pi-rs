@@ -158,3 +158,32 @@ pub struct Args {
     #[arg(short, long)]
     pub quiet: bool,
 }
+
+/// The flags that outrank the config for the whole run, and so are applied
+/// again over every reload: all the core ever reads of the command line.
+#[derive(Debug, Clone, Default)]
+pub struct Pinned {
+    pub config: Option<String>,
+    pub base_url: Option<String>,
+    pub context: Option<u32>,
+    pub system: Option<String>,
+    pub no_skills: bool,
+    pub no_context_files: bool,
+    pub effort: Option<EffortArg>,
+    pub tier: Option<TierArg>,
+}
+
+impl Args {
+    pub fn pinned(&self) -> Pinned {
+        Pinned {
+            config: self.config.clone(),
+            base_url: self.base_url.clone(),
+            context: self.context,
+            system: self.system.clone(),
+            no_skills: self.no_skills,
+            no_context_files: self.no_context_files,
+            effort: self.effort,
+            tier: self.tier,
+        }
+    }
+}
