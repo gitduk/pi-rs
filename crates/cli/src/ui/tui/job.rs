@@ -31,11 +31,8 @@ pub(super) enum Kind {
     // A `!` command, and the lines it printed. They come home whole rather
     // than as events, so settling is the only place they can be shown.
     //
-    // Kept apart from a turn's silence because `Bridge` is one accumulator
-    // for the whole surface, filled by whichever turn is streaming and
-    // emptied only by `Event::TurnStart`; a `!` emits no events, so letting
-    // one speak for the bridge flushes another lane's half-written answer to
-    // the phone as though it were finished.
+    // Kept apart from a turn: a `!` answers no channel, and ending a turn for
+    // the relays here would send a half-written answer as if finished.
     Bash {
         // The output lines, derived by the same function the rebuild draws
         // with — plus the flash for a command that never ran.
@@ -343,13 +340,26 @@ impl Tui {
             return;
         };
         let back = self.core.lanes[lane].finish();
-        view_at(&mut self.views, self.core.lanes[lane].token())
-            .queued
-            .extend(
-                back.unheard
-                    .into_iter()
-                    .map(|said| Queued::Line(Intent::Prompt(said))),
-            );
+        let token = self.core.lanes[lane].token();
+        let steered: Vec<_> = self
+            .steered
+            .extract_if(.., |s| s.0 == token)
+            .map(|s| s.1)
+            .collect();
+        // The mailbox is first in, first out: what went unheard is the tail
+        // of what was said, so it lines up with the tail of the ledger.
+        let heard = steered.len().saturating_sub(back.unheard.len());
+        let from = steered[heard..]
+            .iter()
+            .copied()
+            .chain(std::iter::repeat(None));
+        let unheard: Vec<_> = back
+            .unheard
+            .into_iter()
+            .zip(from)
+            .map(|(said, from)| Queued::Line(Intent::Prompt(said), from))
+            .collect();
+        view_at(&mut self.views, token).queued.extend(unheard);
         let unsend = back.unsend;
 
         match done.kind {
@@ -428,8 +438,9 @@ impl Tui {
         self.refresh_sessions();
 
         let cancelled = matches!(&out, Err(AgentError::Cancelled));
-        if said.is_none() && lane == self.core.current {
-            self.bridge.finish_turn(cancelled).await;
+        if said.is_none() {
+            let token = self.core.lanes[lane].token();
+            self.channels.finish_turn(token, cancelled);
         }
         // The run's totals (subagents' included) land on its lane; an
         // interrupted run lands as the spend the view showed.

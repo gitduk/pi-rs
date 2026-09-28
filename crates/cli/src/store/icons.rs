@@ -49,7 +49,3 @@ pub const KEY_NOTE_SEP: &str = "  ·  "; // between a binding's keys and its not
 // The spinner.
 pub const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 pub const SPIN_STOPPED: &str = "·"; // the static frame a stop lands on
-
-// The WeChat surface.
-pub const TOOL_GEAR: &str = "⚙"; // the tool line
-pub const RETRY_ARROW: &str = "↻"; // a retry

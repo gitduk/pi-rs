@@ -44,8 +44,8 @@ pub enum Builtin {
     // Bare `/settings`. The panel is the whole surface; the line verbs are
     // gone, and an argument after the word is refused.
     Settings(String),
-    // The wechat verb: "" = status, "on" = connect, "off" = disconnect.
-    Wechat(String),
+    // A channel's command: its name, then "" = status, "on" or "off".
+    Channel(&'static str, String),
     // What to run over and over, or empty to stop the loop in force.
     Loop(String),
     // `/new`, and `ctrl+l` twice: a fresh session, the old one kept on disk,
@@ -129,7 +129,7 @@ impl Intent {
             // a panel, which wants the surface to itself.
             Intent::Builtin(Builtin::Settings(rest)) if !rest.trim().is_empty() => Fate::Now,
             Intent::Builtin(Builtin::Settings(_)) => Fate::Queued,
-            Intent::Builtin(Builtin::Wechat(_)) => Fate::Now,
+            Intent::Builtin(Builtin::Channel(..)) => Fate::Now,
             Intent::Other { .. } => Fate::Queued,
             // Arms the lane and submits its first round like a typed line;
             // both want the lane free.
@@ -320,9 +320,9 @@ pub enum Step {
     Prompt { send: String, typed: Option<String> },
     // Needs the network, so the surface runs it and reports.
     Compact(Option<String>),
-    // Starts or stops the wechat bridge. Needs the network, so the surface
+    // Starts or stops the named channel. Needs the network, so the surface
     // runs it and reports — the same rule as `Compact`.
-    Wechat(WechatCmd),
+    Channel(&'static str, ChannelCmd),
     // The settings panel wants the surface to itself, and only a surface with
     // one can answer: bare `/settings` asks for it, an argument is a `Flash`.
     Panel,
@@ -339,12 +339,9 @@ pub enum Step {
     Quit,
 }
 
-/// What an input asked the loop to do, whatever it arrived as.
-///
-/// One vocabulary for the keyboard, the phone and a typed line, so the same
-/// intent gets the same answer however it was expressed.
+/// What `/<channel>` asks: bare for status, `on` or `off`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WechatCmd {
+pub enum ChannelCmd {
     Status,
     On,
     Off,

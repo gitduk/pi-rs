@@ -1,6 +1,7 @@
 //! Parallel checkouts of one repository, and moving the session between them.
 //!
-//! A worktree lives at `<repo>/.worktrees/<name>` on a branch of the same name,
+//! A worktree lives at `<repo>.worktrees/<name>`, beside the repository rather
+//! than inside it, on a branch of the same name,
 //! so one word names the directory, the branch and the command argument.
 //! Git refuses to check one branch out twice, so the alternative to a branch
 //! per worktree is a detached HEAD — commits reachable only through the reflog.
@@ -15,14 +16,23 @@ use std::process::Command;
 
 use anyhow::{Result, bail};
 
-/// Where worktrees live, relative to the repository root.
-const DIR: &str = ".worktrees";
+/// What the directory holding the worktrees adds to the repository's name.
+const SUFFIX: &str = ".worktrees";
+
+/// Beside the repository, never inside: nested, a checkout is searched,
+/// written and `git add`ed as part of the main one.
+fn home(root: &Path) -> Result<PathBuf> {
+    let (Some(parent), Some(name)) = (root.parent(), root.file_name()) else {
+        bail!("{} has no parent to keep worktrees beside", root.display());
+    };
+    Ok(parent.join(format!("{}{SUFFIX}", name.to_string_lossy())))
+}
 
 /// One checkout of the repository.
 #[derive(Debug, Clone)]
 pub struct Tree {
     pub path: PathBuf,
-    /// What `/worktree` takes to reach it: the path under `.worktrees`, or the
+    /// What `/worktree` takes to reach it: the path under `home`, or the
     /// directory name for the main checkout, which lives outside it.
     pub name: String,
     /// None when the checkout is on a detached HEAD.
@@ -57,7 +67,12 @@ fn git(dir: &Path, args: &[&str]) -> Result<std::process::Output> {
 
 fn stderr_of(out: &std::process::Output) -> String {
     let text = String::from_utf8_lossy(&out.stderr);
-    let line = text.trim().lines().next_back().unwrap_or("").trim();
+    // Git's advice follows the reason it refused, and is never the reason.
+    let line = text
+        .lines()
+        .map(str::trim)
+        .rfind(|l| !l.is_empty() && !l.starts_with("hint:"))
+        .unwrap_or("");
     if line.is_empty() {
         "git failed".to_string()
     } else {
@@ -91,7 +106,7 @@ fn branch_exists(dir: &Path, name: &str) -> Result<bool> {
 ///
 /// The main one leading is what lets a worktree find its way back out:
 /// `--show-toplevel` would answer with the checkout asking, not the one that
-/// owns `.worktrees`.
+/// the others hang off.
 pub fn list(dir: &Path) -> Result<Vec<Tree>> {
     let listed = checked(dir, &["worktree", "list", "--porcelain"])?;
     // The flag beside each tree is git's `prunable`: the checkout's directory
@@ -136,21 +151,21 @@ pub fn list(dir: &Path) -> Result<Vec<Tree>> {
         .collect())
 }
 
-// Under `.worktrees` the name is the path below it, so `feat/one` keeps both
-// halves; the main checkout is not under it and answers to its directory name.
+// Under `home` the name is the path below it (`feat/one`); any other
+// checkout, main or made elsewhere, answers to its directory name.
 fn name_of(path: &Path, root: &Path, main: bool) -> String {
-    if main {
-        return path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
+    if !main
+        && let Ok(home) = home(root)
+        && let Ok(rel) = path.strip_prefix(home)
+    {
+        return rel.display().to_string();
     }
-    path.strip_prefix(root.join(DIR))
-        .map(|rel| rel.display().to_string())
-        .unwrap_or_else(|_| path.display().to_string())
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
-// Refuse a name that would not stay under `.worktrees`, or that git would not
+// Refuse a name that would not stay under `home`, or that git would not
 // take as a branch. The check is on the name rather than the joined path
 // because the error should say which word was wrong.
 fn vetted(name: &str) -> Result<&str> {
@@ -165,7 +180,7 @@ fn vetted(name: &str) -> Result<&str> {
         .split('/')
         .any(|part| part.is_empty() || part == ".." || part == ".")
     {
-        bail!("`{name}` is not a path under {DIR}/");
+        bail!("`{name}` would leave the worktrees directory");
     }
     if let Some(bad) = name
         .chars()
@@ -179,8 +194,8 @@ fn vetted(name: &str) -> Result<&str> {
 /// Which of `trees` holds `path`.
 ///
 /// By longest containing path rather than by equality: a run started in a
-/// subdirectory is still in that checkout, and the main one contains every
-/// other, so only the longest match answers.
+/// subdirectory is still in that checkout, and one added inside the main
+/// checkout by hand is contained by both, so only the longest match answers.
 pub fn holding<'a>(trees: &'a [Tree], path: &Path) -> Option<&'a Tree> {
     trees
         .iter()
@@ -208,13 +223,13 @@ pub fn enter(dir: &Path, name: &str) -> Result<Tree> {
         return Ok(trees.swap_remove(i));
     }
 
-    // `.worktrees` hangs off the repository, not off whichever checkout asked,
+    // `home` hangs off the repository, not off whichever checkout asked,
     // so a worktree created from inside another is its sibling.
     let root = match trees.first() {
         Some(main) => main.path.clone(),
         None => bail!("not a git repository"),
     };
-    let path = root.join(DIR).join(name);
+    let path = home(&root)?.join(name);
     let target = path.to_string_lossy().into_owned();
     // An existing branch is checked out rather than re-created: `-b` on one
     // that exists fails, and asking twice means the same feature both times.
@@ -239,9 +254,9 @@ pub fn enter(dir: &Path, name: &str) -> Result<Tree> {
         .find(|t| t.name == name)
         .ok_or_else(|| {
             // Reached when git resolved the path elsewhere — a symlinked
-            // `.worktrees` does that. Left registered rather than adopted.
+            // worktrees directory does that. Left registered rather than adopted.
             anyhow::anyhow!(
-                "git put the checkout somewhere other than {} — is {DIR} a symlink?",
+                "git put the checkout somewhere other than {} — is its parent a symlink?",
                 path.display()
             )
         })?;
@@ -261,7 +276,9 @@ pub struct Removed {
     pub note: Option<String>,
 }
 
-/// Remove the checkout `name` refers to, and the branch it is on.
+/// Remove the checkout `name` refers to, and the branch it is on once that
+/// branch is merged. Unmerged, its commits exist nowhere else, so it stays and
+/// the receipt says so.
 ///
 /// The directory goes first, then the branch: git will not delete a branch
 /// another checkout holds, and until the remove this checkout is that
@@ -271,7 +288,7 @@ pub fn remove(dir: &Path, name: &str) -> Result<Removed> {
     let name = vetted(name)?;
     let trees = list(dir)?;
     // The main checkout answers to its directory name, and a linked tree may
-    // share it; removal means one under `.worktrees`, so that one wins.
+    // share it; removal means a linked one, so that one wins.
     let Some(at) = trees
         .iter()
         .position(|t| !t.main && t.name == name)
@@ -302,7 +319,7 @@ pub fn remove(dir: &Path, name: &str) -> Result<Removed> {
     let mut branch = None;
     let mut note = None;
     if let Some(on) = &tree.branch {
-        let dropped = git(&root, &["branch", "-D", on])?;
+        let dropped = git(&root, &["branch", "-d", on])?;
         if dropped.status.success() {
             branch = Some(on.clone());
         } else {
@@ -442,26 +459,52 @@ impl Core {
                 format!("{mark} {name}{on}").trim_end().to_string()
             })
             .collect();
+        let home = trees
+            .first()
+            .and_then(|main| home(&main.path).ok())
+            .map_or_else(
+                || "beside the repository".into(),
+                |h| h.display().to_string(),
+            );
         out.push(format!(
-            "/worktree <name> works in one, creating it under {}/ if it is not there",
-            DIR
+            "/worktree <name> works in one, creating it in {home}/ if it is not there"
         ));
-        out.push("/worktree rm <name> removes one — its checkout, sessions and branch".into());
+        out.push(
+            "/worktree rm <name> removes one — its checkout, sessions, and its branch once merged"
+                .into(),
+        );
         out
     }
 }
 
+// A repository one level inside a temp dir, so the worktrees kept beside it
+// land inside that dir too and go with it.
 #[cfg(test)]
-fn test_repo() -> tempfile::TempDir {
+pub(crate) struct TestRepo {
+    _dir: tempfile::TempDir,
+    root: PathBuf,
+}
+
+#[cfg(test)]
+impl TestRepo {
+    pub(crate) fn path(&self) -> &Path {
+        &self.root
+    }
+}
+
+#[cfg(test)]
+fn test_repo() -> TestRepo {
     let dir = tempfile::tempdir().unwrap();
-    let at = dir.path();
+    let root = dir.path().join("repo");
+    std::fs::create_dir(&root).unwrap();
+    let at = root.as_path();
     checked(at, &["init", "-q", "--initial-branch=main", "."]).unwrap();
     checked(at, &["config", "user.email", "t@example.com"]).unwrap();
     checked(at, &["config", "user.name", "t"]).unwrap();
     std::fs::write(at.join("a.txt"), "hi").unwrap();
     checked(at, &["add", "-A"]).unwrap();
     checked(at, &["commit", "-qm", "init"]).unwrap();
-    dir
+    TestRepo { _dir: dir, root }
 }
 
 #[cfg(test)]
@@ -469,7 +512,7 @@ mod tests {
     use super::*;
     use crate::core::tests::{Recording, a_repl};
 
-    fn repo() -> tempfile::TempDir {
+    fn repo() -> TestRepo {
         test_repo()
     }
 
@@ -480,7 +523,7 @@ mod tests {
         assert_eq!(tree.branch.as_deref(), Some("feature-one"));
         assert!(!tree.main);
         assert!(tree.path.join("a.txt").is_file());
-        assert!(tree.path.ends_with(".worktrees/feature-one"));
+        assert_eq!(tree.path, home(dir.path()).unwrap().join("feature-one"));
     }
 
     #[test]
@@ -519,7 +562,7 @@ mod tests {
     fn a_nested_name_keeps_both_halves() {
         let dir = repo();
         let tree = enter(dir.path(), "feat/one").unwrap();
-        assert!(tree.path.ends_with(".worktrees/feat/one"));
+        assert_eq!(tree.path, home(dir.path()).unwrap().join("feat/one"));
         assert_eq!(tree.branch.as_deref(), Some("feat/one"));
         let trees = list(dir.path()).unwrap();
         assert!(trees.iter().any(|t| t.name == "feat/one"));
@@ -563,9 +606,38 @@ mod tests {
     }
 
     #[test]
+    fn a_worktree_lives_beside_the_repository_not_inside_it() {
+        let dir = repo();
+        let tree = enter(dir.path(), "one").unwrap();
+        assert!(
+            !tree.path.starts_with(dir.path()),
+            "{}",
+            tree.path.display()
+        );
+        assert_eq!(
+            tree.path.parent(),
+            dir.path()
+                .parent()
+                .map(|p| p.join("repo.worktrees"))
+                .as_deref()
+        );
+    }
+
+    #[test]
+    fn a_checkout_made_elsewhere_answers_to_its_directory_name() {
+        // By hand, or where an older pi kept them: still reached by a word.
+        let dir = repo();
+        let old = dir.path().join(".worktrees/legacy");
+        let target = old.to_string_lossy().into_owned();
+        checked(dir.path(), &["worktree", "add", "-b", "legacy", &target]).unwrap();
+        let tree = enter(dir.path(), "legacy").unwrap();
+        assert_eq!(tree.path, old);
+    }
+
+    #[test]
     fn a_worktree_created_from_inside_another_is_its_sibling() {
-        // Not nested under the one it was asked from: `.worktrees` hangs off
-        // the repository, and asking from anywhere in it means the same place.
+        // Not nested under the one it was asked from: `home` hangs off the
+        // repository, and asking from anywhere in it means the same place.
         let dir = repo();
         let first = enter(dir.path(), "one").unwrap();
         let second = enter(&first.path, "two").unwrap();
@@ -580,7 +652,7 @@ mod tests {
         let dir = repo();
         enter(dir.path(), "one").unwrap();
         checked(dir.path(), &["worktree", "add", "--detach", "elsewhere"]).unwrap();
-        std::fs::remove_dir_all(dir.path().join(DIR).join("one")).unwrap();
+        std::fs::remove_dir_all(home(dir.path()).unwrap().join("one")).unwrap();
         checked(dir.path(), &["worktree", "prune"]).unwrap();
         checked(dir.path(), &["-C", "elsewhere", "checkout", "-q", "one"]).unwrap();
         // Git refuses to check one branch out twice, and `enter` must surface
@@ -595,8 +667,7 @@ mod tests {
         let deep = tree.path.join("crates/cli");
         std::fs::create_dir_all(&deep).unwrap();
         let trees = list(dir.path()).unwrap();
-        // The main checkout contains `.worktrees`, so equality would miss and
-        // a plain prefix test would answer with the wrong one.
+        // Equality would miss: the run is below the checkout's root.
         let held = holding(&trees, &deep).expect("a checkout holds it");
         assert_eq!(held.name, "one");
         assert_eq!(current(&deep).as_deref(), Some("one"));
@@ -614,7 +685,7 @@ mod tests {
     #[test]
     fn a_directory_in_the_way_is_reported_rather_than_entered() {
         let dir = repo();
-        let squatting = dir.path().join(DIR).join("taken");
+        let squatting = home(dir.path()).unwrap().join("taken");
         std::fs::create_dir_all(&squatting).unwrap();
         // A file inside makes it something git would have to displace; an
         // empty directory it would simply take over in place.
@@ -645,12 +716,27 @@ mod tests {
         enter(dir.path(), "feat/one").unwrap();
         enter(dir.path(), "keep").unwrap();
         let removed = remove(dir.path(), "feat/one").unwrap();
-        assert_eq!(removed.path, dir.path().join(DIR).join("feat/one"));
+        assert_eq!(removed.path, home(dir.path()).unwrap().join("feat/one"));
         assert!(!removed.path.exists());
         let trees = list(dir.path()).unwrap();
         assert_eq!(trees.len(), 2, "the main checkout and the survivor");
         assert!(trees.iter().any(|t| t.name == "keep"));
         assert!(!trees.iter().any(|t| t.name == "feat/one"));
+    }
+
+    #[test]
+    fn an_unmerged_branch_outlives_its_checkout() {
+        // Its commits exist nowhere else: the checkout goes, the branch stays,
+        // and the receipt gives git's reason rather than its advice.
+        let dir = repo();
+        let tree = enter(dir.path(), "one").unwrap();
+        checked(&tree.path, &["commit", "-q", "--allow-empty", "-m", "work"]).unwrap();
+        let removed = remove(dir.path(), "one").unwrap();
+        assert!(!tree.path.exists());
+        assert_eq!(removed.branch, None);
+        assert!(branch_exists(dir.path(), "one").unwrap());
+        let note = removed.note.expect("the receipt says why");
+        assert!(note.contains("not fully merged"), "{note}");
     }
 
     #[test]
@@ -687,7 +773,7 @@ mod tests {
     #[test]
     fn a_detached_checkout_goes_without_a_branch() {
         let dir = repo();
-        let target = dir.path().join(DIR).join("det");
+        let target = home(dir.path()).unwrap().join("det");
         checked(
             dir.path(),
             &["worktree", "add", "--detach", &target.to_string_lossy()],
@@ -720,7 +806,7 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .to_string();
-        let target = dir.path().join(DIR).join(&main);
+        let target = home(dir.path()).unwrap().join(&main);
         checked(
             dir.path(),
             &["worktree", "add", "-b", "twin", &target.to_string_lossy()],
@@ -753,7 +839,7 @@ mod tests {
         assert!(res.is_ok(), "remove_worktree failed: {res:?}");
         assert_eq!(core.lanes.len(), 1);
         assert_eq!(core.current, 0);
-        assert!(!dir.path().join(".worktrees/fix-tools").exists());
+        assert!(!home(dir.path()).unwrap().join("fix-tools").exists());
     }
 
     #[test]
@@ -795,6 +881,6 @@ mod tests {
         let err = core.remove_worktree("fix-tools").unwrap_err();
         assert!(err.contains("running in another lane"), "{err}");
         assert_eq!(core.lanes.len(), 2);
-        assert!(dir.path().join(".worktrees/fix-tools").exists());
+        assert!(home(dir.path()).unwrap().join("fix-tools").exists());
     }
 }

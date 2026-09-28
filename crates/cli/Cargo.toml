@@ -21,6 +21,7 @@ tool.workspace = true
 toolbox.workspace = true
 wechat.workspace = true
 anyhow.workspace = true
+async-trait.workspace = true
 clap.workspace = true
 tokio-util.workspace = true
 libc = "0.2"
@@ -41,5 +42,4 @@ tui-markdown = "0.3"
 pulldown-cmark = { version = "0.13", default-features = false }
 
 [dev-dependencies]
-async-trait.workspace = true
 tempfile = "3"

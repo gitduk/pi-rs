@@ -9,7 +9,7 @@ use llm::request::Effort;
 use llm::transport::{Transport, anthropic::Anthropic, chat::ChatCompletions, openai::OpenAi};
 use tokio::sync::mpsc;
 
-use crate::core::{Core, lane, subagent, wechat, worktree};
+use crate::core::{Core, channel, lane, subagent, worktree};
 use crate::input::commands::{Command, commands};
 use crate::input::expand;
 use crate::store::icons;
@@ -675,9 +675,8 @@ async fn main() -> Result<()> {
             current: 0,
             lanes: vec![first],
         };
-        let out = tui::Tui::new(core, key_map, wechat::Bridge::new())?
-            .run()
-            .await;
+        let channels = channel::Channels::new(vec![Arc::new(channel::WeChat::new())]);
+        let out = tui::Tui::new(core, key_map, channels)?.run().await;
         // Subagents handed their transcripts to a background save; wait
         // for those to land before the runtime goes with them.
         subagent::flush().await;

@@ -657,11 +657,14 @@ pub struct Tui {
     events: UnboundedReceiver<TermEvent>,
     // Stops the reader while a child holds the terminal.
     hold: Hold,
-    bridge: core::wechat::Bridge,
+    channels: core::channel::Channels,
+    // Where each line steered into a running turn came from, by lane token,
+    // in the order said: a run hands back what it never heard bare.
+    steered: Vec<(u64, Option<&'static str>)>,
 }
 
 impl Tui {
-    pub fn new(mut core: Core, keys: Arc<Keys>, bridge: core::wechat::Bridge) -> Result<Self> {
+    pub fn new(mut core: Core, keys: Arc<Keys>, channels: core::channel::Channels) -> Result<Self> {
         // The screen first, for raw mode: the answer to the background query
         // carries no newline, so a cooked read would wait for one forever.
         let screen = Screen::new()?;
@@ -709,7 +712,8 @@ impl Tui {
             ui,
             events,
             hold,
-            bridge,
+            channels,
+            steered: Vec::new(),
         })
     }
 
@@ -735,7 +739,8 @@ impl Tui {
             ui,
             events: rx,
             hold: Hold::default(),
-            bridge: core::wechat::Bridge::new(),
+            channels: core::channel::Channels::new(Vec::new()),
+            steered: Vec::new(),
         }
     }
 
@@ -804,9 +809,7 @@ impl Tui {
         // it again, each in the lane it belongs to.
         view::opened(&mut self.views, self.core.lane(), &self.ui.paint);
         // What this lane's run posted while nobody was looking, in the order it
-        // arrived. Not through the bridge: the phone follows the lane in front,
-        // and replaying an hour of another one into it would be a second
-        // conversation arriving out of nowhere.
+        // arrived. Not through the channels: they heard it live.
         let replayed = self.core.lane_mut().take_pending();
         let heard = !replayed.is_empty();
         for event in replayed {
@@ -862,8 +865,10 @@ impl Tui {
     async fn serve_lanes(&mut self) {
         for at in 0..self.core.lanes.len() {
             while let Ok(event) = self.core.lanes[at].inbox().try_recv() {
+                // Every lane, not just the one in front: a turn a channel
+                // asked for is still owed its answer after a switch.
+                self.channels.observe(self.core.lanes[at].token(), &event);
                 if at == self.core.current {
-                    self.bridge.observe(&event).await;
                     let view = front_view(&mut self.views, self.core.lane());
                     // A retry is transport news, not a step of the answer: it
                     // takes the bar a moment, after the half-stream is landed.
@@ -1085,7 +1090,8 @@ impl Tui {
     // while one is, is a property of the question, and `fate` holds it. An
     // idle lane admits everything, which is why `fate` never has to mention
     // idleness — and why it is asked only once a run is known to be there.
-    fn admit(&mut self, asked: Asked) -> Wake {
+    // `from` names the channel the input came from; `None` when typed here.
+    fn admit(&mut self, asked: Asked, from: Option<&'static str>) -> Wake {
         if !self.core.lane().is_running() {
             return Wake::Do(asked);
         }
@@ -1111,7 +1117,7 @@ impl Tui {
             Fate::Queued => {
                 front_view(&mut self.views, self.core.lane())
                     .queued
-                    .push(Queued::Line(intent));
+                    .push(Queued::Line(intent, from));
                 Wake::Nothing
             }
             Fate::Steered(text) => {
@@ -1120,7 +1126,7 @@ impl Tui {
                 let Some(steer) = self.core.lane().steer().cloned() else {
                     front_view(&mut self.views, self.core.lane())
                         .queued
-                        .push(Queued::Line(intent));
+                        .push(Queued::Line(intent, from));
                     return Wake::Nothing;
                 };
                 // Spends the chance to unsend, exactly as the model's first
@@ -1131,6 +1137,11 @@ impl Tui {
                 front_view(&mut self.views, self.core.lane())
                     .state
                     .committed = true;
+                let lane = self.core.lane().token();
+                self.steered.push((lane, from));
+                if let Some(from) = from {
+                    self.channels.ask(from, lane);
+                }
                 steer.say(text);
                 Wake::Nothing
             }
@@ -1228,6 +1239,8 @@ impl Tui {
             // says so, and the run that ends decides whether the loop goes on.
             let mut from_loop = false;
             // A queued line waits for the lane it was aimed at to come free.
+            // The channel what is carried out this pass came from.
+            let mut from = None;
             let woke = if view.queued.is_empty() || running {
                 // Every branch must be cancel-safe: a loser is dropped mid-poll.
                 // `recv()` and `tick()` are; a blocking read gets its own thread.
@@ -1247,30 +1260,31 @@ impl Tui {
                             if self.ui.took_submit() {
                                 self.save_history();
                             }
-                            self.admit(intent)
+                            self.admit(intent, None)
                         }
                         None => Wake::Leave,
                     },
-                    msg = self.bridge.rx.recv() => match msg {
+                    msg = self.channels.rx.recv() => match msg {
                         // The phone types at the lane in front, like a hand,
                         // and its `/stop` is esc. Same intents, same gate, so
                         // they cannot drift apart.
-                        Some(core::wechat::Inbound::Text { text }) => {
+                        Some((channel, core::channel::Inbound::Text { text })) => {
+                            from = Some(channel);
                             let intent = input::read(&text, &self.core.commands);
                             if intent.echoed() {
                                 self.echo_sent(&text);
                             }
-                            self.admit(Asked::Core(intent))
+                            self.admit(Asked::Core(intent), from)
                         }
-                        Some(core::wechat::Inbound::Stop) => self.admit(Asked::Own(Deed::Interrupt)),
+                        Some((_, core::channel::Inbound::Stop)) => self.admit(Asked::Own(Deed::Interrupt), None),
                         // The QR, an error, a way out of one: on the lane the
-                        // bridge follows, where it lasts and can be re-read.
-                        Some(core::wechat::Inbound::Notice(text)) => {
+                        // channel follows, where it lasts and can be re-read.
+                        Some((_, core::channel::Inbound::Notice(text))) => {
                             self.ui.say(front_view(&mut self.views, self.core.lane()), text);
                             Wake::Nothing
                         }
-                        // The bridge saying it is up: one row for a moment.
-                        Some(core::wechat::Inbound::Flash(text)) => {
+                        // A channel saying it is up: one row for a moment.
+                        Some((_, core::channel::Inbound::Flash(text))) => {
                             self.ui.flash(text);
                             Wake::Nothing
                         }
@@ -1285,7 +1299,10 @@ impl Tui {
                     .queued
                     .remove(0)
                 {
-                    Queued::Line(intent) => Wake::Do(Asked::Core(intent)),
+                    Queued::Line(intent, queued_from) => {
+                        from = queued_from;
+                        Wake::Do(Asked::Core(intent))
+                    }
                     Queued::Round { goal, note } => {
                         // The loop that queued this may have been stopped since.
                         // Running it then would be a turn nobody asked for, and
@@ -1416,26 +1433,22 @@ impl Tui {
                 Step::Panel => self.open_panel(),
                 Step::Handled(lines) => self.land_lines(lines),
                 Step::Compact(focus) => self.start_compact(focus, &done_tx),
-                Step::Wechat(cmd) => {
-                    // The command's own answer, failure included: `/wechat on`
-                    // that could not connect is still what `/wechat on` said.
-                    let said = match cmd {
-                        input::WechatCmd::Status => self.bridge.status(),
-                        // Only local locks and a client build await here; the
-                        // login and long poll already run in their own tasks.
-                        input::WechatCmd::On => match self.bridge.on().await {
-                            Ok(said) => said,
-                            Err(e) => vec![format!("wechat: {e:#}")],
-                        },
-                        input::WechatCmd::Off => self.bridge.off(),
-                    };
+                Step::Channel(name, cmd) => {
+                    let said = self.channels.command(name, cmd);
                     self.ui.open_reply(Listing::say(said));
                 }
                 // What was submitted while the run worked is taken up by the
                 // top of this loop, one entry at a time and each read as what
                 // it is. Draining it here instead meant everything queued
                 // became the next prompt, whatever it had been typed as.
-                Step::Prompt { send, typed } => self.start_turn(send, typed, &done_tx),
+                Step::Prompt { send, typed } => {
+                    self.start_turn(send, typed, &done_tx);
+                    if self.core.lane().is_running()
+                        && let Some(from) = from
+                    {
+                        self.channels.ask(from, self.core.lane().token());
+                    }
+                }
             }
         }
         self.save_history();

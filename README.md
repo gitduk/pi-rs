@@ -188,13 +188,18 @@ it was asked, and `/resume <id>` switches to one — the session you leave is
 saved first, so nothing is lost on the way out.
 
 `/worktree <name>` works in another checkout of the same repository:
-`.worktrees/<name>`, on a branch of that name — created if it is not there and
+`<repo>.worktrees/<name>` beside it, on a branch of that name — beside rather
+than inside, so the main checkout never searches, writes or `git add`s another
+one as its own — created if it is not there and
 reused if it is, so asking twice means "go there". Git will not check one
 branch out twice, so the alternative to a branch per worktree is a detached
 HEAD, where commits are reachable only through the reflog; that is not a state
 to leave parallel work in. `/worktree` on its own lists the checkouts, each
 with the branch it is on and a mark against the one in use — the repository's
 own is in that list under its directory name, which is how you get back out.
+`/worktree rm <name>` removes one: its checkout and the sessions recorded in
+it, and its branch once merged — an unmerged branch holds commits nothing
+else does, so it stays, and git's reason is shown.
 
 The session does not come along. A transcript holds workspace-relative paths,
 so under another root the same string names a different file, and a saved

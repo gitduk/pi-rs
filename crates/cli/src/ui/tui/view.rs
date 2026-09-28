@@ -130,8 +130,9 @@ pub enum StreamKind {
 // a pair of optional locals, so what happened is read in one place.
 // One thing waiting for the lane in front to come free.
 pub(super) enum Queued {
-    // What the door made of a submitted line.
-    Line(Intent),
+    // What the door made of a submitted line, and the channel it came from
+    // when it was not typed here.
+    Line(Intent, Option<&'static str>),
     // A round of the loop this lane is under, to be read like a typed line when
     // its turn comes — which is why the goal is kept as text.
     Round { goal: String, note: String },
@@ -158,7 +159,7 @@ pub(super) fn snapshot(lane: &Lane, view: &View) -> Snapshot {
         view.state.started.map(|s| s.elapsed()),
         view.queued
             .iter()
-            .filter(|q| matches!(q, Queued::Line(_)))
+            .filter(|q| matches!(q, Queued::Line(..)))
             .count(),
     )
 }

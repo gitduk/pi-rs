@@ -3,7 +3,7 @@
 //! WeChat renders no markdown at all: a table there arrives as raw pipes, a
 //! link as its own url in brackets. So this is a reducer rather than a
 //! renderer — every construct the model emits is turned into the plainest
-//! text that still says what it said, and nothing here touches the bridge or
+//! text that still says what it said, and nothing here touches the channel or
 //! the socket.
 
 use pulldown_cmark::{CodeBlockKind, Event as MdEvent, Options, Parser, Tag, TagEnd};

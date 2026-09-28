@@ -7,21 +7,21 @@
 //! the checkouts (all of them in one file: a `Core` field holds the list, a
 //! `Lane` one of them), `status.rs` for what a
 //! reader is shown, `meter.rs` for what it cost. The jobs hang off the side:
-//! `bash.rs`, `looping.rs`, `subagent.rs`, `wechat.rs`.
+//! `bash.rs`, `looping.rs`, `subagent.rs`, `channel/`.
 
 pub mod bash;
+pub mod channel;
 pub mod lane;
 pub mod looping;
 pub mod meter;
 pub mod settings;
 pub mod status;
 pub mod subagent;
-pub mod wechat;
 pub mod worktree;
 
 use crate::core::lane::Lane;
 use crate::input::commands::{Command, help};
-use crate::input::{Builtin, Intent, Step, WechatCmd, lines, step_for};
+use crate::input::{Builtin, ChannelCmd, Intent, Step, lines, step_for};
 use crate::store::config;
 use crate::store::listing::Listing;
 use crate::store::session::Store;
@@ -170,11 +170,11 @@ impl Core {
                 }
             }
             Intent::Other { word, args } => step_for(&self.commands, &word, &args),
-            Intent::Builtin(Builtin::Wechat(rest)) => match rest.trim() {
-                "" => Step::Wechat(WechatCmd::Status),
-                "on" => Step::Wechat(WechatCmd::On),
-                "off" => Step::Wechat(WechatCmd::Off),
-                other => Step::Flash(format!("unknown /wechat verb `{other}` — bare, on or off")),
+            Intent::Builtin(Builtin::Channel(name, rest)) => match rest.trim() {
+                "" => Step::Channel(name, ChannelCmd::Status),
+                "on" => Step::Channel(name, ChannelCmd::On),
+                "off" => Step::Channel(name, ChannelCmd::Off),
+                other => Step::Flash(format!("unknown /{name} verb `{other}` — bare, on or off")),
             },
             // Only the bare word opens the panel; an argument is refused
             // rather than half-remembered as a verb.
@@ -296,7 +296,7 @@ mod tests {
             Intent::Builtin(Builtin::Reload),
             Intent::Builtin(Builtin::Model(String::new())),
             Intent::Builtin(Builtin::Worktree("tree".into())),
-            Intent::Builtin(Builtin::Wechat("on".into())),
+            Intent::Builtin(Builtin::Channel("wechat", "on".into())),
         ] {
             assert!(
                 matches!(intent.fate(), Fate::Now),

@@ -138,7 +138,7 @@ pub(crate) const BUILTIN: &[Command] = &[
         "/wechat",
         "[on|off]",
         "bridge this session to WeChat (scan a QR on first connect)",
-        |_, rest| Intent::Builtin(Builtin::Wechat(rest)),
+        |_, rest| Intent::Builtin(Builtin::Channel(crate::core::channel::WeChat::NAME, rest)),
     ),
     Command::builtin("/exit", "", "leave (Ctrl-D does the same)", |_, _| {
         Intent::Builtin(Builtin::Quit)

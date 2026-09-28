@@ -904,3 +904,76 @@ fn a_now_intent_runs_with_the_transcript_a_run_has() {
     }
     drop(lane_dir);
 }
+
+// A line from the phone that has to wait keeps where it came from, or the
+// turn it finally starts answers the terminal and the phone hears nothing.
+#[tokio::test]
+async fn a_queued_line_remembers_the_channel_it_came_from() {
+    let dir = tempfile::tempdir().expect("a checkout");
+    let mut tui = surface(dir.path());
+    let token = tui.core.lane().token();
+
+    tui.admit(
+        Asked::Core(Intent::Prompt("from the phone".into())),
+        Some("wechat"),
+    );
+    tui.admit(Asked::Core(Intent::Prompt("typed here".into())), None);
+
+    let from: Vec<_> = view_at(&mut tui.views, token)
+        .queued
+        .iter()
+        .map(|q| match q {
+            Queued::Line(_, from) => *from,
+            Queued::Round { .. } => panic!("no loop here"),
+        })
+        .collect();
+    assert_eq!(from, [Some("wechat"), None]);
+}
+
+// A line the phone steered in that the run ended before hearing comes back
+// bare from the run; it has to come back as the phone's, or its answer stays
+// on the terminal.
+#[tokio::test]
+async fn a_steered_line_the_run_never_heard_comes_back_as_its_channels() {
+    let dir = tempfile::tempdir().expect("a checkout");
+    let mut tui = surface(dir.path());
+    let token = tui.core.lanes[0].token();
+    let steer = agent::Steer::default();
+    tui.core.lanes[0].begin(
+        tokio_util::sync::CancellationToken::new(),
+        Some(steer.clone()),
+    );
+
+    tui.admit(Asked::Core(Intent::Prompt("heard".into())), Some("wechat"));
+    // The run looked once: that line was heard, the rest were not.
+    steer.take();
+    // The same words from both sides: told apart by order, never by text.
+    tui.admit(Asked::Core(Intent::Prompt("same".into())), None);
+    tui.admit(Asked::Core(Intent::Prompt("same".into())), Some("wechat"));
+    tui.settle(crate::ui::tui::job::Done {
+        token,
+        kind: crate::ui::tui::job::Kind::Turn,
+        ran: Some((
+            agent::session::Session::new(),
+            Err(agent::AgentError::Cancelled),
+        )),
+    })
+    .await;
+
+    let back: Vec<_> = view_at(&mut tui.views, token)
+        .queued
+        .iter()
+        .map(|q| match q {
+            Queued::Line(Intent::Prompt(text), from) => (text.clone(), *from),
+            _ => panic!("only the unheard lines are queued"),
+        })
+        .collect();
+    assert_eq!(
+        back,
+        [
+            ("same".to_string(), None),
+            ("same".to_string(), Some("wechat"))
+        ]
+    );
+    assert!(tui.steered.is_empty(), "the ledger lets go with the run");
+}
