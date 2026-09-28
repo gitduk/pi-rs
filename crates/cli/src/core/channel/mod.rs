@@ -2,8 +2,6 @@
 //! the `Relay`'s, written once for every platform: the answer to the turn it
 //! asked for, whole, cut into ordered pieces when it is long, and nothing else.
 
-mod wechat;
-
 use std::sync::Arc;
 
 use agent::Event;
@@ -13,8 +11,6 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::input::ChannelCmd;
-
-pub use wechat::WeChat;
 
 // Room held back for the `(n/m)` marker so a piece plus its marker still fits
 // the budget. Ten bytes at three digits a side, rounded up.

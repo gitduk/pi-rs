@@ -40,7 +40,6 @@ toml_edit = "0.22"
 serde_path_to_error.workspace = true
 ratatui = "0.30.2"
 tui-markdown = "0.3"
-pulldown-cmark = { version = "0.13", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

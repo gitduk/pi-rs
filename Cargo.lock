@@ -1725,7 +1725,6 @@ dependencies = [
  "ignore",
  "libc",
  "llm",
- "pulldown-cmark",
  "ratatui",
  "serde",
  "serde_json",
@@ -3475,7 +3474,10 @@ name = "wechat"
 version = "1.23.4"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base64 0.22.1",
+ "channel",
+ "pulldown-cmark",
  "qrcode",
  "rand 0.8.8",
  "reqwest",
@@ -3483,6 +3485,8 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-util",
+ "tool",
  "tracing",
 ]
 

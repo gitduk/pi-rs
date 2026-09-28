@@ -246,7 +246,7 @@ async fn main() -> Result<()> {
             current: 0,
             lanes: vec![first],
         };
-        let channels = channel::Channels::new(vec![Arc::new(channel::WeChat::new())]);
+        let channels = channel::Channels::new(vec![Arc::new(wechat::WeChat::new())]);
         let out = tui::Tui::new(core, key_map, channels)?.run().await;
         // Subagents handed their transcripts to a background save; wait
         // for those to land before the runtime goes with them.

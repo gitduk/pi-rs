@@ -1,8 +1,5 @@
 //! WeChat as a channel: the login, the long-poll, and the
-//! `~/.pi/wechat.json` state file. The protocol client stays in the `wechat`
-//! crate; this module is where pi's session meets it.
-
-mod markdown;
+//! `~/.pi/wechat.json` state file, over the protocol client beside it.
 
 use std::path::PathBuf;
 use std::sync::{Arc, PoisonError};
@@ -11,10 +8,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-use wechat::Update;
 
+use crate::Update;
+use crate::markdown::format_markdown;
 use channel::{Channel, Inbound, Inbox};
-use markdown::format_markdown;
 
 // What persists between runs, under the pi root. One peer per session in
 // this build, so the reply address and the context token are single slots.
@@ -43,7 +40,7 @@ struct Typing {
 
 pub struct WeChat {
     state: Arc<Mutex<State>>,
-    client: std::sync::Mutex<wechat::Client>,
+    client: std::sync::Mutex<crate::Client>,
     typing: Mutex<Typing>,
 }
 
@@ -53,7 +50,7 @@ impl WeChat {
 
     pub fn new() -> Self {
         let state = load().unwrap_or_default();
-        let client = wechat::Client::new(base_of(&state));
+        let client = crate::Client::new(base_of(&state));
         Self {
             state: Arc::new(Mutex::new(state)),
             client: std::sync::Mutex::new(client),
@@ -64,11 +61,11 @@ impl WeChat {
     // The client for the base the session currently talks to. A redirected
     // login saves its host to state; the client is rebuilt only when that
     // host changed, so a session keeps one connection pool.
-    async fn client(&self) -> wechat::Client {
+    async fn client(&self) -> crate::Client {
         let base = base_of(&*self.state.lock().await);
         let mut client = self.client.lock().unwrap_or_else(PoisonError::into_inner);
         if client.base_url() != base {
-            *client = wechat::Client::new(base);
+            *client = crate::Client::new(base);
         }
         client.clone()
     }
@@ -151,7 +148,7 @@ impl Channel for WeChat {
 
 fn base_of(state: &State) -> String {
     if state.base_url.is_empty() {
-        wechat::DEFAULT_BASE_URL.to_string()
+        crate::DEFAULT_BASE_URL.to_string()
     } else {
         state.base_url.clone()
     }
@@ -160,7 +157,7 @@ fn base_of(state: &State) -> String {
 // QR → confirm → credentials, then the long-poll. The QR and progress go out
 // as notices, where they stay long enough to be scanned.
 async fn login(
-    mut client: wechat::Client,
+    mut client: crate::Client,
     state: Arc<Mutex<State>>,
     tx: Inbox,
     abort: CancellationToken,
@@ -170,7 +167,7 @@ async fn login(
     ));
     let tx_qr = tx.clone();
     let tx_note = tx.clone();
-    let mut view = wechat::LoginView {
+    let mut view = crate::LoginView {
         show_qr: Box::new(move |qr: &str| {
             for line in qr.lines() {
                 let _ = tx_qr.send(Inbound::Notice(line.to_string()));
@@ -182,7 +179,7 @@ async fn login(
         read_verify_code: None,
     };
     let result = {
-        let login = wechat::login_flow(&mut client, &mut view);
+        let login = crate::login_flow(&mut client, &mut view);
         tokio::pin!(login);
         tokio::select! {
             r = &mut login => r,
@@ -219,13 +216,13 @@ async fn login(
 // errors back off (2s, 30s after three in a row — the reference's rhythm);
 // a stale token is reported and stops the channel until a fresh login.
 async fn poll(
-    client: wechat::Client,
+    client: crate::Client,
     state: Arc<Mutex<State>>,
     tx: Inbox,
     abort: CancellationToken,
 ) {
     let mut failures = 0u32;
-    let mut timeout = wechat::client::LONG_POLL_TIMEOUT;
+    let mut timeout = crate::client::LONG_POLL_TIMEOUT;
     while !abort.is_cancelled() {
         let (token, buf) = {
             let s = state.lock().await;
@@ -262,7 +259,7 @@ async fn poll(
 // lock so every on/off task reuses it; another peer fetches its own.
 async fn typing_ticket(
     t: &mut Typing,
-    client: &wechat::Client,
+    client: &crate::Client,
     token: &str,
     peer: &str,
     context_token: &str,
@@ -328,7 +325,7 @@ async fn handle_update(
         if msg.message_type != 1 {
             continue;
         }
-        let text = wechat::text_of(&msg);
+        let text = crate::text_of(&msg);
         if text.is_empty() {
             continue;
         }
