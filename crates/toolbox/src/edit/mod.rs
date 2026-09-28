@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use crate::blocks::by_row;
 use crate::rows::view_hash;
 use tool::limit::{MAX_BYTES, over_limit};
-use tool::{Ctx, EditError, Tier, Tool, ToolError, ToolOutput};
+use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};
 
 // Rows kept either side of a change: of file the edit did not touch, enough
 // to place it, few enough that the change stays the subject.
@@ -109,30 +109,24 @@ fn to_edits(path: &str, args: &[EditArg]) -> Result<Vec<edits::Edit>, ToolError>
                         .into_iter()
                         .flatten()
                         .count();
-                    return Err(ToolError::Edit(
-                        EditError::Malformed,
-                        format!(
-                            "in {path}, edits[{index}]: {} — give exactly one of \
+                    return Err(ToolError::Invalid(format!(
+                        "in {path}, edits[{index}]: {} — give exactly one of \
                              `old_string`, `insert_after`, `insert_before`",
-                            match given {
-                                0 => "no anchor".to_string(),
-                                2 => "two anchors".to_string(),
-                                n => format!("{n} anchors"),
-                            }
-                        ),
-                    ));
+                        match given {
+                            0 => "no anchor".to_string(),
+                            2 => "two anchors".to_string(),
+                            n => format!("{n} anchors"),
+                        }
+                    )));
                 }
             };
             // `whole_block` needs a parser: a block that never opened would
             // send the model hunting for a line in a file nothing parses.
             if arg.whole_block && crate::syntax::Lang::of(path).is_none() {
-                return Err(ToolError::Edit(
-                    EditError::Refused,
-                    format!(
-                        "in {path}, edits[{index}]: `whole_block` needs a parser and {path} has \
-                         none — quote the block in `old_string` instead, or use `insert_after`"
-                    ),
-                ));
+                return Err(ToolError::Invalid(format!(
+                    "in {path}, edits[{index}]: `whole_block` needs a parser and {path} has \
+                     none — quote the block in `old_string` instead, or use `insert_after`"
+                )));
             }
             Ok(edits::Edit {
                 anchor,
@@ -532,8 +526,7 @@ fn sketch(path: &str, applied: &Applied) -> String {
         .join("\n")
 }
 
-// The refusal, logged under the tag the loop groups repeats by and returned
-// under the category the failure deserves: misspelt and off-target differ.
+// The refusal, logged under its tag and returned as the prose the model reads.
 fn refuse(path: &str, refusal: &Refusal, count: usize) -> ToolError {
     tracing::warn!(
         target: "pi::edit",
@@ -544,20 +537,19 @@ fn refuse(path: &str, refusal: &Refusal, count: usize) -> ToolError {
         error = %refusal,
         "edit refused"
     );
-    let kind = if refusal.is_shape() {
-        EditError::Malformed
-    } else {
-        EditError::Refused
-    };
-    ToolError::Edit(kind, refusal.to_string())
+    ToolError::Invalid(refusal.to_string())
 }
 
 pub struct Edit;
 
+impl Edit {
+    pub const NAME: &'static str = "edit";
+}
+
 #[async_trait]
 impl Tool for Edit {
     fn name(&self) -> &str {
-        tool::names::EDIT
+        Self::NAME
     }
 
     fn description(&self) -> &str {
@@ -678,7 +670,7 @@ impl Tool for Edit {
                 edits = edits.len(),
                 "edit refused"
             );
-            return Err(ToolError::Edit(EditError::Refused, why));
+            return Err(ToolError::Invalid(why));
         }
 
         ctx.note_write(&real);

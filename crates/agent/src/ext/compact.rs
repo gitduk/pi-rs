@@ -2,26 +2,17 @@ use std::collections::HashMap;
 
 use llm::estimate;
 use llm::model::ModelSpec;
-use serde_json::Value;
-use tool::names;
 
 use crate::session::{
     Compaction, Entry, EntryId, Omission, Seen, Session, injected_summary, oversized_args,
     user_block,
 };
 
-// Tools whose results describe current state rather than an action taken. Only
-// these supersede: an `edit` result records something that happened, and the
-// record stays true however many later edits land — but only the newest file
-// read is worth carrying.
-const SUPERSEDABLE: &[&str] = &[names::READ, names::GREP, names::GLOB];
+// What stands in for a result the same call answered again later.
+const REPEATED: &str = "[omitted: the same call ran again later]";
 
-// Results that must survive compaction whatever the budget says.
-//
-// A skill body is instructions the agent is in the middle of following.
-// Omitting it saves tokens and breaks the task — omp protects these for the
-// same reason.
-const PROTECTED: &[&str] = &[names::SKILL];
+// What leads an aged-out result, ahead of the ends it keeps.
+const AGED_OUT: &str = "[omitted to fit the context window]";
 
 // What stands in for an argument the model no longer sees. Written into the
 // record as well as the view, so an archive says what went without the reader
@@ -61,7 +52,6 @@ pub struct Report {
     pub before: usize,
     pub after: usize,
     pub superseded: usize,
-    pub uneventful: usize,
     pub aged_out: usize,
     /// Tool calls whose oversized arguments went.
     pub args_taken: usize,
@@ -76,13 +66,7 @@ pub struct Report {
 
 impl Report {
     pub fn touched(&self) -> bool {
-        self.superseded
-            + self.uneventful
-            + self.aged_out
-            + self.args_taken
-            + self.notices_pruned
-            + self.dropped
-            > 0
+        self.superseded + self.aged_out + self.args_taken + self.notices_pruned + self.dropped > 0
     }
 }
 
@@ -130,7 +114,7 @@ impl<'a> Item<'a> {
     // `tool_result` makes the next request invalid on both formats.
     fn omittable(&self) -> bool {
         match self.entry {
-            Entry::Tool { result: r, .. } => !PROTECTED.contains(&r.name.as_str()),
+            Entry::Tool { .. } => true,
             // A `!` command's output is the other half of a question — bulk
             // nothing downstream waits on — and the variant is what makes the
             // two answerable apart at all.
@@ -205,18 +189,23 @@ fn pruned(notice: &str, text: &str, policy: &Policy) -> String {
     format!("{notice}\n\n{head}\n\n[… {dropped} chars omitted …]\n\n{tail}")
 }
 
-// What makes two results interchangeable. A later result under the same key
-// makes every earlier one dead weight.
-fn supersede_key(name: &str, args: &Value) -> Option<String> {
-    if !SUPERSEDABLE.contains(&name) {
-        return None;
-    }
-    // A whole-file read supersedes an earlier ranged read of the same path, so
-    // the key deliberately ignores offset and limit.
-    match args.get("path").and_then(Value::as_str) {
-        Some(path) if name == names::READ => Some(format!("{}\0{path}", names::READ)),
-        _ => Some(format!("{name}\0{args}")),
-    }
+// What every rung reads and none of them changes.
+struct Frame<'a> {
+    spec: &'a ModelSpec,
+    budget: usize,
+    policy: &'a Policy,
+    already_gone: &'a HashMap<(EntryId, usize), &'a str>,
+}
+
+// One measure, applied until the transcript fits or the measure runs out.
+type Rung = fn(&mut [Item<'_>], &Frame<'_>, &mut Report);
+
+// Cheapest and least lossy first. Compaction knows the transcript's shape —
+// calls, results, sizes, rounds — and never what any one tool means.
+const RUNGS: [Rung; 5] = [repeated, age_out, take_args, trim_notices, drop_history];
+
+fn total(items: &[Item<'_>]) -> usize {
+    items.iter().map(|i| i.tokens).sum()
 }
 
 /// Decide how to shrink the session's context to fit `budget`, cheapest measure
@@ -269,182 +258,45 @@ pub fn plan(
         .iter()
         .map(|s| estimate::text(&injected_summary(s)))
         .sum();
-    let before: usize = items.iter().map(|i| i.tokens).sum::<usize>() + summaries;
-    let mut record = Compaction {
-        tokens_before: before,
-        ..Default::default()
-    };
+    let before = total(&items) + summaries;
     let mut report = Report {
         before,
         ..Default::default()
     };
 
-    if before <= budget {
-        record.tokens_after = before;
-        report.after = before;
-        return (record, report);
-    }
-
-    // Every call in the transcript, so a result can name the work it answers.
-    let calls: HashMap<&str, (&str, &Value)> = view
-        .iter()
-        .flat_map(|s| s.entry().tool_calls())
-        .map(|c| (c.id.as_str(), (c.name.as_str(), &c.args)))
-        .collect();
-
-    let total = |items: &[Item]| -> usize { items.iter().map(|i| i.tokens).sum() };
-
-    // A result whose key reappears later is dead weight wherever it sits, so
-    // this ignores the protected tail.
-    let mut newest: HashMap<String, usize> = HashMap::new();
-    for (n, it) in items.iter().enumerate() {
-        if let Some(r) = it.result()
-            && let Some((name, args)) = calls.get(r.call.as_str())
-            && let Some(key) = supersede_key(name, args)
-        {
-            newest.insert(key, n);
-        }
-    }
-    // Decided in one pass and applied in another: `omit` needs the item
-    // mutably, and reading it to decide already holds it.
-    let stale: Vec<(usize, String)> = items
-        .iter()
-        .enumerate()
-        .filter_map(|(n, it)| {
-            let r = it.result()?;
-            let (name, args) = calls.get(r.call.as_str())?;
-            let key = supersede_key(name, args)?;
-            (newest.get(&key) != Some(&n) && it.omittable())
-                .then(|| (n, format!("[omitted: superseded by a later {name}]")))
-        })
-        .collect();
-    for (n, notice) in stale {
-        items[n].omit(notice);
-        report.superseded += 1;
-    }
-
-    // Results their own tool marked as carrying nothing.
-    let empty: Vec<usize> = items
-        .iter()
-        .enumerate()
-        .filter(|(_, it)| it.result().is_some_and(|r| r.useless) && it.omittable())
-        .map(|(n, _)| n)
-        .collect();
-    for n in empty {
-        items[n].omit("[omitted: this result reported nothing]".into());
-        report.uneventful += 1;
-    }
-
-    // Results and `!` command output, oldest first, never inside the tail the
-    // agent is working from. Both carry bulk nothing downstream waits on.
-    if total(&items) > budget {
-        let suffix = suffixes(&items);
-        for n in 0..items.len() {
-            if total(&items) <= budget || suffix[n] < policy.protect_tail {
-                break;
-            }
-            if !items[n].omittable() || items[n].notice.is_some() {
-                continue;
-            }
-            let notice = "[omitted to fit the context window]";
-            let Some(body) = items[n].prunable() else {
-                continue;
-            };
-            items[n].omit(pruned(notice, &body, policy));
-            report.aged_out += 1;
-        }
-    }
-
-    // Oversized tool arguments: the file a `write` wrote, the bodies an `edit`
-    // carried. The call has run and its result records what happened, so what
-    // is left is the model's own carbon copy of the work, not context it still
-    // needs — and it is the one weight on the assistant side worth taking.
-    // Thinking blocks are deliberately not touched: the API filters prior ones
-    // itself without billing them, and the last turn's may not be edited at all.
-    if total(&items) > budget {
-        let suffix = suffixes(&items);
-        let mut gone = already_gone.clone();
-        for n in 0..items.len() {
-            if total(&items) <= budget || suffix[n] < policy.protect_tail {
-                break;
-            }
-            let Entry::Answer { id, blocks, .. } = items[n].entry else {
-                continue;
-            };
-            let fat: Vec<usize> = blocks
-                .iter()
-                .enumerate()
-                .filter(|(k, b)| {
-                    !already_gone.contains_key(&(*id, *k))
-                        && matches!(b, llm::message::AssistantContent::ToolCall(c)
-                            if oversized_args(c) > 0)
-                })
-                .map(|(k, _)| k)
-                .collect();
-            if fat.is_empty() {
-                continue;
-            }
-            items[n].args_gone.extend(fat);
-            for k in &items[n].args_gone {
-                gone.insert((*id, *k), ARGS_TAKEN);
-            }
-            items[n].tokens = estimate::MESSAGE_OVERHEAD
-                + Session::shown_blocks(blocks, *id, &gone)
-                    .iter()
-                    .map(|b| estimate::assistant_block(b, spec))
-                    .sum::<usize>();
-            report.args_taken += items[n].args_gone.len();
-        }
-    }
-
-    // The kept ends are a floor a window the provider just named can refuse.
-    // Last rung: a pruned entry keeps only the notice that leads it.
-    if total(&items) > budget {
-        for n in 0..items.len() {
+    if before > budget {
+        let frame = Frame {
+            spec,
+            budget,
+            policy,
+            already_gone: &already_gone,
+        };
+        for rung in RUNGS {
             if total(&items) <= budget {
                 break;
             }
-            let Some(full) = items[n].notice.clone() else {
-                continue;
-            };
-            let Some(head) = full.lines().next() else {
-                continue;
-            };
-            if head.len() == full.len() {
-                continue;
-            }
-            items[n].omit(head.to_string());
-            report.notices_pruned += 1;
+            rung(&mut items, &frame, &mut report);
         }
     }
 
-    // Last resort: history leaves the view, oldest first.
-    while total(&items) > budget {
-        let suffix = suffixes(&items);
-        let Some(doomed) = droppable(&items, policy, &suffix) else {
-            break;
-        };
-        for n in &doomed {
-            items[*n].gone = true;
-            items[*n].tokens = 0;
-            record.dropped.push(items[*n].id);
-        }
-        report.dropped += doomed.len();
-    }
-
+    let mut record = Compaction {
+        tokens_before: before,
+        ..Default::default()
+    };
     for it in &items {
-        if !it.gone {
-            for k in &it.args_gone {
-                record.omissions.push(Omission {
-                    entry: it.id,
-                    block: Some(*k),
-                    notice: ARGS_TAKEN.to_string(),
-                });
-            }
+        if it.gone {
+            record.dropped.push(it.id);
+            continue;
+        }
+        for k in &it.args_gone {
+            record.omissions.push(Omission {
+                entry: it.id,
+                block: Some(*k),
+                notice: ARGS_TAKEN.to_string(),
+            });
         }
         if let Some(notice) = &it.notice
             && it.fresh
-            && !it.gone
         {
             record.omissions.push(Omission {
                 entry: it.id,
@@ -454,10 +306,137 @@ pub fn plan(
         }
     }
 
-    record.tokens_after = total(&items);
+    record.tokens_after = if before > budget {
+        total(&items)
+    } else {
+        before
+    };
     report.after = record.tokens_after;
     report.still_over = report.after > budget;
     (record, report)
+}
+
+// A call made again with the same name and arguments: the later answer is the
+// one that stands, so every earlier one is dead weight wherever it sits.
+fn repeated<'a>(items: &mut [Item<'a>], _: &Frame<'_>, report: &mut Report) {
+    let calls: HashMap<&'a str, String> = items
+        .iter()
+        .flat_map(|it| {
+            let entry: &'a Entry = it.entry;
+            entry.tool_calls()
+        })
+        .map(|c| (c.id.as_str(), format!("{}\0{}", c.name, c.args)))
+        .collect();
+    let key = |it: &Item<'_>| it.result().and_then(|r| calls.get(r.call.as_str()));
+    let mut newest: HashMap<&String, usize> = HashMap::new();
+    for (n, it) in items.iter().enumerate() {
+        if let Some(k) = key(it) {
+            newest.insert(k, n);
+        }
+    }
+    for (n, it) in items.iter_mut().enumerate() {
+        if key(it).is_some_and(|k| newest[k] != n) {
+            it.omit(REPEATED.to_string());
+            report.superseded += 1;
+        }
+    }
+}
+
+// Results and `!` command output, oldest first, never inside the tail the
+// agent is working from. Both carry bulk nothing downstream waits on.
+fn age_out(items: &mut [Item<'_>], f: &Frame<'_>, report: &mut Report) {
+    let suffix = suffixes(items);
+    for n in 0..items.len() {
+        if total(items) <= f.budget || suffix[n] < f.policy.protect_tail {
+            break;
+        }
+        if !items[n].omittable() {
+            continue;
+        }
+        let Some(body) = items[n].prunable() else {
+            continue;
+        };
+        items[n].omit(pruned(AGED_OUT, &body, f.policy));
+        report.aged_out += 1;
+    }
+}
+
+// Oversized tool arguments: the file a `write` wrote, the bodies an `edit`
+// carried. The call has run and its result records what happened, so what
+// is left is the model's own carbon copy of the work, not context it still
+// needs — and it is the one weight on the assistant side worth taking.
+// Thinking blocks are deliberately not touched: the API filters prior ones
+// itself without billing them, and the last turn's may not be edited at all.
+fn take_args(items: &mut [Item<'_>], f: &Frame<'_>, report: &mut Report) {
+    let suffix = suffixes(items);
+    let mut gone = f.already_gone.clone();
+    for n in 0..items.len() {
+        if total(items) <= f.budget || suffix[n] < f.policy.protect_tail {
+            break;
+        }
+        let Entry::Answer { id, blocks, .. } = items[n].entry else {
+            continue;
+        };
+        let fat: Vec<usize> = blocks
+            .iter()
+            .enumerate()
+            .filter(|(k, b)| {
+                !f.already_gone.contains_key(&(*id, *k))
+                    && matches!(b, llm::message::AssistantContent::ToolCall(c)
+                        if oversized_args(c) > 0)
+            })
+            .map(|(k, _)| k)
+            .collect();
+        if fat.is_empty() {
+            continue;
+        }
+        items[n].args_gone.extend(fat);
+        for k in &items[n].args_gone {
+            gone.insert((*id, *k), ARGS_TAKEN);
+        }
+        items[n].tokens = estimate::MESSAGE_OVERHEAD
+            + Session::shown_blocks(blocks, *id, &gone)
+                .iter()
+                .map(|b| estimate::assistant_block(b, f.spec))
+                .sum::<usize>();
+        report.args_taken += items[n].args_gone.len();
+    }
+}
+
+// The kept ends are a floor a window the provider just named can refuse:
+// a pruned entry keeps only the notice that leads it.
+fn trim_notices(items: &mut [Item<'_>], f: &Frame<'_>, report: &mut Report) {
+    for n in 0..items.len() {
+        if total(items) <= f.budget {
+            break;
+        }
+        let Some(full) = items[n].notice.clone() else {
+            continue;
+        };
+        let Some(head) = full.lines().next() else {
+            continue;
+        };
+        if head.len() == full.len() {
+            continue;
+        }
+        items[n].omit(head.to_string());
+        report.notices_pruned += 1;
+    }
+}
+
+// Last resort: history leaves the view, oldest first.
+fn drop_history(items: &mut [Item<'_>], f: &Frame<'_>, report: &mut Report) {
+    while total(items) > f.budget {
+        let suffix = suffixes(items);
+        let Some(doomed) = droppable(items, f.policy, &suffix) else {
+            break;
+        };
+        for n in &doomed {
+            items[*n].gone = true;
+            items[*n].tokens = 0;
+        }
+        report.dropped += doomed.len();
+    }
 }
 
 // Where each round of the conversation begins.
@@ -484,21 +463,9 @@ fn round_starts(items: &[Item<'_>]) -> Vec<usize> {
     out
 }
 
-// A skill body is instructions the agent is in the middle of following.
-// Eliding it saves tokens and breaks the task, and so does dropping it.
-fn protected(it: &Item<'_>) -> bool {
-    matches!(
-        it.entry,
-        Entry::Tool { result: r, .. } if PROTECTED.contains(&r.name.as_str())
-    )
-}
-
 // The entries of `span` that are still in the view, or `None` when the span
-// holds nothing to take or something that must not go.
+// holds nothing to take.
 fn takeable(items: &[Item<'_>], span: std::ops::Range<usize>) -> Option<Vec<usize>> {
-    if items[span.clone()].iter().any(protected) {
-        return None;
-    }
     let out: Vec<usize> = span.filter(|n| !items[*n].gone).collect();
     (!out.is_empty()).then_some(out)
 }
@@ -558,11 +525,7 @@ fn droppable(items: &[Item<'_>], policy: &Policy, suffix: &[usize]) -> Option<Ve
         if items[n].gone || !matches!(items[n].entry, Entry::Answer { .. }) {
             continue;
         }
-        let span = exchange(items, n);
-        if span.iter().any(|k| protected(&items[*k])) {
-            continue;
-        }
-        return Some(span);
+        return Some(exchange(items, n));
     }
     None
 }

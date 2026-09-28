@@ -65,8 +65,7 @@ pub struct Applied {
 }
 
 impl Refusal {
-    /// The stable tag a refusal is logged and grouped under, whatever its
-    /// prose says.
+    /// The stable tag a refusal is logged under, whatever its prose says.
     pub fn tag(&self) -> &'static str {
         match self {
             Refusal::NoEdits => "NO_EDITS",
@@ -80,15 +79,6 @@ impl Refusal {
             Refusal::AmbiguousBlock { .. } => "AMBIGUOUS_BLOCK",
             Refusal::Unchanged { .. } => "UNCHANGED",
         }
-    }
-
-    /// Whether the call itself is spelt wrong, as opposed to not fitting the
-    /// file: the two are different lessons and the loop counts them apart.
-    pub fn is_shape(&self) -> bool {
-        matches!(
-            self,
-            Refusal::NoEdits | Refusal::EmptyAnchor { .. } | Refusal::EmptyInsert { .. }
-        )
     }
 }
 

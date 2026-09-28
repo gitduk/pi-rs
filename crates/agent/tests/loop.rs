@@ -164,21 +164,6 @@ async fn drive_steered(
     (session, out, events)
 }
 
-// Every tool-result body in the view, in order.
-fn result_bodies(session: &Session) -> Vec<String> {
-    let mut out = Vec::new();
-    for m in session.context() {
-        if let Message::User { content } = m {
-            for c in content {
-                if let UserContent::ToolResult(r) = c {
-                    out.push(r.flatten_text());
-                }
-            }
-        }
-    }
-    out
-}
-
 // Every result in the view, in order. One entry is one message now, so a
 // turn's results arrive spread across several of them rather than packed into
 // one — joining is the wire's business.
@@ -1070,117 +1055,6 @@ async fn a_named_window_supersedes_the_guesswork_that_preceded_it() {
     // Both are the first squeeze against their own baseline. Compounding them
     // would print 36% here, against a window the provider measured.
     assert!(blind[1].contains("60%"), "{}", blind[1]);
-}
-
-// A read that keeps coming back with the same content is a legitimate
-// re-read, not a loop: only an unbroken streak of failures is named.
-#[tokio::test]
-async fn a_call_that_keeps_returning_the_same_thing_is_named() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("a.txt"), "steady\n").unwrap();
-    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
-
-    let same = || call_turn(&[("t", "read", r#"{"path":"a.txt"}"#)]);
-    let a = tooled(
-        Scripted::new(vec![same(), same(), same(), same(), text_turn("gave up")]),
-        spec(),
-    );
-
-    let (session, out, _) = drive(&a, &ctx, "read it forever").await;
-    out.unwrap();
-
-    // The shape a session actually dies in is a refusal, not a re-read, so the
-    // re-read is never named however many times it repeats.
-    let bodies = result_bodies(&session);
-    assert!(
-        bodies.iter().all(|b| !b.contains("same `read` call")),
-        "{bodies:?}"
-    );
-}
-
-// The failure mode a long session actually dies in: a tool refused the same
-// way, over and over. Whether the args repeat or drift, the refusal is the
-// same one — the loop-breaker keys on it, and the second one is already the
-// whole story.
-#[tokio::test]
-async fn a_refusal_repeated_is_named_sooner_whether_the_args_repeat_or_drift() {
-    for vary in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.txt"), "steady\n").unwrap();
-        let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
-
-        let anchor = |i: usize| {
-            let old = if vary {
-                format!("variant {i}")
-            } else {
-                "match code {".to_string()
-            };
-            format!(r#"{{"path":"a.txt","edits":[{{"old_string":"{old}","new_string":"x"}}]}}"#)
-        };
-        // Read first, or the refusal is the read gate and the anchors never run.
-        let read = call_turn(&[("t", "read", r#"{"path":"a.txt"}"#)]);
-        let mut turns = vec![read];
-        for i in 0..3 {
-            turns.push(call_turn(&[("t", "edit", &anchor(i))]));
-        }
-        turns.push(text_turn("gave up"));
-        let a = tooled(Scripted::new(turns), spec());
-
-        let (session, out, _) = drive(&a, &ctx, "edit it forever").await;
-        out.unwrap();
-
-        let bodies = result_bodies(&session);
-        let refusals: Vec<&String> = bodies
-            .iter()
-            .filter(|b| b.starts_with("no match in a.txt"))
-            .collect();
-        assert_eq!(refusals.len(), 3, "vary={vary}: {refusals:?}");
-        // No leeway for a refusal the way there is for a re-read, and the
-        // notice rides inside the error the model reads, not beside it.
-        assert!(
-            !refusals[0].contains("same `edit` call"),
-            "vary={vary}: {:?}",
-            refusals[0]
-        );
-        assert!(
-            refusals[1].contains("same `edit` call has now failed the same way 2 times"),
-            "vary={vary}: {:?}",
-            refusals[1]
-        );
-    }
-}
-
-#[tokio::test]
-async fn a_call_whose_answer_changes_resets_the_count() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("a.txt");
-    std::fs::write(&path, "first\n").unwrap();
-    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
-
-    let same = || call_turn(&[("t", "read", r#"{"path":"a.txt"}"#)]);
-    let a = tooled(
-        Scripted::new(vec![same(), same(), same(), text_turn("ok")]),
-        spec(),
-    );
-
-    // Change the file between turns so the answer moves.
-    let writer = {
-        let path = path.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            let _ = std::fs::write(&path, "second\n");
-        })
-    };
-    let (session, out, _) = drive(&a, &ctx, "watch it").await;
-    let _ = writer.await;
-    out.unwrap();
-
-    let noticed = session
-        .context()
-        .iter()
-        .any(|m| m.text().contains("same `read` call"));
-    // Whether the race lands or not, a changed answer must never be flagged.
-    assert!(!noticed || std::fs::read_to_string(&path).unwrap() == "first\n");
 }
 
 // Fails every call with a coded timeout, so the loop's code plumbing can be

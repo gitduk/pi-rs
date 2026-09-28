@@ -50,10 +50,6 @@ pub struct ToolResult {
     pub content: Vec<ToolResultContent>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_error: bool,
-    /// Carries no information for later turns (zero matches, wait timeout).
-    /// Compaction may drop it once consumed. Ignored when `is_error`.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub useless: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -240,7 +236,6 @@ impl ToolResult {
             name: name.into(),
             content: vec![ToolResultContent::Text(Text { text: body.into() })],
             is_error: false,
-            useless: false,
         }
     }
 

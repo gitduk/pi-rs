@@ -29,10 +29,6 @@ pub use seams::{Approver, Compactor, Decision, Fitted, Home, Steer, Untouched, W
 
 pub const DEFAULT_SYSTEM: &str = include_str!("../prompts/system.md");
 
-// A tool that fails twice in a row is named. One failure is ordinary — the
-// model reads the error and tries again; the second tells it nothing the
-// first did not, so there is no leeway the way there is for a re-read.
-const FAILURE_LIMIT: usize = 2;
 // Headroom for framing the estimate does not model. Compacting slightly early
 // costs a little quality; compacting late costs the whole turn.
 const SAFETY_MARGIN: usize = 2_000;
@@ -94,12 +90,6 @@ pub struct Agent {
     /// until something is installed — see `Compactor`.
     pub compactor: Arc<dyn Compactor>,
 }
-
-// Per-tool failure streaks across one run, so a loop can be named. Keyed by
-// tool and the stable code its error carries: an edit that keeps coming back
-// "would not parse" is one loop whatever the prose says, while a genuinely
-// different error starts a new count.
-type Failures = HashMap<(String, String), usize>;
 
 // What a streamed call resolves to before anything runs. Deciding first keeps
 // the result list aligned with the call list even when nothing executes.
@@ -174,9 +164,6 @@ impl Agent {
         retry: &Retry,
     ) -> Result<Usage, AgentError> {
         let mut totals = Usage::default();
-        // How many times a tool has failed in a row, so a loop can be named —
-        // naming it is the only thing that stops one.
-        let mut failures: Failures = Failures::new();
 
         // Our token estimate is a bound, not a measurement. When the provider
         // says otherwise, this is what carries the correction forward.
@@ -372,7 +359,7 @@ impl Agent {
                 .map(|i| (i.call.clone(), i.clone()))
                 .collect();
             let (results, stopped) = self
-                .run_calls(&calls, &bad, ctx, tx, &mut failures, &mut totals)
+                .run_calls(&calls, &bad, ctx, tx, &mut totals)
                 .instrument(span.clone())
                 .await;
             let ids = session.push_previewed(results);
@@ -589,17 +576,8 @@ impl Agent {
         bad: &HashMap<String, InvalidToolArgs>,
         ctx: &Ctx,
         tx: &UnboundedSender<Event>,
-        failures: &mut Failures,
         spent: &mut Usage,
     ) -> (Vec<(ToolResult, Option<String>)>, bool) {
-        // Read once for the batch rather than per failure, and from `ctx`
-        // rather than the machine: a session moves — `/new`, `/resume` — and
-        // the context is what moves with it.
-        let journal = ctx
-            .session()
-            .and_then(|id| tool::state::session_dir(ctx.workspace.root(), id))
-            .map(|d| d.join(tool::state::JOURNAL_FILE));
-        let journal = journal.as_deref();
         let actions: Vec<Action> = calls
             .iter()
             .map(|c| {
@@ -696,7 +674,9 @@ impl Agent {
             // rebuild draws those bytes rather than reading the content again.
             let mut preview = None;
             let result = match (action, output) {
-                (Action::Reject(why), _) => failed(call, why.clone(), None, failures, journal),
+                (Action::Reject(why), _) => {
+                    ToolResult::error(call.id.clone(), &call.name, why.clone())
+                }
                 // Left unanswered: its siblings may have acted, so theirs are
                 // kept, and the next prompt closes this one as stopped.
                 (_, Some(Err(ToolError::Cancelled))) => {
@@ -724,7 +704,7 @@ impl Agent {
                             preview: body.clone(),
                         },
                     );
-                    failed(call, body, e.category(), failures, journal)
+                    ToolResult::error(call.id.clone(), &call.name, body)
                 }
                 (_, Some(Ok(out))) => {
                     // A nested run's spend belongs to the run that called it:
@@ -740,13 +720,11 @@ impl Agent {
                             preview: out.preview(),
                         },
                     );
-                    note_success(call, failures);
                     ToolResult {
                         call: call.id.clone(),
                         name: call.name.clone(),
                         content: out.content,
                         is_error: false,
-                        useless: out.useless,
                     }
                 }
                 (_, None) => unreachable!("only rejected calls produce no output"),
@@ -755,17 +733,6 @@ impl Agent {
         }
 
         (results, stopped)
-    }
-}
-
-// A success resets the failure streak for this tool — the loop-breaker only
-// names an unbroken run of failures — except for edit, whose every success is
-// a different file: landing one edit does not mean the next will land, and a
-// call that keeps coming back malformed must keep being counted until the model
-// actually changes approach.
-fn note_success(call: &ToolCall, failures: &mut Failures) {
-    if call.name != tool::names::EDIT {
-        failures.retain(|(name, _), _| name != &call.name);
     }
 }
 
@@ -803,75 +770,6 @@ fn invalid_args_snippet(raw: &str, err: &str) -> String {
     out
 }
 
-// A call that did not run, or ran and failed.
-//
-// The notice goes inside the error body rather than beside it: a failure has
-// no content blocks to append one to, and the model reads the body.
-fn failed(
-    call: &ToolCall,
-    mut body: String,
-    code: Option<&'static str>,
-    failures: &mut Failures,
-    journal: Option<&std::path::Path>,
-) -> ToolResult {
-    if let Some(notice) = too_many_failures(call, code, failures, journal) {
-        body.push_str(&notice);
-    }
-    ToolResult::error(call.id.clone(), &call.name, body)
-}
-
-// Name a tool whose failures are piling up. The count is per tool and per
-// stable error code, so the wording of the refusal — which a loop keeps
-// changing — never matters: a call that keeps coming back refused the same way
-// is a loop, whatever the prose says, while a genuinely different error
-// starts a new count. Two failures is already the whole story; the second
-// tells the model nothing the first did not, so there is no leeway the way
-// there is for a re-read. Naming resets the count, so a mistake made long
-// after the loop was broken is not called the Nth repeat of it.
-fn too_many_failures(
-    call: &ToolCall,
-    code: Option<&'static str>,
-    failures: &mut Failures,
-    journal: Option<&std::path::Path>,
-) -> Option<String> {
-    let key = (
-        call.name.clone(),
-        code.map(str::to_owned).unwrap_or_default(),
-    );
-    let n = failures.entry(key).or_insert(0);
-    *n += 1;
-    if *n < FAILURE_LIMIT {
-        return None;
-    }
-    let seen = *n;
-    *n = 0;
-    tracing::warn!(
-        target: "pi::tool",
-        tool = %call.name,
-        code = code.unwrap_or_default(),
-        seen,
-        "a tool keeps failing in a row"
-    );
-    let mut notice = format!(
-        "\n[the same `{}` call has now failed the same way {seen} times. \
-         Sending it again will not change the answer — change the call, \
-         or reach the goal another way.",
-        call.name
-    );
-    // The journal holds what the transcript cannot: the call as it went out on
-    // the wire. Named exactly, because it is this session's and `ctx` followed
-    // the session here.
-    if let Some(journal) = journal {
-        notice.push_str(&format!(
-            " The wire records for this session are in {} — it is JSONL, so \
-             grep it rather than reading it whole.",
-            journal.display()
-        ));
-    }
-    notice.push(']');
-    Some(notice)
-}
-
 fn wedged(idle: std::time::Duration) -> llm::BrainError {
     llm::BrainError::Stream(format!("the stream sent nothing for {}s", idle.as_secs()))
 }
@@ -885,71 +783,4 @@ async fn leashed<T>(
     tokio::time::timeout(idle, fut)
         .await
         .map_err(|_| wedged(idle))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use llm::message::ToolCall;
-
-    fn call(name: &str) -> ToolCall {
-        ToolCall {
-            id: format!("call_{name}"),
-            name: name.into(),
-            args: serde_json::json!({}),
-        }
-    }
-
-    #[test]
-    fn two_same_code_failures_are_named() {
-        let mut f = Failures::new();
-        assert!(too_many_failures(&call("edit"), Some("EDIT_REFUSED"), &mut f, None).is_none());
-        let n = too_many_failures(&call("edit"), Some("EDIT_REFUSED"), &mut f, None);
-        assert!(n.is_some(), "second same-code failure is named");
-        assert!(n.unwrap().contains("edit"));
-    }
-
-    #[test]
-    fn a_different_code_starts_a_fresh_count() {
-        let mut f = Failures::new();
-        too_many_failures(&call("edit"), Some("EDIT_REFUSED"), &mut f, None);
-        // A genuinely different error is a new situation, not a loop.
-        assert!(
-            too_many_failures(&call("edit"), Some("EDIT_RENUMBERED"), &mut f, None).is_none(),
-            "different code must not count against the old one"
-        );
-    }
-
-    #[test]
-    fn a_success_clears_the_streak_except_for_edits() {
-        let mut f = Failures::new();
-        too_many_failures(&call("bash"), Some("BASH_TIMEOUT"), &mut f, None);
-        note_success(&call("bash"), &mut f);
-        assert!(f.is_empty(), "a bash success breaks the bash streak");
-
-        // Landing one edit does not mean the next will land, so its streak
-        // stays until the model changes approach.
-        too_many_failures(&call("edit"), Some("EDIT_REFUSED"), &mut f, None);
-        note_success(&call("edit"), &mut f);
-        assert!(
-            f.contains_key(&("edit".into(), "EDIT_REFUSED".into())),
-            "an edit success keeps the edit streak"
-        );
-    }
-
-    #[test]
-    fn a_failure_after_naming_starts_a_fresh_count() {
-        let mut f = Failures::new();
-        too_many_failures(&call("edit"), Some("EDIT_REFUSED"), &mut f, None);
-        assert!(
-            too_many_failures(&call("edit"), Some("EDIT_REFUSED"), &mut f, None).is_some(),
-            "two in a row are named"
-        );
-        // The naming reset the count: one isolated mistake after the loop was
-        // broken is a new situation, not the Nth repeat of the old one.
-        assert!(
-            too_many_failures(&call("edit"), Some("EDIT_REFUSED"), &mut f, None).is_none(),
-            "a single failure after naming must not be called a repeat"
-        );
-    }
 }

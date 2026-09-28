@@ -6,7 +6,7 @@ use crate::{Skill, body};
 use tool::limit::{MAX_BYTES, over_limit};
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};
 
-const NAME: &str = tool::names::SKILL;
+const NAME: &str = "skill";
 
 #[derive(Deserialize)]
 struct Args {
@@ -158,7 +158,7 @@ impl Tool for Load {
             if let Ok(meta) = tokio::fs::metadata(&path).await
                 && meta.len() > MAX_BYTES
             {
-                return Ok(ToolOutput::useless(over_limit(
+                return Ok(ToolOutput::text(over_limit(
                     &format!("{}: SKILL.md", args.name),
                     meta.len(),
                 )));
@@ -188,7 +188,7 @@ impl Tool for Load {
         if let Ok(meta) = tokio::fs::metadata(&real).await
             && meta.len() > MAX_BYTES
         {
-            return Ok(ToolOutput::useless(over_limit(
+            return Ok(ToolOutput::text(over_limit(
                 &format!("{}/{rel}", args.name),
                 meta.len(),
             )));

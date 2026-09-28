@@ -60,10 +60,14 @@ struct Hit {
 
 pub struct Grep;
 
+impl Grep {
+    pub const NAME: &'static str = "grep";
+}
+
 #[async_trait]
 impl Tool for Grep {
     fn name(&self) -> &str {
-        tool::names::GREP
+        Self::NAME
     }
 
     fn description(&self) -> &str {
@@ -236,7 +240,7 @@ impl Tool for Grep {
                     " ({skipped} files over the size limit were skipped)"
                 ));
             }
-            return Ok(ToolOutput::useless(format!(
+            return Ok(ToolOutput::text(format!(
                 "no match for `{}`{note}",
                 args.pattern
             )));

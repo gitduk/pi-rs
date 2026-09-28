@@ -380,11 +380,14 @@ once, is refused against a content hash taken at the last read. Concurrent edits
 to one file serialize per path — otherwise both pass their tag check and one
 change disappears silently.
 
-**Compaction** is a ladder, cheapest rung first: supersede a read that a later
-read replaced, omit an uneventful result, age one out, take the bulk of a tool
-call's arguments once it has run, and only then summarize before dropping. What
-it drops is a *round* — a question and everything that answered it — because
-taking the answer alone left the question standing with nothing after it.
+**Compaction** is a ladder, cheapest rung first: supersede a result the same
+call — same tool, same arguments — answered again later, age one out, take the
+bulk of a tool call's arguments once it has run, cut what was aged out down to
+its notice, and only then summarize before dropping. It reads calls, results,
+sizes and rounds, never what a tool means, so nothing is pinned: a skill whose
+instructions went is simply called again. What it drops is a *round* — a
+question and everything that answered it — because taking the answer alone
+left the question standing with nothing after it.
 
 The session is append-only; compaction writes a *record* of what it dropped and
 the model's view is derived from it, so the history that made the session worth

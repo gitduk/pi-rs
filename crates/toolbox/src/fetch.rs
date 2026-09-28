@@ -167,10 +167,14 @@ fn redirect_verdict(attempt: reqwest::redirect::Attempt) -> reqwest::redirect::A
     }
 }
 
+impl Fetch {
+    pub const NAME: &'static str = "fetch";
+}
+
 #[async_trait]
 impl Tool for Fetch {
     fn name(&self) -> &str {
-        tool::names::FETCH
+        Self::NAME
     }
 
     fn description(&self) -> &str {

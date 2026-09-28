@@ -18,10 +18,14 @@ struct Args {
 
 pub struct Bash;
 
+impl Bash {
+    pub const NAME: &'static str = "bash";
+}
+
 #[async_trait]
 impl Tool for Bash {
     fn name(&self) -> &str {
-        tool::names::BASH
+        Self::NAME
     }
 
     fn description(&self) -> &str {
@@ -85,7 +89,7 @@ impl Tool for Bash {
             // Named here too. Without it the row falls back to the body, and a
             // command that printed nothing is the one whose row is read to
             // find out what was asked.
-            return Ok(ToolOutput::useless("exit 0, no output").with_preview(preview));
+            return Ok(ToolOutput::text("exit 0, no output").with_preview(preview));
         }
         Ok(ToolOutput::text(body).with_preview(preview))
     }

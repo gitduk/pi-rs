@@ -19,10 +19,14 @@ struct Args {
 
 pub struct Glob;
 
+impl Glob {
+    pub const NAME: &'static str = "glob";
+}
+
 #[async_trait]
 impl Tool for Glob {
     fn name(&self) -> &str {
-        tool::names::GLOB
+        Self::NAME
     }
 
     fn description(&self) -> &str {
@@ -112,7 +116,7 @@ impl Tool for Glob {
         }
 
         if found.is_empty() {
-            return Ok(ToolOutput::useless(if unreadable.is_empty() {
+            return Ok(ToolOutput::text(if unreadable.is_empty() {
                 format!("no file matches `{}`", args.pattern)
             } else {
                 format!(

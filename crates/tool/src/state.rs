@@ -1,5 +1,5 @@
 //! Where pi keeps what it accumulates between runs, and the id sanitization
-//! that names files inside it. Shared by the transcript store in `cli` and the
+//! that names files inside it. Shared by the transcript store in `pi` and the
 //! spill layer in `tool`, which both need the same answer without a cycle.
 
 use std::path::{Path, PathBuf};
@@ -11,22 +11,8 @@ pub fn dir() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".pi")))
 }
 
-/// Where transcripts and their journals are kept, one directory per session.
-pub fn sessions() -> Option<PathBuf> {
-    dir().map(|d| d.join("sessions"))
-}
-
-/// One session's own directory. Named here rather than in `cli`, which is what
-/// writes it: the agent points the model at the journal inside when a tool
-/// keeps failing, and neither side may guess at the other's layout.
-pub fn session_dir(workspace: &Path, id: &str) -> Option<PathBuf> {
-    sessions().map(|s| s.join(key_of(workspace)).join(file_stem(id)))
-}
-
-/// The journal inside that directory. Named here for the same reason: `cli`
-/// writes it, the agent points at it, and the sweep looks for it by name — one
-/// of the three renaming it alone would leave the other two addressing a file
-/// that is not there.
+/// The journal inside each session's directory, named once for the store that
+/// writes it and the sweep that looks for it by name.
 pub const JOURNAL_FILE: &str = "journal.jsonl";
 
 /// Write bytes where only this user can read them, whole or not at all.

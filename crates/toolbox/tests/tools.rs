@@ -65,39 +65,6 @@ async fn read_leaves_the_workspace_but_write_bash_and_edit_do_not() {
     assert!(matches!(e, Err(ToolError::Escape(_))), "{e:?}");
 }
 
-// `useless` marks a result that carries nothing for a later turn — the flag
-// compaction reads, not the prose the model reads. A silent success is
-// nothing; a silent failure is exactly what a later turn needs.
-#[tokio::test]
-async fn results_that_carry_nothing_are_marked_useless() {
-    let (_d, c) = ctx();
-    std::fs::write(c.workspace.root().join("a.txt"), "one\n").unwrap();
-
-    let past = toolbox::read::Read
-        .execute(json!({ "path": "a.txt", "offset": 99 }), &c)
-        .await
-        .unwrap();
-    assert!(past.useless);
-
-    let silent = toolbox::bash::Bash
-        .execute(json!({ "command": "true" }), &c)
-        .await
-        .unwrap();
-    assert!(silent.useless);
-
-    let quiet = toolbox::bash::Bash
-        .execute(json!({ "command": "grep nothing /dev/null | head" }), &c)
-        .await
-        .unwrap();
-    assert!(quiet.useless);
-
-    let failed = toolbox::bash::Bash
-        .execute(json!({ "command": "false" }), &c)
-        .await
-        .unwrap();
-    assert!(!failed.useless, "a silent failure is not a silent success");
-}
-
 // The window arithmetic saturates: a limit past the end of the file reads to
 // the end rather than wrapping into a panic.
 #[tokio::test]
@@ -163,7 +130,7 @@ async fn a_huge_file_is_refused_before_it_is_read_into_memory() {
         .execute(json!({ "path": "big.log" }), &c)
         .await
         .unwrap();
-    assert!(out.useless);
+    assert!(out.flatten().contains("over the"), "{}", out.flatten());
 }
 
 // The output budget is spent in bytes, not characters: a char-counted clamp

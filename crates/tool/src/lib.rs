@@ -24,7 +24,6 @@ where
 }
 
 pub mod limit;
-pub mod names;
 pub mod output;
 pub mod registry;
 pub mod spill;
@@ -169,25 +168,11 @@ pub enum Concurrency {
     Exclusive,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-/// Why an edit was refused, for the loop to group repeat failures by.
-pub enum EditError {
-    // The call itself is spelt wrong: no anchor, an empty one, nothing to do.
-    Malformed,
-    // The edit does not fit the file as it stands, or would break it.
-    Refused,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
-    // A refusal whose prose the model reads, plus the category the loop
-    // groups repeat failures by when the prose alone keeps changing.
+    // A refusal whose prose the model reads.
     #[error("{0}")]
     Invalid(String),
-
-    // A refusal tagged with its `EditError`, for the same purpose.
-    #[error("{1}")]
-    Edit(EditError, String),
 
     // The one failure the loop must not hand back to the model.
     #[error("cancelled")]
@@ -222,32 +207,14 @@ impl ToolError {
             _ => None,
         }
     }
-
-    /// The stable category the loop groups repeat failures by, where one
-    /// exists. Unlike `code`, this never reaches the model — it exists only
-    /// to tell "the same failure" from "a genuinely new one" when the prose
-    /// keeps changing. A `None` here falls back to grouping by tool name.
-    pub fn category(&self) -> Option<&'static str> {
-        match self {
-            ToolError::Edit(kind, _) => Some(match kind {
-                EditError::Malformed => "EDIT_MALFORMED",
-                EditError::Refused => "EDIT_REFUSED",
-            }),
-            _ => self.code(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolOutput {
     pub content: Vec<ToolResultContent>,
-    /// Carries no information for later turns. Compaction may drop it.
-    pub useless: bool,
     /// One line for a progress display. Set it when the first line of the
     /// result is structure rather than content.
     pub preview: Option<String>,
-    /// What this call used that the caller has not counted: a nested run's
-    /// totals, carried back on the result that ended it.
     /// What the call spent, for a tool that runs a model of its own. Tokens
     /// only: what they are worth is the surface's arithmetic, not ours.
     pub spent: llm::stream::Usage,
@@ -259,7 +226,6 @@ impl ToolOutput {
             content: vec![ToolResultContent::Text(llm::message::Text {
                 text: body.into(),
             })],
-            useless: false,
             preview: None,
             spent: llm::stream::Usage::default(),
         }
@@ -288,13 +254,6 @@ impl ToolOutput {
                 .next()
                 .unwrap_or_default()
                 .to_string(),
-        }
-    }
-
-    pub fn useless(body: impl Into<String>) -> Self {
-        Self {
-            useless: true,
-            ..Self::text(body)
         }
     }
 

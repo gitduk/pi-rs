@@ -998,7 +998,6 @@ pub fn omitted_block(entry: &Entry, notice: &str) -> Vec<UserContent> {
             out.content = vec![ToolResultContent::Text(Text {
                 text: notice.to_string(),
             })];
-            out.useless = false;
             vec![UserContent::ToolResult(out)]
         }
         _ => vec![UserContent::Text(Text {

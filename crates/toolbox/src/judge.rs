@@ -172,10 +172,14 @@ impl Question {
     }
 }
 
+impl Judge {
+    pub const NAME: &'static str = "judge";
+}
+
 #[async_trait]
 impl Tool for Judge {
     fn name(&self) -> &str {
-        tool::names::JUDGE
+        Self::NAME
     }
 
     fn description(&self) -> &str {

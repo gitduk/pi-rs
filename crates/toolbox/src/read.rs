@@ -169,10 +169,14 @@ fn deliver(ctx: &Ctx, rel: &str, view: View) -> Result<ToolOutput, ToolError> {
 
 pub struct Read;
 
+impl Read {
+    pub const NAME: &'static str = "read";
+}
+
 #[async_trait]
 impl Tool for Read {
     fn name(&self) -> &str {
-        tool::names::READ
+        Self::NAME
     }
 
     fn description(&self) -> &str {
@@ -249,7 +253,7 @@ impl Tool for Read {
             }
             names.sort();
             if names.is_empty() {
-                return Ok(ToolOutput::useless(format!("{rel}/ is empty")));
+                return Ok(ToolOutput::text(format!("{rel}/ is empty")));
             }
             let rows: Vec<String> = names.iter().map(|n| format!("{n}\n")).collect();
             let notice = if over > 0 {
@@ -275,11 +279,11 @@ impl Tool for Read {
         // model asked for it by locator, and the retrieval hint promised read
         // would serve it — so the cap does not apply there.
         if meta.len() > MAX_BYTES && !is_spill {
-            return Ok(ToolOutput::useless(over_limit(&rel, meta.len())));
+            return Ok(ToolOutput::text(over_limit(&rel, meta.len())));
         }
         let bytes = tokio::fs::read(&path).await?;
         if looks_binary(&bytes) {
-            return Ok(ToolOutput::useless(format!(
+            return Ok(ToolOutput::text(format!(
                 "{rel} is binary ({} bytes); read is for text",
                 meta.len()
             )));
@@ -290,7 +294,7 @@ impl Tool for Read {
         let content = match std::str::from_utf8(&bytes) {
             Ok(text) => text,
             Err(e) => {
-                return Ok(ToolOutput::useless(format!(
+                return Ok(ToolOutput::text(format!(
                     "{rel} is not valid UTF-8 (byte {} is invalid). If it is text in \
                      another encoding, convert it with bash first.",
                     e.valid_up_to()
@@ -355,7 +359,7 @@ impl Tool for Read {
         let start = offset - 1;
 
         if start >= all.len() {
-            return Ok(ToolOutput::useless(format!(
+            return Ok(ToolOutput::text(format!(
                 "{rel} line {offset} is past the end ({} lines)",
                 all.len()
             )));

@@ -101,7 +101,7 @@ impl Tool for Script {
 
         let captured = exited.stdout;
         if captured.text.trim().is_empty() {
-            return Ok(ToolOutput::useless(format!("{}: no output", self.name)));
+            return Ok(ToolOutput::text(format!("{}: no output", self.name)));
         }
         let mut body = captured.text;
         if let Some(spilled) = &captured.spill {

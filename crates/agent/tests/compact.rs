@@ -31,12 +31,6 @@ fn result(id: &str, name: &str, body: &str) -> Message {
     Message::tool_results(vec![ToolResult::text(id, name, body)])
 }
 
-fn useless(id: &str, name: &str, body: &str) -> Message {
-    let mut r = ToolResult::text(id, name, body);
-    r.useless = true;
-    Message::tool_results(vec![r])
-}
-
 fn body_of(m: &Message) -> String {
     match m {
         Message::User { content } => content
@@ -88,15 +82,16 @@ fn a_transcript_under_budget_is_left_alone() {
     assert_eq!(r.before, r.after);
 }
 
-// Which results may stand in for which: a later read of the same path
-// supersedes the older one — offset and limit sit outside the key — while
-// reads of different files and edits, which record that something happened,
-// never supersede anything.
+// Which results may stand in for which: the same call made again — any tool,
+// same name and arguments — supersedes the older answer. A different range of
+// the same file, a different file, a different edit: all different calls.
 #[test]
-fn supersession_takes_only_a_later_read_of_the_same_file() {
-    let rows: &[(&str, Vec<Message>, usize, usize)] = &[
+fn only_the_same_call_made_again_supersedes() {
+    let edit =
+        |old: &str| json!({ "path": "a.rs", "edits": [{ "old_string": old, "new_string": "x" }] });
+    let rows: &[(&str, Vec<Message>, usize)] = &[
         (
-            "a later read of the same path",
+            "a later read of the same file",
             vec![
                 Message::user("go"),
                 call("c1", "read", json!({ "path": "a.rs" })),
@@ -104,11 +99,21 @@ fn supersession_takes_only_a_later_read_of_the_same_file() {
                 call("c2", "read", json!({ "path": "a.rs" })),
                 result("c2", "read", &big(9_000)),
             ],
-            4_000,
             1,
         ),
         (
-            "offset and limit sit outside the key",
+            "the same command run again",
+            vec![
+                Message::user("go"),
+                call("c1", "bash", json!({ "command": "cargo test" })),
+                result("c1", "bash", &big(9_000)),
+                call("c2", "bash", json!({ "command": "cargo test" })),
+                result("c2", "bash", &big(9_000)),
+            ],
+            1,
+        ),
+        (
+            "a ranged read, then the whole file",
             vec![
                 Message::user("go"),
                 call(
@@ -120,8 +125,7 @@ fn supersession_takes_only_a_later_read_of_the_same_file() {
                 call("c2", "read", json!({ "path": "a.rs" })),
                 result("c2", "read", &big(9_000)),
             ],
-            4_000,
-            1,
+            0,
         ),
         (
             "reads of different files",
@@ -132,70 +136,40 @@ fn supersession_takes_only_a_later_read_of_the_same_file() {
                 call("c2", "read", json!({ "path": "b.rs" })),
                 result("c2", "read", &big(9_000)),
             ],
-            100_000,
             0,
         ),
         (
-            "a later edit of the same file",
+            "two different edits of the same file",
             vec![
                 Message::user("go"),
-                call(
-                    "c1",
-                    "edit",
-                    json!({ "path": "a.rs", "edits": [{ "old_string": "one", "new_string": "two" }] }),
-                ),
+                call("c1", "edit", edit("one")),
                 result("c1", "edit", &big(9_000)),
-                call(
-                    "c2",
-                    "edit",
-                    json!({ "path": "a.rs", "edits": [{ "old_string": "three", "new_string": "four" }] }),
-                ),
+                call("c2", "edit", edit("two")),
                 result("c2", "edit", &big(9_000)),
             ],
-            4_000,
             0,
         ),
     ];
-    for (what, m, budget, want) in rows {
+    for (what, m, want) in rows {
         let mut m = m.clone();
-        let r = compact(&mut m, *budget, &Policy::default());
+        let r = compact(&mut m, 4_000, &Policy::default());
         assert_eq!(r.superseded, *want, "{what}: {r:?}");
         if *want == 1 {
-            // The notice replaces the dead weight and the newest read survives.
+            // The notice replaces the dead weight and the newest answer survives.
             assert_eq!(r.dropped, 0, "{what}: {r:?}");
             assert!(
-                body_of(&m[2]).contains("superseded by a later read"),
+                body_of(&m[2]).contains("the same call ran again later"),
                 "{what}: {}",
                 body_of(&m[2])
             );
             assert!(
                 body_of(&m[4]).starts_with("xxx"),
-                "{what}: the newest read must survive: {}",
+                "{what}: the newest answer must survive: {}",
                 body_of(&m[4])
             );
         }
         assert_balanced(&m);
     }
-}
-
-#[test]
-fn results_their_tool_called_uneventful_go_first() {
-    let mut m = vec![
-        Message::user("go"),
-        call("c1", "grep", json!({ "pattern": "zzz" })),
-        useless("c1", "grep", &big(3_000)),
-        call("c2", "read", json!({ "path": "a.rs" })),
-        result("c2", "read", &big(300)),
-    ];
-    // Omitting the one uneventful result is enough on its own.
-    let r = compact(&mut m, 500, &Policy::default());
-    assert_eq!(r.uneventful, 1);
-    assert_eq!(r.dropped, 0, "{r:?}");
-    assert!(
-        body_of(&m[2]).contains("reported nothing"),
-        "{}",
-        body_of(&m[2])
-    );
 }
 
 #[test]
@@ -268,12 +242,10 @@ fn an_aged_out_result_keeps_its_ends_or_lowers_to_the_notice() {
     }
 }
 
-// Instructions the agent is in the middle of following are not spare context,
-// whatever the budget says: every rung refuses the skill exchange and takes
-// what surrounds it instead.
+// A skill body is compacted like any other result: nothing is pinned, and the
+// model calls the skill again when it needs the instructions back.
 #[test]
-fn a_skill_exchange_survives_whatever_tier_takes_the_rest() {
-    // The drop tier passes the skill by and takes the bash exchange instead.
+fn a_skill_result_is_compacted_like_any_other() {
     let mut m = vec![
         Message::user("go"),
         call("c1", "skill", json!({ "name": "commit" })),
@@ -283,45 +255,16 @@ fn a_skill_exchange_survives_whatever_tier_takes_the_rest() {
     ];
     let r = compact(
         &mut m,
-        200,
-        &Policy {
-            protect_tail: 0,
-            ..Policy::default()
-        },
-    );
-    assert!(r.dropped > 0, "{r:?}");
-    assert!(
-        body_of(&m[2]).starts_with("xxx"),
-        "the skill body must survive: {}",
-        body_of(&m[2])
-    );
-    assert_balanced(&m);
-
-    // The omission rungs take the two reads and still refuse the skill.
-    let mut m = vec![
-        Message::user("go"),
-        call("c1", "skill", json!({ "name": "commit" })),
-        result("c1", "skill", &big(9_000)),
-        call("c2", "read", json!({ "path": "a.rs" })),
-        result("c2", "read", &big(9_000)),
-        call("c3", "read", json!({ "path": "a.rs" })),
-        result("c3", "read", &big(9_000)),
-    ];
-    let r = compact(
-        &mut m,
         4_000,
         &Policy {
             protect_tail: 0,
             ..Policy::default()
         },
     );
+    assert!(r.aged_out > 0, "{r:?}");
     assert!(
-        r.superseded + r.aged_out > 0,
-        "everything else was still reclaimed: {r:?}"
-    );
-    assert!(
-        body_of(&m[2]).starts_with("xxx"),
-        "the skill body must survive: {}",
+        body_of(&m[2]).starts_with("[omitted"),
+        "the oldest result goes first, skill or not: {}",
         body_of(&m[2])
     );
     assert_balanced(&m);

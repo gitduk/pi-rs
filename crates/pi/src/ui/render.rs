@@ -631,9 +631,6 @@ pub fn compaction_line(r: &agent::Report) -> String {
     if r.superseded > 0 {
         parts.push(format!("{} superseded", r.superseded));
     }
-    if r.uneventful > 0 {
-        parts.push(format!("{} uneventful", r.uneventful));
-    }
     if r.aged_out > 0 {
         parts.push(format!("{} aged out", r.aged_out));
     }
