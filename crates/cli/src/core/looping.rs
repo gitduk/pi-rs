@@ -1,24 +1,154 @@
-//! A `/loop` in force on one lane: the same line, submitted round after round
-//! until the tree stops changing.
+//! `/loop`: the same line, submitted round after round until the tree stops
+//! changing.
 //!
 //! What decides another round is the tree, never the model. Asked of the model
 //! it would be answered every time; measured, a round that changed nothing is
 //! the end of the loop and not a matter of opinion.
+//!
+//! A loop drives a lane from outside, as a channel does: the surface asks it
+//! for a round when the lane is free and tells it when a turn it began ends.
+//! The lane itself knows nothing of loops.
+
+use std::collections::BTreeMap;
 
 use tool::Ctx;
 
-/// A `/loop` in force on one lane.
-///
-/// What decides another round is the tree, never the model: the loop keeps a
-/// content fingerprint of the tree and stops when a round stops changing it.
-pub struct Looping {
-    /// Re-submitted verbatim each round, read as whatever it was the first
-    /// time — a skill stays a skill, prose stays prose.
+/// Every lane's loop, by lane token.
+#[derive(Default)]
+pub struct Loops {
+    by_lane: BTreeMap<u64, Entry>,
+}
+
+struct Entry {
+    looping: Looping,
+    phase: Phase,
+}
+
+// Where a loop is between one round and the next.
+#[derive(PartialEq, Eq)]
+enum Phase {
+    // The next round is owed and not yet handed out.
+    Due,
+    // Handed out; waiting to hear whether it started a turn.
+    Handed,
+    // A turn this loop began is running: its end is the loop's to measure.
+    // Anything else the lane runs meanwhile is not a round.
+    Running,
+}
+
+/// A round to submit: the goal as typed, and the note that goes before it.
+pub struct Due {
     pub goal: String,
-    pub round: usize,
-    /// Read into every round's prompt: how far the loop has got, and the
-    /// standing licence to change nothing.
     pub note: String,
+}
+
+impl Loops {
+    /// Put `lane` under a loop over `goal`, marked from where the tree stands
+    /// now. Its first round is due at once.
+    pub fn start(&mut self, lane: u64, goal: String, ctx: &Ctx) -> Result<(), String> {
+        if let Some(entry) = self.by_lane.get(&lane) {
+            return Err(format!(
+                "`{}` is already looping here — /loop to stop it first",
+                entry.looping.goal
+            ));
+        }
+        let looping = Looping::start(ctx, goal);
+        let phase = Phase::Due;
+        self.by_lane.insert(lane, Entry { looping, phase });
+        Ok(())
+    }
+
+    /// Stop the loop on `lane`, saying how far it got; `None` when none was.
+    pub fn stop(&mut self, lane: u64) -> Option<String> {
+        let l = self.take(lane)?;
+        Some(format!(
+            "loop stopped after {} round(s) of `{}`",
+            l.round, l.goal
+        ))
+    }
+
+    /// The round `lane` owes, handed out once. The surface asks only when the
+    /// lane is free and nothing typed is waiting: a typed line goes first.
+    pub fn due(&mut self, lane: u64) -> Option<Due> {
+        let entry = self
+            .by_lane
+            .get_mut(&lane)
+            .filter(|e| e.phase == Phase::Due)?;
+        entry.phase = Phase::Handed;
+        Some(Due {
+            goal: entry.looping.goal.clone(),
+            note: entry.looping.note.clone(),
+        })
+    }
+
+    /// The round just handed out started a turn: its end is this loop's.
+    pub fn ask(&mut self, lane: u64) {
+        if let Some(entry) = self.by_lane.get_mut(&lane) {
+            entry.phase = Phase::Running;
+        }
+    }
+
+    /// The round just handed out started no turn — a skill that went away at a
+    /// reload — so there is nothing to measure and the loop ends.
+    pub fn unstarted(&mut self, lane: u64) -> Option<String> {
+        let l = self.take(lane)?;
+        Some(format!(
+            "loop ended — `{}` starts no turn to measure",
+            l.goal
+        ))
+    }
+
+    /// A turn on `lane` ended. `None` when it was not one this loop began;
+    /// otherwise what the loop does next. `Again` leaves the next round due.
+    pub fn turn_ended(
+        &mut self,
+        lane: u64,
+        cut: Option<Cut>,
+        ctx: &Ctx,
+        cap: Option<usize>,
+    ) -> Option<Round> {
+        let entry = self
+            .by_lane
+            .get_mut(&lane)
+            .filter(|e| e.phase == Phase::Running)?;
+        let round = entry.looping.step(ctx, cut, cap);
+        if matches!(round, Round::Again) {
+            entry.phase = Phase::Due;
+        } else {
+            self.by_lane.remove(&lane);
+        }
+        Some(round)
+    }
+
+    /// Whether `lane` is under a loop, between rounds or in one.
+    pub fn active(&self, lane: u64) -> bool {
+        self.by_lane.contains_key(&lane)
+    }
+
+    /// End the loops of lanes that are gone — a removed checkout takes its
+    /// loop with it — and say which ended.
+    pub fn retain(&mut self, live: impl Fn(u64) -> bool) -> Vec<String> {
+        let gone: Vec<u64> = self.by_lane.keys().copied().filter(|l| !live(*l)).collect();
+        gone.into_iter()
+            .filter_map(|lane| self.take(lane))
+            .map(|l| format!("loop ended — `{}` lost its checkout", l.goal))
+            .collect()
+    }
+
+    fn take(&mut self, lane: u64) -> Option<Looping> {
+        self.by_lane.remove(&lane).map(|e| e.looping)
+    }
+}
+
+// One lane's loop: the goal, and what the tree has looked like so far.
+struct Looping {
+    // Re-submitted verbatim each round, read as whatever it was the first
+    // time — a skill stays a skill, prose stays prose.
+    goal: String,
+    round: usize,
+    // Read into every round's prompt: how far the loop has got, and the
+    // standing licence to change nothing.
+    note: String,
     // Fingerprints the tree has worn, oldest first, the starting state
     // included. The last one is the round that just ended; an earlier hit
     // means a round undid its way back.
@@ -28,11 +158,6 @@ pub struct Looping {
     prev: TreeState,
     // Consecutive rounds that changed fewer than `THIN_CHANGES` lines.
     thin: usize,
-    // Set when this loop puts a round in the queue, taken when that round
-    // ends. A run that did not come from here — a line typed between rounds
-    // — also ends, and counting it would move the loop on something it never
-    // ran.
-    running: bool,
 }
 
 // A round that moves fewer lines than this is below the noise floor; that
@@ -144,8 +269,8 @@ pub enum Cut {
 
 /// What a loop does now that one of its rounds has ended.
 pub enum Round {
-    // Run this line again.
-    Again { goal: String },
+    // Run the goal again: the next round is due.
+    Again,
     // The round changed nothing. Where a loop that is fixing things finishes:
     // a pass that found nothing to do has nothing to do next time either.
     Quiet,
@@ -161,20 +286,28 @@ pub enum Round {
     Cut(Cut),
 }
 
+impl Round {
+    /// The line that says why the loop ended; `None` while it goes on.
+    pub fn ending(&self) -> Option<String> {
+        let said = match self {
+            Round::Again => return None,
+            Round::Cut(Cut::Stopped) => "loop stopped — the round was cut short".into(),
+            Round::Cut(Cut::Failed) => "loop stopped — the round failed".into(),
+            Round::Cut(Cut::Unsent) => "loop stopped — the prompt came back".into(),
+            Round::Quiet => "loop done — that round changed nothing".into(),
+            Round::Oscillating => "loop stopped — a round undid the work before it".into(),
+            Round::Thin => "loop stopped — rounds are only nibbling now".into(),
+            Round::Capped(n) => {
+                format!("loop stopped at loop_max_rounds ({n}) — rounds were still changing files")
+            }
+        };
+        Some(said)
+    }
+}
+
 impl Looping {
-    /// The round beginning is the one this loop queued. Nothing else the lane
-    /// runs is one, so nothing else may move the loop on.
-    pub fn mark_running(&mut self) {
-        self.running = true;
-    }
-
-    /// Whether the round now ending is the one this loop queued.
-    pub fn is_running(&self) -> bool {
-        self.running
-    }
-
-    /// A loop over `goal`, marked from where the tree stands now.
-    pub fn start(ctx: &Ctx, goal: String) -> Self {
+    // A loop over `goal`, marked from where the tree stands now.
+    fn start(ctx: &Ctx, goal: String) -> Self {
         let (seen, prev) = tree_mark(ctx, &TreeState::new());
         Self {
             goal,
@@ -183,14 +316,12 @@ impl Looping {
             seen: vec![seen],
             prev,
             thin: 0,
-            running: false,
         }
     }
 
-    /// What the loop does now that a round has ended. `cut` is what stopped the
-    /// round short, and `None` is a round that reached its own end.
-    pub fn step(&mut self, ctx: &Ctx, cut: Option<Cut>, cap: Option<usize>) -> Round {
-        self.running = false;
+    // What the loop does now that a round has ended. `cut` is what stopped the
+    // round short, and `None` is a round that reached its own end.
+    fn step(&mut self, ctx: &Ctx, cut: Option<Cut>, cap: Option<usize>) -> Round {
         self.round += 1;
         // A cut round ends the loop without measuring the tree: esc may have
         // stopped the run mid-write, and where the tree stands now is not a
@@ -244,8 +375,6 @@ impl Looping {
         if cap.is_some_and(|cap| self.round >= cap) {
             return Round::Capped(self.round);
         }
-        Round::Again {
-            goal: self.goal.clone(),
-        }
+        Round::Again
     }
 }

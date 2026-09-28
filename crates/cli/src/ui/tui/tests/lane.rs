@@ -6,7 +6,7 @@ use crate::store::keys::Mode;
 use crate::store::listing::Listing;
 use crate::store::status::Segment;
 use crate::ui::tui::screen::plain;
-use crate::ui::tui::{Asked, Deed, Intent, Queued, Row, View, view_at};
+use crate::ui::tui::{Asked, Deed, Intent, Origin, Row, View, view_at};
 use agent::Event;
 
 use super::harness::*;
@@ -596,32 +596,27 @@ fn only_a_finished_lane_wears_a_mark_in_the_bar() {
     );
 }
 
-// The loop going on is not the lane finishing: the round queued behind the
-// one that ended is work this lane still has, so `Done` is not its mark.
+// A loop between rounds is not the lane finishing: its next round is work
+// this lane still has, so `Done` is not its mark.
 #[test]
-fn a_lane_with_a_round_waiting_has_not_finished() {
+fn a_lane_under_a_loop_has_not_finished() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
     let (_run_dir, mut behind) = a_running_lane();
     behind.set_worktree(Some("fix-mem".into()));
-    behind.loop_start("go".into());
     behind.end(true, false);
     let token = behind.token();
+    tui.loops.start(token, "go".into(), behind.ctx()).unwrap();
     tui.core.lanes.push(behind);
-    view_at(&mut tui.views, token).queued.push(Queued::Round {
-        goal: "go".into(),
-        note: String::new(),
-    });
     tui.refresh_tabs();
     assert_eq!(
         tui.ui.tabs[1].mark,
         crate::ui::tui::Mark::Plain,
-        "the round in the queue is the loop going on"
+        "the loop is going on"
     );
 
-    // The round that ended was the loop's last: nothing waits behind it,
-    // and that is the lane the colour is for.
-    view_at(&mut tui.views, token).queued.clear();
+    // The loop is over, and that is the lane the colour is for.
+    tui.loops.stop(token);
     tui.refresh_tabs();
     assert_eq!(tui.ui.tabs[1].mark, crate::ui::tui::Mark::Done);
 }
@@ -978,19 +973,19 @@ async fn a_queued_line_remembers_the_channel_it_came_from() {
 
     tui.admit(
         Asked::Core(Intent::Prompt("from the phone".into())),
-        Some("wechat"),
+        Origin::Channel("wechat"),
     );
-    tui.admit(Asked::Core(Intent::Prompt("typed here".into())), None);
+    tui.admit(
+        Asked::Core(Intent::Prompt("typed here".into())),
+        Origin::Typed,
+    );
 
     let from: Vec<_> = view_at(&mut tui.views, token)
         .queued
         .iter()
-        .map(|q| match q {
-            Queued::Line(_, from) => *from,
-            Queued::Round { .. } => panic!("no loop here"),
-        })
+        .map(|q| q.origin)
         .collect();
-    assert_eq!(from, [Some("wechat"), None]);
+    assert_eq!(from, [Origin::Channel("wechat"), Origin::Typed]);
 }
 
 // A line the phone steered in that the run ended before hearing comes back
@@ -1007,12 +1002,18 @@ async fn a_steered_line_the_run_never_heard_comes_back_as_its_channels() {
         Some(steer.clone()),
     );
 
-    tui.admit(Asked::Core(Intent::Prompt("heard".into())), Some("wechat"));
+    tui.admit(
+        Asked::Core(Intent::Prompt("heard".into())),
+        Origin::Channel("wechat"),
+    );
     // The run looked once: that line was heard, the rest were not.
     steer.take();
     // The same words from both sides: told apart by order, never by text.
-    tui.admit(Asked::Core(Intent::Prompt("same".into())), None);
-    tui.admit(Asked::Core(Intent::Prompt("same".into())), Some("wechat"));
+    tui.admit(Asked::Core(Intent::Prompt("same".into())), Origin::Typed);
+    tui.admit(
+        Asked::Core(Intent::Prompt("same".into())),
+        Origin::Channel("wechat"),
+    );
     tui.settle(crate::ui::tui::job::Done {
         token,
         kind: crate::ui::tui::job::Kind::Turn,
@@ -1026,16 +1027,16 @@ async fn a_steered_line_the_run_never_heard_comes_back_as_its_channels() {
     let back: Vec<_> = view_at(&mut tui.views, token)
         .queued
         .iter()
-        .map(|q| match q {
-            Queued::Line(Intent::Prompt(text), from) => (text.clone(), *from),
+        .map(|q| match &q.intent {
+            Intent::Prompt(text) => (text.clone(), q.origin),
             _ => panic!("only the unheard lines are queued"),
         })
         .collect();
     assert_eq!(
         back,
         [
-            ("same".to_string(), None),
-            ("same".to_string(), Some("wechat"))
+            ("same".to_string(), Origin::Typed),
+            ("same".to_string(), Origin::Channel("wechat"))
         ]
     );
     assert!(tui.steered.is_empty(), "the ledger lets go with the run");

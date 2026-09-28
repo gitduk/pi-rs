@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::row::Row;
 use super::term::{Deafened, EXIT_GRACE, external_editor, scratch_file};
-use super::view::{Queued, front_view, tail_of, view_at};
+use super::view::{Origin, Queued, front_view, tail_of, view_at};
 use super::{NO_TRANSCRIPT, Tui};
 use crate::core;
 use crate::core::looping::Cut;
@@ -336,7 +336,7 @@ impl Tui {
         // waiting before closing anything, or a tool row still open is frozen
         // as abandoned and the elapsed figure is read off a cleared clock.
         self.serve_lanes().await;
-        let Some(lane) = self.core.lanes.iter().position(|l| l.token() == done.token) else {
+        let Some(lane) = self.core.position_of(done.token) else {
             return;
         };
         let back = self.core.lanes[lane].finish();
@@ -349,15 +349,18 @@ impl Tui {
         // The mailbox is first in, first out: what went unheard is the tail
         // of what was said, so it lines up with the tail of the ledger.
         let heard = steered.len().saturating_sub(back.unheard.len());
-        let from = steered[heard..]
+        let origins = steered[heard..]
             .iter()
             .copied()
-            .chain(std::iter::repeat(None));
+            .chain(std::iter::repeat(Origin::Typed));
         let unheard: Vec<_> = back
             .unheard
             .into_iter()
-            .zip(from)
-            .map(|(said, from)| Queued::Line(Intent::Prompt(said), from))
+            .zip(origins)
+            .map(|(said, origin)| Queued {
+                intent: Intent::Prompt(said),
+                origin,
+            })
             .collect();
         view_at(&mut self.views, token).queued.extend(unheard);
         let unsend = back.unsend;
@@ -459,8 +462,8 @@ impl Tui {
                 .extend(rows);
         }
 
-        // Before the split below, so a round that ended off-screen still arms
-        // the next one — it waits with the lane, like any queued line.
+        // Before the split below, so a round that ended off-screen still makes
+        // the next one due — it goes when that lane is next in front and free.
         //
         // A run that came back cancelled is the user's own stop, not a failure
         // to report to the model. One that never came back has no outcome to
@@ -478,7 +481,12 @@ impl Tui {
         } else {
             None
         };
-        let said = self.step_loop(lane, cut);
+        let token = self.core.lanes[lane].token();
+        let cap = self.core.config.loop_cap();
+        let ended = self
+            .loops
+            .turn_ended(token, cut, self.core.lanes[lane].ctx(), cap)
+            .and_then(|round| round.ending());
 
         let ok = out.is_ok();
         self.close_run(lane, out);
@@ -493,8 +501,8 @@ impl Tui {
         }
         // Last, and outside the split: a rewind rebuilds the whole surface, and
         // a row landed before it would go with the old drawing.
-        if let Some(said) = said {
-            self.say_of(lane, said);
+        if let Some(ended) = ended {
+            self.say_of(lane, ended);
         }
     }
 

@@ -386,9 +386,7 @@ impl Core {
             .and_then(|trees| trees.into_iter().find(|t| !t.main && t.name == name))
         {
             let running = self.lanes.iter().enumerate().any(|(i, lane)| {
-                i != self.current
-                    && lane.root().starts_with(&target.path)
-                    && (lane.is_running() || lane.looping().is_some())
+                i != self.current && lane.root().starts_with(&target.path) && lane.is_running()
             });
             if running {
                 return Err(format!(

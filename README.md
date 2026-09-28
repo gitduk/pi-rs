@@ -236,11 +236,13 @@ answer` is a loop with nothing to measure — those belong in the ordinary
 back-and-forth, where you are the one who decides to go again. Esc ends a loop
 along with the round it caught, and `loop_max_rounds` puts a ceiling on the one
 shape convergence cannot catch: a round that undoes the one before it changes
-files forever. `/loop` on its own stops the one in force, and a second `/loop` is refused
-rather than replacing it — the round already queued would otherwise run and be
-counted against the loop that did not ask for it. A loop runs in the checkout
-it was started in and only while that one is in front: `/worktree` away from it and its next round waits with
-the lane, like any queued line, until you come back.
+files forever. `/loop` on its own stops the one in force, and a second `/loop` is
+refused rather than replacing it. A goal that starts no turn — `/help`, say — is
+refused at once: there would be nothing to measure. A loop runs in the checkout
+it was started in, and a round goes only when that lane is in front, free, and
+nothing you typed is waiting — what you say comes first. `/worktree` away from
+it and the next round waits until you come back; remove its checkout and the
+loop goes with it.
 `/name` and `--name` label a session, because the ids are timestamps: the
 label leads that session's row in `/resume`, and typing it completes to
 `/resume <id>`.

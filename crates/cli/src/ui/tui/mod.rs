@@ -32,10 +32,10 @@ use crossterm::event::Event as TermEvent;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::core::lane::{Lane, Run};
-use crate::core::looping::{Cut, Round};
+use crate::core::looping::Loops;
 use crate::core::{self, Core};
 use crate::input::commands::{Choice, Command};
-use crate::input::{self, Builtin, Fate, Intent, Rewound, Step};
+use crate::input::{self, Fate, Intent, Rewound, Step};
 use crate::store::icons;
 use crate::store::keys::Keys;
 use crate::store::listing::Listing;
@@ -60,7 +60,7 @@ use mouse::{Regions, Target};
 use scrollback::body;
 use term::{HISTORY_KEEP, Hold, drop_shared_history, history_of, reader};
 use tool::pending_line;
-use view::{Queued, StreamKind, View, Views, front_view, prune_views, snapshot, view_at};
+use view::{Origin, Queued, StreamKind, View, Views, front_view, prune_views, snapshot, view_at};
 use vim::Vim;
 
 // What a folded run shows instead of what it is thinking.
@@ -658,9 +658,10 @@ pub struct Tui {
     // Stops the reader while a child holds the terminal.
     hold: Hold,
     channels: core::channel::Channels,
+    loops: Loops,
     // Where each line steered into a running turn came from, by lane token,
     // in the order said: a run hands back what it never heard bare.
-    steered: Vec<(u64, Option<&'static str>)>,
+    steered: Vec<(u64, Origin)>,
 }
 
 impl Tui {
@@ -713,6 +714,7 @@ impl Tui {
             events,
             hold,
             channels,
+            loops: Loops::default(),
             steered: Vec::new(),
         })
     }
@@ -740,6 +742,7 @@ impl Tui {
             events: rx,
             hold: Hold::default(),
             channels: core::channel::Channels::new(Vec::new()),
+            loops: Loops::default(),
             steered: Vec::new(),
         }
     }
@@ -878,9 +881,10 @@ impl Tui {
                     Mark::Front
                 } else {
                     match lane.run() {
-                        // A round of the loop already waits in this lane's
-                        // queue, so it is not a lane that finished.
-                        Run::Ended { ok: true, .. } if self.round_waiting(lane) => Mark::Plain,
+                        // A loop between rounds: the lane has not finished.
+                        Run::Ended { ok: true, .. } if self.loops.active(lane.token()) => {
+                            Mark::Plain
+                        }
                         Run::Ended { ok: true, .. } => Mark::Done,
                         Run::Ended { ok: false, .. } => Mark::Failed,
                         Run::Running { .. } | Run::Idle => Mark::Plain,
@@ -903,16 +907,6 @@ impl Tui {
         self.ui.tabs = tabs;
     }
 
-    // Whether the lane's loop has another round waiting in its queue: the run
-    // that ended is then one round of a series, not the end of one.
-    fn round_waiting(&self, lane: &Lane) -> bool {
-        self.views.get(&lane.token()).is_some_and(|view| {
-            view.queued
-                .iter()
-                .any(|q| matches!(q, Queued::Round { .. }))
-        })
-    }
-
     // Drop lanes whose checkout was deleted outside pi — idle ones only, a
     // running or looping lane still answering to the index it was given.
     //
@@ -923,7 +917,7 @@ impl Tui {
         // would shift the index a run in flight reports back by. That lane's
         // turn over, the next pass drops what this one left.
         for (at, lane) in self.core.lanes.iter().enumerate().rev() {
-            if lane.is_running() || lane.looping().is_some() {
+            if lane.is_running() || self.loops.active(lane.token()) {
                 break;
             }
             if at == self.core.current {
@@ -946,47 +940,6 @@ impl Tui {
         // The ring's list is cached; a vanished checkout must not stay in it
         // for a later step to offer — and re-create — by its stale name.
         self.ui.lists.forget();
-    }
-
-    // Carry the lane's loop past a round that has just ended: queue the next
-    // one, or hand back the row that says why there is no next one. The caller
-    // lands it, once the screen it belongs on has settled.
-    //
-    // Every ending keeps a row on its own lane's screen; a round beginning
-    // says nothing, the note it hands the model landing as that round's row.
-    //
-    // What decides is the tree, never the model: a round that changed a file
-    // is a round whose work was not finished, and one that changed nothing
-    // has nothing left to do. Asking the model instead would hand back the
-    // judgement this exists to take away from it.
-    fn step_loop(&mut self, lane: usize, cut: Option<Cut>) -> Option<Line<'static>> {
-        let cap = self.core.config.loop_cap();
-        let round = self.core.lanes[lane].loop_step(cut, cap)?;
-        let said = match round {
-            Round::Again { goal } => {
-                // How far the loop has got reaches the model as a note, not
-                // glued to the goal: the goal must stay exactly what `read`
-                // would parse. The note is the row this round lands as.
-                let note = self.core.lanes[lane]
-                    .looping()
-                    .map(|l| l.note.clone())
-                    .unwrap_or_default();
-                view_at(&mut self.views, self.core.lanes[lane].token())
-                    .queued
-                    .push(Queued::Round { goal, note });
-                return None;
-            }
-            Round::Cut(Cut::Stopped) => "loop stopped — the round was cut short".to_string(),
-            Round::Cut(Cut::Failed) => "loop stopped — the round failed".to_string(),
-            Round::Cut(Cut::Unsent) => "loop stopped — the prompt came back".to_string(),
-            Round::Quiet => "loop done — that round changed nothing".to_string(),
-            Round::Oscillating => "loop stopped — a round undid the work before it".to_string(),
-            Round::Thin => "loop stopped — rounds are only nibbling now".to_string(),
-            Round::Capped(n) => {
-                format!("loop stopped at loop_max_rounds ({n}) — rounds were still changing files")
-            }
-        };
-        Some(said.into())
     }
 
     // The front lane's screen out of its transcript: what a swap and a rewind
@@ -1047,8 +1000,7 @@ impl Tui {
     // while one is, is a property of the question, and `fate` holds it. An
     // idle lane admits everything, which is why `fate` never has to mention
     // idleness — and why it is asked only once a run is known to be there.
-    // `from` names the channel the input came from; `None` when typed here.
-    fn admit(&mut self, asked: Asked, from: Option<&'static str>) -> Wake {
+    fn admit(&mut self, asked: Asked, origin: Origin) -> Wake {
         if !self.core.lane().is_running() {
             return Wake::Do(asked);
         }
@@ -1074,7 +1026,7 @@ impl Tui {
             Fate::Queued => {
                 front_view(&mut self.views, self.core.lane())
                     .queued
-                    .push(Queued::Line(intent, from));
+                    .push(Queued { intent, origin });
                 Wake::Nothing
             }
             Fate::Steered(text) => {
@@ -1083,7 +1035,7 @@ impl Tui {
                 let Some(steer) = self.core.lane().steer().cloned() else {
                     front_view(&mut self.views, self.core.lane())
                         .queued
-                        .push(Queued::Line(intent, from));
+                        .push(Queued { intent, origin });
                     return Wake::Nothing;
                 };
                 // Spends the chance to unsend, exactly as the model's first
@@ -1095,9 +1047,9 @@ impl Tui {
                     .state
                     .committed = true;
                 let lane = self.core.lane().token();
-                self.steered.push((lane, from));
-                if let Some(from) = from {
-                    self.channels.ask(from, lane);
+                self.steered.push((lane, origin));
+                if let Origin::Channel(name) = origin {
+                    self.channels.ask(name, lane);
                 }
                 steer.say(text);
                 Wake::Nothing
@@ -1181,6 +1133,11 @@ impl Tui {
             // Before the bar rebuilds, so a vanished tab goes with its lane.
             self.drop_vanished_lanes();
             prune_views(&self.core, &mut self.views);
+            let core = &self.core;
+            for said in self.loops.retain(|t| core.position_of(t).is_some()) {
+                self.ui
+                    .say(front_view(&mut self.views, self.core.lane()), said);
+            }
             self.refresh_tabs();
             let view = front_view(&mut self.views, self.core.lane());
             self.ui.flush(self.core.lane(), view);
@@ -1192,13 +1149,24 @@ impl Tui {
             }
             let running = self.core.lane().is_running();
             let anywhere = self.core.lanes.iter().any(|lane| lane.is_running());
-            // Whether what is about to run is a loop's own round: the queue
-            // says so, and the run that ends decides whether the loop goes on.
-            let mut from_loop = false;
-            // A queued line waits for the lane it was aimed at to come free.
-            // The channel what is carried out this pass came from.
-            let mut from = None;
-            let woke = if view.queued.is_empty() || running {
+            let waiting = !view.queued.is_empty();
+            // Who sent what is carried out this pass.
+            let mut origin = Origin::Typed;
+            // A loop's round goes only when the lane is free and nothing typed
+            // is waiting: what the user says comes first.
+            let due = (!running && !waiting)
+                .then(|| self.loops.due(self.core.lane().token()))
+                .flatten();
+            let woke = if let Some(round) = due {
+                origin = Origin::Loop;
+                let view = front_view(&mut self.views, self.core.lane());
+                self.ui.submit(view, &round.goal);
+                view.surface.scroll = 0;
+                if !round.note.is_empty() {
+                    self.core.lane_mut().push_note(&round.note);
+                }
+                Wake::Do(Asked::Core(input::read(&round.goal, &self.core.commands)))
+            } else if !waiting || running {
                 // Every branch must be cancel-safe: a loser is dropped mid-poll.
                 // `recv()` and `tick()` are; a blocking read gets its own thread.
                 tokio::select! {
@@ -1217,7 +1185,7 @@ impl Tui {
                             if self.ui.took_submit() {
                                 self.save_history();
                             }
-                            self.admit(intent, None)
+                            self.admit(intent, Origin::Typed)
                         }
                         None => Wake::Leave,
                     },
@@ -1226,14 +1194,16 @@ impl Tui {
                         // and its `/stop` is esc. Same intents, same gate, so
                         // they cannot drift apart.
                         Some((name, channel::Inbound::Text { text })) => {
-                            from = Some(name);
+                            origin = Origin::Channel(name);
                             let intent = input::read(&text, &self.core.commands);
                             if intent.echoed() {
                                 self.echo_sent(&text);
                             }
-                            self.admit(Asked::Core(intent), from)
+                            self.admit(Asked::Core(intent), origin)
                         }
-                        Some((_, channel::Inbound::Stop)) => self.admit(Asked::Own(Deed::Interrupt), None),
+                        Some((_, channel::Inbound::Stop)) => {
+                            self.admit(Asked::Own(Deed::Interrupt), Origin::Typed)
+                        }
                         // The QR, an error, a way out of one: on the lane the
                         // channel follows, where it lasts and can be re-read.
                         Some((_, channel::Inbound::Notice(text))) => {
@@ -1252,31 +1222,11 @@ impl Tui {
                 // One at a time, each still the intent it was read as. Joined
                 // as lines, a command and a prompt became one line and `read`
                 // saw only the first word.
-                match front_view(&mut self.views, self.core.lane())
+                let queued = front_view(&mut self.views, self.core.lane())
                     .queued
-                    .remove(0)
-                {
-                    Queued::Line(intent, queued_from) => {
-                        from = queued_from;
-                        Wake::Do(Asked::Core(intent))
-                    }
-                    Queued::Round { goal, note } => {
-                        // The loop that queued this may have been stopped since.
-                        // Running it then would be a turn nobody asked for, and
-                        // one that reads on screen as if it had been typed.
-                        if self.core.lane().looping().is_none() {
-                            continue;
-                        }
-                        from_loop = true;
-                        let view = front_view(&mut self.views, self.core.lane());
-                        self.ui.submit(view, &goal);
-                        view.surface.scroll = 0;
-                        if !note.is_empty() {
-                            self.core.lane_mut().push_note(&note);
-                        }
-                        Wake::Do(Asked::Core(input::read(&goal, &self.core.commands)))
-                    }
-                }
+                    .remove(0);
+                origin = queued.origin;
+                Wake::Do(Asked::Core(queued.intent))
             };
             // Out here, where all of `self` is free again.
             let asked = match woke {
@@ -1295,86 +1245,15 @@ impl Tui {
                     self.carry(deed).await;
                     continue;
                 }
-                // A loop's own round: echoed and read like a typed line, and
-                // marked so the turn it starts is the one the loop counts.
                 // A key that means a command — `ctrl+l` twice is `/new` —
                 // arrives already read.
                 Asked::Core(ready) => ready,
             };
-            // A loop is the surface's: it arms the lane, then puts its goal
-            // back through the door as a typed line — so what runs each round
-            // is read exactly as it would be if it had been typed.
-            if let Intent::Builtin(Builtin::Loop(goal)) = intent {
-                let goal = goal.trim().to_string();
-                if goal.is_empty() {
-                    // The round already queued goes with it: run after a stop,
-                    // it is a turn nobody asked for and it reads as a typed one.
-                    front_view(&mut self.views, self.core.lane())
-                        .queued
-                        .retain(|q| !matches!(q, Queued::Round { .. }));
-                    match self.core.lane_mut().take_looping() {
-                        // A loop really ended: that belongs in the transcript.
-                        Some(l) => {
-                            let said =
-                                format!("loop stopped after {} round(s) of `{}`", l.round, l.goal);
-                            self.ui
-                                .say(front_view(&mut self.views, self.core.lane()), said);
-                        }
-                        // Nothing ended — a note about the line, not the lane.
-                        None => self.ui.open_reply(Listing::say([concat!(
-                            "no loop here — /loop <line> runs one again while ",
-                            "it keeps changing files"
-                        )])),
-                    }
-                    continue;
-                }
-                // Refused rather than replacing: the round already queued would
-                // still run, and it would be counted against the new loop.
-                if let Some(l) = self.core.lane().looping() {
-                    let said = format!(
-                        "`{}` is already looping here — /loop to stop it first",
-                        l.goal
-                    );
-                    self.ui.open_reply(Listing::say([said]));
-                    continue;
-                }
-                if matches!(
-                    input::read(&goal, &self.core.commands),
-                    Intent::Builtin(Builtin::Loop(_))
-                ) {
-                    self.ui
-                        .open_reply(Listing::say(["a loop cannot be its own goal"]));
-                    continue;
-                }
-                self.core.lane_mut().loop_start(goal.clone());
-                front_view(&mut self.views, self.core.lane())
-                    .queued
-                    .push(Queued::Round {
-                        goal,
-                        note: String::new(),
-                    });
-                continue;
-            }
             let was = self.core.current;
+            let asked_on = self.core.lane().token();
             let step = self.core.dispatch(intent);
             self.reconcile(was);
-            if from_loop {
-                // `was`, not whichever lane is in front now: a step may move
-                // the surface to another checkout, and the loop belongs to the
-                // one that queued the round. Addressed by index, the lane left
-                // behind cannot be left armed and unreachable.
-                //
-                // A round is a turn, and only a step that starts one leaves
-                // anything to measure. A line that answers on the spot would
-                // leave the loop armed, and the next turn from anywhere would
-                // be taken for its round.
-                if matches!(step, Step::Prompt { .. } | Step::Bash(_)) {
-                    self.core.lanes[was].loop_running();
-                } else if let Some(stale) = self.core.lanes[was].take_looping() {
-                    let said = format!("loop ended — `{}` starts no turn to measure", stale.goal);
-                    self.say_of(was, said);
-                }
-            }
+            let prompt = matches!(step, Step::Prompt { .. });
             match step {
                 Step::Quit => break,
                 // A refusal is an answer: it was asked for by a line, so it
@@ -1398,13 +1277,40 @@ impl Tui {
                 // top of this loop, one entry at a time and each read as what
                 // it is. Draining it here instead meant everything queued
                 // became the next prompt, whatever it had been typed as.
-                Step::Prompt { send, typed } => {
-                    self.start_turn(send, typed, &done_tx);
-                    if self.core.lane().is_running()
-                        && let Some(from) = from
-                    {
-                        self.channels.ask(from, self.core.lane().token());
+                Step::Prompt { send, typed } => self.start_turn(send, typed, &done_tx),
+                Step::Loop(Some(goal)) => {
+                    let lane = self.core.lane();
+                    if let Err(why) = self.loops.start(lane.token(), goal, lane.ctx()) {
+                        self.ui.open_reply(Listing::say([why]));
                     }
+                }
+                Step::Loop(None) => match self.loops.stop(self.core.lane().token()) {
+                    // A loop really ended: that belongs in the transcript.
+                    Some(said) => self
+                        .ui
+                        .say(front_view(&mut self.views, self.core.lane()), said),
+                    None => self.ui.open_reply(Listing::say([
+                        "no loop here — /loop <line> runs one again while it keeps changing files",
+                    ])),
+                },
+            }
+            // The driver that sent this line hears the end of the turn it began.
+            // By token: the step may have moved the surface to another lane.
+            if origin != Origin::Typed
+                && let Some(at) = self.core.position_of(asked_on)
+            {
+                let started = self.core.lanes[at].is_running();
+                match origin {
+                    // Model turns only: `settle_run` flushes a channel at the
+                    // end of a turn, never of a `!`, so a `!` would leave it stuck.
+                    Origin::Channel(name) if prompt && started => self.channels.ask(name, asked_on),
+                    Origin::Loop if started => self.loops.ask(asked_on),
+                    Origin::Loop => {
+                        if let Some(said) = self.loops.unstarted(asked_on) {
+                            self.say_of(at, said);
+                        }
+                    }
+                    Origin::Channel(_) | Origin::Typed => {}
                 }
             }
         }

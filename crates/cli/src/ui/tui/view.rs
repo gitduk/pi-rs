@@ -32,9 +32,6 @@ pub struct View {
     // What arrived while the run was working, kept as intents rather than
     // lines: their fate was settled at the door, and re-reading them on the
     // way out would ask a question that has already been answered.
-    // A line waiting for the lane, or a round of the loop this lane is under.
-    // The round is not an `Intent`: nothing the door can read produces one, and
-    // nothing in `Core` answers one, so it lives with the queue it waits in.
     pub(super) queued: Vec<Queued>,
     // Whether this lane's opening block has been built. A rebuild builds the
     // whole surface, banner not among it, and marks it drawn for that reason —
@@ -121,21 +118,20 @@ pub enum StreamKind {
     Answer,
 }
 
-// A turn that has ended, on its way back to the loop that started it.
-//
-// The transcript comes home this way rather than through a `JoinHandle`, so
-// one channel serves every lane and nothing has to poll a growing list of
-// them. `session` is None only when the run panicked and took its copy down.
-// What woke the loop this time round. One value out of the select rather than
-// a pair of optional locals, so what happened is read in one place.
-// One thing waiting for the lane in front to come free.
-pub(super) enum Queued {
-    // What the door made of a submitted line, and the channel it came from
-    // when it was not typed here.
-    Line(Intent, Option<&'static str>),
-    // A round of the loop this lane is under, to be read like a typed line when
-    // its turn comes — which is why the goal is kept as text.
-    Round { goal: String, note: String },
+/// Who sent a line. A driver from outside — a channel, a loop — hears the end
+/// of the turns its own lines began, and of no others.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Origin {
+    Typed,
+    Channel(&'static str),
+    Loop,
+}
+
+// One line waiting for the lane in front to come free: what the door made of
+// it, and who sent it.
+pub(super) struct Queued {
+    pub(super) intent: Intent,
+    pub(super) origin: Origin,
 }
 
 pub(super) type Views = std::collections::BTreeMap<u64, View>;
@@ -157,10 +153,7 @@ pub(super) fn snapshot(lane: &Lane, view: &View) -> Snapshot {
     lane.snapshot(
         &view.model,
         view.state.started.map(|s| s.elapsed()),
-        view.queued
-            .iter()
-            .filter(|q| matches!(q, Queued::Line(..)))
-            .count(),
+        view.queued.len(),
     )
 }
 
@@ -172,7 +165,7 @@ pub(super) fn front_view<'a>(views: &'a mut Views, lane: &Lane) -> &'a mut View 
 // surface being told — `/worktree` removes one to leave it — so this reads the
 // lane list rather than tracking it.
 pub(super) fn prune_views(core: &Core, views: &mut Views) {
-    views.retain(|token, _| core.lanes.iter().any(|lane| lane.token() == *token));
+    views.retain(|token, _| core.position_of(*token).is_some());
 }
 
 impl Surface {

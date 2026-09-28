@@ -25,7 +25,6 @@ use tokio_util::sync::CancellationToken;
 use tool::Ctx;
 
 use super::Core;
-use crate::core::looping::{Cut, Looping, Round};
 use crate::core::meter::{Snapshot, Tally};
 use crate::core::resolve::Resolved;
 use crate::input::commands::ago;
@@ -151,8 +150,6 @@ struct Runner {
     // The other end, drained by the surface into this lane's view whether or
     // not it is in front.
     inbox: UnboundedReceiver<Event>,
-    // The `/loop` this lane is under, if any.
-    looping: Option<Looping>,
 }
 
 /// Arm an agent for one checkout: hang the subagent tool on the brief, put that
@@ -247,7 +244,6 @@ impl Lane {
                 run: Run::Idle,
                 events,
                 inbox,
-                looping: None,
             },
         }
     }
@@ -296,37 +292,6 @@ impl Lane {
     /// Whether a run has this lane's transcript right now.
     pub fn is_running(&self) -> bool {
         matches!(self.runner.run, Run::Running { .. })
-    }
-
-    /// The round this lane's loop queued has begun. Nothing else it runs is
-    /// one, so nothing else moves it on.
-    pub fn loop_running(&mut self) {
-        if let Some(looping) = &mut self.runner.looping {
-            looping.mark_running();
-        }
-    }
-
-    /// Put this lane under a loop, marked from where the tree stands now.
-    pub fn loop_start(&mut self, goal: String) {
-        self.runner.looping = Some(Looping::start(&self.checkout.ctx, goal));
-    }
-
-    /// What the loop in force does now that a round has ended — `None` when
-    /// there was no loop, or when the round that ended was not the loop's.
-    ///
-    /// The loop is taken out and only put back to go round again, so every
-    /// ending drops it without a second place to remember that.
-    pub fn loop_step(&mut self, cut: Option<Cut>, cap: Option<usize>) -> Option<Round> {
-        let mut looping = self.runner.looping.take()?;
-        if !looping.is_running() {
-            self.runner.looping = Some(looping);
-            return None;
-        }
-        let out = looping.step(&self.checkout.ctx, cut, cap);
-        if matches!(out, Round::Again { .. }) {
-            self.runner.looping = Some(looping);
-        }
-        Some(out)
     }
 
     // ------------------------------------------------------- what a run does
@@ -430,11 +395,6 @@ impl Lane {
         self.checkout.worktree.as_deref()
     }
 
-    /// The loop this lane is under, if any.
-    pub fn looping(&self) -> Option<&Looping> {
-        self.runner.looping.as_ref()
-    }
-
     /// The transcript, or `None` while a run has it. Both readers answer that
     /// way: the states a lane can be in are named (`NO_TRANSCRIPT`,
     /// `NOTHING_TO_REWIND`) rather than one of them being a panic.
@@ -450,6 +410,11 @@ impl Lane {
     /// The checkout this lane works in.
     pub fn root(&self) -> &Path {
         self.checkout.ctx.workspace.root()
+    }
+
+    /// The checkout's context, for what measures the tree between turns.
+    pub fn ctx(&self) -> &Ctx {
+        &self.checkout.ctx
     }
 
     /// The context a job runs with: this lane's, with the job's own way out.
@@ -529,14 +494,6 @@ impl Lane {
             Err(_) => self.talk.tally.run_spend().usage,
         };
         self.charge(&spent);
-    }
-
-    // -------------------------------------------------------------- the loop
-
-    /// Take the loop off this lane: what bare `/loop`, a round that ended it,
-    /// and a lane being left all mean.
-    pub fn take_looping(&mut self) -> Option<Looping> {
-        self.runner.looping.take()
     }
 
     // -------------------------------------------------------- the transcript

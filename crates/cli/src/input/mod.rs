@@ -131,8 +131,7 @@ impl Intent {
             Intent::Builtin(Builtin::Settings(_)) => Fate::Queued,
             Intent::Builtin(Builtin::Channel(..)) => Fate::Now,
             Intent::Other { .. } => Fate::Queued,
-            // Arms the lane and submits its first round like a typed line;
-            // both want the lane free.
+            // Its first round is due at once, and a round wants the lane free.
             Intent::Builtin(Builtin::Loop(_)) => Fate::Queued,
             // Prose reaches the run that is already talking to the model:
             // waiting for it is what makes a correction arrive too late to be
@@ -192,7 +191,7 @@ fn expanded(skill: &Skill, args: &str) -> Result<String, String> {
 
 // The skill a word names, if it names one. A built-in never reaches here —
 // `parse` has already turned those into their own variants.
-fn skill_for<'a>(commands: &'a [Command], word: &str) -> Option<&'a Skill> {
+pub(crate) fn skill_for<'a>(commands: &'a [Command], word: &str) -> Option<&'a Skill> {
     match &commands.iter().find(|c| c.word.as_ref() == word)?.source {
         Source::Skill(skill) => Some(skill),
         Source::Builtin => None,
@@ -323,6 +322,9 @@ pub enum Step {
     // Starts or stops the named channel. Needs the network, so the surface
     // runs it and reports — the same rule as `Compact`.
     Channel(&'static str, ChannelCmd),
+    // Starts a loop over this goal, already known to start a turn; `None`
+    // stops the one in force. Loops are the surface's, like channels.
+    Loop(Option<String>),
     // The settings panel wants the surface to itself, and only a surface with
     // one can answer: bare `/settings` asks for it, an argument is a `Flash`.
     Panel,

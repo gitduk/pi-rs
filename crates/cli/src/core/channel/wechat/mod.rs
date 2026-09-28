@@ -35,10 +35,10 @@ struct State {
 const MESSAGE_LIMIT: usize = 2000;
 
 // The typing indicator's shared state: the ticket cache, serialized with
-// the on/off sends by the same lock.
+// the on/off sends by the same lock. A ticket is one peer's, kept with it.
 #[derive(Default)]
 struct Typing {
-    ticket: Option<String>,
+    ticket: Option<(String, String)>,
 }
 
 pub struct WeChat {
@@ -129,14 +129,17 @@ impl Channel for WeChat {
     async fn typing(&self, on: bool) {
         let client = self.client().await;
         let mut t = self.typing.lock().await;
-        let Some(ticket) = typing_ticket(&mut t, &self.state, &client).await else {
-            return;
-        };
-        let (token, peer) = {
+        // Read once: the ticket and the send must name the same peer.
+        let (token, peer, context_token) = {
             let s = self.state.lock().await;
-            (s.token.clone(), s.peer.clone())
+            (s.token.clone(), s.peer.clone(), s.context_token.clone())
         };
         let (Some(token), Some(peer)) = (token, peer) else {
+            return;
+        };
+        let context_token = context_token.unwrap_or_default();
+        let Some(ticket) = typing_ticket(&mut t, &client, &token, &peer, &context_token).await
+        else {
             return;
         };
         let status = if on { 1 } else { 2 };
@@ -255,29 +258,25 @@ async fn poll(
     }
 }
 
-// The per-peer typing ticket, fetched once and cached under the typing
-// lock so every on/off task reuses it.
+// `peer`'s typing ticket, fetched once per peer and cached under the typing
+// lock so every on/off task reuses it; another peer fetches its own.
 async fn typing_ticket(
     t: &mut Typing,
-    state: &Arc<Mutex<State>>,
     client: &wechat::Client,
+    token: &str,
+    peer: &str,
+    context_token: &str,
 ) -> Option<String> {
-    if let Some(ticket) = &t.ticket {
+    if let Some((cached_for, ticket)) = &t.ticket
+        && cached_for == peer
+    {
         return Some(ticket.clone());
     }
-    let (token, peer, context_token) = {
-        let s = state.lock().await;
-        (s.token.clone(), s.peer.clone(), s.context_token.clone())
-    };
-    let (Some(token), Some(peer)) = (token, peer) else {
-        return None;
-    };
-    let context_token = context_token.unwrap_or_default();
-    match client.get_config(&token, &peer, &context_token).await {
+    match client.get_config(token, peer, context_token).await {
         Ok(cfg) => {
             let ticket = cfg.typing_ticket.unwrap_or_default();
             if !ticket.is_empty() {
-                t.ticket = Some(ticket.clone());
+                t.ticket = Some((peer.to_string(), ticket.clone()));
             }
             Some(ticket)
         }

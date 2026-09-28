@@ -89,9 +89,25 @@ impl Core {
     pub fn lane_mut(&mut self) -> &mut Lane {
         &mut self.lanes[self.current]
     }
+
+    /// Where the lane `token` names sits now; `None` once it is gone.
+    pub fn position_of(&self, token: u64) -> Option<usize> {
+        self.lanes.iter().position(|lane| lane.token() == token)
+    }
 }
 
 impl Core {
+    // Whether `goal` would start a turn: a round is a turn, and a line that
+    // answers on the spot has none. A skill is looked up, not expanded — that
+    // would log it as invoked before any round has run.
+    fn starts_turn(&self, goal: &str) -> bool {
+        match crate::input::read(goal, &self.commands) {
+            Intent::Prompt(_) | Intent::Bash(_) => true,
+            Intent::Other { word, .. } => crate::input::skill_for(&self.commands, &word).is_some(),
+            Intent::Builtin(_) => false,
+        }
+    }
+
     /// Carry out an intent, or say what the surface must do to carry it out.
     ///
     /// Exhaustive with no catch-all, like `Intent::fate`: the arms a surface
@@ -101,11 +117,13 @@ impl Core {
         match intent {
             Intent::Bash(command) => Step::Bash(command),
             Intent::Prompt(send) => Step::Prompt { send, typed: None },
-            // The surface's: `/loop` arms the lane and queues its first round,
-            // both of which only it can do, so it takes this before `run` is
-            // reached. The arm stays so that a new intent has to say which side
-            // of this line it falls on.
-            Intent::Builtin(Builtin::Loop(_)) => Step::Handled(Listing::default()),
+            Intent::Builtin(Builtin::Loop(goal)) => match goal.trim() {
+                "" => Step::Loop(None),
+                goal if self.starts_turn(goal) => Step::Loop(Some(goal.to_string())),
+                goal => Step::Flash(format!(
+                    "`{goal}` starts no turn — a loop needs one to measure"
+                )),
+            },
             Intent::Builtin(Builtin::Quit) => Step::Quit,
             Intent::Builtin(Builtin::Help) => Step::Handled(Listing::say(help(&self.commands))),
             Intent::Builtin(Builtin::Keys) => Step::Handled(self.keys.listing()),
