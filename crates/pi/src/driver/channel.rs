@@ -1,5 +1,5 @@
-//! The surface's side of the `channel` contract. What the phone gets back is
-//! the `Relay`'s, written once for every platform: the answer to the turn it
+//! pi's side of the `channel` contract. What the phone gets back is the
+//! `Relay`'s, written once for every platform: the answer to the turn it
 //! asked for, whole, cut into ordered pieces when it is long, and nothing else.
 
 use std::sync::Arc;
@@ -10,21 +10,11 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use super::Ended;
 use crate::input::ChannelCmd;
 
-/// How a turn a channel asked for ended, as the phone is told it.
-pub enum Ending {
-    Done,
-    Stopped,
-    Failed(String),
-}
-
-// Room held back for the `(n/m)` marker so a piece plus its marker still fits
-// the budget. Ten bytes at three digits a side, rounded up.
-const MARKER_RESERVE: usize = 12;
-
 /// One channel and the turn it owes an answer to.
-pub struct Relay {
+struct Relay {
     channel: Arc<dyn Channel>,
     inbox: Inbox,
     abort: Option<CancellationToken>,
@@ -126,25 +116,25 @@ impl Relay {
         };
         match event {
             Event::TextDelta(text) => self.asked[at].1.push_str(text),
-            Event::Done { .. } => self.flush(at, &Ending::Done),
+            Event::Done { .. } => self.flush(at, &Ended::Done),
             _ => {}
         }
     }
 
-    // A successful run already flushed on `Done`; a stopped or failed one
-    // sends what it has and says how it ended, even with nothing written.
-    fn finish_turn(&mut self, lane: u64, ending: &Ending) {
+    // A successful run already flushed on `Done`; a stopped, taken-back or
+    // failed one sends what it has and says how it ended, even with nothing.
+    fn finish_turn(&mut self, lane: u64, ended: &Ended) {
         if let Some(at) = self.asked.iter().position(|(l, _)| *l == lane) {
-            self.flush(at, ending);
+            self.flush(at, ended);
         }
     }
 
-    fn flush(&mut self, at: usize, ending: &Ending) {
+    fn flush(&mut self, at: usize, ended: &Ended) {
         let (_, mut text) = self.asked.swap_remove(at);
-        let said = match ending {
-            Ending::Done => None,
-            Ending::Stopped => Some("(stopped)".to_string()),
-            Ending::Failed(why) => Some(format!("(failed: {why})")),
+        let said = match ended {
+            Ended::Done => None,
+            Ended::Stopped | Ended::Unsent => Some("(stopped)".to_string()),
+            Ended::Failed(why) => Some(format!("(failed: {why})")),
         };
         if let Some(said) = said {
             if !text.trim().is_empty() {
@@ -227,7 +217,7 @@ impl Relay {
 /// the channel each message came from.
 pub struct Channels {
     relays: Vec<Relay>,
-    pub(crate) rx: UnboundedReceiver<(&'static str, Inbound)>,
+    pub(super) rx: UnboundedReceiver<(&'static str, Inbound)>,
 }
 
 impl Channels {
@@ -267,9 +257,9 @@ impl Channels {
         }
     }
 
-    pub fn finish_turn(&mut self, lane: u64, ending: &Ending) {
+    pub fn finish_turn(&mut self, lane: u64, ended: &Ended) {
         for relay in &mut self.relays {
-            relay.finish_turn(lane, ending);
+            relay.finish_turn(lane, ended);
         }
     }
 
@@ -278,34 +268,19 @@ impl Channels {
     }
 }
 
-// Cut an outbound message into pieces that each fit `limit` bytes. One that
-// already fits comes back whole and unmarked; anything longer is marked
-// `(n/m)`, so a reader on the phone can tell a message still arriving from one
-// that ended — a send the server blocks reports on the local terminal only,
-// and the phone would otherwise see a truncated answer as the whole answer.
+// Cut an outbound message into pieces that each fit `limit` bytes, at the
+// most natural boundary within reach.
 fn split(text: &str, limit: usize) -> Vec<String> {
-    // Against the real limit, not the loop's smaller budget: text that fits
-    // unmarked should go out unmarked rather than become two marked pieces.
-    if text.len() <= limit {
-        return vec![text.to_string()];
-    }
-    let budget = limit.saturating_sub(MARKER_RESERVE).max(1);
     let mut pieces = Vec::new();
     let mut rest = text;
     while !rest.is_empty() {
-        if rest.len() <= budget {
+        if rest.len() <= limit {
             pieces.push(rest.to_string());
             break;
         }
-        let (cut, skip) = boundary(rest, budget);
+        let (cut, skip) = boundary(rest, limit);
         pieces.push(rest[..cut].to_string());
         rest = &rest[cut + skip..];
-    }
-    let total = pieces.len();
-    if total > 1 {
-        for (i, piece) in pieces.iter_mut().enumerate() {
-            piece.insert_str(0, &format!("({}/{total}) ", i + 1));
-        }
     }
     pieces
 }
@@ -409,11 +384,7 @@ mod tests {
         let text = "中".repeat(200);
         let pieces = split(&text, 100);
         assert!(pieces.len() > 1);
-        let rejoined: String = pieces
-            .iter()
-            .map(|p| p.split_once(") ").expect("marker").1)
-            .collect();
-        assert_eq!(rejoined, text);
+        assert_eq!(pieces.concat(), text);
     }
 
     #[test]
@@ -428,7 +399,7 @@ mod tests {
         let mut b = connected(&fake);
         b.observe(LANE, &Event::TextDelta("local".into()));
         b.observe(LANE, &done());
-        b.finish_turn(LANE, &Ending::Done);
+        b.finish_turn(LANE, &Ended::Done);
         assert!(sent(&mut b, &fake).await.is_empty());
     }
 
@@ -448,7 +419,7 @@ mod tests {
         b.observe(LANE, &Event::Warning("careful".into()));
         b.observe(LANE, &Event::TextDelta("the answer".into()));
         b.observe(LANE, &done());
-        b.finish_turn(LANE, &Ending::Done);
+        b.finish_turn(LANE, &Ended::Done);
         assert_eq!(sent(&mut b, &fake).await, ["the answer"]);
     }
 
@@ -471,10 +442,10 @@ mod tests {
         b.ask(LANE);
         b.observe(LANE, &Event::TextDelta("asked".into()));
         b.observe(LANE, &done());
-        b.finish_turn(LANE, &Ending::Done);
+        b.finish_turn(LANE, &Ended::Done);
         b.observe(LANE, &Event::TextDelta("typed".into()));
         b.observe(LANE, &done());
-        b.finish_turn(LANE, &Ending::Done);
+        b.finish_turn(LANE, &Ended::Done);
         assert_eq!(sent(&mut b, &fake).await, ["asked"]);
     }
 
@@ -509,7 +480,7 @@ mod tests {
         let mut b = connected(&fake);
         b.ask(LANE);
         b.observe(LANE, &Event::TextDelta("half".into()));
-        b.finish_turn(LANE, &Ending::Stopped);
+        b.finish_turn(LANE, &Ended::Stopped);
         assert_eq!(sent(&mut b, &fake).await, ["half\n\n(stopped)"]);
     }
 
@@ -520,7 +491,7 @@ mod tests {
         let fake = Arc::new(Fake::default());
         let mut b = connected(&fake);
         b.ask(LANE);
-        b.finish_turn(LANE, &Ending::Failed("provider returned 500".into()));
+        b.finish_turn(LANE, &Ended::Failed("provider returned 500".into()));
         assert_eq!(
             sent(&mut b, &fake).await,
             ["(failed: provider returned 500)"]
@@ -528,7 +499,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_long_answer_arrives_in_marked_pieces_that_each_fit() {
+    async fn a_long_answer_arrives_in_bare_pieces_that_each_fit() {
         let fake = Arc::new(Fake::default());
         let mut b = connected(&fake);
         b.ask(LANE);
@@ -536,7 +507,7 @@ mod tests {
         b.observe(LANE, &done());
         let sent = sent(&mut b, &fake).await;
         assert!(sent.len() > 1, "{sent:?}");
-        assert!(sent[0].starts_with("(1/"), "{sent:?}");
+        assert!(sent.iter().all(|m| m.starts_with("word")), "{sent:?}");
         assert!(sent.iter().all(|m| m.len() <= 40), "{sent:?}");
     }
 
@@ -547,7 +518,7 @@ mod tests {
         b.off();
         b.ask(LANE);
         b.observe(LANE, &Event::TextDelta("hello".into()));
-        b.finish_turn(LANE, &Ending::Done);
+        b.finish_turn(LANE, &Ended::Done);
         assert!(b.last_send.is_none());
         assert!(fake.sent.lock().unwrap().is_empty());
     }

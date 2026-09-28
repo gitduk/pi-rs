@@ -1,6 +1,6 @@
 use crate::core::lane::Lane;
-use crate::input::Builtin;
 use crate::input::commands::Choice;
+use crate::input::{Builtin, Drive};
 use crate::store::icons;
 use crate::store::keys::Mode;
 use crate::store::listing::Listing;
@@ -606,7 +606,10 @@ fn a_lane_under_a_loop_has_not_finished() {
     behind.set_worktree(Some("fix-mem".into()));
     behind.end(true, false);
     let token = behind.token();
-    tui.loops.start(token, "go".into(), behind.ctx()).unwrap();
+    let started = tui
+        .drivers
+        .command(Drive::Loop(Some("go".into())), token, behind.ctx());
+    assert!(matches!(started, crate::driver::Said::Nothing));
     tui.core.lanes.push(behind);
     tui.refresh_tabs();
     assert_eq!(
@@ -616,7 +619,8 @@ fn a_lane_under_a_loop_has_not_finished() {
     );
 
     // The loop is over, and that is the lane the colour is for.
-    tui.loops.stop(token);
+    tui.drivers
+        .command(Drive::Loop(None), token, tui.core.lanes[1].ctx());
     tui.refresh_tabs();
     assert_eq!(tui.ui.tabs[1].mark, crate::ui::tui::Mark::Done);
 }
@@ -1039,5 +1043,8 @@ async fn a_steered_line_the_run_never_heard_comes_back_as_its_channels() {
             ("same".to_string(), Origin::Channel("wechat"))
         ]
     );
-    assert!(tui.steered.is_empty(), "the ledger lets go with the run");
+    assert!(
+        tui.drivers.steered_lines().is_empty(),
+        "the ledger lets go with the run"
+    );
 }

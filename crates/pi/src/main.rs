@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use crate::args::Args;
 use crate::core::dial::{dial, summary_writer};
 use crate::core::resolve::resolve;
-use crate::core::{Core, channel, lane, subagent, worktree};
+use crate::core::{Core, lane, subagent, worktree};
 use crate::input::expand;
 use crate::store::icons;
 use crate::store::settings::Settings;
@@ -18,6 +18,7 @@ use crate::ui::{render, tui};
 
 mod args;
 mod core;
+mod driver;
 mod input;
 mod store;
 mod ui;
@@ -246,8 +247,8 @@ async fn main() -> Result<()> {
             current: 0,
             lanes: vec![first],
         };
-        let channels = channel::Channels::new(vec![Arc::new(wechat::WeChat::new())]);
-        let out = tui::Tui::new(core, key_map, channels)?.run().await;
+        let drivers = driver::Drivers::new(vec![Arc::new(wechat::WeChat::new())]);
+        let out = tui::Tui::new(core, key_map, drivers)?.run().await;
         // Subagents handed their transcripts to a background save; wait
         // for those to land before the runtime goes with them.
         subagent::flush().await;

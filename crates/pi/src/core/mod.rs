@@ -7,13 +7,11 @@
 //! the checkouts (all of them in one file: a `Core` field holds the list, a
 //! `Lane` one of them), `status.rs` for what a
 //! reader is shown, `meter.rs` for what it cost. The jobs hang off the side:
-//! `bash.rs`, `looping.rs`, `subagent.rs`, `channel/`.
+//! `bash.rs`, `subagent.rs`. What drives a lane from outside is `driver/`'s.
 
 pub mod bash;
-pub mod channel;
 pub mod dial;
 pub mod lane;
-pub mod looping;
 pub mod meter;
 pub mod resolve;
 pub mod settings;
@@ -23,7 +21,7 @@ pub mod worktree;
 
 use crate::core::lane::Lane;
 use crate::input::commands::{Command, help};
-use crate::input::{Builtin, ChannelCmd, Intent, Step, lines, step_for};
+use crate::input::{Builtin, ChannelCmd, Drive, Intent, Step, lines, step_for};
 use crate::store::config;
 use crate::store::listing::Listing;
 use crate::store::session::Store;
@@ -118,8 +116,8 @@ impl Core {
             Intent::Bash(command) => Step::Bash(command),
             Intent::Prompt(send) => Step::Prompt { send, typed: None },
             Intent::Builtin(Builtin::Loop(goal)) => match goal.trim() {
-                "" => Step::Loop(None),
-                goal if self.starts_turn(goal) => Step::Loop(Some(goal.to_string())),
+                "" => Step::Drive(Drive::Loop(None)),
+                goal if self.starts_turn(goal) => Step::Drive(Drive::Loop(Some(goal.to_string()))),
                 goal => Step::Flash(format!(
                     "`{goal}` starts no turn — a loop needs one to measure"
                 )),
@@ -190,9 +188,9 @@ impl Core {
             }
             Intent::Other { word, args } => step_for(&self.commands, &word, &args),
             Intent::Builtin(Builtin::Channel(name, rest)) => match rest.trim() {
-                "" => Step::Channel(name, ChannelCmd::Status),
-                "on" => Step::Channel(name, ChannelCmd::On),
-                "off" => Step::Channel(name, ChannelCmd::Off),
+                "" => Step::Drive(Drive::Channel(name, ChannelCmd::Status)),
+                "on" => Step::Drive(Drive::Channel(name, ChannelCmd::On)),
+                "off" => Step::Drive(Drive::Channel(name, ChannelCmd::Off)),
                 other => Step::Flash(format!("unknown /{name} verb `{other}` — bare, on or off")),
             },
             // Only the bare word opens the panel; an argument is refused

@@ -12,6 +12,7 @@ use super::tool::RunTool;
 use crate::core::Core;
 use crate::core::lane::Lane;
 use crate::core::meter::Snapshot;
+use crate::driver::Origin;
 use crate::input::Intent;
 use crate::ui::render::Paint;
 
@@ -116,15 +117,6 @@ pub enum StreamKind {
     // The answer half, drawn through markdown.
     #[default]
     Answer,
-}
-
-/// Who sent a line. A driver from outside — a channel, a loop — hears the end
-/// of the turns its own lines began, and of no others.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Origin {
-    Typed,
-    Channel(&'static str),
-    Loop,
 }
 
 // One line waiting for the lane in front to come free: what the door made of

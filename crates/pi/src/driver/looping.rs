@@ -5,13 +5,15 @@
 //! it would be answered every time; measured, a round that changed nothing is
 //! the end of the loop and not a matter of opinion.
 //!
-//! A loop drives a lane from outside, as a channel does: the surface asks it
-//! for a round when the lane is free and tells it when a turn it began ends.
-//! The lane itself knows nothing of loops.
+//! A loop drives a lane from outside, as a channel does: it is asked for a
+//! round when the lane is free and told when a turn it began ends. The lane
+//! itself knows nothing of loops.
 
 use std::collections::BTreeMap;
 
 use tool::Ctx;
+
+use super::Ended;
 
 /// Every lane's loop, by lane token.
 #[derive(Default)]
@@ -67,8 +69,8 @@ impl Loops {
         ))
     }
 
-    /// The round `lane` owes, handed out once. The surface asks only when the
-    /// lane is free and nothing typed is waiting: a typed line goes first.
+    /// The round `lane` owes, handed out once. Asked only when the lane is
+    /// free and nothing typed is waiting: a typed line goes first.
     pub fn due(&mut self, lane: u64) -> Option<Due> {
         let entry = self
             .by_lane
@@ -103,7 +105,7 @@ impl Loops {
     pub fn turn_ended(
         &mut self,
         lane: u64,
-        cut: Option<Cut>,
+        ended: &Ended,
         ctx: &Ctx,
         cap: Option<usize>,
     ) -> Option<Round> {
@@ -111,6 +113,12 @@ impl Loops {
             .by_lane
             .get_mut(&lane)
             .filter(|e| e.phase == Phase::Running)?;
+        let cut = match ended {
+            Ended::Done => None,
+            Ended::Stopped => Some(Cut::Stopped),
+            Ended::Failed(_) => Some(Cut::Failed),
+            Ended::Unsent => Some(Cut::Unsent),
+        };
         let round = entry.looping.step(ctx, cut, cap);
         if matches!(round, Round::Again) {
             entry.phase = Phase::Due;

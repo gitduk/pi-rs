@@ -15,11 +15,10 @@ use tokio_util::sync::CancellationToken;
 
 use super::row::Row;
 use super::term::{Deafened, EXIT_GRACE, external_editor, scratch_file};
-use super::view::{Origin, Queued, front_view, tail_of, view_at};
+use super::view::{Queued, front_view, tail_of, view_at};
 use super::{NO_TRANSCRIPT, Tui};
 use crate::core;
-use crate::core::channel::Ending;
-use crate::core::looping::Cut;
+use crate::driver::Ended;
 use crate::input::Intent;
 use crate::store::listing::Listing;
 
@@ -342,18 +341,7 @@ impl Tui {
         };
         let back = self.core.lanes[lane].finish();
         let token = self.core.lanes[lane].token();
-        let steered: Vec<_> = self
-            .steered
-            .extract_if(.., |s| s.0 == token)
-            .map(|s| s.1)
-            .collect();
-        // The mailbox is first in, first out: what went unheard is the tail
-        // of what was said, so it lines up with the tail of the ledger.
-        let heard = steered.len().saturating_sub(back.unheard.len());
-        let origins = steered[heard..]
-            .iter()
-            .copied()
-            .chain(std::iter::repeat(Origin::Typed));
+        let origins = self.drivers.unheard(token, back.unheard.len());
         let unheard: Vec<_> = back
             .unheard
             .into_iter()
@@ -437,16 +425,6 @@ impl Tui {
         // want back; make the completion list see it.
         self.refresh_sessions();
 
-        let cancelled = matches!(&out, Err(AgentError::Cancelled));
-        if said.is_none() {
-            let ending = match &out {
-                Ok(_) => Ending::Done,
-                Err(AgentError::Cancelled) => Ending::Stopped,
-                Err(e) => Ending::Failed(e.to_string()),
-            };
-            let token = self.core.lanes[lane].token();
-            self.channels.finish_turn(token, &ending);
-        }
         // The run's totals (subagents' included) land on its lane; an
         // interrupted run lands as the spend the view showed.
         self.core.lanes[lane].charge_run(&out);
@@ -471,28 +449,24 @@ impl Tui {
         // Before the split below, so a round that ended off-screen still makes
         // the next one due — it goes when that lane is next in front and free.
         //
-        // A run that came back cancelled is the user's own stop, not a failure
-        // to report to the model. One that never came back has no outcome to
-        // read, so it is named the failure it is whatever stood in for one:
-        // `recover_session` has said what became of the transcript, and this
-        // says only what became of the loop.
-        let cut = if unsend {
-            Some(Cut::Unsent)
+        // A run that never came back has no outcome to read, so it is named the
+        // failure it is whatever stood in for one.
+        let how = if unsend {
+            Ended::Unsent
         } else if !ran_back {
-            Some(Cut::Failed)
-        } else if cancelled {
-            Some(Cut::Stopped)
-        } else if out.is_err() {
-            Some(Cut::Failed)
+            Ended::Failed("the run crashed".into())
         } else {
-            None
+            match &out {
+                Ok(_) => Ended::Done,
+                Err(AgentError::Cancelled) => Ended::Stopped,
+                Err(e) => Ended::Failed(e.to_string()),
+            }
         };
         let token = self.core.lanes[lane].token();
         let cap = self.core.config.loop_cap();
         let ended = self
-            .loops
-            .turn_ended(token, cut, self.core.lanes[lane].ctx(), cap)
-            .and_then(|round| round.ending());
+            .drivers
+            .turn_ended(token, &how, self.core.lanes[lane].ctx(), cap);
 
         let ok = out.is_ok();
         self.close_run(lane, out);

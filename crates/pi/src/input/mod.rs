@@ -319,12 +319,9 @@ pub enum Step {
     Prompt { send: String, typed: Option<String> },
     // Needs the network, so the surface runs it and reports.
     Compact(Option<String>),
-    // Starts or stops the named channel. Needs the network, so the surface
-    // runs it and reports — the same rule as `Compact`.
-    Channel(&'static str, ChannelCmd),
-    // Starts a loop over this goal, already known to start a turn; `None`
-    // stops the one in force. Loops are the surface's, like channels.
-    Loop(Option<String>),
+    // A command for what drives a lane from outside. The surface hands it
+    // to the drivers and places what they answer.
+    Drive(Drive),
     // The settings panel wants the surface to itself, and only a surface with
     // one can answer: bare `/settings` asks for it, an argument is a `Flash`.
     Panel,
@@ -339,6 +336,15 @@ pub enum Step {
     // the checkout that just went.
     Worktrees(Listing),
     Quit,
+}
+
+/// A command for a driver.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Drive {
+    /// `/<channel>`, which starts, stops or reports the named channel.
+    Channel(&'static str, ChannelCmd),
+    /// `/loop` over a goal already known to start a turn; `None` stops it.
+    Loop(Option<String>),
 }
 
 /// What `/<channel>` asks: bare for status, `on` or `off`.

@@ -1,6 +1,7 @@
 use crate::core::lane::Lane;
-use crate::core::looping::{Cut, Loops, Round};
-use crate::input::{Builtin, Intent, Step};
+use crate::driver::Ended;
+use crate::driver::looping::{Cut, Loops, Round};
+use crate::input::{Builtin, Drive, Intent, Step};
 
 use super::harness::*;
 
@@ -20,7 +21,7 @@ fn a_loop_goes_round_while_the_tree_keeps_changing() {
     loops.ask(lane.token());
     wrote(&mut lane, "a.rs", "fn main() {}\n");
     assert!(matches!(
-        ended(&mut loops, &lane, None, None),
+        ended(&mut loops, &lane, Ended::Done, None),
         Some(Round::Again)
     ));
 
@@ -35,7 +36,7 @@ fn a_loop_goes_round_while_the_tree_keeps_changing() {
         "fn main() {\n    let x = 1;\n    let y = 2;\n    println!(\"{}\", x + y);\n}\n",
     );
     assert!(matches!(
-        ended(&mut loops, &lane, None, None),
+        ended(&mut loops, &lane, Ended::Done, None),
         Some(Round::Again)
     ));
 
@@ -43,12 +44,12 @@ fn a_loop_goes_round_while_the_tree_keeps_changing() {
     // time either.
     started(&mut loops, &lane);
     assert!(matches!(
-        ended(&mut loops, &lane, None, None),
+        ended(&mut loops, &lane, Ended::Done, None),
         Some(Round::Quiet)
     ));
     assert!(!loops.active(lane.token()), "and the loop is gone");
     assert!(
-        ended(&mut loops, &lane, None, None).is_none(),
+        ended(&mut loops, &lane, Ended::Done, None).is_none(),
         "a later turn is not a round"
     );
 }
@@ -63,7 +64,7 @@ fn a_turn_the_loop_did_not_start_is_not_one_of_its_rounds() {
 
     // Somebody else's turn settling, before the round was handed out.
     assert!(
-        ended(&mut loops, &lane, None, None).is_none(),
+        ended(&mut loops, &lane, Ended::Done, None).is_none(),
         "not the loop's round"
     );
     assert!(loops.active(lane.token()), "and the loop is untouched");
@@ -71,7 +72,7 @@ fn a_turn_the_loop_did_not_start_is_not_one_of_its_rounds() {
     started(&mut loops, &lane);
     wrote(&mut lane, "a.rs", "fn main() {}\n");
     assert!(matches!(
-        ended(&mut loops, &lane, None, None),
+        ended(&mut loops, &lane, Ended::Done, None),
         Some(Round::Again)
     ));
 }
@@ -86,7 +87,7 @@ fn a_cut_round_takes_the_loop_with_it() {
     started(&mut loops, &lane);
     wrote(&mut lane, "a.rs", "fn main() {}\n");
     assert!(matches!(
-        ended(&mut loops, &lane, Some(Cut::Stopped), None),
+        ended(&mut loops, &lane, Ended::Stopped, None),
         Some(Round::Cut(Cut::Stopped))
     ));
     assert!(!loops.active(lane.token()));
@@ -102,7 +103,7 @@ fn a_loop_stops_at_the_configured_ceiling_with_work_still_left() {
     started(&mut loops, &lane);
     wrote(&mut lane, "a.rs", "fn main() {}\n");
     assert!(matches!(
-        ended(&mut loops, &lane, None, Some(1)),
+        ended(&mut loops, &lane, Ended::Done, Some(1)),
         Some(Round::Capped(1))
     ));
     assert!(!loops.active(lane.token()));
@@ -113,7 +114,7 @@ fn a_loop_stops_at_the_configured_ceiling_with_work_still_left() {
     started(&mut loops, &lane);
     wrote(&mut lane, "b.rs", "fn b() {}\n");
     assert!(matches!(
-        ended(&mut loops, &lane, None, None),
+        ended(&mut loops, &lane, Ended::Done, None),
         Some(Round::Again)
     ));
 }
@@ -135,7 +136,7 @@ fn a_stopped_loop_is_gone_and_a_running_one_is_not_replaced() {
     assert!(loops.due(lane.token()).is_none(), "no round after a stop");
     loops.ask(lane.token());
     assert!(
-        ended(&mut loops, &lane, None, None).is_none(),
+        ended(&mut loops, &lane, Ended::Done, None).is_none(),
         "and no turn heard"
     );
     assert!(loops.stop(lane.token()).is_none(), "nothing left to stop");
@@ -185,7 +186,7 @@ fn a_round_that_undoes_the_last_one_stops_as_oscillating() {
     started(&mut loops, &lane);
     wrote(&mut lane, "a.rs", six);
     assert!(matches!(
-        ended(&mut loops, &lane, None, None),
+        ended(&mut loops, &lane, Ended::Done, None),
         Some(Round::Again)
     ));
 
@@ -195,7 +196,7 @@ fn a_round_that_undoes_the_last_one_stops_as_oscillating() {
     started(&mut loops, &lane);
     wrote(&mut lane, "a.rs", six_more);
     assert!(matches!(
-        ended(&mut loops, &lane, None, None),
+        ended(&mut loops, &lane, Ended::Done, None),
         Some(Round::Again)
     ));
 
@@ -203,7 +204,7 @@ fn a_round_that_undoes_the_last_one_stops_as_oscillating() {
     wrote(&mut lane, "a.rs", six);
     assert!(
         matches!(
-            ended(&mut loops, &lane, None, None),
+            ended(&mut loops, &lane, Ended::Done, None),
             Some(Round::Oscillating)
         ),
         "the tree returned to a fingerprint the loop has already worn"
@@ -223,14 +224,14 @@ fn rounds_that_only_nibble_stop_as_thin() {
     started(&mut loops, &lane);
     wrote(&mut lane, "a.rs", "one\n");
     assert!(matches!(
-        ended(&mut loops, &lane, None, None),
+        ended(&mut loops, &lane, Ended::Done, None),
         Some(Round::Again)
     ));
 
     started(&mut loops, &lane);
     wrote(&mut lane, "a.rs", "one\ntwo\n");
     assert!(matches!(
-        ended(&mut loops, &lane, None, None),
+        ended(&mut loops, &lane, Ended::Done, None),
         Some(Round::Thin)
     ));
     assert!(!loops.active(lane.token()));
@@ -246,9 +247,17 @@ fn only_a_goal_that_starts_a_turn_is_looped() {
         tui.core
             .dispatch(Intent::Builtin(Builtin::Loop(goal.into())))
     };
-    assert!(matches!(looped("fix the tests"), Step::Loop(Some(g)) if g == "fix the tests"));
-    assert!(matches!(looped("!cargo test"), Step::Loop(Some(_))));
-    assert!(matches!(looped("  "), Step::Loop(None)), "bare stops");
+    assert!(
+        matches!(looped("fix the tests"), Step::Drive(Drive::Loop(Some(g))) if g == "fix the tests")
+    );
+    assert!(matches!(
+        looped("!cargo test"),
+        Step::Drive(Drive::Loop(Some(_)))
+    ));
+    assert!(
+        matches!(looped("  "), Step::Drive(Drive::Loop(None))),
+        "bare stops"
+    );
     for goal in ["/help", "/loop go", "/nosuchskill"] {
         assert!(matches!(looped(goal), Step::Flash(_)), "{goal}");
     }
@@ -262,8 +271,8 @@ fn started(loops: &mut Loops, lane: &Lane) {
 }
 
 // A turn on the lane ending.
-fn ended(loops: &mut Loops, lane: &Lane, cut: Option<Cut>, cap: Option<usize>) -> Option<Round> {
-    loops.turn_ended(lane.token(), cut, lane.ctx(), cap)
+fn ended(loops: &mut Loops, lane: &Lane, how: Ended, cap: Option<usize>) -> Option<Round> {
+    loops.turn_ended(lane.token(), &how, lane.ctx(), cap)
 }
 
 // Write `body` to `name` in the lane's workspace and record the write, so

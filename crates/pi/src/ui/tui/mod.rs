@@ -32,8 +32,8 @@ use crossterm::event::Event as TermEvent;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::core::lane::{Lane, Run};
-use crate::core::looping::Loops;
 use crate::core::{self, Core};
+use crate::driver::{Drivers, Origin, Said};
 use crate::input::commands::{Choice, Command};
 use crate::input::{self, Fate, Intent, Rewound, Step};
 use crate::store::icons;
@@ -60,7 +60,7 @@ use mouse::{Regions, Target};
 use scrollback::body;
 use term::{HISTORY_KEEP, Hold, drop_shared_history, history_of, reader};
 use tool::pending_line;
-use view::{Origin, Queued, StreamKind, View, Views, front_view, prune_views, snapshot, view_at};
+use view::{Queued, StreamKind, View, Views, front_view, prune_views, snapshot, view_at};
 use vim::Vim;
 
 // What a folded run shows instead of what it is thinking.
@@ -657,15 +657,11 @@ pub struct Tui {
     events: UnboundedReceiver<TermEvent>,
     // Stops the reader while a child holds the terminal.
     hold: Hold,
-    channels: core::channel::Channels,
-    loops: Loops,
-    // Where each line steered into a running turn came from, by lane token,
-    // in the order said: a run hands back what it never heard bare.
-    steered: Vec<(u64, Origin)>,
+    drivers: Drivers,
 }
 
 impl Tui {
-    pub fn new(mut core: Core, keys: Arc<Keys>, channels: core::channel::Channels) -> Result<Self> {
+    pub fn new(mut core: Core, keys: Arc<Keys>, drivers: Drivers) -> Result<Self> {
         // The screen first, for raw mode: the answer to the background query
         // carries no newline, so a cooked read would wait for one forever.
         let screen = Screen::new()?;
@@ -713,9 +709,7 @@ impl Tui {
             ui,
             events,
             hold,
-            channels,
-            loops: Loops::default(),
-            steered: Vec::new(),
+            drivers,
         })
     }
 
@@ -741,9 +735,7 @@ impl Tui {
             ui,
             events: rx,
             hold: Hold::default(),
-            channels: core::channel::Channels::new(Vec::new()),
-            loops: Loops::default(),
-            steered: Vec::new(),
+            drivers: Drivers::new(Vec::new()),
         }
     }
 
@@ -849,7 +841,7 @@ impl Tui {
             while let Ok(event) = self.core.lanes[at].inbox().try_recv() {
                 // Every lane, not just the one in front: a turn a channel
                 // asked for is still owed its answer after a switch.
-                self.channels.observe(self.core.lanes[at].token(), &event);
+                self.drivers.observe(self.core.lanes[at].token(), &event);
                 // Opened first: a banner drawn later would replace the rows.
                 let view = view::opened(&mut self.views, &self.core.lanes[at], &self.ui.paint);
                 // A retry is transport news, not a step of the answer: in front
@@ -882,7 +874,7 @@ impl Tui {
                 } else {
                     match lane.run() {
                         // A loop between rounds: the lane has not finished.
-                        Run::Ended { ok: true, .. } if self.loops.active(lane.token()) => {
+                        Run::Ended { ok: true, .. } if self.drivers.holds(lane.token()) => {
                             Mark::Plain
                         }
                         Run::Ended { ok: true, .. } => Mark::Done,
@@ -917,7 +909,7 @@ impl Tui {
         // would shift the index a run in flight reports back by. That lane's
         // turn over, the next pass drops what this one left.
         for (at, lane) in self.core.lanes.iter().enumerate().rev() {
-            if lane.is_running() || self.loops.active(lane.token()) {
+            if lane.is_running() || self.drivers.holds(lane.token()) {
                 break;
             }
             if at == self.core.current {
@@ -1046,11 +1038,7 @@ impl Tui {
                 front_view(&mut self.views, self.core.lane())
                     .state
                     .committed = true;
-                let lane = self.core.lane().token();
-                self.steered.push((lane, origin));
-                if let Origin::Channel(name) = origin {
-                    self.channels.ask(name, lane);
-                }
+                self.drivers.steered(self.core.lane().token(), origin);
                 steer.say(text);
                 Wake::Nothing
             }
@@ -1134,7 +1122,7 @@ impl Tui {
             self.drop_vanished_lanes();
             prune_views(&self.core, &mut self.views);
             let core = &self.core;
-            for said in self.loops.retain(|t| core.position_of(t).is_some()) {
+            for said in self.drivers.retain(|t| core.position_of(t).is_some()) {
                 self.ui
                     .say(front_view(&mut self.views, self.core.lane()), said);
             }
@@ -1152,20 +1140,20 @@ impl Tui {
             let waiting = !view.queued.is_empty();
             // Who sent what is carried out this pass.
             let mut origin = Origin::Typed;
-            // A loop's round goes only when the lane is free and nothing typed
+            // A driver's line goes only when the lane is free and nothing typed
             // is waiting: what the user says comes first.
-            let due = (!running && !waiting)
-                .then(|| self.loops.due(self.core.lane().token()))
+            let next = (!running && !waiting)
+                .then(|| self.drivers.next(self.core.lane().token()))
                 .flatten();
-            let woke = if let Some(round) = due {
-                origin = Origin::Loop;
+            let woke = if let Some(next) = next {
+                origin = next.origin;
                 let view = front_view(&mut self.views, self.core.lane());
-                self.ui.submit(view, &round.goal);
+                self.ui.submit(view, &next.line);
                 view.surface.scroll = 0;
-                if !round.note.is_empty() {
-                    self.core.lane_mut().push_note(&round.note);
+                if !next.note.is_empty() {
+                    self.core.lane_mut().push_note(&next.note);
                 }
-                Wake::Do(Asked::Core(input::read(&round.goal, &self.core.commands)))
+                Wake::Do(Asked::Core(input::read(&next.line, &self.core.commands)))
             } else if !waiting || running {
                 // Every branch must be cancel-safe: a loser is dropped mid-poll.
                 // `recv()` and `tick()` are; a blocking read gets its own thread.
@@ -1189,12 +1177,12 @@ impl Tui {
                         }
                         None => Wake::Leave,
                     },
-                    msg = self.channels.rx.recv() => match msg {
+                    msg = self.drivers.inbound() => match msg {
                         // The phone types at the lane in front, like a hand,
                         // and its `/stop` is esc. Same intents, same gate, so
                         // they cannot drift apart.
-                        Some((name, channel::Inbound::Text { text })) => {
-                            origin = Origin::Channel(name);
+                        Some((from, channel::Inbound::Text { text })) => {
+                            origin = from;
                             let intent = input::read(&text, &self.core.commands);
                             if intent.echoed() {
                                 self.echo_sent(&text);
@@ -1269,30 +1257,21 @@ impl Tui {
                 Step::Panel => self.open_panel(),
                 Step::Handled(lines) => self.land_lines(lines),
                 Step::Compact(focus) => self.start_compact(focus, &done_tx),
-                Step::Channel(name, cmd) => {
-                    let said = self.channels.command(name, cmd);
-                    self.ui.open_reply(Listing::say(said));
+                Step::Drive(drive) => {
+                    let lane = self.core.lane();
+                    match self.drivers.command(drive, lane.token(), lane.ctx()) {
+                        Said::Nothing => {}
+                        Said::Reply(lines) => self.ui.open_reply(Listing::say(lines)),
+                        Said::Transcript(line) => self
+                            .ui
+                            .say(front_view(&mut self.views, self.core.lane()), line),
+                    }
                 }
                 // What was submitted while the run worked is taken up by the
                 // top of this loop, one entry at a time and each read as what
                 // it is. Draining it here instead meant everything queued
                 // became the next prompt, whatever it had been typed as.
                 Step::Prompt { send, typed } => self.start_turn(send, typed, &done_tx),
-                Step::Loop(Some(goal)) => {
-                    let lane = self.core.lane();
-                    if let Err(why) = self.loops.start(lane.token(), goal, lane.ctx()) {
-                        self.ui.open_reply(Listing::say([why]));
-                    }
-                }
-                Step::Loop(None) => match self.loops.stop(self.core.lane().token()) {
-                    // A loop really ended: that belongs in the transcript.
-                    Some(said) => self
-                        .ui
-                        .say(front_view(&mut self.views, self.core.lane()), said),
-                    None => self.ui.open_reply(Listing::say([
-                        "no loop here — /loop <line> runs one again while it keeps changing files",
-                    ])),
-                },
             }
             // The driver that sent this line hears the end of the turn it began.
             // By token: the step may have moved the surface to another lane.
@@ -1300,17 +1279,8 @@ impl Tui {
                 && let Some(at) = self.core.position_of(asked_on)
             {
                 let started = self.core.lanes[at].is_running();
-                match origin {
-                    // Model turns only: `settle_run` flushes a channel at the
-                    // end of a turn, never of a `!`, so a `!` would leave it stuck.
-                    Origin::Channel(name) if prompt && started => self.channels.ask(name, asked_on),
-                    Origin::Loop if started => self.loops.ask(asked_on),
-                    Origin::Loop => {
-                        if let Some(said) = self.loops.unstarted(asked_on) {
-                            self.say_of(at, said);
-                        }
-                    }
-                    Origin::Channel(_) | Origin::Typed => {}
+                if let Some(said) = self.drivers.dispatched(origin, asked_on, started, prompt) {
+                    self.say_of(at, said);
                 }
             }
         }
