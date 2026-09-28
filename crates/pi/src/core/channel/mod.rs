@@ -12,6 +12,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::input::ChannelCmd;
 
+/// How a turn a channel asked for ended, as the phone is told it.
+pub enum Ending {
+    Done,
+    Stopped,
+    Failed(String),
+}
+
 // Room held back for the `(n/m)` marker so a piece plus its marker still fits
 // the budget. Ten bytes at three digits a side, rounded up.
 const MARKER_RESERVE: usize = 12;
@@ -119,23 +126,31 @@ impl Relay {
         };
         match event {
             Event::TextDelta(text) => self.asked[at].1.push_str(text),
-            Event::Done { .. } => self.flush(at, false),
+            Event::Done { .. } => self.flush(at, &Ending::Done),
             _ => {}
         }
     }
 
-    // A successful run already flushed on `Done`; a cancelled or failed
-    // one sends what it has.
-    fn finish_turn(&mut self, lane: u64, cancelled: bool) {
+    // A successful run already flushed on `Done`; a stopped or failed one
+    // sends what it has and says how it ended, even with nothing written.
+    fn finish_turn(&mut self, lane: u64, ending: &Ending) {
         if let Some(at) = self.asked.iter().position(|(l, _)| *l == lane) {
-            self.flush(at, cancelled);
+            self.flush(at, ending);
         }
     }
 
-    fn flush(&mut self, at: usize, cancelled: bool) {
+    fn flush(&mut self, at: usize, ending: &Ending) {
         let (_, mut text) = self.asked.swap_remove(at);
-        if cancelled && !text.trim().is_empty() {
-            text.push_str("\n\n(stopped)");
+        let said = match ending {
+            Ending::Done => None,
+            Ending::Stopped => Some("(stopped)".to_string()),
+            Ending::Failed(why) => Some(format!("(failed: {why})")),
+        };
+        if let Some(said) = said {
+            if !text.trim().is_empty() {
+                text.push_str("\n\n");
+            }
+            text.push_str(&said);
         }
         if !text.trim().is_empty() {
             let formatted = self.channel.format(&text);
@@ -252,9 +267,9 @@ impl Channels {
         }
     }
 
-    pub fn finish_turn(&mut self, lane: u64, cancelled: bool) {
+    pub fn finish_turn(&mut self, lane: u64, ending: &Ending) {
         for relay in &mut self.relays {
-            relay.finish_turn(lane, cancelled);
+            relay.finish_turn(lane, ending);
         }
     }
 
@@ -413,7 +428,7 @@ mod tests {
         let mut b = connected(&fake);
         b.observe(LANE, &Event::TextDelta("local".into()));
         b.observe(LANE, &done());
-        b.finish_turn(LANE, false);
+        b.finish_turn(LANE, &Ending::Done);
         assert!(sent(&mut b, &fake).await.is_empty());
     }
 
@@ -433,7 +448,7 @@ mod tests {
         b.observe(LANE, &Event::Warning("careful".into()));
         b.observe(LANE, &Event::TextDelta("the answer".into()));
         b.observe(LANE, &done());
-        b.finish_turn(LANE, false);
+        b.finish_turn(LANE, &Ending::Done);
         assert_eq!(sent(&mut b, &fake).await, ["the answer"]);
     }
 
@@ -456,10 +471,10 @@ mod tests {
         b.ask(LANE);
         b.observe(LANE, &Event::TextDelta("asked".into()));
         b.observe(LANE, &done());
-        b.finish_turn(LANE, false);
+        b.finish_turn(LANE, &Ending::Done);
         b.observe(LANE, &Event::TextDelta("typed".into()));
         b.observe(LANE, &done());
-        b.finish_turn(LANE, false);
+        b.finish_turn(LANE, &Ending::Done);
         assert_eq!(sent(&mut b, &fake).await, ["asked"]);
     }
 
@@ -494,8 +509,22 @@ mod tests {
         let mut b = connected(&fake);
         b.ask(LANE);
         b.observe(LANE, &Event::TextDelta("half".into()));
-        b.finish_turn(LANE, true);
+        b.finish_turn(LANE, &Ending::Stopped);
         assert_eq!(sent(&mut b, &fake).await, ["half\n\n(stopped)"]);
+    }
+
+    // A turn that failed before writing a word still answers the phone, which
+    // would otherwise wait on a reply that is never coming.
+    #[tokio::test]
+    async fn a_failed_turn_says_so_even_with_nothing_written() {
+        let fake = Arc::new(Fake::default());
+        let mut b = connected(&fake);
+        b.ask(LANE);
+        b.finish_turn(LANE, &Ending::Failed("provider returned 500".into()));
+        assert_eq!(
+            sent(&mut b, &fake).await,
+            ["(failed: provider returned 500)"]
+        );
     }
 
     #[tokio::test]
@@ -518,7 +547,7 @@ mod tests {
         b.off();
         b.ask(LANE);
         b.observe(LANE, &Event::TextDelta("hello".into()));
-        b.finish_turn(LANE, false);
+        b.finish_turn(LANE, &Ending::Done);
         assert!(b.last_send.is_none());
         assert!(fake.sent.lock().unwrap().is_empty());
     }

@@ -302,10 +302,12 @@ async fn handle_update(
             return;
         }
         *failures += 1;
-        let _ = tx.send(Inbound::Notice(format!(
-            "wechat getupdates error: ret={} errcode={:?} errmsg={:?}",
-            update.ret, update.errcode, update.errmsg
-        )));
+        if *failures == 3 {
+            let _ = tx.send(Inbound::Notice(format!(
+                "wechat getupdates error — backing off: ret={} errcode={:?} errmsg={:?}",
+                update.ret, update.errcode, update.errmsg
+            )));
+        }
         tokio::time::sleep(backoff(failures)).await;
         return;
     }

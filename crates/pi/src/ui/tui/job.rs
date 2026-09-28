@@ -18,6 +18,7 @@ use super::term::{Deafened, EXIT_GRACE, external_editor, scratch_file};
 use super::view::{Origin, Queued, front_view, tail_of, view_at};
 use super::{NO_TRANSCRIPT, Tui};
 use crate::core;
+use crate::core::channel::Ending;
 use crate::core::looping::Cut;
 use crate::input::Intent;
 use crate::store::listing::Listing;
@@ -438,8 +439,13 @@ impl Tui {
 
         let cancelled = matches!(&out, Err(AgentError::Cancelled));
         if said.is_none() {
+            let ending = match &out {
+                Ok(_) => Ending::Done,
+                Err(AgentError::Cancelled) => Ending::Stopped,
+                Err(e) => Ending::Failed(e.to_string()),
+            };
             let token = self.core.lanes[lane].token();
-            self.channels.finish_turn(token, cancelled);
+            self.channels.finish_turn(token, &ending);
         }
         // The run's totals (subagents' included) land on its lane; an
         // interrupted run lands as the spend the view showed.
