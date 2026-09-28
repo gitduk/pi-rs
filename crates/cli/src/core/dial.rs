@@ -33,11 +33,10 @@ fn transport_for(spec: &ModelSpec, configured: Option<String>) -> Arc<dyn Transp
 pub struct Dialled {
     pub spec: ModelSpec,
     pub transport: Arc<dyn Transport>,
-    /// Worth saying once — at startup, and again at every `/model`. Startup
-    /// drops these under `--quiet`, which asks for the answer and nothing
-    /// around it. `/model` prints them either way: the user typed a command
-    /// whose whole purpose is to report, and a silent one would read as broken.
-    pub notes: Vec<String>,
+    /// The guess made for a model the config does not describe. Said at
+    /// startup (not under `--quiet`) and at every `/model`, which reports
+    /// either way; a reload keeps the model and so has nothing new to say.
+    pub assumed: Option<String>,
     /// Said even under `--quiet`, which is why it is not one of the notes. An
     /// exposed key is a fact about the machine rather than progress chatter,
     /// and the run that asked for silence is the scripted one nobody is
@@ -79,17 +78,16 @@ pub fn dial(
         spec.context_window = window;
     }
 
-    let mut notes = Vec::new();
     // A passed-through model is a guess. Saying which guess lets the user
     // correct the one that matters instead of debugging a 400 later.
-    if !config.is_written(model) {
-        notes.push(format!(
+    let assumed = (!config.is_written(model)).then(|| {
+        format!(
             "assuming a {}-token window, {} max output, no pricing, and no \
              thinking for `{}`. Set --context if the server's window differs; \
              --effort needs a config entry naming the model's thinking shape.",
             spec.context_window, spec.max_output_tokens, spec.model
-        ));
-    }
+        )
+    });
     let key = config.key();
     let warning = config
         .api_key
@@ -107,7 +105,7 @@ pub fn dial(
     Ok(Dialled {
         spec,
         transport,
-        notes,
+        assumed,
         warning,
     })
 }

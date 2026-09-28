@@ -822,6 +822,43 @@ fn a_reload_installs_a_new_compactor() {
     );
 }
 
+// A reload follows the running model's entry: a changed one moves the lane
+// onto it; a broken one keeps the old wire, says so, and the rest still lands.
+#[test]
+fn a_reload_follows_the_running_models_entry_or_says_why_not() {
+    let dir = tempfile::tempdir().expect("a checkout");
+    let mut tui = surface(dir.path());
+    let file = dir.path().join("settings.toml");
+    std::fs::write(
+        &file,
+        "base_url = \"http://127.0.0.1:1/v1\"\nformat = \"openai\"\n",
+    )
+    .expect("a settings file");
+    tui.core.pinned.config = Some(file.display().to_string());
+    tui.core.pinned.context = Some(12_345);
+
+    let said = tui.core.reload();
+    assert!(
+        !said.iter().any(|s| s.starts_with("nothing reloaded")),
+        "{said:?}"
+    );
+    assert!(!said.iter().any(|s| s.starts_with("assuming")), "{said:?}");
+    assert_eq!(tui.core.lane().agent().spec().context_window, 12_345);
+
+    std::fs::write(&file, "effort = \"high\"\n").expect("a file with no endpoint");
+    let said = tui.core.reload();
+    assert!(
+        said.iter().any(|s| s.contains("not re-dialled")),
+        "{said:?}"
+    );
+    assert_eq!(tui.core.lane().agent().spec().context_window, 12_345);
+    assert_eq!(
+        tui.core.lane().agent().brief.effort,
+        llm::request::Effort::High,
+        "the rest of the file still lands"
+    );
+}
+
 // Leaving with a run in flight cancels it and waits for the transcript to
 // come home, rather than writing down the state from before the run started.
 #[tokio::test]

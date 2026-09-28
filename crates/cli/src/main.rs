@@ -157,7 +157,7 @@ async fn main() -> Result<()> {
         eprintln!("\x1b[{}m{warning}\x1b[0m", config.theme.muted.codes());
     }
     if !args.quiet {
-        for note in dialled.notes.iter().chain(&resolved.notes) {
+        for note in dialled.assumed.iter().chain(&resolved.notes) {
             eprintln!("\x1b[{}m{note}\x1b[0m", config.theme.muted.codes());
         }
     }

@@ -66,67 +66,51 @@ impl Core {
             Ok(r) => r,
             Err(e) => return failed(e),
         };
-        // Only here, with everything computed: a config or a skill set that
-        // will not resolve leaves what is running exactly as it was.
-        //
-        // One `make_mut`: a run in flight holds the other reference, so this
-        // is where the copy is taken, and taking it four times copies thrice
-        // over.
-        let home = self.home(root.clone(), self.lane().agent().spec().model.clone());
+        // The model stays — which one runs was a decision, not a preference —
+        // but its entry is re-read, through the same `dial` startup used.
+        // A failed dial keeps the old transport and says so: the model's
+        // entry breaking is no reason to refuse the rest of the file.
+        let running = self.lane().agent().spec().clone();
+        let mut notes: Vec<String> = Vec::new();
+        let retarget = match crate::core::dial::dial(
+            &self.pinned,
+            &config,
+            &running.model,
+            config::Origin::Command,
+        ) {
+            Ok(dialled) if dialled.spec != running => {
+                notes.extend(dialled.warning);
+                Some((dialled.transport, dialled.spec))
+            }
+            Ok(_) => None,
+            Err(e) => {
+                notes.push(format!("`{}` not re-dialled — {e}", running.model));
+                None
+            }
+        };
+        let model = retarget
+            .as_ref()
+            .map_or(running.model, |(_, s)| s.model.clone());
         // The one thing here that is an object rather than a value: the
         // compactor holds the summarizer's own connection, so it is rebuilt
         // here or `summarize_model` and `idle_timeout` never follow a reload.
         let retry = config.retry();
-        let writer = crate::core::dial::summary_writer(
-            &self.pinned,
-            &config,
-            &self.lane().agent().spec().model,
-        )
-        .map_err(|e| format!("nothing reloaded — {}", refused("summarize_model", e)))?;
-        // A skill can appear between one turn and the next, so the table of
-        // what a slash answers to travels with everything else here — onto the
-        // lane it belongs to, then into force.
+        let writer = crate::core::dial::summary_writer(&self.pinned, &config, &model)
+            .map_err(|e| format!("nothing reloaded — {}", refused("summarize_model", e)))?;
+
+        // Only here, with everything computed, is anything touched — and in
+        // one `rearm`, so the copy a run in flight forces is taken once.
+        let home = self.home(root.clone(), model);
         let idle = retry.idle;
         self.lane_mut()
             .rearm(std::sync::Arc::new(resolved), home, retry, |ag| {
                 ag.compactor = std::sync::Arc::new(agent::Summarizing::new(writer, idle));
+                if let Some((transport, spec)) = retarget {
+                    ag.retarget(transport, spec);
+                }
             });
         self.in_force();
-        // The running model is deliberately not re-dialled: a reload re-reads
-        // preferences, and which model this session is on was a decision, not a
-        // preference. `/model` is how that one changes.
         self.config = std::sync::Arc::new(config);
-
-        // A spec change forces a re-dial; compare with the same `dial` call
-        // the running spec came from, so the command line's --base-url /
-        // --context overrides keep applying exactly as they do at startup.
-        let mut notes = Vec::new();
-        match crate::core::dial::dial(
-            &self.pinned,
-            &self.config,
-            &self.lane().agent().spec().model,
-            config::Origin::Command,
-        ) {
-            Ok(dialled) if dialled.spec != *self.lane().agent().spec() => {
-                self.retarget(dialled.transport, dialled.spec);
-                notes.extend(
-                    dialled
-                        .notes
-                        .into_iter()
-                        .filter(|n| !n.starts_with("assuming a")),
-                );
-                notes.extend(dialled.warning);
-            }
-            // Same spec, nothing to change; a failed dial keeps the old
-            // transport but has to say so, or the config the model just
-            // accepted disagrees with the endpoint it still talks to.
-            Ok(_) => {}
-            Err(e) => notes.push(format!(
-                "`{}` not re-dialled — {}",
-                self.lane_mut().agent().spec().model,
-                e
-            )),
-        }
         tracing::info!(
             target: "pi::session",
             models = self.config.names().len(),
@@ -291,7 +275,7 @@ impl Core {
                 self.lane_mut().agent().spec().model
             )];
         }
-        let mut said: Vec<String> = dialled.warning.into_iter().chain(dialled.notes).collect();
+        let mut said: Vec<String> = dialled.warning.into_iter().chain(dialled.assumed).collect();
         let spec = &dialled.spec;
         said.push(format!(
             "now on {}{}{}",
