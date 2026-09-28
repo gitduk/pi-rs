@@ -328,7 +328,7 @@ impl Tool for Subagent {
             }
         };
 
-        self.home.keep(&id, session);
+        self.home.keep(ctx.spill_namespace(), &id, session);
 
         let cut = match ran {
             Ok(_) => None,

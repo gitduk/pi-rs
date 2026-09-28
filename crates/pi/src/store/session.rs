@@ -199,6 +199,53 @@ pub fn new_id() -> String {
 // it up, and one of them naming it differently is a session that quietly
 // stops being found.
 const TRANSCRIPT: &str = "session.json";
+// Beside a session's transcript: the subagents its turns called, one file each.
+const SUBAGENTS: &str = "subagents";
+
+// One transcript, written whole. The rename means a crash mid-write cannot
+// leave a truncated one.
+fn write(
+    path: &Path,
+    id: &str,
+    workspace: &Path,
+    model: &str,
+    name: Option<&str>,
+    created: u64,
+    session: &Session,
+) -> Result<PathBuf> {
+    std::fs::create_dir_all(path.parent().expect("a session directory"))?;
+    let tmp = path.with_extension("json.tmp");
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&tmp)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // The transcript holds prompts and file contents. Chmodded before
+        // the write, not after: no moment when the data sits world-readable.
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    // Serialized by reference, straight into the file: a transcript is
+    // megabytes by the end, and a `Stored` clone plus a `to_vec` buffer is
+    // a second full copy that several parallel subagents each pay for.
+    let stored = StoredRef {
+        id,
+        workspace: workspace.display().to_string(),
+        model,
+        created,
+        name,
+        session,
+    };
+    use std::io::Write;
+    let mut out = std::io::BufWriter::new(file);
+    serde_json::to_writer_pretty(&mut out, &stored)?;
+    out.flush()?;
+    drop(out);
+    std::fs::rename(&tmp, path)?;
+    Ok(path.to_path_buf())
+}
 
 // The transcripts one bucket holds, one per session in that workspace. The
 // bucket also holds `history`, which is a file, and asking for a transcript
@@ -303,40 +350,38 @@ impl Store {
         session: &Session,
     ) -> Result<PathBuf> {
         let path = self.path_of(workspace, id);
-        std::fs::create_dir_all(path.parent().expect("a session directory"))?;
+        write(&path, id, workspace, model, name, created, session)
+    }
 
-        // Rename, so a crash mid-write cannot leave a truncated transcript.
-        let tmp = path.with_extension("json.tmp");
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            // The transcript holds prompts and file contents. Chmodded before
-            // the write, not after: no moment when the data sits world-readable.
-            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-        }
-        // Serialized by reference, straight into the file: a transcript is
-        // megabytes by the end, and a `Stored` clone plus a `to_vec` buffer is
-        // a second full copy that several parallel subagents each pay for.
-        let stored = StoredRef {
+    /// Where a subagent's transcript is: inside its parent's session, so
+    /// `/resume` never offers it and dropping the parent drops it too.
+    pub fn subagent_path(&self, workspace: &Path, parent: &str, id: &str) -> PathBuf {
+        self.dir_of(workspace)
+            .join(tool::state::file_stem(parent))
+            .join(SUBAGENTS)
+            .join(format!("{}.json", tool::state::file_stem(id)))
+    }
+
+    /// File a subagent's transcript under the session that called it.
+    pub fn save_subagent(
+        &self,
+        parent: &str,
+        id: &str,
+        workspace: &Path,
+        model: &str,
+        created: u64,
+        session: &Session,
+    ) -> Result<PathBuf> {
+        let path = self.subagent_path(workspace, parent, id);
+        write(
+            &path,
             id,
-            workspace: workspace.display().to_string(),
+            workspace,
             model,
+            Some("subagent"),
             created,
-            name,
             session,
-        };
-        use std::io::Write;
-        let mut out = std::io::BufWriter::new(file);
-        serde_json::to_writer_pretty(&mut out, &stored)?;
-        out.flush()?;
-        drop(out);
-        std::fs::rename(&tmp, &path)?;
-        Ok(path)
+        )
     }
 
     /// Load a transcript by id. `id` is unique across workspaces, so the
@@ -828,6 +873,23 @@ mod tests {
             "other"
         );
         assert!(store.latest(std::path::Path::new("/nowhere")).is_err());
+    }
+
+    #[test]
+    fn a_subagent_is_filed_inside_its_parent_and_never_offered_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::new(tmp.path());
+        let w = std::path::Path::new("/w");
+        let log = log_with(vec![Message::user("x")]);
+        store.save("p", w, "m", None, 1, &log).unwrap();
+        let at = store
+            .save_subagent("p", "p-subagent-0", w, "m", 2, &log)
+            .unwrap();
+
+        assert!(at.starts_with(store.path_of(w, "p").parent().unwrap()));
+        let ids: Vec<String> = store.choices(w).into_iter().map(|c| c.id).collect();
+        assert_eq!(ids, ["p"]);
+        assert_eq!(store.latest(w).unwrap().id, "p");
     }
 
     #[test]

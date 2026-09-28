@@ -56,26 +56,23 @@ pub fn nowhere() -> Arc<dyn Home> {
 struct Nowhere;
 
 impl Home for Nowhere {
-    fn keep(&self, _id: &str, _session: Session) {}
+    fn keep(&self, _parent: &str, _id: &str, _session: Session) {}
 }
 
 impl Home for Filed {
-    // Named rather than left blank: `/resume`'s listing offers sessions to go
-    // back to, and this is not one — it is a record of something that already
-    // happened inside somebody else's turn.
-    //
     // The save runs on a blocking thread so several parallel subagents do not
     // each serialize megabytes on the tool path; the handle is registered so
     // [`flush`] can wait for it before the process goes.
-    fn keep(&self, id: &str, session: Session) {
-        let (store, root, model, id) = (
+    fn keep(&self, parent: &str, id: &str, session: Session) {
+        let (store, root, model, parent, id) = (
             self.store.clone(),
             self.root.clone(),
             self.model.clone(),
+            parent.to_string(),
             id.to_string(),
         );
         let handle = tokio::task::spawn_blocking(move || {
-            let saved = store.save(&id, &root, &model, Some("subagent"), now(), &session);
+            let saved = store.save_subagent(&parent, &id, &root, &model, now(), &session);
             if let Err(e) = saved {
                 tracing::warn!(
                     target: "pi::session",

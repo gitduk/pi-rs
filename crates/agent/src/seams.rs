@@ -38,8 +38,8 @@ pub trait Approver: Send + Sync {
 pub trait Home: Send + Sync {
     // A subagent has no screen, so its transcript is the only account of what
     // it did. Called once with the whole transcript, whether the run finished
-    // or was cut short.
-    fn keep(&self, id: &str, session: Session);
+    // or was cut short; `parent` is the session whose turn made the call.
+    fn keep(&self, parent: &str, id: &str, session: Session);
 }
 
 /// What a pass of the compactor left: what to send next, whether the transcript

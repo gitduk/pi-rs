@@ -164,10 +164,12 @@ struct Kept {
     // The child's whole transcript, the only way anything outside it can see
     // what it was allowed to do.
     sessions: std::sync::Mutex<Vec<(String, String)>>,
+    parents: std::sync::Mutex<Vec<String>>,
 }
 
 impl Home for Kept {
-    fn keep(&self, id: &str, session: Session) {
+    fn keep(&self, parent: &str, id: &str, session: Session) {
+        self.parents.lock().unwrap().push(parent.to_string());
         self.sessions
             .lock()
             .unwrap()
@@ -267,6 +269,9 @@ async fn the_child_answers_into_the_parents_transcript() {
         "the child files under its own name: {ns}"
     );
     assert_ne!(ns, ctx.spill_namespace(), "and not the parent's");
+    // Filed with the session that called it, so the surface can keep the
+    // transcript inside that one.
+    assert_eq!(*kept.parents.lock().unwrap(), [ctx.spill_namespace()]);
 }
 
 #[tokio::test]
