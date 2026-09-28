@@ -287,7 +287,7 @@ async fn a_filed_row_moves_the_cursor_an_adopt_goes_by() {
         .file_screen(lane, view, "! the reply came back short");
     assert_eq!(view.surface.scrollback.len(), drawn + 1, "drawn now");
     assert_eq!(view.surface.tail, None, "with nothing filed to move past");
-    assert_eq!(lane.held_screens.len(), 1, "it is waiting with the lane");
+    assert_eq!(lane.held_screens().len(), 1, "it is waiting with the lane");
 
     // The run comes home, and the next row can be filed as it is drawn.
     lane.return_session(agent::session::Session::default());

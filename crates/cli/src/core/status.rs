@@ -21,10 +21,10 @@ impl Core {
     // under way is counted rather than waiting for it to end.
     pub(super) fn status_lines(&self) -> Vec<String> {
         let lane = self.lane();
-        let mut out = standing_head(&lane.resolved.standing);
-        if !lane.resolved.context.is_empty() {
+        let mut out = standing_head(&lane.resolved().standing);
+        if !lane.resolved().context.is_empty() {
             out.push("context:".into());
-            out.extend(lane.resolved.context.iter().map(|c| format!("- {c}")));
+            out.extend(lane.resolved().context.iter().map(|c| format!("- {c}")));
         }
         out.push(match journal::path() {
             Some(p) => format!("journal: {}", p.display()),
@@ -32,13 +32,11 @@ impl Core {
         });
         out.push(format!(
             "session: {}",
-            self.store
-                .path_of(lane.ctx.workspace.root(), &lane.id)
-                .display()
+            self.store.path_of(lane.root(), lane.id()).display()
         ));
         // Left out until something has been spent: a session nothing has been
         // asked of yet has no figure, and a row of dashes is not one.
-        let spent = lane.tally.session();
+        let spent = lane.tally().session();
         if spent != Totals::default() {
             out.push(format!("spent: {}", crate::store::text::spent(&spent)));
         }
@@ -51,7 +49,7 @@ impl Core {
             return 0;
         };
         lane.session().map_or(0, |s| {
-            llm::estimate::tokens(&s.context(), lane.agent.spec())
+            llm::estimate::tokens(&s.context(), lane.agent().spec())
         })
     }
 }

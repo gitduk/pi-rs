@@ -279,7 +279,7 @@ impl Ui {
                 self.adopt(view, entries);
             }
             // A retry is transport news, not a step of the answer: here is one
-            // another lane met, replayed into its own transcript.
+            // a lane out of sight met, kept as a row in its own view.
             _ => {
                 self.close(view);
                 if let Some(said) = render::describe(&event, &self.paint, self.screen.usable()) {

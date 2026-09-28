@@ -59,15 +59,10 @@ pub enum Run {
         // Set while the run works, acted on when it ends.
         unsend: bool,
     },
-    // A run that ended while this lane was out of sight, kept until the screen
-    // is looking at it and can show how it went.
-    //
-    // Only for work that can be finished off on the view in front: closing a
-    // partial stream, landing animated tool rows, `say` without a prefix. A
-    // job with none of those settles where it ended instead, or its report
-    // waits on a screen that may never come back.
+    // Ended out of sight, view already closed: the bar's mark until someone
+    // looks, and an Esc-asked rewind that waits for the screen.
     Ended {
-        out: Result<llm::stream::Usage, agent::AgentError>,
+        ok: bool,
         // Esc asked for the prompt back while this was still running.
         unsend: bool,
     },
@@ -87,63 +82,77 @@ pub struct Handback {
     pub unheard: Vec<String>,
 }
 
+/// One checkout being worked in, in three parts that change at different
+/// times: the conversation is swapped whole on `/new` and `/resume`; the
+/// checkout and the runner change only through this type's own methods.
 pub struct Lane {
-    pub token: u64,
-    /// Shared so a run can take it with it: `Agent::run` needs only `&self`,
-    /// and a run outlives the borrow the surface could lend it. `/model` and
-    /// `/reload` write through `Arc::make_mut`, so a run in flight keeps the
-    /// agent it started on — which is what they meant all along.
-    pub agent: std::sync::Arc<Agent>,
-    /// The transcript, or None while a run has it. Private: a run borrows it
-    /// through `take_session` and gives it back through `return_session`;
-    /// `fresh_session` and `adopt_session` are the only others that write it.
+    token: u64,
+    checkout: Checkout,
+    talk: Conversation,
+    runner: Runner,
+}
+
+// What the tree and the config decide; lives as long as the lane.
+struct Checkout {
+    // Shared so a run can take it along; `rearm` goes through `make_mut`, so
+    // a run in flight keeps the agent it started on.
+    agent: Arc<Agent>,
+    // The agent's brief, key map, command table and instruction files: one
+    // value, swapped whole by `/reload` and by an opened checkout.
+    resolved: Arc<Resolved>,
+    // Carried across turns: the file locks and edit shifts outlive any one run.
+    ctx: Ctx,
+    // Which worktree this is, or None in the repository's own checkout.
+    worktree: Option<String>,
+}
+
+// One session: replaced whole by `/new` and `/resume`, so nothing of the one
+// being left survives into the next.
+struct Conversation {
+    // The transcript, or None while a run has it: lent through `take_session`
+    // and given back through `return_session`.
     session: Option<Session>,
-    pub id: String,
-    /// When this session began. Held rather than read back: it is set once and
-    /// never changes, and going to disk for it made every save parse the whole
-    /// transcript to recover one integer.
-    pub created: u64,
-    /// What this lane's finished runs have cost, in and out and in money.
-    /// Per lane, not per surface: with lanes working off-screen the surface
-    /// that shows the bill has to be able to say which lane ran it up.
-    pub totals: Totals,
-    /// What the run in flight has cost so far, as its events stated it. Seeded
-    /// from `totals` when a run arms and cleared when a session begins; the
-    /// status lines read this run alone, and `/status` reads the session.
-    pub tally: Tally,
-    /// Rows filed for the screen while a run had the transcript out. They wait
-    /// with it and land when it comes home: a run posts its last events just
-    /// before it ends, so the rows that outlive it are filed exactly while
-    /// there is nowhere to put them. They land after everything the run
-    /// committed — the surface drew them where they happened, and a rebuild
-    /// draws them at the end of the turn, which is the one place the two differ.
-    pub held_screens: Vec<String>,
+    id: String,
+    // When this session began. Held rather than read back: going to disk for
+    // it made every save parse the whole transcript to recover one integer.
+    created: u64,
+    // What the user calls this session, if anything.
+    name: Option<String>,
+    // What this session's finished runs have cost, in and out and in money.
+    totals: Totals,
+    // What the run in flight has cost so far, seeded from `totals` when a run
+    // arms; the status lines read this run alone, `/status` the session.
+    tally: Tally,
+    // Rows filed for the screen while a run had the transcript out. They land
+    // when it comes home, after everything the run committed.
+    held_screens: Vec<String>,
+}
 
-    /// What the user calls this session, if anything.
-    pub name: Option<String>,
-    /// What this checkout and the config decide: the agent's brief, the key map
-    /// in force, the command table, the instruction files. One value, swapped
-    /// whole by `/reload` and by an opened checkout.
-    pub resolved: Arc<Resolved>,
+impl Conversation {
+    fn new(id: String, created: u64, session: Option<Session>, name: Option<String>) -> Self {
+        Self {
+            session,
+            id,
+            created,
+            name,
+            totals: Totals::default(),
+            tally: Tally::default(),
+            held_screens: Vec::new(),
+        }
+    }
+}
 
-    /// Carried across turns: the file locks and edit shifts outlive any one run.
-    pub ctx: Ctx,
-    /// Which worktree the session is in, or None in the repository's own
-    /// checkout. Held so the status line can say where the work is landing.
-    pub worktree: Option<String>,
-    /// Where this lane's runs post what they are doing. One channel per lane,
-    /// so an event needs no label to say which screen it belongs on.
-    pub events: UnboundedSender<Event>,
-    /// The other end. Drained by the loop, into the view when this lane is in
-    /// front and into `pending` when it is not.
-    pub inbox: UnboundedReceiver<Event>,
-    /// What arrived while nobody was looking, in order, waiting to be replayed
-    /// into the view the moment this lane comes back to the front.
-    pub pending: Vec<Event>,
-    /// Where this lane's run stands.
-    pub run: Run,
-    /// The `/loop` this lane is under, if any.
-    pub looping: Option<Looping>,
+// What is running on the lane, and the channel its events arrive on.
+struct Runner {
+    run: Run,
+    // Where this lane's runs post what they are doing. One channel per lane,
+    // so an event needs no label to say which screen it belongs on.
+    events: UnboundedSender<Event>,
+    // The other end, drained by the surface into this lane's view whether or
+    // not it is in front.
+    inbox: UnboundedReceiver<Event>,
+    // The `/loop` this lane is under, if any.
+    looping: Option<Looping>,
 }
 
 /// Arm an agent for one checkout: hang the subagent tool on the brief, put that
@@ -227,22 +236,19 @@ impl Lane {
         let (events, inbox) = Self::channel();
         Self {
             token: next_token(),
-            agent: parts.agent,
-            session: None,
-            id: parts.id,
-            created: parts.created,
-            totals: Totals::default(),
-            tally: Tally::default(),
-            held_screens: Vec::new(),
-            name: parts.name,
-            resolved: parts.resolved,
-            ctx: parts.ctx,
-            worktree: parts.worktree,
-            events,
-            inbox,
-            pending: Vec::new(),
-            run: Run::Idle,
-            looping: None,
+            checkout: Checkout {
+                agent: parts.agent,
+                resolved: parts.resolved,
+                ctx: parts.ctx,
+                worktree: parts.worktree,
+            },
+            talk: Conversation::new(parts.id, parts.created, None, parts.name),
+            runner: Runner {
+                run: Run::Idle,
+                events,
+                inbox,
+                looping: None,
+            },
         }
     }
 
@@ -252,16 +258,17 @@ impl Lane {
         unbounded_channel()
     }
 
-    /// Take the end of a run this lane has been holding, if it is holding one.
+    /// The screen is on this lane again: drop the mark of a run that ended out
+    /// of sight, and say whether its prompt was asked back.
     ///
-    /// Only when it is: a lane still working must keep its `Running`, or the
+    /// Only an ended one: a lane still working must keep its `Running`, or the
     /// token `esc` reaches and the request to unsend go with it.
-    pub fn take_ended(&mut self) -> Option<(Result<llm::stream::Usage, agent::AgentError>, bool)> {
-        match self.run {
-            Run::Ended { .. } => match std::mem::replace(&mut self.run, Run::Idle) {
-                Run::Ended { out, unsend } => Some((out, unsend)),
-                _ => None,
-            },
+    pub fn take_ended(&mut self) -> Option<bool> {
+        match self.runner.run {
+            Run::Ended { unsend, .. } => {
+                self.runner.run = Run::Idle;
+                Some(unsend)
+            }
             _ => None,
         }
     }
@@ -269,7 +276,7 @@ impl Lane {
     /// A job has given this lane's transcript back. The one place `Running`
     /// ends: a lane left in it queues every later prompt and never drains.
     pub fn finish(&mut self) -> Handback {
-        match std::mem::replace(&mut self.run, Run::Idle) {
+        match std::mem::replace(&mut self.runner.run, Run::Idle) {
             Run::Running { unsend, steer, .. } => Handback {
                 unsend,
                 unheard: steer.map(|s| s.take()).unwrap_or_default(),
@@ -280,7 +287,7 @@ impl Lane {
 
     /// Where a line typed mid-run goes, while a run is there to hear one.
     pub fn steer(&self) -> Option<&Steer> {
-        match &self.run {
+        match &self.runner.run {
             Run::Running { steer, .. } => steer.as_ref(),
             _ => None,
         }
@@ -288,20 +295,20 @@ impl Lane {
 
     /// Whether a run has this lane's transcript right now.
     pub fn is_running(&self) -> bool {
-        matches!(self.run, Run::Running { .. })
+        matches!(self.runner.run, Run::Running { .. })
     }
 
     /// The round this lane's loop queued has begun. Nothing else it runs is
     /// one, so nothing else moves it on.
     pub fn loop_running(&mut self) {
-        if let Some(looping) = &mut self.looping {
+        if let Some(looping) = &mut self.runner.looping {
             looping.mark_running();
         }
     }
 
     /// Put this lane under a loop, marked from where the tree stands now.
     pub fn loop_start(&mut self, goal: String) {
-        self.looping = Some(Looping::start(&self.ctx, goal));
+        self.runner.looping = Some(Looping::start(&self.checkout.ctx, goal));
     }
 
     /// What the loop in force does now that a round has ended — `None` when
@@ -310,14 +317,14 @@ impl Lane {
     /// The loop is taken out and only put back to go round again, so every
     /// ending drops it without a second place to remember that.
     pub fn loop_step(&mut self, cut: Option<Cut>, cap: Option<usize>) -> Option<Round> {
-        let mut looping = self.looping.take()?;
+        let mut looping = self.runner.looping.take()?;
         if !looping.is_running() {
-            self.looping = Some(looping);
+            self.runner.looping = Some(looping);
             return None;
         }
-        let out = looping.step(&self.ctx, cut, cap);
+        let out = looping.step(&self.checkout.ctx, cut, cap);
         if matches!(out, Round::Again { .. }) {
-            self.looping = Some(looping);
+            self.runner.looping = Some(looping);
         }
         Some(out)
     }
@@ -327,7 +334,7 @@ impl Lane {
     /// A run has taken this lane. `steer` is the mailbox it hears at the next
     /// turn boundary; a job that calls no model has none to hear from.
     pub fn begin(&mut self, cancel: CancellationToken, steer: Option<Steer>) {
-        self.run = Run::Running {
+        self.runner.run = Run::Running {
             cancel,
             steer,
             unsend: false,
@@ -337,7 +344,7 @@ impl Lane {
     /// Ask the run under way to stop, and say whether there was one. `unsend`
     /// also takes the prompt back, which is what `esc` means.
     pub fn stop(&mut self, unsend: bool) -> bool {
-        match &mut self.run {
+        match &mut self.runner.run {
             Run::Running {
                 cancel,
                 unsend: take_back,
@@ -354,20 +361,46 @@ impl Lane {
     /// Stop whatever is running, saying nothing about the prompt. For the ways
     /// out that are leaving anyway.
     pub fn cancel(&self) {
-        if let Run::Running { cancel, .. } = &self.run {
+        if let Run::Running { cancel, .. } = &self.runner.run {
             cancel.cancel();
         }
     }
 
-    /// What a run left behind, and whether its prompt was taken back. The other
-    /// half of [`Lane::take_ended`], which is the surface collecting it.
-    pub fn end(&mut self, out: Result<llm::stream::Usage, agent::AgentError>, unsend: bool) {
-        self.run = Run::Ended { out, unsend };
+    /// A run ended out of sight: whether it went well, and whether its prompt
+    /// was asked back. The other half of [`Lane::take_ended`].
+    pub fn end(&mut self, ok: bool, unsend: bool) {
+        self.runner.run = Run::Ended { ok, unsend };
     }
 
     /// Where this lane's run stands, for a surface that only draws it.
     pub fn run(&self) -> &Run {
-        &self.run
+        &self.runner.run
+    }
+
+    // ------------------------------------------------------- the checkout
+
+    /// Change the agent, then put the brief back on it under `resolved`. One
+    /// call: a brief armed on an agent other than the one in force is stale.
+    pub fn rearm(
+        &mut self,
+        resolved: Arc<Resolved>,
+        home: Arc<dyn Home>,
+        retry: agent::Retry,
+        change: impl FnOnce(&mut Agent),
+    ) {
+        let agent = Arc::make_mut(&mut self.checkout.agent);
+        change(agent);
+        self.checkout.resolved = arm(agent, resolved, home, retry);
+    }
+
+    /// What this checkout and the config decide.
+    pub fn resolved(&self) -> &Arc<Resolved> {
+        &self.checkout.resolved
+    }
+
+    /// The tree this lane's tools are confined to.
+    pub fn workspace(&self) -> &tool::Workspace {
+        &self.checkout.ctx.workspace
     }
 
     // ---------------------------------------------------- what a surface reads
@@ -384,9 +417,9 @@ impl Lane {
         // lines the user has given it that have not reached the model. Which
         // side of the seam one waits on is the loop's business, not the
         // reader's.
-        self.tally.snapshot(
+        self.talk.tally.snapshot(
             model,
-            self.worktree.as_deref(),
+            self.checkout.worktree.as_deref(),
             started,
             queued + self.steer().map_or(0, agent::Steer::len),
         )
@@ -394,34 +427,34 @@ impl Lane {
 
     /// The checkout this lane works in, when it is not the repository's own.
     pub fn worktree(&self) -> Option<&str> {
-        self.worktree.as_deref()
+        self.checkout.worktree.as_deref()
     }
 
     /// The loop this lane is under, if any.
     pub fn looping(&self) -> Option<&Looping> {
-        self.looping.as_ref()
+        self.runner.looping.as_ref()
     }
 
     /// The transcript, or `None` while a run has it. Both readers answer that
     /// way: the states a lane can be in are named (`NO_TRANSCRIPT`,
     /// `NOTHING_TO_REWIND`) rather than one of them being a panic.
     pub fn session(&self) -> Option<&Session> {
-        self.session.as_ref()
+        self.talk.session.as_ref()
     }
 
     /// The ask nobody has answered, when a run left one open.
     pub fn last_ask(&self) -> Option<EntryId> {
-        self.session.as_ref().and_then(Session::last_ask)
+        self.talk.session.as_ref().and_then(Session::last_ask)
     }
 
     /// The checkout this lane works in.
     pub fn root(&self) -> &Path {
-        self.ctx.workspace.root()
+        self.checkout.ctx.workspace.root()
     }
 
     /// The context a job runs with: this lane's, with the job's own way out.
     pub fn ctx_for(&self, cancel: CancellationToken) -> Ctx {
-        self.ctx.clone().with_cancel(cancel)
+        self.checkout.ctx.clone().with_cancel(cancel)
     }
 
     /// What the views of this lane are keyed by.
@@ -431,32 +464,36 @@ impl Lane {
 
     /// The model this lane's runs ask for.
     pub fn model(&self) -> &str {
-        &self.agent.spec().model
+        &self.checkout.agent.spec().model
     }
 
     /// The agent these runs go through, for what only it knows.
     pub fn agent(&self) -> &Agent {
-        &self.agent
+        &self.checkout.agent
     }
 
     /// What runs of this lane report as they go.
     pub fn sender(&self) -> &UnboundedSender<Event> {
-        &self.events
+        &self.runner.events
     }
 
     /// What this lane has been told and not yet heard.
     pub fn inbox(&mut self) -> &mut UnboundedReceiver<Event> {
-        &mut self.inbox
+        &mut self.runner.inbox
     }
 
     /// The id this lane's session is saved under.
     pub fn id(&self) -> &str {
-        &self.id
+        &self.talk.id
     }
 
-    /// What arrived while nobody was looking, in order.
-    pub fn take_pending(&mut self) -> Vec<Event> {
-        std::mem::take(&mut self.pending)
+    pub fn set_name(&mut self, name: Option<String>) {
+        self.talk.name = name;
+    }
+
+    /// What the run in flight has cost, over the session's settled totals.
+    pub fn tally(&self) -> &Tally {
+        &self.talk.tally
     }
 
     // ------------------------------------------------------------- the meter
@@ -464,21 +501,23 @@ impl Lane {
     /// Fold an event into the meter. The loop's facts arrive here and nowhere
     /// else: what a run has spent is only known from them.
     pub fn note(&mut self, event: &Event) {
-        self.tally.on(event);
+        self.talk.tally.on(event);
     }
 
     /// Start the meter at what the session has already spent, so a resumed
     /// tree does not read as a free run, and pin the rate this run is priced
     /// at: a `/model` answered mid-run does not reprice the turn in flight.
     pub fn seed_meter(&mut self) {
-        self.tally.seed(self.totals, self.agent.spec().pricing);
+        self.talk
+            .tally
+            .seed(self.talk.totals, self.checkout.agent.spec().pricing);
     }
 
     /// Charge what a run spent to the session, once it has reported it, at the
     /// rate that run was started on — the meter's own, pinned at its seed.
     pub fn charge(&mut self, spent: &llm::stream::Usage) {
-        let cost = self.tally.pricing().cost(spent);
-        self.totals.add(spent, cost);
+        let cost = self.talk.tally.pricing().cost(spent);
+        self.talk.totals.add(spent, cost);
     }
 
     /// The same, from the run itself: its own word when it has one, and the
@@ -487,7 +526,7 @@ impl Lane {
     pub fn charge_run(&mut self, out: &Result<llm::stream::Usage, agent::AgentError>) {
         let spent = match out {
             Ok(usage) => *usage,
-            Err(_) => self.tally.run_spend().usage,
+            Err(_) => self.talk.tally.run_spend().usage,
         };
         self.charge(&spent);
     }
@@ -497,14 +536,14 @@ impl Lane {
     /// Take the loop off this lane: what bare `/loop`, a round that ended it,
     /// and a lane being left all mean.
     pub fn take_looping(&mut self) -> Option<Looping> {
-        self.looping.take()
+        self.runner.looping.take()
     }
 
     // -------------------------------------------------------- the transcript
 
     /// Lend the transcript to a job for the length of its run.
     pub fn take_session(&mut self) -> Option<Session> {
-        self.session.take()
+        self.talk.session.take()
     }
 
     /// Take it back: the job has finished, or never started. Whatever was
@@ -513,18 +552,18 @@ impl Lane {
     /// was shown.
     pub fn return_session(&mut self, mut session: Session) {
         assert!(
-            self.session.is_none(),
+            self.talk.session.is_none(),
             "a lane holds one transcript: a second would drop the first"
         );
-        for text in self.held_screens.drain(..) {
+        for text in self.talk.held_screens.drain(..) {
             session.push_screen(&text);
         }
-        self.session = Some(session);
+        self.talk.session = Some(session);
     }
 
     /// What a run's ending should leave in the transcript.
     pub fn note_outcome(&mut self, out: &Result<llm::stream::Usage, agent::AgentError>) {
-        if let Some(session) = self.session.as_mut() {
+        if let Some(session) = self.talk.session.as_mut() {
             session.note_outcome(out);
         }
     }
@@ -532,7 +571,7 @@ impl Lane {
     /// A line the run filed rather than the model: a command's note, read back
     /// with the rest of the transcript. Nothing to file when there is none.
     pub fn push_note(&mut self, note: &str) {
-        if let Some(session) = self.session.as_mut() {
+        if let Some(session) = self.talk.session.as_mut() {
             session.push_note(note);
         }
     }
@@ -546,13 +585,33 @@ impl Lane {
     /// it has drawn has to move past the entry, or the next adopt draws it a
     /// second time. Nothing comes back for a held row, which is filed later.
     pub fn push_screen(&mut self, text: &str) -> Option<EntryId> {
-        match self.session.as_mut() {
+        match self.talk.session.as_mut() {
             Some(session) => Some(session.push_screen(text)),
             None => {
-                self.held_screens.push(text.to_string());
+                self.talk.held_screens.push(text.to_string());
                 None
             }
         }
+    }
+}
+
+// What tests stage a lane with, or read back off it, that nothing else may.
+#[cfg(test)]
+impl Lane {
+    pub(crate) fn set_worktree(&mut self, name: Option<String>) {
+        self.checkout.worktree = name;
+    }
+
+    pub(crate) fn ctx_mut(&mut self) -> &mut Ctx {
+        &mut self.checkout.ctx
+    }
+
+    pub(crate) fn totals(&self) -> &Totals {
+        &self.talk.totals
+    }
+
+    pub(crate) fn held_screens(&self) -> &[String] {
+        &self.talk.held_screens
     }
 }
 
@@ -576,15 +635,15 @@ impl Core {
         let Some(lane) = self.lanes.get(at) else {
             return Ok(());
         };
-        let Some(session) = &lane.session else {
+        let Some(session) = &lane.talk.session else {
             return Ok(());
         };
         self.store.save(
-            &lane.id,
-            lane.ctx.workspace.root(),
-            &lane.agent.spec().model,
-            lane.name.as_deref(),
-            lane.created,
+            &lane.talk.id,
+            lane.checkout.ctx.workspace.root(),
+            &lane.checkout.agent.spec().model,
+            lane.talk.name.as_deref(),
+            lane.talk.created,
             session,
         )?;
         Ok(())
@@ -598,7 +657,7 @@ impl Core {
     pub fn rewind_to(&mut self, entry: agent::session::EntryId) -> anyhow::Result<Rewound> {
         // A rewind is refused while a run has the transcript, so this is the
         // idle path; without it there is nothing to go back through.
-        let Some(session) = &mut self.lane_mut().session else {
+        let Some(session) = &mut self.lane_mut().talk.session else {
             return Ok(Rewound::Nothing);
         };
         let unsent = session.unsent_text(entry);
@@ -615,61 +674,47 @@ impl Core {
             None => Rewound::Kept,
         })
     }
-    // Become the session this id names: the stamp that dates it, the journal
-    // it writes to, and the namespace its spills are filed under.
-    //
-    // One place because the id and the stamp always travel together and the
-    // two callers each set what the other did not — `created` was the one
-    // that got missed, and a resumed session was then re-dated on its next
-    // save with the stamp of the session it had just left.
-    fn becomes(&mut self, id: String, created: u64) {
-        self.lane_mut().id = id;
-        self.lane_mut().created = created;
-        // What `/status` reports is the lane's tally over its settled totals;
-        // a new session starts both at nothing rather than the one just left.
-        self.lane_mut().totals = Totals::default();
-        self.lane_mut().tally = Tally::default();
-        // Rows filed for the screen of the session being left, still waiting on
-        // its run: they are about a run this one never had.
-        self.lane_mut().held_screens.clear();
-        let id = self.lane().id.clone();
+    // Become the session `talk` holds: the journal it writes to and the
+    // namespace its spills are filed under follow it. Replaced whole, so no
+    // part of the session being left — its bill, its held rows — carries over.
+    fn becomes(&mut self, talk: Conversation) {
+        let lane = self.lane_mut();
+        lane.talk = talk;
+        lane.checkout.ctx = lane.checkout.ctx.clone().with_session(&lane.talk.id);
         let path = self
             .store
-            .journal_path(self.lane().ctx.workspace.root(), &id);
-        journal::switched(&path, &id);
-        // Spills are filed under the session id; a session has to own its own
-        // namespace or the one before it keeps swallowing them.
-        self.lane_mut().ctx = self
-            .lane_mut()
-            .ctx
-            .clone()
-            .with_session(&self.lane_mut().id);
+            .journal_path(self.lane().root(), &self.lane().talk.id);
+        journal::switched(&path, &self.lane().talk.id);
     }
     // Drop the in-memory conversation and open a fresh session under a new
-    // id. The old transcript stays on disk.
+    // id, unnamed: a name identifies one session. The old transcript stays on
+    // disk.
     //
     // Says nothing: the screen it is rebuilt into is empty, which is the
     // whole of the news, and the id it opened under is the surface's own
     // business — as with a resumed one.
     pub(super) fn fresh_session(&mut self) {
-        self.lane_mut().session = Some(Session::default());
-        // A name identifies one session; carried over it would name two, which
-        // is what `/name` exists to prevent.
-        self.lane_mut().name = None;
-        self.becomes(session::new_id(), session::now());
+        self.becomes(Conversation::new(
+            session::new_id(),
+            session::now(),
+            Some(Session::default()),
+            None,
+        ));
     }
     // Take a stored transcript as the running one — entries, name and id.
     // Parting with what is being left is the caller's; they differ on when.
     fn adopt_session(&mut self, stored: Stored) -> Vec<String> {
         let (id, name, created) = (stored.id.clone(), stored.name.clone(), stored.created);
-        let session = stored.into_session();
-        self.lane_mut().name = name;
-        self.lane_mut().session = Some(session);
-        self.becomes(id, created);
+        self.becomes(Conversation::new(
+            id,
+            created,
+            Some(stored.into_session()),
+            name,
+        ));
         // The id is a timestamp with a pid in it — nothing to read, and the
         // transcript coming back on screen already says what was resumed. A
         // name is worth a line, being what the user called it.
-        match self.lane_mut().name.as_deref() {
+        match self.lane().talk.name.as_deref() {
             Some(name) => vec![format!("resumed “{name}”")],
             None => Vec::new(),
         }
@@ -697,8 +742,11 @@ impl Core {
 
         // The model travels; what the root decides does not. A switch changes
         // trees, and which model is answering was a decision made elsewhere.
-        let home = self.home(root.clone(), self.lane().agent.spec().model.clone());
-        let mut ag = (*self.lane().agent).clone();
+        let home = self.home(
+            root.clone(),
+            self.lane().checkout.agent.spec().model.clone(),
+        );
+        let mut ag = (*self.lane().checkout.agent).clone();
         let resolved = arm(&mut ag, Arc::new(resolved), home, self.config.retry());
 
         // Built, not cloned from the lane being left: a `Ctx`'s tables key on
@@ -728,7 +776,9 @@ impl Core {
     // The sessions `/resume` can switch to, newest first, the one running
     // now marked.
     pub(super) fn resume_listing(&self) -> Vec<String> {
-        let list = self.store.choices(self.lane().ctx.workspace.root());
+        let list = self
+            .store
+            .choices(self.lane().checkout.ctx.workspace.root());
         if list.is_empty() {
             return vec![
                 "no sessions recorded for this workspace".into(),
@@ -739,7 +789,7 @@ impl Core {
         // it, then its first question — never the id.
         let shown: Vec<(bool, String, u64)> = list
             .iter()
-            .map(|s| (s.id == self.lane().id, s.label(), s.created))
+            .map(|s| (s.id == self.lane().talk.id, s.label(), s.created))
             .collect();
         let width = shown
             .iter()
@@ -775,7 +825,7 @@ impl Core {
         // not read its transcript back leaves the lane's own id naming a session
         // the archive does not hold, and "no switch" would answer that with a
         // screen that never comes back.
-        if id == self.lane().id {
+        if id == self.lane().talk.id {
             if self.lane().session().is_none() {
                 return Err(
                     "this checkout's transcript is gone — /new starts a session here".to_string(),
@@ -786,7 +836,8 @@ impl Core {
         // The session being left has to survive too, or /resume throws it
         // away. An empty one — just opened, nothing said — has nothing to keep.
         if self
-            .lane_mut()
+            .lane()
+            .talk
             .session
             .as_ref()
             .is_some_and(|s| !s.is_empty())
@@ -808,7 +859,7 @@ mod tests {
     // A lane's model is one value behind two `Arc`s; a test that reprices it
     // takes the copies the same way `/model` does.
     fn price(lane: &mut crate::core::lane::Lane, pricing: Pricing) {
-        let agent = std::sync::Arc::make_mut(&mut lane.agent);
+        let agent = std::sync::Arc::make_mut(&mut lane.checkout.agent);
         std::sync::Arc::make_mut(&mut agent.model).spec.pricing = pricing;
     }
 
@@ -839,7 +890,7 @@ mod tests {
             ..Default::default()
         });
 
-        assert_eq!(lane.totals.cost, 3.0 + 15.0);
+        assert_eq!(lane.talk.totals.cost, 3.0 + 15.0);
     }
 
     // A run holds the transcript for as long as it works, and the rows that

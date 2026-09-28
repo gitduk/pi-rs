@@ -1,4 +1,4 @@
-use crate::core::lane::{Lane, Run};
+use crate::core::lane::Lane;
 use crate::store::icons;
 use crate::ui::render::Paint;
 use crate::ui::tui::screen::plain;
@@ -367,7 +367,7 @@ fn the_live_region_ends_with_the_turn_and_not_with_the_clock() {
         "a running lane draws the status line"
     );
 
-    lane.run = Run::Idle;
+    lane.finish();
     assert!(
         !ui.live(&lane, &view, false)
             .0

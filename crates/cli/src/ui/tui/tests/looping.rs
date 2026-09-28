@@ -183,5 +183,5 @@ fn rounds_that_only_nibble_stop_as_thin() {
 fn wrote(lane: &mut Lane, name: &str, body: &str) {
     let path = lane.root().join(name);
     std::fs::write(&path, body).expect("writes into the temp workspace");
-    lane.ctx.note_write(&path);
+    lane.ctx_mut().note_write(&path);
 }

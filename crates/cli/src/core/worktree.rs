@@ -346,7 +346,7 @@ impl Core {
     // are keyed by absolute path. Coming back therefore resumes what was being
     // said in that tree, not an empty page.
     pub(super) fn enter_worktree(&mut self, name: &str) -> Result<Step, String> {
-        let from = self.lane_mut().ctx.workspace.root().to_path_buf();
+        let from = self.lane_mut().root().to_path_buf();
         let tree = enter(&from, name).map_err(|e| refused("worktree", e))?;
         // Built before the comparison: both sides are then canonical, and a
         // path git and the workspace spell differently is still one directory.
@@ -366,11 +366,7 @@ impl Core {
         }
         // Already open: the lane that holds it comes back whole. Nothing is
         // said — the screen changing, bar included, says where you are.
-        if let Some(i) = self
-            .lanes
-            .iter()
-            .position(|lane| lane.ctx.workspace.root() == ws.root())
-        {
+        if let Some(i) = self.lanes.iter().position(|lane| lane.root() == ws.root()) {
             self.current = i;
             self.in_force();
             return Ok(Step::Handled(Listing::default()));
@@ -383,15 +379,15 @@ impl Core {
     // it. Git says no to a checkout with changes in it, and that refusal is
     // passed on rather than forced past.
     pub(super) fn remove_worktree(&mut self, name: &str) -> Result<Step, String> {
-        let from = self.lane().ctx.workspace.root().to_path_buf();
+        let from = self.lane().root().to_path_buf();
         if let Some(target) = list(&from)
             .ok()
             .and_then(|trees| trees.into_iter().find(|t| !t.main && t.name == name))
         {
             let running = self.lanes.iter().enumerate().any(|(i, lane)| {
                 i != self.current
-                    && lane.ctx.workspace.root().starts_with(&target.path)
-                    && (lane.is_running() || lane.looping.is_some())
+                    && lane.root().starts_with(&target.path)
+                    && (lane.is_running() || lane.looping().is_some())
             });
             if running {
                 return Err(format!(
@@ -401,13 +397,7 @@ impl Core {
         }
         let removed = remove(&from, name).map_err(|e| refused("worktree", e))?;
         for i in (0..self.lanes.len()).rev() {
-            if i != self.current
-                && self.lanes[i]
-                    .ctx
-                    .workspace
-                    .root()
-                    .starts_with(&removed.path)
-            {
+            if i != self.current && self.lanes[i].root().starts_with(&removed.path) {
                 self.remove_lane(i);
             }
         }
@@ -430,7 +420,7 @@ impl Core {
     // The checkouts `/worktree` can move to, the repository's own first, the
     // one the session is in marked.
     pub(super) fn worktree_listing(&self) -> Vec<String> {
-        let here = self.lane().ctx.workspace.root();
+        let here = self.lane().root();
         let trees = match list(here) {
             Ok(t) => t,
             Err(e) => return vec![refused("worktree", e)],
@@ -857,7 +847,7 @@ mod tests {
         assert!(res.is_ok(), "remove_worktree failed: {res:?}");
         assert_eq!(core.lanes.len(), 2);
         assert_eq!(core.current, 1);
-        assert_eq!(core.lane().worktree.as_deref(), Some("feat-two"));
+        assert_eq!(core.lane().worktree(), Some("feat-two"));
     }
 
     #[test]
@@ -869,11 +859,7 @@ mod tests {
         core.enter_worktree("fix-tools").unwrap();
         assert_eq!(core.lanes.len(), 2);
 
-        core.lanes[1].run = crate::core::lane::Run::Running {
-            cancel: tokio_util::sync::CancellationToken::new(),
-            steer: None,
-            unsend: false,
-        };
+        core.lanes[1].begin(tokio_util::sync::CancellationToken::new(), None);
 
         core.current = 0;
         core.in_force();

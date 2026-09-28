@@ -1,4 +1,4 @@
-use crate::core::lane::{Lane, Run};
+use crate::core::lane::Lane;
 use crate::input::Builtin;
 use crate::input::commands::Choice;
 use crate::store::icons;
@@ -87,10 +87,10 @@ async fn switching_back_to_a_rebuilt_lane_keeps_its_transcript() {
     );
 }
 
-// A lane out of front keeps what its run posts: the transcript holds it
-// either way, but the view is only fed while the screen is on that lane.
+// A lane out of front keeps what its run posts in its own view as it comes,
+// so the screen that moves to it finds it there, not a backlog to replay.
 #[tokio::test]
-async fn what_a_lane_out_of_front_posted_waits_for_it() {
+async fn what_a_lane_out_of_front_posted_is_in_its_view_already() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let mut tui = surface(dir.path());
     let lane = running_lane(dir.path());
@@ -102,17 +102,22 @@ async fn what_a_lane_out_of_front_posted_waits_for_it() {
         .expect("the lane is listening");
     tui.serve_lanes().await;
     assert!(
-        !tui.core.lanes[1].pending.is_empty(),
-        "a lane out of front threw away what its run posted"
+        lane_rows(&mut tui, token)
+            .iter()
+            .any(|r| r.contains("said behind you")),
+        "a lane out of front did not take what its run posted"
     );
 
-    // The screen moves to it, the way a checkout switch does.
+    // The screen moves to it, the way a checkout switch does: still there once.
     tui.core.current = 1;
     tui.reconcile(0);
     let rows = lane_rows(&mut tui, token);
-    assert!(
-        rows.iter().any(|r| r.contains("said behind you")),
-        "what the lane posted never reached its screen: {rows:?}"
+    assert_eq!(
+        rows.iter()
+            .filter(|r| r.contains("said behind you"))
+            .count(),
+        1,
+        "what the lane posted is on its screen once: {rows:?}"
     );
 }
 
@@ -282,8 +287,42 @@ async fn an_interrupted_turn_keeps_its_spend_in_the_session_totals() {
     })
     .await;
 
-    assert_eq!(tui.core.lanes[0].totals.usage.input, 100);
-    assert_eq!(tui.core.lanes[0].totals.usage.output, 20);
+    assert_eq!(tui.core.lanes[0].totals().usage.input, 100);
+    assert_eq!(tui.core.lanes[0].totals().usage.output, 20);
+}
+
+// The same for a lane out of sight: its meter hears the run as it goes, so a
+// stop that lands before anyone looks still charges what the run spent.
+#[tokio::test]
+async fn an_interrupted_turn_out_of_sight_keeps_its_spend_too() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let mut tui = surface(dir.path());
+    let lane = running_lane(dir.path());
+    let token = lane.token();
+    let sent = lane.sender().clone();
+    tui.core.lanes.push(lane);
+    let mut session = agent::session::Session::new();
+    session.prompt("the task behind you");
+
+    for event in [
+        agent::Event::TurnStart { turn: 1 },
+        agent::Event::Usage(llm::stream::Usage {
+            input: 100,
+            output: 20,
+            ..Default::default()
+        }),
+    ] {
+        sent.send(event).expect("the lane is listening");
+    }
+    tui.settle(crate::ui::tui::job::Done {
+        token,
+        kind: crate::ui::tui::job::Kind::Turn,
+        ran: Some((session, Err(agent::AgentError::Cancelled))),
+    })
+    .await;
+
+    assert_eq!(tui.core.lanes[1].totals().usage.input, 100);
+    assert_eq!(tui.core.lanes[1].totals().usage.output, 20);
 }
 
 // A flash is transient: it is not part of the transcript, and it is
@@ -346,7 +385,7 @@ fn the_bar_keeps_its_row_when_a_flash_comes_and_goes() {
 fn the_bar_lists_the_checkouts_no_lane_has_open() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let mut tui = surface(dir.path());
-    tui.core.lanes[0].worktree = Some("pi-rs".into());
+    tui.core.lanes[0].set_worktree(Some("pi-rs".into()));
     tui.ui
         .lists
         .worktrees
@@ -392,7 +431,7 @@ fn stepping_the_checkouts_walks_the_ring_and_wraps_both_ways() {
             .collect();
         ui.lists.worktrees.set(trees).ok();
         let (_dir, mut lane) = a_running_lane();
-        lane.worktree = at.map(str::to_string);
+        lane.set_worktree(at.map(str::to_string));
         ui.step_checkout(&lane, forward)
     };
     // The main checkout is the one a lane names as None.
@@ -441,15 +480,15 @@ fn the_ring_walks_the_tabs_order_not_gits() {
         },
     ];
     let (_dir, mut lane) = a_running_lane();
-    lane.worktree = Some("fw-rm".into());
+    lane.set_worktree(Some("fw-rm".into()));
 
     assert_eq!(ui.step_checkout(&lane, true).as_deref(), Some("fix-mem"));
-    lane.worktree = Some("fix-mem".into());
+    lane.set_worktree(Some("fix-mem".into()));
     assert_eq!(ui.step_checkout(&lane, true).as_deref(), Some("fix-input"));
-    lane.worktree = Some("fix-input".into());
+    lane.set_worktree(Some("fix-input".into()));
     assert_eq!(ui.step_checkout(&lane, true).as_deref(), Some("pi-rs"));
     // And the other way, still on the bar's order.
-    lane.worktree = Some("fix-mem".into());
+    lane.set_worktree(Some("fix-mem".into()));
     assert_eq!(ui.step_checkout(&lane, false).as_deref(), Some("fw-rm"));
 }
 
@@ -491,7 +530,7 @@ fn a_lane_whose_checkout_vanished_is_dropped_and_current_follows() {
     let earlier = vanished_lane("fix-old");
     tui.core.lanes.insert(0, earlier);
     tui.core.current = 1;
-    tui.core.lanes[1].run = Run::Idle;
+    tui.core.lanes[1].finish();
     tui.drop_vanished_lanes();
     assert_eq!(tui.core.lanes.len(), 1);
     assert_eq!(tui.core.current, 0, "the front lane follows its index");
@@ -513,7 +552,7 @@ fn a_vanished_lane_before_a_running_one_waits_for_it() {
     assert_eq!(tui.core.lanes.len(), 3, "the run's lane must not move");
 
     // The run over, the same pass now reaches the vanished lane.
-    tui.core.lanes[2].run = Run::Idle;
+    tui.core.lanes[2].finish();
     tui.drop_vanished_lanes();
     assert_eq!(tui.core.lanes.len(), 2);
 }
@@ -526,7 +565,7 @@ fn only_a_finished_lane_wears_a_mark_in_the_bar() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
     let (_run_dir, mut behind) = a_running_lane();
-    behind.worktree = Some("fix-mem".into());
+    behind.set_worktree(Some("fix-mem".into()));
     tui.core.lanes.push(behind);
     tui.refresh_tabs();
 
@@ -542,20 +581,14 @@ fn only_a_finished_lane_wears_a_mark_in_the_bar() {
         "and the bar does not animate it: {bar}"
     );
 
-    tui.core.lanes[1].run = Run::Ended {
-        out: Ok(llm::stream::Usage::default()),
-        unsend: false,
-    };
+    tui.core.lanes[1].end(true, false);
     tui.refresh_tabs();
     assert_eq!(
         marks(&tui),
         vec![crate::ui::tui::Mark::Front, crate::ui::tui::Mark::Done]
     );
 
-    tui.core.lanes[1].run = Run::Ended {
-        out: Err(agent::AgentError::Cancelled),
-        unsend: false,
-    };
+    tui.core.lanes[1].end(false, false);
     tui.refresh_tabs();
     assert_eq!(
         marks(&tui),
@@ -570,12 +603,9 @@ fn a_lane_with_a_round_waiting_has_not_finished() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
     let (_run_dir, mut behind) = a_running_lane();
-    behind.worktree = Some("fix-mem".into());
+    behind.set_worktree(Some("fix-mem".into()));
     behind.loop_start("go".into());
-    behind.run = Run::Ended {
-        out: Ok(llm::stream::Usage::default()),
-        unsend: false,
-    };
+    behind.end(true, false);
     let token = behind.token();
     tui.core.lanes.push(behind);
     view_at(&mut tui.views, token).queued.push(Queued::Round {
@@ -698,7 +728,7 @@ fn normal_capitals_step_the_checkouts_and_the_window() {
         matches!(&next, Asked::Core(Intent::Builtin(Builtin::Worktree(name))) if name == "f1"),
         "{next:?}"
     );
-    lane.worktree = Some("f1".into());
+    lane.set_worktree(Some("f1".into()));
     let prev = ui.key(&lane, &mut view, typed('H'), false);
     assert!(
         matches!(&prev, Asked::Core(Intent::Builtin(Builtin::Worktree(name))) if name == "pi-rs"),
@@ -837,8 +867,8 @@ fn lane_rows(tui: &mut crate::ui::tui::Tui, token: u64) -> Vec<String> {
 // exactly what `drop_vanished_lanes` exists to find.
 fn vanished_lane(name: &str) -> Lane {
     let (_dir, mut lane) = a_running_lane();
-    lane.run = Run::Idle;
-    lane.worktree = Some(name.into());
+    lane.finish();
+    lane.set_worktree(Some(name.into()));
     std::fs::remove_dir_all(lane.root()).expect("the checkout goes");
     lane
 }
@@ -851,7 +881,7 @@ fn vanished_lane(name: &str) -> Lane {
 fn resuming_an_own_id_with_no_transcript_says_so() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
-    let id = tui.core.lane().id.clone();
+    let id = tui.core.lane().id().to_string();
     assert!(
         tui.core.lane().session().is_none(),
         "there is nothing to switch to"

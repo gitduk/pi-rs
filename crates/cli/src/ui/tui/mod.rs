@@ -535,7 +535,7 @@ impl Ui {
         // painted in it — and every copy takes the terminal's band.
         let theme = following_terminal(&core.config.theme, self.tty_bg);
         if self.paint.theme.as_ref() != &theme {
-            self.set_theme(view, &core.lane().resolved.context, Arc::new(theme));
+            self.set_theme(view, &core.lane().resolved().context, Arc::new(theme));
         }
         if !Arc::ptr_eq(&self.commands, &core.commands) {
             self.commands = core.commands.clone();
@@ -689,7 +689,7 @@ impl Tui {
         ui.live = core.config.status.live.clone();
         ui.done = core.config.status.done.clone();
         ui.set_vim(&core.config.vim);
-        let context = core.lane().resolved.context.clone();
+        let context = core.lane().resolved().context.clone();
         let mut opening = View::opening(&context, &ui.paint);
         opening.model = core.lane().model().to_string();
         let mut views = Views::new();
@@ -808,30 +808,12 @@ impl Tui {
         // are its own. Nothing reads the screen here: the events below ask for
         // it again, each in the lane it belongs to.
         view::opened(&mut self.views, self.core.lane(), &self.ui.paint);
-        // What this lane's run posted while nobody was looking, in the order it
-        // arrived. Not through the channels: they heard it live.
-        let replayed = self.core.lane_mut().take_pending();
-        let heard = !replayed.is_empty();
-        for event in replayed {
-            let view = front_view(&mut self.views, self.core.lane());
-            self.ui.on_event(self.core.lane_mut(), view, event);
-        }
-        // And the end of it, if it reached one out of sight.
-        if let Some((out, unsend)) = self.core.lane_mut().take_ended() {
-            self.close_run(out);
-            // Esc asked for the prompt back before the screen moved on. The
-            // asking does not go stale because the answer arrived late.
-            if unsend && let Some(id) = self.core.lane().last_ask() {
-                self.rewind_turn(id);
-            }
-        }
-        // The rows that replay filed — the tally line a run ended on, a warning
-        // about it — reached the transcript after their own run was saved, and
-        // this lane may not run again before it is left: written here, where the
-        // screen already has them, rather than left for a turn that may never
-        // come.
-        if heard && let Err(e) = self.core.save_lane(self.core.current) {
-            self.say_of(self.core.current, core::not_saved(&e));
+        // Esc asked the prompt back before the screen moved on and the run ended
+        // out of sight: a rewind wants the screen, so it waited for it.
+        if self.core.lane_mut().take_ended() == Some(true)
+            && let Some(id) = self.core.lane().last_ask()
+        {
+            self.rewind_turn(id);
         }
     }
 
@@ -857,48 +839,24 @@ impl Tui {
         self.ui.open_reply(said);
     }
 
-    // Take what every lane's run has posted since the last look: into the view
-    // when the lane is in front, into its own backlog when it is not.
-    //
-    // A lane out of sight is not drawn — only its transcript has to be kept
-    // whole. What arrived meanwhile is replayed when it comes back.
+    // Take what every lane's run has posted since the last look into its own
+    // view, drawn or not: its meter, filed rows and end happen when they do.
     async fn serve_lanes(&mut self) {
         for at in 0..self.core.lanes.len() {
             while let Ok(event) = self.core.lanes[at].inbox().try_recv() {
                 // Every lane, not just the one in front: a turn a channel
                 // asked for is still owed its answer after a switch.
                 self.channels.observe(self.core.lanes[at].token(), &event);
-                if at == self.core.current {
-                    let view = front_view(&mut self.views, self.core.lane());
-                    // A retry is transport news, not a step of the answer: it
-                    // takes the bar a moment, after the half-stream is landed.
-                    if matches!(event, Event::Retrying { .. }) {
-                        self.ui.close(view);
-                        self.ui.flash_event(&event);
-                        continue;
-                    }
-                    self.ui.on_event(&mut self.core.lanes[at], view, event);
-                } else {
-                    // Deltas arrive thousands at a time and the backlog is
-                    // replayed in one go: a run of them folded into one keeps
-                    // it the size of what was written rather than of how many
-                    // pieces it came in, and the view cannot tell the two apart.
-                    let lane = &mut self.core.lanes[at];
-                    let folded = match (lane.pending.last_mut(), &event) {
-                        (Some(Event::TextDelta(prev)), Event::TextDelta(next)) => {
-                            prev.push_str(next);
-                            true
-                        }
-                        (Some(Event::ReasoningDelta(prev)), Event::ReasoningDelta(next)) => {
-                            prev.push_str(next);
-                            true
-                        }
-                        _ => false,
-                    };
-                    if !folded {
-                        lane.pending.push(event);
-                    }
+                // Opened first: a banner drawn later would replace the rows.
+                let view = view::opened(&mut self.views, &self.core.lanes[at], &self.ui.paint);
+                // A retry is transport news, not a step of the answer: in front
+                // it takes the bar a moment; out of sight it is a row to find.
+                if at == self.core.current && matches!(event, Event::Retrying { .. }) {
+                    self.ui.close(view);
+                    self.ui.flash_event(&event);
+                    continue;
                 }
+                self.ui.on_event(&mut self.core.lanes[at], view, event);
             }
         }
     }
@@ -922,9 +880,9 @@ impl Tui {
                     match lane.run() {
                         // A round of the loop already waits in this lane's
                         // queue, so it is not a lane that finished.
-                        Run::Ended { out: Ok(_), .. } if self.round_waiting(lane) => Mark::Plain,
-                        Run::Ended { out: Ok(_), .. } => Mark::Done,
-                        Run::Ended { out: Err(_), .. } => Mark::Failed,
+                        Run::Ended { ok: true, .. } if self.round_waiting(lane) => Mark::Plain,
+                        Run::Ended { ok: true, .. } => Mark::Done,
+                        Run::Ended { ok: false, .. } => Mark::Failed,
                         Run::Running { .. } | Run::Idle => Mark::Plain,
                     }
                 },
@@ -1010,8 +968,7 @@ impl Tui {
                 // glued to the goal: the goal must stay exactly what `read`
                 // would parse. The note is the row this round lands as.
                 let note = self.core.lanes[lane]
-                    .looping
-                    .as_ref()
+                    .looping()
                     .map(|l| l.note.clone())
                     .unwrap_or_default();
                 view_at(&mut self.views, self.core.lanes[lane].token())

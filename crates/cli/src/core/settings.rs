@@ -50,7 +50,7 @@ impl Core {
     // it has been computed. `/reload` reads the file first; `/settings`
     // hands over a tree it has just edited.
     fn adopt(&mut self, config: Config) -> Result<Vec<String>, String> {
-        let root = self.lane().ctx.workspace.root().to_path_buf();
+        let root = self.lane().root().to_path_buf();
         let failed = |e| Err(format!("nothing reloaded — {}", refused("reload", e)));
         let project = match config::load_project(&root) {
             Ok(p) => p,
@@ -58,7 +58,7 @@ impl Core {
         };
         let resolved = match crate::resolve(
             &self.args,
-            &self.lane().ctx.workspace,
+            self.lane().workspace(),
             &config,
             &project,
             self.settings.claimed(),
@@ -72,20 +72,21 @@ impl Core {
         // One `make_mut`: a run in flight holds the other reference, so this
         // is where the copy is taken, and taking it four times copies thrice
         // over.
-        let home = self.home(root.clone(), self.lane().agent.spec().model.clone());
+        let home = self.home(root.clone(), self.lane().agent().spec().model.clone());
         // The one thing here that is an object rather than a value: the
         // compactor holds the summarizer's own connection, so it is rebuilt
         // here or `summarize_model` and `idle_timeout` never follow a reload.
         let retry = config.retry();
-        let writer = crate::summary_writer(&self.args, &config, &self.lane().agent.spec().model)
+        let writer = crate::summary_writer(&self.args, &config, &self.lane().agent().spec().model)
             .map_err(|e| format!("nothing reloaded — {}", refused("summarize_model", e)))?;
-        let ag = std::sync::Arc::make_mut(&mut self.lane_mut().agent);
-        ag.compactor = std::sync::Arc::new(agent::Summarizing::new(writer, retry.idle));
-        let resolved = crate::core::lane::arm(ag, std::sync::Arc::new(resolved), home, retry);
         // A skill can appear between one turn and the next, so the table of
         // what a slash answers to travels with everything else here — onto the
         // lane it belongs to, then into force.
-        self.lane_mut().resolved = resolved;
+        let idle = retry.idle;
+        self.lane_mut()
+            .rearm(std::sync::Arc::new(resolved), home, retry, |ag| {
+                ag.compactor = std::sync::Arc::new(agent::Summarizing::new(writer, idle));
+            });
         self.in_force();
         // The running model is deliberately not re-dialled: a reload re-reads
         // preferences, and which model this session is on was a decision, not a
@@ -99,10 +100,10 @@ impl Core {
         match crate::dial(
             &self.args,
             &self.config,
-            &self.lane().agent.spec().model,
+            &self.lane().agent().spec().model,
             config::Origin::Command,
         ) {
-            Ok(dialled) if dialled.spec != *self.lane().agent.spec() => {
+            Ok(dialled) if dialled.spec != *self.lane().agent().spec() => {
                 self.retarget(dialled.transport, dialled.spec);
                 notes.extend(
                     dialled
@@ -118,7 +119,7 @@ impl Core {
             Ok(_) => {}
             Err(e) => notes.push(format!(
                 "`{}` not re-dialled — {}",
-                self.lane_mut().agent.spec().model,
+                self.lane_mut().agent().spec().model,
                 e
             )),
         }
@@ -127,8 +128,8 @@ impl Core {
             models = self.config.names().len(),
             rebound_keys = self.config.keys.len(),
             commands = self.commands.len(),
-            effort = ?self.lane().agent.brief.effort,
-            system_bytes = self.lane().agent.brief.system.len(),
+            effort = ?self.lane().agent().brief.effort,
+            system_bytes = self.lane().agent().brief.system.len(),
             "reloaded"
         );
         Ok(notes)
@@ -239,18 +240,13 @@ impl Core {
         transport: std::sync::Arc<dyn llm::Transport>,
         spec: llm::ModelSpec,
     ) {
-        let home = self.home(
-            self.lane().ctx.workspace.root().to_path_buf(),
-            spec.model.clone(),
-        );
-        let resolved = self.lane().resolved.clone();
+        let home = self.home(self.lane().root().to_path_buf(), spec.model.clone());
+        let resolved = self.lane().resolved().clone();
         let retry = self.config.retry();
-        let ag = std::sync::Arc::make_mut(&mut self.lane_mut().agent);
-        ag.retarget(transport, spec);
         // The child is built from this agent, so the tool is hung again for it
         // to run on the model this session just moved to.
-        let resolved = crate::core::lane::arm(ag, resolved, home, retry);
-        self.lane_mut().resolved = resolved;
+        self.lane_mut()
+            .rearm(resolved, home, retry, |ag| ag.retarget(transport, spec));
     }
 }
 
@@ -271,7 +267,7 @@ impl Core {
         let dialled = match crate::dial(&self.args, &self.config, name, config::Origin::Command) {
             Ok(d) => d,
             Err(e) => {
-                let held = self.lane_mut().agent.spec().model.clone();
+                let held = self.lane_mut().agent().spec().model.clone();
                 return vec![format!("still on {held} — {}", refused("switch", e))];
             }
         };
@@ -280,8 +276,11 @@ impl Core {
         // lands on need not be the same string. Comparing the typed one would
         // re-dial the model already running and then announce a reasoning
         // demotion that never happened.
-        if dialled.spec.model == self.lane_mut().agent.spec().model {
-            return vec![format!("already on {}", self.lane_mut().agent.spec().model)];
+        if dialled.spec.model == self.lane_mut().agent().spec().model {
+            return vec![format!(
+                "already on {}",
+                self.lane_mut().agent().spec().model
+            )];
         }
         let mut said: Vec<String> = dialled.warning.into_iter().chain(dialled.notes).collect();
         let spec = &dialled.spec;
@@ -298,7 +297,7 @@ impl Core {
         }
         tracing::info!(
             target: "pi::session",
-            from = %self.lane_mut().agent.spec().model,
+            from = %self.lane_mut().agent().spec().model,
             to = %spec.model,
             format = spec.format.name(),
             context_window = spec.context_window,
@@ -309,7 +308,7 @@ impl Core {
     }
     // What `/model` on its own shows.
     pub(super) fn listing(&self) -> Vec<String> {
-        let here = &self.lane().agent.spec().model;
+        let here = &self.lane().agent().spec().model;
         let choices = self.choices();
         if choices.is_empty() {
             return vec![

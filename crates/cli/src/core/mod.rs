@@ -68,8 +68,8 @@ impl Core {
     // leaving the last lane's in place had this one answering to another
     // tree's.
     fn in_force(&mut self) {
-        self.keys = self.lane().resolved.keys.clone();
-        self.commands = self.lane().resolved.commands.clone();
+        self.keys = self.lane().resolved().keys.clone();
+        self.commands = self.lane().resolved().commands.clone();
     }
 
     /// The checkout in front. Indexing is safe by construction: `lanes` is
@@ -126,11 +126,11 @@ impl Core {
             }
             Intent::Builtin(Builtin::Name(name)) => {
                 let said = if name.is_empty() {
-                    self.lane_mut().name = None;
-                    format!("{} is unnamed again", self.lane_mut().id)
+                    self.lane_mut().set_name(None);
+                    format!("{} is unnamed again", self.lane().id())
                 } else {
-                    let said = format!("{} is now “{name}”", self.lane_mut().id);
-                    self.lane_mut().name = Some(name);
+                    let said = format!("{} is now “{name}”", self.lane().id());
+                    self.lane_mut().set_name(Some(name));
                     said
                 };
                 // `/resume` reads its row off the file, so the name has to land
@@ -470,12 +470,12 @@ mod tests {
     async fn run_the_child(core: &crate::core::Core) {
         let subagent = core
             .lane()
-            .agent
+            .agent()
             .brief
             .registry
             .get(subagent::Subagent::NAME)
             .unwrap();
-        let ctx = tool::Ctx::new(core.lane().ctx.workspace.clone());
+        let ctx = tool::Ctx::new(core.lane().workspace().clone());
         subagent
             .execute(
                 serde_json::json!({ "description": "go", "prompt": "go" }),

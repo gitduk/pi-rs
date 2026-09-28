@@ -336,7 +336,7 @@ impl Tui {
         // waiting before closing anything, or a tool row still open is frozen
         // as abandoned and the elapsed figure is read off a cleared clock.
         self.serve_lanes().await;
-        let Some(lane) = self.core.lanes.iter().position(|l| l.token == done.token) else {
+        let Some(lane) = self.core.lanes.iter().position(|l| l.token() == done.token) else {
             return;
         };
         let back = self.core.lanes[lane].finish();
@@ -406,13 +406,9 @@ impl Tui {
             ),
         };
 
-        // The lane in front drew every row the run left behind: its entries as
-        // they were committed, and whatever its ending filed as it was worded.
-        // So its cursor is the end of what came home — and it has to be, or the
-        // next turn's adopt draws those filed rows again, above the prompt it
-        // is answering. A lane off screen keeps its cursor: that is what the
-        // replay of its `pending` events goes by.
-        if ran_back && lane == self.core.current {
+        // The view drew every row the run left, in front or not, so its cursor
+        // is the end of what came home — or the next adopt draws them again.
+        if ran_back {
             let tail = self.core.lanes[lane].session().and_then(tail_of);
             view_at(&mut self.views, self.core.lanes[lane].token())
                 .surface
@@ -484,15 +480,16 @@ impl Tui {
         };
         let said = self.step_loop(lane, cut);
 
+        let ok = out.is_ok();
+        self.close_run(lane, out);
         if lane == self.core.current {
-            self.close_run(out);
             if unsend && let Some(id) = self.core.lane().last_ask() {
                 self.rewind_turn(id);
             }
         } else {
-            // Out of sight: what the run left to draw waits with it, and the
-            // lane says so in the bar until someone looks.
-            self.core.lanes[lane].end(out, unsend);
+            // Out of sight: the lane says so in the bar until someone looks,
+            // and a prompt asked back is taken back then.
+            self.core.lanes[lane].end(ok, unsend);
         }
         // Last, and outside the split: a rewind rebuilds the whole surface, and
         // a row landed before it would go with the old drawing.
@@ -579,9 +576,9 @@ impl Tui {
         }
     }
 
-    // Draw the end of a run into the view that is on screen.
-    pub(super) fn close_run(&mut self, out: Result<llm::stream::Usage, AgentError>) {
-        let view = front_view(&mut self.views, self.core.lane());
+    // Draw the end of a run into its lane's view, on screen or not.
+    pub(super) fn close_run(&mut self, lane: usize, out: Result<llm::stream::Usage, AgentError>) {
+        let view = view_at(&mut self.views, self.core.lanes[lane].token());
         self.ui.close(view);
         // A cancelled run's calls got no `ToolEnd`; their animated rows have to
         // reach scrollback some other way before the next flush draws them as a
