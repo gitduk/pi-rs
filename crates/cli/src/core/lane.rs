@@ -25,9 +25,9 @@ use tokio_util::sync::CancellationToken;
 use tool::Ctx;
 
 use super::Core;
-use crate::Resolved;
 use crate::core::looping::{Cut, Looping, Round};
 use crate::core::meter::{Snapshot, Tally};
+use crate::core::resolve::Resolved;
 use crate::input::commands::ago;
 use crate::input::{Rewound, refused};
 use crate::store::config;
@@ -731,7 +731,7 @@ impl Core {
         let root = ws.root().to_path_buf();
         let failed = |e| format!("nothing opened — {}", refused("worktree", e));
         let project = config::load_project(&root).map_err(failed)?;
-        let resolved = crate::resolve(
+        let resolved = crate::core::resolve::resolve(
             &self.args,
             &ws,
             &self.config,

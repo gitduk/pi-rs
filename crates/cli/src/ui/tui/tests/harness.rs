@@ -111,7 +111,7 @@ pub(super) fn surface(dir: &std::path::Path) -> crate::ui::tui::Tui {
         store: Store::new(dir.join("state")),
         keys: keys.clone(),
         config: std::sync::Arc::new(crate::store::config::Config::default()),
-        args: std::sync::Arc::new(<crate::Args as clap::Parser>::parse_from(["pi"])),
+        args: std::sync::Arc::new(<crate::args::Args as clap::Parser>::parse_from(["pi"])),
         commands: std::sync::Arc::new(Vec::new()),
         settings: crate::store::settings::Settings::new(toml::Value::Table(Default::default())),
         lanes: vec![running_lane(dir)],

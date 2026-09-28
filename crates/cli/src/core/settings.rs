@@ -56,7 +56,7 @@ impl Core {
             Ok(p) => p,
             Err(e) => return failed(e),
         };
-        let resolved = match crate::resolve(
+        let resolved = match crate::core::resolve::resolve(
             &self.args,
             self.lane().workspace(),
             &config,
@@ -77,8 +77,12 @@ impl Core {
         // compactor holds the summarizer's own connection, so it is rebuilt
         // here or `summarize_model` and `idle_timeout` never follow a reload.
         let retry = config.retry();
-        let writer = crate::summary_writer(&self.args, &config, &self.lane().agent().spec().model)
-            .map_err(|e| format!("nothing reloaded — {}", refused("summarize_model", e)))?;
+        let writer = crate::core::dial::summary_writer(
+            &self.args,
+            &config,
+            &self.lane().agent().spec().model,
+        )
+        .map_err(|e| format!("nothing reloaded — {}", refused("summarize_model", e)))?;
         // A skill can appear between one turn and the next, so the table of
         // what a slash answers to travels with everything else here — onto the
         // lane it belongs to, then into force.
@@ -97,7 +101,7 @@ impl Core {
         // the running spec came from, so the command line's --base-url /
         // --context overrides keep applying exactly as they do at startup.
         let mut notes = Vec::new();
-        match crate::dial(
+        match crate::core::dial::dial(
             &self.args,
             &self.config,
             &self.lane().agent().spec().model,
@@ -264,7 +268,12 @@ impl Core {
     /// force when it ran, and the total is the sum of those, so a switch to a
     /// dearer model does not reprice the cheap turns behind it.
     pub fn switch(&mut self, name: &str) -> Vec<String> {
-        let dialled = match crate::dial(&self.args, &self.config, name, config::Origin::Command) {
+        let dialled = match crate::core::dial::dial(
+            &self.args,
+            &self.config,
+            name,
+            config::Origin::Command,
+        ) {
             Ok(d) => d,
             Err(e) => {
                 let held = self.lane_mut().agent().spec().model.clone();
@@ -344,7 +353,7 @@ mod tests {
             ),
             keys: std::sync::Arc::new(crate::store::keys::Keys::default()),
             config: std::sync::Arc::new(crate::store::config::Config::default()),
-            args: std::sync::Arc::new(<crate::Args as clap::Parser>::parse_from(["pi"])),
+            args: std::sync::Arc::new(<crate::args::Args as clap::Parser>::parse_from(["pi"])),
             commands: std::sync::Arc::new(Vec::new()),
             settings: crate::store::settings::Settings::new(toml::from_str(file).unwrap()),
             lanes: vec![a_lane("s")],

@@ -643,7 +643,7 @@ pub fn install(path: &Path, level: LogLevel) {
 /// of these, and none of them is visible anywhere else afterwards.
 pub fn opening(
     id: &str,
-    args: &crate::Args,
+    args: &crate::args::Args,
     config: &crate::store::config::Config,
     project: &crate::store::config::Project,
     root: &Path,

@@ -11,9 +11,11 @@
 
 pub mod bash;
 pub mod channel;
+pub mod dial;
 pub mod lane;
 pub mod looping;
 pub mod meter;
+pub mod resolve;
 pub mod settings;
 pub mod status;
 pub mod subagent;
@@ -44,7 +46,7 @@ pub struct Core {
     pub config: std::sync::Arc<config::Config>,
     /// The command line, kept because it outranks the config and so has to be
     /// re-applied over every reload.
-    pub args: std::sync::Arc<crate::Args>,
+    pub args: std::sync::Arc<crate::args::Args>,
     /// What a slash answers to, built-ins and skills together. Rebuilt by
     /// `/reload`, because a skill can appear between one turn and the next.
     ///
@@ -458,7 +460,7 @@ mod tests {
             store,
             keys,
             config: std::sync::Arc::new(crate::store::config::Config::default()),
-            args: std::sync::Arc::new(<crate::Args as clap::Parser>::parse_from(["pi"])),
+            args: std::sync::Arc::new(<crate::args::Args as clap::Parser>::parse_from(["pi"])),
             commands,
             settings: crate::store::settings::Settings::new(toml::Value::Table(Default::default())),
             lanes: vec![lane],

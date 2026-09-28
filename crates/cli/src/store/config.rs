@@ -22,7 +22,7 @@ use anyhow::{Context, Result, bail};
 use llm::model::{CacheControl, Format, ModelSpec, Pricing, ReplayThinking, ThinkingControl};
 use serde::{Deserialize, Serialize};
 
-use crate::{EffortArg, FormatArg, TierArg};
+use crate::args::{EffortArg, FormatArg, TierArg};
 
 /// The user's own file: `~/.pi/settings.toml`.
 #[derive(Debug, Default, PartialEq, Deserialize, Serialize)]
