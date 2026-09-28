@@ -9,11 +9,11 @@ use tokio::sync::mpsc;
 use crate::args::Args;
 use crate::core::dial::{dial, summary_writer};
 use crate::core::resolve::resolve;
-use crate::core::{Core, lane, subagent, worktree};
+use crate::core::{Core, lane, worktree};
 use crate::input::expand;
 use crate::store::icons;
 use crate::store::settings::Settings;
-use crate::store::{config, journal, session};
+use crate::store::{config, home, journal, session};
 use crate::ui::{render, tui};
 
 mod args;
@@ -199,9 +199,9 @@ async fn main() -> Result<()> {
     // is never shrunk — see `agent::Compactor`.
     ag.compactor = Arc::new(agent::Summarizing::new(writer, retry.idle));
     let home = if keeps {
-        subagent::Filed::armed(store.clone(), root.clone(), model_id.clone())
+        home::Filed::armed(store.clone(), root.clone(), model_id.clone())
     } else {
-        subagent::nowhere()
+        home::nowhere()
     };
     // Armed here rather than field by field: the brief the lane keeps and the
     // one the agent runs on are the same value, subagent tool and all.
@@ -251,7 +251,7 @@ async fn main() -> Result<()> {
         let out = tui::Tui::new(core, key_map, drivers)?.run().await;
         // Subagents handed their transcripts to a background save; wait
         // for those to land before the runtime goes with them.
-        subagent::flush().await;
+        home::flush().await;
         return out;
     };
 
@@ -316,7 +316,7 @@ async fn main() -> Result<()> {
 
     // Above both ways out below: one exits the process outright, and a stopped
     // run is the one whose subagents were cut short with a save in flight.
-    subagent::flush().await;
+    home::flush().await;
 
     // A run the user stopped is not a failure of the run; scripts should be
     // able to tell the two apart.

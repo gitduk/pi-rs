@@ -16,7 +16,6 @@ pub mod meter;
 pub mod resolve;
 pub mod settings;
 pub mod status;
-pub mod subagent;
 pub mod worktree;
 
 use crate::core::lane::Lane;
@@ -81,7 +80,7 @@ impl Core {
     // vary — a `/worktree` moves one, a `/model` the other — and the rest
     // never does.
     fn home(&self, root: std::path::PathBuf, model: String) -> std::sync::Arc<dyn agent::Home> {
-        crate::core::subagent::Filed::armed(self.store.clone(), root, model)
+        crate::store::home::Filed::armed(self.store.clone(), root, model)
     }
 
     pub fn lane_mut(&mut self) -> &mut Lane {
@@ -452,7 +451,7 @@ mod tests {
         let resolved = crate::core::lane::arm(
             &mut agent,
             crate::core::lane::a_resolved("standing"),
-            crate::core::subagent::Filed::armed(
+            crate::store::home::Filed::armed(
                 crate::store::session::Store::new(root.join("state")),
                 root.to_path_buf(),
                 model.into(),

@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use agent::session::{EntryId, Session};
 use agent::{Agent, Event, Home, Steer, Totals};
+use subagent::Subagent;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio_util::sync::CancellationToken;
 
@@ -169,13 +170,17 @@ pub fn arm(
     home: Arc<dyn Home>,
     retry: agent::Retry,
 ) -> Arc<Resolved> {
-    let brief = crate::core::subagent::hang_on(
+    let subagent = Subagent::new(
         agent,
         resolved.brief.clone(),
         home,
         &resolved.standing,
         retry,
     );
+    // A fresh `Arc`, since the child holds the old one: it runs on the
+    // registry it came from, and only the lane's copy carries the tool.
+    let mut brief = resolved.brief.clone();
+    Arc::make_mut(&mut brief).registry.offer(Arc::new(subagent));
     agent.apply(brief);
     resolved
 }

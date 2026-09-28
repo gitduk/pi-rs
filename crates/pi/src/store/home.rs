@@ -1,4 +1,4 @@
-//! The surface's side of a subagent's return line.
+//! Where a subagent's transcript is filed: pi's side of `agent::Home`.
 //!
 //! A subagent has no lane, no view and no place on the bar, so this is the
 //! whole of what it leaves behind. What it spent no longer lands here: the
@@ -7,9 +7,8 @@
 use std::sync::Arc;
 use std::sync::OnceLock;
 
+use agent::Home;
 use agent::session::Session;
-use agent::{Agent, Home};
-use subagent::Subagent;
 
 use crate::store::session::{Store, now};
 
@@ -29,26 +28,6 @@ pub(crate) async fn flush() {
     for save in saves {
         let _ = save.await;
     }
-}
-
-/// Offer the subagent tool to `brief`, and hand back the brief that now carries
-/// it — unless a tool already holds the name, which keeps it.
-///
-/// A new `Arc` when someone else holds the old one — the child does — so the
-/// copy a subagent runs on keeps the registry it was derived from, and the one
-/// the lane keeps has the tool in it.
-pub fn hang_on(
-    agent: &Agent,
-    brief: Arc<agent::Briefing>,
-    home: Arc<dyn Home>,
-    standing: &str,
-    retry: agent::Retry,
-) -> Arc<agent::Briefing> {
-    let subagent = Subagent::new(agent, brief.clone(), home, standing, retry);
-    let mut armed = brief;
-    let patch = Arc::make_mut(&mut armed);
-    patch.registry.offer(Arc::new(subagent));
-    armed
 }
 
 pub struct Filed {
