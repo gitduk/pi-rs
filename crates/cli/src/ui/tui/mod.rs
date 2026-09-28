@@ -1225,23 +1225,23 @@ impl Tui {
                         // The phone types at the lane in front, like a hand,
                         // and its `/stop` is esc. Same intents, same gate, so
                         // they cannot drift apart.
-                        Some((channel, core::channel::Inbound::Text { text })) => {
-                            from = Some(channel);
+                        Some((name, channel::Inbound::Text { text })) => {
+                            from = Some(name);
                             let intent = input::read(&text, &self.core.commands);
                             if intent.echoed() {
                                 self.echo_sent(&text);
                             }
                             self.admit(Asked::Core(intent), from)
                         }
-                        Some((_, core::channel::Inbound::Stop)) => self.admit(Asked::Own(Deed::Interrupt), None),
+                        Some((_, channel::Inbound::Stop)) => self.admit(Asked::Own(Deed::Interrupt), None),
                         // The QR, an error, a way out of one: on the lane the
                         // channel follows, where it lasts and can be re-read.
-                        Some((_, core::channel::Inbound::Notice(text))) => {
+                        Some((_, channel::Inbound::Notice(text))) => {
                             self.ui.say(front_view(&mut self.views, self.core.lane()), text);
                             Wake::Nothing
                         }
                         // A channel saying it is up: one row for a moment.
-                        Some((_, core::channel::Inbound::Flash(text))) => {
+                        Some((_, channel::Inbound::Flash(text))) => {
                             self.ui.flash(text);
                             Wake::Nothing
                         }

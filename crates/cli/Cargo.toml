@@ -17,6 +17,7 @@ agent.workspace = true
 subagent.workspace = true
 skills.workspace = true
 llm.workspace = true
+channel.workspace = true
 tool.workspace = true
 toolbox.workspace = true
 wechat.workspace = true

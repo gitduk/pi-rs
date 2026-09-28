@@ -286,6 +286,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "channel"
+version = "1.23.4"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "clap"
 version = "4.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1708,6 +1718,7 @@ dependencies = [
  "agent",
  "anyhow",
  "async-trait",
+ "channel",
  "clap",
  "crossterm",
  "futures",

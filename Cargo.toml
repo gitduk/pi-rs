@@ -15,6 +15,7 @@ toolbox = { path = "crates/toolbox" }
 agent = { path = "crates/agent" }
 subagent = { path = "crates/subagent" }
 skills = { path = "crates/skills" }
+channel = { path = "crates/channel" }
 wechat = { path = "crates/wechat" }
 
 anyhow = "1"

@@ -1,7 +1,4 @@
-//! Input channels: a chat platform the session can be driven from.
-//!
-//! A platform implements `Channel` — how to connect, how to send one message,
-//! what its messages may hold — and nothing else. What the phone gets back is
+//! The surface's side of the `channel` contract. What the phone gets back is
 //! the `Relay`'s, written once for every platform: the answer to the turn it
 //! asked for, whole, cut into ordered pieces when it is long, and nothing else.
 
@@ -11,8 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent::Event;
-use async_trait::async_trait;
-use tokio::sync::mpsc::error::SendError;
+use channel::{Channel, Inbound, Inbox};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -20,57 +16,6 @@ use tokio_util::sync::CancellationToken;
 use crate::input::ChannelCmd;
 
 pub use wechat::WeChat;
-
-/// What a channel hands the surface.
-pub enum Inbound {
-    // A text message from the peer.
-    Text { text: String },
-    // Something worth saying on the local terminal and worth finding again: a
-    // status, an error, the QR. The QR has to stay long enough to be scanned,
-    // and a way out of a broken token has to stay readable, so the line lands
-    // in the scrollback rather than on the bar.
-    Notice(String),
-    // The same, on the bar for a moment and no longer: news about the channel
-    // itself that nobody reads twice.
-    Flash(String),
-    // The peer typed `/stop` or `/esc`: interrupt the running turn now.
-    Stop,
-}
-
-/// Where a channel reports. Stamps each message with the channel's name, so
-/// the answer goes back to the channel that asked and no other.
-#[derive(Clone)]
-pub struct Inbox {
-    from: &'static str,
-    tx: UnboundedSender<(&'static str, Inbound)>,
-}
-
-impl Inbox {
-    pub fn send(&self, inbound: Inbound) -> Result<(), SendError<(&'static str, Inbound)>> {
-        self.tx.send((self.from, inbound))
-    }
-}
-
-/// One chat platform. Implementations own their credentials, their wire and
-/// their one peer; the relay decides what is said and when.
-#[async_trait]
-pub trait Channel: Send + Sync {
-    /// The word its command answers to: `wechat` is `/wechat`.
-    fn name(&self) -> &'static str;
-    /// Bytes one outbound message may hold. Bytes because they never
-    /// undercount: a platform that limits characters is safe under it too.
-    fn limit(&self) -> usize;
-    /// The model's markdown, as this platform can show it.
-    fn format(&self, markdown: &str) -> String;
-    /// Log in if needed, then receive until `abort` fires. Progress, the
-    /// peer's messages and failures all go out on `inbox`.
-    async fn run(&self, inbox: Inbox, abort: CancellationToken);
-    /// Send one message to the peer. No peer yet is not an error: there is
-    /// nobody to tell.
-    async fn send(&self, text: &str) -> anyhow::Result<()>;
-    /// Best effort; a platform without an indicator keeps the default.
-    async fn typing(&self, _on: bool) {}
-}
 
 // Room held back for the `(n/m)` marker so a piece plus its marker still fits
 // the budget. Ten bytes at three digits a side, rounded up.
@@ -104,10 +49,7 @@ pub struct Relay {
 
 impl Relay {
     fn new(channel: Arc<dyn Channel>, tx: UnboundedSender<(&'static str, Inbound)>) -> Self {
-        let inbox = Inbox {
-            from: channel.name(),
-            tx,
-        };
+        let inbox = Inbox::new(channel.name(), tx);
         Self {
             channel,
             inbox,
@@ -399,6 +341,7 @@ fn boundary(rest: &str, budget: usize) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use std::sync::Mutex;
 
     // A platform that is up until told otherwise and keeps what it was sent.

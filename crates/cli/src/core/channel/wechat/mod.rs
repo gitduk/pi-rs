@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use wechat::Update;
 
-use super::{Channel, Inbound, Inbox};
+use channel::{Channel, Inbound, Inbox};
 use markdown::format_markdown;
 
 // What persists between runs, under the pi root. One peer per session in
