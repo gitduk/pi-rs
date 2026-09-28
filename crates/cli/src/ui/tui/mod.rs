@@ -773,7 +773,7 @@ impl Tui {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let _ = std::fs::write(path, editor::encode(keep));
+        let _ = ::tool::state::write_private(&path, editor::encode(keep).as_bytes());
     }
 
     // Sessions change on the commands that create, delete or switch them;

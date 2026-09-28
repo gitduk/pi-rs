@@ -371,10 +371,10 @@ impl Agent {
                 .iter()
                 .map(|i| (i.call.clone(), i.clone()))
                 .collect();
-            let results = self
+            let (results, stopped) = self
                 .run_calls(&calls, &bad, ctx, tx, &mut failures, &mut totals)
                 .instrument(span.clone())
-                .await?;
+                .await;
             let ids = session.push_previewed(results);
             // A state update, not a drawing instruction: the renderer derives
             // the results' rows from these entries through the A table.
@@ -384,6 +384,9 @@ impl Agent {
                     entries: session.entries_for(&ids).into_iter().cloned().collect(),
                 },
             );
+            if stopped {
+                return Err(AgentError::Cancelled);
+            }
         }
 
         unreachable!("an unlimited run can only leave by returning inside the loop")
@@ -575,8 +578,8 @@ impl Agent {
         Ok(acc.finish())
     }
 
-    // Every call gets exactly one result, in call order: an unanswered
-    // `tool_use` makes the next request invalid on both wires.
+    // One result per call, in call order, except a cancelled call: it stays
+    // unanswered for `send_prompt` to close, and the flag says one was.
     //
     // `spent` is where a nested call's costs land — a subagent's whole run —
     // so the run that called it reports them.
@@ -588,7 +591,7 @@ impl Agent {
         tx: &UnboundedSender<Event>,
         failures: &mut Failures,
         spent: &mut Usage,
-    ) -> Result<Vec<(ToolResult, Option<String>)>, AgentError> {
+    ) -> (Vec<(ToolResult, Option<String>)>, bool) {
         // Read once for the batch rather than per failure, and from `ctx`
         // rather than the machine: a session moves — `/new`, `/resume` — and
         // the context is what moves with it.
@@ -687,13 +690,19 @@ impl Agent {
         };
 
         let mut results = Vec::with_capacity(calls.len());
+        let mut stopped = false;
         for ((call, action), output) in calls.iter().zip(&actions).zip(outputs) {
             // The copy the screen drew for this result, sent with it so a
             // rebuild draws those bytes rather than reading the content again.
             let mut preview = None;
             let result = match (action, output) {
                 (Action::Reject(why), _) => failed(call, why.clone(), None, failures, journal),
-                (_, Some(Err(ToolError::Cancelled))) => return Err(AgentError::Cancelled),
+                // Left unanswered: its siblings may have acted, so theirs are
+                // kept, and the next prompt closes this one as stopped.
+                (_, Some(Err(ToolError::Cancelled))) => {
+                    stopped = true;
+                    continue;
+                }
                 (_, Some(Err(e))) => {
                     let mut body = e.to_string();
                     if let Some(code) = e.code() {
@@ -745,7 +754,7 @@ impl Agent {
             results.push((result, preview));
         }
 
-        Ok(results)
+        (results, stopped)
     }
 }
 

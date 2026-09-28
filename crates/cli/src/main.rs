@@ -415,6 +415,11 @@ pub fn resolve(
     for script in scripts {
         offer(&mut registry, &mut notes, "user script", Arc::new(script));
     }
+    // Offered per lane after all of the above, so a holder of its name is
+    // known here: say so once, not on every re-arm.
+    if registry.get(::subagent::Subagent::NAME).is_some() {
+        notes.push("tool skipped — subagent: the name is taken".to_string());
+    }
 
     let settled = config.settle(
         &project.clone(),

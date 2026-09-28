@@ -375,6 +375,67 @@ async fn cancellation_stops_the_run() {
     assert!(matches!(out, Err(AgentError::Cancelled)), "{out:?}");
 }
 
+// Stops the run from inside a call, the way a user's Esc lands mid-batch.
+struct Halt;
+
+#[async_trait]
+impl Tool for Halt {
+    fn name(&self) -> &str {
+        "halt"
+    }
+    fn description(&self) -> &str {
+        "test"
+    }
+    fn schema(&self) -> Value {
+        json!({ "type": "object", "properties": {} })
+    }
+    fn tier(&self) -> Tier {
+        Tier::Read
+    }
+    async fn execute(&self, _args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
+        ctx.cancel.cancel();
+        Err(ToolError::Cancelled)
+    }
+}
+
+#[tokio::test]
+async fn a_call_that_finished_beside_a_cancelled_one_keeps_its_result() {
+    let (_d, mut a, ctx) = harness(vec![
+        call_turn(&[("t1", "done", "{}"), ("t2", "halt", "{}")]),
+        text_turn("no"),
+    ]);
+    brief(&mut a).registry = Registry::new()
+        .with(Sleeper {
+            name: "done",
+            delay_ms: 0,
+            exclusive: false,
+        })
+        .with(Halt);
+
+    let (mut session, out, _) = drive(&a, &ctx, "go").await;
+    assert!(matches!(out, Err(AgentError::Cancelled)), "{out:?}");
+
+    session.send_prompt("next", None);
+    let view = session.context();
+    let results = tool_results(&view);
+    let text_of = |id: &str| {
+        results
+            .iter()
+            .find(|r| r.call == id)
+            .map(|r| r.flatten_text())
+    };
+    assert_eq!(
+        text_of("t1").as_deref(),
+        Some("done"),
+        "the finished call ran"
+    );
+    assert_eq!(
+        text_of("t2").as_deref(),
+        Some(agent::session::STOPPED_CALL),
+        "only the cancelled call reads as stopped"
+    );
+}
+
 #[tokio::test]
 async fn cancellation_during_stream_saves_partial_assistant_response() {
     struct PartialStream {
