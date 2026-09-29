@@ -7,37 +7,35 @@ use agent::session::Entry as LogEntry;
 use llm::message::{AssistantContent, ReasoningContent};
 use ratatui::text::Line;
 
-use super::THINKING;
 use super::call::push_tool_row;
-use super::row::Row;
+use super::row::{Row, STEP_INDENT, Step};
 use super::screen;
 use crate::core;
 use crate::store::icons;
 use crate::ui::render::{self, Paint};
 
-// Whether reasoning is folded to its count line, and which block the stream
-// is filling right now.
+// Whether groups are folded to their one line, and which block of reasoning
+// the stream is filling right now.
 //
-// Reasoning always lives in a foldable scrollback entry, folded or not: the
-// screen is repainted from its rows every frame, so a line already shown
-// can still be folded. A block's own state lasts only while it is last; the
-// next block pushes it back to `folded`, the switch.
+// The screen is repainted from its rows every frame, so a group already shown
+// can still be folded. A group's own state lasts only while it is last; the
+// next group pushes it back to `folded`, the switch.
 pub(super) struct Folds {
-    // The next block id; closed rows keep the id they were born with, so
-    // `land` appends only to the open block's entry.
+    // The next block id; a block keeps the id it was born with, so `land`
+    // appends only to the open block.
     pub(super) next: u64,
     // The block streaming right now, if any.
     pub(super) streaming: Option<u64>,
-    // What untouched blocks are folded to: the value a block that stops being
+    // What untouched groups are folded to: the value a group that stops being
     // last folds back to, and the target a global flip is measured from.
     pub(super) folded: bool,
-    // How the last block — the one `ctrl+t` names, finished or streaming —
-    // is folded. It survives the block itself, so the next block is born
-    // with it until the key flips it again.
+    // How the last group — the one `ctrl+t` names — is folded. It survives
+    // the group itself, so the next group is born with it until the key flips
+    // it again.
     pub(super) last: bool,
 }
 
-// Shut: the reasoning is worth a glance while it runs and almost never worth
+// Shut: the working is worth a glance while it runs and almost never worth
 // the scrollback it costs afterwards.
 //
 // The only constructor, because a derived one would answer `false` here — the
@@ -55,32 +53,23 @@ impl Default for Folds {
 }
 
 impl Folds {
-    // Whether a reasoning row is hidden behind the count line: dim, and the
-    // streaming block folded — its own entry when it has one, the last
-    // value it will be born with otherwise.
+    // Whether the reasoning streaming now is hidden behind its group's line.
     pub(super) fn holds(&self, reasoning: bool, scrollback: &[Row]) -> bool {
         reasoning && self.stream_fold(scrollback)
     }
 
-    // How the block streaming now is folded: its entry's own state, or —
-    // before its first line lands — the last value.
+    // How the group of the block streaming now is folded, or — with no such
+    // group — the last value.
     pub(super) fn stream_fold(&self, scrollback: &[Row]) -> bool {
-        if let Some(id) = self.streaming
-            && let Some(folded) = scrollback
-                .iter()
-                .rev()
-                .find(|r| r.block() == Some(id))
-                .and_then(Row::folded)
-        {
-            return folded;
-        }
-        self.last
+        self.streaming
+            .and_then(|id| scrollback.iter().rev().find(|r| r.holds_block(id)))
+            .and_then(Row::folded)
+            .unwrap_or(self.last)
     }
 
-    // The block that was last stops being so: it folds back to the switch.
-    // A new input and a new block both push it out of last.
+    // The group that was last stops being so: it folds back to the switch.
     fn retire_last(&mut self, scrollback: &mut [Row]) {
-        if let Some(row) = last_folded(scrollback) {
+        if let Some(row) = last_group(scrollback) {
             row.set_folded(self.folded);
         }
     }
@@ -93,35 +82,69 @@ impl Folds {
         id
     }
 
-    // A new reasoning block is about to start. It gets an id the scrollback
-    // entry will be born with; its first line takes `birth_fold`.
-    pub(super) fn start(&mut self, scrollback: &mut [Row]) {
+    // A step joins the last row's group, or opens a new one that retires the
+    // old last group and is born the way `ctrl+t` left it.
+    pub(super) fn join(&mut self, scrollback: &mut Vec<Row>, step: Step) {
+        let step = match scrollback.last_mut() {
+            Some(last) => match last.join(step) {
+                Ok(()) => return,
+                Err(step) => step,
+            },
+            None => step,
+        };
         self.retire_last(scrollback);
-        self.streaming = Some(self.take_id());
+        scrollback.push(Row::steps(step, self.birth_fold()));
     }
 
-    // The block that was last stops being so the moment a new input is
-    // submitted: it folds to the switch, its unfold lasting only while it
-    // was last.
+    // A new block of reasoning starts, in a group from its first delta: the
+    // group's line is what shows it until a line lands.
+    pub(super) fn start(&mut self, scrollback: &mut Vec<Row>) {
+        let block = self.take_id();
+        self.streaming = Some(block);
+        self.join(
+            scrollback,
+            Step::Thinking {
+                block,
+                lines: Vec::new(),
+            },
+        );
+    }
+
+    // The group of the block streaming now.
+    pub(super) fn streaming_row<'a>(&self, scrollback: &'a mut [Row]) -> Option<&'a mut Row> {
+        let id = self.streaming?;
+        scrollback.iter_mut().rev().find(|r| r.holds_block(id))
+    }
+
+    // The last group stops being so the moment a new input is submitted: it
+    // folds to the switch, its unfold lasting only while it was last.
     pub(super) fn fold_previous(&mut self, scrollback: &mut [Row]) {
         self.retire_last(scrollback);
     }
 
-    // The streaming block is over; the entry it filled stays where it is.
-    pub(super) fn close_block(&mut self) {
-        self.streaming = None;
+    // The streaming block is over. One that never had a line leaves nothing,
+    // and neither does a group it was alone in.
+    pub(super) fn close_block(&mut self, scrollback: &mut Vec<Row>) {
+        let Some(id) = self.streaming.take() else {
+            return;
+        };
+        if let Some(at) = scrollback.iter().rposition(|r| r.holds_block(id))
+            && scrollback[at].drop_if_empty(id)
+        {
+            scrollback.remove(at);
+        }
     }
 
-    // The value the next block's entry is born with: however `ctrl+t` last
-    // left the last block.
+    // The value the next group is born with: however `ctrl+t` last left the
+    // last group.
     pub(super) fn birth_fold(&self) -> bool {
         self.last
     }
 
-    // Fold or unfold every block in the scrollback and move the switch with
-    // them, the last block included: rows and switch must never disagree,
-    // or the next block is born with a stale value and a mixed screen can
-    // never fold back to a single state.
+    // Fold or unfold every group in the scrollback and move the switch with
+    // them, the last one included: rows and switch must never disagree, or
+    // the next group is born with a stale value and a mixed screen can never
+    // fold back to a single state.
     pub(super) fn flip_all(&mut self, scrollback: &mut [Row]) {
         self.folded = !self.folded;
         self.last = self.folded;
@@ -130,26 +153,23 @@ impl Folds {
         }
     }
 
-    // Flip the last block only: the one streaming, or the newest finished
-    // one when nothing is. The switch is left alone, so the blocks no one is
-    // touching keep what they had; a block with no entry yet is born with
-    // the flip.
+    // Flip the last group only; the switch is left alone. Flipped from what
+    // the group shows, which a click or a lost call may have moved.
     pub(super) fn toggle_current(&mut self, scrollback: &mut [Row]) {
-        self.last = !self.last;
-        let flipped = if let Some(id) = self.streaming {
-            scrollback.iter_mut().rev().find(|r| r.block() == Some(id))
-        } else {
-            last_folded(scrollback)
+        let row = last_group(scrollback);
+        self.last = match row.as_deref() {
+            Some(r) => r.folded() == Some(false) && r.is_expandable(),
+            None => !self.last,
         };
-        if let Some(row) = flipped {
+        if let Some(row) = row {
             row.set_folded(self.last);
         }
     }
 }
 
-// The newest reasoning block's entry in the scrollback, if any.
-fn last_folded(scrollback: &mut [Row]) -> Option<&mut Row> {
-    scrollback.iter_mut().rev().find(|r| r.block().is_some())
+// The newest group in the scrollback, if any.
+fn last_group(scrollback: &mut [Row]) -> Option<&mut Row> {
+    scrollback.iter_mut().rev().find(|r| r.is_steps())
 }
 
 // The scrollback as rows, walked from either end without flattening the
@@ -159,7 +179,7 @@ pub(super) struct ScrollbackRows<'a> {
     rows: &'a [Row],
     // The frame's width, for the rows that clip to fit.
     width: usize,
-    // For the folded summary row, which is synthesized at draw time and so
+    // For a folded group's line, which is synthesized at draw time and so
     // carries no paint of its own.
     paint: &'a Paint,
     // Next entry to read from the front, and the row offset inside it.
@@ -363,26 +383,21 @@ pub(super) fn body(
     width: usize,
     paint: &Paint,
 ) -> Vec<Line<'static>> {
-    if folds.holds(reasoning, scrollback) {
-        // The block's count row in the scrollback already answers the fold
-        // switch; the live placeholder is only for the moment before the
-        // block's first completed line exists to count.
-        let counted = folds
-            .streaming
-            .is_some_and(|id| scrollback.iter().rev().any(|r| r.block() == Some(id)));
-        if !counted {
-            return vec![Line::from(paint.span(&paint.theme.muted, THINKING))];
-        }
-        return Vec::new();
-    }
-    if partial.is_empty() {
+    // Folded, the group's own line in the scrollback is all it shows.
+    if folds.holds(reasoning, scrollback) || partial.is_empty() {
         return Vec::new();
     }
     // All of it, not the rows the terminal has room for: this is the only copy
     // until `close` lands it, and a scroll up has to reach its head.
     if reasoning {
+        // Indented like the lines it will join, when its group has a line.
+        let indent = folds
+            .streaming
+            .and_then(|id| scrollback.iter().rev().find(|r| r.holds_block(id)))
+            .is_some_and(Row::has_calls);
         let muted = Line::from(paint.span(&paint.theme.muted, partial));
-        screen::fit(&muted, width)
+        let border = indent.then(|| Line::from(STEP_INDENT));
+        screen::wrap(border.as_ref(), &muted, width)
     } else {
         render::render_markdown(partial, paint)
             .into_iter()
@@ -451,7 +466,7 @@ pub(super) fn scrollback_from(
                         }
                         AssistantContent::Reasoning(r) => {
                             // Muted, exactly as the live stream paints a
-                            // reasoning row: a rebuilt block must not come
+                            // reasoning line: a rebuilt block must not come
                             // out brighter than the one it replaces.
                             let lines: Vec<Line<'static>> = r
                                 .content
@@ -472,7 +487,8 @@ pub(super) fn scrollback_from(
                             // worked only for as long as nothing looked one up
                             // by id — and `streaming_row` and `stream_fold` both
                             // do, taking the last match.
-                            out.push(Row::reasoning(folds.take_id(), lines, folds.folded));
+                            let block = folds.take_id();
+                            folds.join(&mut out, Step::Thinking { block, lines });
                         }
                     }
                 }
@@ -485,7 +501,7 @@ pub(super) fn scrollback_from(
                 if let Some(rows) = f_entry(other, paint) {
                     if matches!(other, LogEntry::Tool { .. }) {
                         for r in rows {
-                            push_tool_row(&mut out, r);
+                            push_tool_row(&mut out, folds, r);
                         }
                     } else {
                         out.extend(rows);

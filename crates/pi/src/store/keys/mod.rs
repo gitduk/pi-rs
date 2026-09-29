@@ -364,14 +364,14 @@ const BINDINGS: &[Binding] = &[
         action: A::ThinkFold,
         when: W::Editor,
         keys: &["ctrl+t"],
-        note: "the current reasoning block in full, or a count of it",
+        note: "the last group of calls and reasoning in full, or on one line",
     },
     Binding {
         id: "think.fold-all",
         action: A::ThinkFoldAll,
         when: W::Editor,
         keys: &["ctrl+shift+t", "alt+t"],
-        note: "every reasoning block, the current one included",
+        note: "every group of calls and reasoning, the last one included",
     },
     // Normal mode from here down. Every key is a bare character, and that is a
     // rule rather than a coincidence: the layer sits above `Editor`, so

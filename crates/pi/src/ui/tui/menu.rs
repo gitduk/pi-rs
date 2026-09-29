@@ -468,19 +468,18 @@ impl Ui {
             Some(Action::ScrollHalfDown) => self.scroll_view(view, false, self.half_scroll_step()),
             Some(Action::Browse) => self.browse(view),
             Some(Action::ThinkFold) => {
-                // The last block only: the one streaming, or the newest
-                // finished one when nothing is. The switch is left alone, so
-                // the blocks no one is touching keep what they had.
+                // The last group only. The switch is left alone, so the
+                // groups no one is touching keep what they had.
                 view.surface
                     .folds
                     .toggle_current(&mut view.surface.scrollback);
             }
             Some(Action::ThinkFoldAll) => {
-                // Every block in the scrollback, the last one included, and
+                // Every group in the scrollback, the last one included, and
                 // the switch with them: one key presses the whole screen to a
                 // single state.
                 view.surface.folds.flip_all(&mut view.surface.scrollback);
-                // A fold-all reflows blocks above the view too; re-baseline.
+                // A fold-all reflows groups above the view too; re-baseline.
                 view.surface.counted = None;
             }
 

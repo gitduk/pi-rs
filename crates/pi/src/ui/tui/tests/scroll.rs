@@ -1,6 +1,6 @@
 use crate::store::theme::{Color, Theme};
 use crate::ui::render::Paint;
-use crate::ui::tui::row::Row;
+use crate::ui::tui::row::{FoldedTool, Row, Step};
 use crate::ui::tui::scrollback::{Folds, ScrollbackRows};
 use crate::ui::tui::{View, following_terminal};
 use ratatui::text::Line;
@@ -138,129 +138,161 @@ fn scrollback_rows_walk_from_both_ends() {
     assert_eq!(back, vec!["d", "line 2"]);
 }
 
-#[test]
-fn toggling_moves_the_last_block_and_nothing_else() {
-    // `ctrl+t` flips the block that is last now, and only it: the block
-    // pushed out of last by the new one folds back to the switch.
-    let mut t = Folds::default();
-    let mut scrollback = vec![Row::reasoning(9, vec![Line::from("old")], false)];
-    t.start(&mut scrollback);
-    scrollback.push(Row::reasoning(1, vec![Line::from("new")], true));
-    t.toggle_current(&mut scrollback);
-    assert!(t.folded);
-    assert!(scrollback[0].folded() == Some(true));
-    assert!(scrollback[1].folded() == Some(false));
+// A block streamed in: started, and one line landed in its group.
+fn streamed(t: &mut Folds, scrollback: &mut Vec<Row>) {
+    t.start(scrollback);
+    let id = t.streaming.expect("started");
+    t.streaming_row(scrollback)
+        .expect("the group start made")
+        .push_line(id, Line::from("thought"));
 }
 
 #[test]
-fn a_finished_block_keeps_its_fold_until_the_next_question() {
-    // An unfold survives the answer — a finished block is still last —
+fn toggling_moves_the_last_group_and_nothing_else() {
+    // `ctrl+t` flips the group that is last now, and only it: the group
+    // pushed out of last by the new one folds back to the switch.
+    let mut t = Folds::default();
+    let mut scrollback = vec![
+        Row::thinking(9, vec![Line::from("old")], false),
+        Row::notice("an answer"),
+    ];
+    t.start(&mut scrollback);
+    t.toggle_current(&mut scrollback);
+    assert!(t.folded);
+    assert_eq!(scrollback[0].folded(), Some(true));
+    assert_eq!(scrollback[2].folded(), Some(false));
+}
+
+#[test]
+fn a_finished_group_keeps_its_fold_until_the_next_question() {
+    // An unfold survives the answer — a finished group is still last —
     // and folds back to the switch the moment a new input is submitted.
     let mut t = Folds::default();
-    t.start(&mut []);
-    let mut scrollback = vec![block(1, 1, t.birth_fold())];
+    let mut scrollback = Vec::new();
+    streamed(&mut t, &mut scrollback);
     t.toggle_current(&mut scrollback);
-    assert!(scrollback[0].folded() == Some(false));
-    t.close_block();
+    assert_eq!(scrollback[0].folded(), Some(false));
+    t.close_block(&mut scrollback);
     // Still last until the next question is asked.
-    assert!(scrollback[0].folded() == Some(false));
+    assert_eq!(scrollback[0].folded(), Some(false));
     t.fold_previous(&mut scrollback);
-    // The submitted question pushes it out of last: it folds to the
-    // switch.
-    assert!(scrollback[0].folded() == Some(true));
+    // The submitted question pushes it out of last: it folds to the switch.
+    assert_eq!(scrollback[0].folded(), Some(true));
     assert!(!t.birth_fold());
 }
 
 #[test]
-fn a_finished_block_follows_a_global_unfold() {
+fn a_finished_group_follows_a_global_unfold() {
     // The fold follows the switch both ways: a screen the global key
-    // opened keeps its block open once the next question takes over.
+    // opened keeps its group open once the next question takes over.
     let mut t = Folds {
         folded: false,
         ..Default::default()
     };
-    t.start(&mut []);
-    let mut scrollback = vec![block(1, 1, t.birth_fold())];
-    t.close_block();
+    let mut scrollback = Vec::new();
+    streamed(&mut t, &mut scrollback);
+    t.close_block(&mut scrollback);
     t.fold_previous(&mut scrollback);
-    assert!(scrollback[0].folded() == Some(false));
+    assert_eq!(scrollback[0].folded(), Some(false));
 }
 
 #[test]
-fn a_new_block_in_the_same_answer_folds_the_previous_and_inherits_the_flip() {
-    // A second reasoning block in the same answer is the new last: the
-    // first one folds back to the switch, and the second is born the way
-    // `ctrl+t` left the last block.
+fn a_block_after_a_call_joins_its_group() {
+    // The run's working between two answers is one group: a call and the
+    // blocks on either side of it fold behind one line.
     let mut t = Folds::default();
-    t.start(&mut []);
-    let mut scrollback = vec![block(1, 1, t.birth_fold())];
+    let mut scrollback = Vec::new();
+    streamed(&mut t, &mut scrollback);
+    t.close_block(&mut scrollback);
+    t.join(
+        &mut scrollback,
+        Step::Tool(FoldedTool {
+            name: "read".into(),
+            preview: "a.rs".into(),
+        }),
+    );
+    streamed(&mut t, &mut scrollback);
+    t.close_block(&mut scrollback);
+    assert_eq!(scrollback.len(), 1);
+    assert!(scrollback[0].holds_block(1) && scrollback[0].holds_block(2));
+}
+
+#[test]
+fn a_block_after_an_answer_starts_a_group_and_inherits_the_flip() {
+    // Past an answer the next block is a new group and the new last: the
+    // one before folds back to the switch, and the new one is born the way
+    // `ctrl+t` left the last group.
+    let mut t = Folds::default();
+    let mut scrollback = Vec::new();
+    streamed(&mut t, &mut scrollback);
     t.toggle_current(&mut scrollback);
-    assert!(scrollback[0].folded() == Some(false));
-    t.close_block();
-    t.start(&mut scrollback);
-    scrollback.push(block(2, 1, t.birth_fold()));
-    assert!(scrollback[0].folded() == Some(true));
-    assert!(scrollback[1].folded() == Some(false));
+    t.close_block(&mut scrollback);
+    scrollback.push(Row::notice("an answer"));
+    streamed(&mut t, &mut scrollback);
+    assert_eq!(scrollback[0].folded(), Some(true));
+    assert_eq!(scrollback[2].folded(), Some(false));
 }
 
 #[test]
-fn a_flip_before_the_first_line_lands_on_birth() {
-    // `ctrl+t` on a block with no entry yet flips the last value, not the
-    // switch: it outlives close_block, and it is not a one-shot.
+fn a_block_that_ends_without_a_line_leaves_nothing() {
+    // `ctrl+t` before the first line flips the group `start` made, and the
+    // flip outlives it: a block with no line takes its lone group with it.
     let mut t = Folds::default();
-    t.start(&mut []);
-    let mut scrollback: Vec<Row> = Vec::new();
+    let mut scrollback = Vec::new();
+    t.start(&mut scrollback);
     t.toggle_current(&mut scrollback);
     assert!(t.folded, "the switch itself is not touched");
-    assert!(!t.birth_fold());
-    t.close_block();
-    assert!(!t.birth_fold());
+    assert_eq!(scrollback[0].folded(), Some(false));
+    t.close_block(&mut scrollback);
+    assert!(scrollback.is_empty());
     assert!(!t.birth_fold());
 }
 
 #[test]
-fn the_live_placeholder_follows_the_streaming_entry() {
-    // Once the block has an entry, the live region reads its own state,
-    // not the last value: a block the user unfolded streams its lines
-    // even though the switch still says folded.
+fn the_live_text_follows_the_streaming_group() {
+    // The live region reads the group's own state, not the last value: a
+    // group the user unfolded streams its lines even though the switch
+    // still says folded.
     let mut t = Folds::default();
-    t.start(&mut []);
-    assert!(t.holds(true, &[]));
-    let scrollback = [block(1, 1, false)];
+    let mut scrollback = Vec::new();
+    t.start(&mut scrollback);
+    assert!(t.holds(true, &scrollback));
+    scrollback[0].set_folded(false);
     assert!(!t.holds(true, &scrollback));
 }
 
 #[test]
-fn a_global_flip_takes_the_current_block_with_it() {
+fn a_global_flip_takes_the_current_group_with_it() {
     // The case that named the key: everything else unfolded, the current
-    // block folded on its own. The global key folds the whole screen —
-    // the current block keeps its fold, because the fold is where the
-    // rest are going.
+    // group folded on its own. The global key folds the whole screen — the
+    // current group keeps its fold, because the fold is where the rest are
+    // going.
     let mut t = Folds {
         folded: false,
         ..Default::default()
     };
-    t.start(&mut []);
-    let mut scrollback = vec![Row::reasoning(1, vec![Line::from("new")], true)];
+    let mut scrollback = Vec::new();
+    streamed(&mut t, &mut scrollback);
+    assert_eq!(scrollback[0].folded(), Some(true));
     t.flip_all(&mut scrollback);
     assert!(t.folded);
-    assert!(scrollback[0].folded() == Some(true));
+    assert_eq!(scrollback[0].folded(), Some(true));
 }
 
 #[test]
-fn flipping_every_block_moves_the_switch_with_them() {
-    // The global key folds or unfolds every block, the current one
+fn flipping_every_group_moves_the_switch_with_them() {
+    // The global key folds or unfolds every group, the current one
     // included, and moves the switch with them: rows and switch never
     // disagree, so the screen always folds back to a single state.
     let mut t = Folds::default();
-    t.start(&mut []);
-    let mut scrollback = vec![block(1, 1, true)];
-    t.toggle_current(&mut scrollback); // unfold the current block on its own
-    t.close_block();
+    let mut scrollback = Vec::new();
+    streamed(&mut t, &mut scrollback);
+    t.toggle_current(&mut scrollback); // unfold the current group on its own
+    t.close_block(&mut scrollback);
     t.flip_all(&mut scrollback); // global fold
     assert!(!t.folded);
     assert!(scrollback.iter().all(|e| e.folded() == Some(false)));
-    // The switch moved with them, so the next block is born unfolded.
+    // The switch moved with them, so the next group is born unfolded.
     assert!(!t.birth_fold());
     // And a second global press folds the whole screen back.
     t.flip_all(&mut scrollback);
@@ -275,29 +307,39 @@ fn the_answer_is_never_folded() {
 }
 
 #[test]
-fn a_flip_applies_to_each_new_last_block_until_flipped_back() {
-    // `ctrl+t` controls the last thinking block, whatever it is: the
-    // first one is born unfolded, and each new block that takes over as
-    // last is born unfolded too, while the one it displaces folds back to
-    // the switch.
+fn a_flip_applies_to_each_new_last_group_until_flipped_back() {
+    // `ctrl+t` controls the last group, whatever it is: the first one is
+    // born unfolded, and each new group that takes over as last is born
+    // unfolded too, while the one it displaces folds back to the switch.
     let mut t = Folds::default();
 
-    // Startup: the key names a block that does not exist yet.
+    // Startup: the key names a group that does not exist yet.
     t.toggle_current(&mut []);
     assert!(!t.birth_fold());
 
-    // The first thinking block arrives and is the last one.
-    t.start(&mut []);
-    let mut scrollback = vec![block(1, 1, t.birth_fold())];
-    assert!(scrollback[0].folded() == Some(false));
-    t.close_block();
+    let mut scrollback = Vec::new();
+    streamed(&mut t, &mut scrollback);
+    assert_eq!(scrollback[0].folded(), Some(false));
+    t.close_block(&mut scrollback);
 
-    // A tool call ends the block; the next thinking block is the new
-    // last, born unfolded, and the first one folds back to the switch.
-    t.start(&mut scrollback);
-    scrollback.push(block(2, 1, t.birth_fold()));
-    assert!(scrollback[0].folded() == Some(true));
-    assert!(scrollback[1].folded() == Some(false));
+    // An answer ends the group; the next one is the new last, born
+    // unfolded, and the first folds back to the switch.
+    scrollback.push(Row::notice("an answer"));
+    streamed(&mut t, &mut scrollback);
+    assert_eq!(scrollback[0].folded(), Some(true));
+    assert_eq!(scrollback[2].folded(), Some(false));
+}
+
+// A click moves a group without the key knowing; the key then flips what
+// the group shows, rather than a remembered value it no longer matches.
+#[test]
+fn the_key_flips_what_a_click_left() {
+    let mut t = Folds::default();
+    let mut scrollback = Vec::new();
+    streamed(&mut t, &mut scrollback);
+    assert!(scrollback[0].toggle_expand(), "a click unfolds it");
+    t.toggle_current(&mut scrollback);
+    assert_eq!(scrollback[0].folded(), Some(true));
 }
 
 #[test]
@@ -371,4 +413,20 @@ fn a_wrapped_row_landing_below_moves_the_scroll_by_its_rows() {
         rebased + 2,
         "both wrapped rows folded into the scroll"
     );
+}
+
+// A group can stop being unfoldable while unfolded — a call it held failed
+// and left — so the key reads it as shown, folded, and opens the next one.
+#[test]
+fn the_key_reads_a_group_with_nothing_to_unfold_as_folded() {
+    let mut t = Folds::default();
+    let mut scrollback = vec![Row::steps(
+        Step::Tool(FoldedTool {
+            name: "read".into(),
+            preview: "a.rs".into(),
+        }),
+        false,
+    )];
+    t.toggle_current(&mut scrollback);
+    assert!(!t.birth_fold(), "the next group is born open");
 }

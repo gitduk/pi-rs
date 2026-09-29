@@ -1,11 +1,12 @@
 //! The rows a tool call occupies while it runs: the line it holds itself, and
-//! the summary row that draws it when there is one to fold into.
+//! the group that draws it when there is one to fold into.
 
 use super::row::{self, PendingTool, Row};
+use super::scrollback::Folds;
 use crate::store::icons;
 use crate::ui::render::named;
 
-// A tool call still running. Its line is drawn by the summary row it will fold
+// A tool call still running. Its line is drawn by the group it will fold
 // into when there is one, and by the live block when there is not.
 pub(super) struct RunTool {
     pub(super) id: String,
@@ -52,7 +53,7 @@ fn is_modifying_tool(name: &str) -> bool {
     name == toolbox::edit::Edit::NAME || name == toolbox::write::Write::NAME
 }
 
-// Whether the summary row draws for this call: the row is where a foldable
+// Whether the group draws for this call: the row is where a foldable
 // call lands, so it is the row's from the moment it starts — and only while it
 // can still land there. One that has ended badly is on its way to a line of
 // its own, and the row must not name, count or mark what it will not keep.
@@ -60,7 +61,7 @@ fn holds(t: &RunTool) -> bool {
     !is_modifying_tool(&t.name) && t.done.as_ref().is_none_or(|row| row.ok() == Some(true))
 }
 
-// The calls the summary row draws, in the order they started, each with the
+// The calls the group draws, in the order they started, each with the
 // state the row shows for it. A call lands as the foldable row it is drawn
 // as, so showing it there from the start is what keeps the line from jumping
 // up into the row when the result arrives.
@@ -76,26 +77,23 @@ pub(super) fn held(tools: &[RunTool]) -> Vec<PendingTool> {
         .collect()
 }
 
-// The calls in flight the live block draws: what is left when the summary row
+// The calls in flight the live block draws: what is left when the group
 // is drawing the foldable ones.
 pub(super) fn drawn(tools: &[RunTool], row_holds: bool) -> Vec<&RunTool> {
     tools.iter().filter(|t| !(row_holds && holds(t))).collect()
 }
 
-pub(super) fn push_tool_row(scrollback: &mut Vec<Row>, row: Row) {
+// Where a tool's row goes: a read-only call that landed well is a step of
+// the group, and anything else a line of its own that ends the group.
+pub(super) fn push_tool_row(scrollback: &mut Vec<Row>, folds: &mut Folds, row: Row) {
     if let Some(name) = row.tool_name().filter(|&n| !is_modifying_tool(n))
         && row.ok() == Some(true)
     {
-        let preview = row.tool_preview().unwrap_or_default().to_string();
-        if let Some(last) = scrollback.last_mut()
-            && last.push_tool(name.to_string(), preview.clone())
-        {
-            return;
-        }
-        scrollback.push(Row::tools_summary(row::FoldedTools::new(row::FoldedTool {
+        let tool = row::FoldedTool {
             name: name.to_string(),
-            preview,
-        })));
+            preview: row.tool_preview().unwrap_or_default().to_string(),
+        };
+        folds.join(scrollback, row::Step::Tool(tool));
         return;
     }
     scrollback.push(row);

@@ -5,11 +5,6 @@ use crate::ui::tui::{Asked, Deed, Intent, View, view_at};
 
 use super::harness::*;
 
-// Both scrollback producers draw block ids from one counter. They used
-// not to: a rebuilt block was always `0`, which held only while nothing
-// looked one up — and `streaming_row` and `stream_fold` both do, taking the
-// last match, so two blocks sharing a number is two blocks the lookup
-// cannot tell apart.
 #[test]
 fn a_deed_says_whether_a_run_in_flight_allows_it() {
     // Only the two that rewrite the transcript care: the run in flight is

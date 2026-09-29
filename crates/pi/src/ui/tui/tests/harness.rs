@@ -18,7 +18,7 @@ pub(super) fn drawn_rows(view: &View) -> Vec<String> {
 
 // A closed reasoning block of id `id` and `n` lines in the scrollback.
 pub(super) fn block(id: u64, n: usize, folded: bool) -> Row {
-    Row::reasoning(
+    Row::thinking(
         id,
         (1..=n).map(|i| Line::from(format!("line {i}"))).collect(),
         folded,

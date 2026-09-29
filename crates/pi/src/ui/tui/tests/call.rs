@@ -9,6 +9,11 @@ use crate::ui::tui::scrollback::{Folds, scrollback_from};
 
 use super::harness::*;
 
+// Both scrollback producers draw block ids from one counter. They used
+// not to: a rebuilt block was always `0`, which held only while nothing
+// looked one up — and `streaming_row` and `stream_fold` both do, taking the
+// last match, so two blocks sharing a number is two blocks the lookup
+// cannot tell apart.
 #[test]
 fn rebuilt_reasoning_blocks_get_ids_of_their_own() {
     use agent::session::Session;
@@ -29,15 +34,14 @@ fn rebuilt_reasoning_blocks_get_ids_of_their_own() {
 
     let mut folds = Folds::default();
     let rows = scrollback_from(&s, &Paint::new(false), &mut folds);
-    let ids: Vec<u64> = rows.iter().filter_map(Row::block).collect();
-    assert_eq!(ids.len(), 3, "{} rows, {ids:?}", rows.len());
-    let mut sorted = ids.clone();
-    sorted.sort_unstable();
-    sorted.dedup();
-    assert_eq!(sorted.len(), 3, "two blocks share a number: {ids:?}");
-    // And the counter moved, so a block streamed after the rebuild cannot
-    // land on one of these.
-    assert!(!ids.contains(&folds.take_id()), "{ids:?}");
+    // Nothing between them, so the three are one group.
+    let groups: Vec<&Row> = rows.iter().filter(|r| r.is_steps()).collect();
+    assert_eq!(groups.len(), 1, "{} rows", rows.len());
+    // And the counter moved past them, so a block streamed after the rebuild
+    // cannot land on one of these.
+    let next = folds.take_id();
+    let ids: Vec<u64> = (0..next).filter(|&id| groups[0].holds_block(id)).collect();
+    assert_eq!(ids.len(), 3, "two blocks share a number: {ids:?}");
 }
 
 #[test]
@@ -58,8 +62,7 @@ fn rebuilt_empty_reasoning_blocks_are_ignored() {
 
     let mut folds = Folds::default();
     let rows = scrollback_from(&s, &Paint::new(false), &mut folds);
-    let ids: Vec<u64> = rows.iter().filter_map(Row::block).collect();
-    assert_eq!(ids.len(), 0);
+    assert!(!rows.iter().any(Row::is_steps));
 }
 
 // A multi-line error body reaches the pending live line and the committed

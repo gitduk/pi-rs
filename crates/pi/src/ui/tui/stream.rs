@@ -105,32 +105,18 @@ impl Ui {
     }
 
     // Where a finished row goes: a reasoning line into the streaming block's
-    // foldable entry, anything else straight into scrollback.
+    // group, anything else straight into scrollback.
     pub(super) fn land(&mut self, view: &mut View, painted: Line<'static>, reasoning: bool) {
-        if reasoning && let Some(id) = view.surface.folds.streaming {
-            if let Some(row) = self.streaming_row(view, id) {
-                row.push_line(painted);
-                return;
-            }
-            // The block's first line: born the way `ctrl+t` last left the last
-            // block — its own fold, not the switch.
-            view.surface.scrollback.push(Row::reasoning(
-                id,
-                vec![painted],
-                view.surface.folds.birth_fold(),
-            ));
+        let surface = &mut view.surface;
+        // `start` made the group before any line could land.
+        if reasoning
+            && let Some(id) = surface.folds.streaming
+            && let Some(row) = surface.folds.streaming_row(&mut surface.scrollback)
+        {
+            row.push_line(id, painted);
             return;
         }
-        view.surface.scrollback.push(Row::notice(painted));
-    }
-
-    // The scrollback entry for a streaming block, if it has one yet.
-    pub(super) fn streaming_row<'a>(&mut self, view: &'a mut View, id: u64) -> Option<&'a mut Row> {
-        view.surface
-            .scrollback
-            .iter_mut()
-            .rev()
-            .find(|r| r.block() == Some(id))
+        surface.scrollback.push(Row::notice(painted));
     }
 
     pub(super) fn close(&mut self, view: &mut View) {
@@ -147,17 +133,9 @@ impl Ui {
             }
         }
         if reasoning {
-            // The block is over: it stops taking lines; its entry is already
-            // in the scrollback, folded or not.
-            view.surface.folds.close_block();
-            if view
-                .surface
-                .scrollback
-                .last()
-                .is_some_and(Row::is_empty_reasoning)
-            {
-                view.surface.scrollback.pop();
-            }
+            // The block is over: it stops taking lines, and its group stays
+            // where it is.
+            view.surface.folds.close_block(&mut view.surface.scrollback);
         }
         view.surface.stream.kind = StreamKind::Answer;
     }
@@ -173,8 +151,8 @@ impl Ui {
             view.surface.stream.kind = kind;
             if reasoning {
                 // A new reasoning block: `close` just settled the previous
-                // one; this one gets a fresh id and pushes the old last one
-                // back to the switch.
+                // one; this one gets a fresh id and joins the last group, or
+                // starts one.
                 view.surface.folds.start(&mut view.surface.scrollback);
             }
         }
@@ -182,7 +160,7 @@ impl Ui {
         view.surface.stream.text.push_str(delta);
         if reasoning {
             // A finished reasoning line belongs in the streaming block's
-            // foldable entry as soon as it ends.
+            // group as soon as it ends.
             while let Some(i) = view.surface.stream.text.find('\n') {
                 let line: String = view.surface.stream.text.drain(..=i).collect();
                 let line = line.trim_end_matches('\n').to_string();
@@ -254,7 +232,7 @@ impl Ui {
                 self.file_screen(lane, view, &line);
             }
             // A call's two events are one line here: the start either hands
-            // the call to the summary row above or takes a line in the live
+            // the call to the group above or takes a line in the live
             // region (where the spinner can animate it), and the end settles
             // that line to the ✗/✓ mark it lands with. Parallel calls each
             // hold a place of their own, matched back by id because they end
@@ -358,7 +336,7 @@ impl Ui {
                 if let LogEntry::Tool { result: r, .. } = entry {
                     self.check_pending(view, &r.call, rows.last(), width);
                     for r in rows {
-                        push_tool_row(&mut view.surface.scrollback, r);
+                        push_tool_row(&mut view.surface.scrollback, &mut view.surface.folds, r);
                     }
                 } else {
                     view.surface.scrollback.extend(rows);
@@ -443,15 +421,11 @@ impl Ui {
         let hist_view = (self.screen.height as usize)
             .saturating_sub(editor_h + menu_h + bar_h)
             .max(1);
-        // The summary row the calls in flight fold into, when it is the last
+        // The group the calls in flight fold into, when it is the last
         // thing in the scrollback: its line is where they show, so they are
         // its to draw and the live block leaves them alone.
         let last = view.surface.scrollback.len().checked_sub(1);
-        let row_holds = view
-            .surface
-            .scrollback
-            .last()
-            .is_some_and(Row::is_tools_summary);
+        let row_holds = view.surface.scrollback.last().is_some_and(Row::is_steps);
         let held = if row_holds {
             call::held(&view.state.tools)
         } else {

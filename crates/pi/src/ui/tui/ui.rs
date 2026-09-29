@@ -97,7 +97,7 @@ pub(super) struct Ui {
     // back: a screen row only means something inside a named region.
     pub(super) regions: Regions,
     // Whether the live block lists every call in flight it draws or only the
-    // newest with a count — the ones the summary row holds are drawn there
+    // newest with a count — the ones the group holds are drawn there
     // whatever this says. A click on a pending row flips it; it outlives the
     // calls.
     pub(super) live_tools_shown: bool,
@@ -229,7 +229,7 @@ impl Ui {
         crate::store::theme::style_to_ratatui(s)
     }
 
-    // The rows above the input line: the calls in flight the summary row is
+    // The rows above the input line: the calls in flight the group is
     // not drawing, the open stream, and the status line. The editor draws
     // separately, pinned to the bottom. With the rows comes the count that
     // leads them: the pending calls', which a click opens — only the producer
@@ -247,7 +247,7 @@ impl Ui {
         let thinking = view.surface.stream.kind == StreamKind::Reasoning;
 
         // The calls that keep a line here: a foldable one does not while the
-        // summary row above is holding it. Collapsed the newest of them is
+        // group above is holding it. Collapsed the newest of them is
         // named with a count for the rest, opened one each, in the shape it
         // will fold into.
         let shown = drawn(&view.state.tools, row_holds);

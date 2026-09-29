@@ -36,7 +36,7 @@ impl FoldedTool {
     }
 }
 
-// A call still in flight, as the summary row that will fold it draws it: the
+// A call still in flight, as the group that will fold it draws it: the
 // row is where the call lands, so it draws the call from the moment it starts.
 // The live block has no line of it then, and nothing jumps up when the result
 // arrives.
@@ -65,11 +65,27 @@ fn spinning(pending: &[PendingTool]) -> bool {
     pending.iter().any(|p| !p.landed)
 }
 
-// How many calls the row speaks for: the ones folded in and the ones it holds
-// while they are out. One is its own line, so the count is what decides
-// whether it has a body to unfold.
-fn calls(tools: &FoldedTools, pending: &[PendingTool]) -> usize {
-    tools.count() + pending.len()
+// How many calls the row speaks for: the ones landed in it and the ones it
+// holds while they are out. One is its own line, so the count is part of
+// what decides whether it has a body to unfold.
+fn calls(steps: &[Step], pending: &[PendingTool]) -> usize {
+    steps.iter().filter(|s| matches!(s, Step::Tool(_))).count() + pending.len()
+}
+
+// The reasoning lines the row holds, or `None` when it holds no block.
+fn thought(steps: &[Step]) -> Option<usize> {
+    steps
+        .iter()
+        .filter_map(|s| match s {
+            Step::Thinking { lines, .. } => Some(lines.len()),
+            Step::Tool(_) => None,
+        })
+        .reduce(|a, b| a + b)
+}
+
+// Whether unfolding would show more than the row's own line.
+fn expandable(steps: &[Step], pending: &[PendingTool]) -> bool {
+    calls(steps, pending) > 1 || thought(steps).is_some_and(|n| n > 0)
 }
 
 // The tool and its leading argument, named the one way every row that shows a
@@ -86,33 +102,18 @@ fn desc_of(name: &str, preview: &str) -> String {
     }
 }
 
-/// The tools folded into one summary row. The tool that opened the row is
-/// always in it, so an empty bundle has no representation and neither the
-/// head nor the unfolded body has an empty case to answer.
-pub struct FoldedTools(Vec<FoldedTool>);
+/// What an unfolded group's steps sit under its line with.
+pub const STEP_INDENT: &str = "  ";
 
-impl FoldedTools {
-    pub fn new(first: FoldedTool) -> Self {
-        Self(vec![first])
-    }
-
-    /// The tool the head describes: the newest one folded in.
-    pub fn last(&self) -> &FoldedTool {
-        self.0.last().expect("a bundle holds a tool")
-    }
-
-    pub fn count(&self) -> usize {
-        self.0.len()
-    }
-
-    /// Every tool, oldest first.
-    pub fn iter(&self) -> impl Iterator<Item = &FoldedTool> {
-        self.0.iter()
-    }
-
-    pub fn push(&mut self, tool: FoldedTool) {
-        self.0.push(tool);
-    }
+/// One step of a group, in the order the run took it: a read-only call that
+/// landed well, or a block of reasoning.
+pub enum Step {
+    Tool(FoldedTool),
+    Thinking {
+        // The stream appends a block's lines to the row holding its id.
+        block: u64,
+        lines: Vec<Line<'static>>,
+    },
 }
 
 pub struct Row(Kind, Height);
@@ -182,12 +183,6 @@ impl Height {
     }
 }
 
-// The rendered rows of a tools summary, keyed by what they were painted at:
-// width and the spinner frame. A spinning row must replace its frame as it
-// advances, and a row whose calls changed has its painted rows dropped, so
-// those two settle the key — nothing else can change what it renders.
-type PaintedRows = Option<((usize, usize), Vec<Line<'static>>)>;
-
 enum Kind {
     // One logical line of a prompt the user said: the border and the body kept
     // apart, so a wrap can repeat the border.
@@ -235,26 +230,18 @@ enum Kind {
         hovered: bool,
         painted: RefCell<Option<(usize, Vec<Line<'static>>)>>,
     },
-    // A block of reasoning that can be folded or unfolded.
-    Reasoning {
-        // Which block this row belongs to; the stream appends completed lines
-        // to the open block's row and nothing else.
-        block: u64,
-        lines: Vec<Line<'static>>,
-        folded: bool,
-    },
-    // A bundle of read-only tool results folded together into a summary row.
+    // The run's working behind one fold: read-only calls that landed well
+    // and the reasoning around them, in order.
     //
     // `pending` is the calls in flight this row draws: they are not in the
     // scrollback yet, and the live block leaves them to the row, which is
     // where they will land.
-    ToolsSummary {
-        tools: FoldedTools,
+    Steps {
+        steps: Vec<Step>,
         pending: Vec<PendingTool>,
         folded: bool,
         hovered: bool,
         spinner: usize,
-        painted: RefCell<PaintedRows>,
     },
 }
 
@@ -309,7 +296,7 @@ impl Row {
         }
     }
 
-    /// One reasoning line. A reasoning line lives inside a block's row, not
+    /// One reasoning line. A reasoning line lives inside its group, not
     /// beside it.
     pub fn reasoning_line(line: &str, paint: &Paint) -> Line<'static> {
         Line::from(paint.span(&paint.theme.muted, line))
@@ -323,41 +310,52 @@ impl Row {
             .collect()
     }
 
-    /// A bundle of read-only tool results folded together into a summary row.
-    pub fn tools_summary(tools: FoldedTools) -> Self {
-        Self::new(Kind::ToolsSummary {
-            tools,
+    /// A group whose first step is `first`, folded the way it is born.
+    pub fn steps(first: Step, folded: bool) -> Self {
+        Self::new(Kind::Steps {
+            steps: vec![first],
             pending: Vec::new(),
-            folded: true,
+            folded,
             hovered: false,
             spinner: 0,
-            painted: RefCell::new(None),
         })
     }
 
-    /// Add a tool to a tools summary row, if it is one.
-    pub fn push_tool(&mut self, name: String, preview: String) -> bool {
-        if let Kind::ToolsSummary { tools, painted, .. } = &mut self.0 {
-            tools.push(FoldedTool { name, preview });
-            *painted.borrow_mut() = None;
+    /// A lone block of reasoning, as a group of one.
+    #[cfg(test)]
+    pub fn thinking(block: u64, lines: Vec<Line<'static>>, folded: bool) -> Self {
+        Self::steps(Step::Thinking { block, lines }, folded)
+    }
+
+    /// Add a step to this row if it is a group; the step comes back if not.
+    pub fn join(&mut self, step: Step) -> Result<(), Step> {
+        if let Kind::Steps { steps, .. } = &mut self.0 {
+            steps.push(step);
             self.1.clear();
-            true
+            Ok(())
         } else {
-            false
+            Err(step)
         }
     }
 
-    /// Whether this row is a folded tools summary row.
-    pub fn is_tools_summary(&self) -> bool {
-        matches!(&self.0, Kind::ToolsSummary { .. })
+    /// Whether this row is a group.
+    pub fn is_steps(&self) -> bool {
+        matches!(&self.0, Kind::Steps { .. })
+    }
+
+    /// Whether this row is a group that names calls, and so draws a line of
+    /// its own above its steps when unfolded.
+    pub fn has_calls(&self) -> bool {
+        match &self.0 {
+            Kind::Steps { steps, pending, .. } => calls(steps, pending) > 0,
+            _ => false,
+        }
     }
 
     /// Whether this row is an expandable row.
     pub fn is_expandable(&self) -> bool {
         match &self.0 {
-            // One tool is its own summary line, so unfolding would only
-            // repeat it.
-            Kind::ToolsSummary { tools, pending, .. } => calls(tools, pending) > 1,
+            Kind::Steps { steps, pending, .. } => expandable(steps, pending),
             Kind::Result { preview_lines, .. } => *preview_lines > render::SKETCHED_ROWS,
             _ => false,
         }
@@ -369,11 +367,8 @@ impl Row {
             return false;
         }
         match &mut self.0 {
-            Kind::ToolsSummary {
-                folded, painted, ..
-            } => {
+            Kind::Steps { folded, .. } => {
                 *folded = !*folded;
-                *painted.borrow_mut() = None;
                 self.1.clear();
                 true
             }
@@ -391,42 +386,25 @@ impl Row {
 
     /// Bring a row up to date before the frame is drawn: which row the mouse
     /// is over, where the spinner is, and the calls in flight this row draws
-    /// for. A summary row spins for the calls it holds, so the two arrive
-    /// together rather than as a flag beside them.
+    /// for. A group spins for the calls it holds, so the two arrive together
+    /// rather than as a flag beside them.
     pub fn update_live(&mut self, hovered: bool, spin: usize, held: &[PendingTool]) {
         match &mut self.0 {
-            Kind::ToolsSummary {
-                tools,
+            Kind::Steps {
                 pending,
-                folded,
                 hovered: h,
                 spinner: s,
-                painted,
+                ..
             } => {
                 // A call starting, ending or landing rewrites the row's line
-                // and changes how many rows it counts for: both readings go.
+                // and can change how many rows it counts for.
                 if pending.as_slice() != held {
                     *pending = held.to_vec();
-                    *painted.borrow_mut() = None;
                     self.1.clear();
                 }
-                // A call it held can leave without landing in it — a failure
-                // goes to a line of its own — and one call is its own line,
-                // so a row left with one has to fold itself back: `toggle`
-                // refuses it then, and the body would repeat the header.
-                if !*folded && calls(tools, pending) <= 1 {
-                    *folded = true;
-                    *painted.borrow_mut() = None;
-                    self.1.clear();
-                }
-                // Hover restyles, so it drops the painted rows and keeps the
-                // height; the frame is in the key, so a tick repaints without
-                // help — and a row with nothing out has no frame to advance.
-                if *h != hovered {
-                    *h = hovered;
-                    *painted.borrow_mut() = None;
-                }
-                if spinning(pending) && *s != spin {
+                // Neither moves a height: the line is clipped to the width.
+                *h = hovered;
+                if spinning(pending) {
                     *s = spin;
                 }
             }
@@ -441,15 +419,6 @@ impl Row {
             }
             _ => {}
         }
-    }
-
-    /// A reasoning block's first row. Later lines go in through `push_line`.
-    pub fn reasoning(block: u64, lines: Vec<Line<'static>>, folded: bool) -> Self {
-        Self::new(Kind::Reasoning {
-            block,
-            lines,
-            folded,
-        })
     }
 
     /// A tool result the screen already has in parts — the live path, which
@@ -590,23 +559,17 @@ impl Row {
                     render::SKETCHED_ROWS + 1
                 }
             }
-            Kind::Reasoning { lines, folded, .. } => {
-                if *folded {
-                    1
-                } else {
-                    lines.len()
-                }
-            }
-            Kind::ToolsSummary {
-                tools,
+            Kind::Steps {
+                steps,
                 pending,
                 folded,
                 ..
             } => {
-                if *folded {
+                if *folded || !expandable(steps, pending) {
                     1
                 } else {
-                    1 + calls(tools, pending)
+                    let header = usize::from(calls(steps, pending) > 0);
+                    header + steps.iter().map(Step::len).sum::<usize>() + pending.len()
                 }
             }
         }
@@ -681,35 +644,24 @@ impl Row {
                 };
                 (rows.get(i).cloned().unwrap_or_default(), None)
             }
-            Kind::Reasoning { lines, folded, .. } => {
-                let text = if *folded {
-                    // The count row is synthesized at draw time, so it takes
-                    // its muted styling here rather than from a painted row.
-                    Line::from(paint.span(&paint.theme.muted, thinking_summary(lines.len())))
-                } else {
-                    lines[i].clone()
-                };
-                (text, None)
-            }
-            Kind::ToolsSummary {
-                tools,
+            Kind::Steps {
+                steps,
                 pending,
                 folded,
                 hovered,
                 spinner,
-                painted,
             } => {
-                let mut painted = painted.borrow_mut();
-                let rows = match &mut *painted {
-                    Some((key, rows)) if *key == (width, *spinner) => rows,
-                    slot => {
-                        let rows = tools_summary_rows(
-                            tools, pending, *folded, *hovered, *spinner, paint, width,
-                        );
-                        &mut slot.insert(((width, *spinner), rows)).1
-                    }
-                };
-                (rows.get(i).cloned().unwrap_or_default(), None)
+                let open = !*folded && expandable(steps, pending);
+                let header = calls(steps, pending) > 0;
+                let head = || steps_header(steps, pending, open, *hovered, *spinner, paint, width);
+                if !open || (header && i == 0) {
+                    return (head(), None);
+                }
+                let border = header.then(|| Line::from(STEP_INDENT));
+                (
+                    step_line(steps, pending, i - usize::from(header), paint, width),
+                    border,
+                )
             }
         }
     }
@@ -723,42 +675,53 @@ impl Row {
         }
     }
 
-    /// The reasoning block this row belongs to, if it is one.
-    pub fn block(&self) -> Option<u64> {
+    /// Whether this row is the group holding reasoning block `id`.
+    pub fn holds_block(&self, id: u64) -> bool {
         match &self.0 {
-            Kind::Reasoning { block, .. } => Some(*block),
-            _ => None,
+            Kind::Steps { steps, .. } => steps
+                .iter()
+                .any(|s| matches!(s, Step::Thinking { block, .. } if *block == id)),
+            _ => false,
         }
     }
 
     /// Whether this row is folded, and the handle to change it.
     pub fn folded(&self) -> Option<bool> {
         match &self.0 {
-            Kind::Reasoning { folded, .. } => Some(*folded),
+            Kind::Steps { folded, .. } => Some(*folded),
             _ => None,
         }
     }
 
     pub fn set_folded(&mut self, to: bool) {
-        if let Kind::Reasoning { folded, .. } = &mut self.0 {
+        if let Kind::Steps { folded, .. } = &mut self.0 {
             *folded = to;
             self.1.clear();
         }
     }
 
-    /// Whether this row is an empty reasoning block.
-    pub fn is_empty_reasoning(&self) -> bool {
-        match &self.0 {
-            Kind::Reasoning { lines, .. } => lines.is_empty(),
-            _ => false,
-        }
+    /// Drop block `id` if it ended without a line, and say whether the group
+    /// is left with no step at all.
+    pub fn drop_if_empty(&mut self, id: u64) -> bool {
+        let Kind::Steps { steps, .. } = &mut self.0 else {
+            return false;
+        };
+        steps.retain(
+            |s| !matches!(s, Step::Thinking { block, lines } if *block == id && lines.is_empty()),
+        );
+        self.1.clear();
+        steps.is_empty()
     }
 
-    /// Append a finished line to a reasoning block. A no-op on anything else,
-    /// which no caller can reach: the only handle to a row is one found by
-    /// `block()`, and only a reasoning row answers that.
-    pub fn push_line(&mut self, line: Line<'static>) {
-        if let Kind::Reasoning { lines, .. } = &mut self.0 {
+    /// Append a finished line to reasoning block `id`. A no-op anywhere else,
+    /// which no caller can reach: the row is found by `holds_block`.
+    pub fn push_line(&mut self, id: u64, line: Line<'static>) {
+        if let Kind::Steps { steps, .. } = &mut self.0
+            && let Some(Step::Thinking { lines, .. }) = steps
+                .iter_mut()
+                .rev()
+                .find(|s| matches!(s, Step::Thinking { block, .. } if *block == id))
+        {
             lines.push(line);
             self.1.clear();
         }
@@ -790,10 +753,10 @@ fn tool_start_line(name: &str, summary: &str) -> String {
     format!("{} {}", icons::PENDING_MARK, named(name, summary))
 }
 
-// The count line a shut thinking block leaves in the scrollback.
-fn thinking_summary(n: usize) -> String {
+// "N line(s)", the count a folded block of reasoning shows.
+fn line_count(n: usize) -> String {
     let s = if n == 1 { "" } else { "s" };
-    format!("thinking{}{n} line{s}", icons::PART_SEP)
+    format!("{n} line{s}")
 }
 
 fn clip_to(s: &str, max_cols: usize) -> &str {
@@ -808,56 +771,71 @@ fn clip_to(s: &str, max_cols: usize) -> &str {
     s.trim_end()
 }
 
-fn tools_summary_header(
-    tools: &FoldedTools,
+impl Step {
+    // The lines it takes in an unfolded group.
+    fn len(&self) -> usize {
+        match self {
+            Step::Tool(_) => 1,
+            Step::Thinking { lines, .. } => lines.len(),
+        }
+    }
+}
+
+// A group's own line: its newest call, in flight or not, so the line holds
+// still when the result lands; folded, also what it hides.
+fn steps_header(
+    steps: &[Step],
     pending: &[PendingTool],
-    folded: bool,
+    open: bool,
     hovered: bool,
     spinner: usize,
     paint: &Paint,
     width: usize,
 ) -> Line<'static> {
-    // The row speaks for its newest call, ended or not — a call in flight is
-    // one of its tools already, so the line does not change under it when the
-    // result lands. Folded keeps that call and its count; unfolded, the count
-    // would repeat the list.
-    let desc = pending
-        .last()
-        .map(PendingTool::desc)
-        .unwrap_or_else(|| tools.last().desc());
-    let count = calls(tools, pending);
-    let body = if folded && count > 1 {
-        let digits = count.to_string();
-        // The ellipsis is glued to the count — `…12` — with a space before
-        // it and a column of air before the terminal edge. One leading
-        // space after the check.
-        let sep_w = 1 + UnicodeWidthStr::width(icons::ELLIPSIS) + 1;
-        let fixed_w = 1 + digits.len() + sep_w;
-        let room = width.saturating_sub(fixed_w);
-        let budget = room.clamp(8, 50);
-        let desc_w = UnicodeWidthStr::width(desc.as_str());
-        let shown = if desc_w > budget {
-            clip_to(&desc, budget)
-        } else {
-            &desc
+    let thought = thought(steps);
+    let newest = pending.last().map(PendingTool::desc).or_else(|| {
+        steps.iter().rev().find_map(|s| match s {
+            Step::Tool(t) => Some(t.desc()),
+            Step::Thinking { .. } => None,
+        })
+    });
+    let Some(desc) = newest else {
+        let text = match thought {
+            Some(n) if n > 0 => format!("thinking{}{}", icons::PART_SEP, line_count(n)),
+            _ => super::THINKING.to_string(),
         };
-        format!(" {shown} {}{digits}", icons::ELLIPSIS)
-    } else {
-        let room = width.saturating_sub(2).max(10);
-        format!(" {}", clip_to(&desc, room))
+        return Line::from(paint.span_hovered(hovered, &paint.theme.muted, text));
     };
+    let mut tail = String::new();
+    if !open {
+        let count = calls(steps, pending);
+        if count > 1 {
+            tail.push_str(&format!(" {}{count}", icons::ELLIPSIS));
+        }
+        match thought {
+            Some(0) => tail.push_str(&format!("{}{}", icons::PART_SEP, super::THINKING)),
+            Some(n) => tail.push_str(&format!("{}thinking {}", icons::PART_SEP, line_count(n))),
+            None => {}
+        }
+    }
+    // The mark and the space after it, the tail, and a column of air before
+    // the terminal edge: the call's text takes whatever is left.
+    let room = width
+        .saturating_sub(2 + UnicodeWidthStr::width(tail.as_str()) + 1)
+        .max(8);
     // Each half is its own span, so hover bolds instead of recolouring.
     Line::from(vec![
         summary_mark(pending, spinner, hovered, paint),
-        // The body keeps its own leading space: the running row has no
-        // mark-span to separate from it, and one space after the check is the
-        // look.
-        paint.span_hovered(hovered, &paint.theme.muted, body),
+        paint.span_hovered(
+            hovered,
+            &paint.theme.muted,
+            format!(" {}{tail}", clip_to(&desc, room)),
+        ),
     ])
 }
 
-// The mark a tools summary leads with: the frame while one of the calls it
-// holds is still out, and the check for a batch that has all landed.
+// The mark a group leads with: the frame while one of the calls it holds is
+// still out, and the check once they have all landed.
 fn summary_mark(
     pending: &[PendingTool],
     spinner: usize,
@@ -871,36 +849,31 @@ fn summary_mark(
     paint.span_hovered(hovered, &paint.theme.status.ok, icons::DONE_MARK)
 }
 
-fn tools_summary_rows(
-    tools: &FoldedTools,
+// Line `i` of an unfolded group's steps, the calls in flight last. The indent
+// is `line`'s border, so a wrapped line of reasoning keeps it.
+fn step_line(
+    steps: &[Step],
     pending: &[PendingTool],
-    folded: bool,
-    hovered: bool,
-    spinner: usize,
+    mut i: usize,
     paint: &Paint,
     width: usize,
-) -> Vec<Line<'static>> {
-    let header = tools_summary_header(tools, pending, folded, hovered, spinner, paint, width);
-    if folded {
-        return vec![header];
+) -> Line<'static> {
+    let call = |desc: String| {
+        let room = width.saturating_sub(STEP_INDENT.len()).max(10);
+        Line::from(paint.span(&paint.theme.muted, clip_to(&desc, room).to_string()))
+    };
+    for step in steps {
+        let n = step.len();
+        if i >= n {
+            i -= n;
+            continue;
+        }
+        return match step {
+            Step::Tool(t) => call(t.desc()),
+            Step::Thinking { lines, .. } => lines[i].clone(),
+        };
     }
-    // The calls in flight are listed with the landed ones: the header counts
-    // them, and a body shorter than its own count reads as dropped rows.
-    let mut rows = Vec::with_capacity(1 + calls(tools, pending));
-    rows.push(header);
-    // The header already wears the mark; the tools it lists need no second
-    // one, and the indent keeps them under it.
-    let room = width.saturating_sub(2).max(10);
-    let descs = tools
-        .iter()
-        .map(FoldedTool::desc)
-        .chain(pending.iter().map(PendingTool::desc));
-    for desc in descs {
-        rows.push(Line::from(
-            paint.span(&paint.theme.muted, format!("  {}", clip_to(&desc, room))),
-        ));
-    }
-    rows
+    pending.get(i).map(|p| call(p.desc())).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -919,15 +892,15 @@ mod conversation_tests {
         {
             assert!(row.is_conversation());
         }
-        let tools = FoldedTools::new(FoldedTool {
+        let tool = Step::Tool(FoldedTool {
             name: "read".into(),
             preview: "src/main.rs".into(),
         });
         for row in [
             Row::notice("a command printed this"),
-            Row::reasoning(1, vec![Line::from("thinking")], false),
+            Row::thinking(1, vec![Line::from("thinking")], false),
             Row::result(true, "read", "src/main.rs"),
-            Row::tools_summary(tools),
+            Row::steps(tool, true),
         ] {
             assert!(!row.is_conversation());
         }
@@ -935,7 +908,7 @@ mod conversation_tests {
 }
 
 #[cfg(test)]
-mod tools_summary_tests {
+mod steps_tests {
     use super::*;
 
     fn tool(name: &str, preview: &str) -> FoldedTool {
@@ -945,14 +918,14 @@ mod tools_summary_tests {
         }
     }
 
-    fn bundle(tools: Vec<FoldedTool>) -> FoldedTools {
-        let mut it = tools.into_iter();
-        let first = it.next().expect("a bundle holds at least one tool");
-        let mut bundle = FoldedTools::new(first);
-        for tool in it {
-            bundle.push(tool);
+    // A folded group of these calls, in order.
+    fn bundle(tools: Vec<FoldedTool>) -> Row {
+        let mut it = tools.into_iter().map(Step::Tool);
+        let mut row = Row::steps(it.next().expect("a group holds a step"), true);
+        for step in it {
+            assert!(row.join(step).is_ok());
         }
-        bundle
+        row
     }
 
     // A call in flight, as the row is handed one: `landed` says whether its
@@ -971,7 +944,7 @@ mod tools_summary_tests {
     #[test]
     fn a_spinning_summary_row_advances_through_the_paint_cache() {
         let paint = Paint::new(true);
-        let mut row = Row::tools_summary(bundle(vec![tool("read", "a.rs")]));
+        let mut row = bundle(vec![tool("read", "a.rs")]);
         let held = [pending("read", "b.rs", false)];
 
         use crate::ui::tui::screen::plain;
@@ -1010,7 +983,7 @@ mod tools_summary_tests {
     #[test]
     fn a_call_still_out_keeps_the_row_spinning() {
         let paint = Paint::new(true);
-        let mut row = Row::tools_summary(bundle(vec![tool("read", "a.rs")]));
+        let mut row = bundle(vec![tool("read", "a.rs")]);
 
         use crate::ui::tui::screen::plain;
 
@@ -1041,7 +1014,7 @@ mod tools_summary_tests {
     #[test]
     fn a_landed_batch_wears_its_own_mark() {
         let paint = Paint::new(true);
-        let mut row = Row::tools_summary(bundle(vec![tool("read", "a.rs")]));
+        let mut row = bundle(vec![tool("read", "a.rs")]);
 
         use crate::ui::tui::screen::plain;
 
@@ -1056,11 +1029,11 @@ mod tools_summary_tests {
 
     // A row the user unfolded can lose the call that made it unfoldable — a
     // failure leaves for a line of its own, and the row stops being the last
-    // one in the scrollback — so it has to fold itself back: with one call
-    // left, `toggle` refuses and the body would repeat the header.
+    // one in the scrollback — so it shows as folded: with one call left,
+    // `toggle` refuses and the body would repeat the header.
     #[test]
-    fn a_row_left_with_one_call_folds_itself_back() {
-        let mut row = Row::tools_summary(bundle(vec![tool("read", "a.rs")]));
+    fn a_row_left_with_one_call_shows_as_folded() {
+        let mut row = bundle(vec![tool("read", "a.rs")]);
         row.update_live(false, 0, &[pending("grep", "match 1", false)]);
         assert!(row.is_expandable(), "two calls are a batch");
         assert!(row.toggle_expand());
@@ -1076,7 +1049,7 @@ mod tools_summary_tests {
     #[test]
     fn unfolding_a_summary_row_lists_the_calls_it_holds() {
         let paint = Paint::new(false);
-        let mut row = Row::tools_summary(bundle(vec![tool("read", "a.rs")]));
+        let mut row = bundle(vec![tool("read", "a.rs")]);
 
         use crate::ui::tui::screen::plain;
 
@@ -1096,7 +1069,7 @@ mod tools_summary_tests {
             tool("read", "crates/agent/src/session.rs"),
             tool("grep", "match 1"),
         ]);
-        let mut row = Row::tools_summary(tools);
+        let mut row = tools;
         assert_eq!(row.len(), 1);
 
         assert!(row.toggle_expand());
@@ -1108,10 +1081,93 @@ mod tools_summary_tests {
 
     #[test]
     fn a_single_tool_summary_never_unfolds() {
-        let mut row = Row::tools_summary(bundle(vec![tool("read", "a.rs")]));
+        let mut row = bundle(vec![tool("read", "a.rs")]);
         assert!(!row.is_expandable());
         assert!(!row.toggle_expand());
         assert_eq!(row.len(), 1);
+    }
+
+    fn think(block: u64, n: usize) -> Step {
+        Step::Thinking {
+            block,
+            lines: (1..=n).map(|i| Line::from(format!("line {i}"))).collect(),
+        }
+    }
+
+    // Each line as the screen draws it, border included.
+    fn shown(row: &Row, width: usize) -> Vec<String> {
+        use crate::ui::tui::screen::plain;
+        let paint = Paint::new(false);
+        (0..row.len())
+            .map(|i| {
+                let (line, border) = row.line(i, &paint, width);
+                border.map(|b| plain(&b)).unwrap_or_default() + &plain(&line)
+            })
+            .collect()
+    }
+
+    // Reasoning between calls no longer splits them: one line folded, every
+    // step in order unfolded.
+    #[test]
+    fn a_group_folds_its_calls_and_thinking_into_one_line() {
+        let mut row = bundle(vec![tool("read", "a.rs")]);
+        assert!(row.join(think(1, 3)).is_ok());
+        assert!(row.join(Step::Tool(tool("read", "b.rs"))).is_ok());
+        assert_eq!(
+            shown(&row, 80),
+            [format!(
+                "{} read b.rs {}2{}thinking 3 lines",
+                icons::DONE_MARK,
+                icons::ELLIPSIS,
+                icons::PART_SEP
+            )]
+        );
+        assert!(row.toggle_expand());
+        assert_eq!(
+            shown(&row, 80),
+            [
+                format!("{} read b.rs", icons::DONE_MARK),
+                "  read a.rs".into(),
+                "  line 1".into(),
+                "  line 2".into(),
+                "  line 3".into(),
+                "  read b.rs".into(),
+            ]
+        );
+    }
+
+    // A block with no call around it keeps the look it always had: its
+    // count folded, its lines unfolded, nothing to sit under.
+    #[test]
+    fn a_lone_block_reads_as_its_count() {
+        let mut row = Row::steps(think(1, 2), true);
+        assert_eq!(
+            shown(&row, 80),
+            [format!("thinking{}2 lines", icons::PART_SEP)]
+        );
+        assert!(row.toggle_expand());
+        assert_eq!(shown(&row, 80), ["line 1", "line 2"]);
+
+        // Before its first line lands there is nothing to unfold.
+        let empty = Row::steps(think(2, 0), false);
+        assert!(!empty.is_expandable());
+        assert_eq!(shown(&empty, 80), [crate::ui::tui::THINKING]);
+    }
+
+    // One call or many, the text runs up to what follows it; a group's once
+    // stopped at 50 columns while a lone call ran to the edge.
+    #[test]
+    fn a_long_call_fills_the_row_before_what_follows_it() {
+        let long = "x".repeat(200);
+        let mut row = bundle(vec![tool("bash", &long), tool("bash", &long)]);
+        assert!(row.join(think(1, 1)).is_ok());
+        let line = &shown(&row, 80)[0];
+        let tail = format!(" {}2{}thinking 1 line", icons::ELLIPSIS, icons::PART_SEP);
+        assert!(line.ends_with(&tail), "{line}");
+        assert_eq!(UnicodeWidthStr::width(line.as_str()), 79, "{line}");
+
+        let one = bundle(vec![tool("bash", &long)]);
+        assert_eq!(UnicodeWidthStr::width(shown(&one, 80)[0].as_str()), 79);
     }
 
     #[test]
@@ -1142,7 +1198,7 @@ mod height_tests {
     #[test]
     fn a_rows_height_is_the_sum_of_its_lines() {
         let paint = Paint::new(false);
-        let row = Row::reasoning(1, vec![Line::from("abcdef"), Line::from("gh")], false);
+        let row = Row::thinking(1, vec![Line::from("abcdef"), Line::from("gh")], false);
         for width in [2usize, 4, 80] {
             let sum: usize = (0..row.len())
                 .map(|i| row.line_height(i, &paint, width))
@@ -1150,7 +1206,7 @@ mod height_tests {
             assert_eq!(sum, row.height(&paint, width), "at width {width}");
         }
         // Asked a whole row at a time, then one line at a time: same answer.
-        let fresh = Row::reasoning(1, vec![Line::from("abcdef"), Line::from("gh")], false);
+        let fresh = Row::thinking(1, vec![Line::from("abcdef"), Line::from("gh")], false);
         assert_eq!(fresh.height(&paint, 2), 4, "three rows and one");
         assert_eq!(fresh.line_height(0, &paint, 2), 3, "abcdef wraps to three");
         assert_eq!(fresh.line_height(1, &paint, 2), 1);

@@ -59,7 +59,7 @@ pub struct Surface {
     pub(super) scrollback: Vec<Row>,
     // The stream still writing the next row, and which kind it is.
     pub(super) stream: Stream,
-    // The reasoning folds ledger.
+    // How the groups of calls and reasoning are folded.
     pub(super) folds: Folds,
     // How many rows the opening block occupies. A theme change replaces
     // exactly those and leaves the conversation under them alone.
