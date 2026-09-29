@@ -232,7 +232,7 @@ fn a_batch_in_flight_hands_its_remainder_to_the_row_that_opens() {
     let rows = drawn_rows(&view);
     assert_eq!(rows.len(), 1, "one row, not two: {rows:?}");
     assert!(
-        rows[0].ends_with(&format!("read b.rs {}{}", icons::ELLIPSIS, 2)),
+        rows[0].ends_with(&format!("read b.rs{}2 calls", icons::PART_SEP)),
         "got: {}",
         rows[0]
     );
@@ -260,7 +260,7 @@ fn a_modifying_call_keeps_its_line() {
     ui.flush(&lane, &mut view);
 
     assert_eq!(live_pending_rows(&ui), 1, "the edit holds a row of its own");
-    let (live, _) = ui.live(&lane, &view, true);
+    let (live, _) = ui.live(&lane, &view, true, std::time::Instant::now());
     assert!(
         plain(&live[0]).contains("edit b.rs"),
         "and that row is the edit's: {:?}",
@@ -303,7 +303,7 @@ fn a_failing_call_never_joins_the_row() {
     // The row is back to what it keeps, and the ✗ holds the line its own
     // row will take.
     assert_eq!(live_pending_rows(&ui), 1, "the ✗ keeps a line here");
-    let (live, _) = ui.live(&lane, &view, true);
+    let (live, _) = ui.live(&lane, &view, true, std::time::Instant::now());
     assert_eq!(
         plain(&live[0]),
         format!("{} read b.rs", icons::FAIL_MARK),
@@ -357,27 +357,26 @@ fn a_stopped_tool_call_is_silenced_in_tui() {
 
 // The live region follows the lane's turn, not the clock beside it. One
 // field answering both meant every ending path had to put the clock back
-// or leave a spinner running over a lane that had finished.
+// or leave a status line running over a lane that had finished.
 #[test]
 fn the_live_region_ends_with_the_turn_and_not_with_the_clock() {
     let ui = test_ui(80, 24);
     let (_dir, mut lane) = a_running_lane();
     let mut view = View::default();
     view.state.started = Some(std::time::Instant::now());
+    // Nothing else is live here, so the status line is the only row.
     assert!(
-        ui.live(&lane, &view, false)
+        !ui.live(&lane, &view, false, std::time::Instant::now())
             .0
-            .iter()
-            .any(|r| icons::SPINNER_FRAMES.iter().any(|f| plain(r).contains(f))),
+            .is_empty(),
         "a running lane draws the status line"
     );
 
     lane.finish();
     assert!(
-        !ui.live(&lane, &view, false)
+        ui.live(&lane, &view, false, std::time::Instant::now())
             .0
-            .iter()
-            .any(|r| icons::SPINNER_FRAMES.iter().any(|f| plain(r).contains(f))),
+            .is_empty(),
         "the clock is still set; the turn is what says the run is over"
     );
 }

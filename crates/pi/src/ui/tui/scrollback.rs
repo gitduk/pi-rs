@@ -1,14 +1,14 @@
 //! The transcript as the scrollback walks it: the rows, the folded blocks
 //! among them, and the window they are read through.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use agent::session::Entry as LogEntry;
 use llm::message::{AssistantContent, ReasoningContent};
 use ratatui::text::Line;
 
 use super::call::push_tool_row;
-use super::row::{Row, STEP_INDENT, Step};
+use super::row::{Row, Step};
 use super::screen;
 use crate::core;
 use crate::store::icons;
@@ -33,6 +33,9 @@ pub(super) struct Folds {
     // the group itself, so the next group is born with it until the key flips
     // it again.
     pub(super) last: bool,
+    // Each call's whole leading argument, by call id, from the answer that
+    // made it until its result lands: the result does not carry it.
+    pub(super) asked: HashMap<String, String>,
 }
 
 // Shut: the working is worth a glance while it runs and almost never worth
@@ -48,23 +51,27 @@ impl Default for Folds {
             streaming: None,
             folded: true,
             last: true,
+            asked: HashMap::new(),
         }
     }
 }
 
 impl Folds {
-    // Whether the reasoning streaming now is hidden behind its group's line.
+    // Whether the reasoning streaming now is hidden behind a line: its
+    // group's, or its own inside an unfolded one.
     pub(super) fn holds(&self, reasoning: bool, scrollback: &[Row]) -> bool {
-        reasoning && self.stream_fold(scrollback)
+        reasoning && self.stream_indent(scrollback).is_none()
     }
 
-    // How the group of the block streaming now is folded, or — with no such
-    // group — the last value.
-    pub(super) fn stream_fold(&self, scrollback: &[Row]) -> bool {
-        self.streaming
-            .and_then(|id| scrollback.iter().rev().find(|r| r.holds_block(id)))
-            .and_then(Row::folded)
-            .unwrap_or(self.last)
+    // The indent the streaming block shows its lines under, if they show.
+    pub(super) fn stream_indent(&self, scrollback: &[Row]) -> Option<&'static str> {
+        let Some(id) = self.streaming else {
+            return (!self.last).then_some("");
+        };
+        match scrollback.iter().rev().find(|r| r.holds_block(id)) {
+            Some(row) => row.shows_block(id),
+            None => (!self.last).then_some(""),
+        }
     }
 
     // The group that was last stops being so: it folds back to the switch.
@@ -72,6 +79,17 @@ impl Folds {
         if let Some(row) = last_group(scrollback) {
             row.set_folded(self.folded);
         }
+    }
+
+    // Keep what call `id` asked for, for the step it lands as.
+    pub(super) fn ask(&mut self, id: &str, args: &serde_json::Value) {
+        self.asked
+            .insert(id.to_string(), render::asked(args).to_string());
+    }
+
+    // What call `id` asked for, once: its result has landed.
+    pub(super) fn take_asked(&mut self, id: &str) -> String {
+        self.asked.remove(id).unwrap_or_default()
     }
 
     // The next block id. The one place ids come from, so a rebuilt block and
@@ -103,9 +121,12 @@ impl Folds {
         self.streaming = Some(block);
         self.join(
             scrollback,
+            // Open while it streams, so it reads as it is written; it folds
+            // to its first line when it ends.
             Step::Thinking {
                 block,
                 lines: Vec::new(),
+                open: true,
             },
         );
     }
@@ -122,14 +143,14 @@ impl Folds {
         self.retire_last(scrollback);
     }
 
-    // The streaming block is over. One that never had a line leaves nothing,
-    // and neither does a group it was alone in.
+    // The streaming block is over and folds to its first line. One that never
+    // had a line leaves nothing, and neither does a group it was alone in.
     pub(super) fn close_block(&mut self, scrollback: &mut Vec<Row>) {
         let Some(id) = self.streaming.take() else {
             return;
         };
         if let Some(at) = scrollback.iter().rposition(|r| r.holds_block(id))
-            && scrollback[at].drop_if_empty(id)
+            && scrollback[at].end_block(id)
         {
             scrollback.remove(at);
         }
@@ -390,13 +411,10 @@ pub(super) fn body(
     // All of it, not the rows the terminal has room for: this is the only copy
     // until `close` lands it, and a scroll up has to reach its head.
     if reasoning {
-        // Indented like the lines it will join, when its group has a line.
-        let indent = folds
-            .streaming
-            .and_then(|id| scrollback.iter().rev().find(|r| r.holds_block(id)))
-            .is_some_and(Row::has_calls);
+        // Indented like the lines it will join.
+        let indent = folds.stream_indent(scrollback).unwrap_or_default();
         let muted = Line::from(paint.span(&paint.theme.muted, partial));
-        let border = indent.then(|| Line::from(STEP_INDENT));
+        let border = (!indent.is_empty()).then(|| Line::from(indent));
         screen::wrap(border.as_ref(), &muted, width)
     } else {
         render::render_markdown(partial, paint)
@@ -456,6 +474,7 @@ pub(super) fn scrollback_from(
                         }
                         AssistantContent::ToolCall(c) => {
                             if answered.contains(&c.id) {
+                                folds.ask(&c.id, &c.args);
                                 continue;
                             }
                             out.push(Row::tool_start(
@@ -488,7 +507,14 @@ pub(super) fn scrollback_from(
                             // by id — and `streaming_row` and `stream_fold` both
                             // do, taking the last match.
                             let block = folds.take_id();
-                            folds.join(&mut out, Step::Thinking { block, lines });
+                            folds.join(
+                                &mut out,
+                                Step::Thinking {
+                                    block,
+                                    lines,
+                                    open: false,
+                                },
+                            );
                         }
                     }
                 }
@@ -499,9 +525,9 @@ pub(super) fn scrollback_from(
             // adoption draw from one place.
             other => {
                 if let Some(rows) = f_entry(other, paint) {
-                    if matches!(other, LogEntry::Tool { .. }) {
+                    if let LogEntry::Tool { result, .. } = other {
                         for r in rows {
-                            push_tool_row(&mut out, folds, r);
+                            push_tool_row(&mut out, folds, r, result);
                         }
                     } else {
                         out.extend(rows);

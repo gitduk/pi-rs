@@ -675,11 +675,11 @@ pub fn named(name: &str, summary: &str) -> String {
     }
 }
 
-/// The one argument worth showing in a progress line.
-pub fn summarize(args: &serde_json::Value) -> String {
+/// The one argument worth showing, whole.
+pub fn asked(args: &serde_json::Value) -> &str {
     // Order is priority: `pattern` beats `path` because a grep carries both,
     // and `description`, written for this line, beats the prompt it names.
-    for key in [
+    [
         "description",
         "pattern",
         "command",
@@ -687,12 +687,23 @@ pub fn summarize(args: &serde_json::Value) -> String {
         "query",
         "prompt",
         "name",
-    ] {
-        if let Some(v) = args.get(key).and_then(|v| v.as_str()) {
-            return clip(v, 80);
-        }
+    ]
+    .into_iter()
+    .find_map(|key| args.get(key).and_then(|v| v.as_str()))
+    .unwrap_or_default()
+}
+
+/// The one argument worth showing in a progress line: its first line, `…`
+/// saying there is more of it.
+pub fn summarize(args: &serde_json::Value) -> String {
+    let v = asked(args);
+    let first = v.lines().next().unwrap_or_default();
+    let line = clip(first, 80);
+    if first.len() < v.trim_end().len() && !line.ends_with(icons::ELLIPSIS) {
+        format!("{line}{}", icons::ELLIPSIS)
+    } else {
+        line
     }
-    String::new()
 }
 
 #[cfg(test)]

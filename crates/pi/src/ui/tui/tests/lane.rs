@@ -1,12 +1,10 @@
 use crate::core::lane::Lane;
 use crate::input::commands::Choice;
 use crate::input::{Builtin, Drive};
-use crate::store::icons;
 use crate::store::keys::Mode;
 use crate::store::listing::Listing;
 use crate::store::status::Segment;
 use crate::ui::tui::row::Row;
-use crate::ui::tui::screen::plain;
 use crate::ui::tui::{Asked, Deed, Intent, Origin, View, view_at};
 use agent::Event;
 
@@ -559,8 +557,8 @@ fn a_vanished_lane_before_a_running_one_waits_for_it() {
 }
 
 // The bar answers what a lane has finished, not what it is doing: a lane
-// working out of sight wears its plain name and no frame, and only a run
-// that ended wears a mark.
+// working out of sight wears its plain name, and only a run that ended wears
+// a mark.
 #[test]
 fn only_a_finished_lane_wears_a_mark_in_the_bar() {
     let dir = tempfile::tempdir().expect("a checkout");
@@ -575,11 +573,6 @@ fn only_a_finished_lane_wears_a_mark_in_the_bar() {
         marks(&tui),
         vec![crate::ui::tui::Mark::Front, crate::ui::tui::Mark::Plain],
         "a lane working out of sight is just a lane"
-    );
-    let bar = plain(&tui.ui.lane_bar("", 80).expect("two lanes keep a bar"));
-    assert!(
-        !icons::SPINNER_FRAMES.iter().any(|f| bar.contains(f)),
-        "and the bar does not animate it: {bar}"
     );
 
     tui.core.lanes[1].end(true, false);

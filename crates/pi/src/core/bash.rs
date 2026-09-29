@@ -63,9 +63,15 @@ pub async fn run_bash(ctx: &tool::Ctx, command: &str) -> Bashed {
 pub fn bash_said(text: &str) -> Vec<String> {
     text.lines()
         .skip(1)
-        .filter(|l| !matches!(*l, "<stdout>" | "</stdout>" | "<stderr>" | "</stderr>"))
+        .filter(|l| !is_stream_tag(l))
         .map(str::to_string)
         .collect()
+}
+
+/// Whether a line of a command's output is one of the tags the model reads
+/// its streams by, which a screen leaves out.
+pub fn is_stream_tag(line: &str) -> bool {
+    matches!(line, "<stdout>" | "</stdout>" | "<stderr>" | "</stderr>")
 }
 
 impl Bashed {

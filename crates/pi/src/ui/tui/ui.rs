@@ -12,7 +12,7 @@ use super::editor::Editor;
 use super::menu::{Lists, MenuEntry};
 use super::mouse::{Regions, Target};
 use super::reply::Reply;
-use super::row::Row;
+use super::row::{Row, count};
 use super::screen::{self, Screen};
 use super::scrollback::body;
 use super::view::{StreamKind, View, snapshot};
@@ -91,7 +91,9 @@ pub(super) struct Ui {
     // A note answering the last keypress, and when it landed. It stands at
     // the bar's right end for `FLASH` and then goes — see `bar_line`.
     pub(super) flash: Option<(String, Instant)>,
-    pub(super) hovered_scrollback: Option<usize>,
+    // The scrollback row and line under the mouse, when a click there
+    // opens or closes something.
+    pub(super) hovered_scrollback: Option<(usize, usize)>,
     pub(super) row_targets: Vec<Target>,
     // Where the frame's regions landed last. The click handler reads them
     // back: a screen row only means something inside a named region.
@@ -239,6 +241,7 @@ impl Ui {
         lane: &Lane,
         view: &View,
         row_holds: bool,
+        now: std::time::Instant,
     ) -> (Vec<Line<'static>>, usize) {
         let width = self.screen.usable();
         let mut rows: Vec<Line<'static>> = Vec::new();
@@ -254,20 +257,29 @@ impl Ui {
         let mut pending = Vec::new();
         if !self.browsing {
             if self.live_tools_shown {
-                pending.extend(shown.iter().copied().map(|t| pending_line(self.spinner, t)));
+                pending.extend(
+                    shown
+                        .iter()
+                        .copied()
+                        .map(|t| pending_line(now, self.spinner, t, &self.paint)),
+                );
             } else if let Some(t) = shown.last() {
                 let extra = if shown.len() > 1 {
-                    format!(" (+{})", shown.len() - 1)
+                    format!("{}{}", icons::PART_SEP, count(shown.len(), "call"))
                 } else {
                     String::new()
                 };
-                pending.push(format!("{}{extra}", pending_line(self.spinner, t)));
+                let mut line = pending_line(now, self.spinner, t, &self.paint);
+                line.spans
+                    .push(self.paint.span(&self.paint.theme.muted, extra));
+                pending.push(line);
             }
         }
-        rows.extend(pending.into_iter().flat_map(|line| {
-            let muted = Line::from(self.paint.span(&self.paint.theme.muted, line));
-            screen::fit(&muted, width)
-        }));
+        rows.extend(
+            pending
+                .into_iter()
+                .flat_map(|line| screen::fit(&line, width)),
+        );
         // The draw tags screen rows by index, and a long summary wraps:
         // count the rows the block takes, not the lines before they did.
         let pending_rows = rows.len();
@@ -288,17 +300,13 @@ impl Ui {
         if lane.is_running() && !self.browsing {
             let mut parts = status::parts(&self.status, &snapshot(lane, view));
             // A run that is stopping says so; an ordinary running line needs
-            // no word for it — the spinner is what says the turn is on.
+            // no word for it — its clock ticking is what says the turn is on,
+            // and a call out turns on its own line.
             parts.extend(view.state.retry.clone());
             if view.state.stopping {
                 parts.push(format!("stopping{}", icons::ELLIPSIS));
             }
-            let spin = if view.state.stopping {
-                icons::SPIN_STOPPED
-            } else {
-                icons::SPINNER_FRAMES[self.spinner % icons::SPINNER_FRAMES.len()]
-            };
-            let line = format!("{spin} {}", parts.join(icons::PART_SEP));
+            let line = parts.join(icons::PART_SEP);
             let muted = Line::from(self.paint.span(&self.paint.theme.muted, line));
             rows.extend(screen::fit(&muted, width));
         }

@@ -5,7 +5,7 @@
 //! unreachable and left the renderer writing into a terminal nobody was
 //! managing. Here a single loop holds raw mode from start to finish and
 //! services three sources at once — the agent's events, the keyboard, and a
-//! timer for the spinner — so nothing has to be bolted on beside it.
+//! timer for the animation — so nothing has to be bolted on beside it.
 
 mod browse;
 mod call;
@@ -48,7 +48,7 @@ use ui::{Mark, Tab, Ui, following_terminal, lane_name};
 use view::{Queued, View, Views, front_view, prune_views, view_at};
 
 // What a folded run shows instead of what it is thinking.
-const THINKING: &str = "thinking...";
+const THINKING: &str = "thinking…";
 
 // How close two Ctrl-C presses must be to read as one deliberate quit.
 //

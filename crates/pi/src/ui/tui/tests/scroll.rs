@@ -206,10 +206,7 @@ fn a_block_after_a_call_joins_its_group() {
     t.close_block(&mut scrollback);
     t.join(
         &mut scrollback,
-        Step::Tool(FoldedTool {
-            name: "read".into(),
-            preview: "a.rs".into(),
-        }),
+        Step::Tool(FoldedTool::new("read", "a.rs", "", "")),
     );
     streamed(&mut t, &mut scrollback);
     t.close_block(&mut scrollback);
@@ -415,10 +412,7 @@ fn a_wrapped_row_landing_below_moves_the_scroll_by_its_rows() {
 fn the_key_reads_a_group_with_nothing_to_unfold_as_folded() {
     let mut t = Folds::default();
     let mut scrollback = vec![Row::steps(
-        Step::Tool(FoldedTool {
-            name: "read".into(),
-            preview: "a.rs".into(),
-        }),
+        Step::Tool(FoldedTool::new("read", "a.rs", "", "")),
         false,
     )];
     t.toggle_current(&mut scrollback);

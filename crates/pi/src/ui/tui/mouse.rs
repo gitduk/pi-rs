@@ -27,19 +27,22 @@ impl Ui {
             .copied()
     }
 
-    /// The scrollback row the mouse is over, if the cursor is on its text.
-    fn hovered_row(&self, view: &View, col: u16, row: u16) -> Option<usize> {
-        let Target::Scrollback(idx) = self.target_at(row)? else {
+    /// The scrollback row the mouse is over and the line of it a click there
+    /// opens or closes, if the cursor is on that line's text.
+    fn hovered_row(&self, view: &View, col: u16, row: u16) -> Option<(usize, usize)> {
+        let Target::Scrollback(idx, line) = self.target_at(row)? else {
             return None;
         };
         let row = view.surface.scrollback.get(idx)?;
-        if !row.is_expandable() {
-            return None;
-        }
-        // The mouse must cover the row's own text, not the empty rest of the
-        // row: the click that expands it lands on the head line only.
-        let first = row.line(0, &self.paint, self.screen.usable()).0;
-        ((col as usize) < first.width()).then_some(idx)
+        let width = self.screen.usable();
+        let line = row.click_line(line, width)?;
+        // The mouse must cover the line's own text, not the empty rest of the
+        // row.
+        let (text, border) = row.line(line, &self.paint, width);
+        let start = border.map_or(0, |b| b.width());
+        (start..start + text.width())
+            .contains(&(col as usize))
+            .then_some((idx, line))
     }
 
     pub(super) fn on_mouse_move(&mut self, view: &mut View, col: u16, row: u16) {
@@ -52,12 +55,13 @@ impl Ui {
             // rows are rebuilt every frame, so the flip is all it takes.
             Some(Target::PendingTools) => self.live_tools_shown = !self.live_tools_shown,
             _ => {
-                if let Some(idx) = self.hovered_row(view, col, row)
+                let width = self.screen.usable();
+                if let Some((idx, line)) = self.hovered_row(view, col, row)
                     && view
                         .surface
                         .scrollback
                         .get_mut(idx)
-                        .is_some_and(|r| r.toggle_expand())
+                        .is_some_and(|r| r.toggle_at(line, width))
                 {
                     view.surface.counted = None;
                 }
@@ -78,11 +82,12 @@ impl Ui {
 
 // What one rendered row of the history area sits on, as a click sees it:
 // which block, named the only way a block in that region can be — a
-// scrollback row by index, the live region's pending-call rows, or nothing.
+// scrollback row by index and the line of it, the live region's pending-call
+// rows, or nothing.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Target {
     None,
-    Scrollback(usize),
+    Scrollback(usize, usize),
     PendingTools,
 }
 

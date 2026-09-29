@@ -40,7 +40,7 @@ fn a_retry_waits_on_the_status_line_and_leaves_its_reason_in_a_row() {
             reason: "502 Bad Gateway: upstream connect error".into(),
         },
     );
-    let (live, _) = ui.live(&lane, &view, false);
+    let (live, _) = ui.live(&lane, &view, false, std::time::Instant::now());
     let status = plain(live.last().expect("a status line"));
     assert!(status.ends_with("retry 2 in 3.00s"), "{status:?}");
     assert_eq!(
@@ -49,7 +49,7 @@ fn a_retry_waits_on_the_status_line_and_leaves_its_reason_in_a_row() {
     );
 
     ui.on_event(&mut lane, &mut view, agent::Event::TextDelta("ok".into()));
-    let (live, _) = ui.live(&lane, &view, false);
+    let (live, _) = ui.live(&lane, &view, false, std::time::Instant::now());
     let status = plain(live.last().expect("a status line"));
     assert!(!status.contains("retry"), "{status:?}");
 }

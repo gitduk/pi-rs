@@ -190,9 +190,7 @@ pub fn window_tagged<T: Clone, P: Piece>(
     (back, scroll)
 }
 
-/// A line's text without its styling, for tests that assert on layout
-/// rather than colour.
-#[cfg(test)]
+/// A line's text without its styling.
 pub(crate) fn plain(line: &Line<'_>) -> String {
     line.spans.iter().map(|s| s.content.as_ref()).collect()
 }

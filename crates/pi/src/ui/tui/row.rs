@@ -15,7 +15,7 @@
 use std::cell::RefCell;
 
 use llm::message::{ToolResult, ToolResultContent};
-use ratatui::style::Style as RStyle;
+use ratatui::style::{Modifier, Style as RStyle};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -28,11 +28,42 @@ use crate::ui::render::{self, Paint};
 pub struct FoldedTool {
     pub name: String,
     pub preview: String,
+    // What the step shows opened, under its line: the lines of the argument
+    // past the first the line names (`asked` of them), then what came back.
+    body: Vec<String>,
+    asked: usize,
+    open: bool,
 }
 
 impl FoldedTool {
+    /// `asked` is the call's whole leading argument, `output` what it
+    /// printed; both are what opening the step shows.
+    pub fn new(name: &str, preview: &str, asked: &str, output: &str) -> Self {
+        let mut body: Vec<String> = asked.lines().skip(1).map(str::to_string).collect();
+        let asked = body.len();
+        let bash = name == toolbox::bash::Bash::NAME;
+        body.extend(
+            output
+                .lines()
+                .filter(|l| !(bash && crate::core::bash::is_stream_tag(l)))
+                .map(str::to_string),
+        );
+        Self {
+            name: name.to_string(),
+            preview: preview.to_string(),
+            body,
+            asked,
+            open: false,
+        }
+    }
+
     fn desc(&self) -> String {
         desc_of(&self.name, &self.preview)
+    }
+
+    // The lines the call printed, the count its line ends with.
+    fn printed(&self) -> usize {
+        self.body.len() - self.asked
     }
 }
 
@@ -50,6 +81,9 @@ pub struct PendingTool {
     /// row's — it is on its way to a line of its own — so what the row holds
     /// is always a call it will keep.
     pub landed: bool,
+    /// Whole seconds it has been out, once there are enough to be worth
+    /// saying; `None` before that and once it has landed.
+    pub secs: Option<u64>,
 }
 
 impl PendingTool {
@@ -58,10 +92,64 @@ impl PendingTool {
     }
 }
 
-// Whether the row still has a call out, which is when it spins. Any of them,
-// not the newest: the row is the only place a call in flight shows, so its
-// mark cannot settle while one is still running.
-fn spinning(pending: &[PendingTool]) -> bool {
+/// The frame a call in flight shows at spinner tick `tick`.
+pub fn call_frame(tick: usize) -> &'static str {
+    const TICKS_PER_FRAME: usize = 2;
+    icons::CALL_FRAMES[tick / TICKS_PER_FRAME % icons::CALL_FRAMES.len()]
+}
+
+/// A call's text while it is out: muted, with a brighter band sweeping
+/// across it one character a tick.
+pub fn shimmer(text: &str, tick: usize, paint: &Paint) -> Vec<Span<'static>> {
+    // How far past each end the band travels, so a sweep leaves the text at
+    // rest for a moment before the next.
+    const EDGE: usize = 4;
+    if !paint.color {
+        return vec![paint.span(&paint.theme.muted, text.to_string())];
+    }
+    let span = |lit: u8, run: String| match lit {
+        2 => Span::styled(run, RStyle::default().add_modifier(Modifier::BOLD)),
+        1 => Span::raw(run),
+        _ => paint.span(&paint.theme.muted, run),
+    };
+    let at = (tick % (text.chars().count() + 2 * EDGE)) as isize - EDGE as isize;
+    let mut spans = Vec::new();
+    let (mut run, mut level) = (String::new(), 0);
+    for (i, c) in text.chars().enumerate() {
+        let lit = match (i as isize - at).unsigned_abs() {
+            0 => 2,
+            1 => 1,
+            _ => 0,
+        };
+        if lit != level && !run.is_empty() {
+            spans.push(span(level, std::mem::take(&mut run)));
+        }
+        level = lit;
+        run.push(c);
+    }
+    if !run.is_empty() {
+        spans.push(span(level, run));
+    }
+    spans
+}
+
+/// How long a call has been out, as its line says it: nothing for a call
+/// quick enough to be over before the number could be read.
+pub fn out_for(secs: Option<u64>) -> String {
+    secs.map(|s| {
+        format!(
+            "{}{}",
+            icons::PART_SEP,
+            llm::figures::elapsed(std::time::Duration::from_secs(s))
+        )
+    })
+    .unwrap_or_default()
+}
+
+// Whether the row still has a call out. Any of them, not the newest: the row
+// is the only place a call in flight shows, so its mark cannot settle while
+// one is still running.
+fn running(pending: &[PendingTool]) -> bool {
     pending.iter().any(|p| !p.landed)
 }
 
@@ -83,9 +171,22 @@ fn thought(steps: &[Step]) -> Option<usize> {
         .reduce(|a, b| a + b)
 }
 
+// The one step of a group that holds nothing else. Such a group has no list
+// to open: opening it opens the step.
+fn lone<'a>(steps: &'a [Step], pending: &[PendingTool]) -> Option<&'a Step> {
+    match (steps, pending) {
+        ([step], []) => Some(step),
+        _ => None,
+    }
+}
+
 // Whether unfolding would show more than the row's own line.
 fn expandable(steps: &[Step], pending: &[PendingTool]) -> bool {
-    calls(steps, pending) > 1 || thought(steps).is_some_and(|n| n > 0)
+    match lone(steps, pending) {
+        Some(Step::Tool(t)) => !t.body.is_empty(),
+        Some(Step::Thinking { lines, .. }) => !lines.is_empty(),
+        None => steps.len() + pending.len() > 1,
+    }
 }
 
 // The tool and its leading argument, named the one way every row that shows a
@@ -105,14 +206,18 @@ fn desc_of(name: &str, preview: &str) -> String {
 /// What an unfolded group's steps sit under its line with.
 pub const STEP_INDENT: &str = "  ";
 
+/// What an opened call's lines sit under its own line with.
+pub const STEP_BODY_INDENT: &str = "    ";
+
 /// One step of a group, in the order the run took it: a read-only call that
-/// landed well, or a block of reasoning.
+/// landed well, or a block of reasoning; each opens on its own.
 pub enum Step {
     Tool(FoldedTool),
     Thinking {
         // The stream appends a block's lines to the row holding its id.
         block: u64,
         lines: Vec<Line<'static>>,
+        open: bool,
     },
 }
 
@@ -240,7 +345,9 @@ enum Kind {
         steps: Vec<Step>,
         pending: Vec<PendingTool>,
         folded: bool,
-        hovered: bool,
+        // The line under the mouse, when it is one a click opens or closes.
+        hovered: Option<usize>,
+        // The tick the calls still out shimmer at.
         spinner: usize,
     },
 }
@@ -316,7 +423,7 @@ impl Row {
             steps: vec![first],
             pending: Vec::new(),
             folded,
-            hovered: false,
+            hovered: None,
             spinner: 0,
         })
     }
@@ -324,7 +431,14 @@ impl Row {
     /// A lone block of reasoning, as a group of one.
     #[cfg(test)]
     pub fn thinking(block: u64, lines: Vec<Line<'static>>, folded: bool) -> Self {
-        Self::steps(Step::Thinking { block, lines }, folded)
+        Self::steps(
+            Step::Thinking {
+                block,
+                lines,
+                open: false,
+            },
+            folded,
+        )
     }
 
     /// Add a step to this row if it is a group; the step comes back if not.
@@ -343,12 +457,25 @@ impl Row {
         matches!(&self.0, Kind::Steps { .. })
     }
 
-    /// Whether this row is a group that names calls, and so draws a line of
-    /// its own above its steps when unfolded.
-    pub fn has_calls(&self) -> bool {
-        match &self.0 {
-            Kind::Steps { steps, pending, .. } => calls(steps, pending) > 0,
-            _ => false,
+    /// The indent reasoning block `id` shows its lines under, if this group
+    /// shows them; the block's unfinished line follows them there.
+    pub fn shows_block(&self, id: u64) -> Option<&'static str> {
+        let Kind::Steps {
+            steps,
+            pending,
+            folded: false,
+            ..
+        } = &self.0
+        else {
+            return None;
+        };
+        let held = |s: &Step| matches!(s, Step::Thinking { block, .. } if *block == id);
+        match lone(steps, pending) {
+            Some(s) => held(s).then_some(""),
+            None => steps
+                .iter()
+                .any(|s| held(s) && s.is_open())
+                .then_some(STEP_INDENT),
         }
     }
 
@@ -384,37 +511,90 @@ impl Row {
         }
     }
 
-    /// Bring a row up to date before the frame is drawn: which row the mouse
-    /// is over, where the spinner is, and the calls in flight this row draws
-    /// for. A group spins for the calls it holds, so the two arrive together
-    /// rather than as a flag beside them.
-    pub fn update_live(&mut self, hovered: bool, spin: usize, held: &[PendingTool]) {
+    /// The line a click on line `i` opens or closes, if any: a result opens
+    /// from anywhere on it, a group from its own line or a step's.
+    pub fn click_line(&self, i: usize, width: usize) -> Option<usize> {
+        match &self.0 {
+            Kind::Result { .. } => self.is_expandable().then_some(0),
+            Kind::Steps {
+                steps,
+                pending,
+                folded,
+                ..
+            } => {
+                let listed = !*folded && lone(steps, pending).is_none();
+                let step = || match unit_at(steps, pending, i - 1)? {
+                    (Unit::Step(s), 0) => Some(s),
+                    _ => None,
+                };
+                if i == 0 {
+                    expandable(steps, pending).then_some(0)
+                } else if listed && step().is_some_and(|s| s.opens(width)) {
+                    Some(i)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Open or close what line `i` heads — see `click_line` — and say
+    /// whether anything moved.
+    pub fn toggle_at(&mut self, i: usize, width: usize) -> bool {
+        if i == 0 || !self.is_steps() {
+            return self.toggle_expand();
+        }
+        if self.click_line(i, width) != Some(i) {
+            return false;
+        }
+        let Kind::Steps { steps, .. } = &mut self.0 else {
+            return false;
+        };
+        let Some(k) = step_index(steps, i - 1) else {
+            return false;
+        };
+        steps[k].flip();
+        self.1.clear();
+        true
+    }
+
+    /// Bring a row up to date before the frame is drawn: which of its lines
+    /// the mouse is over, the spinner's tick, and the calls in flight this
+    /// row draws for.
+    pub fn update_live(&mut self, hovered: Option<usize>, spin: usize, held: &[PendingTool]) {
         match &mut self.0 {
             Kind::Steps {
                 pending,
                 hovered: h,
-                spinner: s,
+                spinner,
                 ..
             } => {
-                // A call starting, ending or landing rewrites the row's line
-                // and can change how many rows it counts for.
+                // A call starting, ending or landing can change how many rows
+                // the row counts for; a second ticking by cannot, its lines
+                // being clipped to the width.
                 if pending.as_slice() != held {
+                    let reshaped = pending.len() != held.len()
+                        || pending.iter().zip(held).any(|(a, b)| {
+                            (&a.name, &a.preview, a.landed) != (&b.name, &b.preview, b.landed)
+                        });
                     *pending = held.to_vec();
-                    self.1.clear();
+                    if reshaped {
+                        self.1.clear();
+                    }
                 }
-                // Neither moves a height: the line is clipped to the width.
+                // Neither moves a height: hover bolds, and bold is no wider;
+                // a frame is one column like the next.
                 *h = hovered;
-                if spinning(pending) {
-                    *s = spin;
-                }
+                *spinner = spin;
             }
             Kind::Result {
                 hovered: h,
                 preview_lines,
                 painted,
                 ..
-            } if *preview_lines > render::SKETCHED_ROWS && *h != hovered => {
-                *h = hovered;
+            } if *preview_lines > render::SKETCHED_ROWS && *h != hovered.is_some() => {
+                *h = hovered.is_some();
                 *painted.borrow_mut() = None;
             }
             _ => {}
@@ -443,14 +623,7 @@ impl Row {
     /// back to.
     pub fn stored_result(r: &ToolResult, preview: Option<&str>) -> Self {
         let preview = preview.map(str::to_string).unwrap_or_else(|| {
-            let body: String = r
-                .content
-                .iter()
-                .filter_map(|c| match c {
-                    ToolResultContent::Text(t) => Some(t.text.as_str()),
-                    _ => None,
-                })
-                .collect();
+            let body = result_text(r);
             match body.split_once('\n') {
                 Some((h, _)) => h.to_string(),
                 None => body,
@@ -483,7 +656,7 @@ impl Row {
         }
     }
 
-    /// A tool's start line: what an unanswered call keeps in the view.
+    /// The line a call that was never answered keeps: stopped before it landed.
     pub fn tool_start(name: &str, summary: &str, paint: &Paint) -> Self {
         Self::notice(Line::from(
             paint.span(&paint.theme.muted, tool_start_line(name, summary)),
@@ -566,10 +739,13 @@ impl Row {
                 ..
             } => {
                 if *folded || !expandable(steps, pending) {
-                    1
-                } else {
-                    let header = usize::from(calls(steps, pending) > 0);
-                    header + steps.iter().map(Step::len).sum::<usize>() + pending.len()
+                    return 1;
+                }
+                match lone(steps, pending) {
+                    // The block is the group: its lines, with no line above.
+                    Some(Step::Thinking { lines, .. }) => lines.len(),
+                    Some(Step::Tool(t)) => 1 + t.body.len(),
+                    None => 1 + steps.iter().map(Step::len).sum::<usize>() + pending.len(),
                 }
             }
         }
@@ -652,16 +828,28 @@ impl Row {
                 spinner,
             } => {
                 let open = !*folded && expandable(steps, pending);
-                let header = calls(steps, pending) > 0;
-                let head = || steps_header(steps, pending, open, *hovered, *spinner, paint, width);
-                if !open || (header && i == 0) {
-                    return (head(), None);
+                let hover = |at: usize| *hovered == Some(at);
+                let under = |indent: &'static str| Some(Line::from(indent));
+                match lone(steps, pending) {
+                    Some(Step::Thinking { lines, .. }) if open => {
+                        let line = lines[i].clone();
+                        // Bold as `span_hovered` bolds: only where there is colour.
+                        let line = if hover(i) && paint.color {
+                            line.patch_style(RStyle::default().add_modifier(Modifier::BOLD))
+                        } else {
+                            line
+                        };
+                        (line, None)
+                    }
+                    Some(Step::Tool(t)) if open && i > 0 => {
+                        (body_line(t, i - 1, paint), under(STEP_INDENT))
+                    }
+                    _ if !open || i == 0 => (
+                        steps_header(steps, pending, open, hover(0), *spinner, paint, width),
+                        None,
+                    ),
+                    _ => step_line(steps, pending, i - 1, hover(i), *spinner, paint, width),
                 }
-                let border = header.then(|| Line::from(STEP_INDENT));
-                (
-                    step_line(steps, pending, i - usize::from(header), paint, width),
-                    border,
-                )
             }
         }
     }
@@ -700,15 +888,19 @@ impl Row {
         }
     }
 
-    /// Drop block `id` if it ended without a line, and say whether the group
-    /// is left with no step at all.
-    pub fn drop_if_empty(&mut self, id: u64) -> bool {
+    /// Block `id` has ended: it folds to its first line, or goes if it never
+    /// had one. Says whether the group is left with no step at all.
+    pub fn end_block(&mut self, id: u64) -> bool {
         let Kind::Steps { steps, .. } = &mut self.0 else {
             return false;
         };
-        steps.retain(
-            |s| !matches!(s, Step::Thinking { block, lines } if *block == id && lines.is_empty()),
-        );
+        steps.retain_mut(|s| match s {
+            Step::Thinking { block, lines, open } if *block == id => {
+                *open = false;
+                !lines.is_empty()
+            }
+            _ => true,
+        });
         self.1.clear();
         steps.is_empty()
     }
@@ -748,15 +940,25 @@ impl Row {
     }
 }
 
-// A tool's start line: what an unanswered call keeps in the view.
-fn tool_start_line(name: &str, summary: &str) -> String {
-    format!("{} {}", icons::PENDING_MARK, named(name, summary))
+/// What a result says in text, its other parts left out.
+pub fn result_text(r: &ToolResult) -> String {
+    r.content
+        .iter()
+        .filter_map(|c| match c {
+            ToolResultContent::Text(t) => Some(t.text.as_str()),
+            _ => None,
+        })
+        .collect()
 }
 
-// "N line(s)", the count a folded block of reasoning shows.
-fn line_count(n: usize) -> String {
+fn tool_start_line(name: &str, summary: &str) -> String {
+    format!("{} {}", icons::STOPPED_MARK, named(name, summary))
+}
+
+/// "N thing(s)": the counts a line ends with.
+pub(super) fn count(n: usize, thing: &str) -> String {
     let s = if n == 1 { "" } else { "s" };
-    format!("{n} line{s}")
+    format!("{n} {thing}{s}")
 }
 
 fn clip_to(s: &str, max_cols: usize) -> &str {
@@ -771,109 +973,327 @@ fn clip_to(s: &str, max_cols: usize) -> &str {
     s.trim_end()
 }
 
-impl Step {
-    // The lines it takes in an unfolded group.
-    fn len(&self) -> usize {
+// `text` in `room` columns, closed by `…` when any of it was cut or `more`
+// follows it: the mark sits on the text, never apart from it.
+fn clipped(text: &str, room: usize, more: bool) -> String {
+    if !more && UnicodeWidthStr::width(text) <= room {
+        return text.to_string();
+    }
+    format!(
+        "{}{}",
+        clip_to(text, room.saturating_sub(1)),
+        icons::ELLIPSIS
+    )
+}
+
+// The mark a line naming a step or a call leads with.
+#[derive(Clone, Copy)]
+enum Mark {
+    Done,
+    // Out, turning and its text shimmering at this spinner tick.
+    Out(usize),
+    // Reasoning wears none: a call is the thing that gets a mark.
+    Thought,
+}
+
+impl Mark {
+    // The mark and the space after it, or nothing.
+    fn spans(self, hovered: bool, paint: &Paint) -> Vec<Span<'static>> {
+        let (glyph, style) = match self {
+            Mark::Done => (icons::DONE_MARK, &paint.theme.status.ok),
+            Mark::Out(tick) => (call_frame(tick), &paint.theme.muted),
+            Mark::Thought => return Vec::new(),
+        };
+        vec![
+            paint.span_hovered(hovered, style, glyph),
+            paint.span_hovered(hovered, &paint.theme.muted, " "),
+        ]
+    }
+
+    fn width(self) -> usize {
         match self {
-            Step::Tool(_) => 1,
-            Step::Thinking { lines, .. } => lines.len(),
+            Mark::Thought => 0,
+            _ => 2,
         }
     }
 }
 
-// A group's own line: its newest call, in flight or not, so the line holds
-// still when the result lands; folded, also what it hides.
+// What one line naming a step or a call says, before it is fitted to a width.
+struct Head {
+    mark: Mark,
+    text: String,
+    // What follows the text, a count or a time, kept whole when the text is cut.
+    tail: String,
+    // Whether more of the text is there than this line, whatever the width.
+    more: bool,
+}
+
+impl Head {
+    // The text's columns: the mark and its space, the tail, and a column of
+    // air before the terminal edge.
+    fn room(&self, width: usize) -> usize {
+        width
+            .saturating_sub(self.mark.width() + UnicodeWidthStr::width(self.tail.as_str()) + 1)
+            .max(8)
+    }
+
+    fn cut(&self, width: usize) -> bool {
+        UnicodeWidthStr::width(self.text.as_str()) > self.room(width)
+    }
+
+    // Opened, the text is whole and wraps, and what the tail said is below it.
+    fn line(&self, open: bool, hovered: bool, paint: &Paint, width: usize) -> Line<'static> {
+        if let Mark::Out(tick) = self.mark
+            && !open
+            && !hovered
+        {
+            let text = clipped(&self.text, self.room(width), self.more);
+            let mut spans = self.mark.spans(false, paint);
+            spans.extend(shimmer(&text, tick, paint));
+            spans.push(paint.span(&paint.theme.muted, self.tail.clone()));
+            return Line::from(spans);
+        }
+        let text = if open {
+            self.text.clone()
+        } else {
+            let text = clipped(&self.text, self.room(width), self.more);
+            format!("{text}{}", self.tail)
+        };
+        // The mark and the text are spans of their own, so hover bolds
+        // instead of recolouring.
+        let mut spans = self.mark.spans(hovered, paint);
+        spans.push(paint.span_hovered(hovered, &paint.theme.muted, text));
+        Line::from(spans)
+    }
+}
+
+// " · N lines", or nothing for none.
+fn lines_tail(n: usize) -> String {
+    if n == 0 {
+        return String::new();
+    }
+    format!("{}{}", icons::PART_SEP, count(n, "line"))
+}
+
+fn pending_head(p: &PendingTool, tick: usize) -> Head {
+    Head {
+        mark: if p.landed {
+            Mark::Done
+        } else {
+            Mark::Out(tick)
+        },
+        text: p.desc(),
+        tail: out_for(p.secs),
+        more: false,
+    }
+}
+
+impl Step {
+    fn is_open(&self) -> bool {
+        match self {
+            Step::Tool(t) => t.open,
+            Step::Thinking { open, .. } => *open,
+        }
+    }
+
+    fn flip(&mut self) {
+        match self {
+            Step::Tool(t) => t.open = !t.open,
+            Step::Thinking { open, .. } => *open = !*open,
+        }
+    }
+
+    // The lines an opened step shows under its own.
+    fn body_len(&self) -> usize {
+        match self {
+            Step::Tool(t) => t.body.len(),
+            Step::Thinking { lines, .. } => lines.len().saturating_sub(1),
+        }
+    }
+
+    // The lines it takes in an unfolded group.
+    fn len(&self) -> usize {
+        1 + if self.is_open() { self.body_len() } else { 0 }
+    }
+
+    fn head(&self) -> Head {
+        match self {
+            Step::Tool(t) => Head {
+                mark: Mark::Done,
+                text: t.desc(),
+                tail: lines_tail(t.printed()),
+                more: t.asked > 0,
+            },
+            Step::Thinking { lines, .. } => Head {
+                mark: Mark::Thought,
+                text: lines
+                    .first()
+                    .map_or_else(|| super::THINKING.to_string(), super::screen::plain),
+                tail: if lines.len() > 1 {
+                    lines_tail(lines.len())
+                } else {
+                    String::new()
+                },
+                more: lines.len() > 1,
+            },
+        }
+    }
+
+    // Whether its line opens: there is more under it, or more of it than
+    // the width shows.
+    fn opens(&self, width: usize) -> bool {
+        self.is_open()
+            || self.body_len() > 0
+            || self.head().cut(width.saturating_sub(STEP_INDENT.len()))
+    }
+}
+
+// What line `i` of an unfolded group's list sits in, and how far into it.
+enum Unit<'a> {
+    Step(&'a Step),
+    Pending(&'a PendingTool),
+}
+
+fn unit_at<'a>(
+    steps: &'a [Step],
+    pending: &'a [PendingTool],
+    i: usize,
+) -> Option<(Unit<'a>, usize)> {
+    match walk(steps, i) {
+        Ok((k, at)) => Some((Unit::Step(&steps[k]), at)),
+        Err(rest) => pending.get(rest).map(|p| (Unit::Pending(p), 0)),
+    }
+}
+
+// Which step line `i` of the list falls in and how far into it, or how far
+// past the last step it lies.
+fn walk(steps: &[Step], mut i: usize) -> Result<(usize, usize), usize> {
+    for (k, step) in steps.iter().enumerate() {
+        match i.checked_sub(step.len()) {
+            Some(rest) => i = rest,
+            None => return Ok((k, i)),
+        }
+    }
+    Err(i)
+}
+
+// The step whose own line is line `i` of the list.
+fn step_index(steps: &[Step], i: usize) -> Option<usize> {
+    match walk(steps, i) {
+        Ok((k, 0)) => Some(k),
+        _ => None,
+    }
+}
+
+// A group's own line. Listing its steps under it, it counts them. Folded, it
+// names its newest call, in flight or not, so the line holds still when the
+// result lands, and says what else it hides.
 fn steps_header(
     steps: &[Step],
     pending: &[PendingTool],
     open: bool,
     hovered: bool,
-    spinner: usize,
+    tick: usize,
     paint: &Paint,
     width: usize,
 ) -> Line<'static> {
     let thought = thought(steps);
-    let newest = pending.last().map(PendingTool::desc).or_else(|| {
-        steps.iter().rev().find_map(|s| match s {
-            Step::Tool(t) => Some(t.desc()),
-            Step::Thinking { .. } => None,
-        })
+    let calls = calls(steps, pending);
+    let muted = |text: String| paint.span_hovered(hovered, &paint.theme.muted, text);
+    let mark = if running(pending) {
+        Mark::Out(tick)
+    } else {
+        Mark::Done
+    };
+    let thinking = |n: usize| match n {
+        0 => super::THINKING.to_string(),
+        n => format!("thinking {}", count(n, "line")),
+    };
+    if open && lone(steps, pending).is_none() {
+        let mut parts: Vec<String> = Vec::new();
+        if calls > 0 {
+            parts.push(count(calls, "call"));
+        }
+        parts.extend(thought.map(thinking));
+        let text = parts.join(icons::PART_SEP);
+        if calls == 0 {
+            return Line::from(muted(text));
+        }
+        let head = Head {
+            mark,
+            text,
+            tail: String::new(),
+            more: false,
+        };
+        return head.line(true, hovered, paint, width);
+    }
+    let newest = pending.last().map(|p| pending_head(p, tick)).or_else(|| {
+        steps
+            .iter()
+            .rev()
+            .find(|s| matches!(s, Step::Tool(_)))
+            .map(Step::head)
     });
-    let Some(desc) = newest else {
+    let Some(newest) = newest else {
         let text = match thought {
-            Some(n) if n > 0 => format!("thinking{}{}", icons::PART_SEP, line_count(n)),
+            Some(n) if n > 0 => format!("thinking{}{}", icons::PART_SEP, count(n, "line")),
             _ => super::THINKING.to_string(),
         };
-        return Line::from(paint.span_hovered(hovered, &paint.theme.muted, text));
+        return Line::from(muted(text));
     };
-    let mut tail = String::new();
-    if !open {
-        let count = calls(steps, pending);
-        if count > 1 {
-            tail.push_str(&format!(" {}{count}", icons::ELLIPSIS));
-        }
-        match thought {
-            Some(0) => tail.push_str(&format!("{}{}", icons::PART_SEP, super::THINKING)),
-            Some(n) => tail.push_str(&format!("{}thinking {}", icons::PART_SEP, line_count(n))),
-            None => {}
-        }
+    let mut tail = pending.last().map(|p| out_for(p.secs)).unwrap_or_default();
+    if calls > 1 {
+        tail.push_str(&format!("{}{}", icons::PART_SEP, count(calls, "call")));
     }
-    // The mark and the space after it, the tail, and a column of air before
-    // the terminal edge: the call's text takes whatever is left.
-    let room = width
-        .saturating_sub(2 + UnicodeWidthStr::width(tail.as_str()) + 1)
-        .max(8);
-    // Each half is its own span, so hover bolds instead of recolouring.
-    Line::from(vec![
-        summary_mark(pending, spinner, hovered, paint),
-        paint.span_hovered(
-            hovered,
-            &paint.theme.muted,
-            format!(" {}{tail}", clip_to(&desc, room)),
-        ),
-    ])
+    if let Some(n) = thought {
+        tail.push_str(&format!("{}{}", icons::PART_SEP, thinking(n)));
+    }
+    let head = Head {
+        mark,
+        tail,
+        ..newest
+    };
+    head.line(open, hovered, paint, width)
 }
 
-// The mark a group leads with: the frame while one of the calls it holds is
-// still out, and the check once they have all landed.
-fn summary_mark(
-    pending: &[PendingTool],
-    spinner: usize,
-    hovered: bool,
-    paint: &Paint,
-) -> Span<'static> {
-    // The frame is the row's animation, so it wears no style.
-    if spinning(pending) {
-        return Span::raw(icons::SPINNER_FRAMES[spinner % icons::SPINNER_FRAMES.len()]);
+// A line of what an opened call shows: the argument's own lines in the
+// group's voice, then what came back in the plain one.
+fn body_line(t: &FoldedTool, j: usize, paint: &Paint) -> Line<'static> {
+    let text = t.body.get(j).cloned().unwrap_or_default();
+    if j < t.asked {
+        Line::from(paint.span(&paint.theme.muted, text))
+    } else {
+        Line::from(text)
     }
-    paint.span_hovered(hovered, &paint.theme.status.ok, icons::DONE_MARK)
 }
 
-// Line `i` of an unfolded group's steps, the calls in flight last. The indent
-// is `line`'s border, so a wrapped line of reasoning keeps it.
+// Line `i` of an unfolded group's list, the calls in flight last, with the
+// indent it sits under as the border a wrap repeats.
 fn step_line(
     steps: &[Step],
     pending: &[PendingTool],
-    mut i: usize,
+    i: usize,
+    hovered: bool,
+    tick: usize,
     paint: &Paint,
     width: usize,
-) -> Line<'static> {
-    let call = |desc: String| {
-        let room = width.saturating_sub(STEP_INDENT.len()).max(10);
-        Line::from(paint.span(&paint.theme.muted, clip_to(&desc, room).to_string()))
+) -> (Line<'static>, Option<Line<'static>>) {
+    let room = width.saturating_sub(STEP_INDENT.len());
+    let (line, indent) = match unit_at(steps, pending, i) {
+        Some((Unit::Step(s), 0)) => (
+            s.head().line(s.is_open(), hovered, paint, room),
+            STEP_INDENT,
+        ),
+        Some((Unit::Step(Step::Tool(t)), j)) => (body_line(t, j - 1, paint), STEP_BODY_INDENT),
+        // No mark to sit past: the block's lines run under its first.
+        Some((Unit::Step(Step::Thinking { lines, .. }), j)) => (lines[j].clone(), STEP_INDENT),
+        Some((Unit::Pending(p), _)) => (
+            pending_head(p, tick).line(false, false, paint, room),
+            STEP_INDENT,
+        ),
+        None => (Line::default(), STEP_INDENT),
     };
-    for step in steps {
-        let n = step.len();
-        if i >= n {
-            i -= n;
-            continue;
-        }
-        return match step {
-            Step::Tool(t) => call(t.desc()),
-            Step::Thinking { lines, .. } => lines[i].clone(),
-        };
-    }
-    pending.get(i).map(|p| call(p.desc())).unwrap_or_default()
+    (line, Some(Line::from(indent)))
 }
 
 #[cfg(test)]
@@ -892,10 +1312,7 @@ mod conversation_tests {
         {
             assert!(row.is_conversation());
         }
-        let tool = Step::Tool(FoldedTool {
-            name: "read".into(),
-            preview: "src/main.rs".into(),
-        });
+        let tool = Step::Tool(FoldedTool::new("read", "src/main.rs", "", ""));
         for row in [
             Row::notice("a command printed this"),
             Row::thinking(1, vec![Line::from("thinking")], false),
@@ -912,10 +1329,7 @@ mod steps_tests {
     use super::*;
 
     fn tool(name: &str, preview: &str) -> FoldedTool {
-        FoldedTool {
-            name: name.to_string(),
-            preview: preview.to_string(),
-        }
+        FoldedTool::new(name, preview, "", "")
     }
 
     // A folded group of these calls, in order.
@@ -935,60 +1349,26 @@ mod steps_tests {
             name: name.to_string(),
             preview: preview.to_string(),
             landed,
+            secs: None,
         }
     }
 
-    // The rendered rows are cached by (width, spinner), so a spinning summary
-    // row must replace its frame as the spinner advances — a cache keyed by
-    // width alone would freeze the row on its first frame.
-    #[test]
-    fn a_spinning_summary_row_advances_through_the_paint_cache() {
-        let paint = Paint::new(true);
-        let mut row = bundle(vec![tool("read", "a.rs")]);
-        let held = [pending("read", "b.rs", false)];
-
-        use crate::ui::tui::screen::plain;
-
-        row.update_live(false, 0, &held);
-        let f0 = plain(&row.line(0, &paint, 80).0);
-        row.update_live(false, 1, &held);
-        let f1 = plain(&row.line(0, &paint, 80).0);
-
-        // The call it holds leads, and the count is the batch it is already
-        // part of: one landed, one still out.
-        assert_eq!(
-            f0,
-            format!(
-                "{} read b.rs {}{}",
-                icons::SPINNER_FRAMES[0],
-                icons::ELLIPSIS,
-                2
-            )
-        );
-        assert_eq!(
-            f1,
-            format!(
-                "{} read b.rs {}{}",
-                icons::SPINNER_FRAMES[1],
-                icons::ELLIPSIS,
-                2
-            )
-        );
-        assert_ne!(f0, f1, "the running frame must advance, not freeze");
+    fn calls_tail(n: usize) -> String {
+        format!("{}{n} calls", icons::PART_SEP)
     }
 
     // Calls end in whatever order they end in, and the row is the only place
-    // one in flight shows: a call still out keeps the spinner on however the
-    // call it names ended.
+    // one in flight shows: a call still out keeps the row pending however
+    // the call it names ended.
     #[test]
-    fn a_call_still_out_keeps_the_row_spinning() {
+    fn a_call_still_out_keeps_the_row_pending() {
         let paint = Paint::new(true);
         let mut row = bundle(vec![tool("read", "a.rs")]);
 
         use crate::ui::tui::screen::plain;
 
         row.update_live(
-            false,
+            None,
             0,
             &[
                 pending("bash", "cargo test", false),
@@ -999,31 +1379,8 @@ mod steps_tests {
 
         assert_eq!(
             line,
-            format!(
-                "{} read b.rs {}{}",
-                icons::SPINNER_FRAMES[0],
-                icons::ELLIPSIS,
-                3
-            ),
-            "it names the newest, and spins for the one still out"
-        );
-    }
-
-    // A call that has landed but is not adopted yet wears the mark it will
-    // land with, so the row it is drawn in does not change when it does.
-    #[test]
-    fn a_landed_batch_wears_its_own_mark() {
-        let paint = Paint::new(true);
-        let mut row = bundle(vec![tool("read", "a.rs")]);
-
-        use crate::ui::tui::screen::plain;
-
-        row.update_live(false, 0, &[pending("read", "b.rs", true)]);
-        let landed = plain(&row.line(0, &paint, 80).0);
-
-        assert_eq!(
-            landed,
-            format!("{} read b.rs {}{}", icons::DONE_MARK, icons::ELLIPSIS, 2)
+            format!("{} read b.rs{}", call_frame(0), calls_tail(3)),
+            "it names the newest, and stays pending for the one still out"
         );
     }
 
@@ -1034,53 +1391,18 @@ mod steps_tests {
     #[test]
     fn a_row_left_with_one_call_shows_as_folded() {
         let mut row = bundle(vec![tool("read", "a.rs")]);
-        row.update_live(false, 0, &[pending("grep", "match 1", false)]);
+        row.update_live(None, 0, &[pending("grep", "match 1", false)]);
         assert!(row.is_expandable(), "two calls are a batch");
         assert!(row.toggle_expand());
         assert_eq!(row.len(), 3, "the header and both calls");
 
-        row.update_live(false, 0, &[]);
+        row.update_live(None, 0, &[]);
         assert_eq!(row.len(), 1, "folded back to the one tool it holds");
         assert!(!row.is_expandable());
     }
 
-    // The row's line and its body both count what it holds: a body that
-    // listed only the landed tools would be shorter than the header's count.
     #[test]
-    fn unfolding_a_summary_row_lists_the_calls_it_holds() {
-        let paint = Paint::new(false);
-        let mut row = bundle(vec![tool("read", "a.rs")]);
-
-        use crate::ui::tui::screen::plain;
-
-        row.update_live(false, 0, &[pending("grep", "match 1", false)]);
-        assert!(row.is_expandable(), "one landed and one out is a batch");
-        assert!(row.toggle_expand());
-        assert_eq!(row.len(), 3, "the header and both calls");
-        let body = plain(&row.line(1, &paint, 80).0);
-        let held = plain(&row.line(2, &paint, 80).0);
-        assert_eq!(body.trim(), "read a.rs");
-        assert_eq!(held.trim(), "grep match 1");
-    }
-
-    #[test]
-    fn unfolded_tools_summary_shows_all_tools() {
-        let tools = bundle(vec![
-            tool("read", "crates/agent/src/session.rs"),
-            tool("grep", "match 1"),
-        ]);
-        let mut row = tools;
-        assert_eq!(row.len(), 1);
-
-        assert!(row.toggle_expand());
-        assert_eq!(row.len(), 3);
-
-        assert!(row.toggle_expand());
-        assert_eq!(row.len(), 1);
-    }
-
-    #[test]
-    fn a_single_tool_summary_never_unfolds() {
+    fn a_single_tool_with_nothing_under_it_never_unfolds() {
         let mut row = bundle(vec![tool("read", "a.rs")]);
         assert!(!row.is_expandable());
         assert!(!row.toggle_expand());
@@ -1091,6 +1413,7 @@ mod steps_tests {
         Step::Thinking {
             block,
             lines: (1..=n).map(|i| Line::from(format!("line {i}"))).collect(),
+            open: false,
         }
     }
 
@@ -1106,40 +1429,56 @@ mod steps_tests {
             .collect()
     }
 
-    // Reasoning between calls no longer splits them: one line folded, every
-    // step in order unfolded.
+    // Folded, the group is one line; unfolded, a line per step under a line
+    // that counts them; and each step opens on its own, the line a click
+    // lands on naming which.
     #[test]
-    fn a_group_folds_its_calls_and_thinking_into_one_line() {
+    fn a_group_unfolds_to_its_steps_and_each_step_opens_alone() {
+        let ran = FoldedTool::new("bash", "cat <<EOF", "cat <<EOF\nhi\nEOF", "hi\n");
         let mut row = bundle(vec![tool("read", "a.rs")]);
         assert!(row.join(think(1, 3)).is_ok());
-        assert!(row.join(Step::Tool(tool("read", "b.rs"))).is_ok());
+        assert!(row.join(Step::Tool(ran)).is_ok());
+        let (done, dots, sep) = (icons::DONE_MARK, icons::ELLIPSIS, icons::PART_SEP);
         assert_eq!(
             shown(&row, 80),
             [format!(
-                "{} read b.rs {}2{}thinking 3 lines",
-                icons::DONE_MARK,
-                icons::ELLIPSIS,
-                icons::PART_SEP
+                "{done} bash cat <<EOF{dots}{}{sep}thinking 3 lines",
+                calls_tail(2)
             )]
         );
         assert!(row.toggle_expand());
+        let unfolded = [
+            format!("{done} 2 calls{sep}thinking 3 lines"),
+            format!("  {done} read a.rs"),
+            format!("  line 1{dots}{sep}3 lines"),
+            format!("  {done} bash cat <<EOF{dots}{sep}1 line"),
+        ];
+        assert_eq!(shown(&row, 80), unfolded);
+
+        assert_eq!(row.click_line(1, 80), None, "nothing under the read");
+        assert!(row.toggle_at(2, 80), "the reasoning opens");
+        assert_eq!(row.len(), 6);
+        assert!(row.toggle_at(5, 80), "the call past it still answers");
         assert_eq!(
-            shown(&row, 80),
+            shown(&row, 80)[2..],
             [
-                format!("{} read b.rs", icons::DONE_MARK),
-                "  read a.rs".into(),
                 "  line 1".into(),
                 "  line 2".into(),
                 "  line 3".into(),
-                "  read b.rs".into(),
+                format!("  {done} bash cat <<EOF"),
+                "    hi".into(),
+                "    EOF".into(),
+                "    hi".into(),
             ]
         );
+        assert_eq!(row.click_line(6, 80), None, "a body line opens nothing");
+        assert!(row.toggle_at(2, 80) && row.toggle_at(3, 80));
+        assert_eq!(shown(&row, 80), unfolded);
     }
 
-    // A block with no call around it keeps the look it always had: its
-    // count folded, its lines unfolded, nothing to sit under.
+    // A group of one step has no list to open: opening it opens the step.
     #[test]
-    fn a_lone_block_reads_as_its_count() {
+    fn a_group_of_one_opens_its_step() {
         let mut row = Row::steps(think(1, 2), true);
         assert_eq!(
             shown(&row, 80),
@@ -1148,21 +1487,41 @@ mod steps_tests {
         assert!(row.toggle_expand());
         assert_eq!(shown(&row, 80), ["line 1", "line 2"]);
 
+        let mut one = bundle(vec![FoldedTool::new(
+            "read",
+            "a.rs",
+            "a.rs",
+            "fn main() {}",
+        )]);
+        assert!(one.toggle_at(0, 80));
+        assert_eq!(
+            shown(&one, 80),
+            [
+                format!("{} read a.rs", icons::DONE_MARK),
+                "  fn main() {}".into()
+            ]
+        );
+
         // Before its first line lands there is nothing to unfold.
         let empty = Row::steps(think(2, 0), false);
         assert!(!empty.is_expandable());
         assert_eq!(shown(&empty, 80), [crate::ui::tui::THINKING]);
     }
 
-    // One call or many, the text runs up to what follows it; a group's once
-    // stopped at 50 columns while a lone call ran to the edge.
+    // One call or many, the text runs up to what follows it, `…` on its end;
+    // a group's once stopped at 50 columns while a lone call ran to the edge.
     #[test]
     fn a_long_call_fills_the_row_before_what_follows_it() {
         let long = "x".repeat(200);
         let mut row = bundle(vec![tool("bash", &long), tool("bash", &long)]);
         assert!(row.join(think(1, 1)).is_ok());
         let line = &shown(&row, 80)[0];
-        let tail = format!(" {}2{}thinking 1 line", icons::ELLIPSIS, icons::PART_SEP);
+        let tail = format!(
+            "{}{}{}thinking 1 line",
+            icons::ELLIPSIS,
+            calls_tail(2),
+            icons::PART_SEP
+        );
         assert!(line.ends_with(&tail), "{line}");
         assert_eq!(UnicodeWidthStr::width(line.as_str()), 79, "{line}");
 

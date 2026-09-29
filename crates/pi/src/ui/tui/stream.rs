@@ -239,10 +239,12 @@ impl Ui {
             // out of order.
             Event::ToolStart { id, name, args, .. } => {
                 self.close(view);
+                view.surface.folds.ask(id, args);
                 view.state.tools.push(RunTool {
                     id: id.clone(),
                     name: name.clone(),
                     summary: crate::ui::render::summarize(args),
+                    started: std::time::Instant::now(),
                     done: None,
                 });
             }
@@ -314,6 +316,7 @@ impl Ui {
     // start line the row stood for and clear the row.
     pub(super) fn abandon_tools(&mut self, view: &mut View) {
         for t in std::mem::take(&mut view.state.tools) {
+            view.surface.folds.take_asked(&t.id);
             let row = t
                 .done
                 .unwrap_or_else(|| Row::tool_start(&t.name, &t.summary, &self.paint));
@@ -333,10 +336,15 @@ impl Ui {
                 continue;
             }
             if let Some(rows) = f_entry(entry, &self.paint) {
-                if let LogEntry::Tool { result: r, .. } = entry {
-                    self.check_pending(view, &r.call, rows.last(), width);
+                if let LogEntry::Tool { result, .. } = entry {
+                    self.check_pending(view, &result.call, rows.last(), width);
                     for r in rows {
-                        push_tool_row(&mut view.surface.scrollback, &mut view.surface.folds, r);
+                        push_tool_row(
+                            &mut view.surface.scrollback,
+                            &mut view.surface.folds,
+                            r,
+                            result,
+                        );
                     }
                 } else {
                     view.surface.scrollback.extend(rows);
@@ -426,8 +434,9 @@ impl Ui {
         // its to draw and the live block leaves them alone.
         let last = view.surface.scrollback.len().checked_sub(1);
         let row_holds = view.surface.scrollback.last().is_some_and(Row::is_steps);
+        let now = std::time::Instant::now();
         let held = if row_holds {
-            call::held(&view.state.tools)
+            call::held(&view.state.tools, now)
         } else {
             Vec::new()
         };
@@ -435,9 +444,10 @@ impl Ui {
             // Only the last row takes them, and only the last row can be the
             // summary they belong to: any other is handed nothing.
             let flight: &[PendingTool] = if Some(idx) == last { &held } else { &[] };
-            row.update_live(self.hovered_scrollback == Some(idx), self.spinner, flight);
+            let hovered = self.hovered_scrollback.filter(|h| h.0 == idx).map(|h| h.1);
+            row.update_live(hovered, self.spinner, flight);
         }
-        let (live, pending_rows) = self.live(lane, view, row_holds);
+        let (live, pending_rows) = self.live(lane, view, row_holds, now);
 
         // While the view is scrolled up, rows the bottom gained fold back
         // into `scroll` — a sum of per-row cached heights, where a wrap counts
@@ -461,7 +471,13 @@ impl Ui {
         }
         let scrollback = ScrollbackRows::new(&view.surface.scrollback, &self.paint, width, keep)
             .indexed()
-            .map(|(item, idx)| (item, Target::Scrollback(idx)));
+            .map(|(item, idx)| {
+                let line = match &item {
+                    Piece::Row { line, .. } => *line,
+                    Piece::Live(_) => 0,
+                };
+                (item, Target::Scrollback(idx, line))
+            });
 
         // The pending-call rows lead the live block; a click on one opens or
         // closes the batch.
