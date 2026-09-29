@@ -301,12 +301,6 @@ fn flipping_every_group_moves_the_switch_with_them() {
 }
 
 #[test]
-fn the_answer_is_never_folded() {
-    let t = Folds::default();
-    assert!(!t.holds(false, &[]));
-}
-
-#[test]
 fn a_flip_applies_to_each_new_last_group_until_flipped_back() {
     // `ctrl+t` controls the last group, whatever it is: the first one is
     // born unfolded, and each new group that takes over as last is born

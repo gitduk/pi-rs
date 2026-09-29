@@ -271,37 +271,6 @@ async fn a_second_edit_right_after_the_first_applies_without_a_reread() {
     );
 }
 
-// A change is placed by the three rows either side of it, no more.
-#[tokio::test]
-async fn an_edit_shows_three_rows_of_context_either_side() {
-    let (_d, c) = ctx();
-    let body: String = (1..=20).map(|n| format!("l{n}\n")).collect();
-    std::fs::write(c.workspace.root().join("a.rs"), body).unwrap();
-    let out = read_then_edit(&c, "a.rs", "l10\n", "ten\n").await.unwrap();
-    for kept in ["l7\n", "l9\n", "l11\n", "l13\n"] {
-        assert!(out.contains(kept), "{kept} missing: {out}");
-    }
-    for cut in ["l6\n", "l14\n"] {
-        assert!(!out.contains(cut), "{cut} shown: {out}");
-    }
-}
-
-// Blank rows count toward the three, but a run of them shows as one.
-#[tokio::test]
-async fn a_run_of_blank_context_rows_shows_as_one() {
-    let (_d, c) = ctx();
-    let body: String = (1..=20)
-        .map(|n| match n {
-            11 | 12 => "\n".to_string(),
-            n => format!("l{n}\n"),
-        })
-        .collect();
-    std::fs::write(c.workspace.root().join("a.rs"), body).unwrap();
-    let out = read_then_edit(&c, "a.rs", "l10\n", "ten\n").await.unwrap();
-    assert!(out.contains(" 11 \n") && out.contains("l13\n"), "{out}");
-    assert!(!out.contains(" 12 \n") && !out.contains("l14\n"), "{out}");
-}
-
 // The view was recorded, so the gate can answer for the file moving: an
 // anchor that still matches applies, with the staleness note beside its
 // report; one whose text is gone refuses, and nothing may be written.

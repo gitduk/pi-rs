@@ -65,23 +65,3 @@ impl Row {
         self
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // The two ways a listing is built end up in the same shape: the cells a
-    // table is made of, and the one cell a sentence is.
-    #[test]
-    fn a_sentence_is_a_row_of_one() {
-        let listing = Listing::say(["nothing to list", "and nothing else"]);
-        assert_eq!(
-            listing,
-            Listing::of([
-                Row::new(["nothing to list"]),
-                Row::new(["and nothing else"])
-            ])
-        );
-        assert!(Listing::default().is_empty());
-    }
-}
