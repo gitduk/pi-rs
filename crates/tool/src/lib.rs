@@ -79,20 +79,6 @@ impl Tier {
             Tier::Net => true,
         }
     }
-
-    /// The most both ceilings allow — what `min` gave while this was a total
-    /// order. `Write` and `Net` have no order between them, so what survives
-    /// both of those is `Read`. `the_cap_is_the_most_both_ceilings_allow`
-    /// states the property this has to keep.
-    pub fn capped_by(self, other: Tier) -> Tier {
-        if self.under(other) {
-            self
-        } else if other.under(self) {
-            other
-        } else {
-            Tier::Read
-        }
-    }
 }
 
 #[cfg(test)]
@@ -114,10 +100,9 @@ mod tier_tests {
     // The shape of the thing, stated once: what each ceiling reaches; the
     // whole reason `Net` is a tier and not a rung — a run may reach the web
     // without gaining the right to change anything here, and a run that may
-    // only read the tree does not silently gain the web; and what a project
-    // ceiling leaves, which is what `min` did while this was a total order.
+    // only read the tree does not silently gain the web.
     #[test]
-    fn the_tier_lattice_reaches_and_caps_as_documented() {
+    fn the_tier_lattice_reaches_as_documented() {
         let reach = |c: Tier| ALL.into_iter().filter(|t| t.under(c)).collect::<Vec<_>>();
         assert_eq!(reach(Read), vec![Read]);
         assert_eq!(reach(Write), vec![Read, Write]);
@@ -130,33 +115,6 @@ mod tier_tests {
         // Exec is the exception, and deliberately: `sh` can `curl`, so
         // refusing the fetch tool there would deny nothing.
         assert!(Net.under(Exec));
-
-        assert_eq!(Exec.capped_by(Read), Read);
-        assert_eq!(Exec.capped_by(Net), Net);
-        assert_eq!(Read.capped_by(Exec), Read);
-        assert_eq!(Net.capped_by(Write), Read);
-        assert_eq!(Write.capped_by(Net), Read);
-        for t in ALL {
-            assert_eq!(t.capped_by(t), t);
-            assert_eq!(t.capped_by(Exec), t, "exec caps nothing");
-        }
-    }
-
-    // The property `capped_by` has to keep, whatever tiers exist: the cap is
-    // under both ceilings, and nothing under both reaches past it. A fifth
-    // tier whose pairwise meet is not itself a tier fails here rather than
-    // silently taking the `Read` branch.
-    #[test]
-    fn the_cap_is_the_most_both_ceilings_allow() {
-        for a in ALL {
-            for b in ALL {
-                let cap = a.capped_by(b);
-                assert!(cap.under(a) && cap.under(b), "{a:?} + {b:?} gave {cap:?}");
-                for t in ALL.iter().filter(|t| t.under(a) && t.under(b)) {
-                    assert!(t.under(cap), "{t:?} is under {a:?} and {b:?}, not {cap:?}");
-                }
-            }
-        }
     }
 }
 
