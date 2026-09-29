@@ -440,7 +440,7 @@ impl Core {
                 } else {
                     " "
                 };
-                let name = crate::store::text::pad(&t.name, width);
+                let name = crate::text::pad(&t.name, width);
                 let on = t
                     .branch_note()
                     .map(|on| format!("  {on}"))

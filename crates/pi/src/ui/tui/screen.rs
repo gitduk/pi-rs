@@ -43,7 +43,7 @@ pub fn fit(line: &Line<'_>, width: usize) -> Vec<Line<'static>> {
             if c == '\x1b' {
                 // An escape in the content is outside noise: no columns, no
                 // cells, nothing the spans do not already say. Consume it.
-                let mut esc = crate::store::text::Escape::new();
+                let mut esc = crate::text::Escape::new();
                 for n in chars.by_ref() {
                     if esc.closed(n) {
                         break;
@@ -263,7 +263,7 @@ fn write_line(line: &Line<'_>, x: u16, y: u16, buf: &mut Buffer) {
         while let Some(c) = chars.next() {
             if c == '\x1b' {
                 // Same deal as `fit`: outside noise, not a cell. Consume it.
-                let mut esc = crate::store::text::Escape::new();
+                let mut esc = crate::text::Escape::new();
                 for n in chars.by_ref() {
                     if esc.closed(n) {
                         break;

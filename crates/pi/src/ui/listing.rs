@@ -2,8 +2,9 @@
 
 use unicode_width::UnicodeWidthStr;
 
+use crate::store::icons;
 use crate::store::listing::Listing;
-use crate::store::{icons, text};
+use crate::text;
 
 /// The rows as text: the first cell of every row padded to the widest first
 /// cell among the rows that have more than one, so the columns line up, and the

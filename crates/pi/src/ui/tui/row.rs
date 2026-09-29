@@ -20,7 +20,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::store::icons;
-use crate::store::text::named;
+use crate::ui::render::named;
 use crate::ui::render::{self, Paint};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

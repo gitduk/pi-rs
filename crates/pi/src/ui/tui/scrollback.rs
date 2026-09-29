@@ -445,7 +445,7 @@ pub(super) fn scrollback_from(
                             }
                             out.push(Row::tool_start(
                                 &c.name,
-                                &crate::store::text::summarize(&c.args),
+                                &crate::ui::render::summarize(&c.args),
                                 paint,
                             ));
                         }

@@ -40,7 +40,7 @@ const OPENING: &str = "\x1b]11;";
 
 /// What the terminal said about itself, and what asking it took from the user.
 #[derive(Default)]
-pub struct Asked {
+pub struct Answer {
     /// The terminal's own background, when it answered.
     pub bg: Option<(u8, u8, u8)>,
     /// What the user typed while the question was out. The asking read it, so
@@ -53,13 +53,13 @@ pub struct Asked {
 /// Raw mode has to be up already: the reply ends in `BEL` or `ST`, never in a
 /// newline, so a cooked read would wait for one that is not coming.
 #[cfg(unix)]
-pub fn background() -> Asked {
+pub fn background() -> Answer {
     let mut out = std::io::stdout();
     // The opening back with a `?` on it: what a terminal answers in.
     let ask = format!("{OPENING}?\x1b\\");
     if out.write_all(ask.as_bytes()).is_err() || out.flush().is_err() {
         // A terminal that cannot be written to has no answer either.
-        return Asked::default();
+        return Answer::default();
     }
     read_answer(libc::STDIN_FILENO)
 }
@@ -67,16 +67,16 @@ pub fn background() -> Asked {
 // Nothing is asked where nothing is read: a reply left in the input stream is
 // a reply the editor would take as typed text.
 #[cfg(not(unix))]
-pub fn background() -> Asked {
-    Asked::default()
+pub fn background() -> Answer {
+    Answer::default()
 }
 
 // Read until the terminal answers or `WAIT` is up: a reply is taken, the user's
 // own bytes are kept, and an attempt ends at its terminator or at `REPLY_LIMIT`.
 #[cfg(unix)]
-fn read_answer(fd: RawFd) -> Asked {
+fn read_answer(fd: RawFd) -> Answer {
     let started = Instant::now();
-    let mut asked = Asked::default();
+    let mut asked = Answer::default();
     let mut held: Vec<u8> = Vec::new();
     let mut typed: Vec<u8> = Vec::new();
     let mut one = [0u8; 1];
@@ -311,7 +311,7 @@ mod tests {
 
     // A pipe standing in for the terminal. What is left over after the read is
     // what the keyboard reader would have taken.
-    fn answer(sent: &[u8]) -> (Asked, String) {
+    fn answer(sent: &[u8]) -> (Answer, String) {
         let mut fds = [0 as libc::c_int; 2];
         // SAFETY: two fds into an array this frame owns.
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);

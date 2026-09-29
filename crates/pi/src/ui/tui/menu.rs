@@ -129,11 +129,7 @@ impl Ui {
         let muted = self.rat_style(&self.paint.theme.muted);
         menu.iter()
             .map(|c| {
-                let line = format!(
-                    "  {}  {}",
-                    crate::store::text::pad(c.show(), head),
-                    c.help()
-                );
+                let line = format!("  {}  {}", crate::text::pad(c.show(), head), c.help());
                 ListItem::new(Line::from(Span::styled(line, muted)))
             })
             .collect()

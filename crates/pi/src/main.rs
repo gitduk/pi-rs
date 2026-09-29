@@ -21,6 +21,7 @@ mod core;
 mod driver;
 mod input;
 mod store;
+mod text;
 mod ui;
 
 // The prompt, or None when the run should ask for one.

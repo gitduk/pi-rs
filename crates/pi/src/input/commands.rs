@@ -157,7 +157,7 @@ fn gist(description: &str) -> String {
     let first = description
         .split_once(". ")
         .map_or(description, |(head, _)| head);
-    crate::store::text::clip(first.trim().trim_end_matches('.'), GIST)
+    crate::text::clip(first.trim().trim_end_matches('.'), GIST)
 }
 
 /// What a slash answers to: the built-ins, then one command per skill.

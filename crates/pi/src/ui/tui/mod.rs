@@ -174,10 +174,10 @@ impl Tui {
         // The screen first, for raw mode: the answer to the background query
         // carries no newline, so a cooked read would wait for one forever.
         let screen = Screen::new()?;
-        let asked = tty::background();
+        let answer = tty::background();
         let paint = Paint::with_theme(
             true,
-            Arc::new(following_terminal(&core.config.theme, asked.bg)),
+            Arc::new(following_terminal(&core.config.theme, answer.bg)),
         );
         let mut ui = Ui::new(
             screen,
@@ -187,10 +187,10 @@ impl Tui {
             Lists::new(core.store.clone(), core.lane_mut().root().to_path_buf()),
             paint,
         );
-        ui.tty_bg = asked.bg;
+        ui.tty_bg = answer.bg;
         // Asking the terminal read it, so it is typed in here: the keyboard
         // reader would never see those bytes again.
-        ui.editor.insert_str(&asked.typed);
+        ui.editor.insert_str(&answer.typed);
         ui.at_root = core.lane().root().to_path_buf();
         ui.live = core.config.status.live.clone();
         ui.done = core.config.status.done.clone();
@@ -828,7 +828,7 @@ impl Tui {
                             .lane()
                             .session()
                             .and_then(|s| s.last_node())
-                            .map(|n| crate::store::text::clip(n.show(), 60))
+                            .map(|n| crate::text::clip(n.show(), 60))
                             .filter(|t| !t.is_empty())
                             .map(|t| format!(" — the transcript now ends at {t}"))
                             .unwrap_or_default();
@@ -861,7 +861,7 @@ impl Tui {
             .into_iter()
             .map(|node| MenuEntry::Message {
                 id: node.id(),
-                show: crate::store::text::clip(node.show(), 60),
+                show: crate::text::clip(node.show(), 60),
                 help: "you — unsends it",
             })
             .collect();

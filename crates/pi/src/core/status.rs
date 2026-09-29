@@ -38,7 +38,7 @@ impl Core {
         // asked of yet has no figure, and a row of dashes is not one.
         let spent = lane.tally().session();
         if spent != Totals::default() {
-            out.push(format!("spent: {}", crate::store::text::spent(&spent)));
+            out.push(format!("spent: {}", crate::text::spent(&spent)));
         }
         out
     }

@@ -1,5 +1,5 @@
-//! Cutting and measuring text the terminal will show, and the two shapes a
-//! run's spend is written in.
+//! Cutting and measuring text the terminal will show, and the wording of a
+//! run's spend. Shared by every layer, so it sits under all of them.
 //!
 //! Columns, not characters: a line of Chinese fits half as many characters in
 //! the same width, and an escape sequence occupies none.
@@ -169,37 +169,4 @@ pub fn clip(s: &str, max: usize) -> String {
 pub fn pad(s: &str, width: usize) -> String {
     let w = unicode_width::UnicodeWidthStr::width(s);
     format!("{s}{}", " ".repeat(width.saturating_sub(w)))
-}
-
-/// A tool and the argument its summary picked out, with the prefix the caller
-/// draws left off: a spinner while it runs, ⚙ on the phone, a mark once it has
-/// ended. The row a finished call lands as names it from the other side — the
-/// head of its result, through `tui::row`'s own rule — because what came back
-/// is not what was asked for.
-pub fn named(name: &str, summary: &str) -> String {
-    if summary.is_empty() {
-        name.to_string()
-    } else {
-        format!("{name} {summary}")
-    }
-}
-
-/// The one argument worth showing in a progress line.
-pub fn summarize(args: &serde_json::Value) -> String {
-    // Order is priority: `pattern` beats `path` because a grep carries both,
-    // and `description`, written for this line, beats the prompt it names.
-    for key in [
-        "description",
-        "pattern",
-        "command",
-        "path",
-        "query",
-        "prompt",
-        "name",
-    ] {
-        if let Some(v) = args.get(key).and_then(|v| v.as_str()) {
-            return clip(v, 80);
-        }
-    }
-    String::new()
 }

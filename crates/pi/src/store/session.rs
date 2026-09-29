@@ -13,7 +13,7 @@ pub use agent::session::now;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::store::text::clip;
+use crate::text::clip;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Stored {

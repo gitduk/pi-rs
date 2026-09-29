@@ -768,7 +768,7 @@ impl Core {
                 format!(
                     "{} {}  {:>10}",
                     if *mark { icons::CURRENT_ITEM } else { " " },
-                    crate::store::text::pad(text, width),
+                    crate::text::pad(text, width),
                     ago(*created)
                 )
             })

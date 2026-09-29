@@ -253,7 +253,7 @@ impl Ui {
                 view.state.tools.push(RunTool {
                     id: id.clone(),
                     name: name.clone(),
-                    summary: crate::store::text::summarize(args),
+                    summary: crate::ui::render::summarize(args),
                     done: None,
                 });
             }

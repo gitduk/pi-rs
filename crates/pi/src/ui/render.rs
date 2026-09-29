@@ -2,7 +2,7 @@
 //! renderer that writes a one-shot run's rows.
 //!
 //! What a config names is below this (`store/theme.rs`), and so is what a
-//! string occupies (`store/text.rs`); what is here puts the two on a screen.
+//! string occupies (`text.rs`); what is here puts the two on a screen.
 
 use std::fmt::Write as _;
 use std::io::{IsTerminal, Write};
@@ -14,8 +14,8 @@ use llm::model::Pricing;
 use ratatui::text::{Line, Span};
 
 use crate::store::icons;
-use crate::store::text::{RESET, clip, named, summarize};
 use crate::store::theme::{Attr, Color, Style, Theme, band_to_ratatui, push_sep, style_to_ratatui};
+use crate::text::{RESET, clip};
 
 /// Whether the surface being written to can carry colour, and the theme behind
 /// the codes it uses.
@@ -428,7 +428,7 @@ fn fmt_delay(ms: u64) -> String {
 /// what a row is: the interactive surface repaints a region and hands them
 /// over one at a time.
 ///
-/// Both renderers call this, over the same naming (`store::text::named`): a
+/// Both renderers call this, over the same naming (`named`): a
 /// tool call reads the same either way, and a second copy of the wording would
 /// drift on the first edit. `None` is the caller's to place — the two deltas,
 /// which are a fragment rather than a line, and `Done`, which is a status line
@@ -660,6 +660,39 @@ pub fn compaction_line(r: &agent::Report) -> String {
         String::new()
     };
     format!("compacted {} → {} tokens{detail}{warn}", r.before, r.after)
+}
+
+/// A tool and the argument its summary picked out, with the prefix the caller
+/// draws left off: a spinner while it runs, ⚙ on the phone, a mark once it has
+/// ended. The row a finished call lands as names it from the other side — the
+/// head of its result, through `tui::row`'s own rule — because what came back
+/// is not what was asked for.
+pub fn named(name: &str, summary: &str) -> String {
+    if summary.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name} {summary}")
+    }
+}
+
+/// The one argument worth showing in a progress line.
+pub fn summarize(args: &serde_json::Value) -> String {
+    // Order is priority: `pattern` beats `path` because a grep carries both,
+    // and `description`, written for this line, beats the prompt it names.
+    for key in [
+        "description",
+        "pattern",
+        "command",
+        "path",
+        "query",
+        "prompt",
+        "name",
+    ] {
+        if let Some(v) = args.get(key).and_then(|v| v.as_str()) {
+            return clip(v, 80);
+        }
+    }
+    String::new()
 }
 
 #[cfg(test)]
