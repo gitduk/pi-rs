@@ -106,8 +106,8 @@ impl Settings {
         get(tree, path).ok().map(|_| file.as_path())
     }
 
-    /// `raw` at `path`, tried on a copy of the files first: a value the config
-    /// would not accept reaches no file. Answers with the value that was there
+    /// `raw` at `path`, tried on a copy of the files first, the environment
+    /// included: a value the config would not accept reaches no file. Answers with the value that was there
     /// and the one to write.
     pub fn check(&self, path: &str, raw: &str) -> Result<(Option<toml::Value>, toml::Value)> {
         let raw = typed(path, raw);
@@ -115,7 +115,7 @@ impl Settings {
         let old = get(&scratch, path).ok().cloned();
         set(&mut scratch, path, &raw)?;
         let new = get(&scratch, path).expect("the path was just set").clone();
-        crate::store::config::Config::from_tree(scratch)?;
+        crate::store::config::Config::in_force(scratch)?;
         Ok((old, new))
     }
 

@@ -122,9 +122,10 @@ impl Core {
         self.settings.rows()
     }
     /// Write a value into this project's `.pi.toml` and reload: tried on a
-    /// copy of the files first, so a bad value touches no file. The panel's
-    /// edit line answers through here, so a refusal comes back named, to be
-    /// shown beside the edit that earned it.
+    /// copy of the files first, and the file put back if the reload still
+    /// refuses it, so a bad value does not stay on disk. The panel's edit line
+    /// answers through here, so a refusal comes back named, to be shown beside
+    /// the edit that earned it.
     pub fn edit(&mut self, path: &str, raw: &str) -> Result<Vec<String>, String> {
         let (old, new) = self
             .settings
@@ -133,11 +134,25 @@ impl Core {
         let root = self.lane().root().to_path_buf();
         let file = config::project_target(&root)
             .ok_or_else(|| "no project here: a .pi.toml in $HOME is never read".to_string())?;
+        let before = std::fs::read(&file).ok();
         config::write(&file, path, new.clone()).map_err(|e| format!("{e:#}"))?;
-        if let Err(e) = self.settings.reread(self.pinned.config.as_deref(), &root) {
-            return Err(refused("settings", e));
-        }
-        let mut said = self.rebuild();
+        let at = self.pinned.config.clone();
+        let adopted = self
+            .settings
+            .reread(at.as_deref(), &root)
+            .map_err(|e| refused("settings", e))
+            .and_then(|()| self.rebuilt());
+        let mut said = match adopted {
+            Ok(said) => said,
+            Err(why) => {
+                let _ = match before {
+                    Some(bytes) => tool::state::write_private(&file, &bytes),
+                    None => std::fs::remove_file(&file),
+                };
+                let _ = self.settings.reread(at.as_deref(), &root);
+                return Err(why);
+            }
+        };
         let old_shown = match &old {
             Some(v) => mask_secret(path, &settings::render(v)),
             None => "<unset>".to_string(),

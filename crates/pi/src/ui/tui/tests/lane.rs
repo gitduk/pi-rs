@@ -793,6 +793,25 @@ async fn a_settings_edit_is_written_to_the_project_file_and_reaches_the_surface(
     );
 }
 
+// An edit the reload refuses is taken back off the disk: a `system` naming no
+// file passes the config's own checks and fails only once the prompt is read.
+#[tokio::test]
+async fn an_edit_the_reload_refuses_leaves_no_file_behind() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let mut tui = surface(dir.path());
+    let user = dir.path().join("settings.toml");
+    std::fs::write(&user, "").expect("an empty settings file");
+    tui.core.pinned.config = Some(user.display().to_string());
+
+    let missing = dir.path().join("no-such-prompt.md");
+    let refused = tui.core.edit("system", &missing.display().to_string());
+    assert!(refused.is_err(), "{refused:?}");
+    assert!(
+        !dir.path().join(".pi.toml").exists(),
+        "the file was put back"
+    );
+}
+
 // A reload reaches everything the config installed, not only the values the
 // lanes read directly. The compactor is the one object here: it holds the
 // summarizer's own connection, so a `summarize_model` that changed has to be
