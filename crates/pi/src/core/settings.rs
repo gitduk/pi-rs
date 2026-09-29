@@ -30,7 +30,15 @@ impl Core {
         if let Err(e) = self.settings.reread(self.pinned.config.as_deref(), &root) {
             return vec![format!("nothing reloaded — {}", refused("reload", e))];
         }
-        self.rebuild()
+        let before = self.lane().resolved().endpoint.clone();
+        let mut said = self.rebuild();
+        // The banner is drawn once, so a moved endpoint is said here instead.
+        // An edit needs no such line: it names the value it wrote.
+        let after = &self.lane().resolved().endpoint;
+        if *after != before {
+            said.extend(after.clone());
+        }
+        said
     }
     // Take this config as the one in force: recompute everything it decides
     // and swap it in. Whole or not at all — nothing is touched until all of
@@ -82,10 +90,6 @@ impl Core {
 
         // Only here, with everything computed, is anything touched — and in
         // one `rearm`, so the copy a run in flight forces is taken once.
-        // The banner is drawn once, so a moved endpoint is said here instead.
-        if resolved.endpoint != self.lane().resolved().endpoint {
-            notes.extend(resolved.endpoint.clone());
-        }
         let archive = self.archive(root.clone(), model);
         let idle = retry.idle;
         self.lane_mut()
