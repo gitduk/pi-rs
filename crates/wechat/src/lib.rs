@@ -14,7 +14,7 @@ pub mod login;
 mod markdown;
 pub mod types;
 
-pub use adapter::WeChat;
+pub use adapter::{Keep, WeChat};
 pub use client::{Client, Error as ClientError};
 pub use login::{LoginError, LoginView, login as login_flow, render_qr};
 pub use types::{

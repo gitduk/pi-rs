@@ -1,24 +1,21 @@
-//! WeChat as a channel: the login, the long-poll, and the state file the host
-//! names, over the protocol client beside it.
+//! WeChat as a channel: the login, the long-poll, and the state the host
+//! keeps for it, over the protocol client beside it.
 
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 use tokio_util::sync::CancellationToken;
 
 use crate::Update;
 use crate::markdown::format_markdown;
 use channel::{Channel, Inbound, Inbox};
 
-// What persists between runs, in the file the host named. One peer per session
+// What persists between runs, through the host's `Keep`. One peer per session
 // in this build, so the reply address and the context token are single slots.
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 struct State {
-    #[serde(skip)]
-    file: Option<PathBuf>,
     token: Option<String>,
     base_url: String,
     peer: Option<String>,
@@ -40,8 +37,31 @@ struct Typing {
     ticket: Option<(String, String)>,
 }
 
+/// Where the state goes after each change. The host decides where and how:
+/// it holds a login, so the host's write is the private one.
+pub type Keep = Arc<dyn Fn(&[u8]) + Send + Sync>;
+
+// The state and the way out for it, locked as one so a save sees what the
+// holder of the lock just wrote.
+struct Kept {
+    state: Mutex<State>,
+    keep: Keep,
+}
+
+impl Kept {
+    async fn lock(&self) -> MutexGuard<'_, State> {
+        self.state.lock().await
+    }
+
+    fn save(&self, state: &State) {
+        if let Ok(body) = serde_json::to_vec_pretty(state) {
+            (self.keep)(&body);
+        }
+    }
+}
+
 pub struct WeChat {
-    state: Arc<Mutex<State>>,
+    state: Arc<Kept>,
     client: std::sync::Mutex<crate::Client>,
     typing: Mutex<Typing>,
 }
@@ -50,14 +70,18 @@ impl WeChat {
     /// The word `/wechat` answers to; the command table reads it from here.
     pub const NAME: &'static str = "wechat";
 
-    /// `file` is where the login and the reply address persist between runs;
-    /// without one they last only as long as the process.
-    pub fn new(file: Option<PathBuf>) -> Self {
-        let mut state = file.as_deref().and_then(load).unwrap_or_default();
-        state.file = file;
+    /// `saved` is what `keep` was last handed, if anything; a missing or
+    /// unreadable one starts logged out.
+    pub fn new(saved: Option<&[u8]>, keep: Keep) -> Self {
+        let state: State = saved
+            .and_then(|b| serde_json::from_slice(b).ok())
+            .unwrap_or_default();
         let client = crate::Client::new(base_of(&state));
         Self {
-            state: Arc::new(Mutex::new(state)),
+            state: Arc::new(Kept {
+                state: Mutex::new(state),
+                keep,
+            }),
             client: std::sync::Mutex::new(client),
             typing: Mutex::default(),
         }
@@ -155,12 +179,7 @@ fn base_of(state: &State) -> String {
 
 // QR → confirm → credentials, then the long-poll. The QR and progress go out
 // as notices, where they stay long enough to be scanned.
-async fn login(
-    mut client: crate::Client,
-    state: Arc<Mutex<State>>,
-    tx: Inbox,
-    abort: CancellationToken,
-) {
+async fn login(mut client: crate::Client, state: Arc<Kept>, tx: Inbox, abort: CancellationToken) {
     let _ = tx.send(Inbound::Notice(
         "wechat login started — scan the QR below with WeChat".into(),
     ));
@@ -198,7 +217,7 @@ async fn login(
             s.peer = None;
             s.get_updates_buf = String::new();
             s.context_token = None;
-            save(&s);
+            state.save(&s);
             drop(s);
             let _ = tx.send(Inbound::Flash(
                 "wechat connected — polling for messages".into(),
@@ -214,12 +233,7 @@ async fn login(
 // The long-poll loop. Client-side timeouts are the normal empty result, real
 // errors back off (2s, 30s after three in a row — the reference's rhythm);
 // a stale token is reported and stops the channel until a fresh login.
-async fn poll(
-    client: crate::Client,
-    state: Arc<Mutex<State>>,
-    tx: Inbox,
-    abort: CancellationToken,
-) {
+async fn poll(client: crate::Client, state: Arc<Kept>, tx: Inbox, abort: CancellationToken) {
     let mut failures = 0u32;
     let mut timeout = crate::client::LONG_POLL_TIMEOUT;
     while !abort.is_cancelled() {
@@ -284,7 +298,7 @@ async fn typing_ticket(
 }
 
 async fn handle_update(
-    state: &Arc<Mutex<State>>,
+    state: &Kept,
     tx: &Inbox,
     update: Update,
     failures: &mut u32,
@@ -294,7 +308,7 @@ async fn handle_update(
         if update.is_stale_token() {
             let mut s = state.lock().await;
             s.token = None;
-            save(&s);
+            state.save(&s);
             let _ = tx.send(Inbound::Notice(
                 "wechat token expired — /wechat off, then /wechat on to rescan".into(),
             ));
@@ -344,7 +358,7 @@ async fn handle_update(
         let _ = tx.send(Inbound::Text { text });
     }
     if dirty {
-        save(&s);
+        state.save(&s);
     }
 }
 
@@ -356,24 +370,6 @@ fn backoff(failures: &mut u32) -> Duration {
         Duration::from_secs(30)
     } else {
         Duration::from_secs(2)
-    }
-}
-
-fn load(path: &Path) -> Option<State> {
-    let body = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&body).ok()
-}
-
-// The credentials here are the phone's, not the provider's, but they are a
-// login either way: through the same private write, so the file is 0600 and a
-// crash mid-save leaves the last good copy rather than half of this one.
-fn save(state: &State) {
-    let Some(path) = &state.file else { return };
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    if let Ok(body) = serde_json::to_vec_pretty(state) {
-        let _ = tool::state::write_private(path, &body);
     }
 }
 

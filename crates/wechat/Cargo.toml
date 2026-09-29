@@ -10,7 +10,6 @@ description = "WeChat as a pi channel: the bot client, its login flow, and the a
 anyhow.workspace = true
 async-trait.workspace = true
 channel.workspace = true
-tool.workspace = true
 tokio-util.workspace = true
 pulldown-cmark = { version = "0.13", default-features = false }
 base64 = "0.22"

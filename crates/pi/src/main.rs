@@ -248,8 +248,10 @@ async fn main() -> Result<()> {
             current: 0,
             lanes: vec![first],
         };
+        let (saved, keep) = store::private_file("wechat.json");
         let drivers = driver::Drivers::new(vec![Arc::new(wechat::WeChat::new(
-            store::dir().map(|d| d.join("wechat.json")),
+            saved.as_deref(),
+            Arc::new(keep),
         ))]);
         let out = tui::Tui::new(core, key_map, drivers)?.run().await;
         // Subagents handed their transcripts to a background save; wait
