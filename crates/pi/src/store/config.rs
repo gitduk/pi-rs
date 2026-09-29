@@ -604,8 +604,8 @@ fn expand_key(raw: &str) -> Option<String> {
     }
 }
 
-/// `:7897` and `:7897/v1` typed at an input. The file and the running spec
-/// store the expanded URL; this is typing, not a dialect.
+/// `:7897` and `:7897/v1`, as typed at an input or written in a file: a local
+/// port, spelled short.
 pub fn expand_base_url(raw: &str) -> String {
     let rest = match raw.strip_prefix(':') {
         Some(rest) => rest,
@@ -691,7 +691,8 @@ impl Config {
     /// A tree as a config, with everything a file can get wrong refused now:
     /// a typo in a model you are not running today is still a typo.
     pub fn from_tree(tree: toml::Value) -> Result<Config> {
-        let config: Config = serde_path_to_error::deserialize(tree)?;
+        let mut config: Config = serde_path_to_error::deserialize(tree)?;
+        config.base_url = config.base_url.map(|url| expand_base_url(url.trim()));
         config.check_key()?;
         for (model, entry) in &config.models {
             if config.base_url.is_some() && config.format.is_some() {
@@ -840,6 +841,12 @@ output_per_mtok = 0
 
     // A file is checked as a whole config, whichever it is: the section that
     // no longer exists is refused rather than read as nothing.
+    #[test]
+    fn a_port_in_the_file_is_a_local_url() {
+        let c = parse("base_url = \":2/v1\"\n").unwrap();
+        assert_eq!(c.base_url.as_deref(), Some("http://127.0.0.1:2/v1"));
+    }
+
     #[test]
     fn a_retired_section_is_refused() {
         assert!(parse("[defaults]\nmodel = \"flash\"\n").is_err());
