@@ -1177,13 +1177,13 @@ mod steps_tests {
             preview.push_str(&format!("\n  {i} + line {i}"));
         }
         let mut row = Row::result(true, "edit", preview);
-        assert_eq!(row.len(), 26);
+        assert_eq!(row.len(), render::SKETCHED_ROWS + 1);
 
         assert!(row.toggle_expand());
         assert_eq!(row.len(), 32);
 
         assert!(row.toggle_expand());
-        assert_eq!(row.len(), 26);
+        assert_eq!(row.len(), render::SKETCHED_ROWS + 1);
     }
 }
 

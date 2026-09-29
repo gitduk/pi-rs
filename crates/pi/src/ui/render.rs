@@ -271,7 +271,7 @@ pub fn render_markdown(text: &str, paint: &Paint) -> Vec<ratatui::text::Line<'st
 }
 
 /// The diff rows a sketched (folded) result shows under its head.
-const SKETCH_LIMIT: usize = 24;
+const SKETCH_LIMIT: usize = 16;
 /// The preview rows a folded result shows: the head plus the sketch limit.
 pub const SKETCHED_ROWS: usize = 1 + SKETCH_LIMIT;
 

@@ -12,7 +12,7 @@ use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};
 
 // Rows kept either side of a change: of file the edit did not touch, enough
 // to place it, few enough that the change stays the subject.
-const CONTEXT: usize = 4;
+const CONTEXT: usize = 3;
 // Changed rows shown before the rest are counted: the rows the edit wrote are
 // what the reader came for, and a window this wide fits what one edit meant.
 const CHANGED_RUN: usize = 40;
@@ -350,6 +350,12 @@ impl<'x> Row<'x> {
         matches!(self, Self::Line { sign: ' ', .. })
     }
 
+    // A kept row with nothing on it: it places nothing, so a run of them
+    // shows as one.
+    fn is_blank(&self) -> bool {
+        matches!(self, Self::Line { sign: ' ', text, .. } if text.trim().is_empty())
+    }
+
     // Whether this row carries the sign `mark`: how the head counts the rows
     // the edit moved, and how one run is read apart from the next.
     fn has(&self, mark: char) -> bool {
@@ -503,6 +509,7 @@ fn sketch(path: &str, applied: &Applied) -> String {
         }
         shown.extend_from_slice(&run[run.len() - tail..]);
     }
+    shown.dedup_by(|a, b| a.is_blank() && b.is_blank());
     // Right-aligned so a three-digit row lines up with a two-digit one, and
     // the mark starts where the rows it stands for do.
     let width = shown
