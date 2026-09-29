@@ -111,11 +111,11 @@ pub async fn run(
         None => history,
     };
     let (text, usage) =
-        crate::ext::oneshot::ask(transport, spec, PROMPT, body, MAX_SUMMARY_TOKENS, idle).await?;
+        super::oneshot::ask(transport, spec, PROMPT, body, MAX_SUMMARY_TOKENS, idle).await?;
     // Nothing to say is a failure here: the span goes either way, and it goes
     // unsummarized.
     if text.trim().is_empty() {
-        return Err(llm::BrainError::Summarizer(
+        return Err(llm::LlmError::Summarizer(
             "the summarizer returned nothing".into(),
         ));
     }

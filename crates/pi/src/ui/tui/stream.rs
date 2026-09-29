@@ -1,11 +1,11 @@
 //! A run's events becoming rows: the text as it streams, the tool calls as
 //! they run and finish, and the block that closes when the turn does.
+use super::call::{self, RunTool, push_tool_row};
 use super::mouse::{Regions, Target};
 use super::row::{PendingTool, Row};
 use super::screen;
 use super::screen::Rows;
 use super::scrollback::{Piece, ScrollbackRows, absorb_growth, f_entry};
-use super::tool::{self, RunTool, push_tool_row};
 use super::view::{StreamKind, Surface, View, snapshot};
 use super::{BAR_H, FLASH, Ui};
 use crate::core::lane::Lane;
@@ -433,7 +433,7 @@ impl Ui {
             .last()
             .is_some_and(Row::is_tools_summary);
         let held = if row_holds {
-            tool::held(&view.state.tools)
+            call::held(&view.state.tools)
         } else {
             Vec::new()
         };

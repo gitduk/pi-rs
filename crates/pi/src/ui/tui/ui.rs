@@ -7,6 +7,7 @@ use std::time::Instant;
 use ratatui::style::Style as RStyle;
 use ratatui::text::{Line, Span};
 
+use super::call::{drawn, pending_line};
 use super::editor::Editor;
 use super::menu::{Lists, MenuEntry};
 use super::mouse::{Regions, Target};
@@ -15,7 +16,6 @@ use super::reply::Reply;
 use super::row::Row;
 use super::screen::{self, Screen};
 use super::scrollback::body;
-use super::tool::{drawn, pending_line};
 use super::view::{StreamKind, View, snapshot};
 use super::vim::Vim;
 use crate::core::Core;
@@ -25,7 +25,7 @@ use crate::store::icons;
 use crate::store::keys::Keys;
 use crate::store::status::{Segment, default_done, default_live};
 use crate::store::theme::Style as ThemeStyle;
-use crate::store::theme::{Theme, panels_for};
+use crate::store::theme::{Theme, bands_for};
 use crate::ui::render::Paint;
 use crate::ui::status;
 
@@ -500,13 +500,13 @@ pub(super) fn following_terminal(theme: &Theme, bg: Option<(u8, u8, u8)>) -> The
     let Some(bg) = bg else {
         return theme;
     };
-    let panels = panels_for(bg);
-    let default = crate::store::theme::Panel::default();
+    let bands = bands_for(bg);
+    let default = crate::store::theme::Bands::default();
     if theme.prompt.panel.input == default.input {
-        theme.prompt.panel.input = panels.input;
+        theme.prompt.panel.input = bands.input;
     }
     if theme.prompt.panel.said == default.said {
-        theme.prompt.panel.said = panels.said;
+        theme.prompt.panel.said = bands.said;
     }
     theme
 }

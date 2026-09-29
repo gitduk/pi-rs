@@ -13,7 +13,7 @@ use futures::stream::{BoxStream, StreamExt};
 use serde_json::{Value, json};
 
 use super::{FAILED, Shared, Transport};
-use crate::error::{BrainError, Result};
+use crate::error::{LlmError, Result};
 use crate::message::{AssistantContent, Image, Message, Replay, ToolResult, UserContent, tagged};
 use crate::model::{Format, ModelSpec, ThinkingControl};
 use crate::request::{Request, ToolChoice};
@@ -38,7 +38,7 @@ impl ChatCompletions {
 fn check_format(spec: &ModelSpec) -> Result<()> {
     match spec.format {
         Format::Chat => Ok(()),
-        _ => Err(BrainError::Config(format!(
+        _ => Err(LlmError::Config(format!(
             "{} is not a chat-completions-format model",
             spec.model
         ))),
@@ -400,18 +400,18 @@ impl Transport for ChatCompletions {
             .eventsource()
             .flat_map(move |item| {
                 let events: Vec<Result<StreamEvent>> = match item {
-                    Err(e) => vec![Err(BrainError::Stream(e.to_string()))],
+                    Err(e) => vec![Err(LlmError::Stream(e.to_string()))],
                     // `[DONE]` is data-only and carries no JSON; the chunks
                     // before it already delivered the turn.
                     Ok(f) if f.data == "[DONE]" => Vec::new(),
                     Ok(f) => match serde_json::from_str::<Value>(&f.data) {
-                        Err(e) => vec![Err(BrainError::Stream(e.to_string()))],
+                        Err(e) => vec![Err(LlmError::Stream(e.to_string()))],
                         Ok(data) if data.get("error").is_some_and(|e| !e.is_null()) => {
                             tracing::warn!(
                                 target: "pi::wire", format = "chat",
                                 detail = %data["error"], "error frame"
                             );
-                            vec![Err(BrainError::Stream(data["error"].to_string()))]
+                            vec![Err(LlmError::Stream(data["error"].to_string()))]
                         }
                         Ok(data) => dec.frame(&data).into_iter().map(Ok).collect(),
                     },

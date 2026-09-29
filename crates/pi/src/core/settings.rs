@@ -76,7 +76,7 @@ impl Core {
             &self.pinned,
             &config,
             &running.model,
-            config::Origin::Command,
+            config::ModelOrigin::Command,
         ) {
             Ok(dialled) if dialled.spec != running => {
                 notes.extend(dialled.warning);
@@ -100,10 +100,10 @@ impl Core {
 
         // Only here, with everything computed, is anything touched — and in
         // one `rearm`, so the copy a run in flight forces is taken once.
-        let home = self.home(root.clone(), model);
+        let archive = self.archive(root.clone(), model);
         let idle = retry.idle;
         self.lane_mut()
-            .rearm(std::sync::Arc::new(resolved), home, retry, |ag| {
+            .rearm(std::sync::Arc::new(resolved), archive, retry, |ag| {
                 ag.compactor = std::sync::Arc::new(agent::Summarizing::new(writer, idle));
                 if let Some((transport, spec)) = retarget {
                     ag.retarget(transport, spec);
@@ -228,13 +228,13 @@ impl Core {
         transport: std::sync::Arc<dyn llm::Transport>,
         spec: llm::ModelSpec,
     ) {
-        let home = self.home(self.lane().root().to_path_buf(), spec.model.clone());
+        let archive = self.archive(self.lane().root().to_path_buf(), spec.model.clone());
         let resolved = self.lane().resolved().clone();
         let retry = self.config.retry();
         // The child is built from this agent, so the tool is hung again for it
         // to run on the model this session just moved to.
         self.lane_mut()
-            .rearm(resolved, home, retry, |ag| ag.retarget(transport, spec));
+            .rearm(resolved, archive, retry, |ag| ag.retarget(transport, spec));
     }
 }
 
@@ -256,7 +256,7 @@ impl Core {
             &self.pinned,
             &self.config,
             name,
-            config::Origin::Command,
+            config::ModelOrigin::Command,
         ) {
             Ok(d) => d,
             Err(e) => {

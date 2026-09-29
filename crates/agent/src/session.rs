@@ -1190,9 +1190,7 @@ mod tests {
             ),
             (
                 "a death with a cause",
-                failed(Err(AgentError::Brain(llm::BrainError::Stream(
-                    "died".into(),
-                )))),
+                failed(Err(AgentError::Llm(llm::LlmError::Stream("died".into())))),
                 Some(stopped_note(Some("stream: died"))),
             ),
         ] {

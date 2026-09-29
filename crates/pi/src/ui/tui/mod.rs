@@ -8,6 +8,7 @@
 //! timer for the spinner — so nothing has to be bolted on beside it.
 
 mod browse;
+mod call;
 mod editor;
 mod job;
 mod menu;
@@ -19,7 +20,6 @@ mod screen;
 mod scrollback;
 mod stream;
 mod term;
-mod tool;
 mod ui;
 mod view;
 mod vim;
@@ -277,7 +277,7 @@ impl Tui {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let _ = ::tool::state::write_private(&path, editor::encode(keep).as_bytes());
+        let _ = tool::state::write_private(&path, editor::encode(keep).as_bytes());
     }
 
     // Sessions change on the commands that create, delete or switch them;

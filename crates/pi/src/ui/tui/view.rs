@@ -6,9 +6,9 @@ use std::time::Instant;
 
 use agent::session::EntryId;
 
+use super::call::RunTool;
 use super::row::Row;
 use super::scrollback::{Folds, scrollback_from};
-use super::tool::RunTool;
 use crate::core::Core;
 use crate::core::lane::Lane;
 use crate::core::meter::Snapshot;

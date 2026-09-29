@@ -13,19 +13,21 @@ use tracing::Instrument as _;
 
 use crate::session::Session;
 
+pub mod approval;
+pub mod compaction;
 pub mod context;
 pub mod event;
-pub mod ext;
+pub mod retry;
 pub mod seams;
 pub mod session;
 
+pub use approval::Ceiling;
+pub use compaction::Summarizing;
+pub use compaction::ladder::{Policy, Report};
 use event::say;
 pub use event::{Event, Totals};
-pub use ext::approval::Ceiling;
-pub use ext::compact::{Policy, Report};
-pub use ext::compactor::Summarizing;
-pub use ext::retry::Retry;
-pub use seams::{Approver, Compactor, Decision, Fitted, Home, Steer, Untouched, Working};
+pub use retry::Retry;
+pub use seams::{Approver, Archive, Compactor, Decision, Fitted, Steer, Untouched, Working};
 
 pub const DEFAULT_SYSTEM: &str = include_str!("../prompts/system.md");
 
@@ -52,7 +54,7 @@ pub const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
     #[error(transparent)]
-    Brain(#[from] llm::BrainError),
+    Llm(#[from] llm::LlmError),
 
     #[error("cancelled")]
     Cancelled,
@@ -243,7 +245,7 @@ impl Agent {
                     .await
                 {
                     Ok(done) => break done,
-                    Err((AgentError::Brain(e), _))
+                    Err((AgentError::Llm(e), _))
                         if llm::classify(&e) == llm::Fault::Overflow && squeezes < MAX_SQUEEZE =>
                     {
                         squeezes += 1;
@@ -461,7 +463,7 @@ impl Agent {
                 return Err((err, partial));
             }
             let e = match err {
-                AgentError::Brain(e) => e,
+                AgentError::Llm(e) => e,
                 other => return Err((other, partial)),
             };
 
@@ -475,7 +477,7 @@ impl Agent {
                     error = %e,
                     "giving up"
                 );
-                return Err((AgentError::Brain(e), partial));
+                return Err((AgentError::Llm(e), partial));
             }
 
             attempt += 1;
@@ -516,7 +518,7 @@ impl Agent {
         let mut stream = tokio::select! {
             r = leashed(idle, self.model.transport.stream(&self.model.spec, req)) => match r {
                 Ok(r) => r.map_err(|e| (AgentError::from(e), None))?,
-                Err(e) => return Err((AgentError::Brain(e), None)),
+                Err(e) => return Err((AgentError::Llm(e), None)),
             },
             _ = ctx.cancel.cancelled() => return Err((AgentError::Cancelled, None)),
         };
@@ -527,7 +529,7 @@ impl Agent {
                     Ok(n) => n,
                     // A provider that stops sending mid-stream would otherwise
                     // hold the turn open until the user gives up.
-                    Err(e) => return Err((AgentError::Brain(e), None)),
+                    Err(e) => return Err((AgentError::Llm(e), None)),
                 },
                 _ = ctx.cancel.cancelled() => {
                     return Err((AgentError::Cancelled, Some(acc.finish())));
@@ -770,8 +772,8 @@ fn invalid_args_snippet(raw: &str, err: &str) -> String {
     out
 }
 
-fn wedged(idle: std::time::Duration) -> llm::BrainError {
-    llm::BrainError::Stream(format!("the stream sent nothing for {}s", idle.as_secs()))
+fn wedged(idle: std::time::Duration) -> llm::LlmError {
+    llm::LlmError::Stream(format!("the stream sent nothing for {}s", idle.as_secs()))
 }
 
 // The leash every provider call here keeps: silence past `idle` reads as a

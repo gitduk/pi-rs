@@ -1,4 +1,4 @@
-use agent::ext::compact::plan;
+use agent::compaction::ladder::plan;
 use agent::session::{Compaction, Entry, Omission, Prompt, Seen, Session};
 use agent::{Policy, Report};
 use llm::estimate;
@@ -632,7 +632,7 @@ mod budget {
             protect_tail: a.kept_tokens(),
             ..agent::Policy::default()
         };
-        let (_record, report) = agent::ext::compact::plan(&s, a.spec(), budget, &policy);
+        let (_record, report) = agent::compaction::ladder::plan(&s, a.spec(), budget, &policy);
         assert!(
             !report.still_over,
             "the tail left nothing to reclaim: {report:?}"
@@ -646,7 +646,7 @@ mod budget {
         let a = agent_with(200_000, 32_000);
         let s = Session::with_prompt("hello");
         let (record, r) =
-            agent::ext::compact::plan(&s, a.spec(), a.budget(), &agent::Policy::default());
+            agent::compaction::ladder::plan(&s, a.spec(), a.budget(), &agent::Policy::default());
         assert!(!r.touched());
         assert_eq!(
             record,

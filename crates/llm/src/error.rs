@@ -1,5 +1,5 @@
 #[derive(Debug, thiserror::Error)]
-pub enum BrainError {
+pub enum LlmError {
     #[error("http: {0}")]
     Http(#[from] reqwest::Error),
 
@@ -24,4 +24,4 @@ pub enum BrainError {
     Config(String),
 }
 
-pub type Result<T> = std::result::Result<T, BrainError>;
+pub type Result<T> = std::result::Result<T, LlmError>;

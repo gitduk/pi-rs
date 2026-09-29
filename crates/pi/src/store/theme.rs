@@ -475,19 +475,19 @@ pub struct Prompt {
     /// The bands the prompt paints: the input line, and the lines it lands
     /// as. Two shades, the live one the brighter.
     #[serde(default)]
-    pub panel: Panel,
+    pub panel: Bands,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct Panel {
+pub struct Bands {
     #[serde(default = "default_panel_input")]
     pub input: Color,
     #[serde(default = "default_panel_said")]
     pub said: Color,
 }
 
-impl Default for Panel {
+impl Default for Bands {
     fn default() -> Self {
         Self {
             input: default_panel_input(),
@@ -506,7 +506,7 @@ impl Default for Prompt {
             color: default_prompt_color(),
             icon: default_icon(),
             normal: default_normal_icon(),
-            panel: Panel::default(),
+            panel: Bands::default(),
         }
     }
 }
@@ -616,7 +616,7 @@ pub fn band_to_ratatui(c: &Color) -> ratatui::style::Style {
 /// lit up instead of as a slab laid over it. A landed line is two twelfths of
 /// the way towards white and the live one three; a light background goes the
 /// other way, towards black.
-pub fn panels_for(bg: (u8, u8, u8)) -> Panel {
+pub fn bands_for(bg: (u8, u8, u8)) -> Bands {
     let (r, g, b) = (f64::from(bg.0), f64::from(bg.1), f64::from(bg.2));
     let lum = 0.299 * r + 0.587 * g + 0.114 * b;
     let dark = lum <= 127.5;
@@ -640,7 +640,7 @@ pub fn panels_for(bg: (u8, u8, u8)) -> Panel {
         let byte = |v: f64| v.clamp(0.0, 255.0).floor() as u8;
         Color::Rgb(byte(scaled.0), byte(scaled.1), byte(scaled.2))
     };
-    Panel {
+    Bands {
         input: step(3.0),
         said: step(2.0),
     }

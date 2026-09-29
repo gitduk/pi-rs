@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use super::Transport;
 use super::{FAILED, Gaps, Shared};
-use crate::error::{BrainError, Result};
+use crate::error::{LlmError, Result};
 use crate::message::{
     AssistantContent, Image, Message, Reasoning, ReasoningContent, Replay, Text, ToolCall,
     ToolResult, ToolResultContent, UserContent, tagged,
@@ -36,7 +36,7 @@ impl OpenAi {
 fn check_format(spec: &ModelSpec) -> Result<()> {
     match spec.format {
         Format::OpenAi => Ok(()),
-        _ => Err(BrainError::Config(format!(
+        _ => Err(LlmError::Config(format!(
             "{} is not an openai-format model",
             spec.model
         ))),
@@ -530,15 +530,15 @@ impl Transport for OpenAi {
             .eventsource()
             .flat_map(move |frame| {
                 let events: Vec<Result<StreamEvent>> = match frame {
-                    Err(e) => vec![Err(BrainError::Stream(e.to_string()))],
+                    Err(e) => vec![Err(LlmError::Stream(e.to_string()))],
                     Ok(f) => match serde_json::from_str::<Value>(&f.data) {
-                        Err(e) => vec![Err(BrainError::Stream(e.to_string()))],
+                        Err(e) => vec![Err(LlmError::Stream(e.to_string()))],
                         Ok(data) if data.get("error").is_some_and(|e| !e.is_null()) => {
                             tracing::warn!(
                                 target: "pi::wire", format = "openai",
                                 detail = %data["error"], "error frame"
                             );
-                            vec![Err(BrainError::Stream(data["error"].to_string()))]
+                            vec![Err(LlmError::Stream(data["error"].to_string()))]
                         }
                         // A run that failed server-side reports it here, not
                         // as a status: without this the turn ends looking
@@ -549,7 +549,7 @@ impl Transport for OpenAi {
                                 target: "pi::wire", format = "openai",
                                 detail = %detail, "failed response"
                             );
-                            vec![Err(BrainError::Stream(detail.to_string()))]
+                            vec![Err(LlmError::Stream(detail.to_string()))]
                         }
                         Ok(data) => dec.frame(&data).into_iter().map(Ok).collect(),
                     },

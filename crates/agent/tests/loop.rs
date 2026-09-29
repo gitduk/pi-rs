@@ -680,7 +680,7 @@ async fn a_summarizer_that_fails_drops_the_history_without_failing_the_turn() {
             req: &Request,
         ) -> llm::Result<BoxStream<'static, llm::Result<StreamEvent>>> {
             if req.tools.is_empty() {
-                return Err(llm::BrainError::Stream("summarizer is down".into()));
+                return Err(llm::LlmError::Stream("summarizer is down".into()));
             }
             let i = self.0.fetch_add(1, Ordering::SeqCst);
             let events = if i < 4 {
@@ -715,7 +715,7 @@ async fn a_summarizer_that_fails_drops_the_history_without_failing_the_turn() {
 // Fails the first `fail` attempts with `err`, then answers normally.
 struct Flaky {
     remaining: AtomicUsize,
-    err: fn() -> llm::BrainError,
+    err: fn() -> llm::LlmError,
 }
 
 #[async_trait]
@@ -732,7 +732,7 @@ impl Transport for Flaky {
     }
 }
 
-fn flaky(times: usize, err: fn() -> llm::BrainError) -> Arc<Flaky> {
+fn flaky(times: usize, err: fn() -> llm::LlmError) -> Arc<Flaky> {
     Arc::new(Flaky {
         remaining: AtomicUsize::new(times),
         err,
@@ -753,7 +753,7 @@ async fn a_throttled_request_is_retried_until_it_lands() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
     let a = tooled(
-        flaky(2, || llm::BrainError::Api {
+        flaky(2, || llm::LlmError::Api {
             format: "anthropic",
             status: 429,
             body: "rate limit exceeded".into(),
@@ -779,11 +779,11 @@ async fn a_throttled_request_is_retried_until_it_lands() {
 async fn retries_stop_at_the_attempt_budget() {
     // A case: what it is called, the failure to answer with, and how many
     // attempts that should take.
-    type Case = (&'static str, fn() -> llm::BrainError, usize);
+    type Case = (&'static str, fn() -> llm::LlmError, usize);
     let cases: &[Case] = &[
         (
             "429",
-            || llm::BrainError::Api {
+            || llm::LlmError::Api {
                 format: "anthropic",
                 status: 429,
                 body: "rate limit exceeded".into(),
@@ -792,7 +792,7 @@ async fn retries_stop_at_the_attempt_budget() {
         ),
         (
             "stream",
-            || llm::BrainError::Stream("connection reset".into()),
+            || llm::LlmError::Stream("connection reset".into()),
             3,
         ),
     ];
@@ -892,7 +892,7 @@ impl Transport for Picky {
                 Some(limit) => format!("prompt is too long: {size} tokens > {limit} maximum"),
                 None => "Request exceeds the maximum size".into(),
             };
-            return Err(llm::BrainError::Api {
+            return Err(llm::LlmError::Api {
                 format: "anthropic",
                 status: 413,
                 body,
@@ -998,7 +998,7 @@ impl Transport for Mixed {
         _spec: &ModelSpec,
         _req: &Request,
     ) -> llm::Result<BoxStream<'static, llm::Result<StreamEvent>>> {
-        let unnamed = || llm::BrainError::Api {
+        let unnamed = || llm::LlmError::Api {
             format: "anthropic",
             status: 413,
             body: "Request exceeds the maximum size".into(),
@@ -1006,7 +1006,7 @@ impl Transport for Mixed {
         match self.calls.fetch_add(1, Ordering::SeqCst) {
             0 => Err(unnamed()),
             // 413, not 400: only transient statuses are retried after a squeeze.
-            1 => Err(llm::BrainError::Api {
+            1 => Err(llm::LlmError::Api {
                 format: "anthropic",
                 status: 413,
                 body: format!("prompt is too long: 99999 tokens > {} maximum", self.limit),

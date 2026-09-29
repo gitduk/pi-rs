@@ -9,7 +9,7 @@ use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};
 use toolbox::bash;
 
 use agent::session::Session;
-use agent::{Agent, AgentError, Briefing, Event, Home, Retry};
+use agent::{Agent, AgentError, Archive, Briefing, Event, Retry};
 use tracing::Instrument as _;
 
 const PROMPT: &str = include_str!("../prompts/subagent.md");
@@ -65,7 +65,7 @@ pub struct Subagent {
     // Cloned for each call and thrown away after. Its registry has no
     // `subagent` of its own, so this does not nest.
     agent: Arc<Agent>,
-    home: Arc<dyn Home>,
+    archive: Arc<dyn Archive>,
     // How long the child may run silent before it is read as wedged: the one
     // brake here, and the only way a child ends that is not esc.
     deadline: Duration,
@@ -92,7 +92,7 @@ impl Subagent {
     pub fn new(
         parent: &Agent,
         brief: Arc<Briefing>,
-        home: Arc<dyn Home>,
+        archive: Arc<dyn Archive>,
         standing: &str,
         retry: Retry,
     ) -> Self {
@@ -110,7 +110,7 @@ impl Subagent {
         };
         Self {
             agent: Arc::new(agent),
-            home,
+            archive,
             deadline,
             retry,
         }
@@ -325,7 +325,7 @@ impl Tool for Subagent {
             }
         };
 
-        self.home.keep(ctx.spill_namespace(), &id, session);
+        self.archive.keep(ctx.spill_namespace(), &id, session);
 
         let cut = match ran {
             Ok(_) => None,
@@ -339,10 +339,10 @@ impl Tool for Subagent {
             Err(AgentError::Cancelled) => Some(if wedged.load(Ordering::Relaxed) {
                 format!(
                     "a call ran {} with no progress",
-                    llm::count::elapsed(self.deadline)
+                    llm::figures::elapsed(self.deadline)
                 )
             } else {
-                format!("stopped after {}", llm::count::elapsed(self.deadline))
+                format!("stopped after {}", llm::figures::elapsed(self.deadline))
             }),
             Err(why) => {
                 // The child's spend rode home on the collector, but an error
@@ -351,7 +351,7 @@ impl Tool for Subagent {
                     format!(
                         " ({} turn(s), {}, ran uncounted)",
                         heard.turns,
-                        llm::count::slash(heard.spent.input, heard.spent.output)
+                        llm::figures::slash(heard.spent.input, heard.spent.output)
                     )
                 } else {
                     String::new()
@@ -422,8 +422,8 @@ impl Tool for Subagent {
 fn sketch(description: &str, heard: &Heard, took: Duration) -> String {
     let spent = format!(
         "{} · {}",
-        llm::count::elapsed(took),
-        llm::count::slash(heard.spent.input, heard.spent.output)
+        llm::figures::elapsed(took),
+        llm::figures::slash(heard.spent.input, heard.spent.output)
     );
     // Flattened, not trusted: this row is written one line at a time, and a
     // newline in it would stair-step everything drawn after.

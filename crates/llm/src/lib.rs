@@ -1,7 +1,7 @@
-pub mod count;
 pub mod error;
 pub mod estimate;
 pub mod fault;
+pub mod figures;
 pub mod message;
 pub mod model;
 pub mod request;
@@ -10,7 +10,7 @@ pub mod stream;
 pub mod totals;
 pub mod transport;
 
-pub use error::{BrainError, Result};
+pub use error::{LlmError, Result};
 pub use fault::{Fault, classify};
 pub use message::{AssistantContent, Message, ToolCall, ToolResult, UserContent};
 pub use model::{Format, ModelSpec, ReplayThinking};

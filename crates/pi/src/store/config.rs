@@ -437,7 +437,7 @@ impl Config {
 /// from: a bare `pi` that fails on a name the user never typed is a mystery
 /// with three files to search.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Origin {
+pub enum ModelOrigin {
     Flag,
     Command,
     Resumed,
@@ -446,15 +446,15 @@ pub enum Origin {
     OnlyModel,
 }
 
-impl Origin {
+impl ModelOrigin {
     pub fn describe(self) -> &'static str {
         match self {
-            Origin::Flag => "-m",
-            Origin::Command => "/model",
-            Origin::Resumed => "the resumed session",
-            Origin::Project => "defaults.model in the project's .pi.toml",
-            Origin::Global => "defaults.model in ~/.pi/settings.toml",
-            Origin::OnlyModel => "the only model in ~/.pi/settings.toml",
+            ModelOrigin::Flag => "-m",
+            ModelOrigin::Command => "/model",
+            ModelOrigin::Resumed => "the resumed session",
+            ModelOrigin::Project => "defaults.model in the project's .pi.toml",
+            ModelOrigin::Global => "defaults.model in ~/.pi/settings.toml",
+            ModelOrigin::OnlyModel => "the only model in ~/.pi/settings.toml",
         }
     }
 }
@@ -586,24 +586,24 @@ impl Config {
         project: &Project,
         flag: Option<&str>,
         prior: Option<&str>,
-    ) -> Option<(String, Origin)> {
+    ) -> Option<(String, ModelOrigin)> {
         if let Some(m) = flag {
-            return Some((m.to_string(), Origin::Flag));
+            return Some((m.to_string(), ModelOrigin::Flag));
         }
         if let Some(m) = prior {
-            return Some((m.to_string(), Origin::Resumed));
+            return Some((m.to_string(), ModelOrigin::Resumed));
         }
         if let Some(m) = &project.model {
-            return Some((m.clone(), Origin::Project));
+            return Some((m.clone(), ModelOrigin::Project));
         }
         if let Some(m) = &self.model {
-            return Some((m.clone(), Origin::Global));
+            return Some((m.clone(), ModelOrigin::Global));
         }
         // One model written down: there is nothing else it could mean, and
         // making the name be written twice only creates the chance to write it
         // differently.
         if let [only] = self.names().as_slice() {
-            return Some((only.clone(), Origin::OnlyModel));
+            return Some((only.clone(), ModelOrigin::OnlyModel));
         }
         None
     }
@@ -962,7 +962,7 @@ output_per_mtok = 0
         );
         assert_eq!(
             c.model(&p, None, None),
-            Some(("other".into(), Origin::Project))
+            Some(("other".into(), ModelOrigin::Project))
         );
     }
 

@@ -95,7 +95,7 @@ pub(crate) async fn exchange(
         body
     };
     tracing::warn!(target: "pi::wire", format, status, took_ms, detail = %body, "refused");
-    Err(crate::BrainError::Api {
+    Err(crate::LlmError::Api {
         format,
         status,
         body,

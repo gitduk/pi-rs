@@ -18,7 +18,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use agent::session::{EntryId, Session};
-use agent::{Agent, Event, Home, Steer, Totals};
+use agent::{Agent, Archive, Event, Steer, Totals};
 use subagent::Subagent;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio_util::sync::CancellationToken;
@@ -167,13 +167,13 @@ struct Runner {
 pub fn arm(
     agent: &mut Agent,
     resolved: Arc<Resolved>,
-    home: Arc<dyn Home>,
+    archive: Arc<dyn Archive>,
     retry: agent::Retry,
 ) -> Arc<Resolved> {
     let subagent = Subagent::new(
         agent,
         resolved.brief.clone(),
-        home,
+        archive,
         &resolved.standing,
         retry,
     );
@@ -354,13 +354,13 @@ impl Lane {
     pub fn rearm(
         &mut self,
         resolved: Arc<Resolved>,
-        home: Arc<dyn Home>,
+        archive: Arc<dyn Archive>,
         retry: agent::Retry,
         change: impl FnOnce(&mut Agent),
     ) {
         let agent = Arc::make_mut(&mut self.checkout.agent);
         change(agent);
-        self.checkout.resolved = arm(agent, resolved, home, retry);
+        self.checkout.resolved = arm(agent, resolved, archive, retry);
     }
 
     /// What this checkout and the config decide.
@@ -708,12 +708,12 @@ impl Core {
 
         // The model travels; what the root decides does not. A switch changes
         // trees, and which model is answering was a decision made elsewhere.
-        let home = self.home(
+        let archive = self.archive(
             root.clone(),
             self.lane().checkout.agent.spec().model.clone(),
         );
         let mut ag = (*self.lane().checkout.agent).clone();
-        let resolved = arm(&mut ag, Arc::new(resolved), home, self.config.retry());
+        let resolved = arm(&mut ag, Arc::new(resolved), archive, self.config.retry());
 
         // Built, not cloned from the lane being left: a `Ctx`'s tables key on
         // absolute paths in one tree, and none of that lane's describe this.

@@ -1,4 +1,4 @@
-use crate::error::BrainError;
+use crate::error::LlmError;
 
 /// What to do about a failed request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,21 +16,21 @@ pub enum Fault {
 ///
 /// Message text is not consulted: providers disagree about what a quota error
 /// is called, and retry policy should not depend on an empirical word list.
-pub fn classify(err: &BrainError) -> Fault {
+pub fn classify(err: &LlmError) -> Fault {
     match err {
         // 408 is a timeout, 409 a collision, 425 an early hint; 429 a
         // throttle; 5xx (and 522/524/529 from CDNs) load. All are worth
         // another attempt.
-        BrainError::Api {
+        LlmError::Api {
             status: 408 | 409 | 425 | 429 | 500 | 502 | 503 | 504 | 522 | 524 | 529,
             ..
         } => Fault::Transient,
         // 413 is a size refusal, whatever the body says about it.
-        BrainError::Api { status: 413, .. } => Fault::Overflow,
-        BrainError::Api { .. } => Fault::Permanent,
+        LlmError::Api { status: 413, .. } => Fault::Overflow,
+        LlmError::Api { .. } => Fault::Permanent,
         // A dropped socket or a truncated stream is worth another attempt.
-        BrainError::Http(_) | BrainError::Stream(_) => Fault::Transient,
-        BrainError::Json(_) | BrainError::Config(_) | BrainError::Summarizer(_) => Fault::Permanent,
+        LlmError::Http(_) | LlmError::Stream(_) => Fault::Transient,
+        LlmError::Json(_) | LlmError::Config(_) | LlmError::Summarizer(_) => Fault::Permanent,
     }
 }
 
@@ -43,7 +43,7 @@ pub fn classify(err: &BrainError) -> Fault {
 ///
 /// None when the message carries no usable number; the caller then falls back
 /// to squeezing blindly.
-pub fn overflow_limit(err: &BrainError) -> Option<usize> {
+pub fn overflow_limit(err: &LlmError) -> Option<usize> {
     // Below this is a status code or a version, never a context window.
     const FLOOR: usize = 1_000;
 
@@ -58,8 +58,8 @@ pub fn overflow_limit(err: &BrainError) -> Option<usize> {
 mod tests {
     use super::*;
 
-    fn api(status: u16, body: &str) -> BrainError {
-        BrainError::Api {
+    fn api(status: u16, body: &str) -> LlmError {
+        LlmError::Api {
             format: "anthropic",
             status,
             body: body.into(),
@@ -98,7 +98,7 @@ mod tests {
             assert_eq!(classify(&api(status, body)), Fault::Permanent);
         }
         assert_eq!(
-            classify(&BrainError::Config("no key".into())),
+            classify(&LlmError::Config("no key".into())),
             Fault::Permanent
         );
     }
@@ -163,11 +163,11 @@ mod tests {
     #[test]
     fn a_broken_stream_is_worth_another_attempt() {
         assert_eq!(
-            classify(&BrainError::Stream("connection reset".into())),
+            classify(&LlmError::Stream("connection reset".into())),
             Fault::Transient
         );
         assert_eq!(
-            classify(&BrainError::Stream("idle for 300s".into())),
+            classify(&LlmError::Stream("idle for 300s".into())),
             Fault::Transient
         );
     }

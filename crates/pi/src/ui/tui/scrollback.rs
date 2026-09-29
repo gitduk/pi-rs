@@ -8,9 +8,9 @@ use llm::message::{AssistantContent, ReasoningContent};
 use ratatui::text::Line;
 
 use super::THINKING;
+use super::call::push_tool_row;
 use super::row::Row;
 use super::screen;
-use super::tool::push_tool_row;
 use crate::core;
 use crate::store::icons;
 use crate::ui::render::{self, Paint};

@@ -191,7 +191,7 @@ enum Kind {
     // One logical line of a prompt the user said: the border and the body kept
     // apart, so a wrap can repeat the border.
     //
-    // `band` is the panel the whole screen row sits in: `prompt.panel.said`.
+    // `band` is the band the whole screen row sits in: `prompt.panel.said`.
     Said {
         // The rule and its column: `SAID_RULE` in the prompt colour.
         border: Line<'static>,

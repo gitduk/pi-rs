@@ -1,7 +1,7 @@
 //! The disk, and the names the config speaks.
 //!
 //! Two things live here: the files a run reads and writes (`session.rs`,
-//! `home.rs`, `journal.rs`, `config.rs`, `settings.rs`), and the vocabulary a
+//! `archive.rs`, `journal.rs`, `config.rs`, `settings.rs`), and the vocabulary a
 //! config is written in — `theme.rs`, `keys.rs`, `status.rs`, `icons.rs`,
 //! `text.rs`. The
 //! vocabulary is here rather than in `ui/` because it is what a setting is
@@ -10,8 +10,8 @@
 
 use std::path::PathBuf;
 
+pub mod archive;
 pub mod config;
-pub mod home;
 pub mod icons;
 pub mod journal;
 pub mod keys;

@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use super::Transport;
 use super::{Gaps, Shared};
-use crate::error::{BrainError, Result};
+use crate::error::{LlmError, Result};
 use crate::message::{
     AssistantContent, Image, Message, Reasoning, Replay, ToolResult, ToolResultContent,
     UserContent, tagged,
@@ -38,7 +38,7 @@ impl Anthropic {
 fn cache_control(spec: &ModelSpec) -> Result<CacheControl> {
     match spec.format {
         Format::Anthropic { cache_control } => Ok(cache_control),
-        _ => Err(BrainError::Config(format!(
+        _ => Err(LlmError::Config(format!(
             "{} is not an anthropic-format model",
             spec.model
         ))),
@@ -402,7 +402,7 @@ impl Transport for Anthropic {
 
         let stream = resp.bytes_stream().eventsource().filter_map(move |frame| {
             let out = match frame {
-                Err(e) => Some(Err(BrainError::Stream(e.to_string()))),
+                Err(e) => Some(Err(LlmError::Stream(e.to_string()))),
                 Ok(frame) => match serde_json::from_str::<Value>(&frame.data) {
                     // `ping` and other bodyless frames carry no JSON.
                     Err(_) => None,
@@ -411,7 +411,7 @@ impl Transport for Anthropic {
                             target: "pi::wire", wire = "anthropic",
                             detail = %data["error"], "error frame"
                         );
-                        Some(Err(BrainError::Stream(data["error"].to_string())))
+                        Some(Err(LlmError::Stream(data["error"].to_string())))
                     }
                     Ok(data) => {
                         decode_frame(&data, &mut stop, &mut usage, &mut gaps.frame()).map(Ok)

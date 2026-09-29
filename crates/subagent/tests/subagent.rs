@@ -13,7 +13,7 @@ mod common;
 use common::spec;
 
 use agent::session::Session;
-use agent::{Agent, Home, Retry};
+use agent::{Agent, Archive, Retry};
 use subagent::Subagent;
 use tool::{Ctx, FileLocks, Registry, Tier, Tool, ToolError, ToolOutput, Viewed, Workspace};
 
@@ -167,7 +167,7 @@ struct Kept {
     parents: std::sync::Mutex<Vec<String>>,
 }
 
-impl Home for Kept {
+impl Archive for Kept {
     fn keep(&self, parent: &str, id: &str, session: Session) {
         self.parents.lock().unwrap().push(parent.to_string());
         self.sessions

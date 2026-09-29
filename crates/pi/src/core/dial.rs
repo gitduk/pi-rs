@@ -49,7 +49,7 @@ pub struct Dialled {
 // Every name resolves now — an unlisted one is passed through with default
 // numbers — so the only way this fails is a config with no endpoint to send
 // it to, and the useful half of that message is who asked.
-fn unknown(model: &str, named_by: config::Origin) -> String {
+fn unknown(model: &str, named_by: config::ModelOrigin) -> String {
     format!(
         "`{model}`, named by {}, cannot be reached — see examples/pi.toml",
         named_by.describe()
@@ -66,7 +66,7 @@ pub fn dial(
     pinned: &Pinned,
     config: &config::Config,
     model: &str,
-    named_by: config::Origin,
+    named_by: config::ModelOrigin,
 ) -> Result<Dialled> {
     let mut spec = config
         .find(model)
@@ -120,7 +120,7 @@ pub fn summary_writer(
 ) -> Result<Option<(Arc<dyn Transport>, ModelSpec)>> {
     match &config.summarize_model {
         Some(name) if name != working => {
-            let summarizer = dial(pinned, config, name, config::Origin::Global)
+            let summarizer = dial(pinned, config, name, config::ModelOrigin::Global)
                 .with_context(|| format!("summarize_model = \"{name}\""))?;
             Ok(Some((summarizer.transport, summarizer.spec)))
         }

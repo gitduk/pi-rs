@@ -35,7 +35,7 @@ pub trait Approver: Send + Sync {
 ///
 /// This layer says what it needs and the surface provides it; what a child
 /// spent travels back on the tool result instead.
-pub trait Home: Send + Sync {
+pub trait Archive: Send + Sync {
     // A subagent has no screen, so its transcript is the only account of what
     // it did. Called once with the whole transcript, whether the run finished
     // or was cut short; `parent` is the session whose turn made the call.

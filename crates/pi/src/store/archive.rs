@@ -1,4 +1,4 @@
-//! Where a subagent's transcript is filed: pi's side of `agent::Home`.
+//! Where a subagent's transcript is filed: pi's side of `agent::Archive`.
 //!
 //! A subagent has no lane, no view and no place on the bar, so this is the
 //! whole of what it leaves behind. What it spent no longer lands here: the
@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-use agent::Home;
+use agent::Archive;
 use agent::session::Session;
 
 use crate::store::session::{Store, now};
@@ -42,24 +42,24 @@ impl Filed {
     /// Handed straight out as the trait object the tool takes: nothing here
     /// needs the concrete type, and a caller that has to spell the coercion is
     /// a caller doing this crate's job.
-    pub fn armed(store: Store, root: std::path::PathBuf, model: String) -> Arc<dyn Home> {
+    pub fn armed(store: Store, root: std::path::PathBuf, model: String) -> Arc<dyn Archive> {
         Arc::new(Self { store, root, model })
     }
 }
 
 /// A run with nowhere to file: a one-shot keeps no transcript, so the subagents
 /// it calls keep none either.
-pub fn nowhere() -> Arc<dyn Home> {
+pub fn nowhere() -> Arc<dyn Archive> {
     Arc::new(Nowhere)
 }
 
 struct Nowhere;
 
-impl Home for Nowhere {
+impl Archive for Nowhere {
     fn keep(&self, _parent: &str, _id: &str, _session: Session) {}
 }
 
-impl Home for Filed {
+impl Archive for Filed {
     // The save runs on a blocking thread so several parallel subagents do not
     // each serialize megabytes on the tool path; the handle is registered so
     // [`flush`] can wait for it before the process goes.

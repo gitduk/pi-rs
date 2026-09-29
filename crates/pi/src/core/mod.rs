@@ -79,8 +79,12 @@ impl Core {
     // Where a subagent started in this lane files what it did. Root and model
     // vary — a `/worktree` moves one, a `/model` the other — and the rest
     // never does.
-    fn home(&self, root: std::path::PathBuf, model: String) -> std::sync::Arc<dyn agent::Home> {
-        crate::store::home::Filed::armed(self.store.clone(), root, model)
+    fn archive(
+        &self,
+        root: std::path::PathBuf,
+        model: String,
+    ) -> std::sync::Arc<dyn agent::Archive> {
+        crate::store::archive::Filed::armed(self.store.clone(), root, model)
     }
 
     pub fn lane_mut(&mut self) -> &mut Lane {
@@ -451,7 +455,7 @@ mod tests {
         let resolved = crate::core::lane::arm(
             &mut agent,
             crate::core::lane::a_resolved("standing"),
-            crate::store::home::Filed::armed(
+            crate::store::archive::Filed::armed(
                 crate::store::session::Store::new(root.join("state")),
                 root.to_path_buf(),
                 model.into(),

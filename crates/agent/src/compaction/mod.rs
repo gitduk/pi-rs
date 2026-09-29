@@ -1,5 +1,9 @@
-//! The compactor that ships: what the window cannot hold is dropped, and a
-//! model is asked what went.
+//! Shrinking a transcript that outgrew the window. The compactor that ships:
+//! `ladder` drops what the window cannot hold, and a model is asked what went.
+
+pub mod ladder;
+mod oneshot;
+mod summary;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,9 +16,9 @@ use tokio::sync::mpsc::UnboundedSender;
 use tracing::Instrument as _;
 
 use crate::event::{Event, say};
-use crate::ext::compact::{self, Policy, Report};
 use crate::seams::{Compactor, Fitted, Working};
 use crate::session;
+use ladder::{Policy, Report};
 
 /// The compactor that ships.
 pub struct Summarizing {
@@ -57,7 +61,7 @@ impl Summarizing {
         policy: &Policy,
         focus: Option<&str>,
     ) -> Option<(Report, Usage)> {
-        let (mut record, mut report) = compact::plan(session, run.spec, budget, policy);
+        let (mut record, mut report) = ladder::plan(session, run.spec, budget, policy);
         let mut spent = Usage::default();
         if !record.dropped.is_empty() {
             let used = self
@@ -99,12 +103,9 @@ impl Summarizing {
             Some((t, s)) => (&**t, s),
             None => (run.transport, run.spec),
         };
-        let history = crate::ext::summarize::render(
-            &session.summaries(),
-            &session.entries_for(&record.dropped),
-        );
+        let history = summary::render(&session.summaries(), &session.entries_for(&record.dropped));
 
-        match crate::ext::summarize::run(transport, spec, history, focus, self.idle).await {
+        match summary::run(transport, spec, history, focus, self.idle).await {
             Ok((text, used)) => {
                 record.summary = Some(text);
                 // The new summary covers what the old one did, so the entry
