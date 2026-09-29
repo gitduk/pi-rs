@@ -322,6 +322,43 @@ async fn parallel_results_follow_call_order_not_completion_order() {
     );
 }
 
+// A quick call in a batch says it is done when it is, not when the slowest
+// is: the screen marks each call by its own end.
+#[tokio::test]
+async fn each_call_says_its_end_as_it_lands() {
+    let (_d, mut a, ctx) = harness(vec![
+        call_turn(&[("t1", "slow", "{}"), ("t2", "fast", "{}")]),
+        text_turn("ok"),
+    ]);
+    brief(&mut a).registry = Registry::new()
+        .with(Sleeper {
+            name: "slow",
+            delay_ms: 150,
+            exclusive: false,
+        })
+        .with(Sleeper {
+            name: "fast",
+            delay_ms: 10,
+            exclusive: false,
+        });
+
+    let (session, out, events) = drive(&a, &ctx, "go").await;
+    out.unwrap();
+
+    let ended: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::ToolEnd { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ended, ["t2", "t1"], "the fast call ends first");
+    let view = session.context();
+    let results = tool_results(&view);
+    assert_eq!(results[0].flatten_text(), "slow", "results keep call order");
+    assert_eq!(results[1].flatten_text(), "fast");
+}
+
 #[tokio::test]
 async fn an_exclusive_call_forces_the_batch_to_run_serially() {
     let (_d, mut a, ctx) = harness(vec![

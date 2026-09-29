@@ -644,97 +644,119 @@ impl Agent {
 
         // One future per call, awaited positionally: results stay aligned with
         // the calls; an Exclusive batch runs in turn, a Shared batch joins.
+        // Each says its own end the moment it has one, so a quick call in a
+        // batch does not read as running until the slowest is done.
         let futures: Vec<_> = calls
             .iter()
             .zip(&actions)
             .map(|(call, action)| {
                 async move {
                     match action {
-                        Action::Reject(_) => None,
+                        Action::Reject(why) => Landed::Answered(
+                            ToolResult::error(call.id.clone(), &call.name, why.clone()),
+                            None,
+                        ),
                         Action::Run(t) => {
-                            Some(tool::output::gated(t.as_ref(), call.args.clone(), ctx).await)
+                            let output =
+                                tool::output::gated(t.as_ref(), call.args.clone(), ctx).await;
+                            landed(call, output, tx)
                         }
                     }
                 }
                 .instrument(ran(call))
             })
             .collect();
-        let outputs: Vec<Option<Result<ToolOutput, ToolError>>> = if exclusive {
-            let mut outputs = Vec::with_capacity(futures.len());
+        let outcomes: Vec<Landed> = if exclusive {
+            let mut outcomes = Vec::with_capacity(futures.len());
             for f in futures {
-                outputs.push(f.await);
+                outcomes.push(f.await);
             }
-            outputs
+            outcomes
         } else {
             futures::future::join_all(futures).await
         };
 
         let mut results = Vec::with_capacity(calls.len());
         let mut stopped = false;
-        for ((call, action), output) in calls.iter().zip(&actions).zip(outputs) {
-            // The copy the screen drew for this result, sent with it so a
-            // rebuild draws those bytes rather than reading the content again.
-            let mut preview = None;
-            let result = match (action, output) {
-                (Action::Reject(why), _) => {
-                    ToolResult::error(call.id.clone(), &call.name, why.clone())
-                }
+        for outcome in outcomes {
+            match outcome {
                 // Left unanswered: its siblings may have acted, so theirs are
                 // kept, and the next prompt closes this one as stopped.
-                (_, Some(Err(ToolError::Cancelled))) => {
-                    stopped = true;
-                    continue;
-                }
-                (_, Some(Err(e))) => {
-                    let mut body = e.to_string();
-                    if let Some(code) = e.code() {
-                        // A stable code lets the model branch on what happened
-                        // instead of parsing the prose; the prose still leads.
-                        body = format!("Error: {body} [code: {code}]");
-                    }
-                    // The pending live line draws from this same text, so
-                    // adoption's equality check gets both halves from one
-                    // source; without it a multi-line error renders one way
-                    // live and another after a rebuild.
-                    preview = Some(body.clone());
-                    say(
-                        tx,
-                        Event::ToolEnd {
-                            id: call.id.clone(),
-                            name: call.name.clone(),
-                            is_error: true,
-                            preview: body.clone(),
-                        },
-                    );
-                    ToolResult::error(call.id.clone(), &call.name, body)
-                }
-                (_, Some(Ok(out))) => {
+                Landed::Stopped => stopped = true,
+                Landed::Answered(result, preview) => results.push((result, preview)),
+                Landed::Ran(result, preview, used) => {
                     // A nested run's spend belongs to the run that called it:
                     // folded in here, it reaches `Event::Done` and the return.
-                    spent.add(&out.spent);
-                    preview = out.preview.clone();
-                    say(
-                        tx,
-                        Event::ToolEnd {
-                            id: call.id.clone(),
-                            name: call.name.clone(),
-                            is_error: false,
-                            preview: out.preview(),
-                        },
-                    );
-                    ToolResult {
-                        call: call.id.clone(),
-                        name: call.name.clone(),
-                        content: out.content,
-                        is_error: false,
-                    }
+                    spent.add(&used);
+                    results.push((result, preview));
                 }
-                (_, None) => unreachable!("only rejected calls produce no output"),
-            };
-            results.push((result, preview));
+            }
         }
 
         (results, stopped)
+    }
+}
+
+// What one call came to. The preview is the copy the screen drew for this
+// result, sent with it so a rebuild draws those bytes rather than reading the
+// content again.
+enum Landed {
+    Stopped,
+    Answered(ToolResult, Option<String>),
+    Ran(ToolResult, Option<String>, Usage),
+}
+
+// A call's output as its result, its end said as it lands.
+fn landed(
+    call: &ToolCall,
+    output: Result<ToolOutput, ToolError>,
+    tx: &UnboundedSender<Event>,
+) -> Landed {
+    match output {
+        Err(ToolError::Cancelled) => Landed::Stopped,
+        Err(e) => {
+            let mut body = e.to_string();
+            if let Some(code) = e.code() {
+                // A stable code lets the model branch on what happened
+                // instead of parsing the prose; the prose still leads.
+                body = format!("Error: {body} [code: {code}]");
+            }
+            // The pending live line draws from this same text, so adoption's
+            // equality check gets both halves from one source; without it a
+            // multi-line error renders one way live and another after a
+            // rebuild.
+            say(
+                tx,
+                Event::ToolEnd {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                    is_error: true,
+                    preview: body.clone(),
+                },
+            );
+            Landed::Answered(
+                ToolResult::error(call.id.clone(), &call.name, body.clone()),
+                Some(body),
+            )
+        }
+        Ok(out) => {
+            say(
+                tx,
+                Event::ToolEnd {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                    is_error: false,
+                    preview: out.preview(),
+                },
+            );
+            let result = ToolResult {
+                call: call.id.clone(),
+                name: call.name.clone(),
+                content: out.content,
+                is_error: false,
+            };
+            Landed::Ran(result, out.preview, out.spent)
+        }
     }
 }
 
