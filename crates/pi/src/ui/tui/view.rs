@@ -94,6 +94,9 @@ pub struct State {
     pub(super) committed: bool,
     // The run has been asked to stop and is still winding down.
     pub(super) stopping: bool,
+    // The retry the run is waiting out, worded for the status line; the next
+    // event of any other kind means the wait is over.
+    pub(super) retry: Option<String>,
 }
 
 // The stream still writing itself into the screen, and the kind of line it

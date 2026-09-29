@@ -1,6 +1,6 @@
-//! The parts a status line is made of, and which of them each line shows.
+//! The parts the status line is made of.
 //!
-//! The names are a config file's: `status.live` and `status.done` list these.
+//! The names are a config file's: `status` lists these.
 //! What each part reads as is the surface's, and is written where it draws.
 
 use serde::{Deserialize, Serialize};
@@ -20,48 +20,35 @@ pub enum Segment {
     Worktree,
 }
 
-/// Which parts each line shows, as the config states it. An absent list is the
-/// default one, so a file that names neither reads as the shipped layout.
-#[derive(Debug, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Lines {
-    #[serde(default = "default_live")]
-    pub live: Vec<Segment>,
-    #[serde(default = "default_done")]
-    pub done: Vec<Segment>,
-}
+/// Which parts the status line shows: one list, drawn while a run works and
+/// kept under its answer once it ends. A part with nothing to say drops out,
+/// which is how one list serves both.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(transparent)]
+pub struct Parts(pub Vec<Segment>);
 
-impl Default for Lines {
+impl Default for Parts {
     fn default() -> Self {
-        Self {
-            live: default_live(),
-            done: default_done(),
-        }
+        Self(default_parts())
     }
 }
 
-/// The live line when the config names nothing: elapsed, the counts, the cache
-/// read so far, context, and queued work. What the lane is rather than what it
-/// did — its model, its checkout — is the bar's, not this line's.
-pub fn default_live() -> Vec<Segment> {
-    vec![
-        Segment::Elapsed,
-        Segment::InOut,
-        Segment::Cache,
-        Segment::Ctx,
-        Segment::Queued,
-    ]
+impl std::ops::Deref for Parts {
+    type Target = [Segment];
+    fn deref(&self) -> &[Segment] {
+        &self.0
+    }
 }
 
-/// The same for the done line — elapsed, then `in/out · cached · $cost` as it
-/// stood, with context and compaction added.
-pub fn default_done() -> Vec<Segment> {
+/// The parts when the config names none.
+pub fn default_parts() -> Vec<Segment> {
     vec![
         Segment::Elapsed,
         Segment::InOut,
         Segment::Cache,
         Segment::Ctx,
         Segment::Compacted,
+        Segment::Queued,
         Segment::Cost,
     ]
 }

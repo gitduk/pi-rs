@@ -78,13 +78,13 @@ fn paint(
     mut rx: mpsc::UnboundedReceiver<agent::Event>,
     quiet: bool,
     theme: std::sync::Arc<crate::store::theme::Theme>,
-    done: Vec<crate::store::status::Segment>,
+    status: Vec<crate::store::status::Segment>,
     model: String,
     pricing: llm::model::Pricing,
     worktree: Option<String>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut r = render::Renderer::new(quiet, theme, done, model, pricing, worktree);
+        let mut r = render::Renderer::new(quiet, theme, status, model, pricing, worktree);
         while let Some(event) = rx.recv().await {
             r.on(event);
         }
@@ -276,7 +276,7 @@ async fn main() -> Result<()> {
         rx,
         quiet,
         std::sync::Arc::new(config.theme.clone()),
-        config.status.done.clone(),
+        config.status.to_vec(),
         model_id.clone(),
         ag.spec().pricing,
         worktree.clone(),

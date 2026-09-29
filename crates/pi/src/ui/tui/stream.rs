@@ -15,7 +15,7 @@ use crate::ui::status;
 use agent::Event;
 use agent::session::Entry as LogEntry;
 use ratatui::layout::Rect;
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListState};
 use std::time::Instant;
 
@@ -57,25 +57,17 @@ impl Ui {
     // part of one — sent there it also stacked a row per press, which is how
     // holding the step key in a single checkout wrote a screenful of one line.
     // Muted here rather than at the callers, which had drifted apart on it.
+    // A flash is a short answer nobody reads back; anything longer, or worth
+    // copying, belongs in the scrollback instead.
     pub(super) fn flash(&mut self, line: impl Into<String>) {
-        let text = Line::from(self.paint.span(&self.paint.theme.muted, line.into()));
-        self.flash = Some((text, Instant::now()));
+        self.flash = Some((line.into(), Instant::now()));
     }
 
-    // The bar's row for a retry, worded as the one-shot renderer words it and
-    // given the bar's own width, so `describe`'s clipping and ellipsis are drawn.
-    pub(super) fn flash_event(&mut self, event: &Event) {
-        let row = render::describe(event, &self.paint, self.screen.usable())
-            .and_then(|rows| rows.into_iter().next());
-        if let Some(row) = row {
-            self.flash(row.to_string());
-        }
-    }
-
-    // The bar row while a flash is up, and the only place an expired one is
-    // dropped — every frame passes through here, so nothing else has to
-    // remember to clear it.
-    fn flash_line(&mut self, width: usize) -> Option<Line<'static>> {
+    // The bar row: the bar on the left, a flash while one is up on the right,
+    // and a bare row when there is neither — never nothing, so nothing above
+    // it moves. The only place an expired flash is dropped: every frame passes
+    // through here, so nothing else has to remember to clear it.
+    pub(super) fn bar_line(&mut self, model: &str, width: usize) -> Line<'static> {
         if self
             .flash
             .as_ref()
@@ -83,17 +75,33 @@ impl Ui {
         {
             self.flash = None;
         }
-        let (text, _) = self.flash.as_ref()?;
-        screen::fit(text, width).into_iter().next()
-    }
-
-    // The bar row, whatever it is saying: the flash while it is up, the bar's
-    // own line otherwise, and a bare row when there is neither — never nothing,
-    // so nothing above it moves.
-    fn bar_line(&mut self, model: &str, width: usize) -> Line<'static> {
-        self.flash_line(width)
-            .or_else(|| self.lane_bar(model, width))
-            .unwrap_or_default()
+        let Some((text, _)) = &self.flash else {
+            return self.lane_bar(model, width).unwrap_or_default();
+        };
+        const GAP: usize = 2;
+        let wants = unicode_width::UnicodeWidthStr::width(text.as_str());
+        let bar_w = self.lane_bar(model, width).map_or(0, |l| l.width());
+        // Beside the bar when both fit; otherwise the flash keeps up to half
+        // the row and the bar folds itself into the rest.
+        let room = if bar_w + GAP + wants <= width {
+            wants
+        } else {
+            width.saturating_sub(bar_w + GAP).max(wants.min(width / 2))
+        };
+        let text = if wants <= room {
+            text.clone()
+        } else {
+            crate::text::clip(text, room.saturating_sub(1))
+        };
+        let flash = self.paint.span(&self.paint.theme.muted, text);
+        let mut spans = self
+            .lane_bar(model, width.saturating_sub(room + GAP))
+            .map(|l| l.spans)
+            .unwrap_or_default();
+        let used: usize = spans.iter().map(Span::width).sum::<usize>() + flash.width();
+        spans.push(Span::raw(" ".repeat(width.saturating_sub(used))));
+        spans.push(flash);
+        Line::from(spans)
     }
 
     // Where a finished row goes: a reasoning line into the streaming block's
@@ -196,6 +204,9 @@ impl Ui {
         // Every number either status line shows is read here, once. The arms
         // below decide only what reaches the scrollback.
         lane.note(&event);
+        if !matches!(event, Event::Retrying { .. }) {
+            view.state.retry = None;
+        }
         match &event {
             Event::TextDelta(d) => self.write(view, d, false),
             Event::ReasoningDelta(d) => self.write(view, d, true),
@@ -212,7 +223,7 @@ impl Ui {
                 // Asked now rather than at every draw: a run whose segments
                 // all had nothing to say leaves no row, and a blank one is
                 // worse than none.
-                let parts = status::parts(&self.done, &snap);
+                let parts = status::parts(&self.status, &snap);
                 if !parts.is_empty() {
                     // Filed, not just drawn: the numbers are the run's own and
                     // nothing else holds them, so a row that was not filed is
@@ -278,8 +289,21 @@ impl Ui {
                 self.close(view);
                 self.adopt(view, entries);
             }
-            // A retry is transport news, not a step of the answer: here is one
-            // a lane out of sight met, kept as a row in its own view.
+            // Transport news, not a step of the answer: the wait goes on the
+            // status line, the reason — often a whole error body — in a row
+            // of its own where it can be read in full.
+            Event::Retrying {
+                attempt,
+                delay_ms,
+                reason,
+            } => {
+                self.close(view);
+                view.state.retry = Some(format!(
+                    "retry {attempt} in {}",
+                    render::fmt_delay(*delay_ms)
+                ));
+                self.say_muted(view, reason.as_str());
+            }
             _ => {
                 self.close(view);
                 if let Some(said) = render::describe(&event, &self.paint, self.screen.usable()) {

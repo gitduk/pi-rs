@@ -118,7 +118,8 @@ One loop owns the terminal for the whole session. Finished output is pushed
 searchable, still there after exit. Only what is still changing is repainted.
 Pinned under it is the bar: the checkouts of this repository, the one in front
 among them, and the model in force at the end of the row — a row too narrow for
-them all drops from the ends and marks the gap with an `…`.
+them all drops from the ends and marks the gap with an `…`. A keypress's short
+answer (`nothing to rewind to`) stands at the row's right end for a moment.
 
 A slash command answers over the menu instead of into the scrollback: the rows
 are dismissed rather than kept, because what a command says is not part of the

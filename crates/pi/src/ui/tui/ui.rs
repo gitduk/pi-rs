@@ -23,7 +23,7 @@ use crate::core::resolve::Resolved;
 use crate::input::commands::{Choice, Command};
 use crate::store::icons;
 use crate::store::keys::Keys;
-use crate::store::status::{Segment, default_done, default_live};
+use crate::store::status::{Segment, default_parts};
 use crate::store::theme::Style as ThemeStyle;
 use crate::store::theme::{Theme, bands_for};
 use crate::ui::render::Paint;
@@ -84,14 +84,13 @@ pub(super) struct Ui {
     pub(super) spinner: usize,
     // The modal keys, or None while they are off.
     pub(super) vim: Option<Vim>,
-    // The segments each line shows, in the order the config named them.
-    pub(super) live: Vec<Segment>,
-    pub(super) done: Vec<Segment>,
+    // The segments the status line shows, in the order the config named them.
+    pub(super) status: Vec<Segment>,
     // What the bar says, in ring order. Rebuilt before every draw.
     pub(super) tabs: Vec<Tab>,
-    // A note answering the last keypress, painted, and when it landed. It
-    // takes the bar's row for `FLASH` and then goes — see `flash`.
-    pub(super) flash: Option<(Line<'static>, Instant)>,
+    // A note answering the last keypress, and when it landed. It stands at
+    // the bar's right end for `FLASH` and then goes — see `bar_line`.
+    pub(super) flash: Option<(String, Instant)>,
     pub(super) hovered_scrollback: Option<usize>,
     pub(super) row_targets: Vec<Target>,
     // Where the frame's regions landed last. The click handler reads them
@@ -202,8 +201,7 @@ impl Ui {
             vim: None,
             reply: None,
             spinner: 0,
-            live: default_live(),
-            done: default_done(),
+            status: default_parts(),
             tabs: Vec::new(),
             flash: None,
             hovered_scrollback: None,
@@ -288,9 +286,10 @@ impl Ui {
         });
 
         if lane.is_running() && !self.browsing {
-            let mut parts = status::parts(&self.live, &snapshot(lane, view));
+            let mut parts = status::parts(&self.status, &snapshot(lane, view));
             // A run that is stopping says so; an ordinary running line needs
             // no word for it — the spinner is what says the turn is on.
+            parts.extend(view.state.retry.clone());
             if view.state.stopping {
                 parts.push(format!("stopping{}", icons::ELLIPSIS));
             }
@@ -316,7 +315,7 @@ impl Ui {
         // off the checkouts' before they are fitted.
         let model = (!model.is_empty()).then(|| self.paint.span(&theme.muted, model.to_string()));
         let Some(front) = self.tabs.iter().position(|t| t.mark == Mark::Front) else {
-            return model.map(Line::from);
+            return model.and_then(|m| screen::fit(&Line::from(m), width).into_iter().next());
         };
         let strip = model
             .as_ref()
@@ -482,8 +481,7 @@ impl Ui {
         }
         self.set_vim(&core.config.vim);
         // And the segment lists, copied in at startup.
-        self.live = core.config.status.live.clone();
-        self.done = core.config.status.done.clone();
+        self.status = core.config.status.to_vec();
     }
 }
 

@@ -764,7 +764,7 @@ fn normal_capitals_step_the_checkouts_and_the_window() {
 async fn an_edited_project_file_reaches_the_surface_and_names_what_outranks_it() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let mut tui = surface(dir.path());
-    assert!(!tui.ui.live.contains(&Segment::Model));
+    assert!(!tui.ui.status.contains(&Segment::Model));
     // An empty user file of its own, so the reload never reads the real one.
     let user = dir.path().join("settings.toml");
     std::fs::write(&user, "").expect("an empty settings file");
@@ -773,7 +773,7 @@ async fn an_edited_project_file_reaches_the_surface_and_names_what_outranks_it()
 
     std::fs::write(
         dir.path().join(".pi.toml"),
-        "effort = \"low\"\n[status]\nlive = [\"model\"]\n",
+        "effort = \"low\"\nstatus = [\"model\"]\n",
     )
     .expect("the project file");
     let said = tui.core.config_edited();
@@ -783,7 +783,7 @@ async fn an_edited_project_file_reaches_the_surface_and_names_what_outranks_it()
         "{said:?}"
     );
     tui.land_lines(Listing::say(said));
-    assert_eq!(tui.ui.live, vec![Segment::Model]);
+    assert_eq!(tui.ui.status, vec![Segment::Model]);
 }
 
 // A reload reaches everything the config installed, not only the values the

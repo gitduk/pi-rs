@@ -83,6 +83,7 @@ impl Tui {
         view.state.started = Some(std::time::Instant::now());
         view.state.committed = committed;
         view.state.stopping = false;
+        view.state.retry = None;
         self.core.lane_mut().seed_meter();
     }
 
@@ -286,7 +287,10 @@ impl Tui {
     pub(super) async fn edit_config(&mut self, path: std::path::PathBuf) {
         let (ran, resumed) = self.in_editor(&path).await;
         if let Err(e) = resumed {
-            self.ui.flash(format!("the screen did not come back: {e}"));
+            self.say_of(
+                self.core.current,
+                format!("the screen did not come back: {e}"),
+            );
         }
         let said = match ran {
             Err(why) => vec![why],
@@ -302,7 +306,7 @@ impl Tui {
         let path = match scratch_file(self.ui.editor.text()) {
             Ok(path) => path,
             Err(e) => {
-                self.ui.flash(format!("no scratch file: {e}"));
+                self.say_of(self.core.current, format!("no scratch file: {e}"));
                 return;
             }
         };
@@ -310,6 +314,7 @@ impl Tui {
 
         // Judged on its own: a save that succeeded is still a save when the
         // screen comes back badly, and reading the two together threw it away.
+        let quit = matches!(&ran, Ok(s) if !s.success());
         let (mut keep, mut said) = match ran {
             Err(why) => (false, Some(why)),
             // `:cq` is how vim says "forget it". Git reads a non-zero exit the
@@ -346,12 +351,10 @@ impl Tui {
         if !keep {
             let _ = std::fs::remove_file(&path);
         }
-        // `keep` is exactly "this message names the file": the two branches
-        // that leave one behind are the two the user has to act on, and a row
-        // in the transcript is what survives long enough to copy a path out
-        // of. The rest are a press's own answer.
+        // Only a plain `:cq` is a press's own answer; the rest carry an error
+        // or name the file left behind, and belong where they can be re-read.
         if let Some(line) = said {
-            if keep {
+            if keep || !quit {
                 self.say_of(self.core.current, line);
             } else {
                 self.ui.flash(line);
@@ -604,6 +607,7 @@ impl Tui {
         // frozen spinner.
         self.ui.abandon_tools(view);
         view.state.started = None;
+        view.state.retry = None;
         match out {
             Ok(_) => {}
             Err(AgentError::Cancelled) => {

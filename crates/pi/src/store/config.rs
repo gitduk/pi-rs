@@ -90,9 +90,9 @@ pub struct Config {
     /// The SGR codes behind every colour the terminal uses.
     #[serde(default)]
     pub theme: crate::store::theme::Theme,
-    /// Which parts the running and the finished status lines show.
+    /// Which parts the status line under the answer shows, running or done.
     #[serde(default)]
-    pub status: crate::store::status::Lines,
+    pub status: crate::store::status::Parts,
     /// Vim keys: on unless a file turns them off.
     #[serde(default)]
     pub vim: Vim,
@@ -741,6 +741,15 @@ pub fn warn_if_exposed(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The example is documentation nothing else reads, so this is what keeps
+    // a renamed or removed key from rotting in it.
+    #[test]
+    fn the_shipped_example_is_a_valid_config() {
+        let example = include_str!("../../../../examples/pi.toml");
+        let config = Config::from_tree(toml::from_str(example).unwrap());
+        assert!(config.is_ok(), "{:?}", config.err());
+    }
 
     const SAMPLE: &str = r#"
 base_url = "http://localhost:7896/v1"

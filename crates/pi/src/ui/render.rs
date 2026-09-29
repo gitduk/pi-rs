@@ -415,7 +415,7 @@ fn diverged(was: &str, is: &str) -> (Range<usize>, Range<usize>) {
     (was_at..was_at + cut(was_rest), is_at..is_at + cut(is_rest))
 }
 
-fn fmt_delay(ms: u64) -> String {
+pub fn fmt_delay(ms: u64) -> String {
     if ms >= 1000 {
         format!("{:.2}s", ms as f64 / 1000.0)
     } else {
@@ -497,7 +497,7 @@ pub struct Renderer {
     quiet: bool,
     // The segments this renderer ends a run with. A one-shot run times nothing
     // and queues nothing, so `elapsed` and `queued` have nothing to say here.
-    done: Vec<crate::store::status::Segment>,
+    status: Vec<crate::store::status::Segment>,
     // Read off the same events the terminal reads, so a one-shot run ends on
     // the line the terminal would have shown it.
     tally: crate::core::meter::Tally,
@@ -516,7 +516,7 @@ impl Renderer {
     pub fn new(
         quiet: bool,
         theme: Arc<Theme>,
-        done: Vec<crate::store::status::Segment>,
+        status: Vec<crate::store::status::Segment>,
         model: String,
         pricing: Pricing,
         worktree: Option<String>,
@@ -528,7 +528,7 @@ impl Renderer {
         Self {
             paint: Paint::with_theme(std::io::stderr().is_terminal(), theme),
             quiet,
-            done,
+            status,
             tally,
             model,
             worktree,
@@ -566,7 +566,7 @@ impl Renderer {
                 let snap = self
                     .tally
                     .snapshot(&self.model, self.worktree.as_deref(), None, 0);
-                let line = crate::ui::status::line(&self.done, &snap);
+                let line = crate::ui::status::line(&self.status, &snap);
                 if !line.is_empty() {
                     eprintln!("{}", self.paint.on(&self.paint.theme.muted, &line));
                 }
@@ -702,7 +702,7 @@ mod tests {
         let mut r = super::Renderer::new(
             false,
             std::sync::Arc::new(super::Theme::default()),
-            crate::store::status::default_done(),
+            crate::store::status::default_parts(),
             String::new(),
             llm::model::Pricing::default(),
             None,

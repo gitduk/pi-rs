@@ -23,7 +23,6 @@ mod ui;
 mod view;
 mod vim;
 
-use agent::Event;
 use agent::session::EntryId;
 use anyhow::Result;
 use crossterm::event::Event as TermEvent;
@@ -183,8 +182,7 @@ impl Tui {
         // reader would never see those bytes again.
         ui.editor.insert_str(&answer.typed);
         ui.at_root = core.lane().root().to_path_buf();
-        ui.live = core.config.status.live.clone();
-        ui.done = core.config.status.done.clone();
+        ui.status = core.config.status.to_vec();
         ui.set_vim(&core.config.vim);
         let mut opening = View::opening(core.lane().resolved(), &ui.paint);
         opening.model = core.lane().model().to_string();
@@ -343,13 +341,6 @@ impl Tui {
                 self.drivers.observe(self.core.lanes[at].token(), &event);
                 // Opened first: a banner drawn later would replace the rows.
                 let view = view::opened(&mut self.views, &self.core.lanes[at], &self.ui.paint);
-                // A retry is transport news, not a step of the answer: in front
-                // it takes the bar a moment; out of sight it is a row to find.
-                if at == self.core.current && matches!(event, Event::Retrying { .. }) {
-                    self.ui.close(view);
-                    self.ui.flash_event(&event);
-                    continue;
-                }
                 self.ui.on_event(&mut self.core.lanes[at], view, event);
             }
         }

@@ -84,9 +84,32 @@ idle_timeout = 300
 # edit may touch, so grant it the way you would a shell. Entries must be
 # absolute; a directory that does not exist yet is created on first write.
 # Empty by default: those tools stay inside the workspace. Read tools already
-# reach anywhere. Only this file can set it — a cloned pi.toml may not lower
-# the boundary.
+# reach anywhere.
 # write_roots = ["/tmp", "/home/me/scratch"]
+
+# Which parts the status line under the answer shows, in this order. One
+# list: the line repaints while a turn runs and stays in the scrollback once it
+# ends. Naming none keeps this default.
+#
+# The spend parts — in_out, cache and cost — are the run's own: what this
+# answer has cost since you sent it, not what the session had before it. The
+# session's running total is the `spent:` line `/status` prints, and no part
+# of the status line reads it.
+#
+#   elapsed    3s / 2m05s — nothing times a one-shot run, so it drops there
+#   in_out     8.4k in / 390 out, a dash for a half the provider never stated
+#   cache      41.2k cached, left out when nothing was read from cache
+#   cost       $0.0012, left out when the model carries no pricing
+#   ctx        ctx 54/743.4k, the transcript against what it may occupy
+#   compacted  compacted 2×, left out when the run never shrank the transcript
+#   queued     2 queued — lines submitted while the run worked
+#   model      deepseek-v4-flash
+#   worktree   feature-one, left out in the repository's own checkout
+#
+# A part with nothing to say is left out rather than shown empty, so one list
+# serves the running line and the finished one: `queued` is gone once the run
+# ends, `cost` until something has been spent.
+status = ["elapsed", "in_out", "cache", "ctx", "compacted", "queued", "cost"]
 
 # ---------------------------------------------------------------------------
 # Facts about a model the defaults get wrong.
@@ -136,30 +159,3 @@ replay_thinking = "tagged"
 "menu.accept"   = ["tab"]
 "menu.next"     = ["down", "ctrl+n"]
 "menu.previous" = ["up", "ctrl+p"]
-
-[status]
-# Which parts each status line shows, in this order. The running line is the
-# one that repaints under the spinner; the finished line is printed once a
-# turn ends and stays in the scrollback. Naming neither keeps these defaults.
-#
-# The spend parts — in_out, cache and cost — are the run's own: what this
-# answer has cost since you sent it, not what the session had before it. The
-# session's running total is the `spent:` line `/status` prints, and no part
-# of a status line reads it.
-#
-#   elapsed    3s / 2m05s — the running line only; nothing times a pipe
-#   in_out     8.4k in / 390 out, a dash for a half the provider never stated
-#   cache      41.2k cached, left out when nothing was read from cache
-#   cost       $0.0012, left out when the model carries no pricing
-#   turns      2 turns — the finished line only
-#   ctx        ctx 54/743.4k, the transcript against what it may occupy
-#   compacted  compacted 2×, left out when the run never shrank the transcript
-#   queued     2 queued — lines submitted while the run worked
-#   model      deepseek-v4-flash
-#   worktree   feature-one, left out in the repository's own checkout
-#
-# A part with nothing to say is left out rather than shown empty, so a line
-# that asks for `cost` against an unpriced model simply does not carry it.
-# A running line carries no extra word: the spinner is what says a turn is on.
-live = ["elapsed", "in_out", "cache", "ctx", "queued", "worktree"]
-done = ["turns", "in_out", "cache", "ctx", "compacted", "cost", "worktree"]
