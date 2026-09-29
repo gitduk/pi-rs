@@ -320,13 +320,14 @@ fn blank_note(edits: &[usize]) -> String {
 }
 
 // One row of a sketch: a file row under the sign that says which side of the
-// edit it is on, or the count of the rows a long run left out.
+// edit it is on, or a mark where a long run left rows out.
 #[derive(Clone, Copy)]
 enum Row<'x> {
     // `n` numbers the row in the file it is read in: the old file for a row
     // that went, the new one for a row that came or stayed.
     Line { sign: char, n: usize, text: &'x str },
-    Elided(usize),
+    // Rows left out; the jump in the numbers says how many.
+    Gap,
 }
 
 impl<'x> Row<'x> {
@@ -505,18 +506,18 @@ fn sketch(path: &str, applied: &Applied) -> String {
         // A marker earns its row only where shown rows sit on both sides of
         // it, or where a changed run was cut short.
         if !run[0].is_kept() || (head > 0 && tail > 0) {
-            shown.push(Row::Elided(run.len() - head - tail));
+            shown.push(Row::Gap);
         }
         shown.extend_from_slice(&run[run.len() - tail..]);
     }
     shown.dedup_by(|a, b| a.is_blank() && b.is_blank());
     // Right-aligned so a three-digit row lines up with a two-digit one, and
-    // the mark starts where the rows it stands for do.
+    // the mark sits in the number column, apart from any text.
     let width = shown
         .iter()
         .filter_map(|r| match r {
             Row::Line { n, .. } => Some(*n),
-            Row::Elided(_) => None,
+            Row::Gap => None,
         })
         .max()
         .map_or(1, |n| n.to_string().len());
@@ -524,7 +525,7 @@ fn sketch(path: &str, applied: &Applied) -> String {
         .iter()
         .map(|r| match r {
             Row::Line { sign, n, text } => format!("{sign}{n:>width$} {text}"),
-            Row::Elided(n) => format!("{}… {n} lines", " ".repeat(width + 2)),
+            Row::Gap => format!(" {:>width$}", '⋮'),
         })
         .collect();
     std::iter::once(format!("{path} +{plus} -{minus}"))
