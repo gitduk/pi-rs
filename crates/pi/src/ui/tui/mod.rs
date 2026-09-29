@@ -195,8 +195,7 @@ impl Tui {
         ui.live = core.config.status.live.clone();
         ui.done = core.config.status.done.clone();
         ui.set_vim(&core.config.vim);
-        let context = core.lane().resolved().context.clone();
-        let mut opening = View::opening(&context, &ui.paint);
+        let mut opening = View::opening(core.lane().resolved(), &ui.paint);
         opening.model = core.lane().model().to_string();
         let mut views = Views::new();
         views.insert(core.lane().token(), opening);

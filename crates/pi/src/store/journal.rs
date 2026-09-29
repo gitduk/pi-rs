@@ -649,7 +649,7 @@ pub fn opening(
     id: &str,
     args: &crate::args::Args,
     config: &crate::store::config::Config,
-    project: &crate::store::config::Project,
+    project: Option<&Path>,
     root: &Path,
     prior: Option<&crate::store::session::Stored>,
 ) {
@@ -662,8 +662,7 @@ pub fn opening(
         models = config.names().len(),
         rebound_keys = config.keys.len(),
         model = config.model.as_deref().unwrap_or("-"),
-        project_model = project.model.as_deref().unwrap_or("-"),
-        project_max_tier = ?project.max_tier,
+        project = %project.map_or("-".into(), |p| p.display().to_string()),
         resumed = prior.map(|p| p.session.entries().len()).unwrap_or(0),
         session = id,
         "start"

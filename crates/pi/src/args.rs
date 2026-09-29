@@ -66,14 +66,6 @@ impl From<tool::Tier> for TierArg {
     }
 }
 
-impl TierArg {
-    /// A project ceiling applied downward. `tool::Tier` owns the rule, which
-    /// is not `min`: `write` and `net` have no order between them.
-    pub fn capped_by(self, other: Self) -> Self {
-        tool::Tier::from(self).capped_by(other.into()).into()
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, ValueEnum, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EffortArg {

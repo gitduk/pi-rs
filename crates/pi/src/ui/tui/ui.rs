@@ -20,6 +20,7 @@ use super::view::{StreamKind, View, snapshot};
 use super::vim::Vim;
 use crate::core::Core;
 use crate::core::lane::Lane;
+use crate::core::resolve::Resolved;
 use crate::input::commands::{Choice, Command};
 use crate::store::icons;
 use crate::store::keys::Keys;
@@ -450,7 +451,7 @@ impl Ui {
     pub(super) fn set_theme(
         &mut self,
         view: &mut View,
-        context: &[String],
+        resolved: &Resolved,
         theme: Arc<crate::store::theme::Theme>,
     ) {
         self.paint.theme = theme;
@@ -460,7 +461,7 @@ impl Ui {
         self.show_mode();
         // The opening block is painted once at construction; rebuild it so a
         // /reload lands on the new theme instead of the old.
-        let opening = Row::banner(context, &self.paint);
+        let opening = Row::banner(resolved, &self.paint);
         let rest = view.surface.scrollback.split_off(view.surface.opened);
         view.surface.opened = opening.len();
         view.surface.scrollback = opening.into_iter().chain(rest).collect();
@@ -481,7 +482,7 @@ impl Ui {
         // painted in it — and every copy takes the terminal's band.
         let theme = following_terminal(&core.config.theme, self.tty_bg);
         if self.paint.theme.as_ref() != &theme {
-            self.set_theme(view, &core.lane().resolved().context, Arc::new(theme));
+            self.set_theme(view, core.lane().resolved(), Arc::new(theme));
         }
         if !Arc::ptr_eq(&self.commands, &core.commands) {
             self.commands = core.commands.clone();

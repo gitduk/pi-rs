@@ -480,7 +480,10 @@ mod tests {
             config: std::sync::Arc::new(crate::store::config::Config::default()),
             pinned: crate::args::Pinned::default(),
             commands,
-            settings: crate::store::settings::Settings::new(toml::Value::Table(Default::default())),
+            settings: crate::store::settings::Settings::new(
+                toml::Value::Table(Default::default()),
+                None,
+            ),
             lanes: vec![lane],
             current: 0,
         }

@@ -30,7 +30,6 @@ use crate::core::meter::{Snapshot, Tally};
 use crate::core::resolve::Resolved;
 use crate::input::commands::ago;
 use crate::input::{Rewound, refused};
-use crate::store::config;
 use crate::store::icons;
 use crate::store::journal;
 use crate::store::session::{self, Stored};
@@ -202,6 +201,7 @@ pub(crate) fn a_resolved(standing: &str) -> Arc<Resolved> {
         commands: Arc::new(Vec::new()),
         notes: Vec::new(),
         context: Vec::new(),
+        endpoint: None,
     })
 }
 
@@ -688,7 +688,8 @@ impl Core {
     // Open a checkout as a lane of its own, and put it in front.
     //
     // Whole or not at all, like every other path that reads a config: a tree
-    // whose config or skills will not resolve leaves the run where it was.
+    // whose skills will not resolve leaves the run where it was. The config is
+    // the one in force, not re-read for this tree: `/reload` does that.
     pub(super) fn open_lane(
         &mut self,
         ws: tool::Workspace,
@@ -696,15 +697,9 @@ impl Core {
     ) -> Result<Vec<String>, String> {
         let root = ws.root().to_path_buf();
         let failed = |e| format!("nothing opened — {}", refused("worktree", e));
-        let project = config::load_project(&root).map_err(failed)?;
-        let resolved = crate::core::resolve::resolve(
-            &self.pinned,
-            &ws,
-            &self.config,
-            &project,
-            self.settings.claimed(),
-        )
-        .map_err(failed)?;
+        let resolved =
+            crate::core::resolve::resolve(&self.pinned, &ws, &self.config, &self.settings)
+                .map_err(failed)?;
 
         // The model travels; what the root decides does not. A switch changes
         // trees, and which model is answering was a decision made elsewhere.

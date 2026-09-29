@@ -3,16 +3,34 @@
 //! There is no table of settings here: the tree is `Config` serialized, so a
 //! field added to the struct appears without anything else being edited.
 //!
-//! `Settings` is the pair a run carries: the tree as the file last said it, and
-//! the values this session claimed on top. What the config is computed from is
-//! the two overlaid; what the panel edits is the claim, and `/reload` replaces
-//! the file's half.
+//! `Settings` is what a run carries: the tree as the files last said it — the
+//! user's, with the project's `.pi.toml` laid over it — and the values this
+//! session claimed on top. What the config is computed from is the two
+//! overlaid; what the panel edits is the claim, and `/reload` replaces the
+//! files' half.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
-use serde::Deserialize as _;
+
+// `over`'s keys replace `base`'s, table by table; anything else replaces whole.
+fn overlay(base: &mut toml::Value, over: &toml::Value) {
+    match (base, over) {
+        (toml::Value::Table(base), toml::Value::Table(over)) => {
+            for (k, v) in over {
+                match base.get_mut(k) {
+                    Some(slot) => overlay(slot, v),
+                    None => {
+                        base.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+        (slot, v) => *slot = v.clone(),
+    }
+}
 
 /// Every leaf, as `path` and the value rendered the way a file would write it.
 pub fn leaves(tree: &toml::Value) -> Vec<(String, String)> {
@@ -45,29 +63,65 @@ pub struct SettingRow {
     pub changed: bool,
 }
 
-/// The config file as this run read it, and the values this session claimed on
-/// top of it.
+/// The config files as this run read them, and the values this session claimed
+/// on top of them.
 pub struct Settings {
-    // The tree as last read from disk. `/settings` edits a copy of it;
-    // `/reload` replaces it.
+    // The user's tree with the project's over it, as last read from disk.
+    // `/settings` edits a copy of it; `/reload` replaces it.
     file: toml::Value,
+    // The project's file and its own tree, to say which keys it set.
+    project: Option<(PathBuf, toml::Value)>,
     // What this session has claimed, by path. Replayed over every reload, so a
     // claimed value keeps winning over the file.
     claimed: BTreeMap<String, toml::Value>,
 }
 
 impl Settings {
-    pub fn new(file: toml::Value) -> Self {
+    pub fn new(user: toml::Value, project: Option<(PathBuf, toml::Value)>) -> Self {
+        let mut file = user;
+        if let Some((_, tree)) = &project {
+            overlay(&mut file, tree);
+        }
         Self {
             file,
+            project,
             claimed: BTreeMap::new(),
         }
     }
 
-    /// Re-read the file, keeping what this session has claimed.
-    pub fn reread(&mut self, at: Option<&str>) -> Result<()> {
-        self.file = crate::store::config::load_tree(at)?;
+    /// The user's file (`at`, else the default) and the project file nearest
+    /// `root`.
+    pub fn load(at: Option<&str>, root: &Path) -> Result<Self> {
+        Ok(Self::new(
+            crate::store::config::load_tree(at)?,
+            crate::store::config::load_project(root)?,
+        ))
+    }
+
+    /// Re-read both files, keeping what this session has claimed.
+    pub fn reread(&mut self, at: Option<&str>, root: &Path) -> Result<()> {
+        let claimed = std::mem::take(&mut self.claimed);
+        *self = Self {
+            claimed,
+            ..Self::load(at, root)?
+        };
         Ok(())
+    }
+
+    /// The config in force: the files, the claims, the environment.
+    pub fn config(&self) -> Result<crate::store::config::Config> {
+        crate::store::config::Config::in_force(self.effective()?, &self.claimed)
+    }
+
+    /// The project file read, if one was found.
+    pub fn project(&self) -> Option<&Path> {
+        self.project.as_ref().map(|(file, _)| file.as_path())
+    }
+
+    /// The project file, when it is the one holding a value at `path`.
+    pub fn project_sets(&self, path: &str) -> Option<&Path> {
+        let (file, tree) = self.project.as_ref()?;
+        get(tree, path).ok().map(|_| file.as_path())
     }
 
     /// The file tree with the claims on top — what the config is computed from.
@@ -104,7 +158,7 @@ impl Settings {
         let old = get(&scratch, path).ok().cloned();
         set(&mut scratch, path, &raw)?;
         let new = get(&scratch, path).expect("the path was just set").clone();
-        crate::store::config::Config::deserialize(scratch).map_err(|e| anyhow::anyhow!(e))?;
+        crate::store::config::Config::from_tree(scratch)?;
         self.claimed.insert(path.to_string(), new.clone());
         Ok((old, new))
     }
@@ -304,6 +358,32 @@ fn parse_after(cur: &toml::Value, raw: &str) -> Result<toml::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The project's file wins key by key, tables merged rather than replaced,
+    // and says which keys are its own.
+    #[test]
+    fn the_project_file_lays_over_the_user_file_key_by_key() {
+        let user = toml::from_str(
+            "base_url = \"http://user\"\nmodel = \"a\"\n[vim]\nenabled = false\nescape = \"jk\"\n",
+        )
+        .unwrap();
+        let project =
+            toml::from_str("base_url = \"http://project\"\n[vim]\nenabled = true\n").unwrap();
+        let s = Settings::new(user, Some((PathBuf::from("/repo/.pi.toml"), project)));
+        let tree = s.effective().unwrap();
+        assert_eq!(
+            get(&tree, "base_url").unwrap().as_str(),
+            Some("http://project")
+        );
+        assert_eq!(get(&tree, "model").unwrap().as_str(), Some("a"));
+        assert_eq!(get(&tree, "vim.enabled").unwrap().as_bool(), Some(true));
+        assert_eq!(get(&tree, "vim.escape").unwrap().as_str(), Some("jk"));
+        assert_eq!(
+            s.project_sets("base_url"),
+            Some(Path::new("/repo/.pi.toml"))
+        );
+        assert_eq!(s.project_sets("model"), None);
+    }
 
     const SAMPLE: &str = r##"
 base_url = "http://localhost:7896/v1"

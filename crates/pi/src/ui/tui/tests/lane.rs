@@ -69,7 +69,7 @@ async fn switching_back_to_a_rebuilt_lane_keeps_its_transcript() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let mut tui = surface(dir.path());
     let lane = running_lane(dir.path());
-    let mut view = crate::ui::tui::View::opening(&[], &tui.ui.paint);
+    let mut view = crate::ui::tui::View::opening(&crate::core::lane::a_resolved(""), &tui.ui.paint);
     // As `rebuild` leaves it: the conversation, and no banner.
     view.surface.scrollback = vec![Row::notice("what was said before")];
     view.surface.opened = 0;

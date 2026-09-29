@@ -114,7 +114,10 @@ pub(super) fn surface(dir: &std::path::Path) -> crate::ui::tui::Tui {
         config: std::sync::Arc::new(crate::store::config::Config::default()),
         pinned: crate::args::Pinned::default(),
         commands: std::sync::Arc::new(Vec::new()),
-        settings: crate::store::settings::Settings::new(toml::Value::Table(Default::default())),
+        settings: crate::store::settings::Settings::new(
+            toml::Value::Table(Default::default()),
+            None,
+        ),
         lanes: vec![running_lane(dir)],
         current: 0,
     };

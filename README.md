@@ -79,13 +79,13 @@ a stated default. A key that is not one of them is refused at load, with the
 list of the ones that are: a typo there otherwise leaves a quirk at its default
 and produces a 400 much later, pointing at nothing.
 
-**Projects may configure, not redirect.** A `.pi.toml` inside a repository may
-set `model`, `effort` and `max_tier`, and nothing else. It arrives
-by `git clone`; a base url, a key or a system-prompt path would let a checkout
-point the run at a server of its own or name any file on disk to be sent to the
-provider. `max_tier` applies downward only, so a repository can declare itself
-read-only but cannot hand itself the shell — not even past an explicit
-`--tier`.
+**A project file lays over the user's.** A `.pi.toml` at or above the
+workspace, up to the repository root, takes the same keys as
+`~/.pi/settings.toml` and wins key by key — a repository can point at its own
+endpoint. Anything it sets is yours to trust: that includes `base_url`,
+`api_key`, `system` and `write_roots`, so read the `.pi.toml` of a checkout you
+did not write. The screen opens with the endpoint in force and where it came
+from, and `/status` repeats it.
 
 ## Run
 

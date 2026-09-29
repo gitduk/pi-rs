@@ -22,6 +22,7 @@ impl Core {
     pub(super) fn status_lines(&self) -> Vec<String> {
         let lane = self.lane();
         let mut out = standing_head(&lane.resolved().standing);
+        out.extend(lane.resolved().endpoint.clone());
         if !lane.resolved().context.is_empty() {
             out.push("context:".into());
             out.extend(lane.resolved().context.iter().map(|c| format!("- {c}")));

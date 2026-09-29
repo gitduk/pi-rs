@@ -19,6 +19,7 @@ use ratatui::style::Style as RStyle;
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::core::resolve::Resolved;
 use crate::store::icons;
 use crate::ui::render::named;
 use crate::ui::render::{self, Paint};
@@ -763,17 +764,19 @@ impl Row {
         }
     }
 
-    /// What the screen opens with: the version, and the instruction files this
-    /// run stands on.
+    /// What the screen opens with: the version, the endpoint requests go to,
+    /// and the instruction files this run stands on.
     ///
     /// Built rather than stored, so a `/reload` onto a new theme replaces the
     /// rows instead of repainting the strings inside them — there is no way to
     /// reach those. The files are shown here rather than said as a startup
     /// note: they are what the run is standing on, not news, and a note about
     /// them scrolls away while this stays at the top where it belongs.
-    pub fn banner(context: &[String], paint: &Paint) -> Vec<Self> {
+    pub fn banner(resolved: &Resolved, paint: &Paint) -> Vec<Self> {
         let muted = |line: &str| Self::notice(Line::from(paint.span(&paint.theme.muted, line)));
         let mut rows = vec![muted(icons::VERSION_BANNER)];
+        rows.extend(resolved.endpoint.as_deref().map(muted));
+        let context = &resolved.context;
         if !context.is_empty() {
             rows.push(muted("context:"));
             rows.extend(context.iter().map(|f| muted(&format!("- {f}"))));

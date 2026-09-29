@@ -12,6 +12,7 @@ use super::scrollback::{Folds, scrollback_from};
 use crate::core::Core;
 use crate::core::lane::Lane;
 use crate::core::meter::Snapshot;
+use crate::core::resolve::Resolved;
 use crate::driver::Origin;
 use crate::input::Intent;
 use crate::ui::render::Paint;
@@ -192,7 +193,7 @@ pub(super) fn tail_of(session: &agent::session::Session) -> Option<EntryId> {
 pub(super) fn opened<'a>(views: &'a mut Views, lane: &Lane, paint: &Paint) -> &'a mut View {
     let view = view_at(views, lane.token());
     if !view.drawn {
-        *view = View::opening(&lane.resolved().context, paint);
+        *view = View::opening(lane.resolved(), paint);
     }
     view
 }
@@ -200,8 +201,8 @@ pub(super) fn opened<'a>(views: &'a mut Views, lane: &Lane, paint: &Paint) -> &'
 impl View {
     /// A lane nobody has said anything in yet: the banner naming what it
     /// stands on, and everything else empty.
-    pub fn opening(context: &[String], paint: &Paint) -> Self {
-        let scrollback = Row::banner(context, paint);
+    pub fn opening(resolved: &Resolved, paint: &Paint) -> Self {
+        let scrollback = Row::banner(resolved, paint);
         let opened = scrollback.len();
         Self {
             drawn: true,

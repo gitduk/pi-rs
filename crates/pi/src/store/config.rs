@@ -24,7 +24,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::args::{EffortArg, FormatArg, TierArg};
 
-/// The user's own file: `~/.pi/settings.toml`.
+/// A config file: the user's `~/.pi/settings.toml`, or a repository's
+/// `.pi.toml` laid over it key by key.
 #[derive(Debug, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -49,9 +50,7 @@ pub struct Config {
     /// The judgment endpoint, when this machine has one. Present, the `judge`
     /// tool is in the set and the model can delegate snap judgments to it;
     /// absent, the tool never exists, so the model never sees a name it
-    /// cannot call. Only this user-level file can set it: a judgment endpoint
-    /// receives pieces of this machine's state, and a cloned `pi.toml` must
-    /// not choose where those go.
+    /// cannot call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub judge: Option<JudgeSection>,
 
@@ -75,8 +74,7 @@ pub struct Config {
 
     /// Absolute directories every tool above the read tier may reach beyond
     /// the workspace root — `bash` may work in one, not only `write` and
-    /// `edit`. Only this user-level file can set them: a cloned `pi.toml`
-    /// must not be able to lower its own boundary.
+    /// `edit`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub write_roots: Vec<String>,
 
@@ -272,24 +270,6 @@ impl JudgeSection {
     }
 }
 
-/// A `.pi.toml` inside a repository.
-///
-/// A repository is not a trusted source — it arrives by `git clone` from
-/// someone else. Anything that could point the run at a server of its own
-/// choosing (a base url, a key, a wire quirk) is absent by construction, and so
-/// is `system`, which would let a checkout name any file on disk and have its
-/// contents sent to the provider. What is left can only pick among models the
-/// user has already defined and turn the dials on how hard the run works.
-#[derive(Debug, Default, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Project {
-    pub model: Option<String>,
-    pub effort: Option<EffortArg>,
-    /// A ceiling, applied downward only: a checkout may declare itself
-    /// read-only, never hand itself the shell.
-    pub max_tier: Option<TierArg>,
-}
-
 fn default_context() -> u32 {
     128_000
 }
@@ -346,8 +326,6 @@ impl Default for ModelEntry {
 }
 
 impl Config {
-    // The endpoint's shape, refused rather than guessed: naming the wrong one
-    // is a 400 on the first turn, and neither is a safer bet than the other.
     // The endpoint's shape, refused rather than guessed: naming the wrong one
     // is a 400 on the first turn, and neither is a safer bet than the other.
     fn format(&self) -> Result<Format> {
@@ -452,8 +430,8 @@ impl ModelOrigin {
             ModelOrigin::Flag => "-m",
             ModelOrigin::Command => "/model",
             ModelOrigin::Resumed => "the resumed session",
-            ModelOrigin::Project => "defaults.model in the project's .pi.toml",
-            ModelOrigin::Global => "defaults.model in ~/.pi/settings.toml",
+            ModelOrigin::Project => "`model` in the project's .pi.toml",
+            ModelOrigin::Global => "`model` in ~/.pi/settings.toml",
             ModelOrigin::OnlyModel => "the only model in ~/.pi/settings.toml",
         }
     }
@@ -509,10 +487,6 @@ impl Config {
         self.api_key.as_deref().and_then(expand_key)
     }
 
-    fn apply_env(&mut self) {
-        self.apply_env_unclaimed(&BTreeMap::new());
-    }
-
     pub fn apply_env_unclaimed(&mut self, claimed: &BTreeMap<String, toml::Value>) {
         self.apply_env_with(|k| std::env::var(k).ok(), claimed);
     }
@@ -521,14 +495,13 @@ impl Config {
     where
         F: FnMut(&str) -> Option<String>,
     {
-        let (url, format, cache) =
-            if let Some(url) = lookup("ANTHROPIC_BASE_URL").filter(|s| !s.trim().is_empty()) {
-                (url, FormatArg::Anthropic, None)
-            } else if let Some(url) = lookup("OPENAI_BASE_URL").filter(|s| !s.trim().is_empty()) {
-                (url, FormatArg::Openai, Some(CacheControl::Off))
-            } else {
-                return;
-            };
+        let Some((var, url)) = endpoint_var(&mut lookup) else {
+            return;
+        };
+        let (format, cache) = match var {
+            ANTHROPIC_BASE_URL => (FormatArg::Anthropic, None),
+            _ => (FormatArg::Openai, Some(CacheControl::Off)),
+        };
 
         if !claimed.contains_key("base_url") {
             self.base_url = Some(expand_base_url(url.trim()));
@@ -541,22 +514,15 @@ impl Config {
         }
     }
 
-    /// `/settings` > flag > project > this file > the built-in default.
+    /// `/settings` > flag > the files > the built-in default.
     ///
     /// A key named in `claimed` was set by `/settings` this session, so it
-    /// skips the flag and the project: the config tree already carries the
-    /// claimed value. The tier keeps its ceiling — a project may only pull
-    /// it down, and `/settings` does not open that back door.
-    pub fn settle(
-        &self,
-        project: &Project,
-        flags: Flags,
-        claimed: &BTreeMap<String, toml::Value>,
-    ) -> Settled {
+    /// skips the flag: the config tree already carries the claimed value.
+    pub fn settle(&self, flags: Flags, claimed: &BTreeMap<String, toml::Value>) -> Settled {
         let effort = if claimed.contains_key("effort") {
             self.effort
         } else {
-            flags.effort.or(project.effort).or(self.effort)
+            flags.effort.or(self.effort)
         }
         .unwrap_or(EffortArg::Off);
         let tier = if claimed.contains_key("tier") {
@@ -564,13 +530,12 @@ impl Config {
         } else {
             flags.tier.or(self.tier)
         }
-        .unwrap_or(TierArg::Exec)
-        .capped_by(project.max_tier.unwrap_or(TierArg::Exec));
+        .unwrap_or(TierArg::Exec);
         Settled { effort, tier }
     }
 
     /// A resumed run stays on the model that produced the transcript, so `prior`
-    /// outranks both files: continuing is continuing, and a project default
+    /// outranks the files: continuing is continuing, and a project default
     /// that quietly moved a half-finished session elsewhere would be a surprise
     /// nobody asked for. `/model` is the deliberate way to move it.
     ///
@@ -581,11 +546,13 @@ impl Config {
     /// None when nothing named one. There is no fallback to a model we picked:
     /// a hardcoded name is a claim about what exists, and it goes stale the
     /// week a vendor ships something.
+    ///
+    /// `from_project`: the project's file is the one that set `model`.
     pub fn model(
         &self,
-        project: &Project,
         flag: Option<&str>,
         prior: Option<&str>,
+        from_project: bool,
     ) -> Option<(String, ModelOrigin)> {
         if let Some(m) = flag {
             return Some((m.to_string(), ModelOrigin::Flag));
@@ -593,11 +560,12 @@ impl Config {
         if let Some(m) = prior {
             return Some((m.to_string(), ModelOrigin::Resumed));
         }
-        if let Some(m) = &project.model {
-            return Some((m.clone(), ModelOrigin::Project));
-        }
         if let Some(m) = &self.model {
-            return Some((m.clone(), ModelOrigin::Global));
+            let origin = match from_project {
+                true => ModelOrigin::Project,
+                false => ModelOrigin::Global,
+            };
+            return Some((m.clone(), origin));
         }
         // One model written down: there is nothing else it could mean, and
         // making the name be written twice only creates the chance to write it
@@ -607,6 +575,24 @@ impl Config {
         }
         None
     }
+}
+
+const ANTHROPIC_BASE_URL: &str = "ANTHROPIC_BASE_URL";
+const OPENAI_BASE_URL: &str = "OPENAI_BASE_URL";
+
+// The variable that names the endpoint, Anthropic's first, and what it says.
+fn endpoint_var<F>(lookup: &mut F) -> Option<(&'static str, String)>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    [ANTHROPIC_BASE_URL, OPENAI_BASE_URL]
+        .into_iter()
+        .find_map(|var| Some((var, lookup(var).filter(|s| !s.trim().is_empty())?)))
+}
+
+/// The environment variable an unclaimed `base_url` is taken from, if any.
+pub fn endpoint_env() -> Option<&'static str> {
+    endpoint_var(&mut |k| std::env::var(k).ok()).map(|(var, _)| var)
 }
 
 /// `$NAME` reads that environment variable; anything else is the key itself.
@@ -648,10 +634,8 @@ pub fn global_path() -> Option<PathBuf> {
 /// The nearest project file at or above `start`, stopping at the repository
 /// root.
 ///
-/// `home` is never searched: `~/.pi/settings.toml` is the global file, and
-/// treating it as a project file too would hand it privileges the global file
-/// already has by other means — and hand every directory under `$HOME` outside
-/// a repo the same file as its "project" config.
+/// `home` is never searched: a `.pi.toml` there would be every directory's
+/// under `$HOME` outside a repo, a second global file nobody meant to write.
 fn project_path(start: &Path, home: Option<&Path>) -> Option<PathBuf> {
     for dir in start.ancestors() {
         if home == Some(dir) {
@@ -669,80 +653,68 @@ fn project_path(start: &Path, home: Option<&Path>) -> Option<PathBuf> {
     None
 }
 
-/// Read the user's config, if there is one.
-///
-/// A file named explicitly and missing is an error — the user asked for it. The
-/// default location missing is the ordinary case and says nothing.
-pub fn load(explicit: Option<&str>) -> Result<Config> {
-    let target = match explicit {
-        Some(p) => Some((PathBuf::from(p), true)),
-        None => global_path().map(|p| (p, false)),
+/// A config file's tree, checked as a config on its own so an error names the
+/// file it is in. A missing file is `None` unless it was asked for by name.
+fn read_tree(path: &Path, required: bool) -> Result<Option<toml::Value>> {
+    let body = match std::fs::read_to_string(path) {
+        Ok(body) => body,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !required => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
     };
-    let mut config = match target {
-        Some((path, required)) => match std::fs::read_to_string(&path) {
-            Ok(body) => parse(&body).with_context(|| format!("{}", path.display()))?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !required => Config::default(),
-            Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
-        },
-        None => Config::default(),
-    };
-    config.apply_env();
-    for (model, entry) in &config.models {
-        config.spec(model, entry)?;
-        config.check_thinking(model, entry)?;
-    }
-    Ok(config)
+    let tree: toml::Value = toml::from_str(&body).with_context(|| format!("{}", path.display()))?;
+    Config::from_tree(tree.clone()).with_context(|| format!("{}", path.display()))?;
+    Ok(Some(tree))
 }
 
-/// The file's tree, for `/settings` to walk and `/reload` to re-read.
-/// `None` when the config file is absent: the tree is then the empty table.
+/// The user's file: `explicit` when given, which must then exist, else
+/// `settings.toml` under the pi root. Absent, the tree is the empty table.
 pub fn load_tree(explicit: Option<&str>) -> Result<toml::Value> {
-    let (path, required) = match explicit {
-        Some(p) => (PathBuf::from(p), true),
+    let found = match explicit {
+        Some(p) => read_tree(Path::new(p), true)?,
         None => match global_path() {
-            Some(p) => (p, false),
-            None => return Ok(toml::Value::Table(Default::default())),
+            Some(p) => read_tree(&p, false)?,
+            None => None,
         },
     };
-    match std::fs::read_to_string(&path) {
-        Ok(body) => Ok(toml::from_str(&body).with_context(|| format!("{}", path.display()))?),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !required => {
-            Ok(toml::Value::Table(Default::default()))
-        }
-        Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
-    }
+    Ok(found.unwrap_or_else(|| toml::Value::Table(Default::default())))
 }
 
-pub fn load_project(workspace: &Path) -> Result<Project> {
+/// The nearest `.pi.toml` at or above `workspace`, and its tree.
+pub fn load_project(workspace: &Path) -> Result<Option<(PathBuf, toml::Value)>> {
     let Some(path) = project_path(workspace, home().as_deref()) else {
-        return Ok(Project::default());
+        return Ok(None);
     };
-    let body = std::fs::read_to_string(&path)
-        .with_context(|| format!("cannot read {}", path.display()))?;
-    parse_project(&body).with_context(|| format!("{}", path.display()))
+    Ok(read_tree(&path, true)?.map(|tree| (path, tree)))
 }
 
-fn parse(body: &str) -> Result<Config> {
-    let de = toml::de::Deserializer::parse(body)?;
-    let config: Config = serde_path_to_error::deserialize(de)?;
-    config.check_key()?;
-    for (model, entry) in &config.models {
-        // Rejected here rather than at use: a typo in a model you are not
-        // running today is still a typo, and this is when it is cheap to see.
-        if config.base_url.is_some() && config.format.is_some() {
+impl Config {
+    /// A tree as a config, with everything a file can get wrong refused now:
+    /// a typo in a model you are not running today is still a typo.
+    pub fn from_tree(tree: toml::Value) -> Result<Config> {
+        let config: Config = serde_path_to_error::deserialize(tree)?;
+        config.check_key()?;
+        for (model, entry) in &config.models {
+            if config.base_url.is_some() && config.format.is_some() {
+                config.spec(model, entry)?;
+            }
+            config.check_thinking(model, entry)?;
+        }
+        config.key_map()?;
+        Ok(config)
+    }
+
+    /// The config a run uses: the tree, the environment's endpoint where this
+    /// session has not claimed one, and every model checked against the
+    /// endpoint it ends up with. Startup, `/reload` and `/settings` all come
+    /// through here, so none of them accepts what another would refuse.
+    pub fn in_force(tree: toml::Value, claimed: &BTreeMap<String, toml::Value>) -> Result<Config> {
+        let mut config = Self::from_tree(tree)?;
+        config.apply_env_unclaimed(claimed);
+        for (model, entry) in &config.models {
             config.spec(model, entry)?;
         }
-        config.check_thinking(model, entry)?;
+        Ok(config)
     }
-    config.key_map()?;
-    Ok(config)
-}
-
-fn parse_project(body: &str) -> Result<Project> {
-    toml::from_str(body).context(
-        "a project .pi.toml may set only `model`, `effort` and `max_tier` — \
-         a checkout does not get to name a server, a key, or a system prompt",
-    )
 }
 
 /// A key written into a file others can read is worth one line of warning.
@@ -862,107 +834,59 @@ output_per_mtok = 0
         assert_eq!(c.format, Some(FormatArg::Anthropic));
     }
 
+    fn parse(body: &str) -> Result<Config> {
+        Config::from_tree(toml::from_str(body)?)
+    }
+
+    // A file is checked as a whole config, whichever it is: the section that
+    // no longer exists is refused rather than read as nothing.
     #[test]
-    fn a_project_cannot_name_a_server_of_its_own() {
-        // The whole point: a repository arrives by git clone, and this is the
-        // line between "configure the run" and "redirect it".
-        for body in [
-            "[provider.evil]\nbase_url = \"http://attacker/v1\"\nformat = \"openai\"\n",
-            "[defaults]\nsystem = \"/etc/shadow\"\n",
-            "[defaults]\ntier = \"exec\"\n",
-        ] {
-            assert!(parse_project(body).is_err(), "accepted: {body}");
-        }
+    fn a_retired_section_is_refused() {
+        assert!(parse("[defaults]\nmodel = \"flash\"\n").is_err());
     }
 
     #[test]
-    fn a_project_lowers_the_tier_and_cannot_raise_it() {
-        let c: Config = parse("tier = \"write\"\n").unwrap();
-        let down = parse_project("max_tier = \"read\"\n").unwrap();
-        assert_eq!(
-            c.settle(&down, Flags::default(), &BTreeMap::new()).tier,
-            TierArg::Read
-        );
-
-        let up = parse_project("max_tier = \"exec\"\n").unwrap();
-        assert_eq!(
-            c.settle(&up, Flags::default(), &BTreeMap::new()).tier,
-            TierArg::Write
-        );
-    }
-
-    // `max_tier` is a ceiling, and two ceilings with no order between them
-    // leave only what they share. A checkout that declared itself read-only
-    // plus the web does not thereby hand a `--tier write` run the web.
-    #[test]
-    fn a_ceiling_beside_the_tier_rather_than_above_it_leaves_read() {
-        let c: Config = parse("tier = \"write\"\n").unwrap();
-        let net = parse_project("max_tier = \"net\"\n").unwrap();
-        assert_eq!(
-            c.settle(&net, Flags::default(), &BTreeMap::new()).tier,
-            TierArg::Read
-        );
-
-        let c: Config = parse("tier = \"net\"\n").unwrap();
-        assert_eq!(
-            c.settle(&net, Flags::default(), &BTreeMap::new()).tier,
-            TierArg::Net
-        );
-    }
-
-    #[test]
-    fn write_roots_parse_from_the_user_config_only() {
-        // A cloned pi.toml cannot widen its own write boundary.
-        assert!(parse_project("write_roots = [\"/etc\"]\n").is_err());
-    }
-
-    #[test]
-    fn a_flag_outranks_both_files_but_still_meets_the_ceiling() {
-        let c = Config::default();
-        let p = parse_project("effort = \"low\"\nmax_tier = \"read\"\n").unwrap();
+    fn a_flag_outranks_the_files() {
+        let c = parse("effort = \"low\"\ntier = \"read\"\n").unwrap();
         let flags = Flags {
             effort: Some(EffortArg::High),
             tier: Some(TierArg::Exec),
         };
-        let s = c.settle(&p, flags, &BTreeMap::new());
+        let s = c.settle(flags, &BTreeMap::new());
         assert!(matches!(s.effort, EffortArg::High));
-        // Not even --tier exec gets past a checkout that declared itself
-        // read-only; passing --tier is not reading the repository's file.
-        assert_eq!(s.tier, TierArg::Read);
+        assert_eq!(s.tier, TierArg::Exec);
     }
 
     #[test]
-    fn a_claimed_value_skips_the_flag_and_the_project() {
+    fn a_claimed_value_skips_the_flag() {
         let c = parse("effort = \"low\"\ntier = \"write\"\n").unwrap();
-        let p = parse_project("effort = \"medium\"\nmax_tier = \"exec\"\n").unwrap();
         let flags = Flags {
             effort: Some(EffortArg::High),
             tier: Some(TierArg::Exec),
         };
         // The panel claims the key this session: the tree already
-        // carries it, so the flag and the project must both stand down.
+        // carries it, so the flag must stand down.
         let mut claimed = BTreeMap::new();
         claimed.insert("effort".into(), toml::Value::String("low".into()));
         claimed.insert("tier".into(), toml::Value::String("write".into()));
-        let s = c.settle(&p, flags, &claimed);
+        let s = c.settle(flags, &claimed);
         assert!(matches!(s.effort, EffortArg::Low));
         assert_eq!(s.tier, TierArg::Write);
     }
 
     #[test]
-    fn the_resumed_model_outranks_a_project_that_wants_another() {
+    fn the_resumed_model_outranks_the_files() {
         // Resuming means resuming, project default or not. Moving the session
         // is `/model`'s job, and it says so when it happens.
         let c = parse(SAMPLE).unwrap();
-        let p = parse_project("model = \"other\"\n").unwrap();
-        assert_eq!(c.model(&p, None, Some("resumed")).unwrap().0, "resumed");
+        assert_eq!(c.model(None, Some("resumed"), true).unwrap().0, "resumed");
         assert_eq!(
-            c.model(&p, Some("flag"), Some("resumed")).unwrap().0,
+            c.model(Some("flag"), Some("resumed"), true).unwrap().0,
             "flag"
         );
         assert_eq!(
-            c.model(&p, None, None),
-            Some(("other".into(), ModelOrigin::Project))
+            c.model(None, None, true),
+            Some(("flash".into(), ModelOrigin::Project))
         );
     }
 

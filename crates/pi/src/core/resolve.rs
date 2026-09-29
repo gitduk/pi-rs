@@ -2,7 +2,7 @@
 //! prompt, the ceiling, the commands. Startup, `/reload` and every new lane
 //! come through here.
 
-use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -10,6 +10,7 @@ use llm::request::Effort;
 
 use crate::args::{EffortArg, Pinned};
 use crate::input::commands::{Command, commands};
+use crate::store::settings::Settings;
 use crate::store::{config, journal};
 use agent::context;
 
@@ -37,6 +38,9 @@ pub struct Resolved {
     /// would. Shown under the banner rather than said as a note: it is what
     /// this run is standing on, not news.
     pub context: Vec<String>,
+    /// Where requests go and which source said so, for the banner and
+    /// `/status`: two files can each name one now.
+    pub endpoint: Option<String>,
 }
 
 /// Offer `tool` to the set, saying so when an earlier source holds its name.
@@ -58,8 +62,7 @@ pub fn resolve(
     pinned: &Pinned,
     workspace: &tool::Workspace,
     config: &config::Config,
-    project: &config::Project,
-    claimed: &BTreeMap<String, toml::Value>,
+    settings: &Settings,
 ) -> Result<Resolved> {
     let root = workspace.root();
     let mut notes = Vec::new();
@@ -114,12 +117,11 @@ pub fn resolve(
     }
 
     let settled = config.settle(
-        &project.clone(),
         config::Flags {
             effort: pinned.effort,
             tier: pinned.tier,
         },
-        claimed,
+        settings.claimed(),
     );
     let tier = tool::Tier::from(settled.tier);
     let effort = match settled.effort {
@@ -169,5 +171,37 @@ pub fn resolve(
         commands: std::sync::Arc::new(commands),
         notes,
         context,
+        endpoint: endpoint(pinned, config, settings, root),
     })
+}
+
+// The url requests go to, and the one source it came from, in the order
+// they rank: the flag, this session's claim, the environment, the files.
+fn endpoint(
+    pinned: &Pinned,
+    config: &config::Config,
+    settings: &Settings,
+    root: &Path,
+) -> Option<String> {
+    let (url, from) = match &pinned.base_url {
+        Some(url) => (config::expand_base_url(url), "--base-url".to_string()),
+        None => {
+            let url = config.base_url.clone()?;
+            let from = if settings.claimed().contains_key("base_url") {
+                "/settings".to_string()
+            } else if let Some(var) = config::endpoint_env() {
+                format!("${var}")
+            } else if let Some(file) = settings.project_sets("base_url") {
+                context::short(file, root)
+            } else {
+                match &pinned.config {
+                    Some(file) => file.clone(),
+                    None => config::global_path()
+                        .map_or_else(|| "settings.toml".into(), |p| context::short(&p, root)),
+                }
+            };
+            (url, from)
+        }
+    };
+    Some(format!("endpoint: {url} ({from})"))
 }

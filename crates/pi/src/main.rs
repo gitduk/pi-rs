@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::io::{IsTerminal as _, Read as _};
 use std::sync::Arc;
 
@@ -13,7 +12,7 @@ use crate::core::{Core, lane, worktree};
 use crate::input::expand;
 use crate::store::icons;
 use crate::store::settings::Settings;
-use crate::store::{archive, config, journal, session};
+use crate::store::{archive, journal, session};
 use crate::ui::{render, tui};
 
 mod args;
@@ -97,12 +96,15 @@ fn paint(
 async fn main() -> Result<()> {
     let args = std::sync::Arc::new(Args::parse());
     let prompt = read_prompt(&args)?;
-    let config = Arc::new(config::load(args.config.as_deref())?);
-
-    let workspace = tool::Workspace::new(&args.cwd)
-        .and_then(|ws| ws.with_write_roots(&config.write_roots))
-        .with_context(|| format!("cannot use {} as a workspace", args.cwd))?;
-    let project = config::load_project(workspace.root())?;
+    let within = || format!("cannot use {} as a workspace", args.cwd);
+    let workspace = tool::Workspace::new(&args.cwd).with_context(within)?;
+    // The project file is found from the workspace, and the write roots it may
+    // name widen that same workspace: read between the two steps.
+    let settings = Settings::load(args.config.as_deref(), workspace.root())?;
+    let config = Arc::new(settings.config()?);
+    let workspace = workspace
+        .with_write_roots(&config.write_roots)
+        .with_context(within)?;
 
     let store = session::Store::default();
     // Off the startup path, like the journal's own sweep: it stats every
@@ -144,16 +146,16 @@ async fn main() -> Result<()> {
         .unwrap_or_else(session::new_id);
 
     let Some((named, named_by)) = config.model(
-        &project,
         args.model.as_deref(),
         prior.as_ref().map(|p| p.model.as_str()),
+        settings.project_sets("model").is_some(),
     ) else {
         bail!("no model to run. Define one in ~/.pi/settings.toml — see examples/pi.toml.");
     };
     let pinned = args.pinned();
     let dialled = dial(&pinned, &config, &named, named_by)?;
 
-    let resolved = resolve(&pinned, &workspace, &config, &project, &BTreeMap::new())?;
+    let resolved = resolve(&pinned, &workspace, &config, &settings)?;
     // Ahead of the quiet check on purpose: see `Dialled::warning`.
     if let Some(warning) = &dialled.warning {
         eprintln!("\x1b[{}m{warning}\x1b[0m", config.theme.muted.codes());
@@ -189,7 +191,7 @@ async fn main() -> Result<()> {
             &id,
             &args,
             &config,
-            &project,
+            settings.project(),
             workspace.root(),
             prior.as_ref(),
         );
@@ -241,10 +243,7 @@ async fn main() -> Result<()> {
             config: config.clone(),
             pinned: pinned.clone(),
             commands,
-            settings: Settings::new(
-                config::load_tree(args.config.as_deref())
-                    .unwrap_or_else(|_| toml::Value::Table(Default::default())),
-            ),
+            settings,
             current: 0,
             lanes: vec![first],
         };

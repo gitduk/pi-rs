@@ -3,8 +3,6 @@
 //!
 //! The value itself is `store/settings.rs`; this is what the Core does to it.
 
-use serde::Deserialize;
-
 use super::Core;
 use super::meter::summary;
 use super::status::{carries_reasoning, demotion};
@@ -28,8 +26,9 @@ impl Core {
     /// name, the history, the model. Only what the config decides is
     /// replaced.
     pub fn reload(&mut self) -> Vec<String> {
-        // Re-read the file tree; the claimed overrides stay.
-        if let Err(e) = self.settings.reread(self.pinned.config.as_deref()) {
+        // Re-read the file trees; the claimed overrides stay.
+        let root = self.lane().root().to_path_buf();
+        if let Err(e) = self.settings.reread(self.pinned.config.as_deref(), &root) {
             return vec![format!("nothing reloaded — {}", refused("reload", e))];
         }
         let mut said = self.rebuild();
@@ -52,16 +51,11 @@ impl Core {
     fn adopt(&mut self, config: Config) -> Result<Vec<String>, String> {
         let root = self.lane().root().to_path_buf();
         let failed = |e| Err(format!("nothing reloaded — {}", refused("reload", e)));
-        let project = match config::load_project(&root) {
-            Ok(p) => p,
-            Err(e) => return failed(e),
-        };
         let resolved = match crate::core::resolve::resolve(
             &self.pinned,
             self.lane().workspace(),
             &config,
-            &project,
-            self.settings.claimed(),
+            &self.settings,
         ) {
             Ok(r) => r,
             Err(e) => return failed(e),
@@ -100,6 +94,10 @@ impl Core {
 
         // Only here, with everything computed, is anything touched — and in
         // one `rearm`, so the copy a run in flight forces is taken once.
+        // The banner is drawn once, so a moved endpoint is said here instead.
+        if resolved.endpoint != self.lane().resolved().endpoint {
+            notes.extend(resolved.endpoint.clone());
+        }
         let archive = self.archive(root.clone(), model);
         let idle = retry.idle;
         self.lane_mut()
@@ -127,26 +125,18 @@ impl Core {
     fn rebuild(&mut self) -> Vec<String> {
         self.rebuilt().unwrap_or_else(|why| vec![why])
     }
-    // The file's rows with the session's claims on top — what the panel
+    // The same, saying why when nothing could be adopted.
+    fn rebuilt(&mut self) -> Result<Vec<String>, String> {
+        let config = self.settings.config().map_err(|e| refused("settings", e))?;
+        self.adopt(config)
+    }
+    // The files' rows with the session's claims on top — what the panel
     // shows. Path by path rather than one overlaid tree, so a claim the file
     // can no longer address (an ancestor the file has turned into a
     // non-table) still answers, with the file's own value beside it for the
     // mark.
     pub fn setting_rows(&self) -> Vec<settings::SettingRow> {
         self.settings.rows()
-    }
-    // The same, saying why when nothing could be adopted.
-    fn rebuilt(&mut self) -> Result<Vec<String>, String> {
-        let tree = self
-            .settings
-            .effective()
-            .map_err(|e| refused("settings", e))?;
-        let mut config = match config::Config::deserialize(tree) {
-            Ok(c) => c,
-            Err(e) => return Err(refused("settings", anyhow::anyhow!(e))),
-        };
-        config.apply_env_unclaimed(self.settings.claimed());
-        self.adopt(config)
     }
     /// Take a value into the session: try the write on a scratch tree first,
     /// so a bad value touches nothing, then record it as a claim and rebuild.
@@ -187,6 +177,13 @@ impl Core {
         let Some(value) = self.settings.claimed_value(path) else {
             return Ok(vec![format!("{path}: the session and the file agree")]);
         };
+        // Written under the project's line, it would lose to it on the reload.
+        if let Some(project) = self.settings.project_sets(path) {
+            return Err(format!(
+                "{path} is set by {} — change it there",
+                project.display()
+            ));
+        }
         let file = self
             .pinned
             .config
@@ -196,8 +193,9 @@ impl Core {
             .ok_or_else(|| "no settings file to write".to_string())?;
         config::write(&file, path, value.clone()).map_err(|e| format!("{e:#}"))?;
         self.settings.drop_claim(path);
+        let root = self.lane().root().to_path_buf();
         self.settings
-            .reread(self.pinned.config.as_deref())
+            .reread(self.pinned.config.as_deref(), &root)
             .map_err(|e| format!("{e:#}"))?;
         let mut said = self.rebuild();
         said.push(format!(
@@ -339,7 +337,7 @@ mod tests {
             config: std::sync::Arc::new(crate::store::config::Config::default()),
             pinned: crate::args::Pinned::default(),
             commands: std::sync::Arc::new(Vec::new()),
-            settings: crate::store::settings::Settings::new(toml::from_str(file).unwrap()),
+            settings: crate::store::settings::Settings::new(toml::from_str(file).unwrap(), None),
             lanes: vec![a_lane("s")],
             current: 0,
         }
