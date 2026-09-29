@@ -231,25 +231,23 @@ impl Tui {
     //
     // It borrows the transcript like a turn, and for the same reason: the
     // result is filed in it, and nothing else may replace it meanwhile.
-    // Hand the terminal to `$EDITOR` on a copy of the line, and take back what
-    // was saved. On its own thread: a run in flight still has a stream to serve.
-    pub(super) async fn edit_externally(&mut self) {
-        let path = match scratch_file(self.ui.editor.text()) {
-            Ok(path) => path,
-            Err(e) => {
-                self.ui.flash(format!("no scratch file: {e}"));
-                return;
-            }
-        };
+    // Hand the terminal to `$EDITOR` on `path` and take it back. Nothing
+    // between the leave and the resume may return early: the surface would be
+    // left invisible. On its own thread: a run in flight still has a stream to
+    // serve. Answers with how the editor ended, and whether the screen came back.
+    async fn in_editor(
+        &mut self,
+        path: &std::path::Path,
+    ) -> (
+        Result<std::process::ExitStatus, String>,
+        std::io::Result<()>,
+    ) {
         let (program, args) = external_editor();
-
-        // The terminal is gone from here to `resume`, so nothing between them
-        // may return early: the surface would be left invisible.
         let _parked = self.hold.park().await;
         let _deaf = Deafened::new();
         self.ui.screen.leave();
         let ran = tokio::task::spawn_blocking({
-            let path = path.clone();
+            let path = path.to_path_buf();
             move || {
                 let mut cmd = std::process::Command::new(program);
                 cmd.args(args).arg(&path);
@@ -275,19 +273,52 @@ impl Tui {
         front_view(&mut self.views, self.core.lane())
             .surface
             .counted = None;
+        let ran = match ran {
+            Err(e) => Err(format!("the editor did not run: {e}")),
+            Ok(Err(e)) => Err(format!("could not run the editor: {e}")),
+            Ok(Ok(status)) => Ok(status),
+        };
+        (ran, resumed)
+    }
+
+    // The project's config in `$EDITOR`, then the reload that makes it count.
+    // A non-zero exit (`:cq`) is "forget it": nothing is reloaded.
+    pub(super) async fn edit_config(&mut self, path: std::path::PathBuf) {
+        let (ran, resumed) = self.in_editor(&path).await;
+        if let Err(e) = resumed {
+            self.ui.flash(format!("the screen did not come back: {e}"));
+        }
+        let said = match ran {
+            Err(why) => vec![why],
+            Ok(s) if !s.success() => vec![format!("editor exited {s} — nothing reloaded")],
+            Ok(_) => self.core.config_edited(),
+        };
+        self.land_lines(Listing::say(said));
+    }
+
+    // Hand the terminal to `$EDITOR` on a copy of the line, and take back what
+    // was saved.
+    pub(super) async fn edit_externally(&mut self) {
+        let path = match scratch_file(self.ui.editor.text()) {
+            Ok(path) => path,
+            Err(e) => {
+                self.ui.flash(format!("no scratch file: {e}"));
+                return;
+            }
+        };
+        let (ran, resumed) = self.in_editor(&path).await;
 
         // Judged on its own: a save that succeeded is still a save when the
         // screen comes back badly, and reading the two together threw it away.
         let (mut keep, mut said) = match ran {
-            Err(e) => (false, Some(format!("the editor did not run: {e}"))),
-            Ok(Err(e)) => (false, Some(format!("could not run the editor: {e}"))),
+            Err(why) => (false, Some(why)),
             // `:cq` is how vim says "forget it". Git reads a non-zero exit the
             // same way, and the line the user had is worth more than the file.
-            Ok(Ok(s)) if !s.success() => (
+            Ok(s) if !s.success() => (
                 false,
                 Some(format!("editor exited {s} — the line is unchanged")),
             ),
-            Ok(Ok(_)) => match std::fs::read_to_string(&path) {
+            Ok(_) => match std::fs::read_to_string(&path) {
                 Ok(text) => {
                     self.ui.editor.set_line(text.trim_end());
                     (false, None)

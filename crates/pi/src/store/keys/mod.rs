@@ -55,7 +55,7 @@ pub enum When {
 pub enum Menu {
     #[default]
     Off,
-    // A completion list, the rewind selector, a panel, or a command's reply:
+    // A completion list, the rewind selector, or a command's reply:
     // the menu's movement and dismissal keys, and nothing more.
     On,
 }
@@ -632,8 +632,8 @@ impl Press {
 
 /// The character a press types, when it types one on its own: a letter with
 /// `ctrl` or `alt` on it is the menu's key rather than the surface's own, which
-/// is the same rule every screen with a letter vocabulary reads — browse, the
-/// panel, a reply — so it is written down once, here.
+/// is the same rule every screen with a letter vocabulary reads — browse and a
+/// reply — so it is written down once, here.
 pub fn bare_letter(key: &crossterm::event::KeyEvent) -> Option<char> {
     let bare = !key
         .modifiers
@@ -720,8 +720,7 @@ impl Keys {
         // Over the run, which costs `esc` — the one key `menu.dismiss` and
         // `run.interrupt` both claim. It costs it only for a press: dismissing
         // records the line it happened at, so the list is gone by the next
-        // press and that one reaches the run. Innermost first, the way `esc`
-        // inside a panel leaves the edit before it leaves the panel.
+        // press and that one reaches the run. Innermost first.
         if layers.menu != Menu::Off {
             live.push(When::Menu);
         }

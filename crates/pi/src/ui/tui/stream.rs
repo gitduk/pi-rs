@@ -397,11 +397,9 @@ impl Ui {
         // it, and the scrolled history fills what is left. The caret's row
         // therefore depends only on the pinned rows, never on how the
         // history wraps.
-        // One space, one thing in it: they all draw over the menu, and the
-        // surface can hold one at a time — the reply first, then the panel,
-        // then whatever the line is completing to.
-        let panel = self.panel.as_ref().map(|p| p.view(&self.paint, width));
-        let panel_h = panel.as_ref().map_or(0, |(r, _)| r.len());
+        // One space, one thing in it: both draw over the menu, and the
+        // surface holds one at a time — the reply first, then whatever the
+        // line is completing to.
         // Both branches leave the bar its row: a menu tall enough to take it
         // would drop whatever that row is saying. The reply is asked for no
         // more than that, and answers in rows rather than lines — it wraps
@@ -410,8 +408,6 @@ impl Ui {
         let reply = self.reply.as_ref().map(|r| r.view(room, width));
         let menu_h = if let Some(reply) = &reply {
             reply.len()
-        } else if panel.is_some() {
-            panel_h.min(room)
         } else if menu.is_empty() {
             0
         } else {
@@ -514,8 +510,6 @@ impl Ui {
             frame.render_widget(Rows(&rows), regions.history);
             if let Some(reply) = &reply {
                 frame.render_widget(Rows(reply), regions.menu);
-            } else if let Some((panel, _)) = &panel {
-                frame.render_widget(Rows(panel), regions.menu);
             } else if !items.is_empty() {
                 let mut state = ListState::default();
                 state.select(Some(picked));
@@ -538,13 +532,7 @@ impl Ui {
                 );
             }
             frame.render_widget(Rows(&input_view), regions.editor);
-            // The panel's caret, when the panel is the one being drawn: a
-            // reply over it would otherwise wear a caret at its own row.
-            if let Some((_, Some((row, col)))) = panel.filter(|_| reply.is_none()) {
-                if (row as usize) < menu_h {
-                    frame.set_cursor_position((regions.menu.x + col, regions.menu.y + row));
-                }
-            } else if self.panel.is_none() && !self.browsing {
+            if !self.browsing {
                 let caret_row = regions.editor.y + caret_in_view as u16;
                 frame.set_cursor_position((caret.1, caret_row));
             }

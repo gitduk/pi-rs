@@ -1,5 +1,5 @@
 //! What the surface keeps for itself across lanes: the editor and the rows
-//! around it, the bar, the open panel or reply, the theme it paints in.
+//! around it, the bar, the open reply, the theme it paints in.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -11,7 +11,6 @@ use super::call::{drawn, pending_line};
 use super::editor::Editor;
 use super::menu::{Lists, MenuEntry};
 use super::mouse::{Regions, Target};
-use super::panel::Panel;
 use super::reply::Reply;
 use super::row::Row;
 use super::screen::{self, Screen};
@@ -66,13 +65,8 @@ pub(super) struct Ui {
     pub(super) lists: Lists,
     // The same copy, of the same list `/help` prints.
     pub(super) commands: Arc<Vec<Command>>,
-    // The open panel, or None — one at a time, which is what one field
-    // rather than one per panel is for. While it is up it owns the menu rows
-    // and intercepts the menu keys before the editor does.
-    pub(super) panel: Option<Panel>,
-    // What a slash command last answered, or None. Read-only, and drawn over
-    // the panel while it is up: a command asked for from a screen the panel
-    // covers must still be answerable.
+    // What a slash command last answered, or None. Read-only; while it is up
+    // it owns the menu rows and intercepts the menu keys before the editor.
     pub(super) reply: Option<Reply>,
     // When the last `ctrl+l` was pressed, for the new-session double-tap.
     pub(super) last_l: Option<Instant>,
@@ -206,7 +200,6 @@ impl Ui {
             at_menu: None,
             at_root: std::path::PathBuf::new(),
             vim: None,
-            panel: None,
             reply: None,
             spinner: 0,
             live: default_live(),
@@ -468,7 +461,7 @@ impl Ui {
     }
 
     // Every copy of the config the surface keeps, brought up to date — the one
-    // landing `/reload` and everything the settings panel does share.
+    // landing `/reload` and `/settings` share.
     pub(super) fn adopt_config(&mut self, core: &Core, view: &mut View) {
         // The key map lives in two places; a reload has to reach both or the
         // screen keeps answering to the old bindings.

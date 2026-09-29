@@ -3,7 +3,7 @@
 //! `Core` is the root — the store, the config in force, the key map, the command
 //! table, the settings, the checkouts open in this run — and what outlives a
 //! turn lives here or on a lane and nowhere else. Every verb lives with the
-//! state it moves: `settings.rs` for the config and its panel, `lane.rs` for
+//! state it moves: `settings.rs` for the config, `lane.rs` for
 //! the checkouts (all of them in one file: a `Core` field holds the list, a
 //! `Lane` one of them), `status.rs` for what a
 //! reader is shown, `meter.rs` for what it cost. The jobs hang off the side:
@@ -196,11 +196,18 @@ impl Core {
                 "off" => Step::Drive(Drive::Channel(name, ChannelCmd::Off)),
                 other => Step::Flash(format!("unknown /{name} verb `{other}` — bare, on or off")),
             },
-            // Only the bare word opens the panel; an argument is refused
+            // Only the bare word opens the file; an argument is refused
             // rather than half-remembered as a verb.
-            Intent::Builtin(Builtin::Settings(rest)) if rest.trim().is_empty() => Step::Panel,
+            Intent::Builtin(Builtin::Settings(rest)) if rest.trim().is_empty() => {
+                match crate::store::config::project_target(self.lane().root()) {
+                    Some(file) => Step::EditConfig(file),
+                    None => {
+                        Step::Flash("no project here: a .pi.toml in $HOME is never read".into())
+                    }
+                }
+            }
             Intent::Builtin(Builtin::Settings(_)) => {
-                Step::Flash("settings are edited in the panel — bare /settings opens it".into())
+                Step::Flash("bare /settings opens the project's .pi.toml".into())
             }
         }
     }

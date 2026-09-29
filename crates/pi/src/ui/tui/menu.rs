@@ -1,7 +1,6 @@
 //! The lists a surface opens over the editor — completions, `/model`, the
 //! rewind menu — and the keys that drive them.
 use super::mouse::at_row_name;
-use super::panel::Took;
 use super::row::Row;
 use super::view::View;
 use super::vim::{Typed, double_tap};
@@ -22,11 +21,11 @@ use ratatui::widgets::ListItem;
 use std::time::Instant;
 
 impl Ui {
-    // A panel or a reply is up: one of them owns the space the menu draws in,
-    // and the completion list waits. Also what puts the menu's own keys in
-    // force while one is open — see `Menu` in `store::keys`.
+    // A reply is up: it owns the space the menu draws in, and the completion
+    // list waits. Also what puts the menu's own keys in force while it is
+    // open — see `Menu` in `store::keys`.
     pub(super) fn overlay(&self) -> bool {
-        self.panel.is_some() || self.reply.is_some()
+        self.reply.is_some()
     }
 
     // What the line could still become: a completion while a command word is
@@ -221,15 +220,14 @@ impl Ui {
         };
         // Browse mode takes the keyboard whole: its keys command where the
         // view sits, and the editor's table has nothing on screen to aim at.
-        // A panel or a reply outranks it — either can open onto a browse the
-        // user never left, off the queue or the phone, and it is drawn over
-        // everything.
+        // A reply outranks it — it can open onto a browse the user never left,
+        // off the queue or the phone, and it is drawn over everything.
         if self.browsing && !self.overlay() {
             return self.browse_key(view, key);
         }
         let press = Press::of(key.code, key.modifiers);
-        // A panel or a reply counts as a menu: its own keys are the Menu
-        // bindings, and `menu()` is empty while it is open, so the layer has to
+        // A reply counts as a menu: its own keys are the Menu bindings, and
+        // `menu()` is empty while it is open, so the layer has to
         // be forced on. The layer is computed before `action`, not inside it:
         // `menu()` mutates the @-completion cache while `keys` stays borrowed.
         let menu = if self.overlay() {
@@ -273,18 +271,6 @@ impl Ui {
                 self.reply = None;
             } else {
                 return self.reply_key(bound, key);
-            }
-        }
-
-        // The panel owns the menu keys while it is open, and answers with
-        // whatever its own verbs mean; `panel.rs` is where a new one plugs in.
-        if let Some(panel) = &mut self.panel {
-            match panel.press(bound, key) {
-                Took::Deed(deed) => return Asked::Own(deed),
-                Took::Close => {
-                    self.panel = None;
-                    return Asked::Own(Deed::Nothing);
-                }
             }
         }
 

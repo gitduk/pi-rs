@@ -85,10 +85,11 @@ workspace, up to the repository root, takes the same keys as
 endpoint. Anything it sets is yours to trust: that includes `base_url`,
 `api_key`, `system` and `write_roots`, so read the `.pi.toml` of a checkout you
 did not write. The screen opens with the endpoint in force and where it came
-from, and `/status` repeats it. `/settings` writes the project's `.pi.toml`
-(creating it at the repository root when there is none) and reloads; settings
-meant for every project go in `~/.pi/settings.toml` by hand. An environment
-endpoint or a flag still outranks both files, and an edit it shadows says so.
+from, and `/status` repeats it. `/settings` opens the project's `.pi.toml` in
+`$VISUAL` / `$EDITOR` (at the repository root when there is none yet) and
+reloads when the editor exits; settings meant for every project go in
+`~/.pi/settings.toml` by hand. An environment endpoint or a flag still outranks
+both files, and `/settings` names any key it shadows.
 
 ## Run
 
@@ -137,8 +138,8 @@ id under `[keys]` in `~/.pi/settings.toml` replaces that action's defaults:
 
 The namespace says what the action touches, and that is also what decides when
 it is live — `edit.*` and `move.*` whenever you are typing, `menu.*` while
-something is open over the editor (a completion list, the rewind selector, the
-settings panel, or a command's answer), and `run.*` only during a turn. Two
+something is open over the editor (a completion list, the rewind selector, or
+a command's answer), and `run.*` only during a turn. Two
 actions may share a key when they are never live together, which is how `up` is
 `menu.previous` with a list open and `history.older` without it. Sharing one
 *within* a context is refused at load, along with an unknown id or an unreadable

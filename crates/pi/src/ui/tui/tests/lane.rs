@@ -757,10 +757,11 @@ fn normal_capitals_step_the_checkouts_and_the_window() {
     );
 }
 
-// A panel edit lands in the project's `.pi.toml` and reaches the surface: a
-// second edit to the same file keeps the first one's line.
+// What `/settings` does once the editor closes: the project's file is read
+// back and reaches the surface, and a key the files set that a flag still
+// outranks is named rather than silently ignored.
 #[tokio::test]
-async fn a_settings_edit_is_written_to_the_project_file_and_reaches_the_surface() {
+async fn an_edited_project_file_reaches_the_surface_and_names_what_outranks_it() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let mut tui = surface(dir.path());
     assert!(!tui.ui.live.contains(&Segment::Model));
@@ -768,48 +769,21 @@ async fn a_settings_edit_is_written_to_the_project_file_and_reaches_the_surface(
     let user = dir.path().join("settings.toml");
     std::fs::write(&user, "").expect("an empty settings file");
     tui.core.pinned.config = Some(user.display().to_string());
+    tui.core.pinned.effort = Some(crate::args::EffortArg::High);
 
-    let said = tui
-        .core
-        .edit("status.live", r#"["model"]"#)
-        .expect("the edit lands");
+    std::fs::write(
+        dir.path().join(".pi.toml"),
+        "effort = \"low\"\n[status]\nlive = [\"model\"]\n",
+    )
+    .expect("the project file");
+    let said = tui.core.config_edited();
+    assert!(
+        said.iter()
+            .any(|l| l.starts_with("effort: --effort outranks")),
+        "{said:?}"
+    );
     tui.land_lines(Listing::say(said));
     assert_eq!(tui.ui.live, vec![Segment::Model]);
-
-    let said = tui
-        .core
-        .edit("status.done", r#"["cost"]"#)
-        .expect("the second edit lands");
-    tui.land_lines(Listing::say(said));
-    assert_eq!(tui.ui.done, vec![Segment::Cost]);
-
-    let written = std::fs::read_to_string(dir.path().join(".pi.toml")).expect("the project file");
-    assert!(written.contains("live"), "{written}");
-    assert!(written.contains("done"), "{written}");
-    assert_eq!(
-        std::fs::read_to_string(&user).unwrap(),
-        "",
-        "the user file is untouched"
-    );
-}
-
-// An edit the reload refuses is taken back off the disk: a `system` naming no
-// file passes the config's own checks and fails only once the prompt is read.
-#[tokio::test]
-async fn an_edit_the_reload_refuses_leaves_no_file_behind() {
-    let dir = tempfile::tempdir().expect("a temp dir");
-    let mut tui = surface(dir.path());
-    let user = dir.path().join("settings.toml");
-    std::fs::write(&user, "").expect("an empty settings file");
-    tui.core.pinned.config = Some(user.display().to_string());
-
-    let missing = dir.path().join("no-such-prompt.md");
-    let refused = tui.core.edit("system", &missing.display().to_string());
-    assert!(refused.is_err(), "{refused:?}");
-    assert!(
-        !dir.path().join(".pi.toml").exists(),
-        "the file was put back"
-    );
 }
 
 // A reload reaches everything the config installed, not only the values the

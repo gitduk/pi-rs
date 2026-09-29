@@ -41,8 +41,8 @@ pub enum Builtin {
     Model(String),
     // The name to work in, or empty to list what there is.
     Worktree(String),
-    // Bare `/settings`. The panel is the whole surface; the line verbs are
-    // gone, and an argument after the word is refused.
+    // Bare `/settings`: the project's `.pi.toml` in `$EDITOR`. An argument
+    // after the word is refused.
     Settings(String),
     // A channel's command: its name, then "" = status, "on" or "off".
     Channel(&'static str, String),
@@ -125,8 +125,8 @@ impl Intent {
             Intent::Builtin(Builtin::Compact(_)) => {
                 Fate::Refused("/compact rewrites the transcript this run is writing — esc first")
             }
-            // An argument is a refusal, and a refusal answers now; bare opens
-            // a panel, which wants the surface to itself.
+            // An argument is a refusal, and a refusal answers now; bare hands
+            // the terminal to an editor and reloads, which waits for the run.
             Intent::Builtin(Builtin::Settings(rest)) if !rest.trim().is_empty() => Fate::Now,
             Intent::Builtin(Builtin::Settings(_)) => Fate::Queued,
             Intent::Builtin(Builtin::Channel(..)) => Fate::Now,
@@ -322,9 +322,9 @@ pub enum Step {
     // A command for what drives a lane from outside. The surface hands it
     // to the drivers and places what they answer.
     Drive(Drive),
-    // The settings panel wants the surface to itself, and only a surface with
-    // one can answer: bare `/settings` asks for it, an argument is a `Flash`.
-    Panel,
+    // The config file to open in `$EDITOR` and reload after: the editor takes
+    // the terminal, which only the surface can give away.
+    EditConfig(std::path::PathBuf),
     // Dealt with here; this is what there is to show for it. Returned rather
     // than laid out: the surface decides how wide the columns are.
     Handled(Listing),

@@ -92,7 +92,7 @@ pub(super) enum Target {
 pub(super) struct Regions {
     // The scrolled transcript, the live region's rows included.
     pub(super) history: Rect,
-    // The completion list, the rewind selector, or the open panel over it.
+    // The completion list, the rewind selector, or the open reply over it.
     pub(super) menu: Rect,
     // The bar: the checkouts, or the flash that took its row.
     pub(super) bar: Rect,

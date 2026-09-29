@@ -738,64 +738,6 @@ pub fn warn_if_exposed(path: &Path) -> Option<String> {
     None
 }
 
-/// Write one value at `dotted` in the file at `path`, leaving every other byte —
-/// comments, blank lines, the rest of the tree — untouched.
-///
-/// The panel edits one field at a time, so this never re-serializes the whole
-/// file: a DOM round-trip would drop the comments that carry a measurement's
-/// provenance.
-pub fn write(path: &Path, dotted: &str, value: toml::Value) -> Result<()> {
-    let body = match std::fs::read_to_string(path) {
-        Ok(body) => body,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
-    };
-    let mut doc = body
-        .parse::<toml_edit::DocumentMut>()
-        .context("the config file must stay valid TOML")?;
-    let segments = crate::store::settings::segments(dotted)?;
-    // Walk to the parent table, creating intermediate tables as needed.
-    let mut table = doc.as_table_mut();
-    let last = segments[segments.len() - 1].clone();
-    for seg in &segments[..segments.len() - 1] {
-        if !table.contains_key(seg) {
-            table.insert(seg, toml_edit::Item::Table(toml_edit::Table::new()));
-        }
-        let item = table
-            .get_mut(seg)
-            .ok_or_else(|| anyhow::anyhow!("no table `{seg}`"))?;
-        table = item
-            .as_table_mut()
-            .ok_or_else(|| anyhow::anyhow!("`{seg}` is not a table"))?;
-    }
-    table.insert(&last, toml_edit::Item::Value(to_edit_value(&value)));
-    // Keys live here; `write_private` is the shared atomic write, pid-suffixed
-    // temp and all, so two writers cannot clobber each other's temp file.
-    tool::state::write_private(path, doc.to_string().as_bytes())?;
-    Ok(())
-}
-
-// toml_edit's own value type has no From<toml::Value>, so build it by hand.
-// Tables and arrays recurse; scalars map straight across.
-fn to_edit_value(value: &toml::Value) -> toml_edit::Value {
-    use toml_edit::Value;
-    match value {
-        toml::Value::String(s) => Value::from(s.as_str()),
-        toml::Value::Integer(i) => Value::from(*i),
-        toml::Value::Float(f) => Value::from(*f),
-        toml::Value::Boolean(b) => Value::from(*b),
-        toml::Value::Datetime(d) => Value::from(d.to_string()),
-        toml::Value::Array(items) => Value::Array(items.iter().map(to_edit_value).collect()),
-        toml::Value::Table(map) => {
-            let mut t = toml_edit::InlineTable::new();
-            for (k, v) in map {
-                t.insert(k, to_edit_value(v));
-            }
-            Value::InlineTable(t)
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

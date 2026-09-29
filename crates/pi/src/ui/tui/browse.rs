@@ -34,7 +34,7 @@ impl Ui {
         // Nothing in here arms a key outside it: the `esc` that leaves must
         // not read as half of the editor's double-tap.
         self.last_esc = None;
-        // The letters are bare ones, as the panel's vocabulary is: with a
+        // The letters are bare ones, as a reply's vocabulary is: with a
         // modifier they are the menu's keys, which is nothing on this screen.
         let bare = keys::bare_letter(&key).is_some();
         let page = self.page_scroll_step();

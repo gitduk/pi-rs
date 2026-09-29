@@ -131,9 +131,12 @@ pub(crate) const BUILTIN: &[Command] = &[
     Command::builtin("/help", "", "this list", |_, _| {
         Intent::Builtin(Builtin::Help)
     }),
-    Command::builtin("/settings", "", "open the settings panel", |_, rest| {
-        Intent::Builtin(Builtin::Settings(rest))
-    }),
+    Command::builtin(
+        "/settings",
+        "",
+        "edit the project's .pi.toml, then reload",
+        |_, rest| Intent::Builtin(Builtin::Settings(rest)),
+    ),
     Command::builtin(
         "/wechat",
         "[on|off]",

@@ -13,7 +13,6 @@ mod editor;
 mod job;
 mod menu;
 mod mouse;
-mod panel;
 mod reply;
 mod row;
 mod screen;
@@ -39,7 +38,6 @@ use crate::store::listing::Listing;
 use crate::ui::render::Paint;
 use crate::ui::status;
 use crate::ui::tty;
-use panel::Panel;
 use ratatui::text::Line;
 use screen::Screen;
 use std::sync::Arc;
@@ -109,9 +107,6 @@ pub(crate) enum Deed {
     // A row chosen from it: the conversation rewinds there, and what the row
     // was decides whether it is kept or unsent.
     To(agent::session::EntryId),
-    // The settings panel's edit line kept a value: it goes to the project's
-    // `.pi.toml`, and the config reloads.
-    SettingEdit(String, String),
     // Stop the run: from esc, or from the phone's `/stop`.
     Interrupt,
     // Esc caught a prompt on its way out: stop the run, then unsend it.
@@ -470,10 +465,6 @@ impl Tui {
             Deed::Unsend => self.stop_current(true),
             Deed::Rewind => self.open_rewind(),
             Deed::To(id) => self.rewind_turn(id),
-            Deed::SettingEdit(path, value) => {
-                let said = self.core.edit(&path, &value);
-                self.land_setting(said);
-            }
             Deed::External => self.edit_externally().await,
         }
     }
@@ -543,45 +534,6 @@ impl Tui {
                 self.ui.open_reply(Listing::say([why]));
                 Wake::Nothing
             }
-        }
-    }
-
-    // A settings-panel action landed: its lines go to the scrollback and the
-    // panel sees the fresh rows. A refusal stays in the panel, beside the
-    // edit that earned it; there is nowhere else for it to be read.
-    fn land_setting(&mut self, said: Result<Vec<String>, String>) {
-        match said {
-            Ok(lines) => {
-                // Said into the scrollback above the panel rather than put up
-                // as a reply: a reply draws in the menu region the panel is
-                // drawing in and takes its keys, and the panel answers every
-                // commit it is given — one `esc` per space or `r` is not a
-                // panel that can be used.
-                let view = front_view(&mut self.views, self.core.lane());
-                for line in lines {
-                    self.ui.say(view, line);
-                }
-                self.ui.adopt_config(&self.core, view);
-                self.reload_panel();
-            }
-            Err(why) => {
-                if let Some(panel) = &mut self.ui.panel {
-                    panel.refuse(why);
-                }
-            }
-        }
-    }
-
-    // The panel owns the screen until it is dismissed.
-    fn open_panel(&mut self) {
-        let rows = self.core.setting_rows();
-        self.ui.panel = Some(Panel::new(rows, &self.core.config.vim));
-    }
-
-    // Re-read the open panel's rows after a commit changed them underneath.
-    fn reload_panel(&mut self) {
-        if let Some(panel) = &mut self.ui.panel {
-            panel.refresh(self.core.setting_rows());
         }
     }
 
@@ -749,7 +701,7 @@ impl Tui {
                     // A checkout went; the cached list would go on offering it.
                     self.ui.lists.forget();
                 }
-                Step::Panel => self.open_panel(),
+                Step::EditConfig(file) => self.edit_config(file).await,
                 Step::Handled(lines) => self.land_lines(lines),
                 Step::Compact(focus) => self.start_compact(focus, &done_tx),
                 Step::Drive(drive) => {

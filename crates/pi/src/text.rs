@@ -83,35 +83,6 @@ impl Default for Escape {
     }
 }
 
-// The characters a terminal actually shows, escapes stepped over: they cost
-// a dozen bytes and zero columns, so anything measuring or reproducing what
-// is on screen has to skip them the same way.
-fn visible(s: &str) -> impl Iterator<Item = char> + '_ {
-    let mut chars = s.chars();
-    std::iter::from_fn(move || {
-        loop {
-            let c = chars.next()?;
-            if c != '\x1b' {
-                return Some(c);
-            }
-            let mut esc = Escape::new();
-            for c in chars.by_ref() {
-                if esc.closed(c) {
-                    break;
-                }
-            }
-        }
-    })
-}
-
-/// The columns a painted string occupies, which is what a layout has to
-/// budget for — not its byte or character count.
-pub fn visible_width(s: &str) -> usize {
-    visible(s)
-        .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0))
-        .sum()
-}
-
 /// A spend in the one wording every place that says it uses: `/status` hands
 /// it a session's figures, and a status line composes the same two out of its
 /// `in_out`, `cache` and `cost` segments, which say a run's. The cost is shown

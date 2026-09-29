@@ -1,8 +1,7 @@
 use crate::input::commands::{Command, Source};
 use crate::input::{Builtin, Fate};
 use crate::store::listing::Listing;
-use crate::store::settings::row;
-use crate::ui::tui::{Asked, Deed, Intent, Panel, View, view_at};
+use crate::ui::tui::{Asked, Deed, Intent, View, view_at};
 
 use super::harness::*;
 
@@ -15,20 +14,13 @@ use super::harness::*;
 fn a_deed_says_whether_a_run_in_flight_allows_it() {
     // Only the two that rewrite the transcript care: the run in flight is
     // writing it. The rest are the screen's own and go through whenever
-    // they are asked for; the panel's three rebuild through
-    // `Arc::make_mut`, so a run in flight keeps the agent it started on.
+    // they are asked for.
     assert!(matches!(Deed::Rewind.fate(), Fate::Refused(_)));
     assert!(matches!(
         Deed::To(agent::session::EntryId(1)).fate(),
         Fate::Refused(_)
     ));
-    for deed in [
-        Deed::Nothing,
-        Deed::External,
-        Deed::Interrupt,
-        Deed::Unsend,
-        Deed::SettingEdit("a.b".into(), "1".into()),
-    ] {
+    for deed in [Deed::Nothing, Deed::External, Deed::Interrupt, Deed::Unsend] {
         assert!(matches!(deed.fate(), Fate::Now), "{deed:?} should proceed");
     }
 }
@@ -302,47 +294,6 @@ async fn a_filed_row_moves_the_cursor_an_adopt_goes_by() {
     );
 }
 
-// A browsing panel swallows the keys it does not know: a letter typed
-// over it neither moves a row nor reaches the input line underneath.
-#[tokio::test]
-async fn browsing_panel_does_not_leak_keys_to_the_editor() {
-    let dir = tempfile::tempdir().expect("a checkout");
-    let mut tui = surface(dir.path());
-    let rows = vec![row("model", "flash")];
-    tui.ui.panel = Some(Panel::new(rows, &crate::store::config::Vim::default()));
-    let token = tui.core.lane().token();
-    let lane = tui.core.lane_mut();
-    let intent = tui
-        .ui
-        .key(lane, view_at(&mut tui.views, token), typed('z'), false);
-    assert!(matches!(intent, Asked::Own(Deed::Nothing)));
-    assert!(
-        tui.ui.editor.is_empty(),
-        "the editor did not take the keystroke"
-    );
-}
-
-// The panel can open onto a browse nobody left — a `/settings` queued
-// during a run, or sent from the phone — and it is drawn over everything:
-// a mode that swallowed its keys would leave a screen nobody can drive.
-#[tokio::test]
-async fn a_panel_opened_onto_browse_still_takes_the_keys() {
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    let dir = tempfile::tempdir().expect("a checkout");
-    let mut tui = surface(dir.path());
-    let rows = vec![row("model", "flash")];
-    tui.ui.panel = Some(Panel::new(rows, &crate::store::config::Vim::default()));
-    tui.ui.browsing = true;
-    let token = tui.core.lane().token();
-    let lane = tui.core.lane_mut();
-    let esc = crate::ui::tui::TermEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-
-    let asked = tui.ui.key(lane, view_at(&mut tui.views, token), esc, false);
-    assert!(matches!(asked, Asked::Own(Deed::Nothing)));
-    assert!(tui.ui.panel.is_none(), "the panel took the esc and closed");
-    assert!(tui.ui.browsing, "and the browse behind it is still up");
-}
-
 // The completion list stays up during a run — `/help` and `/model` answer
 // on the spot then, and the rest queue as what they are. `esc` is the one
 // key it costs, and it costs it for a press: innermost first, so the list
@@ -395,18 +346,5 @@ fn esc_takes_the_list_first_and_the_run_next() {
         ui.editor.text(),
         "/new",
         "the half-typed word was completed"
-    );
-
-    // A panel is modal — `/settings` opens one while a run is in flight —
-    // and `esc` there is about the panel, the way it is about the list.
-    ui.panel = Some(Panel::new(
-        Vec::new(),
-        &crate::store::config::Vim::default(),
-    ));
-    let intent = ui.key(&lane, &mut view, esc(), true);
-    assert!(matches!(intent, Asked::Own(Deed::Nothing)), "{intent:?}");
-    assert!(
-        ui.panel.is_none(),
-        "esc closed the panel rather than the run"
     );
 }

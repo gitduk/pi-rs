@@ -1,5 +1,4 @@
-//! What `/reload`, `/settings` and `/model` do to the Core, and the rows the
-//! settings panel shows.
+//! What `/reload`, `/settings` and `/model` do to the Core.
 //!
 //! The value itself is `store/settings.rs`; this is what the Core does to it.
 
@@ -10,7 +9,6 @@ use crate::input::commands::Choice;
 use crate::input::refused;
 use crate::store::config::{self, Config};
 use crate::store::icons;
-use crate::store::settings::{self, mask_secret};
 
 impl Core {
     /// Re-read the config and everything it decides.
@@ -121,67 +119,36 @@ impl Core {
         let config = self.settings.config().map_err(|e| refused("settings", e))?;
         self.adopt(config)
     }
-    // Every leaf the files hold — what the panel shows.
-    pub fn setting_rows(&self) -> Vec<settings::SettingRow> {
-        self.settings.rows()
+    /// After `/settings` closed the editor: reload, and name what the files
+    /// now say that a flag or the environment still outranks.
+    pub fn config_edited(&mut self) -> Vec<String> {
+        let mut said = self.reload();
+        said.extend(self.shadowed());
+        said
     }
-    /// Write a value into this project's `.pi.toml` and reload: tried on a
-    /// copy of the files first, and the file put back if the reload still
-    /// refuses it, so a bad value does not stay on disk. The panel's edit line
-    /// answers through here, so a refusal comes back named, to be shown beside
-    /// the edit that earned it.
-    pub fn edit(&mut self, path: &str, raw: &str) -> Result<Vec<String>, String> {
-        let (old, new) = self
-            .settings
-            .check(path, raw)
-            .map_err(|e| refused("settings", e))?;
-        let root = self.lane().root().to_path_buf();
-        let file = config::project_target(&root)
-            .ok_or_else(|| "no project here: a .pi.toml in $HOME is never read".to_string())?;
-        let before = std::fs::read(&file).ok();
-        config::write(&file, path, new.clone()).map_err(|e| format!("{e:#}"))?;
-        let at = self.pinned.config.clone();
-        let adopted = self
-            .settings
-            .reread(at.as_deref(), &root)
-            .map_err(|e| refused("settings", e))
-            .and_then(|()| self.rebuilt());
-        let mut said = match adopted {
-            Ok(said) => said,
-            Err(why) => {
-                let _ = match before {
-                    Some(bytes) => tool::state::write_private(&file, &bytes),
-                    None => std::fs::remove_file(&file),
-                };
-                let _ = self.settings.reread(at.as_deref(), &root);
-                return Err(why);
-            }
-        };
-        let old_shown = match &old {
-            Some(v) => mask_secret(path, &settings::render(v)),
-            None => "<unset>".to_string(),
-        };
-        said.push(format!(
-            "{path}: {old_shown} → {} — written to {}",
-            mask_secret(path, &settings::render(&new)),
-            agent::context::short(&file, &root)
-        ));
-        said.extend(self.shadowed(path));
-        Ok(said)
-    }
-    // A value just written that a flag or the environment still outranks.
-    fn shadowed(&self, path: &str) -> Option<String> {
-        let by = match path {
-            "base_url" if self.pinned.base_url.is_some() => "--base-url".to_string(),
-            "base_url" | "format" => format!("${}", config::endpoint_env()?),
-            "effort" if self.pinned.effort.is_some() => "--effort".to_string(),
-            "tier" if self.pinned.tier.is_some() => "--tier".to_string(),
-            "system" if self.pinned.system.is_some() => "--system".to_string(),
-            _ => return None,
-        };
-        Some(format!(
-            "{path}: {by} still outranks the file, so this run keeps it"
-        ))
+    // Each key the files set that this run takes from somewhere higher.
+    fn shadowed(&self) -> Vec<String> {
+        let env = config::endpoint_env().map(|var| format!("${var}"));
+        let flag = |on: bool, name: &str| on.then(|| name.to_string());
+        [
+            (
+                "base_url",
+                flag(self.pinned.base_url.is_some(), "--base-url").or(env.clone()),
+            ),
+            ("format", env),
+            ("effort", flag(self.pinned.effort.is_some(), "--effort")),
+            ("tier", flag(self.pinned.tier.is_some(), "--tier")),
+            ("system", flag(self.pinned.system.is_some(), "--system")),
+        ]
+        .into_iter()
+        .filter(|(path, _)| self.settings.sets(path))
+        .filter_map(|(path, by)| {
+            Some(format!(
+                "{path}: {} outranks the files, so this run keeps it",
+                by?
+            ))
+        })
+        .collect()
     }
     /// The models `/model` can reach, with what tells them apart.
     pub fn choices(&self) -> Vec<Choice> {

@@ -32,7 +32,6 @@ pub const UNOPENED_MARK: &str = "○"; // a checkout on the bar that no lane has
 pub const COMPACT_RULE: &str = "───"; // the dashes a compaction banner wears
 
 // Menus and lists.
-pub const MENU_SIGIL: &str = "›"; // the menu's selected row
 pub const CURRENT_ITEM: &str = "●"; // the current row in `/model` and `/resume`
 
 // The input lines.

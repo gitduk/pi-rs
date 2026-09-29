@@ -6,7 +6,7 @@
 //! model — nor a flash, which is one row for a second: it is something the
 //! user asked for and has not finished reading.
 //!
-//! It rides the menu's plumbing, like the panel it shares the region with:
+//! It rides the menu's plumbing, in the region the menu draws in:
 //! `MenuNext` / `MenuPrevious` move, `MenuDismiss` and `MenuAccept` close, and
 //! the browsing keys `j` / `k` / `q` sit beside them as a fixed vocabulary.
 
@@ -38,7 +38,7 @@ impl Reply {
 
     /// The rows a reply takes on screen: a line wider than the surface is a
     /// row it wraps to, and the window is measured in what the drawing counts.
-    /// Fitted here rather than left to `Rows`, as the panel's rows are, because
+    /// Fitted here rather than left to `Rows`, because
     /// the room this is given is a row count — a wrapped line is one the count
     /// would miss, and the menu would then draw over the bar.
     fn rows(&self, width: usize) -> Vec<Line<'static>> {
