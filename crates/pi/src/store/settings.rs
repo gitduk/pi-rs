@@ -4,13 +4,10 @@
 //! field added to the struct appears without anything else being edited.
 //!
 //! `Settings` is what a run carries: the tree as the files last said it — the
-//! user's, with the project's `.pi.toml` laid over it — and the values this
-//! session claimed on top. What the config is computed from is the two
-//! overlaid; what the panel edits is the claim, and `/reload` replaces the
-//! files' half.
+//! user's, with the project's `.pi.toml` laid over it. There is no session
+//! layer: the panel writes the project's file, and `/reload` re-reads both.
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
@@ -54,26 +51,19 @@ pub fn leaves(tree: &toml::Value) -> Vec<(String, String)> {
     out
 }
 
-/// One leaf as the panel shows it: the value in force for the session, and
-/// whether the file still holds something else — which is what the panel's
-/// write and revert act on.
+/// One leaf as the panel shows it: where it is, and what the files say.
 pub struct SettingRow {
     pub path: String,
     pub value: String,
-    pub changed: bool,
 }
 
-/// The config files as this run read them, and the values this session claimed
-/// on top of them.
+/// The config files as this run read them.
 pub struct Settings {
     // The user's tree with the project's over it, as last read from disk.
     // `/settings` edits a copy of it; `/reload` replaces it.
     file: toml::Value,
     // The project's file and its own tree, to say which keys it set.
     project: Option<(PathBuf, toml::Value)>,
-    // What this session has claimed, by path. Replayed over every reload, so a
-    // claimed value keeps winning over the file.
-    claimed: BTreeMap<String, toml::Value>,
 }
 
 impl Settings {
@@ -82,11 +72,7 @@ impl Settings {
         if let Some((_, tree)) = &project {
             overlay(&mut file, tree);
         }
-        Self {
-            file,
-            project,
-            claimed: BTreeMap::new(),
-        }
+        Self { file, project }
     }
 
     /// The user's file (`at`, else the default) and the project file nearest
@@ -98,19 +84,15 @@ impl Settings {
         ))
     }
 
-    /// Re-read both files, keeping what this session has claimed.
+    /// Re-read both files.
     pub fn reread(&mut self, at: Option<&str>, root: &Path) -> Result<()> {
-        let claimed = std::mem::take(&mut self.claimed);
-        *self = Self {
-            claimed,
-            ..Self::load(at, root)?
-        };
+        *self = Self::load(at, root)?;
         Ok(())
     }
 
-    /// The config in force: the files, the claims, the environment.
+    /// The config in force: the files, then the environment.
     pub fn config(&self) -> Result<crate::store::config::Config> {
-        crate::store::config::Config::in_force(self.effective()?, &self.claimed)
+        crate::store::config::Config::in_force(self.file.clone())
     }
 
     /// The project file read, if one was found.
@@ -124,78 +106,24 @@ impl Settings {
         get(tree, path).ok().map(|_| file.as_path())
     }
 
-    /// The file tree with the claims on top — what the config is computed from.
-    pub fn effective(&self) -> Result<toml::Value> {
-        let mut tree = self.file.clone();
-        for (path, value) in &self.claimed {
-            put(&mut tree, path, value.clone())?;
-        }
-        Ok(tree)
-    }
-
-    pub fn claimed(&self) -> &BTreeMap<String, toml::Value> {
-        &self.claimed
-    }
-
-    /// What the file alone says at `path`, for the check that names a claim
-    /// still shadowing a line the file has moved on from.
-    pub fn file_value(&self, path: &str) -> Option<&toml::Value> {
-        get(&self.file, path).ok()
-    }
-
-    /// What this session has claimed at `path`, if anything.
-    pub fn claimed_value(&self, path: &str) -> Option<toml::Value> {
-        self.claimed.get(path).cloned()
-    }
-
-    /// Take a value into the session, or refuse it whole: the write is tried on
-    /// a scratch tree first, so a value the config would not accept reaches
-    /// neither the config in force nor the claim. Answers with the value that
-    /// was there and the one that now is.
-    pub fn claim(&mut self, path: &str, raw: &str) -> Result<(Option<toml::Value>, toml::Value)> {
+    /// `raw` at `path`, tried on a copy of the files first: a value the config
+    /// would not accept reaches no file. Answers with the value that was there
+    /// and the one to write.
+    pub fn check(&self, path: &str, raw: &str) -> Result<(Option<toml::Value>, toml::Value)> {
         let raw = typed(path, raw);
-        let mut scratch = self.effective()?;
+        let mut scratch = self.file.clone();
         let old = get(&scratch, path).ok().cloned();
         set(&mut scratch, path, &raw)?;
         let new = get(&scratch, path).expect("the path was just set").clone();
         crate::store::config::Config::from_tree(scratch)?;
-        self.claimed.insert(path.to_string(), new.clone());
         Ok((old, new))
     }
 
-    /// Plant a claim no line of the file can address, which is what the panel
-    /// has to keep answering for. No path in the program makes one — `claim`
-    /// refuses what the config will not take — so this is the tests' way in.
-    #[cfg(test)]
-    pub(crate) fn claim_unchecked(&mut self, path: &str, value: toml::Value) {
-        self.claimed.insert(path.to_string(), value);
-    }
-
-    /// Drop this session's claim on `path`. False when there was none.
-    pub fn drop_claim(&mut self, path: &str) -> bool {
-        self.claimed.remove(path).is_some()
-    }
-
-    /// The file's rows with the session's claims on top — what the panel
-    /// shows. Path by path rather than one overlaid tree, so a claim the file
-    /// can no longer address (an ancestor the file has turned into a
-    /// non-table) still answers, with the file's own value beside it for the
-    /// mark.
+    /// Every leaf the files hold — what the panel shows.
     pub fn rows(&self) -> Vec<SettingRow> {
-        let mut rows: BTreeMap<String, String> = leaves(&self.file).into_iter().collect();
-        for (path, claimed) in &self.claimed {
-            rows.insert(path.clone(), render(claimed));
-        }
-        rows.into_iter()
-            .map(|(path, value)| {
-                let claimed = self.claimed.get(&path);
-                let file = get(&self.file, &path).ok();
-                SettingRow {
-                    path,
-                    value,
-                    changed: claimed.is_some() && claimed != file,
-                }
-            })
+        leaves(&self.file)
+            .into_iter()
+            .map(|(path, value)| SettingRow { path, value })
             .collect()
     }
 }
@@ -223,11 +151,10 @@ fn typed<'a>(path: &str, raw: &'a str) -> Cow<'a, str> {
 }
 
 #[cfg(test)]
-pub(crate) fn row(path: &str, value: &str, changed: bool) -> SettingRow {
+pub(crate) fn row(path: &str, value: &str) -> SettingRow {
     SettingRow {
         path: path.into(),
         value: value.into(),
-        changed,
     }
 }
 
@@ -262,16 +189,6 @@ pub fn set(tree: &mut toml::Value, path: &str, raw: &str) -> Result<()> {
             .unwrap_or(toml::Value::String(raw.to_string())),
     };
     parent.insert(key.clone(), value);
-    Ok(())
-}
-
-/// Place an already-parsed value at `path`, creating intermediate tables.
-/// Used by `/settings`'s replay log, where the value was validated when it
-/// was claimed and must land in the tree exactly as typed.
-pub fn put(tree: &mut toml::Value, path: &str, value: toml::Value) -> Result<()> {
-    let segments = segments(path)?;
-    let parent = table_at(tree, &segments[..segments.len() - 1], path)?;
-    parent.insert(segments[segments.len() - 1].clone(), value);
     Ok(())
 }
 
@@ -370,7 +287,7 @@ mod tests {
         let project =
             toml::from_str("base_url = \"http://project\"\n[vim]\nenabled = true\n").unwrap();
         let s = Settings::new(user, Some((PathBuf::from("/repo/.pi.toml"), project)));
-        let tree = s.effective().unwrap();
+        let tree = s.file.clone();
         assert_eq!(
             get(&tree, "base_url").unwrap().as_str(),
             Some("http://project")

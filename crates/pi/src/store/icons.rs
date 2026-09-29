@@ -34,7 +34,6 @@ pub const COMPACT_RULE: &str = "───"; // the dashes a compaction banner we
 // Menus and lists.
 pub const MENU_SIGIL: &str = "›"; // the menu's selected row
 pub const CURRENT_ITEM: &str = "●"; // the current row in `/model` and `/resume`
-pub const CHANGED_MARK: &str = "≠"; // a session value the file no longer holds
 
 // The input lines.
 pub const INPUT_SIGIL: &str = PROMPT_BAR; // `theme.prompt.icon` default

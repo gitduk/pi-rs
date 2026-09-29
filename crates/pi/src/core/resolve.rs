@@ -116,13 +116,10 @@ pub fn resolve(
         notes.push("tool skipped — subagent: the name is taken".to_string());
     }
 
-    let settled = config.settle(
-        config::Flags {
-            effort: pinned.effort,
-            tier: pinned.tier,
-        },
-        settings.claimed(),
-    );
+    let settled = config.settle(config::Flags {
+        effort: pinned.effort,
+        tier: pinned.tier,
+    });
     let tier = tool::Tier::from(settled.tier);
     let effort = match settled.effort {
         EffortArg::Off => Effort::Off,
@@ -176,7 +173,7 @@ pub fn resolve(
 }
 
 // The url requests go to, and the one source it came from, in the order
-// they rank: the flag, this session's claim, the environment, the files.
+// they rank: the flag, the environment, the files.
 fn endpoint(
     pinned: &Pinned,
     config: &config::Config,
@@ -187,9 +184,7 @@ fn endpoint(
         Some(url) => (config::expand_base_url(url), "--base-url".to_string()),
         None => {
             let url = config.base_url.clone()?;
-            let from = if settings.claimed().contains_key("base_url") {
-                "/settings".to_string()
-            } else if let Some(var) = config::endpoint_env() {
+            let from = if let Some(var) = config::endpoint_env() {
                 format!("${var}")
             } else if let Some(file) = settings.project_sets("base_url") {
                 context::short(file, root)

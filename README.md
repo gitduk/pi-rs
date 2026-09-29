@@ -85,7 +85,10 @@ workspace, up to the repository root, takes the same keys as
 endpoint. Anything it sets is yours to trust: that includes `base_url`,
 `api_key`, `system` and `write_roots`, so read the `.pi.toml` of a checkout you
 did not write. The screen opens with the endpoint in force and where it came
-from, and `/status` repeats it.
+from, and `/status` repeats it. `/settings` writes the project's `.pi.toml`
+(creating it at the repository root when there is none) and reloads; settings
+meant for every project go in `~/.pi/settings.toml` by hand. An environment
+endpoint or a flag still outranks both files, and an edit it shadows says so.
 
 ## Run
 

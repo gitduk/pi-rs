@@ -28,8 +28,6 @@ fn a_deed_says_whether_a_run_in_flight_allows_it() {
         Deed::Interrupt,
         Deed::Unsend,
         Deed::SettingEdit("a.b".into(), "1".into()),
-        Deed::SettingWrite("a.b".into()),
-        Deed::SettingRevert("a.b".into()),
     ] {
         assert!(matches!(deed.fate(), Fate::Now), "{deed:?} should proceed");
     }
@@ -310,7 +308,7 @@ async fn a_filed_row_moves_the_cursor_an_adopt_goes_by() {
 async fn browsing_panel_does_not_leak_keys_to_the_editor() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
-    let rows = vec![row("model", "flash", false)];
+    let rows = vec![row("model", "flash")];
     tui.ui.panel = Some(Panel::new(rows, &crate::store::config::Vim::default()));
     let token = tui.core.lane().token();
     let lane = tui.core.lane_mut();
@@ -332,7 +330,7 @@ async fn a_panel_opened_onto_browse_still_takes_the_keys() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
-    let rows = vec![row("model", "flash", false)];
+    let rows = vec![row("model", "flash")];
     tui.ui.panel = Some(Panel::new(rows, &crate::store::config::Vim::default()));
     tui.ui.browsing = true;
     let token = tui.core.lane().token();

@@ -1,5 +1,5 @@
-//! What `/reload` and `/model` do to the Core, and the rows the settings panel
-//! shows: the config in force, the claims this session laid over it, the model.
+//! What `/reload`, `/settings` and `/model` do to the Core, and the rows the
+//! settings panel shows.
 //!
 //! The value itself is `store/settings.rs`; this is what the Core does to it.
 
@@ -26,23 +26,11 @@ impl Core {
     /// name, the history, the model. Only what the config decides is
     /// replaced.
     pub fn reload(&mut self) -> Vec<String> {
-        // Re-read the file trees; the claimed overrides stay.
         let root = self.lane().root().to_path_buf();
         if let Err(e) = self.settings.reread(self.pinned.config.as_deref(), &root) {
             return vec![format!("nothing reloaded — {}", refused("reload", e))];
         }
-        let mut said = self.rebuild();
-        // Name any claim that still shadows a line the file just changed.
-        for path in self.settings.claimed().keys() {
-            if let Some(old) = self.settings.file_value(path)
-                && old != &self.settings.claimed()[path]
-            {
-                said.push(format!(
-                    "{path}: the file changed it, but this session is still shadowing it — /settings, then r on the row takes the file back"
-                ));
-            }
-        }
-        said
+        self.rebuild()
     }
     // Take this config as the one in force: recompute everything it decides
     // and swap it in. Whole or not at all — nothing is touched until all of
@@ -120,8 +108,7 @@ impl Core {
         );
         Ok(notes)
     }
-    // Recompute the config from the file tree plus the session's claimed
-    // overrides, and adopt it.
+    // Recompute the config from the file trees, and adopt it.
     fn rebuild(&mut self) -> Vec<String> {
         self.rebuilt().unwrap_or_else(|why| vec![why])
     }
@@ -130,79 +117,52 @@ impl Core {
         let config = self.settings.config().map_err(|e| refused("settings", e))?;
         self.adopt(config)
     }
-    // The files' rows with the session's claims on top — what the panel
-    // shows. Path by path rather than one overlaid tree, so a claim the file
-    // can no longer address (an ancestor the file has turned into a
-    // non-table) still answers, with the file's own value beside it for the
-    // mark.
+    // Every leaf the files hold — what the panel shows.
     pub fn setting_rows(&self) -> Vec<settings::SettingRow> {
         self.settings.rows()
     }
-    /// Take a value into the session: try the write on a scratch tree first,
-    /// so a bad value touches nothing, then record it as a claim and rebuild.
-    /// The panel's edit line answers through here, so a refusal comes back
-    /// named, to be shown beside the edit that earned it.
+    /// Write a value into this project's `.pi.toml` and reload: tried on a
+    /// copy of the files first, so a bad value touches no file. The panel's
+    /// edit line answers through here, so a refusal comes back named, to be
+    /// shown beside the edit that earned it.
     pub fn edit(&mut self, path: &str, raw: &str) -> Result<Vec<String>, String> {
         let (old, new) = self
             .settings
-            .claim(path, raw)
+            .check(path, raw)
             .map_err(|e| refused("settings", e))?;
+        let root = self.lane().root().to_path_buf();
+        let file = config::project_target(&root)
+            .ok_or_else(|| "no project here: a .pi.toml in $HOME is never read".to_string())?;
+        config::write(&file, path, new.clone()).map_err(|e| format!("{e:#}"))?;
+        if let Err(e) = self.settings.reread(self.pinned.config.as_deref(), &root) {
+            return Err(refused("settings", e));
+        }
         let mut said = self.rebuild();
         let old_shown = match &old {
             Some(v) => mask_secret(path, &settings::render(v)),
             None => "<unset>".to_string(),
         };
         said.push(format!(
-            "{path}: {old_shown} → {} (session only)",
-            mask_secret(path, &settings::render(&new))
+            "{path}: {old_shown} → {} — written to {}",
+            mask_secret(path, &settings::render(&new)),
+            agent::context::short(&file, &root)
         ));
+        said.extend(self.shadowed(path));
         Ok(said)
     }
-    /// The panel's r: the file's value takes the session back. No claim on
-    /// the path means the file is already in force and there is nothing to
-    /// say.
-    pub fn revert(&mut self, path: &str) -> Vec<String> {
-        if !self.settings.drop_claim(path) {
-            return Vec::new();
-        }
-        let mut said = self.rebuild();
-        said.push(format!("{path}: back to what the file says"));
-        said
-    }
-    /// The panel's space: the session value at `path` replaces the file's
-    /// line, the claim goes, and the config adopts what the file now says.
-    /// The value was validated when the session took it, so only the disk
-    /// can refuse.
-    pub fn write_to_file(&mut self, path: &str) -> Result<Vec<String>, String> {
-        let Some(value) = self.settings.claimed_value(path) else {
-            return Ok(vec![format!("{path}: the session and the file agree")]);
+    // A value just written that a flag or the environment still outranks.
+    fn shadowed(&self, path: &str) -> Option<String> {
+        let by = match path {
+            "base_url" if self.pinned.base_url.is_some() => "--base-url".to_string(),
+            "base_url" | "format" => format!("${}", config::endpoint_env()?),
+            "effort" if self.pinned.effort.is_some() => "--effort".to_string(),
+            "tier" if self.pinned.tier.is_some() => "--tier".to_string(),
+            "system" if self.pinned.system.is_some() => "--system".to_string(),
+            _ => return None,
         };
-        // Written under the project's line, it would lose to it on the reload.
-        if let Some(project) = self.settings.project_sets(path) {
-            return Err(format!(
-                "{path} is set by {} — change it there",
-                project.display()
-            ));
-        }
-        let file = self
-            .pinned
-            .config
-            .as_deref()
-            .map(std::path::PathBuf::from)
-            .or_else(config::global_path)
-            .ok_or_else(|| "no settings file to write".to_string())?;
-        config::write(&file, path, value.clone()).map_err(|e| format!("{e:#}"))?;
-        self.settings.drop_claim(path);
-        let root = self.lane().root().to_path_buf();
-        self.settings
-            .reread(self.pinned.config.as_deref(), &root)
-            .map_err(|e| format!("{e:#}"))?;
-        let mut said = self.rebuild();
-        said.push(format!(
-            "{path} = {} — written to the file",
-            mask_secret(path, &settings::render(&value))
-        ));
-        Ok(said)
+        Some(format!(
+            "{path}: {by} still outranks the file, so this run keeps it"
+        ))
     }
     /// The models `/model` can reach, with what tells them apart.
     pub fn choices(&self) -> Vec<Choice> {
@@ -319,76 +279,5 @@ impl Core {
                 format!("{mark} {:width$}  {}", c.name, c.note)
             })
             .collect()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::core::tests::a_lane;
-
-    // A Core whose file tree is the given TOML, enough for the `/settings`
-    // surface to answer.
-    fn core_with_file(file: &str) -> crate::core::Core {
-        crate::core::Core {
-            store: crate::store::session::Store::new(
-                std::env::temp_dir().join("pi-settings-get-test"),
-            ),
-            keys: std::sync::Arc::new(crate::store::keys::Keys::default()),
-            config: std::sync::Arc::new(crate::store::config::Config::default()),
-            pinned: crate::args::Pinned::default(),
-            commands: std::sync::Arc::new(Vec::new()),
-            settings: crate::store::settings::Settings::new(toml::from_str(file).unwrap(), None),
-            lanes: vec![a_lane("s")],
-            current: 0,
-        }
-    }
-
-    fn claimed_base_url() -> crate::core::Core {
-        let mut core = core_with_file(r#"base_url = "http://127.0.0.1:7896""#);
-        core.settings
-            .claim("base_url", "http://127.0.0.1:7897")
-            .expect("a valid claim");
-        core
-    }
-
-    #[test]
-    fn rows_answer_path_by_path_when_the_file_breaks_under_a_claim() {
-        // `models` is no longer a table, so the claim cannot be overlaid onto
-        // the file — the row is still due, with the mark and its r.
-        let mut core = core_with_file("model = \"flash\"\nmodels = 3");
-        core.settings
-            .claim_unchecked("models.flash", toml::Value::String("m2".into()));
-        let rows = core.setting_rows();
-        let model = rows
-            .iter()
-            .find(|r| r.path == "model")
-            .expect("the file's own row");
-        assert!(!model.changed);
-        let claimed = rows
-            .iter()
-            .find(|r| r.path == "models.flash")
-            .expect("the claimed row");
-        assert_eq!(claimed.value, "m2");
-        assert!(claimed.changed, "the file has no value there to agree with");
-    }
-
-    #[test]
-    fn panel_rows_read_the_claim_over_the_file_and_mark_it() {
-        let core = claimed_base_url();
-        let rows = core.setting_rows();
-        let row = rows
-            .iter()
-            .find(|r| r.path == "base_url")
-            .expect("the claimed path is a row");
-        assert_eq!(row.value, "http://127.0.0.1:7897");
-        assert!(row.changed, "the file still says 7896");
-
-        let mut core = core_with_file("model = \"flash\"");
-        core.settings
-            .claim_unchecked("margins", toml::Value::Integer(2));
-        let rows = core.setting_rows();
-        let added = rows.iter().find(|r| r.path == "margins").expect("added");
-        assert_eq!(added.value, "2");
-        assert!(added.changed);
     }
 }

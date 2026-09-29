@@ -109,13 +109,9 @@ pub(crate) enum Deed {
     // A row chosen from it: the conversation rewinds there, and what the row
     // was decides whether it is kept or unsent.
     To(agent::session::EntryId),
-    // The settings panel's edit line kept a value: the session takes it, and
-    // the file does not — `SettingWrite` is what moves it to the file.
+    // The settings panel's edit line kept a value: it goes to the project's
+    // `.pi.toml`, and the config reloads.
     SettingEdit(String, String),
-    // The panel's space: the session value replaces the file's line.
-    SettingWrite(String),
-    // The panel's r: the file's value takes the session back.
-    SettingRevert(String),
     // Stop the run: from esc, or from the phone's `/stop`.
     Interrupt,
     // Esc caught a prompt on its way out: stop the run, then unsend it.
@@ -477,15 +473,6 @@ impl Tui {
             Deed::SettingEdit(path, value) => {
                 let said = self.core.edit(&path, &value);
                 self.land_setting(said);
-            }
-            Deed::SettingWrite(path) => {
-                let said = self.core.write_to_file(&path);
-                self.land_setting(said);
-            }
-            Deed::SettingRevert(path) => {
-                let said = self.core.revert(&path);
-                self.land_lines(Listing::say(said));
-                self.reload_panel();
             }
             Deed::External => self.edit_externally().await,
         }

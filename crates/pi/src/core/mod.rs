@@ -50,8 +50,8 @@ pub struct Core {
     /// holds the same table to complete against and re-reads it whenever this
     /// one is replaced.
     pub commands: std::sync::Arc<Vec<Command>>,
-    /// The config file and what this session claimed on top of it: what
-    /// `/settings` edits, and what `/reload` replaces the file's half of.
+    /// The config files as last read: what `/settings` writes into and
+    /// `/reload` reads again.
     pub settings: Settings,
     /// Every checkout open in this run, in the order they were opened. The
     /// main one is first, because that is where a run starts.

@@ -3,7 +3,7 @@
 //! It rides the existing menu plumbing — `MenuNext` / `MenuPrevious` move,
 //! `MenuAccept` edits and submits, `MenuDismiss` cancels or closes — so a
 //! user's own bindings follow without a second table; the browsing keys
-//! (`j`, `i`, `q`, space, `r`) are a fixed vocabulary beside it. The cursor,
+//! (`j`, `k`, `i`, `q`) are a fixed vocabulary beside it. The cursor,
 //! the edit line and the dispatch are written here once.
 
 use crossterm::event::KeyEvent;
@@ -20,8 +20,7 @@ use crate::store::keys::Action;
 use crate::store::settings::SettingRow;
 use crate::store::settings::mask_secret;
 
-/// The rows a panel shows: every path the config has, the value in force for
-/// the session, and whether the file still holds another one.
+/// The rows a panel shows: every path the config files have, and its value.
 pub struct Panel {
     rows: Vec<SettingRow>,
     at: usize,
@@ -146,7 +145,7 @@ impl Panel {
     }
 
     // Leave Insert with the edit kept. A value that did not change is just
-    // dropped; one that did goes to the session as a claim, and the panel
+    // dropped; one that did goes to the project's file, and the panel
     // stays in Insert until the commit answers — `refresh` closes it,
     // `refuse` keeps it open beside the refusal.
     fn submit_edit(&mut self) -> Took {
@@ -191,24 +190,6 @@ impl Panel {
                     return Took::Deed(Deed::Nothing);
                 }
                 'q' => return Took::Close,
-                // Space writes the session value to the file, r takes it
-                // back; the settings panel owns both, on a changed row.
-                ' ' => {
-                    return Took::Deed(
-                        self.rows
-                            .get(self.at)
-                            .map(|r| Deed::SettingWrite(r.path.clone()))
-                            .unwrap_or(Deed::Nothing),
-                    );
-                }
-                'r' => {
-                    return Took::Deed(
-                        self.rows
-                            .get(self.at)
-                            .map(|r| Deed::SettingRevert(r.path.clone()))
-                            .unwrap_or(Deed::Nothing),
-                    );
-                }
                 _ => {}
             }
         }
@@ -334,11 +315,10 @@ impl Panel {
             out.extend(screen::fit(&refused, width));
         }
         // The one line of chrome: what mode is up and what its keys are. A
-        // panel that answers to q and space says so, or the first q lands as
-        // a mystery.
+        // panel that answers to q says so, or the first q lands as a mystery.
         let line = if self.browsing() {
             Line::from(format!(
-                "  normal{}j/k move · i edit · space write file · r revert · q close",
+                "  normal{}j/k move · i edit · q close",
                 icons::KEY_NOTE_SEP
             ))
         } else {
@@ -360,14 +340,7 @@ impl Panel {
     fn row(&self, at: usize) -> String {
         let row = &self.rows[at];
         let shown = mask_secret(&row.path, &row.value);
-        // The session has left the file's value behind: the mark says so, and
-        // normal mode's space and r are what settle it.
-        let mark = if row.changed {
-            format!(" {}", icons::CHANGED_MARK)
-        } else {
-            String::new()
-        };
-        format!("{} = {shown}{mark}", row.path)
+        format!("{} = {shown}", row.path)
     }
 }
 
@@ -448,10 +421,7 @@ mod tests {
     }
 
     fn settings() -> Vec<SettingRow> {
-        vec![
-            row("base_url", "http://x", false),
-            row("model", "flash", true),
-        ]
+        vec![row("base_url", "http://x"), row("model", "flash")]
     }
 
     #[test]
@@ -464,14 +434,14 @@ mod tests {
 
     #[test]
     fn modifiers_keep_the_browsing_letters_dead() {
-        // Ctrl+R is not `r`: the fixed vocabulary answers bare letters only,
+        // Ctrl+I is not `i`: the fixed vocabulary answers bare letters only,
         // the way the bound table it replaced always did.
         let mut p = Panel::new(settings(), &vim());
-        let took = p.press(
+        p.press(
             None,
-            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL),
         );
-        assert!(matches!(took, Took::Deed(Deed::Nothing)), "not a revert");
+        assert!(!p.editing(), "not an edit");
         assert!(!matches!(
             p.press(
                 None,
@@ -511,7 +481,7 @@ mod tests {
     }
 
     // i opens the row; the escape pair takes its first half back off and
-    // keeps the edit as the session's. The panel stays in Insert until the
+    // keeps the edit. The panel stays in Insert until the
     // commit answers — the loop's refresh closes it.
     #[test]
     fn i_opens_the_row_and_jk_keeps_it() {
@@ -527,21 +497,6 @@ mod tests {
             other => panic!("kept {other:?}"),
         }
         assert!(p.editing(), "the commit answers before Insert closes");
-    }
-
-    // Space and r settle a row the session and the file disagree on.
-    #[test]
-    fn space_and_r_settle_a_row() {
-        let mut p = Panel::new(settings(), &vim());
-        typed(&mut p, "j");
-        assert!(matches!(
-            deed(typed_close(&mut p, ' ')),
-            Deed::SettingWrite(ref path) if path == "model"
-        ));
-        assert!(matches!(
-            deed(typed_close(&mut p, 'r')),
-            Deed::SettingRevert(ref path) if path == "model"
-        ));
     }
 
     // Esc drops the edit and lands back in Normal mode with the row as it
@@ -593,10 +548,7 @@ mod tests {
     fn refresh_keeps_the_cursor_on_the_same_path() {
         let mut p = Panel::new(settings(), &vim());
         act(&mut p, Action::MenuNext);
-        let after = vec![
-            row("model", "deepseek", false),
-            row("base_url", "http://y", false),
-        ];
+        let after = vec![row("model", "deepseek"), row("base_url", "http://y")];
         p.refresh(after);
         assert_eq!(
             p.editing_value(),
@@ -670,7 +622,7 @@ mod tests {
     // bug class this whole rendering exists to rule out.
     #[test]
     fn the_caret_survives_wide_paths_and_values() {
-        let mut p = Panel::new(vec![row("模型.name", "http://x", false)], &vim());
+        let mut p = Panel::new(vec![row("模型.name", "http://x")], &vim());
         typed(&mut p, "i");
         typed(&mut p, "中");
         let (_, caret) = p.view(&Paint::new(true), 80);

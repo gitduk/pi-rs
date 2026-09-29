@@ -487,11 +487,11 @@ impl Config {
         self.api_key.as_deref().and_then(expand_key)
     }
 
-    pub fn apply_env_unclaimed(&mut self, claimed: &BTreeMap<String, toml::Value>) {
-        self.apply_env_with(|k| std::env::var(k).ok(), claimed);
+    fn apply_env(&mut self) {
+        self.apply_env_with(|k| std::env::var(k).ok());
     }
 
-    fn apply_env_with<F>(&mut self, mut lookup: F, claimed: &BTreeMap<String, toml::Value>)
+    fn apply_env_with<F>(&mut self, mut lookup: F)
     where
         F: FnMut(&str) -> Option<String>,
     {
@@ -503,35 +503,19 @@ impl Config {
             _ => (FormatArg::Openai, Some(CacheControl::Off)),
         };
 
-        if !claimed.contains_key("base_url") {
-            self.base_url = Some(expand_base_url(url.trim()));
-        }
-        if !claimed.contains_key("format") {
-            self.format = Some(format);
-            if let Some(c) = cache {
-                self.cache_control = c;
-            }
+        self.base_url = Some(expand_base_url(url.trim()));
+        self.format = Some(format);
+        if let Some(c) = cache {
+            self.cache_control = c;
         }
     }
 
-    /// `/settings` > flag > the files > the built-in default.
-    ///
-    /// A key named in `claimed` was set by `/settings` this session, so it
-    /// skips the flag: the config tree already carries the claimed value.
-    pub fn settle(&self, flags: Flags, claimed: &BTreeMap<String, toml::Value>) -> Settled {
-        let effort = if claimed.contains_key("effort") {
-            self.effort
-        } else {
-            flags.effort.or(self.effort)
+    /// Flag > the files > the built-in default.
+    pub fn settle(&self, flags: Flags) -> Settled {
+        Settled {
+            effort: flags.effort.or(self.effort).unwrap_or(EffortArg::Off),
+            tier: flags.tier.or(self.tier).unwrap_or(TierArg::Exec),
         }
-        .unwrap_or(EffortArg::Off);
-        let tier = if claimed.contains_key("tier") {
-            self.tier
-        } else {
-            flags.tier.or(self.tier)
-        }
-        .unwrap_or(TierArg::Exec);
-        Settled { effort, tier }
     }
 
     /// A resumed run stays on the model that produced the transcript, so `prior`
@@ -590,7 +574,7 @@ where
         .find_map(|var| Some((var, lookup(var).filter(|s| !s.trim().is_empty())?)))
 }
 
-/// The environment variable an unclaimed `base_url` is taken from, if any.
+/// The environment variable `base_url` is taken from, if any.
 pub fn endpoint_env() -> Option<&'static str> {
     endpoint_var(&mut |k| std::env::var(k).ok()).map(|(var, _)| var)
 }
@@ -653,6 +637,22 @@ fn project_path(start: &Path, home: Option<&Path>) -> Option<PathBuf> {
     None
 }
 
+/// Where `/settings` writes for `workspace`: the project file in force, else a
+/// new one at the repository root, or in the workspace outside a repository.
+/// `None` in `$HOME` itself, whose `.pi.toml` is never read.
+pub fn project_target(workspace: &Path) -> Option<PathBuf> {
+    let home = home();
+    if let Some(found) = project_path(workspace, home.as_deref()) {
+        return Some(found);
+    }
+    let dir = workspace
+        .ancestors()
+        .take_while(|dir| home.as_deref() != Some(*dir))
+        .find(|dir| dir.join(".git").exists())
+        .unwrap_or(workspace);
+    (home.as_deref() != Some(dir)).then(|| dir.join(".pi.toml"))
+}
+
 /// A config file's tree, checked as a config on its own so an error names the
 /// file it is in. A missing file is `None` unless it was asked for by name.
 fn read_tree(path: &Path, required: bool) -> Result<Option<toml::Value>> {
@@ -704,13 +704,13 @@ impl Config {
         Ok(config)
     }
 
-    /// The config a run uses: the tree, the environment's endpoint where this
-    /// session has not claimed one, and every model checked against the
-    /// endpoint it ends up with. Startup, `/reload` and `/settings` all come
-    /// through here, so none of them accepts what another would refuse.
-    pub fn in_force(tree: toml::Value, claimed: &BTreeMap<String, toml::Value>) -> Result<Config> {
+    /// The config a run uses: the tree, the environment's endpoint over it,
+    /// and every model checked against the endpoint it ends up with. Startup,
+    /// `/reload` and `/settings` all come through here, so none of them
+    /// accepts what another would refuse.
+    pub fn in_force(tree: toml::Value) -> Result<Config> {
         let mut config = Self::from_tree(tree)?;
-        config.apply_env_unclaimed(claimed);
+        config.apply_env();
         for (model, entry) in &config.models {
             config.spec(model, entry)?;
         }
@@ -738,14 +738,18 @@ pub fn warn_if_exposed(path: &Path) -> Option<String> {
     None
 }
 
-/// Write one value at `path` in `settings.toml`, leaving every other byte —
+/// Write one value at `dotted` in the file at `path`, leaving every other byte —
 /// comments, blank lines, the rest of the tree — untouched.
 ///
 /// The panel edits one field at a time, so this never re-serializes the whole
 /// file: a DOM round-trip would drop the comments that carry a measurement's
 /// provenance.
 pub fn write(path: &Path, dotted: &str, value: toml::Value) -> Result<()> {
-    let body = std::fs::read_to_string(path)?;
+    let body = match std::fs::read_to_string(path) {
+        Ok(body) => body,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
+    };
     let mut doc = body
         .parse::<toml_edit::DocumentMut>()
         .context("the config file must stay valid TOML")?;
@@ -814,24 +818,15 @@ input_per_mtok = 0.14
 output_per_mtok = 0
 "#;
 
-    // A key the /settings panel claimed this session must not be overridden
-    // by the environment; the unclaimed format still follows it.
+    // The environment's endpoint beats the files, and brings its format.
     #[test]
-    fn a_claimed_base_url_keeps_the_environment_out() {
-        let mut c = Config::default();
-        let mut claimed = BTreeMap::new();
-        claimed.insert(
-            "base_url".into(),
-            toml::Value::String("http://claimed".into()),
-        );
-        c.apply_env_with(
-            |k| match k {
-                "ANTHROPIC_BASE_URL" => Some("https://anthropic.example.com".into()),
-                _ => None,
-            },
-            &claimed,
-        );
-        assert_eq!(c.base_url, None);
+    fn the_environment_endpoint_beats_the_files() {
+        let mut c = parse("base_url = \"http://file\"\nformat = \"openai\"\n").unwrap();
+        c.apply_env_with(|k| match k {
+            "ANTHROPIC_BASE_URL" => Some("https://anthropic.example.com".into()),
+            _ => None,
+        });
+        assert_eq!(c.base_url.as_deref(), Some("https://anthropic.example.com"));
         assert_eq!(c.format, Some(FormatArg::Anthropic));
     }
 
@@ -859,26 +854,9 @@ output_per_mtok = 0
             effort: Some(EffortArg::High),
             tier: Some(TierArg::Exec),
         };
-        let s = c.settle(flags, &BTreeMap::new());
+        let s = c.settle(flags);
         assert!(matches!(s.effort, EffortArg::High));
         assert_eq!(s.tier, TierArg::Exec);
-    }
-
-    #[test]
-    fn a_claimed_value_skips_the_flag() {
-        let c = parse("effort = \"low\"\ntier = \"write\"\n").unwrap();
-        let flags = Flags {
-            effort: Some(EffortArg::High),
-            tier: Some(TierArg::Exec),
-        };
-        // The panel claims the key this session: the tree already
-        // carries it, so the flag must stand down.
-        let mut claimed = BTreeMap::new();
-        claimed.insert("effort".into(), toml::Value::String("low".into()));
-        claimed.insert("tier".into(), toml::Value::String("write".into()));
-        let s = c.settle(flags, &claimed);
-        assert!(matches!(s.effort, EffortArg::Low));
-        assert_eq!(s.tier, TierArg::Write);
     }
 
     #[test]

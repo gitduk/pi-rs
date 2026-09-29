@@ -757,16 +757,18 @@ fn normal_capitals_step_the_checkouts_and_the_window() {
     );
 }
 
-// Whichever door the config comes in by — an edit claimed for the
-// session, or the session value written to the file — it has to land, or
-// the line never moves.
+// A panel edit lands in the project's `.pi.toml` and reaches the surface: a
+// second edit to the same file keeps the first one's line.
 #[tokio::test]
-async fn a_settings_change_to_the_status_segments_reaches_the_surface() {
+async fn a_settings_edit_is_written_to_the_project_file_and_reaches_the_surface() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let mut tui = surface(dir.path());
     assert!(!tui.ui.live.contains(&Segment::Model));
+    // An empty user file of its own, so the reload never reads the real one.
+    let user = dir.path().join("settings.toml");
+    std::fs::write(&user, "").expect("an empty settings file");
+    tui.core.pinned.config = Some(user.display().to_string());
 
-    // The session door: an edit claims the value for this run.
     let said = tui
         .core
         .edit("status.live", r#"["model"]"#)
@@ -774,22 +776,21 @@ async fn a_settings_change_to_the_status_segments_reaches_the_surface() {
     tui.land_lines(Listing::say(said));
     assert_eq!(tui.ui.live, vec![Segment::Model]);
 
-    // The file door: the session value goes to the file the config is
-    // read from, so the surface's own `--config` is pointed at a temp
-    // one. The list it writes is another, to tell the two apart.
-    let file = dir.path().join("settings.toml");
-    std::fs::write(&file, "").expect("an empty settings file");
-    tui.core.pinned.config = Some(file.display().to_string());
-    tui.core
-        .settings
-        .claim("status.done", "[\"cost\"]")
-        .expect("a valid claim");
     let said = tui
         .core
-        .write_to_file("status.done")
-        .expect("the write lands");
+        .edit("status.done", r#"["cost"]"#)
+        .expect("the second edit lands");
     tui.land_lines(Listing::say(said));
     assert_eq!(tui.ui.done, vec![Segment::Cost]);
+
+    let written = std::fs::read_to_string(dir.path().join(".pi.toml")).expect("the project file");
+    assert!(written.contains("live"), "{written}");
+    assert!(written.contains("done"), "{written}");
+    assert_eq!(
+        std::fs::read_to_string(&user).unwrap(),
+        "",
+        "the user file is untouched"
+    );
 }
 
 // A reload reaches everything the config installed, not only the values the
