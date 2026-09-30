@@ -67,3 +67,17 @@ fn a_retry_waits_on_the_status_line_and_leaves_its_reason_in_a_row() {
     assert!(!status.contains("retry"), "{status:?}");
 }
 
+// A running line with nothing to say goes, rather than leaving a blank row
+// between the stream and the bar.
+#[test]
+fn a_status_line_with_nothing_to_say_draws_no_row() {
+    let mut ui = test_ui(80, 24);
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    view.state.started = Some(std::time::Instant::now());
+    let (shown, _) = ui.live(&lane, &view, false, std::time::Instant::now());
+    assert_eq!(shown.len(), 1, "the clock has something to say");
+    ui.status = Vec::new();
+    let (gone, _) = ui.live(&lane, &view, false, std::time::Instant::now());
+    assert!(gone.is_empty(), "{gone:?}");
+}

@@ -124,6 +124,8 @@ fn a_wrapped_pending_batch_tags_every_row_it_takes() {
     let mut ui = test_ui(40, 24);
     let (_dir, mut lane) = a_running_lane();
     let mut view = View::default();
+    // A run under way: its clock gives the status line something to say.
+    view.state.started = Some(std::time::Instant::now());
 
     ui.on_event(
         &mut lane,

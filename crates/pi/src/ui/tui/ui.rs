@@ -309,9 +309,12 @@ impl Ui {
             if view.state.stopping {
                 parts.push(format!("stopping{}", icons::ELLIPSIS));
             }
-            let line = parts.join(icons::PART_SEP);
-            let muted = Line::from(self.paint.span(&self.paint.theme.muted, line));
-            rows.extend(screen::fit(&muted, width));
+            // `status = []` asks for no line, and a blank row is not none.
+            if !parts.is_empty() {
+                let line = parts.join(icons::PART_SEP);
+                let muted = Line::from(self.paint.span(&self.paint.theme.muted, line));
+                rows.extend(screen::fit(&muted, width));
+            }
         }
 
         (rows, pending_rows)
