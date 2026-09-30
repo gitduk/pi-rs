@@ -97,12 +97,7 @@ pub fn resolve(
     // A judgment endpoint is opt-in by section: no `[judge]` in the file, no
     // tool in the set.
     if let Some(judge) = &config.judge {
-        let endpoint = judge.endpoint();
-        // Named at startup because this one leaves the machine and costs
-        // money: a tool in the set the user did not ask for is worth saying
-        // out loud, and the endpoint says which account is paying.
-        notes.push(format!("judge: snap judgments via {endpoint}"));
-        let judge = toolbox::judge::Judge::new(endpoint, judge.key(), judge.model.clone());
+        let judge = toolbox::judge::Judge::new(judge.endpoint(), judge.key(), judge.model.clone());
         offer(&mut registry, &mut notes, "judge", Arc::new(judge));
     }
 
