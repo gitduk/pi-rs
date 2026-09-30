@@ -88,9 +88,11 @@ pub(super) struct Ui {
     pub(super) status: Vec<Segment>,
     // What the bar says, in ring order. Rebuilt before every draw.
     pub(super) tabs: Vec<Tab>,
-    // A note answering the last keypress, and when it landed. It stands at
-    // the bar's right end for `FLASH` and then goes — see `bar_line`.
+    // A note answering the last keypress, and when it landed. It stands
+    // where the layout puts it for `FLASH` and then goes — see `bar_lines`.
     pub(super) flash: Option<(String, Instant)>,
+    // What the bar's rows hold: the script's last answer, or the default.
+    pub(super) layout: crate::store::bar::Layout,
     // The scrollback row and line under the mouse, when a click there
     // opens or closes something.
     pub(super) hovered_scrollback: Option<(usize, usize)>,
@@ -206,6 +208,7 @@ impl Ui {
             status: default_parts(),
             tabs: Vec::new(),
             flash: None,
+            layout: Default::default(),
             hovered_scrollback: None,
             row_targets: Vec::new(),
             live_tools_shown: false,
@@ -314,20 +317,14 @@ impl Ui {
         (rows, pending_rows)
     }
 
-    // The bar: one entry per checkout in `refresh_tabs` order, the lane's model
-    // last. Too narrow, the front one stays and each dropped end keeps its `…`.
-    pub(super) fn lane_bar(&self, model: &str, width: usize) -> Option<Line<'static>> {
+    // The checkouts, one entry each in `refresh_tabs` order. Too narrow, the
+    // front one stays and each dropped end keeps its `…`.
+    pub(super) fn tabs_strip(&self, strip: usize) -> Vec<Span<'static>> {
         let theme = &self.paint.theme;
         let sep = self.tab_sep.width();
-        // The model is the row's end whatever else it holds, so its share comes
-        // off the checkouts' before they are fitted.
-        let model = (!model.is_empty()).then(|| self.paint.span(&theme.muted, model.to_string()));
         let Some(front) = self.tabs.iter().position(|t| t.mark == Mark::Front) else {
-            return model.and_then(|m| screen::fit(&Line::from(m), width).into_iter().next());
+            return Vec::new();
         };
-        let strip = model
-            .as_ref()
-            .map_or(width, |m| width.saturating_sub(m.width() + sep));
         let items: Vec<Span<'static>> = self
             .tabs
             .iter()
@@ -400,14 +397,9 @@ impl Ui {
             spans.push(self.tab_sep.clone());
             spans.push(dots);
         }
-        // A strip wider than its share is cut here: a front checkout too long
-        // for its share would otherwise eat the model rather than fold itself.
-        let mut spans = screen::fit(&Line::from(spans), strip).remove(0).spans;
-        if let Some(model) = model {
-            spans.push(self.tab_sep.clone());
-            spans.push(model);
-        }
-        screen::fit(&Line::from(spans), width).into_iter().next()
+        // A front checkout too long for its share folds itself here rather
+        // than eating the parts beside it.
+        screen::fit(&Line::from(spans), strip).remove(0).spans
     }
 
     // The checkout a step from this one, wrapping at either end — where the

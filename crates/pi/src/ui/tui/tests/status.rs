@@ -3,19 +3,32 @@ use crate::ui::tui::screen::plain;
 
 use super::harness::*;
 
+fn facts(model: &str) -> crate::ui::tui::bar::Facts {
+    crate::ui::tui::bar::Facts {
+        model: model.into(),
+        effort: llm::request::Effort::Off,
+        tier: crate::args::TierArg::Exec,
+        running: false,
+        root: std::path::PathBuf::new(),
+        worktree: None,
+        ctx: None,
+        spent: 0.0,
+    }
+}
+
 // A flash stands at the bar's right end, and the bar keeps its row: the
 // model the lane runs is not the thing a keypress's answer should hide.
 #[test]
 fn a_flash_stands_beside_the_bar_rather_than_over_it() {
     let mut ui = test_ui(60, 24);
     ui.flash("nothing to rewind to");
-    let row = plain(&ui.bar_line("deepseek", 60));
+    let row = plain(&ui.bar_lines(&facts("deepseek"), &Default::default(), 60)[0]);
     assert!(row.starts_with("deepseek"), "{row:?}");
     assert!(row.ends_with("nothing to rewind to"), "{row:?}");
     assert_eq!(row.chars().count(), 60);
 
     // Too narrow for both: the flash keeps half the row, cut with its `…`.
-    let row = plain(&ui.bar_line("a-rather-long-model-name", 30));
+    let row = plain(&ui.bar_lines(&facts("a-rather-long-model-name"), &Default::default(), 30)[0]);
     assert!(row.ends_with('…'), "{row:?}");
     assert!(
         unicode_width::UnicodeWidthStr::width(row.as_str()) <= 30,
@@ -53,3 +66,4 @@ fn a_retry_waits_on_the_status_line_and_leaves_its_reason_in_a_row() {
     let status = plain(live.last().expect("a status line"));
     assert!(!status.contains("retry"), "{status:?}");
 }
+

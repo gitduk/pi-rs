@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tool::{Concurrency, Ctx, Tier, Tool, ToolError, ToolOutput};
@@ -41,6 +41,34 @@ impl Script {
     }
 }
 
+/// The command that runs a Rust script, building it first when it changed.
+pub fn cargo_script(path: &Path) -> tokio::process::Command {
+    // `-Zscript` is nightly-only as of cargo 1.93; once `cargo <file>.rs`
+    // runs on stable, drop `+nightly` and `-Zscript`.
+    let mut command = tokio::process::Command::new("cargo");
+    command.args(["+nightly", "-Zscript", "--quiet"]).arg(path);
+    command
+}
+
+/// Run a script once outside any tool call, in the workspace root: `input` on
+/// stdin, stdout back, or the exit status and stderr when it fails.
+pub async fn run_script(
+    path: &Path,
+    input: Vec<u8>,
+    timeout: Duration,
+    ctx: &Ctx,
+) -> Result<String, String> {
+    let mut command = cargo_script(path);
+    command.current_dir(ctx.workspace.root());
+    let exited = crate::process::run(command, Some(input), timeout, ctx)
+        .await
+        .map_err(|e| e.to_string())?;
+    if !exited.status.success() {
+        return Err(format!("{}\n{}", exited.status, exited.stderr.text.trim()));
+    }
+    Ok(exited.stdout.text)
+}
+
 #[async_trait]
 impl Tool for Script {
     fn name(&self) -> &str {
@@ -77,12 +105,8 @@ impl Tool for Script {
     }
 
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
-        // `-Zscript` is nightly-only as of cargo 1.93; once `cargo <file>.rs`
-        // runs on stable, drop `+nightly` and `-Zscript`.
-        let mut command = tokio::process::Command::new("cargo");
+        let mut command = cargo_script(&self.path);
         command
-            .args(["+nightly", "-Zscript", "--quiet"])
-            .arg(&self.path)
             // Cargo finds a script's config from the script's directory, not
             // this one, so the workspace cannot configure the build.
             .current_dir(ctx.workspace.root())

@@ -74,6 +74,16 @@ impl Effort {
         }
     }
 
+    /// The name a person reads and a config writes.
+    pub fn name(self) -> &'static str {
+        match self {
+            Effort::Off => "off",
+            Effort::Low => "low",
+            Effort::Medium => "medium",
+            Effort::High => "high",
+        }
+    }
+
     /// Kept separate from `as_openai`: the two vocabularies coincide today,
     /// and the split leaves each wire free to diverge without touching the
     /// other.

@@ -10,6 +10,7 @@
 use std::path::PathBuf;
 
 pub mod archive;
+pub mod bar;
 pub mod config;
 pub mod icons;
 pub mod journal;

@@ -13,7 +13,7 @@ mod script;
 
 use std::path::Path;
 
-pub use script::Script;
+pub use script::{Script, cargo_script, run_script};
 
 /// Scan the given directory for `.rs` files; anything else is not a script.
 /// One whose frontmatter carries no description is not registered — a tool

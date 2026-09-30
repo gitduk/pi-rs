@@ -1,5 +1,7 @@
 //! A run's events becoming rows: the text as it streams, the tool calls as
 //! they run and finish, and the block that closes when the turn does.
+use super::Ui;
+use super::bar::Facts;
 use super::call::{self, RunTool, push_tool_row};
 use super::mouse::{Regions, Target};
 use super::row::{PendingTool, Row};
@@ -7,7 +9,6 @@ use super::screen;
 use super::screen::Rows;
 use super::scrollback::{Piece, ScrollbackRows, absorb_growth, f_entry};
 use super::view::{StreamKind, Surface, View, snapshot};
-use super::{BAR_H, FLASH, Ui};
 use crate::core::lane::Lane;
 use crate::store::icons;
 use crate::ui::render;
@@ -15,7 +16,7 @@ use crate::ui::status;
 use agent::Event;
 use agent::session::Entry as LogEntry;
 use ratatui::layout::Rect;
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 use ratatui::widgets::{List, ListState};
 use std::time::Instant;
 
@@ -61,47 +62,6 @@ impl Ui {
     // copying, belongs in the scrollback instead.
     pub(super) fn flash(&mut self, line: impl Into<String>) {
         self.flash = Some((line.into(), Instant::now()));
-    }
-
-    // The bar row: the bar on the left, a flash while one is up on the right,
-    // and a bare row when there is neither — never nothing, so nothing above
-    // it moves. The only place an expired flash is dropped: every frame passes
-    // through here, so nothing else has to remember to clear it.
-    pub(super) fn bar_line(&mut self, model: &str, width: usize) -> Line<'static> {
-        if self
-            .flash
-            .as_ref()
-            .is_some_and(|(_, at)| at.elapsed() >= FLASH)
-        {
-            self.flash = None;
-        }
-        let Some((text, _)) = &self.flash else {
-            return self.lane_bar(model, width).unwrap_or_default();
-        };
-        const GAP: usize = 2;
-        let wants = unicode_width::UnicodeWidthStr::width(text.as_str());
-        let bar_w = self.lane_bar(model, width).map_or(0, |l| l.width());
-        // Beside the bar when both fit; otherwise the flash keeps up to half
-        // the row and the bar folds itself into the rest.
-        let room = if bar_w + GAP + wants <= width {
-            wants
-        } else {
-            width.saturating_sub(bar_w + GAP).max(wants.min(width / 2))
-        };
-        let text = if wants <= room {
-            text.clone()
-        } else {
-            crate::text::clip(text, room.saturating_sub(1))
-        };
-        let flash = self.paint.span(&self.paint.theme.muted, text);
-        let mut spans = self
-            .lane_bar(model, width.saturating_sub(room + GAP))
-            .map(|l| super::screen::spans_of(&l))
-            .unwrap_or_default();
-        let used: usize = spans.iter().map(Span::width).sum::<usize>() + flash.width();
-        spans.push(Span::raw(" ".repeat(width.saturating_sub(used))));
-        spans.push(flash);
-        Line::from(spans)
     }
 
     // Where a finished row goes: a reasoning line into the streaming block's
@@ -380,13 +340,11 @@ impl Ui {
         // same one, so a scrolled-up browse measures what it shows.
         let browse = self.browsing;
         let keep = move |row: &Row| !browse || row.is_conversation();
-        // A flash outranks the bar's own line: it is gone in a moment, where
-        // that line is always a keystroke away.
-        let bar = self.bar_line(lane.model(), width);
-        // The bar's row is not worth a terminal that cannot hold it, a row to
-        // type on and a row of history: one that short keeps the other two, and
-        // what is being typed keeps its row.
-        let bar_h = BAR_H.min((self.screen.height as usize).saturating_sub(2));
+        let mut bar = self.bar_lines(&Facts::of(lane), &snapshot(lane, view), width);
+        // The bar's rows are not worth a terminal that cannot hold them, a row
+        // to type on and a row of history: one that short keeps the other two.
+        bar.truncate((self.screen.height as usize).saturating_sub(2));
+        let bar_h = bar.len();
         // Nothing to type on, so nothing to pin to the bottom: the rows the
         // editor would have taken go to the history.
         let (input, caret) = if browse {
@@ -533,7 +491,7 @@ impl Ui {
                     &mut state,
                 );
             }
-            frame.render_widget(Rows(std::slice::from_ref(&bar)), regions.bar);
+            frame.render_widget(Rows(&bar), regions.bar);
             // Before the rows, so a span over the band keeps it: the columns the
             // input does not reach carry it too, one short of the edge.
             if let Some(band) = self.band {

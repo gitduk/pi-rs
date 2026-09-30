@@ -177,7 +177,5 @@ pub(super) fn tab(mark: crate::ui::tui::Mark, name: &str) -> crate::ui::tui::Tab
 
 // The bar's row as text, without a screen to read it off.
 pub(super) fn bar(ui: &crate::ui::tui::Ui, width: usize) -> String {
-    ui.lane_bar("", width)
-        .map(|l| l.to_string())
-        .unwrap_or_default()
+    ratatui::text::Line::from(ui.tabs_strip(width)).to_string()
 }

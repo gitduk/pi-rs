@@ -168,6 +168,45 @@ colour nor attribute.
 A key that is not one of those is refused at load, like a misspelled compat
 key.
 
+The bar over the input line is laid out by `$PI_HOME/bar.rs` (by default
+`~/.pi/bar.rs`) when there is one: a cargo script, run with
+`cargo +nightly -Zscript` in the checkout's root, that reads pi's state as
+JSON on stdin — `model`, `effort`, `tier`, `running`, `root`, `worktree`,
+`ctx` (`[used, budget]` as the last turn left it, or null) and `spent` (the
+session's dollars) — and prints a layout on stdout:
+
+```json
+{"lines": [{
+   "left":  [{"group": [{"text": "󰏗 pi-rs", "style": "34"},
+                        {"text": " +12", "style": "add"}]},
+             {"part": "model", "style": {"color": "32", "sgr": ["bold"]}},
+             {"group": [{"text": "ctx "}, {"part": "ctx", "style": "36"}]},
+             "tier"],
+   "right": ["flash"],
+   "sep":   {"text": "  "}}],
+ "refresh": 2}
+```
+
+Each entry in `lines` is one row, kept whether or not it has anything to say.
+An item is a part pi fills in on every frame — `tabs` `flash` `model`
+`effort` `tier`, or any of the status line's (`elapsed` `in_out` `cache`
+`cost` `ctx` `compacted` `queued` `worktree`), which read the run in flight or
+the one that last ended — bare or as `{"part", "style"}`; the script's own
+`{"text", "style"}`; or a `group` of texts and parts (not `tabs`) joined with
+no separator, which goes whole when every part in it has nothing to say. A
+part or text with nothing to say drops out along with the separator before
+it.
+`sep` is what stands between items, a muted ` · ` when absent. A `style` is a
+theme name (`muted` `heading` `emphasis` `code` `input` `ok` `err` `add`
+`del`) or a Style written as `[theme]` writes one; `tabs` keeps its own
+colours, which say which checkout is in front and how each last run ended.
+The script runs again when pi's state changes, when the file does, and every
+`refresh` seconds (0.5 at least) for what it reads from outside pi. Until it
+answers — a first build can take a while — or whenever it fails, the bar is
+the default `tabs · model` with the flash on the right, and a failure says
+where the layout went wrong in one line of the scrollback; a failed script is
+retried every five seconds.
+
 `/help` `/new` `/resume` `/name` `/model` `/worktree` `/compact` `/loop`
 `/reload` `/keys` `/status` `/settings` `/wechat` `/exit`, and one more for
 every skill on disk. Typing `/` opens a list of what the line could still

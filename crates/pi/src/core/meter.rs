@@ -153,6 +153,11 @@ impl Tally {
         }
     }
 
+    /// The context used against the budget, as the last event said.
+    pub fn ctx(&self) -> Option<(usize, usize)> {
+        self.ctx
+    }
+
     /// What this run has spent so far: the turns that have reported plus the
     /// one in flight. The lines read it, and the surface reads it again when a
     /// run ends without its own word — an interrupted turn — so the spend still

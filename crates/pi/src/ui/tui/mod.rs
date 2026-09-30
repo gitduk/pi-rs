@@ -7,6 +7,7 @@
 //! services three sources at once — the agent's events, the keyboard, and a
 //! timer for the animation — so nothing has to be bolted on beside it.
 
+mod bar;
 mod browse;
 mod call;
 mod editor;
@@ -60,11 +61,6 @@ const DOUBLE_TAP: std::time::Duration = std::time::Duration::from_millis(500);
 // How long a flash stays on the bar row: long enough to read a short line
 // without looking for it, short enough that a second try lands after it.
 const FLASH: std::time::Duration = std::time::Duration::from_secs(1);
-
-// The bar's own row: present whatever the bar has to say, because a row that
-// came and went would take the transcript above it along on every key that
-// missed. Every terminal tall enough to hold it gives it this one.
-const BAR_H: usize = 1;
 
 // One text each: three and two call sites had their own copy of these, and a
 // reworded one would have drifted.
@@ -157,6 +153,7 @@ pub struct Tui {
     // Stops the reader while a child holds the terminal.
     hold: Hold,
     drivers: Drivers,
+    bar: bar::BarScript,
 }
 
 impl Tui {
@@ -207,6 +204,7 @@ impl Tui {
             events,
             hold,
             drivers,
+            bar: bar::BarScript::find(),
         })
     }
 
@@ -233,6 +231,7 @@ impl Tui {
             events: rx,
             hold: Hold::default(),
             drivers: Drivers::new(Vec::new()),
+            bar: bar::BarScript::at(None),
         }
     }
 
@@ -565,6 +564,7 @@ impl Tui {
                     .say(front_view(&mut self.views, self.core.lane()), said);
             }
             self.refresh_tabs();
+            self.bar.poke(self.core.lane());
             let view = front_view(&mut self.views, self.core.lane());
             self.ui.flush(self.core.lane(), view);
             // After the frame, not before it: a fork here would hold the
@@ -593,6 +593,7 @@ impl Tui {
                 }
                 Wake::Do(Asked::Core(input::read(&next.line, &self.core.commands)))
             } else if !waiting || running {
+                let bar_due = self.bar.due().map(tokio::time::Instant::from_std);
                 // Every branch must be cancel-safe: a loser is dropped mid-poll.
                 // `recv()` and `tick()` are; a blocking read gets its own thread.
                 tokio::select! {
@@ -603,6 +604,14 @@ impl Tui {
                         self.ui.spinner += 1;
                         Wake::Nothing
                     }
+                    Some(out) = self.bar.rx.recv() => {
+                        if let Some(why) = self.bar.land(out, &mut self.ui.layout) {
+                            self.ui.say_muted(front_view(&mut self.views, self.core.lane()), why);
+                        }
+                        Wake::Nothing
+                    }
+                    _ = tokio::time::sleep_until(bar_due.unwrap_or_else(tokio::time::Instant::now)),
+                        if bar_due.is_some() => Wake::Nothing,
                     key = self.events.recv() => match key {
                         Some(key) => {
                             let lane = self.core.lane();
