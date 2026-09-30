@@ -153,6 +153,16 @@ fn running(pending: &[PendingTool]) -> bool {
     pending.iter().any(|p| !p.landed)
 }
 
+// The lines of the block still streaming in the row, if one is.
+fn thinking_now(steps: &[Step]) -> Option<usize> {
+    steps.iter().find_map(|s| match s {
+        Step::Thinking {
+            lines, live: true, ..
+        } => Some(lines.len()),
+        _ => None,
+    })
+}
+
 // How many calls the row speaks for: the ones landed in it and the ones it
 // holds while they are out. One is its own line, so the count is part of
 // what decides whether it has a body to unfold.
@@ -218,6 +228,8 @@ pub enum Step {
         block: u64,
         lines: Vec<Line<'static>>,
         open: bool,
+        // Still streaming: the group is not done while it is.
+        live: bool,
     },
 }
 
@@ -436,6 +448,7 @@ impl Row {
                 block,
                 lines,
                 open: false,
+                live: false,
             },
             folded,
         )
@@ -897,8 +910,14 @@ impl Row {
         };
         let hidden = *folded;
         steps.retain_mut(|s| match s {
-            Step::Thinking { block, lines, open } if *block == id => {
+            Step::Thinking {
+                block,
+                lines,
+                open,
+                live,
+            } if *block == id => {
                 *open = !hidden && *open;
+                *live = false;
                 !lines.is_empty()
             }
             _ => true,
@@ -1202,7 +1221,10 @@ fn steps_header(
     let thought = thought(steps);
     let calls = calls(steps, pending);
     let muted = |text: String| paint.span_hovered(hovered, &paint.theme.muted, text);
-    let mark = if running(pending) {
+    // The group's mark, not its newest call's: a block still streaming
+    // after the last call landed means the group is not done.
+    let live = thinking_now(steps).filter(|_| !running(pending));
+    let mark = if running(pending) || live.is_some() {
         Mark::Out(tick)
     } else {
         Mark::Done
@@ -1228,6 +1250,19 @@ fn steps_header(
             more: false,
         };
         return head.line(true, hovered, paint, width);
+    }
+    if let Some(n) = live
+        && calls > 0
+    {
+        let mut tail = lines_tail(n);
+        tail.push_str(&format!("{}{}", icons::PART_SEP, count(calls, "call")));
+        let head = Head {
+            mark,
+            text: super::THINKING.to_string(),
+            tail,
+            more: false,
+        };
+        return head.line(open, hovered, paint, width);
     }
     let newest = pending.last().map(|p| pending_head(p, tick)).or_else(|| {
         steps
@@ -1416,6 +1451,7 @@ mod steps_tests {
             block,
             lines: (1..=n).map(|i| Line::from(format!("line {i}"))).collect(),
             open: false,
+            live: false,
         }
     }
 

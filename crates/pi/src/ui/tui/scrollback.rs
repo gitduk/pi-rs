@@ -127,6 +127,7 @@ impl Folds {
                 block,
                 lines: Vec::new(),
                 open: true,
+                live: true,
             },
         );
     }
@@ -513,6 +514,7 @@ pub(super) fn scrollback_from(
                                     block,
                                     lines,
                                     open: false,
+                                    live: false,
                                 },
                             );
                         }
