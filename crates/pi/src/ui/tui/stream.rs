@@ -96,7 +96,7 @@ impl Ui {
         let flash = self.paint.span(&self.paint.theme.muted, text);
         let mut spans = self
             .lane_bar(model, width.saturating_sub(room + GAP))
-            .map(|l| l.spans)
+            .map(|l| super::screen::spans_of(&l))
             .unwrap_or_default();
         let used: usize = spans.iter().map(Span::width).sum::<usize>() + flash.width();
         spans.push(Span::raw(" ".repeat(width.saturating_sub(used))));

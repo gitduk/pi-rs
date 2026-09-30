@@ -27,17 +27,17 @@ use unicode_width::UnicodeWidthChar;
 ///
 /// Repainting works by counting rows, so a line that wraps on its own would
 /// throw the count off by however many times it wrapped. Styles ride on the
-/// spans, so a wrapped coloured line keeps its colour past the first row
-/// without anything re-opening an escape sequence. Escape sequences found in
-/// the content itself — outside noise a tool's output carried in — take no
-/// columns and no cells.
+/// spans, the line's own folded into each, so a wrapped coloured line keeps
+/// its colour past the first row without anything re-opening an escape
+/// sequence. Escape sequences found in the content itself — outside noise a
+/// tool's output carried in — take no columns and no cells.
 pub fn fit(line: &Line<'_>, width: usize) -> Vec<Line<'static>> {
     let width = width.max(1);
     let mut out: Vec<Line<'static>> = Vec::new();
     let mut row: Vec<Span<'static>> = Vec::new();
     let mut used = 0usize;
     for span in &line.spans {
-        let style = span.style;
+        let style = line.style.patch(span.style);
         let mut chars = span.content.chars();
         while let Some(c) = chars.next() {
             if c == '\x1b' {
@@ -190,6 +190,15 @@ pub fn window_tagged<T: Clone, P: Piece>(
     (back, scroll)
 }
 
+/// A line's spans with the line's own style folded into each, for building
+/// another line out of them without losing that style.
+pub(crate) fn spans_of(line: &Line<'_>) -> Vec<Span<'static>> {
+    line.spans
+        .iter()
+        .map(|s| Span::styled(s.content.to_string(), line.style.patch(s.style)))
+        .collect()
+}
+
 /// A line's text without its styling.
 pub(crate) fn plain(line: &Line<'_>) -> String {
     line.spans.iter().map(|s| s.content.as_ref()).collect()
@@ -225,11 +234,7 @@ pub fn wrap(border: Option<&Line<'_>>, line: &Line<'_>, width: usize) -> Vec<Lin
     fit(line, avail)
         .into_iter()
         .map(|piece| {
-            let mut spans: Vec<Span<'static>> = border
-                .spans
-                .iter()
-                .map(|s| Span::styled(s.content.to_string(), s.style))
-                .collect();
+            let mut spans = spans_of(border);
             spans.extend(piece.spans);
             Line::from(spans)
         })

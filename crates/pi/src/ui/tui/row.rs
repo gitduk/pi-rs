@@ -795,7 +795,7 @@ impl Row {
             Kind::Notice { text, times } => {
                 // The count wears the muted style whatever the line it trails,
                 // so a repeated warning still reads as one warning.
-                let mut spans = text.spans.clone();
+                let mut spans = super::screen::spans_of(text);
                 spans.push(paint.span(&paint.theme.muted, format!(" ×{times}")));
                 (Line::from(spans), None)
             }
@@ -832,13 +832,13 @@ impl Row {
                 let under = |indent: &'static str| Some(Line::from(indent));
                 match lone(steps, pending) {
                     Some(Step::Thinking { lines, .. }) if open => {
-                        let line = lines[i].clone();
+                        let mut line = lines[i].clone();
                         // Bold as `span_hovered` bolds: only where there is colour.
-                        let line = if hover(i) && paint.color {
-                            line.patch_style(RStyle::default().add_modifier(Modifier::BOLD))
-                        } else {
-                            line
-                        };
+                        if hover(i) && paint.color {
+                            for span in &mut line.spans {
+                                span.style = span.style.add_modifier(Modifier::BOLD);
+                            }
+                        }
                         (line, None)
                     }
                     Some(Step::Tool(t)) if open && i > 0 => {
