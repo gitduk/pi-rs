@@ -122,7 +122,7 @@ impl Folds {
         self.join(
             scrollback,
             // Open while it streams, so it reads as it is written; it folds
-            // to its first line when it ends.
+            // when it ends only if nobody could see it.
             Step::Thinking {
                 block,
                 lines: Vec::new(),
@@ -143,7 +143,7 @@ impl Folds {
         self.retire_last(scrollback);
     }
 
-    // The streaming block is over and folds to its first line. One that never
+    // The streaming block is over, folded if its group is. One that never
     // had a line leaves nothing, and neither does a group it was alone in.
     pub(super) fn close_block(&mut self, scrollback: &mut Vec<Row>) {
         let Some(id) = self.streaming.take() else {

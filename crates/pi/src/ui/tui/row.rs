@@ -888,15 +888,17 @@ impl Row {
         }
     }
 
-    /// Block `id` has ended: it folds to its first line, or goes if it never
-    /// had one. Says whether the group is left with no step at all.
+    /// Block `id` has ended: behind a folded group it folds to its first line,
+    /// in view it stays as the reader watched it; it goes if it never had a
+    /// line. Says whether the group is left with no step at all.
     pub fn end_block(&mut self, id: u64) -> bool {
-        let Kind::Steps { steps, .. } = &mut self.0 else {
+        let Kind::Steps { steps, folded, .. } = &mut self.0 else {
             return false;
         };
+        let hidden = *folded;
         steps.retain_mut(|s| match s {
             Step::Thinking { block, lines, open } if *block == id => {
-                *open = false;
+                *open = !hidden && *open;
                 !lines.is_empty()
             }
             _ => true,
