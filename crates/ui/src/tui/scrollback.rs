@@ -121,12 +121,12 @@ impl Folds {
         self.streaming = Some(block);
         self.join(
             scrollback,
-            // Open while it streams, so it reads as it is written; it folds
-            // when it ends only if nobody could see it.
+            // Shut like any other step: an unfolded group lists its steps one
+            // line each, and a click opens the one worth reading.
             Step::Thinking {
                 block,
                 lines: Vec::new(),
-                open: true,
+                open: false,
                 live: true,
             },
         );
