@@ -5,23 +5,15 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use tokio::sync::mpsc;
 
-use crate::args::Args;
-use crate::core::dial::{dial, summary_writer};
-use crate::core::resolve::resolve;
-use crate::core::{Core, lane, worktree};
-use crate::input::expand;
-use crate::store::icons;
-use crate::store::settings::Settings;
-use crate::store::{archive, journal, session};
-use crate::ui::{render, tui};
-
-mod args;
-mod core;
-mod driver;
-mod input;
-mod store;
-mod text;
-mod ui;
+use pi_core::args::Args;
+use pi_core::core::dial::{dial, summary_writer};
+use pi_core::core::resolve::resolve;
+use pi_core::core::{self, Core, lane, worktree};
+use pi_core::input::expand;
+use pi_core::store::icons;
+use pi_core::store::settings::Settings;
+use pi_core::store::{archive, journal, session};
+use ui::{render, tui};
 
 // The prompt, or None when the run should ask for one.
 fn read_prompt(args: &Args) -> Result<Option<String>> {
@@ -77,8 +69,8 @@ fn cancel_on_interrupt() -> tokio_util::sync::CancellationToken {
 fn paint(
     mut rx: mpsc::UnboundedReceiver<agent::Event>,
     quiet: bool,
-    theme: std::sync::Arc<crate::store::theme::Theme>,
-    status: Vec<crate::store::status::Segment>,
+    theme: std::sync::Arc<pi_core::store::theme::Theme>,
+    status: Vec<pi_core::store::status::Segment>,
     model: String,
     pricing: llm::model::Pricing,
     worktree: Option<String>,
@@ -228,7 +220,7 @@ async fn main() -> Result<()> {
         // session its spills belong to. `commands` is what the Core shows for
         // the front lane; the lane's own copy travels in `resolved`.
         let commands = resolved.commands.clone();
-        let ctx = tool::Ctx::new(workspace).with_session(&id, store::spill_root());
+        let ctx = tool::Ctx::new(workspace).with_session(&id, pi_core::store::spill_root());
         let mut first = lane::Lane::opened(lane::Opening {
             id,
             created,
@@ -247,8 +239,8 @@ async fn main() -> Result<()> {
             current: 0,
             lanes: vec![first],
         };
-        let (saved, keep) = store::private_file("wechat.json");
-        let drivers = driver::Drivers::new(vec![Arc::new(wechat::WeChat::new(
+        let (saved, keep) = pi_core::store::private_file("wechat.json");
+        let drivers = pi_core::driver::Drivers::new(vec![Arc::new(wechat::WeChat::new(
             saved.as_deref(),
             Arc::new(keep),
         ))]);
@@ -284,7 +276,7 @@ async fn main() -> Result<()> {
     let mut ctx = tool::Ctx::new(workspace).with_cancel(cancel_on_interrupt());
     // Without a session the spills land in the temp dir rather than `~/.pi`.
     if keeps {
-        ctx = ctx.with_session(&id, store::spill_root());
+        ctx = ctx.with_session(&id, pi_core::store::spill_root());
     }
 
     // Always through the log: a loaded session whose view happens to be empty

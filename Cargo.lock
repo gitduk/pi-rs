@@ -1717,15 +1717,30 @@ version = "1.23.4"
 dependencies = [
  "agent",
  "anyhow",
+ "clap",
+ "llm",
+ "pi-core",
+ "tokio",
+ "tokio-util",
+ "tool",
+ "tracing",
+ "ui",
+ "wechat",
+]
+
+[[package]]
+name = "pi-core"
+version = "1.23.4"
+dependencies = [
+ "agent",
+ "anyhow",
  "async-trait",
  "channel",
  "clap",
  "crossterm",
  "futures",
  "ignore",
- "libc",
  "llm",
- "ratatui",
  "serde",
  "serde_json",
  "serde_path_to_error",
@@ -1739,7 +1754,6 @@ dependencies = [
  "toolbox",
  "tracing",
  "tracing-subscriber",
- "tui-markdown",
  "unicode-width",
  "wechat",
 ]
@@ -3214,6 +3228,34 @@ name = "ucd-trie"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2896d95c02a80c6d6a5d6e953d479f5ddf2dfdb6a244441010e373ac0fb88971"
+
+[[package]]
+name = "ui"
+version = "1.23.4"
+dependencies = [
+ "agent",
+ "anyhow",
+ "async-trait",
+ "channel",
+ "clap",
+ "crossterm",
+ "futures",
+ "libc",
+ "llm",
+ "pi-core",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tool",
+ "toolbox",
+ "tracing",
+ "tui-markdown",
+ "unicode-width",
+]
 
 [[package]]
 name = "unicase"

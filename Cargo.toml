@@ -17,6 +17,8 @@ subagent = { path = "crates/subagent" }
 skills = { path = "crates/skills" }
 channel = { path = "crates/channel" }
 wechat = { path = "crates/wechat" }
+pi-core = { path = "crates/pi-core" }
+ui = { path = "crates/ui" }
 
 anyhow = "1"
 async-trait = "0.1"

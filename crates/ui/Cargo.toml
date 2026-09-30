@@ -1,0 +1,34 @@
+[package]
+name = "ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "pi's surfaces: the full-screen TUI and the one-shot printer"
+
+[dependencies]
+pi-core.workspace = true
+futures.workspace = true
+agent.workspace = true
+llm.workspace = true
+channel.workspace = true
+tool.workspace = true
+toolbox.workspace = true
+anyhow.workspace = true
+tokio-util.workspace = true
+libc = "0.2"
+tracing.workspace = true
+unicode-width = "0.2.2"
+crossterm = { version = "0.29", default-features = false, features = ["events", "bracketed-paste", "windows"] }
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+tokio.workspace = true
+ratatui = "0.30.2"
+tui-markdown = "0.3"
+
+[dev-dependencies]
+pi-core = { workspace = true, features = ["testing"] }
+async-trait.workspace = true
+toml.workspace = true
+tempfile = "3"
