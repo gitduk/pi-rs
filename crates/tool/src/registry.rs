@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use llm::request::ToolDef;
 
-use crate::Tool;
+use crate::{Tier, Tool};
 
 /// The active tool set. Ordering is stable so the tool block stays
 /// prompt-cacheable across turns.
@@ -70,6 +70,13 @@ impl Registry {
         self
     }
 
+    /// Only the tools a run capped at `ceiling` may call. A tool the model can
+    /// see but not use costs it a refused turn before it finds another way.
+    pub fn within(mut self, ceiling: Tier) -> Self {
+        self.tools.retain(|_, t| t.tier().under(ceiling));
+        self
+    }
+
     pub fn defs(&self) -> Vec<ToolDef> {
         self.tools
             .values()
@@ -85,10 +92,10 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Ctx, Tier, ToolError, ToolOutput};
+    use crate::{Ctx, ToolError, ToolOutput};
     use serde_json::Value;
 
-    struct Named(&'static str, &'static str);
+    struct Named(&'static str, &'static str, Tier);
 
     #[async_trait::async_trait]
     impl Tool for Named {
@@ -102,7 +109,7 @@ mod tests {
             Value::Null
         }
         fn tier(&self) -> Tier {
-            Tier::Read
+            self.2
         }
         async fn execute(&self, _: Value, _: &Ctx) -> Result<ToolOutput, ToolError> {
             Ok(ToolOutput::text(""))
@@ -112,10 +119,25 @@ mod tests {
     #[test]
     fn the_first_to_claim_a_name_keeps_it() {
         let mut r = Registry::new();
-        assert!(r.offer(Arc::new(Named("read", "first"))));
-        assert!(!r.offer(Arc::new(Named("read", "second"))));
-        assert!(r.offer(Arc::new(Named("grep", "other"))));
+        assert!(r.offer(Arc::new(Named("read", "first", Tier::Read))));
+        assert!(!r.offer(Arc::new(Named("read", "second", Tier::Read))));
+        assert!(r.offer(Arc::new(Named("grep", "other", Tier::Read))));
         assert_eq!(r.get("read").unwrap().description(), "first");
         assert_eq!(r.names(), vec!["grep", "read"]);
+    }
+
+    // Hidden rather than refused: a tool the model never sees is one it never
+    // spends a turn on, and a wrong cut here is invisible until it does.
+    #[test]
+    fn only_tools_under_the_ceiling_stay() {
+        let r = Registry::new()
+            .with(Named("read", "", Tier::Read))
+            .with(Named("edit", "", Tier::Write))
+            .with(Named("bash", "", Tier::Exec))
+            .with(Named("fetch", "", Tier::Net));
+        assert_eq!(r.clone().within(Tier::Read).names(), vec!["read"]);
+        assert_eq!(r.clone().within(Tier::Write).names(), vec!["edit", "read"]);
+        assert_eq!(r.clone().within(Tier::Net).names(), vec!["fetch", "read"]);
+        assert_eq!(r.within(Tier::Exec).names().len(), 4);
     }
 }

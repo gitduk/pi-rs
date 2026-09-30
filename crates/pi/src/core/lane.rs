@@ -23,7 +23,7 @@ use subagent::Subagent;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio_util::sync::CancellationToken;
 
-use tool::Ctx;
+use tool::{Ctx, Tool};
 
 use super::Core;
 use crate::core::meter::{Snapshot, Tally};
@@ -179,7 +179,9 @@ pub fn arm(
     // A fresh `Arc`, since the child holds the old one: it runs on the
     // registry it came from, and only the lane's copy carries the tool.
     let mut brief = resolved.brief.clone();
-    Arc::make_mut(&mut brief).registry.offer(Arc::new(subagent));
+    if subagent.tier().under(resolved.ceiling) {
+        Arc::make_mut(&mut brief).registry.offer(Arc::new(subagent));
+    }
     agent.apply(brief);
     resolved
 }
@@ -197,6 +199,7 @@ pub(crate) fn a_resolved(standing: &str) -> Arc<Resolved> {
             subagent_deadline: None,
         }),
         standing: standing.into(),
+        ceiling: tool::Tier::Exec,
         keys: Arc::new(crate::store::keys::Keys::default()),
         commands: Arc::new(Vec::new()),
         notes: Vec::new(),

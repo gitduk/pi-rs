@@ -26,6 +26,9 @@ pub struct Resolved {
     /// files. Kept apart because the subagent has its own prompt but the same
     /// tree, the same machine and the same tier.
     pub standing: std::sync::Arc<str>,
+    /// How far this run may reach. The lane needs it to decide whether the
+    /// subagent, offered after this set is cut, belongs in it.
+    pub ceiling: tool::Tier,
     /// The key table this tree asked for, defaults included.
     pub keys: std::sync::Arc<crate::store::keys::Keys>,
     /// The built-ins plus one command per skill. Here rather than in the Core
@@ -155,7 +158,7 @@ pub fn resolve(
 
     Ok(Resolved {
         brief: std::sync::Arc::new(agent::Briefing {
-            registry,
+            registry: registry.within(tier),
             system,
             effort,
             approver: std::sync::Arc::new(agent::Ceiling(tier)),
@@ -164,6 +167,7 @@ pub fn resolve(
                 .map(|s| std::time::Duration::from_secs(s.max(1))),
         }),
         standing: standing.into(),
+        ceiling: tier,
         keys: std::sync::Arc::new(config.key_map()?),
         commands: std::sync::Arc::new(commands),
         notes,
