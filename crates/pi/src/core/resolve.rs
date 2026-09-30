@@ -106,8 +106,8 @@ pub fn resolve(
         offer(&mut registry, &mut notes, "judge", Arc::new(judge));
     }
 
-    let (scripts, skipped) = context::home()
-        .map(|home| toolbox::scripts::discover_in(&home.join(".pi/tools")))
+    let (scripts, skipped) = crate::store::dir()
+        .map(|root| toolbox::scripts::discover_in(&root.join("tools")))
         .unwrap_or_default();
     notes.extend(skipped.iter().map(|p| format!("tool skipped — {p}")));
     for script in scripts {

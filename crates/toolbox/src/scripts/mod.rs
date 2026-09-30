@@ -1,4 +1,5 @@
-//! User-defined tools: a Rust script dropped into `~/.pi/tools/` is a tool.
+//! User-defined tools: a Rust script dropped into `$PI_HOME/tools/` (by
+//! default `~/.pi/tools/`) is a tool.
 //! Its cargo frontmatter is its interface: `[package] description` says what
 //! it does, and each `name = "what it is"` under `[package.metadata.pi.args]`
 //! declares one argument, however many. Arguments also arrive as environment
