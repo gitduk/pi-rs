@@ -30,10 +30,8 @@ struct Args {
     verify: Option<String>,
 }
 
-// How many of a child's written paths the result names before it counts the
-// rest. A note, not a view: `spill::fit` budgets a list the caller asked for,
-// where this one rides along on every result and has to stay small. The tree
-// is what a caller reads for the whole manifest.
+// How many written paths the result names before counting the rest — kept
+// small since it rides on every result, unlike `spill::fit`.
 const NAMED: usize = 20;
 
 // What ran after the child, and how it went.
@@ -49,10 +47,8 @@ enum Outcome {
     // Killed at the cap. It ran, possibly far enough to leave changes behind,
     // and only its verdict is missing — never say this one did not run.
     CutOff { ms: u64 },
-    // No verdict, for a reason that is not the cap. Deliberately silent on
-    // whether the command ran: a shell that would not start and an output
-    // that would not spill both arrive as one error, and guessing between
-    // them is how a caller is told the tree is clean when it is not.
+    // No verdict, for a reason that is not the cap. Silent on whether the
+    // command ran: guessing risks telling a caller the tree is clean when it isn't.
     NoVerdict(String),
 }
 
@@ -80,15 +76,9 @@ impl Subagent {
     /// Build the subagent from the one that will call it: same transport, same
     /// model, its own prompt, and no `subagent` in its registry.
     ///
-    /// `standing` is what the checkout says — the workspace anchor and the
-    /// instruction files. It travels with the tree, not with the caller, and
-    /// the child edits that same tree.
-    ///
-    /// `brief` is the one the child runs on: the parent's with its prompt
-    /// replaced and itself taken out of the registry. Handed in rather than
-    /// read off the agent, so the caller can arm the parent and the child from
-    /// one value — the parent's own brief is still the old one at this point,
-    /// which is why the deadline is read from this argument and not from it.
+    /// `standing` is the checkout's workspace anchor and instruction files.
+    /// `brief` is passed in, not read off `parent`, so the caller can arm
+    /// both from one value while the parent's own brief is still the old one.
     pub fn new(
         parent: &Agent,
         brief: Arc<Briefing>,
@@ -215,13 +205,8 @@ impl Tool for Subagent {
             ctx.spill_namespace(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         );
-        // Per field, not wholesale: the tree, the locks and the renumbering are
-        // shared because parent and child edit the same files, while the
-        // transcript, its own name among the spills and the token are the
-        // child's own.
-        //
-        // Its own name, not its own tree: a one-shot parent spills to the temp
-        // directory, and a locator the child prints is one the parent resolves.
+        // Tree, locks and renumbering are shared with the parent (same files);
+        // transcript, spill name and token are the child's own.
         let stop = ctx.cancel.child_token();
         let root = ctx.spill_root().to_path_buf();
         let child = ctx
@@ -306,8 +291,6 @@ impl Tool for Subagent {
                 None => Err(AgentError::Unstopped),
             }
         };
-        // The child's own clock, read beside the counts on the row: how long
-        // the job took.
         let took = started.elapsed();
         watchdog.abort();
         // The collector ends when the last sender goes, and `run` held one.
@@ -329,10 +312,8 @@ impl Tool for Subagent {
 
         let cut = match ran {
             Ok(_) => None,
-            // Esc, and only Esc: our own token being tripped leaves the
-            // parent's alone. This is the one error the loop never hands back
-            // to the model, so telling them apart is what stops a wedged child
-            // from ending the caller's whole turn.
+            // Esc only: our own token tripping leaves the parent's alone —
+            // conflating them would end the caller's whole turn over a wedged child.
             Err(AgentError::Cancelled) if ctx.cancel.is_cancelled() => {
                 return Err(ToolError::Cancelled);
             }
@@ -379,9 +360,8 @@ impl Tool for Subagent {
         {
             None => None,
             Some(command) => {
-                // No deadline of our own: `run` clamps to the cap every shell
-                // command in the workspace answers to, and shortening a
-                // subagent's leash is not a request for a shorter test suite.
+                // No deadline of our own: `run` already clamps to the workspace's
+                // shell cap, and a subagent's leash isn't a request for a shorter suite.
                 let room = Duration::MAX;
                 // The caller's context, not the child's: a child stopped by
                 // its own cap leaves that token tripped, and this cancelled.
@@ -390,9 +370,8 @@ impl Tool for Subagent {
                         code: ran.code,
                         body: ran.body,
                     },
-                    // Esc ends the caller's turn as it does anywhere else.
-                    // Anything else is an outcome, not a reason to drop the
-                    // work the child already did.
+                    // Esc ends the caller's turn as elsewhere; anything else is an
+                    // outcome, not a reason to drop the work the child already did.
                     Err(ToolError::Cancelled) => return Err(ToolError::Cancelled),
                     Err(ToolError::Timeout { ms }) => Outcome::CutOff { ms },
                     Err(why) => Outcome::NoVerdict(why.to_string()),
@@ -414,11 +393,8 @@ impl Tool for Subagent {
     }
 }
 
-// The line a finished call leaves on the screen: the job it was, and in
-// brackets what it took. The job leads because several children run at once
-// and a bill alone names none of them; the brackets are what keep the bill
-// from reading as a second thing the caller asked for. The clock, not a turn
-// count: the child is not bounded by turns.
+// The finished-call line: job, then its cost in brackets. The job leads
+// because several children run at once, so a bare cost names none of them.
 fn sketch(description: &str, heard: &Heard, took: Duration) -> String {
     let spent = format!(
         "{} · {}",
@@ -436,15 +412,8 @@ fn sketch(description: &str, heard: &Heard, took: Duration) -> String {
     }
 }
 
-// What the caller reads: the child's own words, then the notes that were not
-// taken from them.
-//
-// A subagent's account of itself is the one part of this result nothing else
-// checks, and the caller cannot tell a job done from a job merely reported
-// done. `wrote` and `check` are taken from the tree instead — the paths from
-// the bookkeeping every write goes through, the status from running the
-// caller's own command afterwards. Never empty: a subagent that said nothing
-// is a fact the caller has to be told, not an empty string to interpret.
+// The child's words, then notes pulled from the tree rather than trusted
+// from the child — write paths, check status. Never empty: silence is a fact too.
 fn answer(
     heard: &Heard,
     cut: Option<&str>,

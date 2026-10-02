@@ -1,19 +1,12 @@
 //! Startup defaults and locally-defined models.
 //!
-//! A working setup should not be a command line to retype. Pi keeps a provider
-//! catalog (`~/.pi/agent/models.json`) apart from preferences
-//! (`settings.toml`); the split earns its keep there because the catalog is a
-//! thing you copy between machines. One file with two sections is the same idea
-//! with less to find.
+//! TOML rather than JSON: most of what a model entry holds is a measurement,
+//! and a measurement without its provenance rots. `thinking = "budget"` needs
+//! the comment saying which endpoint that was tried against, and JSON has
+//! nowhere to put it.
 //!
-//! TOML rather than JSON for one reason: most of what a model entry holds is a
-//! measurement, and a measurement without its provenance rots. `thinking =
-//! "budget"` needs the comment saying which endpoint that was tried against,
-//! and JSON has nowhere to put it.
-//!
-//! Providers own the connection, models own themselves. Seven models behind one
-//! endpoint used to mean seven copies of its url and key; now the endpoint is
-//! written once and the models hang off it.
+//! Providers own the connection, models own themselves: the endpoint is
+//! written once and every model under it hangs off that one entry.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -29,10 +22,8 @@ use crate::args::{EffortArg, FormatArg, TierArg};
 #[derive(Debug, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// The endpoint this machine talks to. One, because pi talks to one at a
-    /// time: a map of them made every model's name a `provider.model` pair,
-    /// and that pair is what the config, the archive and the reasoning stamp
-    /// each had to spell in their own way.
+    /// The endpoint this machine talks to: pi talks to one at a time, so this
+    /// is one field, not a map keyed by provider.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -59,9 +50,8 @@ pub struct Config {
     pub model: Option<String>,
     /// Who writes the summary when history is compacted. Defaults to `model`.
     ///
-    /// Named for the job, not for a tier: `lite_model` would be a category with
-    /// one member and no test for membership, and every task added after would
-    /// have to argue about whether it qualifies.
+    /// Named for the job, not a tier, so a later task isn't stuck arguing
+    /// whether it counts as "lite".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summarize_model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -174,8 +164,7 @@ fn default_loop_max_rounds() -> Option<usize> {
     Some(DEFAULT_LOOP_MAX_ROUNDS)
 }
 
-// The ceiling an unset `loop_max_rounds` reads as: the floor for a loop that
-// keeps changing files without ever repeating itself.
+// The default `loop_max_rounds` — see the field doc.
 const DEFAULT_LOOP_MAX_ROUNDS: usize = 10;
 
 impl Default for Vim {
@@ -307,9 +296,8 @@ pub struct ModelEntry {
     pub pricing: Pricing,
 }
 
-// The shape a model gets when the file does not describe it. Written out
-// rather than derived: `derive(Default)` would zero the window, and a zero
-// window is a budget of nothing rather than a stated guess.
+// Written out rather than derived: `derive(Default)` would zero the
+// window, a budget of nothing rather than a stated guess.
 impl Default for ModelEntry {
     fn default() -> Self {
         Self {
@@ -451,14 +439,11 @@ pub struct Settled {
 }
 
 impl Config {
-    /// The spec for a model name. Every name resolves: the endpoint is the
-    /// same one either way, and an entry only ever supplies facts the defaults
-    /// get wrong.
+    /// The spec for a model name. Every name resolves: an entry only ever
+    /// supplies facts the defaults get wrong.
     ///
-    /// A name the file does not list is passed through with default numbers.
     /// Probing the endpoint for its catalog would cost a round trip and still
-    /// not answer the one question that matters — how wide the window is — so
-    /// the alternative to guessing is writing ten models down to reach one.
+    /// not answer the one thing that matters — how wide the window is.
     pub fn find(&self, name: &str) -> Result<ModelSpec> {
         match self.models.get(name) {
             Some(model) => self.spec(name, model),
@@ -476,13 +461,8 @@ impl Config {
         self.models.keys().cloned().collect()
     }
 
-    /// The credential to send, or None when the endpoint wants none.
-    ///
-    /// Read at use rather than at load, so a run needs only the variable it
-    /// actually reaches for. A `$NAME` that names an unset variable is the
-    /// same as no key: the request goes out without one and the endpoint's
-    /// response says what it needs. The *shape* is checked at load, because a
-    /// malformed `$NAME` is a typo today and every day after.
+    /// The credential to send, or None when the endpoint wants none. Read at
+    /// use; the *shape* is still checked at load, since a bad `$NAME` is a typo.
     pub fn key(&self) -> Option<String> {
         self.api_key.as_deref().and_then(expand_key)
     }
@@ -518,20 +498,8 @@ impl Config {
         }
     }
 
-    /// A resumed run stays on the model that produced the transcript, so `prior`
-    /// outranks the files: continuing is continuing, and a project default
-    /// that quietly moved a half-finished session elsewhere would be a surprise
-    /// nobody asked for. `/model` is the deliberate way to move it.
-    ///
-    /// A config that defines exactly one model and names no default means that
-    /// one: there is nothing else it could mean, and making the user write the
-    /// name twice only creates the chance to write it differently.
-    ///
-    /// None when nothing named one. There is no fallback to a model we picked:
-    /// a hardcoded name is a claim about what exists, and it goes stale the
-    /// week a vendor ships something.
-    ///
-    /// `from_project`: the project's file is the one that set `model`.
+    /// Resolves in order: `flag`, `prior`, `self.model`, then the only model
+    /// if there is exactly one. `from_project`: whether the project file set it.
     pub fn model(
         &self,
         flag: Option<&str>,
@@ -551,9 +519,6 @@ impl Config {
             };
             return Some((m.clone(), origin));
         }
-        // One model written down: there is nothing else it could mean, and
-        // making the name be written twice only creates the chance to write it
-        // differently.
         if let [only] = self.names().as_slice() {
             return Some((only.clone(), ModelOrigin::OnlyModel));
         }
@@ -564,7 +529,6 @@ impl Config {
 const ANTHROPIC_BASE_URL: &str = "ANTHROPIC_BASE_URL";
 const OPENAI_BASE_URL: &str = "OPENAI_BASE_URL";
 
-// The variable that names the endpoint, Anthropic's first, and what it says.
 fn endpoint_var<F>(lookup: &mut F) -> Option<(&'static str, String)>
 where
     F: FnMut(&str) -> Option<String>,
@@ -615,11 +579,8 @@ pub fn global_path() -> Option<PathBuf> {
     super::dir().map(|root| root.join("settings.toml"))
 }
 
-/// The nearest project file at or above `start`, stopping at the repository
-/// root.
-///
-/// `home` is never searched: a `.pi.toml` there would be every directory's
-/// under `$HOME` outside a repo, a second global file nobody meant to write.
+/// The nearest project file at or above `start`, stopping at the repo root.
+/// `home` is never searched: a `.pi.toml` there applies outside any repo.
 fn project_path(start: &Path, home: Option<&Path>) -> Option<PathBuf> {
     for dir in start.ancestors() {
         if home == Some(dir) {
@@ -769,7 +730,6 @@ input_per_mtok = 0.14
 output_per_mtok = 0
 "#;
 
-    // The environment's endpoint beats the files, and brings its format.
     #[test]
     fn the_environment_endpoint_beats_the_files() {
         let mut c = parse("base_url = \"http://file\"\nformat = \"openai\"\n").unwrap();
@@ -785,14 +745,14 @@ output_per_mtok = 0
         Config::from_tree(toml::from_str(body)?)
     }
 
-    // A file is checked as a whole config, whichever it is: the section that
-    // no longer exists is refused rather than read as nothing.
     #[test]
     fn a_port_in_the_file_is_a_local_url() {
         let c = parse("base_url = \":2/v1\"\n").unwrap();
         assert_eq!(c.base_url.as_deref(), Some("http://127.0.0.1:2/v1"));
     }
 
+    // A file is checked as a whole config: a section that no longer exists
+    // is refused rather than read as nothing.
     #[test]
     fn a_retired_section_is_refused() {
         assert!(parse("[defaults]\nmodel = \"flash\"\n").is_err());

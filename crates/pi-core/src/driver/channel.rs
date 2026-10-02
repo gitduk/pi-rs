@@ -28,9 +28,8 @@ struct Relay {
     // The outbound task last spawned. The next one awaits it, so a split
     // answer's tail cannot be overtaken by the next answer.
     last_send: Option<JoinHandle<()>>,
-    // Stops the chain above. A single send was over before `off` could
-    // matter; a split one runs for seconds, and until this the phone kept
-    // receiving pieces after the channel had reported itself stopped.
+    // Stops the chain above: a split send runs for seconds, and without
+    // this the phone kept receiving pieces after the channel had stopped.
     outbound: CancellationToken,
 }
 
@@ -153,10 +152,8 @@ impl Relay {
         }
     }
 
-    // One outbound message, sent from its own task so a slow or failing
-    // send cannot stall the surface that called it. Failures land on the
-    // local terminal rather than vanishing: a platform may rate-limit or
-    // block, and that has to be visible here.
+    // Sent from its own task so a slow or failing send can't stall the
+    // caller; failures land on the terminal rather than vanishing silently.
     fn send_line(&mut self, text: &str) {
         // `off` keeps the credentials, so an ended channel would keep sending.
         if !self.alive() {
@@ -285,15 +282,8 @@ fn split(text: &str, limit: usize) -> Vec<String> {
     pieces
 }
 
-// Where to end a piece that overflows `budget`, and how many separator bytes
-// to drop after it: the last paragraph break within reach, else the last line
-// break, else the last space, else the last character boundary. A hard cut
-// drops nothing — indentation inside a code block is content, and the halves
-// have to rejoin exactly. A boundary in the first half of the budget is worse
-// than no boundary at all: taking it doubles the number of messages.
-//
-// The cut is never zero: a budget shorter than the first character would
-// otherwise leave the caller's loop exactly where it started, forever.
+// Falls back paragraph → line → space → char boundary, dropping nothing
+// (exact rejoin); the cut is never zero, or the loop would spin forever.
 fn boundary(rest: &str, budget: usize) -> (usize, usize) {
     let first = rest.chars().next().map_or(1, char::len_utf8);
     let mut end = budget.max(first);

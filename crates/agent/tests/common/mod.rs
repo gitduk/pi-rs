@@ -1,9 +1,8 @@
 //! Fixtures shared by the integration tests.
 //!
 //! `ModelSpec` has no `Default` on purpose — an id, a model and a base url
-//! have no sensible empty value in production — so every test file that needs
-//! one has to build the whole struct. Here once, rather than drifting apart in
-//! each of them.
+//! have no sensible empty value in production — so tests build the whole
+//! struct here rather than drifting apart across files.
 
 use llm::model::{CacheControl, Format, ModelSpec, Pricing, ReplayThinking, ThinkingControl};
 use llm::transport::Transport;
@@ -12,9 +11,8 @@ use std::sync::Arc;
 /// Put the compactor that ships on an agent: `writer` for a summarizer with a
 /// model of its own, `None` for the model doing the work.
 ///
-/// An `Agent::new` starts on the identity compactor, which never shrinks
-/// anything — that is the seam's contract rather than an accident — so a test
-/// about compaction has to say which one it means.
+/// `Agent::new` starts on the identity compactor, which never shrinks
+/// anything, so a test about compaction must say which one it means.
 pub fn compacting(agent: &mut agent::Agent, writer: Option<(Arc<dyn Transport>, ModelSpec)>) {
     agent.compactor = Arc::new(agent::Summarizing::new(
         writer,

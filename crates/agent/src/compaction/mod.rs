@@ -23,11 +23,8 @@ use ladder::{Policy, Report};
 /// The compactor that ships.
 pub struct Summarizing {
     policy: Policy,
-    /// Who writes the summary, when it is not the model doing the work. The job
-    /// is large input, small output and little judgement, so it need not be the
-    /// expensive one. Its own transport as well as its own spec: the spec that
-    /// priced a turn has to be the one that ran it, or a cheap summary is
-    /// billed at the working model's rate.
+    /// Who writes the summary, when it is not the model doing the work.
+    /// Carries its own transport and spec — pricing must match what ran it.
     writer: Option<(Arc<dyn Transport>, ModelSpec)>,
     /// How long a wedged stream is given before it is read as wedged, for the
     /// summary's own call.
@@ -44,9 +41,7 @@ impl Summarizing {
     }
 
     /// The working tail to hold back, against a transcript budget of `budget`.
-    ///
-    /// A flat 16k is a seventh of a 114k budget and more than a 9k one holds,
-    /// and a tail the size of the budget leaves the drop tier nothing to take.
+    /// Capped at a quarter of `budget`, so a small run still leaves room to drop.
     fn tail_within(&self, budget: usize) -> usize {
         self.policy.protect_tail.min(budget / 4)
     }
@@ -80,18 +75,8 @@ impl Summarizing {
         Some((report, spent))
     }
 
-    /// Ask what the span being dropped is worth, and to whom.
-    ///
-    /// A summary that carries this session's work forward, folding in any
-    /// summary already in force and retiring it.
-    ///
-    /// A failure is not fatal: the entries still go. Losing the summary costs
-    /// context; failing the turn costs the whole run.
-    ///
-    /// Returns the tokens only. What they cost is the surface's arithmetic —
-    /// see `run/meter.rs` — so a summarizer on a cheaper model is billed at the
-    /// run's rate rather than its own. Worth saying out loud: it is why the
-    /// number on the status line is an estimate, not an invoice.
+    /// Failure is not fatal: entries still go, only the summary is lost.
+    /// Returns tokens only; billed at the run's rate, not the writer's own.
     async fn retire_span(
         &self,
         session: &session::Session,
@@ -148,7 +133,6 @@ impl Compactor for Summarizing {
         match self.pass(session, run, budget, &policy, None).await {
             Some((report, spent)) => {
                 say(tx, Event::Compacted(report));
-                // It changed, so the measurement above is stale.
                 Fitted {
                     context: session.context(),
                     changed: true,

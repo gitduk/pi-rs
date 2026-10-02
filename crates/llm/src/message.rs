@@ -94,10 +94,8 @@ pub enum ReasoningContent {
 
 /// How a stored reasoning block goes back out to one model.
 ///
-/// Both transports and the token estimate need this answer, and each used to
-/// derive it for itself — a count that outruns the encoder compacts against
-/// bytes that never leave, and one that lags it walks into a 400. Decided here
-/// once, they cannot disagree.
+/// Decided once, so transports and the token estimate can't disagree: an
+/// outrun count compacts bytes that never leave; a lagging one risks a 400.
 pub enum Replay<'a> {
     // The target's own, signed: the block replays as itself.
     Signed { signature: &'a str },
@@ -129,9 +127,8 @@ impl Reasoning {
 
     /// Which way this block leaves for `spec`.
     ///
-    /// Keyed on the target's format rather than on the calling transport,
-    /// because the estimate has no transport: the two agree only because the
-    /// transport is itself chosen by that same field.
+    /// Keyed on the target's format, not the calling transport: the estimate
+    /// has no transport, and both agree only because format picks it too.
     pub fn replay_for(&self, spec: &ModelSpec) -> Replay<'_> {
         if self.by.as_deref() == Some(spec.model.as_str()) {
             match spec.format {
@@ -149,17 +146,14 @@ impl Reasoning {
                         ReasoningContent::Encrypted(s) => Some(s.as_str()),
                         ReasoningContent::Text { .. } => None,
                     });
-                    // `id` is required on the item and the ciphertext is the
-                    // whole of what replays, so a block missing either demotes
-                    // rather than shipping an item the endpoint refuses.
+                    // `id` and the ciphertext are both required, or the
+                    // endpoint refuses the item — missing either demotes.
                     if let (Some(id), Some(encrypted)) = (self.id.as_deref(), encrypted) {
                         return Replay::Encrypted { id, encrypted };
                     }
                 }
-                // Chat has no signed or encrypted reasoning either: the wire
-                // carries thinking as plain `reasoning_content`, which is not
-                // a signed/encrypted shape, so even the model's own blocks
-                // fall through to the replay_thinking policy below.
+                // Chat has no signed/encrypted shape, so even the model's
+                // own blocks fall through to the policy below.
                 Format::Chat => {}
             }
         }

@@ -4,9 +4,8 @@ use crate::stream::Usage;
 
 /// Usage and its price, accumulated across turns.
 ///
-/// The usage figures are the provider's own, verbatim: a field the host left
-/// out reads as zero, and a surface that shows a count treats that as "not
-/// reported", never as a real zero.
+/// Usage figures are the provider's own, verbatim: a field the host left out
+/// reads as zero — never presented as "not reported", just a real zero.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Totals {
     pub usage: Usage,

@@ -1,13 +1,8 @@
-//! The state a session owns, and the verbs that move it.
+//! The state a session owns, and the verbs that move it: `Core` is the root
+//! — the store, config, keys, commands, settings, open checkouts.
 //!
-//! `Core` is the root — the store, the config in force, the key map, the command
-//! table, the settings, the checkouts open in this run — and what outlives a
-//! turn lives here or on a lane and nowhere else. Every verb lives with the
-//! state it moves: `settings.rs` for the config, `lane.rs` for
-//! the checkouts (all of them in one file: a `Core` field holds the list, a
-//! `Lane` one of them), `status.rs` for what a
-//! reader is shown, `meter.rs` for what it cost. The one job hangs off the side:
-//! `bash.rs`. What drives a lane from outside is `driver/`'s.
+//! Each verb lives with its state — see `settings.rs`, `lane.rs`,
+//! `status.rs`, `meter.rs`, `bash.rs`, `driver/`.
 
 pub mod bash;
 pub mod dial;
@@ -44,11 +39,10 @@ pub struct Core {
     /// The command line's say over the config, re-applied over every reload.
     pub pinned: crate::args::Pinned,
     /// What a slash answers to, built-ins and skills together. Rebuilt by
-    /// `/reload`, because a skill can appear between one turn and the next.
+    /// `/reload`, since a skill can appear between one turn and the next.
     ///
-    /// Shared rather than copied, like the key map beside it: the terminal
-    /// holds the same table to complete against and re-reads it whenever this
-    /// one is replaced.
+    /// Shared rather than copied: the terminal holds the same table and
+    /// re-reads it whenever this is replaced.
     pub commands: std::sync::Arc<Vec<Command>>,
     /// The config files as last read: what `/settings` writes into and
     /// `/reload` reads again.
@@ -61,10 +55,8 @@ pub struct Core {
 }
 
 impl Core {
-    // Put the lane in front's key map and command table in force. A skill
-    // belongs to one tree and not another, and so does a rebound key;
-    // leaving the last lane's in place had this one answering to another
-    // tree's.
+    // Put the lane in front's key map and command table in force: a skill
+    // and a rebound key belong to one tree, not another.
     fn in_force(&mut self) {
         self.keys = self.lane().resolved().keys.clone();
         self.commands = self.lane().resolved().commands.clone();
@@ -76,9 +68,8 @@ impl Core {
         &self.lanes[self.current]
     }
 
-    // Where a subagent started in this lane files what it did. Root and model
-    // vary — a `/worktree` moves one, a `/model` the other — and the rest
-    // never does.
+    // Where a subagent started in this lane files what it did. Root and
+    // model vary (`/worktree`, `/model`); the rest never does.
     fn archive(
         &self,
         root: std::path::PathBuf,
@@ -98,9 +89,8 @@ impl Core {
 }
 
 impl Core {
-    // Whether `goal` would start a turn: a round is a turn, and a line that
-    // answers on the spot has none. A skill is looked up, not expanded — that
-    // would log it as invoked before any round has run.
+    // Whether `goal` would start a turn. A skill is looked up, not
+    // expanded — that would log it as invoked before any round has run.
     fn starts_turn(&self, goal: &str) -> bool {
         match crate::input::read(goal, &self.commands) {
             Intent::Prompt(_) | Intent::Bash(_) => true,
@@ -286,17 +276,15 @@ mod tests {
 
     #[test]
     fn a_key_and_a_line_that_mean_the_same_thing_are_one_intent() {
-        // `ctrl+l` twice returns `Intent::Builtin(Builtin::New)` directly. This is the other
-        // half: the typed word lands on the same variant, so there is no
-        // second value for `fate` to answer differently about.
+        // `ctrl+l` twice also returns `Intent::Builtin(Builtin::New)`; the
+        // typed word lands on the same variant, so `fate` sees one value.
         assert_eq!(read("/new", BUILTIN), Intent::Builtin(Builtin::New));
     }
 
     #[test]
     fn leaving_is_never_refused() {
-        // One intent for `/exit`, `/quit`, ctrl+d and a double ctrl+c — the
-        // words are checked with the rest of the table — and it always
-        // proceeds: a wedged run must not be able to trap the user.
+        // One intent for `/exit`, `/quit`, ctrl+d and double ctrl+c; it
+        // always proceeds — a wedged run must not trap the user.
         assert!(matches!(Intent::Builtin(Builtin::Quit).fate(), Fate::Now));
     }
 
@@ -515,9 +503,8 @@ mod tests {
             .unwrap();
     }
 
-    // `/model` retargets the lane's agent and rebuilds the subagent behind
-    // it; the rebuild has to carry the new endpoint and model, or a child
-    // called after the switch keeps talking to the old one with the old key.
+    // `/model` rebuilds the subagent with the new endpoint and model, or a
+    // child called after the switch keeps talking to the old one.
     #[tokio::test]
     async fn retarget_rebuilds_the_subagent_on_the_new_model() {
         let dir = tempfile::tempdir().unwrap();

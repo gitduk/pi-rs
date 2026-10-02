@@ -22,20 +22,14 @@ enum Kind {
     // `ESC [`, `ESC O` — parameters and intermediates, then a byte in
     // 0x40-0x7e.
     Control,
-    // `ESC P`, `ESC X`, `ESC ]`, `ESC ^`, `ESC _` — DCS, SOS, OSC, PM, APC.
-    // Arbitrary text closed by BEL or by ST (`ESC \`), not by any byte
-    // range: an OSC setting the window title carries a `;` and the title,
-    // and a scanner reading it as a control sequence stops on the first
-    // letter and draws the rest of the title.
+    // `ESC P/X/]/^/_` (DCS/SOS/OSC/PM/APC): arbitrary text closed by BEL
+    // or ST (`ESC \`), not by a byte range — content may contain those bytes.
     Str,
     // A bare `ESC` with an intermediate byte, ending on a byte in 0x30-0x7e
     // — wider than a control sequence's, which is where `ESC 7` lives.
     Bare,
-    // Over already: the first character was itself the final byte. `ESC 7`
-    // saves the cursor and `ESC 8` restores it — what `less`, `vim` and
-    // every progress bar emit most — and 0x37 is outside a control
-    // sequence's range, so reading one as a control sequence leaves it
-    // looking unfinished and eats the character after it.
+    // The first character is itself the final byte (e.g. `ESC 7`/`ESC 8`,
+    // save/restore cursor) — outside Control's range, so it needs its own case.
     Done,
 }
 
@@ -51,9 +45,8 @@ impl Escape {
 
     pub fn closed(&mut self, c: char) -> bool {
         let Some(kind) = &self.kind else {
-            // The first character decides the shape, and for a two-byte
-            // sequence it is also the last. `[` and `O` are final bytes by
-            // the range test too, so they are matched before it.
+            // `[` and `O` are also final bytes by the range test, so they
+            // must come first to select Control instead of Done.
             let kind = match c {
                 '[' | 'O' => Kind::Control,
                 'P' | 'X' | ']' | '^' | '_' => Kind::Str,
@@ -83,11 +76,8 @@ impl Default for Escape {
     }
 }
 
-/// A spend in the one wording every place that says it uses: `/status` hands
-/// it a session's figures, and a status line composes the same two out of its
-/// `in_out`, `cache` and `cost` segments, which say a run's. The cost is shown
-/// only when the model is priced — an unpriced model reports no cost rather
-/// than $0.
+/// The shared wording for a spend, used for both a session's totals and a
+/// run's. Cost is omitted (not shown as $0) when the model is unpriced.
 pub fn spent(t: &agent::Totals) -> String {
     let mut parts = vec![in_out(t.usage.input, t.usage.output)];
     if t.usage.cache_read > 0 {
@@ -99,12 +89,7 @@ pub fn spent(t: &agent::Totals) -> String {
     parts.join(icons::PART_SEP)
 }
 
-/// One line, cut to `max` columns.
-///
-/// Columns rather than characters: what overflows a terminal is columns, and a
-/// line of Chinese fits half as many characters in the same width. Counting
-/// characters let a `grep` pattern or a refusal written in Chinese run to twice
-/// the intended width and wrap.
+/// One line, cut to `max` display columns, not characters (see module doc).
 pub fn clip(s: &str, max: usize) -> String {
     let one = s.replace('\n', " ");
     let mut used = 0;

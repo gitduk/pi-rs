@@ -1,8 +1,7 @@
 //! Bounded capture for the streams a tool pulls in — a child's stdout, a
-//! response body. Memory stays capped whatever the producer does: what
-//! overflows the window streams to disk, where `read` can get it back.
-//! Sweeps that assemble output as items share [`Budget`]; what reaches the
-//! transcript is what [`bound`] lets through.
+//! response body. What overflows the window streams to disk; `read` gets it
+//! back. Sweeps that assemble output as items share [`Budget`]; what reaches
+//! the transcript is what [`bound`] lets through.
 
 use std::io::Write as _;
 use std::path::Path;
@@ -80,8 +79,6 @@ impl Capture {
             self.front.extend_from_slice(chunk);
             return Ok(());
         }
-        // The crossing: the bytes held so far open the file, and everything
-        // from here on — the rest of this chunk included — lands there.
         let room = spill::MAX_OUTPUT - self.front.len();
         self.front.extend_from_slice(&chunk[..room]);
         let rest = &chunk[room..];
@@ -227,9 +224,8 @@ mod tests {
         Ok(cap.finish())
     }
 
-    // Below the cap a stream is kept whole; at the cap, still whole; past it,
-    // the view shows both ends and the spill file holds every byte — not just
-    // the view.
+    // Below the cap, kept whole; at the cap, still whole; past it, the view
+    // shows both ends but the spill file holds every byte, not just the view.
     #[tokio::test]
     async fn the_spill_threshold_keeps_small_streams_whole_and_spills_the_rest() {
         let dir = tempfile::tempdir().unwrap();
@@ -253,8 +249,7 @@ mod tests {
         assert_eq!(back.len(), body.len());
     }
 
-    // The ToolOutput door: what overflows is bounded and leaves the locator,
-    // what fits passes untouched.
+    // What fits passes straight through, untouched.
     #[tokio::test]
     async fn bound_spills_what_overflows_and_leaves_the_locator() {
         let dir = tempfile::tempdir().unwrap();

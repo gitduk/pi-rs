@@ -10,7 +10,7 @@ use crate::store::session::ResumeChoice;
 
 #[derive(Clone)]
 pub enum Source {
-    // A word `parse` knows and `command` answers itself.
+    // A word `read` knows and `command` answers itself.
     Builtin,
     // A `SKILL.md` to read and hand to the model as if the user had typed it.
     Skill(Skill),
@@ -50,9 +50,8 @@ impl Command {
     }
 }
 
-/// A word the table lists and nothing more: a skill, whose line `step_for`
-/// expands once the door has handed it on. A word the table does not have at
-/// all lands in the same place.
+/// A word the table lists and nothing more — a skill `step_for` expands
+/// later. A word the table lacks entirely lands in the same place.
 fn hand_on(word: &str, args: String) -> Intent {
     Intent::Other {
         word: word.to_string(),
@@ -60,13 +59,8 @@ fn hand_on(word: &str, args: String) -> Intent {
     }
 }
 
-// Every built-in command, once: the word, what it takes, what it does, and what
-// it means. Help, completion and reading a line all come from here, so a word
-// that reached only one of them is not a bug this table can have.
-//
-// Nothing reads this directly except `commands`, which appends the skills to
-// it. What a run answers to is settled when the workspace is known, not when
-// the binary is built.
+// Every built-in, once: help, completion and reading a line all come from
+// here, so a word landing in only one of them is a bug this table prevents.
 pub(crate) const BUILTIN: &[Command] = &[
     Command::builtin(
         "/new",
@@ -151,11 +145,8 @@ pub(crate) const BUILTIN: &[Command] = &[
 // How wide a one-line description may be before it is cut.
 const GIST: usize = 60;
 
-// A description written for the model, cut down to a line for a list.
-//
-// Two cuts, because they answer different questions: the first sentence is
-// where the description stops being a summary, and the column is where the
-// terminal stops having room.
+// Two cuts: the first sentence is where the summary stops being one, the
+// column is where the terminal stops having room.
 fn gist(description: &str) -> String {
     let first = description
         .split_once(". ")
@@ -165,14 +156,8 @@ fn gist(description: &str) -> String {
 
 /// What a slash answers to: the built-ins, then one command per skill.
 ///
-/// No prefix. A skill is `/commit`, not `/skill:commit`, because the name is
-/// what it is known by and a namespace only earns its keep when something else
-/// is competing for the word. What does compete is a built-in, and the built-in
-/// wins: a repository contributes skills, and one that could take `/new` away
-/// from the session it would otherwise start is a checkout redefining the
-/// terminal. The skill itself is untouched — the model can still load it by
-/// name — and the note says which of the two happened, because a command that
-/// silently is not there is one the user goes looking for in the wrong place.
+/// No prefix: a skill is `/commit`, not `/skill:commit`. On a name clash a
+/// built-in wins — the skill stays loadable by name, and the note says so.
 pub fn commands(skills: &[Skill], notes: &mut Vec<String>) -> Vec<Command> {
     let mut out = BUILTIN.to_vec();
     for skill in skills {
@@ -206,10 +191,8 @@ pub(crate) fn help(commands: &[Command]) -> Vec<String> {
         let head = format!("{} {}", c.word, c.args);
         format!("{head:width$}  {}", c.help)
     };
-    // The break is where the built-ins end, not where the skills begin: a third
-    // source would otherwise land silently in the half that looks built in.
-    // `commands` keeps the built-ins first and contiguous, so one position
-    // settles it.
+    // Where built-ins end, not where skills begin — a third source would
+    // otherwise land in the built-in half. `commands` keeps them contiguous.
     let Some(split) = commands
         .iter()
         .position(|c| !matches!(c.source, Source::Builtin))
@@ -264,19 +247,14 @@ fn worktree_candidates(trees: &[Choice], head: &str, prefix: &str) -> Vec<Candid
         .collect()
 }
 
-/// What the line could still become: a command while its word is being typed,
+/// What the line could still become: a command while its word is typed,
 /// then that command's own argument once the word is settled.
 ///
-/// The commands with arguments worth completing are the ones whose argument is
-/// a name out of a known set: `/model` against the config's models, `/resume`
-/// against the workspace's saved sessions, `/worktree` against the
-/// repository's checkouts. A prompt is prose and a focus phrase is prose;
-/// guessing at either is worse than leaving it alone.
+/// Only args with a known name set are completed (`/model`, `/resume`,
+/// `/worktree`); a prompt or focus phrase is prose, not guessed.
 ///
-/// The last two are asked for through a call rather than handed over, because
-/// every line but theirs is completed without them: reading the workspace's
-/// sessions is a walk of every transcript in it and reading the checkouts is a
-/// `git worktree list`, and a frame that offers neither should pay neither.
+/// Sessions and worktrees are asked for lazily: walking transcripts or
+/// running `git worktree list` is paid only by the line that needs it.
 pub fn complete<'a>(
     line: &str,
     commands: &[Command],
@@ -288,9 +266,8 @@ pub fn complete<'a>(
         return Vec::new();
     }
     let Some((word, rest)) = line.split_once(char::is_whitespace) else {
-        // The exact word stays in the list. Dropping it would leave only the
-        // longer `/news` when `/new` is typed in full, and Tab would hand the
-        // line to the wrong command.
+        // The exact word stays in the list: dropping it would leave only
+        // `/news` when `/new` is typed in full, and Tab would pick wrong.
         return commands
             .iter()
             .filter(|c| c.word.starts_with(line))

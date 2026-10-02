@@ -1,12 +1,8 @@
-//! What each part of the status line reads as, and how the parts make one line.
+//! Draws the status line from parts; which parts show is the config's, in
+//! `store/status.rs`. Repainted while a turn runs, its last frame kept in
+//! scrollback once it ends.
 //!
-//! Which parts it shows is the config's, so the vocabulary is below this
-//! (`store/status.rs`); what is here draws them. One list, one line: repainted
-//! while a turn runs, and its last frame kept in the scrollback once it ends.
-//!
-//! It says the run in flight, and nothing before it: a session millions of
-//! tokens deep would otherwise never let the line read as what this answer
-//! cost.
+//! Shows only the run in flight, not the whole session's total.
 
 use std::time::Duration;
 
@@ -19,9 +15,8 @@ pub const SPIN: Duration = Duration::from_millis(90);
 pub fn render(segment: Segment, s: &Snapshot) -> Option<String> {
     Some(match segment {
         Segment::Elapsed => llm::figures::elapsed(s.elapsed?),
-        // Dashes say "a turn ran and the host stated nothing". A run
-        // nothing has been spent on yet — no turn has stated a count —
-        // drops the part instead of showing a row of zeros.
+        // Dashes (elsewhere) mean "ran, but reported nothing"; this drops the
+        // part instead when nothing has been spent on yet.
         Segment::InOut if s.turns == 0 && s.input == 0 && s.output == 0 => return None,
         Segment::InOut => llm::figures::in_out(s.input, s.output),
         Segment::Cache if s.cache_read == 0 => return None,

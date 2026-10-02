@@ -84,9 +84,8 @@ impl Judge {
         })? {
             let room = (MAX_BYTES + 1).saturating_sub(raw.len());
             raw.extend_from_slice(&chunk[..chunk.len().min(room)]);
-            // One byte past the cap is proof this is not a judgment answer:
-            // those are small JSON, so clipping means `base_url` is pointed
-            // somewhere else, and half of that answer helps nobody.
+            // One byte past the cap proves this isn't a judgment answer —
+            // those are small JSON, so clipping means `base_url` points elsewhere.
             if raw.len() > MAX_BYTES {
                 return Err(ToolError::Invalid(format!(
                     "judgment endpoint answered with over {} MiB — not a judgment response; check `base_url`",
@@ -145,9 +144,8 @@ impl Kind {
 }
 
 impl Question {
-    // Checked here rather than left to the endpoint: the shape a kind takes
-    // is this tool's contract, and a refusal the model can fix in place beats
-    // a round trip that comes back as somebody else's 422.
+    // Checked here, not left to the endpoint: a refusal the model can fix in
+    // place beats a round trip back as someone else's 422.
     fn validate(&self, id: &str) -> Result<(), ToolError> {
         let bad = |want: &str| {
             Err(ToolError::Invalid(format!(
@@ -273,9 +271,8 @@ impl Tool for Judge {
             r = self.answer(&body) => r?,
             _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
         };
-        // Readable, not verbatim: pretty for the model that reads it whole,
-        // one digest line for the display that shows only the first. A body
-        // outside the expected shape still passes through undecorated.
+        // Readable, not verbatim: pretty JSON for the model, one digest line
+        // for the display; a body outside the expected shape passes through as-is.
         let Ok(shaped) = serde_json::from_str::<Value>(&text) else {
             return Ok(ToolOutput::text(text));
         };
@@ -290,10 +287,8 @@ impl Tool for Judge {
     }
 }
 
-/// `phase=done  readiness=1.25  shipped_and_verified=0.95` — one value per
-/// answer, the kind deciding which field is the value: a choice's option, a
-/// score's position, a noul's probability. Distributions and legends stay in
-/// the body; this line is for a glance, not a reading.
+/// `phase=done  readiness=1.25  urgent=0.95` — one value per answer, for a
+/// glance; the full distributions and legends stay in the body.
 fn digest(answers: Option<&Value>) -> Option<String> {
     let answers = answers?.as_object()?;
     let mut line = String::new();

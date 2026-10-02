@@ -1,24 +1,10 @@
-//! The journal: what pi did, as opposed to what the model saw.
+//! The journal: what pi did, as opposed to what the model saw — decisions,
+//! wire traffic and timings the transcript beside it doesn't carry.
 //!
-//! The transcript beside it already holds every message, tool call and result,
-//! so this file holds the rest — the decisions, the wire traffic and the
-//! timings that never reach a message. Reading a bug back means reading the two
-//! together rather than reproducing it.
+//! One JSON object per line, meant for `jq`; no line depends on another.
+//! One file per session, followed across every run that resumes into it.
 //!
-//! One file per session, kept across every run that touched it: a run that
-//! starts by resuming opens the resumed session's journal, and a `/resume` or
-//! `/new` mid-run switches the file the records land in. The seam where the
-//! switch happened is recorded in the file it moved to.
-//!
-//! One JSON object per line. `jq` is the intended reader; a line is never
-//! wrapped and never depends on the line before it.
-//!
-//! Records are filed under a `pi::` target — `pi::loop`, `pi::wire`, `pi::tool`
-//! and so on — which is what `ev` carries and what a reader filters on. A call
-//! that states no target takes its module path instead and still arrives,
-//! because what counts as ours is where the code lives, not what it is named:
-//! a diagnostic that goes missing for want of a convention is the failure this
-//! file exists to prevent. What is left out below `trace` is the dependencies.
+//! Records are filed under a `pi::` target, or absent one, the module path.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -34,9 +20,8 @@ use tracing_subscriber::filter::{FilterFn, filter_fn};
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
 
-// How much of one string field survives. Raising the level raises this too:
-// at `info` the journal is a timeline and a truncated field still identifies
-// itself, while `debug` is what you turn on to read one whole.
+// How much of one string field survives; raising the level raises this too.
+// `info` keeps a timeline readable; `debug` is for reading one field whole.
 const FIELD_CAP_INFO: usize = 1_024;
 const FIELD_CAP_DEBUG: usize = 64 * 1_024;
 
@@ -87,12 +72,8 @@ impl LogLevel {
 // format string is exactly what should fill it.
 const HEAD: [&str; 5] = ["ts", "ms", "lvl", "ev", "in"];
 
-// Field names whose value never reaches the file.
-//
-// A backstop, not the rule: the rule is that call sites do not pass secrets.
-// Matched on the whole name and on the `_key` / `_token` / `_secret` suffix,
-// so `api_key` goes and `api_key_env` — the name of a variable, which is
-// exactly what a key bug needs — stays.
+// A backstop, not the rule — call sites are expected not to pass secrets.
+// `api_key_env` stays: it names a variable, not a key.
 const SECRET: [&str; 7] = [
     "api_key",
     "apikey",
@@ -134,8 +115,6 @@ fn clip(s: &str, cap: usize) -> Value {
     Value::String(format!("{}…+{} bytes", &s[..end], s.len() - end))
 }
 
-// ---------------------------------------------------------------- timestamps
-
 // RFC 3339, UTC, milliseconds. Hand-rolled: a calendar is thirty lines and a
 // date crate is a dependency the rest of the binary has no use for.
 pub(crate) fn rfc3339(t: SystemTime) -> String {
@@ -166,8 +145,6 @@ fn civil(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-// --------------------------------------------------------------------- sink
-
 struct Sink {
     out: BufWriter<File>,
     written: u64,
@@ -175,16 +152,12 @@ struct Sink {
     // A failed flush means the file can no longer be trusted to hold what we
     // send it; the sink stops writing and says so once on stderr.
     failed: bool,
-    // Which file `out` is writing to right now; `retarget` moves it when the
-    // run switches sessions. Kept here, under the sink's own lock, so [`path`]
-    // reads it back rather than from a second copy that could drift.
+    // Which file `out` writes to now; `retarget` moves it. Kept under the
+    // sink's lock so [`path`] reads it back rather than a copy that could drift.
     path: PathBuf,
 }
 
-// The open journal. One per run; the layer holds it and nothing else writes
-// to the file. Which file it is writing to lives on the [`Sink`], so [`path`]
-// reads it back from the journal itself rather than from a second copy that
-// could drift.
+// The open journal: one per run, held only by the layer.
 struct Journal {
     // Wall clock is what pairs a record with everything else on the machine;
     // the monotonic one is what measures. Neither substitutes for the other.
@@ -217,7 +190,6 @@ fn open_file(path: &Path) -> std::io::Result<File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        // Prompts, paths and what the model wrote, the same as the transcript.
         let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
     }
     Ok(file)
@@ -233,9 +205,8 @@ impl Journal {
         })
     }
 
-    // Point the same journal at another session's file — a `/resume` or a
-    // `/new` — without re-installing the subscriber. The run's clock keeps
-    // counting, and the cap applies to the new file from empty.
+    // Points the same journal at another session's file (`/resume` or `/new`)
+    // without reinstalling the subscriber; the cap applies to the new file fresh.
     fn retarget(&self, path: &Path) -> std::io::Result<()> {
         let file = open_file(path)?;
         let Ok(mut sink) = self.sink.lock() else {
@@ -246,9 +217,8 @@ impl Journal {
         Ok(())
     }
 
-    // One record. Every failure here is swallowed except a failed flush, which
-    // stops the writing for good: a run must not die of its own logging, and a
-    // poisoned lock would otherwise take the process with it on the next record.
+    // Every failure here is swallowed except a failed flush, which stops
+    // writing for good — a run must not die of its own logging.
     fn write(&self, record: Map<String, Value>) {
         let Ok(mut sink) = self.sink.lock() else {
             return;
@@ -269,18 +239,14 @@ impl Journal {
                 r#"{{"lvl":"WARN","ev":"pi::journal","msg":"journal capped at {FILE_CAP} bytes; nothing further is recorded"}}"#
             );
         }
-        // Flushed per record on purpose: the records worth having are the ones
-        // written just before the thing that killed the process.
-        // A flush that fails is a file that cannot be trusted with the rest;
-        // the process is still alive, so stderr is where the warning goes.
+        // Flushed per record: the records worth having are the ones written just
+        // before whatever killed the process. A failed flush warns on stderr.
         if let Err(e) = sink.out.flush() {
             sink.failed = true;
             eprintln!("warning: journal write failed ({e}); recording stops and stays stopped");
         }
     }
 }
-
-// -------------------------------------------------------------------- layer
 
 // Collects `tracing` fields into a JSON object, redacting and clipping on the
 // way in so nothing oversized is ever held.
@@ -294,9 +260,8 @@ impl Fields<'_> {
         let name = match field.name() {
             // `tracing`'s own name for the format string.
             "message" => "msg",
-            // A call site that reuses a header's name would otherwise overwrite
-            // it — a wrong `ms` reads as a real one. Kept, under a name that
-            // cannot collide, rather than dropped or allowed to win.
+            // A call site reusing a header's name would otherwise overwrite it — a
+            // wrong `ms` would read as real. Kept under a name that cannot collide.
             n if HEAD.contains(&n) => return self.shadowed(n, value),
             other => other,
         };
@@ -350,9 +315,8 @@ impl Visit for Fields<'_> {
         self.value(field, Value::Bool(value));
     }
 
-    // The whole chain, not the outermost link. An error's own line is
-    // routinely the least specific thing about it — "error sending request"
-    // over "Connection refused" — and the cause is what a journal is read for.
+    // The whole chain, not just the outermost line: the cause is usually
+    // what a journal is read for, not the least-specific wrapper message.
     fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {
         let mut text = value.to_string();
         let mut source = value.source();
@@ -375,16 +339,8 @@ struct JournalLayer {
     journal: std::sync::Arc<Journal>,
 }
 
-// Which records reach the file.
-//
-// Ours, at the chosen level; a dependency's, only at `trace`. Without the
-// second half the journal is mostly hyper's connection pool, and `trace` — the
-// level you reach for when nothing else explained it — is unreadable. That
-// level is also the one place a dependency's own account is worth having,
-// which is where the line lifts.
-//
-// "Ours" is whatever the workspace compiled, known by where its source lives:
-// no list of crates to join, and no target a call could forget to name.
+// Ours, at the chosen level; a dependency's, only at `trace` — else the
+// journal is mostly hyper's pool. "Ours" means where the source lives.
 fn ours(level: LevelFilter) -> FilterFn<impl Fn(&Metadata<'_>) -> bool> {
     let theirs = if level == LevelFilter::TRACE {
         level
@@ -423,10 +379,8 @@ impl JournalLayer {
     }
 }
 
-// The span path a record sits under, outermost first, with the session of
-// each run's own span in brackets: `turn[p]>tool>subagent[c]>turn[c]>tool`.
-// Parallel subagents share every span name; the bracketed id is what files
-// a record under the run that made it.
+// Outermost first, bracketed with each span's own session id, e.g.
+// `turn[p]>tool>subagent[c]>turn[c]>tool` tells parallel subagents apart.
 fn path_of<S>(span: &tracing_subscriber::registry::SpanRef<'_, S>) -> String
 where
     S: for<'a> LookupSpan<'a>,
@@ -547,11 +501,8 @@ where
     }
 }
 
-// ------------------------------------------------------------------- install
-
-// The journal this run writes to. One per run, retargeted in place when the
-// run moves to another session, so a surface that wants to name it can reach
-// it from far away without the path being threaded through the terminal loop.
+// One journal per run, retargeted in place on session switch, so any
+// surface can reach it without the path threaded through the terminal loop.
 static JOURNAL: std::sync::OnceLock<std::sync::Arc<Journal>> = std::sync::OnceLock::new();
 
 /// Where the journal is writing right now, for `/status` and the failure line.
@@ -561,15 +512,8 @@ pub fn path() -> Option<PathBuf> {
     JOURNAL.get()?.sink.lock().ok().map(|s| s.path.clone())
 }
 
-/// Drop journals nothing will be read back from. Walks the session tree,
-/// because that is where they live now — a bucket, a session, its journal.
-///
-/// A fortnight, where a transcript keeps until its checkout goes: a journal is
-/// for reading back a run that went wrong last week, and a transcript is the
-/// work itself. Sharing a directory does not make them the same age.
-///
-/// Failures are ignored: a full or read-only directory is a reason to log
-/// less, never to stop the run.
+/// Drops journals nothing will be read back from, kept a fortnight — shorter
+/// than the transcript beside it. Failures just mean logging less, never stopping.
 pub fn prune(sessions: &Path) {
     let Ok(buckets) = std::fs::read_dir(sessions) else {
         return;
@@ -589,11 +533,8 @@ pub fn prune(sessions: &Path) {
                 .is_some_and(|age| age > KEEP);
             if old {
                 let _ = std::fs::remove_file(&path);
-                // And the directory with it, when the journal was the last thing
-                // in it: a session that never got as far as a transcript — a run
-                // that could not start, or one that said nothing — leaves a
-                // directory nothing else in the tree can take, since a bucket
-                // only goes when it is empty.
+                // And the directory, if the journal was the last thing in it — a run
+                // that never got as far as a transcript, since a bucket needs to be empty.
                 let _ = std::fs::remove_dir(entry.path());
             }
         }
@@ -635,12 +576,8 @@ pub fn install(path: &Path, level: LogLevel) {
     }
 }
 
-/// The state the run started from, recorded once.
-///
-/// Everything here was already settled before the journal opened — the config
-/// read, the workspace resolved, the prior session loaded — so it is stated
-/// rather than observed. A surprising run is usually surprising because of one
-/// of these, and none of them is visible anywhere else afterwards.
+/// The state the run started from, recorded once: config, workspace and prior
+/// session, all settled before the journal opened and stated rather than observed.
 pub fn opening(
     id: &str,
     args: &crate::args::Args,
@@ -663,9 +600,8 @@ pub fn opening(
         session = id,
         "start"
     );
-    // Which key does what is a question the terminal cannot be asked after the
-    // fact, and a binding that silently did not apply looks exactly like one
-    // that did. Debug rather than info: it is a table, not a fact.
+    // A silently-ignored rebind looks exactly like one that worked, and the
+    // terminal can't be asked after the fact. Debug, not info: it's a table.
     for (action, binds) in &config.keys {
         // Written out rather than debug-printed: the point is to compare it
         // against what the user meant to write, not against the enum.
@@ -697,9 +633,8 @@ pub fn switched(path: &Path, id: &str) {
 mod tests {
     use super::*;
 
-    // A session directory whose journal was the last thing in it is one nothing
-    // else can take: the transcript sweep only removes a bucket that is empty,
-    // and a bucket holding a directory never is.
+    // The transcript sweep only removes an empty bucket, and a bucket holding
+    // a directory never is — so an old journal takes its directory with it.
     #[test]
     fn an_old_journal_takes_its_directory_with_it() {
         let dir = tempfile::tempdir().unwrap();

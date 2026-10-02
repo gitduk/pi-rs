@@ -71,12 +71,8 @@ fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-// `.agents/skills` here and in every ancestor up to the repository root.
-//
-// A monorepo keeps shared skills at the top while the work happens several
-// directories below, so stopping at the workspace would hide them. The walk
-// ends at the repository root and never reaches `$HOME`, whose `.agents` is
-// the personal one and is added separately.
+// `.agents/skills` in every ancestor up to the repo root — a monorepo keeps
+// shared skills at the top. Never reaches `$HOME`; that one is added separately.
 fn ancestral_agents(workspace: &Path) -> Vec<PathBuf> {
     let home = home();
     let mut out = Vec::new();
@@ -94,12 +90,8 @@ fn ancestral_agents(workspace: &Path) -> Vec<PathBuf> {
 
 /// Where skills come from, nearest first.
 ///
-/// One name, `.agents/skills`, at both levels, and it is the shared standard
-/// rather than ours. Supporting the vendor-neutral location is what makes a
-/// shared skill shared; carrying a private name beside it — anyone's, ours
-/// included — only leaves the question of where a skill belongs permanently
-/// open. A directory under some other name reaches the list by being symlinked
-/// into this one, which is the same mechanism said out loud.
+/// Always `.agents/skills` — the shared, vendor-neutral name. A directory
+/// under another name can still join the list by symlinking into this one.
 pub fn sources(workspace: &Path) -> Vec<PathBuf> {
     let mut out = ancestral_agents(workspace);
     out.extend(home().map(|h| h.join(".agents/skills")));
@@ -140,9 +132,8 @@ fn read_one(dir: &Path) -> Read {
         return Read::Problem(format!("{shown}: SKILL.md has no description"));
     };
 
-    // One skill per line in the tool catalog and the help list.
-    // Capped: the catalog rides every request, so one poisoned description
-    // must not tax every turn until the skill is deleted.
+    // One line in the catalog and help list; capped since the catalog rides
+    // every request, so one poisoned description can't tax every turn.
     let mut folded = String::new();
     for word in description.split_whitespace() {
         if !folded.is_empty() {
@@ -184,11 +175,8 @@ pub fn discover(workspace: &Path) -> Found {
     discover_from(&sources(workspace))
 }
 
-// How far below a source directory a skill may sit.
-//
-// Skill collections group by category, so the top level is not always where
-// they are. A bound keeps a stray symlink or a `node_modules` from turning
-// discovery into a full filesystem walk.
+// How far below a source directory a skill may sit — collections group by
+// category, so a bound also keeps a stray symlink from a full filesystem walk.
 const MAX_DEPTH: usize = 3;
 
 /// The same, over explicit directories. Taking them as an argument keeps the
@@ -250,10 +238,8 @@ fn walk(dir: &Path, depth: usize, found: &mut Found) {
 mod tests {
     use super::*;
 
-    // A name addresses the skill's directory, so one that could leave it must
-    // never load. Casing and hyphen style are left alone on purpose — a shared
-    // `.agents/skills` holds skills written to other tools' rules, and
-    // rejecting those makes them invisible for no gain.
+    // Casing and hyphen style are left alone on purpose: a shared
+    // `.agents/skills` holds skills written to other tools' rules.
     #[test]
     fn a_name_that_could_leave_the_directory_is_refused() {
         assert!(!usable("../escape"));

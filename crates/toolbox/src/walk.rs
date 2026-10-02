@@ -53,16 +53,11 @@ fn compile(
     ))
 }
 
-/// A gitignore-aware walk rooted in a directory. Links are not followed: one
-/// pointing elsewhere would leave the root and can revisit the same files.
+/// A gitignore-aware walk rooted in a directory. Links are not followed, to
+/// avoid leaving the root or revisiting files.
 ///
-/// Dotted entries are kept — `.github`, `.cargo` and friends are ordinary
-/// project files — but `.git` itself is not: an object store is megabytes of
-/// noise no model can act on, and it is never what a search meant to find.
-/// The machine-wide global gitignore only applies inside the workspace: a
-/// search outside it is scoped to what the user named, not to their config.
-/// An exclude set prunes matching entries here, at the walk: one matching
-/// directory skips its whole subtree instead of being filtered file by file.
+/// Dotted entries are kept except `.git` itself; the global gitignore applies
+/// only inside the workspace; an exclude set prunes whole subtrees at the walk.
 pub fn walker(ws: &Workspace, root: &Path, skip: Option<GlobSet>) -> ignore::WalkBuilder {
     let mut b = ignore::WalkBuilder::new(root);
     b.hidden(false)

@@ -1,18 +1,11 @@
 //! Everything a model needs before it can be talked to: where it lives, which
 //! shape it speaks, how it takes a thinking instruction, and what it costs.
 //!
-//! There is no built-in list of models. A hand-written one goes stale the week
-//! a vendor ships something, and there is no way to tell by reading it which
-//! entries still describe reality — so the models a run can reach are the ones
-//! the user has written down in `~/.pi/settings.toml`, against the endpoint
-//! they are actually pointed at. `examples/pi.toml` carries measured starting
-//! points.
+//! No built-in model list: the user writes what they can reach in
+//! `~/.pi/settings.toml`; `examples/pi.toml` carries measured starting points.
 //!
-//! Two axes, and keeping them apart is what stops a setting from being written
-//! where it cannot be read. An **endpoint fact** is what this server implements
-//! of a format, and rides `Format`. A **model fact** travels with the model
-//! whoever serves it, and sits on `ModelSpec`. "Opus 4.7 rejects temperature"
-//! is the second kind — which is why it is not on `Format`.
+//! Two axes, kept apart: an **endpoint fact** rides `Format`, a **model
+//! fact** (e.g. temperature support) sits on `ModelSpec`.
 
 use serde::{Deserialize, Serialize};
 
@@ -30,10 +23,8 @@ pub enum Format {
 
 impl Format {
     /// The name this format goes by everywhere it is written down: the config
-    /// key's value, the journal's `format` field, an API error's first word.
-    /// It is not the credential contract: the two OpenAI-family wires share
-    /// `OPENAI_API_KEY`, and only Anthropic keys on this name.
-    /// Renaming one renames the journal word but never a key.
+    /// key, the journal's `format` field, an API error's word — not the
+    /// credential contract, since OpenAI-family wires share one key.
     pub fn name(&self) -> &'static str {
         match self {
             Format::Anthropic { .. } => "anthropic",
@@ -45,9 +36,8 @@ impl Format {
 
 /// Whether to ask an Anthropic endpoint to cache, and for how long.
 ///
-/// Two bools would be four states, and one of them — say nothing, but keep it
-/// an hour — means nothing. One field is all there is to send: the API places
-/// the breakpoint itself and moves it as the conversation grows.
+/// Two bools would allow a meaningless state ("say nothing, keep it an
+/// hour"); one field is all there is to send — the API places the breakpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheControl {
@@ -80,15 +70,13 @@ pub enum ThinkingControl {
 /// What becomes of *foreign* reasoning when the transcript goes back out —
 /// blocks another model produced, or this one produced unsigned.
 ///
-/// Reasoning the target itself signed or encrypted always replays as itself and
-/// is not governed here: that is decided by comparing origins, and a setting
-/// could only get it wrong.
+/// Signed/encrypted reasoning from the target itself always replays as-is;
+/// that's decided by comparing origins, not by this setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplayThinking {
-    // Leave it out. What the docs say to do when the model changes, and the
-    // cheapest of the three: a target that ignores a foreign block still
-    // bills for reading it.
+    // Leave it out — what the docs say to do on a model change, and cheapest:
+    // a target that ignores a foreign block still bills for reading it.
     #[default]
     Off,
     // Wrapped in `<think>`, for the models trained to read that.
@@ -142,12 +130,8 @@ impl Pricing {
     }
 }
 
-// A spec for tests to override the two or three fields they actually care
-// about.
-//
-// `ModelSpec` has no `Default` on purpose — an id, a model and a base url have
-// no sensible empty value in production — so without this every test module
-// builds the whole struct, and three of them had already drifted apart.
+// `ModelSpec` has no `Default` on purpose: an id, model and base url have no
+// sensible empty value in production, so tests get this helper instead.
 #[cfg(test)]
 impl ModelSpec {
     pub(crate) fn test() -> Self {

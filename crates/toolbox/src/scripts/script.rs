@@ -27,9 +27,8 @@ pub struct Script {
 }
 
 impl Script {
-    // Declared string args ride in as environment as well, under three
-    // guards: a portable name, an inherited environment that always wins, and
-    // a size past which only stdin carries the value.
+    // Declared string args also ride in as environment, under three guards: a
+    // portable name, an inherited value that always wins, and a size cap.
     fn env<'a>(&'a self, args: &'a Value) -> impl Iterator<Item = (&'a str, &'a str)> {
         self.args.iter().filter_map(|(name, _)| {
             let value = args.get(name).and_then(Value::as_str)?;
@@ -140,9 +139,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // Declared args ride in as environment, but a name the process already
-    // owns — `PATH` among them — is never shadowed by a call's argument: an
-    // inherited environment wins, or a script is hijackable by its caller.
+    // PATH and other inherited names are never shadowed by a call's argument:
+    // otherwise a script would be hijackable by its own caller.
     #[test]
     fn an_inherited_name_is_never_shadowed() {
         let script = Script {

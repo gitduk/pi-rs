@@ -2,16 +2,14 @@ use std::path::Path;
 
 /// What makes a node an annotation of what follows it.
 ///
-/// Three cases because the grammars offer three different signals, and taking
-/// the strongest one each offers is the difference between right and nearly
-/// right: tree-sitter-rust tags its own doc comments, and knows that `////` is
-/// not one — a check on the `///` prefix does not.
+/// Three cases for three different grammar signals, taken at their strongest:
+/// tree-sitter-rust tags its own doc comments and knows `////` isn't one,
+/// which a bare `///` prefix check would miss.
 pub(crate) enum Mark {
     // Any node of this kind: an attribute, a decorator.
     Kind(&'static str),
-    // A comment the grammar itself marks as documentation *of what follows*.
-    // Rust's `//!` and `/*!` document the enclosing module instead, and are
-    // the same node kind carrying the same `doc` field.
+    // A comment the grammar marks as documentation of what follows. Rust's
+    // `//!`/`/*!` share the same node kind but document the module instead.
     Outer(&'static str),
     // A comment whose opener says so, where the grammar draws no line.
     Opener(&'static str, &'static str),
@@ -106,11 +104,10 @@ impl Lang {
 
     /// How a node says it annotates whatever it touches.
     ///
-    /// A construct owns the annotations directly above it, so replacing a
-    /// function replaces its `#[inline]` and its `///` with it — orphaning
-    /// either is what a reader would call a bug. Only adjacency binds them: a
-    /// blank line between a comment and the next declaration means the comment
-    /// was talking about something else.
+    /// A construct owns the annotations directly above it — replacing a
+    /// function replaces its `#[inline]` and `///` too — bound only by
+    /// adjacency: a blank line before the declaration means the comment was
+    /// talking about something else.
     pub(crate) fn annotations(self) -> &'static [Mark] {
         match self {
             Lang::Rust => &[

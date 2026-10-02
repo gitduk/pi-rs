@@ -19,11 +19,8 @@ pub struct Item {
     pub text: String,
 }
 
-// The rows one construct occupies, and the row that names it.
-//
-// The single answer to "what is the thing at this row", so that `block` and
-// `outline` cannot drift: both are this function, reached from a row and from
-// a node respectively.
+// The rows one construct occupies, and the row that names it: the single
+// answer `block` and `outline` both reach through, so they cannot drift apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Extent {
     start: usize,
@@ -37,11 +34,8 @@ fn parse(lang: Lang, content: &str) -> Option<tree_sitter::Tree> {
     p.parse(content, None)
 }
 
-// The last row holding any of `node`, 0-based.
-//
-// A node stopping at column 0 stopped *at* that row's boundary, not inside it:
-// a line comment swallows its own newline, and a markdown section closes where
-// the next heading begins.
+// The last row holding `node`, 0-based: stopping at column 0 means it
+// stopped at the row boundary, not inside it — as with a swallowed newline.
 fn last_row(node: Node) -> usize {
     let end = node.end_position();
     if end.column == 0 && end.row > node.start_position().row {
@@ -60,9 +54,8 @@ fn touches(a: Node, b: Node) -> bool {
 fn annotates(lang: Lang, node: Node, src: &str) -> bool {
     lang.annotations().iter().any(|mark| match mark {
         Mark::Kind(kind) => node.kind() == *kind,
-        // `outer`, not `doc`: a `//!` header carries `doc` too and belongs to
-        // the module around it, so absorbing it into the first item below
-        // would delete the crate's own documentation on the first edit.
+        // `outer`, not `doc`: a `//!` header carries `doc` too but belongs to
+        // the module, not the first item below — conflating them deletes it on edit.
         Mark::Outer(kind) => node.kind() == *kind && node.child_by_field_name("outer").is_some(),
         Mark::Opener(kind, opener) => {
             node.kind() == *kind
@@ -73,10 +66,8 @@ fn annotates(lang: Lang, node: Node, src: &str) -> bool {
     })
 }
 
-// Past the annotations to the thing they are about.
-//
-// Two shapes, one walk each: Rust's attributes precede the item as siblings,
-// Python's decorators are the leading children of a wrapper node.
+// Past the annotations to the thing they are about: Rust's attributes
+// precede the item as siblings, Python's decorators are a wrapper's leading children.
 fn subject<'t>(lang: Lang, node: Node<'t>, src: &str) -> Node<'t> {
     let mut n = node;
     while annotates(lang, n, src) {
@@ -143,9 +134,8 @@ fn annotation_above<'t>(lang: Lang, node: Node<'t>, src: &str) -> Option<Node<'t
     (annotates(lang, prev, src) && touches(prev, node)).then_some(prev)
 }
 
-// A node an address may name. What the parser could not read is not a
-// construct: `N*` over an error node replaces a span nobody looked at, and a
-// view that printed its range would be inviting exactly that.
+// A node an address may name: what the parser couldn't read is not a
+// construct, so `N*` over an error node would replace a span nobody looked at.
 fn resolvable(node: Node) -> bool {
     node.is_named() && !node.is_error() && !node.is_missing()
 }
@@ -165,8 +155,7 @@ pub fn extents(lang: Lang, content: &str) -> HashMap<usize, (usize, usize)> {
     };
     let root = tree.root_node();
     // The widest node per row: `#[inline]` is a construct of its own and also
-    // part of the function under it, and the wider one is what a caller naming
-    // that row is after.
+    // part of the function under it — the wider one is what a caller naming the row wants.
     let mut best: HashMap<usize, Node> = HashMap::new();
     let mut cursor = root.walk();
     let mut stack = vec![root];
@@ -239,14 +228,8 @@ pub fn outline(lang: Lang, content: &str) -> Vec<Item> {
     out
 }
 
-// `shown` is the span of the nearest declaration already listed, so a wrapper
-// and the thing it wraps are not listed twice.
-//
-// `export class C {…}` is two declared nodes opening and closing on the same
-// rows — the export and the class — and the reader wants one line, not two.
-// Suppressing by span rather than by node kind keeps the language tables
-// honest: `export_statement` really is the declaration when it wraps something
-// anonymous, and says so by being the only node with that span.
+// `shown` is the nearest listed declaration's span, so a wrapper and what it
+// wraps aren't listed twice — e.g. `export class C {}` shares one span.
 fn visit(
     node: Node,
     lang: Lang,
@@ -263,10 +246,8 @@ fn visit(
         }
         let kind = child.kind();
         let container = lang.containers().contains(&kind);
-        // The same `extent` a patch resolves this row through, so a skeleton
-        // entry and the block an edit takes cannot name different things.
-        // Computed only where it can be used: the walk passes through far more
-        // nodes than it lists.
+        // The same `extent` a patch resolves this row through, so skeleton and
+        // edit can't disagree; computed only for candidates, since most nodes aren't listed.
         let candidate = lang.declarations().contains(&kind);
         let span = candidate.then(|| extent(lang, child, src));
         let listed = span.filter(|e| shown != Some((e.start, e.end)));
@@ -281,11 +262,8 @@ fn visit(
             });
         }
         if container || !candidate {
-            // Undeclared nodes are still walked: a declaration often sits inside
-            // a wrapper the outline itself has no reason to show.
-            // Only a span that was actually listed can suppress a duplicate of
-            // itself. Carrying every span walked through would let a class's
-            // body suppress the one method that shares its extent.
+            // Undeclared nodes are still walked, since declarations often sit
+            // inside an unlisted wrapper; only a span actually listed can suppress its duplicate.
             let shown = listed.map(|e| (e.start, e.end)).or(shown);
             let deeper = depth + usize::from(listed.is_some());
             visit(child, lang, src, lines, deeper, shown, out);

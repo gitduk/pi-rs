@@ -1,473 +1,132 @@
 # pi
 
-A coding agent that stays inside one directory.
+A terminal coding agent in Rust. One binary, `pi`.
 
-Rust, eight crates, no framework. It reads and edits files, runs commands,
-searches, and compacts its own transcript when the window fills.
-One binary, `pi`.
+It began as a rewrite of the core of
+[oh-my-pi](https://github.com/can1357/oh-my-pi); the message model is copied
+from [rig](https://github.com/0xPlaygrounds/rig).
 
-It started as an exercise in extracting the core of
-[oh-my-pi](https://github.com/can1357/oh-my-pi) and rewriting it, and the
-message model borrows its shape from [rig](https://github.com/0xPlaygrounds/rig)
-— copied rather than depended on, so an upstream release cannot move it.
-
-## Build
+## Install
 
 ```bash
-cargo build --release          # target/release/pi
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/gitduk/pi-rs/releases/latest/download/pi-installer.sh | sh
 ```
 
-Nothing to install and nothing to configure at build time. There is no
-`PATH` entry created for you; symlink it where you want it.
-
-`cargo test` runs everything; `cargo clippy --all-targets` is expected to
-be silent.
-
-## Release
-
-Releases are built and published locally, not on CI. Git has no `post-push`
-hook, so pushing alone publishes nothing: after a push to `master`, run
-`scripts/release-on-push.sh` by hand. It builds the binary, and if the
-`[workspace.package]` version is not tagged on origin yet, tags it and uploads
-the binary via `gh release create --generate-notes`. An already-tagged version
-is a no-op, so a rerun after a routine push skips the build.
-
-A `pre-commit` hook keeps `Cargo.lock` in sync with the manifests: whenever a
-`Cargo.toml` is staged, it rewrites the lock file and stages it, so a version
-bump can be committed without a manual `cargo build` in between.
-
-
-The hooks are not version-controlled; install them on a fresh clone with:
-
-
-```bash
-install -m 755 scripts/hooks/pre-commit .git/hooks/pre-commit
-```
+Prebuilt for Linux x86_64 and aarch64. Anywhere else, `cargo build --release`
+leaves the binary at `target/release/pi`.
 
 ## Configure
 
-There is **no built-in list of models**. A hand-written catalog goes stale the
-week a vendor ships something, and nothing in it tells you which entries still
-describe reality — so the models a run can reach are the ones written down in
-`~/.pi/settings.toml`, against the endpoint they are actually pointed at.
+There is no built-in model list. `~/.pi/settings.toml` names one endpoint and
+the models on it:
 
 ```toml
-base_url = "http://127.0.0.1:7896/v1"
-format   = "openai"             # openai | anthropic
-api_key  = "x"
+base_url = "https://api.anthropic.com"
+format   = "anthropic"          # anthropic | openai | chat
+api_key  = "$ANTHROPIC_API_KEY" # a leading `$` reads the environment
 
-[models.flash]
-context_window = 1_000_000
-max_output_tokens = 384_000
+[models."claude-sonnet-5"]
+context_window    = 200_000
+max_output_tokens = 64_000
 ```
 
-That is a complete config. pi talks to one endpoint at a time, so the endpoint
-is the file itself and a model is named the way that endpoint names it. With
-exactly one model described you do not name a default — there is nothing else
-it could mean — so `pi` runs it.
+| `format`    | API              | pi appends          |
+| ----------- | ---------------- | ------------------- |
+| `anthropic` | Messages         | `/v1/messages`      |
+| `openai`    | Responses        | `/responses`        |
+| `chat`      | Chat Completions | `/chat/completions` |
 
-[`examples/pi.toml`](examples/pi.toml) is the full reference: every field with
-the default it carries, and measured starting points for a few real endpoints.
-It is documentation, not a table that claims to be current.
+[`examples/pi.toml`](examples/pi.toml) lists every key. An unknown key is
+refused at load.
 
-**Two wires.** `anthropic` is the Messages API, `openai` is the Responses API.
-Those are the two native shapes and pi speaks nothing else: a server offering
-only Chat Completions belongs behind a gateway that translates. A host's quirks
-are ordinary fields on the provider or the model — whether it takes sampling
-parameters, whether a forced tool choice sticks, whether it caches — each with
-a stated default. A key that is not one of them is refused at load, with the
-list of the ones that are: a typo there otherwise leaves a quirk at its default
-and produces a 400 much later, pointing at nothing.
-
-**A project file lays over the user's.** A `.pi.toml` at or above the
-workspace, up to the repository root, takes the same keys as
-`~/.pi/settings.toml` and wins key by key — a repository can point at its own
-endpoint. Anything it sets is yours to trust: that includes `base_url`,
-`api_key`, `system` and `write_roots`, so read the `.pi.toml` of a checkout you
-did not write. The screen opens with the endpoint in force and where it came
-from, and `/status` repeats it. `/settings` opens the project's `.pi.toml` in
-`$VISUAL` / `$EDITOR` (at the repository root when there is none yet) and
-reloads when the editor exits; settings meant for every project go in
-`~/.pi/settings.toml` by hand. An environment endpoint or a flag still outranks
-both files, and `/settings` names any key it shadows.
+A `.pi.toml` between the workspace and the repository root overrides the same
+keys, `base_url`, `api_key`, `system` and `write_roots` included. Read the one
+in a checkout you did not write before running pi there.
 
 ## Run
 
 ```bash
-pi                             # interactive
-pi "fix the flaky test"        # one-shot
-echo "..." | pi                # prompt on stdin
-pi -c                          # continue the last session here
-pi -C ~/some-repo --tier read  # elsewhere, read-only
-pi --tier net                  # read the tree and the web, write and run nothing
+pi                        # interactive
+pi "fix the flaky test"   # one-shot: answer on stdout, nothing saved
+echo "..." | pi           # prompt on stdin
+pi -c                     # continue the last session in this directory
+pi -C ~/repo --tier read  # another directory, read-only
 ```
 
-Interactive is the default at a terminal: the whole screen — the answer, the
-tool lines, the bar — is drawn there. A one-shot run prints the answer to
-stdout so it pipes, and everything else to stderr.
+`--tier` caps what a run may reach:
 
-A one-shot run keeps nothing: no transcript, no journal, nothing under
-`~/.pi`. That is what makes it one-shot — there is nothing to come back to.
-`-c` and `--resume` are the exception: naming a session makes the prompt
-belong to it, and what the run produces is saved there.
+| Tier    | Reaches                                       |
+| ------- | --------------------------------------------- |
+| `read`  | any file on the machine                       |
+| `write` | `read`, plus writing inside the workspace     |
+| `exec`  | everything, through a shell. **The default.** |
+| `net`   | `read`, plus the web                          |
 
-### The terminal
+**`bash` is not sandboxed.** `write` and `edit` are held inside the workspace
+and `write_roots`, symlinks resolved. `bash` runs `sh -c` with only its working
+directory held there, and pi never asks before a call. Use `--tier` when that
+is too much.
 
-One loop owns the terminal for the whole session. Finished output is pushed
-*above* the live region and becomes ordinary scrollback — selectable,
-searchable, still there after exit. Only what is still changing is repainted.
-Pinned under it is the bar: the checkouts of this repository, the one in front
-among them, and the model in force at the end of the row — a row too narrow for
-them all drops from the ends and marks the gap with an `…`. A keypress's short
-answer (`nothing to rewind to`) stands at the row's right end for a moment.
+A run has no turn cap. It ends when the model stops calling tools or you press
+Esc.
 
-A slash command answers over the menu instead of into the scrollback: the rows
-are dismissed rather than kept, because what a command says is not part of the
-conversation the model reads. The line that asked for it is not echoed either —
-a row above an answer that never comes is a question standing alone. The answer
-reads the menu's own keys and nothing else, so typing over it takes it down on
-the way past and the letters land in the editor, where they were going.
+## In a session
 
-Keys are rebindable. `/keys` lists every action with what it is bound to; an
-id under `[keys]` in `~/.pi/settings.toml` replaces that action's defaults:
+| Input                              | Does                                          |
+| ---------------------------------- | --------------------------------------------- |
+| `/new`, `/resume [id]`, `/name`    | start, switch, label a session                |
+| `/model [name]`                    | list the models, or move the session to one   |
+| `/worktree [name]`, `/worktree rm` | work in `<repo>.worktrees/<name>`             |
+| `/compact [focus]`                 | summarize everything but the working tail     |
+| `/loop <line>`                     | resubmit a line until a round edits no file   |
+| `/reload`, `/settings`             | re-read the config, or edit the project's     |
+| `/status`, `/keys`, `/help`        | session paths and spend; bindings; commands   |
+| `/wechat on`, `/wechat off`        | bridge the session to a WeChat chat           |
+| `/<skill> [args]`                  | run a skill (also one-shot: `pi "/commit"`)   |
+| `! <command>`                      | run a shell command and record its output     |
+| `@path`                            | complete a workspace file                     |
 
-```toml
-[keys]
-"line.clear" = "ctrl+g"
-"move.line.start"  = ["home", "f5"]
-```
+## Tools
 
-The namespace says what the action touches, and that is also what decides when
-it is live — `edit.*` and `move.*` whenever you are typing, `menu.*` while
-something is open over the editor (a completion list, the rewind selector, or
-a command's answer), and `run.*` only during a turn. Two
-actions may share a key when they are never live together, which is how `up` is
-`menu.previous` with a list open and `history.older` without it. Sharing one
-*within* a context is refused at load, along with an unknown id or an unreadable
-binding.
+`read` `write` `edit` `glob` `grep` `bash` `fetch` `skill` `subagent`, plus:
 
-Colours are configurable the same way, under `[theme]` in
-`~/.pi/settings.toml`. Every key is a Style: a colour, text attributes, or
-both. `muted` `heading`
-`emphasis` `code` `input`, plus `diff.add` `diff.del`, `status.ok` `status.err`,
-`menu.selected`, `prompt.color` and `prompt.panel.input` `prompt.panel.said`.
-A plain string is shorthand for a colour alone — `code = "#dd80ff"` (or the
-short `#f80`, same as `"38;2;221;128;255"`); a table takes the full form
-`{ color = …, sgr = ["bold", "italic"] }`. Attributes are names (bold, dim,
-italic, underline, blink, reverse, strike) or any SGR parameter list passed
-through. The line being typed sits on a band, `prompt.panel.input`, and every
-line it lands as sits on one too, `prompt.panel.said`; both follow the
-terminal — pi asks it for its background (xterm's `OSC 11`) and lifts that
-colour, three twelfths of the way to white for the live line and two for a
-landed one — so a band is the terminal's own canvas lit up rather than a grey
-laid over it. A terminal that will not say leaves opencode's two elevations,
-`#1e1e1e` and `#141414`, and a colour the config names itself is kept. `49` —
-SGR's default background — is the terminal's own, which is how a band comes
-off. `prompt.icon` and `prompt.normal` are the two values that are neither
-colour nor attribute.
-A key that is not one of those is refused at load, like a misspelled compat
-key.
+- `judge`, when the config has a `[judge]` section.
+- One tool per cargo script in `~/.pi/tools/*.rs`. Its `[package] description`
+  is the tool's description and `[package.metadata.pi.args]` its arguments.
+  Needs `cargo +nightly -Zscript`.
 
-The bar over the input line is laid out by `$PI_HOME/bar.rs` (by default
-`~/.pi/bar.rs`) when there is one: a cargo script, run with
-`cargo +nightly -Zscript` in the checkout's root, that reads pi's state as
-JSON on stdin — `model`, `effort`, `tier`, `running`, `root`, `worktree`,
-`ctx` (`[used, budget]` as the last turn left it, or null) and `spent` (the
-session's dollars) — and prints a layout on stdout:
+`fetch` speaks http and https and refuses loopback, private and link-local
+addresses. With [rtk](https://github.com/rtk-ai/rtk) on `PATH`, `bash` runs
+each command through `rtk rewrite`; `RTK_DISABLED=1` turns that off.
 
-```json
-{"lines": [{
-   "left":  [{"group": [{"text": "󰏗 pi-rs", "style": "34"},
-                        {"text": " +12", "style": "add"}]},
-             {"part": "model", "style": {"color": "32", "sgr": ["bold"]}},
-             {"group": [{"text": "ctx "}, {"part": "ctx", "style": "36"}]},
-             "tier"],
-   "right": ["flash"],
-   "sep":   {"text": "  "}}],
- "refresh": 2}
-```
+When the transcript outgrows the window, pi drops repeated and old tool
+results first and summarizes whole rounds last. The saved session keeps
+everything; only the model's view shrinks.
 
-Each entry in `lines` is one row, kept whether or not it has anything to say.
-An item is a part pi fills in on every frame — `tabs` `flash` `model`
-`effort` `tier`, or any of the status line's (`elapsed` `in_out` `cache`
-`cost` `ctx` `compacted` `queued` `worktree`), which read the run in flight or
-the one that last ended — bare or as `{"part", "style"}`; the script's own
-`{"text", "style"}`; or a `group` of texts and parts (not `tabs`) joined with
-no separator, which goes whole when every part in it has nothing to say. A
-part or text with nothing to say drops out along with the separator before
-it.
-`sep` is what stands between items, a muted ` · ` when absent. A `style` is a
-theme name (`muted` `heading` `emphasis` `code` `input` `ok` `err` `add`
-`del`) or a Style written as `[theme]` writes one; `tabs` keeps its own
-colours, which say which checkout is in front and how each last run ended.
-The script runs again when pi's state changes, when the file does, and every
-`refresh` seconds (0.5 at least) for what it reads from outside pi. Until it
-answers — a first build can take a while — or whenever it fails, the bar is
-the default `tabs · model` with the flash on the right, and a failure says
-where the layout went wrong in one line of the scrollback; a failed script is
-retried every five seconds.
+## Files
 
-`/help` `/new` `/resume` `/name` `/model` `/worktree` `/compact` `/loop`
-`/reload` `/keys` `/status` `/settings` `/wechat` `/exit`, and one more for
-every skill on disk. Typing `/` opens a list of what the line could still
-become; `↑` `↓` pick, `Tab` accepts, `Esc` dismisses it until the next
-keystroke. `/model`, `/resume` and `/worktree` complete their arguments too:
-the model name is the tedious part the config already knows, a saved session
-answers to its own label — the name you gave it, or its first question — and a
-checkout by its branch.
-Typing `@` completes workspace files the same way: `@src/ma` lands as
-`@src/main.rs`, a directory lands with its `/` left open for the next step.
+`PI_HOME` moves `~/.pi`.
 
-In Normal mode with nothing typed, `v` reads the conversation alone — what was
-asked and what was answered, with the thinking, the calls and the input line
-itself out of the way. `j`/`k` walk it a row, `J`/`K` half a screen, `G` and
-`gg` its two ends, and `Esc`, `q` or `v` leave.
+| Path                                     | Holds                                      |
+| ---------------------------------------- | ------------------------------------------ |
+| `~/.pi/settings.toml`                    | endpoint, models, `[keys]`, `[theme]`      |
+| `~/.pi/AGENTS.md`, `AGENTS.md`           | standing instructions: yours, a project's  |
+| `~/.agents/skills/`, `.agents/skills/`   | skills: a directory with a `SKILL.md`      |
+| `~/.pi/tools/*.rs`                       | script tools                               |
+| `~/.pi/bar.rs`                           | a cargo script that lays out the bar       |
+| `~/.pi/sessions/<project>/<session>/`    | the transcript and `journal.jsonl`         |
 
-`/new` starts a fresh session, keeping this one on disk; `ctrl+l` clears the
-line, and with nothing left on it a second press inside the double-tap window
-starts a fresh session the same way. `/resume` lists the sessions saved for this
-workspace — one directory per project under `~/.pi/sessions/`, named by the
-path — newest first, each row the name you gave it followed by the first thing
-it was asked, and `/resume <id>` switches to one — the session you leave is
-saved first, so nothing is lost on the way out.
+The journal records what the transcript does not: requests, timings, refusals,
+retries. One JSON object per line, `0600`, kept two weeks. `PI_LOG` takes
+`debug`, `trace` or `off`.
 
-`/worktree <name>` works in another checkout of the same repository:
-`<repo>.worktrees/<name>` beside it, on a branch of that name — beside rather
-than inside, so the main checkout never searches, writes or `git add`s another
-one as its own — created if it is not there and
-reused if it is, so asking twice means "go there". Git will not check one
-branch out twice, so the alternative to a branch per worktree is a detached
-HEAD, where commits are reachable only through the reflog; that is not a state
-to leave parallel work in. `/worktree` on its own lists the checkouts, each
-with the branch it is on and a mark against the one in use — the repository's
-own is in that list under its directory name, which is how you get back out.
-`/worktree rm <name>` removes one: its checkout and the sessions recorded in
-it, and its branch once merged — an unmerged branch holds commits nothing
-else does, so it stays, and git's reason is shown.
+## Develop
 
-The session does not come along. A transcript holds workspace-relative paths,
-so under another root the same string names a different file, and a saved
-session belongs to one workspace — so a move starts a fresh one, and the
-session left behind is saved where it was. Everything the workspace decides is
-re-read on the way and the move lands only if all of it resolves: the standing
-instructions, the skills, the project's `.pi.toml`. What `/resume` offers
-follows too, because sessions are stored per workspace — each checkout keeps
-its own history.
-
-A line that starts with `!` is a shell command, not a prompt: `! git status`
-runs it and shows the output, and the command and its result are recorded in
-the transcript so the model answers with them in view. It runs in the same
-workspace, under the same timeout, with the same clamps as the model's own
-`bash` tool. `!` alone is just a prompt.
-`/compact [what to keep in view]` summarizes everything outside the tail
-you are working from — for when a phase has ended and no budget can tell.
-
-`/loop <line>` runs that line again, and again, while it keeps changing the
-tree. It is one thing, and the thing is not repetition: a model that has just
-reviewed its own work and found nothing left will say so whether or not that
-is true, and the second pass — the one you type yourself — is where the rest
-of it turns up. `/loop` is that second pass, decided by the tree instead. A
-round that wrote a file had work left; a round that wrote nothing did not, and
-the loop ends there. What counts is what `write` and `edit` touched — a change
-a shell command made is not in it, and a round of those alone ends the loop.
-Each round carries a note naming it and saying that an unchanged round is how a
-loop ends; the goal itself is re-submitted exactly as typed, so a skill under
-`/loop` runs the way it runs alone. How much has changed is the model's to
-measure — the tree is right there.
-
-What it does not do is judge whether a goal was reached. `/loop find me an
-answer` is a loop with nothing to measure — those belong in the ordinary
-back-and-forth, where you are the one who decides to go again. Esc ends a loop
-along with the round it caught, and `loop_max_rounds` puts a ceiling on the one
-shape convergence cannot catch: a round that undoes the one before it changes
-files forever. `/loop` on its own stops the one in force, and a second `/loop` is
-refused rather than replacing it. A goal that starts no turn — `/help`, say — is
-refused at once: there would be nothing to measure. A loop runs in the checkout
-it was started in, and a round goes only when that lane is in front, free, and
-nothing you typed is waiting — what you say comes first. `/worktree` away from
-it and the next round waits until you come back; remove its checkout and the
-loop goes with it.
-`/name` and `--name` label a session, because the ids are timestamps: the
-label leads that session's row in `/resume`, and typing it completes to
-`/resume <id>`.
-
-`/model` on its own lists what `~/.pi/settings.toml` defines — wire, window,
-price — with a mark against the one running. `/model <name>` moves the session
-to another, transcript and all. Prior reasoning does not survive the move
-intact: a block carries the model that produced it, and a model that did not
-write it gets the text without the signature, as prose or wrapped in
-` thinking` depending on what it accepts. Nothing is rewritten on the way, so
-switching back makes the original blocks native again. What has been spent
-stays spent — every turn was priced by the model that ran it.
-
-`/reload` re-reads the config, the standing instructions and the skills. It
-fails whole or not at all: a broken config leaves what was running running,
-and says what was wrong with it. The model is not among what reloads — which
-model a session is on is a decision, not a preference, and `/model` is how it
-changes. There is no narrower `/reload keys` because there is nothing to save:
-an unchanged system prompt is the same string, so the provider's cache survives
-a reload that changed nothing.
-
-`/wechat on` bridges this session to WeChat: the first time it shows a QR to
-scan, then it long-polls the Weixin iLink bot API (no public port needed) and
-every message from that chat lands in this session as if typed here. The
-reply streams to the phone when the turn ends, tool calls appear as short
-lines, and `/stop` from the phone interrupts a running turn. `/wechat` reports
-the bridge's state; `/wechat off` disconnects. Credentials and the message
-cursor live in `~/.pi/wechat.json`.
-
-### The journal
-
-Every session keeps one at `~/.pi/sessions/<project>/<session>/journal.jsonl`,
-beside the transcript it recorded, so that dropping a session drops both.
-`/status` says where — along with the transcript's own file, the tail of the
-system prompt the model is answering under, and what that session has spent so
-far. A tool that fails the same way twice is told the path too: the journal
-holds the call as it went on the wire, which the transcript does not. A run
-opens the journal of the session it starts on —
-`--resume` included — and `/resume` or `/new` switches it to the session now
-in charge, so the whole of a session reads as one file across the runs that
-touched it. A one-shot prompt has no session, so it opens no journal: `PI_LOG`
-has nothing to write to.
-
-It is the other half of the transcript: the transcript holds every
-message, tool call and result, so the journal holds what never reaches a
-message — which config was read, what went on the wire and what came back, how
-long each turn and each tool took, why an edit was refused, what the loop
-decided when it compacted or retried or gave up. A bug is read back from the
-two together rather than reproduced.
-
-One JSON object per line, so `jq` is the reader:
-
-```bash
-J=~/.pi/sessions/<project>/<session>/journal.jsonl    # /status prints it
-jq -c 'select(.lvl=="WARN" or .lvl=="ERROR")' $J      # only what went wrong
-jq -c 'select(.ev=="pi::span")|{msg,name,dur_ms}' $J  # what took the time
-jq -c 'select(.ev=="pi::edit")|{stage,path,edits}' $J # how each edit call ended
-```
-
-`ms` is milliseconds since the run began, `in` is the span a record sits under
-(`turn>tool`), and `ev` says which part spoke: `pi::session` `pi::loop`
-`pi::wire` `pi::tool` `pi::edit` `pi::bash` `pi::compact` `pi::keys`, plus
-`pi::span` for the record that closes a span and carries its `dur_ms`.
-`PI_LOG=debug` widens the fields, so the arguments each call carried arrive
-whole rather than clipped to a kilobyte. `PI_LOG=trace` adds the request bodies
-themselves — hundreds of kilobytes a turn, which is why they sit a level below
-everything else — and the dependencies' own accounts, which is a lot of hyper.
-`PI_LOG=off` writes nothing.
-
-Journals are as sensitive as transcripts — prompts, paths, file contents — and
-kept the same way: `0600`, outside the workspace, dropped after two weeks. No
-credential is written: keys travel in headers, which are never recorded, and a
-field named for one is replaced by a fingerprint of it.
-
-### Standing instructions
-
-`AGENTS.md` for both — `~/.pi/AGENTS.md` for yours, a project's in the
-project — walked up to the repository root, general first, so where two
-disagree the nearer directory is the one read last. Appended to the system prompt, which is the part a provider
-caches. `--no-context-files` turns it off.
-
-### Skills
-
-One name at both levels: `.agents/skills` in the project (walked up to the
-repository root) and `~/.agents/skills`. That is the shared standard rather
-than ours; carrying a private name beside it — anyone's, ours included — only
-leaves the question of where a skill belongs permanently open. A directory
-under some other name reaches the list by being symlinked into this one.
-
-A skill is a directory with a `SKILL.md` carrying `name` and `description`.
-Only descriptions are always in context; the body loads when the model asks for
-it. Anything unreadable is reported at startup rather than vanishing.
-
-**A skill is also a command.** `/commit` runs the one called `commit` — no
-prefix, because the name is what you know it by and a namespace only earns its
-keep when something else wants the word. The instructions arrive as a message
-you could have typed, so the model has them without spending a turn fetching
-them, and anything after the word goes in below as what they are being applied
-to. A built-in wins the collision: a repository contributes skills, and one
-that could take `/new` away from the session it would otherwise start is a
-checkout redefining the terminal — the skill stays loadable by name and the
-startup notice says so. `/help` lists the two halves apart, since with no
-prefix the word alone does not say which it is.
-
-It reads the same one-shot: `pi "/commit fix the tests"` hands over the same
-instructions to a run that answers once. Only the skills do — `/new` and the
-rest operate on a session and there is none here, and any other word starting
-with a slash is left as prose, because `pi "/usr/bin is missing"` is a prompt
-and refusing it to catch a typo is the worse trade.
-
-## What it does
-
-**Tools.** `read` `write` `edit` `glob` `grep` `bash` `fetch` `skill` `subagent`.
-Each declares a tier and `--tier` caps the run. `read`, `write` and `exec` are a
-ladder, each reaching further into this machine than the last; `net` sits beside
-them rather than above, because the outside world is a different direction —
-`--tier net` reads the tree and the web, writing nothing and running nothing,
-while `--tier exec` covers `net` anyway, since `sh` can `curl`. A request is
-still a request: nothing filters the address, so `fetch` reaches a host on your
-own network as readily as one on the internet. Every path is resolved
-against the workspace root through the deepest existing ancestor, so a symlink
-cannot walk out. `bash` gets its own process group and a SIGTERM-then-SIGKILL
-timeout; `fetch` speaks http and https only, and answers with text. With
-[rtk](https://github.com/rtk-ai/rtk) on `PATH`, `bash` asks it for the command's
-equivalent first — `git status` runs as `rtk git status` — so what reaches the
-transcript is rtk's compact output; no rtk, one too old for `rtk rewrite`, or
-`RTK_DISABLED=1` runs the command as it was written.
-
-**Edits** name the text to find rather than a line number: an anchor is matched
-literally against the file as it stands, so every entry in a call lands against
-the same content and an earlier one never shifts a later one. `insert_after` and
-`insert_before` add rows without repeating them, and `whole_block` takes a
-construct named by its first line. An anchor that matches nothing, or more than
-once, is refused against a content hash taken at the last read. Concurrent edits
-to one file serialize per path — otherwise both pass their tag check and one
-change disappears silently.
-
-**Compaction** is a ladder, cheapest rung first: supersede a result the same
-call — same tool, same arguments — answered again later, age one out, take the
-bulk of a tool call's arguments once it has run, cut what was aged out down to
-its notice, and only then summarize before dropping. It reads calls, results,
-sizes and rounds, never what a tool means, so nothing is pinned: a skill whose
-instructions went is simply called again. What it drops is a *round* — a
-question and everything that answered it — because taking the answer alone
-left the question standing with nothing after it.
-
-The session is append-only; compaction writes a *record* of what it dropped and
-the model's view is derived from it, so the history that made the session worth
-reading survives. What the model is sent and what a person reads are different
-projections of the same list: compaction is the model losing sight of the
-conversation, not you.
-
-**Failures** are classified by HTTP status alone, never by message
-wording: a spent quota and a throttle both arrive as HTTP 429, and pi
-cannot tell them apart, so it retries every 429 the same way. An overflow
-refusal usually names the real window, so the correction is read out of it
-rather than guessed.
-
-**A stuck model is named, because nothing else stops it.** There is no turn
-cap: a run ends when the model stops, when you interrupt it, or when the
-transport gives up. So a call that comes back byte-identical is told so — on
-the third for an answer, since a re-read after compaction is legitimate, and on
-the second for a refusal, since nothing legitimate re-sends a call that was
-just refused. Repeated refusals are how most sessions actually die: a model
-that cannot get a tool's arguments right will keep getting them wrong the same
-way until it is told so.
-
-**Token counts** come from the provider, and only from the provider. A host
-that reports nothing — or what it reports cannot be true — leaves that part
-out: the running line, the closing line and `/status` show a dash where a count
-is missing, never a number of ours. A proxy that answers a
-thirty-thousand-token transcript with an input count of two hundred, and no
-caching of any kind to explain it, is not tokenizing differently; taking that
-figure at face value turns the running cost into fiction. A missing figure
-prices nothing, and the cost shown is only ever what the provider's own
-numbers amount to. A status line counts the run — what this answer has cost
-since you sent it, which is the figure you can act on — while `/status` counts
-the session behind it; one tally feeds both, so neither can drift from the
-other.
+`cargo test` and `cargo clippy --all-targets`, both expected clean. Run
+`cargo fmt` before committing. Pushing a `vX.Y.Z` tag builds and publishes the
+release on CI.
 
 ## Not built
 
-MCP, LSP, message-level cache breakpoints, session branching
-(the log carries ids for it; nothing uses them yet), `Ctrl-Z` suspend.
+MCP, LSP, a sandbox for `bash`, per-call approval, session branching.

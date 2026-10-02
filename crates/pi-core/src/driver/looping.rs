@@ -1,13 +1,8 @@
 //! `/loop`: the same line, submitted round after round until the tree stops
-//! changing.
+//! changing — judged by the tree, never by the model.
 //!
-//! What decides another round is the tree, never the model. Asked of the model
-//! it would be answered every time; measured, a round that changed nothing is
-//! the end of the loop and not a matter of opinion.
-//!
-//! A loop drives a lane from outside, as a channel does: it is asked for a
-//! round when the lane is free and told when a turn it began ends. The lane
-//! itself knows nothing of loops.
+//! A loop drives a lane from outside, as a channel does; the lane itself
+//! knows nothing of loops.
 
 use std::collections::BTreeMap;
 
@@ -157,9 +152,8 @@ struct Looping {
     // Read into every round's prompt: how far the loop has got, and the
     // standing licence to change nothing.
     note: String,
-    // Fingerprints the tree has worn, oldest first, the starting state
-    // included. The last one is the round that just ended; an earlier hit
-    // means a round undid its way back.
+    // Fingerprints the tree has worn, oldest first (starting state
+    // included); an earlier hit means a round undid its way back.
     seen: Vec<String>,
     // The written tree as the last round left it, one entry per path. The
     // next round is diffed against this, path by path.
@@ -185,10 +179,8 @@ struct TreeFile {
 // The written tree, one entry per path.
 type TreeState = std::collections::BTreeMap<std::path::PathBuf, TreeFile>;
 
-// The tree as the loop measures it: a content fingerprint over every written
-// path, plus the bytes to diff the next round against. A path whose stat is
-// unchanged since `prev` keeps its cached bytes — reading every file again
-// every round is work the diff will throw away.
+// A content fingerprint over every written path, plus cached bytes to diff
+// against; a path whose stat is unchanged since `prev` skips the re-read.
 fn tree_mark(ctx: &Ctx, prev: &TreeState) -> (String, TreeState) {
     let mut h = 0xcbf2_9ce4_8422_2325u64;
     let mut tree = TreeState::new();
@@ -236,10 +228,8 @@ fn count_changes(prev: &[u8], now: &[u8]) -> usize {
         return n + m;
     }
     if n.saturating_mul(m) > 250_000 {
-        // Past the LCS budget: every positionally equal line is one kept, and
-        // every remaining line of either side is one remove or add. The count
-        // is an upper bound on the edit distance — a same-sized rewrite is
-        // never reported as zero change, and a true no-op is still zero.
+        // Past the LCS budget: positionally-equal lines are kept, the rest
+        // counted as remove/add — an upper bound, never zero for a rewrite.
         let kept = a.iter().zip(&b).filter(|(x, y)| x == y).count();
         return (n + m) - 2 * kept;
     }
@@ -262,10 +252,8 @@ fn count_changes(prev: &[u8], now: &[u8]) -> usize {
 
 /// What cut a round short of its own end.
 ///
-/// The loop goes with the run on any of the three: what decides a round is the
-/// tree, and a round that was stopped, that failed, or that was taken back
-/// never left the tree the verdict the loop reads. Which of the three it was is
-/// the whole of what the screen has to say about it.
+/// The loop goes with the run on any of the three: a stopped, failed or
+/// taken-back round never left the tree a verdict to read.
 pub enum Cut {
     // Esc, or a stop asked for another way.
     Stopped,
@@ -331,9 +319,8 @@ impl Looping {
     // round short, and `None` is a round that reached its own end.
     fn step(&mut self, ctx: &Ctx, cut: Option<Cut>, cap: Option<usize>) -> Round {
         self.round += 1;
-        // A cut round ends the loop without measuring the tree: esc may have
-        // stopped the run mid-write, and where the tree stands now is not a
-        // judgement anyone asked for.
+        // A cut round ends the loop without measuring: esc may have stopped
+        // the run mid-write, so the tree's state isn't a judgement to read.
         if let Some(cut) = cut {
             return Round::Cut(cut);
         }

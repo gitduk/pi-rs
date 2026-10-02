@@ -23,9 +23,8 @@ use tool::{Concurrency, Ctx, Registry, Tier, Tool, ToolError, ToolOutput, Worksp
 struct Scripted {
     turns: Vec<Vec<StreamEvent>>,
     next: AtomicUsize,
-    // Where a test that needs the user to speak mid-run leaves the line: said
-    // as the turn at this index goes out, which is past that turn's own look
-    // at the mailbox and so exercises the seam rather than the start.
+    // Where a mid-run interjection leaves the line: past this turn's own
+    // mailbox look, so it exercises the seam rather than the start.
     interject: std::sync::Mutex<Option<(usize, Steer, String)>>,
 }
 
@@ -164,9 +163,8 @@ async fn drive_steered(
     (session, out, events)
 }
 
-// Every result in the view, in order. One entry is one message now, so a
-// turn's results arrive spread across several of them rather than packed into
-// one — joining is the wire's business.
+// Every result in the view, in order: one entry is one message, spread
+// across several rather than packed into one — joining is the wire's business.
 fn tool_results(msgs: &[Message]) -> Vec<&llm::message::ToolResult> {
     msgs.iter()
         .filter_map(|m| match m {
@@ -313,9 +311,8 @@ async fn parallel_results_follow_call_order_not_completion_order() {
         "the slow call was issued first"
     );
     assert_eq!(results[1].flatten_text(), "fast");
-    // Two 120ms calls that overlap land near 120ms; run back to back they
-    // take 240ms. The headroom keeps a loaded CI from flaking while the bound
-    // still fails if the calls ever stop overlapping.
+    // Two 120ms calls that overlap land near 120ms, not 240ms; the headroom
+    // keeps a loaded CI from flaking without masking a real regression.
     assert!(
         started.elapsed().as_millis() < 190,
         "shared calls must overlap"
@@ -360,9 +357,13 @@ async fn each_call_says_its_end_as_it_lands() {
 }
 
 #[tokio::test]
-async fn an_exclusive_call_forces_the_batch_to_run_serially() {
+async fn an_exclusive_call_runs_alone_and_its_neighbours_still_join() {
     let (_d, mut a, ctx) = harness(vec![
-        call_turn(&[("t1", "solo", "{}"), ("t2", "other", "{}")]),
+        call_turn(&[
+            ("t1", "solo", "{}"),
+            ("t2", "slow", "{}"),
+            ("t3", "fast", "{}"),
+        ]),
         text_turn("ok"),
     ]);
     brief(&mut a).registry = Registry::new()
@@ -372,18 +373,31 @@ async fn an_exclusive_call_forces_the_batch_to_run_serially() {
             exclusive: true,
         })
         .with(Sleeper {
-            name: "other",
+            name: "slow",
             delay_ms: 80,
+            exclusive: false,
+        })
+        .with(Sleeper {
+            name: "fast",
+            delay_ms: 10,
             exclusive: false,
         });
 
     let started = std::time::Instant::now();
-    let (_s, out, _) = drive(&a, &ctx, "go").await;
+    let (_s, out, events) = drive(&a, &ctx, "go").await;
     out.unwrap();
     assert!(
         started.elapsed().as_millis() >= 160,
         "an exclusive call must not overlap"
     );
+    let ended: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::ToolEnd { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ended, ["t1", "t3", "t2"], "the shared pair must overlap");
 }
 
 #[tokio::test]
@@ -600,10 +614,8 @@ fn bulky_turn(id: &str) -> Vec<StreamEvent> {
     ev
 }
 
-// The bug this shape exists to prevent: both compaction paths used to price
-// the summary with `self.spec`, so a cheap summarizer was billed at the
-// expensive model's rates — twice over, silently, and only visible in a total
-// that looked plausible.
+// A cheap summarizer's tokens must be billed at the run's rate, not its own —
+// otherwise a total that looks plausible is silently wrong.
 #[tokio::test]
 async fn a_summary_on_another_model_still_counts_toward_the_run() {
     let dir = tempfile::tempdir().unwrap();
@@ -926,7 +938,12 @@ impl Transport for Picky {
             self.refusals.fetch_add(1, Ordering::SeqCst);
             // 413, not 400: only transient statuses are retried after a squeeze.
             let body = match self.named {
-                Some(limit) => format!("prompt is too long: {size} tokens > {limit} maximum"),
+                // A provider counts more than our estimate does, or it would
+                // not be refusing a request we fitted to its window.
+                Some(limit) => format!(
+                    "prompt is too long: {} tokens > {limit} maximum",
+                    size + limit
+                ),
                 None => "Request exceeds the maximum size".into(),
             };
             return Err(llm::LlmError::Api {
@@ -958,13 +975,14 @@ fn fat_history() -> Vec<Message> {
 // window when the refusal names one, squeezing blindly when it does not.
 #[tokio::test]
 async fn an_overflow_refusal_shrinks_the_transcript_and_retries() {
-    // The named row keeps the roomy default window: what is under test is the
-    // refit to the refusal's own number, not a window the transcript actually
-    // fills. The unnamed row squeezes blindly against a modest window, the
-    // realistic case — an estimate off by a third, not by 30x.
+    // The named row keeps the roomy default window, testing the refit itself;
+    // the unnamed row squeezes blindly, the realistic off-by-a-third case.
     for (window, fits, named) in [
         (200_000u32, 2_000usize, Some(2_000usize)),
         (60_000, 8_000, None),
+        // The window the run was already fitted to: refitting alone would
+        // resend the same request until the squeezes ran out.
+        (60_000, 8_000, Some(60_000)),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
@@ -993,10 +1011,9 @@ async fn an_overflow_refusal_shrinks_the_transcript_and_retries() {
             "the refusal must have happened"
         );
         match named {
-            Some(_) => {
-                // The refusal named its window, so the budget is refitted to
-                // it rather than squeezed blindly — and compaction lands
-                // comfortably inside what the provider measured.
+            Some(limit) if limit < window as usize => {
+                // Refitted to the named window rather than squeezed blindly,
+                // so compaction lands inside what the provider measured.
                 assert!(
                     events
                         .iter()
@@ -1010,7 +1027,7 @@ async fn an_overflow_refusal_shrinks_the_transcript_and_retries() {
                     "{events:?}"
                 );
             }
-            None => assert!(
+            _ => assert!(
                 events
                     .iter()
                     .any(|e| matches!(e, Event::Warning(w) if w.contains("named no limit"))),
@@ -1018,6 +1035,59 @@ async fn an_overflow_refusal_shrinks_the_transcript_and_retries() {
             ),
         }
         assert_eq!(session.context().last().unwrap().text(), "fits now");
+    }
+}
+
+// Records each request's estimated input and its output cap.
+#[derive(Default)]
+struct Sizes(std::sync::Mutex<Vec<(usize, Option<u32>)>>);
+
+#[async_trait]
+impl Transport for Sizes {
+    async fn stream(
+        &self,
+        spec: &ModelSpec,
+        req: &Request,
+    ) -> llm::Result<BoxStream<'static, llm::Result<StreamEvent>>> {
+        let input = llm::estimate::tokens(&req.messages, spec)
+            + req.system_text().map_or(0, llm::estimate::text)
+            + llm::estimate::tool_defs(&req.tools);
+        self.0.lock().unwrap().push((input, req.max_output_tokens));
+        Ok(futures::stream::iter(text_turn("ok").into_iter().map(Ok)).boxed())
+    }
+}
+
+// Anthropic refuses input + max_tokens past the window, so the cap sent must
+// be the reply the budget reserved, not the spec's larger one.
+#[tokio::test]
+async fn input_and_output_cap_fit_the_window_together() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
+    let sizes = Arc::new(Sizes::default());
+    let mut spec = spec();
+    spec.context_window = 200_000;
+    spec.max_output_tokens = 120_000;
+    let mut a = tooled(sizes.clone(), spec);
+    common::compacting(&mut a, None);
+    // Inside the budget, yet past the window once the spec's cap is added.
+    let mut history = vec![Message::user("the task")];
+    for i in 0..3 {
+        history.push(call_message(&format!("h{i}")));
+        history.push(Message::tool_results(vec![llm::message::ToolResult::text(
+            format!("h{i}"),
+            "read",
+            "z".repeat(120_000),
+        )]));
+    }
+    let mut session = Session::from_messages(history);
+    let (tx, _rx) = mpsc::unbounded_channel();
+    a.run(&mut session, &ctx, &tx, &fast_retry()).await.unwrap();
+
+    let sizes = sizes.0.lock().unwrap();
+    assert!(!sizes.is_empty());
+    for &(input, cap) in sizes.iter() {
+        let cap = cap.map_or(120_000, |c| c as usize);
+        assert!(input + cap <= 200_000, "{input} + {cap} > 200000");
     }
 }
 
@@ -1054,10 +1124,8 @@ impl Transport for Mixed {
     }
 }
 
-// A blind squeeze shrinks the estimate the spec claimed. Once the provider
-// names its real window that baseline is gone, so the discount goes with it —
-// otherwise the run spends the rest of its life at 60% of a figure that was
-// never a guess, while the warning says it refitted to the window.
+// A blind squeeze shrinks the estimate the spec claimed; once the provider
+// names a real window, that baseline — and the discount with it — is gone.
 #[tokio::test]
 async fn a_named_window_supersedes_the_guesswork_that_preceded_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -1139,9 +1207,8 @@ async fn a_coded_tool_error_reaches_the_model_with_its_code() {
     assert!(body.ends_with("[code: TOOL_TIMEOUT]"), "{body}");
 }
 
-// A line said while the run worked lands at the next seam — after the results
-// it interrupted, never among them. Among them it would leave a `tool_use`
-// unanswered, which both wires refuse.
+// A line said while the run worked lands at the next seam, after the results
+// it interrupted — among them it would leave a `tool_use` unanswered.
 #[tokio::test]
 async fn a_line_said_mid_run_lands_after_the_results_it_interrupted() {
     let (_d, mut a, ctx, wire) =
@@ -1179,8 +1246,7 @@ async fn a_line_said_mid_run_lands_after_the_results_it_interrupted() {
 }
 
 // The model stopped, but the user had already spoken. Posting `Done` here
-// would leave the line to start a second run saying what this one can still
-// hear: the same words, an extra turn, and an ending that was not one.
+// would leave the line to start a second run saying what this one can hear.
 #[tokio::test]
 async fn a_line_said_while_the_model_finished_keeps_the_run_going() {
     let (_d, a, ctx, wire) = wired(vec![text_turn("all done"), text_turn("noted")]);

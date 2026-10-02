@@ -16,11 +16,8 @@ pub const MESSAGE_OVERHEAD: usize = 8;
 // Framing a tool call or result carries beyond its payload.
 const BLOCK_OVERHEAD: usize = 12;
 
-// What an image costs once encoded. A crude constant beats no accounting: an
-// unmeasured image is the one thing that blows a budget silently. This is the
-// ceiling for a standard-resolution image, which is the most that can be said
-// without the image in hand — a high-resolution one costs several times this,
-// and the estimate is a floor there.
+// A crude constant beats no accounting for image cost. Ceiling for a
+// standard-resolution image; a high-res one costs several times this.
 const IMAGE_TOKENS: usize = 1_568;
 
 /// A bound on what a string costs. Public because the system prompt and tool
@@ -34,12 +31,8 @@ fn of_bytes(n: usize) -> usize {
     n.div_ceil(BYTES_PER_TOKEN)
 }
 
-/// What a JSON value costs serialized, without serializing it.
-///
-/// An upper bound on serde_json's compact form, counted at its widest: every
-/// escape taken as `\u00XX`, every number as the longest a double needs. Tool
-/// arguments and schemas are JSON and they are the bulk of a request, so
-/// building them once more just to measure them was the dearest thing here.
+/// Upper bound on serde_json's compact form: every escape at its widest
+/// (`\u00XX`), every number at a double's longest. Costly to serialize twice.
 fn json_bytes(v: &Value) -> usize {
     match v {
         Value::Null => 4,
@@ -78,16 +71,11 @@ use text as of;
 // `<think>` and its closing tag, the wrapper a demoted block ships inside.
 const TAG_OVERHEAD: usize = 6;
 
-/// A bound on what a transcript costs to send to `spec`.
+/// A bound on what a transcript costs to send to `spec`, not a token count:
+/// no tokenizer is embedded, so this only decides *when* to compact.
 ///
-/// No tokenizer is embedded: this decides *when* to compact, and for that a
-/// bound in the right direction beats an exact count for a tokenizer the
-/// provider may not even be using.
-///
-/// Replay-aware, and that is the whole reason it takes a spec. A model that
-/// drops prior reasoning is sent none of it, so counting it here compacts a
-/// session against bytes that never leave — on a transcript that is 40%
-/// reasoning, that is where the budget goes.
+/// Replay-aware: a model that drops prior reasoning is sent none of it, so
+/// counting it here would compact against bytes that never leave.
 pub fn tokens(messages: &[Message], spec: &ModelSpec) -> usize {
     messages.iter().map(|m| message(m, spec)).sum()
 }
@@ -120,10 +108,8 @@ pub fn omitted_result(r: &ToolResult, notice: &str) -> usize {
     result_head(r) + of(notice)
 }
 
-// What every result costs whatever its body: the block framing and both names.
-// The id is in it because a `tool_result` the caller cannot match to a call is
-// not a result — and one spelling, because a planner and a sender pricing the
-// same result differently is the bug `omitted_result` exists to settle.
+// Framing plus both names: the id so a caller can match the result to its
+// call. One spelling, so a planner and a sender never price it differently.
 fn result_head(r: &ToolResult) -> usize {
     BLOCK_OVERHEAD + of(&r.call) + of(&r.name)
 }
@@ -164,12 +150,8 @@ fn whole_block(b: &AssistantContent) -> usize {
     }
 }
 
-// What a prior reasoning block costs when replayed to `spec` — nothing at all
-// on one that drops it.
-//
-// Which way it replays is `Reasoning::replay_for`'s call, the same one both
-// encoders ask; only the sizing is this function's. Summed per block rather
-// than over the joined prose, so the bound stays the higher of the two.
+// What a prior reasoning block costs when replayed to `spec` (0 if dropped).
+// Summed per block, not joined prose, so the bound stays the higher of the two.
 fn replayed_reasoning(r: &Reasoning, spec: &ModelSpec) -> usize {
     let text = || -> usize {
         r.content
@@ -237,9 +219,8 @@ mod tests {
 
     #[test]
     fn a_serialized_value_is_bounded_without_being_serialized() {
-        // The bound may not be low: it is what decides when to compact. A little
-        // high compacts a little early; low and the provider says the request
-        // did not fit.
+        // The bound must not run low: a little high compacts a bit early; too low
+        // and the provider rejects the request as too large.
         for value in [
             json!(null),
             json!(true),

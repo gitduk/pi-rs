@@ -1,11 +1,8 @@
 //! Standing instructions: what to do here, as opposed to what to do now.
 //!
-//! Both are `AGENTS.md`, the vendor-neutral name every harness reads: yours at
-//! the pi root beside `settings.toml`, a project's in the project. Another
-//! harness's own file is deliberately not read in its place: the shared name
-//! exists so that one file serves every tool, and reading the alternatives too
-//! would reward keeping them apart. One name rather than two for the same job,
-//! for the same reason.
+//! Both are `AGENTS.md`, the vendor-neutral name every harness reads — yours
+//! at the pi root, a project's in the project. Other harnesses' own files are
+//! deliberately not read, so one file serves every tool instead of two.
 
 use std::path::{Path, PathBuf};
 
@@ -62,9 +59,8 @@ pub fn workspace(root: &Path) -> String {
 
 /// What the model may change, and where — the workspace root plus every
 /// configured write root, as far as this run's ceiling reaches. The write and
-/// exec tools enforce exactly this set; the model needs it spelled out before
-/// it picks a tool for a path outside the workspace, so the escape refusal is
-/// not the first it hears of the boundary.
+/// exec tools enforce exactly this set, spelled out here so the escape
+/// refusal is not the model's first hint of the boundary.
 pub fn boundary(ws: &tool::Workspace, tier: tool::Tier) -> String {
     let extras = ws.write_roots();
     // Nothing to say when the run may not write at all, or when the workspace
@@ -92,14 +88,9 @@ edit refuse.",
 
 /// What this run is, as against what it is working on.
 ///
-/// Everything here holds still for the whole run, because it rides the system
-/// prompt — the part a provider caches. A field that moved mid-run would cost
-/// that cache every turn, which is why the model and the window are not here:
-/// the window is the denominator of a number the turn already carries.
-///
-/// `stamp` is the caller's clock reading, as a timestamp; only its day is
-/// used, so that two runs an hour apart still share one cached prefix. The
-/// reading is the caller's because a calendar is not the loop's business.
+/// Fields here hold still for the whole run, since this rides the cached
+/// system-prompt prefix; only `stamp`'s day is kept, so runs an hour apart
+/// still share one cache entry.
 pub fn env(stamp: &str, tier: tool::Tier) -> String {
     let day = stamp.split_once('T').map_or(stamp, |(day, _)| day);
     // `sh`, not `$SHELL`: the bash tool runs `Command::new("sh")` whatever the
@@ -114,10 +105,9 @@ pub fn env(stamp: &str, tier: tool::Tier) -> String {
 
 /// Every instructions file that applies, most general first.
 ///
-/// Order is the whole point: the nearest directory speaks last, so where two
-/// files disagree the more specific one is the one the model read most
-/// recently. The walk ends at the repository root and never reaches `$HOME`,
-/// whose file is the personal one and is already first in the list.
+/// The nearest directory speaks last, so where files disagree the more
+/// specific one was read most recently. The walk ends at the repository
+/// root and never reaches `$HOME`, whose file is already first in the list.
 pub fn paths(workspace: &Path, home: Option<&Path>, root: Option<&Path>) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Some(r) = root
@@ -152,11 +142,8 @@ pub fn load(workspace: &Path, root: Option<&Path>) -> Loaded {
     from(workspace, home().as_deref(), root)
 }
 
-// The same, against a stated home and pi root rather than this process's.
-//
-// A test that reads the real `$HOME` passes or fails on whether whoever runs
-// it happens to keep one — which is a property of the machine, not of
-// the code under test.
+// The same, against a stated home and pi root, so a test does not pass or
+// fail on whether the machine running it happens to have a real `$HOME`.
 fn from(workspace: &Path, home: Option<&Path>, root: Option<&Path>) -> Loaded {
     let mut loaded = Loaded::default();
     for path in paths(workspace, home, root) {
@@ -188,10 +175,6 @@ mod tests {
         std::fs::write(path, body).unwrap();
     }
 
-    // The block is advice the model acts on, so it may claim only what the
-    // ceiling makes true: a run that cannot write hears nothing about
-    // writable paths, and one that cannot run a shell is not told a shell is
-    // the way around the boundary.
     #[test]
     fn the_write_block_claims_only_what_the_ceiling_allows() {
         let dir = tempfile::tempdir().unwrap();
@@ -219,13 +202,10 @@ mod tests {
         assert!(boundary(&bare, tool::Tier::Exec).is_empty());
     }
 
-    // The block rides the cached prompt prefix, so its one moving part, the
-    // date, has to move once a day — not on every run.
     #[test]
     fn the_env_date_moves_once_a_day_not_every_run() {
         let got = env("2026-09-21T12:00:00.000Z", tool::Tier::Read);
         assert!(got.contains("date=\"2026-09-21\""), "{got}");
-        // Two readings an hour apart name the same day, and so the same block.
         assert_eq!(got, env("2026-09-21T13:00:00.000Z", tool::Tier::Read));
         assert_ne!(got, env("2026-09-22T12:00:00.000Z", tool::Tier::Read));
     }
@@ -254,9 +234,6 @@ mod tests {
         );
     }
 
-    // Editing your own config is an ordinary thing to do — `pi -C ~/.pi` —
-    // and both files now answer to one name, so the walk up reaches the very
-    // file the personal slot already took.
     #[test]
     fn the_personal_file_is_not_sent_twice_when_it_is_also_the_workspace() {
         let tmp = tempfile::tempdir().unwrap();

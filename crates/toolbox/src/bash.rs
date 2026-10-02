@@ -66,10 +66,8 @@ impl Tool for Bash {
                 .unwrap_or(DEFAULT_TIMEOUT_MS),
         );
 
-        // rtk, when it is installed, answers with this command in its own
-        // vocabulary and filters what it prints; what it answers with is what
-        // runs, so the row names that. It is asked from `cwd`, where a
-        // project's filters live, and races the token rather than delaying Esc.
+        // rtk rewrites `command` in its own vocabulary; the rewrite is what runs.
+        // Run from `cwd` for project filters; races cancellation so Esc isn't delayed.
         let rewritten = tokio::select! {
             r = crate::rtk::rewrite(&args.command, &cwd) => r,
             _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
@@ -81,14 +79,12 @@ impl Tool for Bash {
         if ran.code != 0 {
             body.push_str(&format!("exit {}\n", ran.code));
         }
-        // A progress line says what ran and is one line: the diff-row
-        // renderer and the journal treat every newline after the first as
+        // One line: the diff-row renderer and journal treat further newlines as
         // structure, not text.
         let preview = command.split('\n').next().unwrap_or_default();
         if body.is_empty() {
-            // Named here too. Without it the row falls back to the body, and a
-            // command that printed nothing is the one whose row is read to
-            // find out what was asked.
+            // Preview stays set: without it the row falls back to body, hiding
+            // what a silent command was asked to do.
             return Ok(ToolOutput::text("exit 0, no output").with_preview(preview));
         }
         Ok(ToolOutput::text(body).with_preview(preview))
@@ -106,10 +102,6 @@ pub struct Ran {
 /// Run `command` under the workspace's clamps — its own process group, a
 /// SIGTERM-then-SIGKILL timeout capped at ten minutes, and the
 /// context's cancellation.
-///
-/// Public because `subagent` runs a caller's check through it: a second
-/// implementation would be a second set of those clamps to keep right, and the
-/// one that drifts is the one nothing is watching.
 pub async fn run(
     command: &str,
     cwd: &std::path::Path,
@@ -153,7 +145,6 @@ pub async fn run(
     Ok(Ran { code, body })
 }
 
-// Shapes a bounded capture into the `<label>` section the transcript reads.
 fn section(label: &str, s: &output::Captured) -> String {
     let body = s.text.trim_end();
     if body.is_empty() {

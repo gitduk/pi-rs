@@ -138,10 +138,8 @@ fn to_edits(path: &str, args: &[EditArg]) -> Result<Vec<edits::Edit>, ToolError>
         .collect()
 }
 
-// The syntax break a change would leave behind, and what to look at.
-//
-// Only "parsed before, does not now" — never "does not parse": a file already
-// broken is usually why an edit is happening, and refusing it strands the model.
+// The syntax break an edit left behind, and where to look. Flags only
+// "parsed before, not now": a broken file is often why the edit ran.
 fn broke_syntax(path: &str, before: &str, after: &str, landed: &[Landed]) -> Option<String> {
     let rows = crate::parses::broke_rows(path, Some(before), after);
     let row = nearest_row(&rows, landed)?;
@@ -277,11 +275,8 @@ fn crop(s: &str, max: usize) -> String {
     t
 }
 
-/// The report the model reads: where the edit landed, and what it displaced.
-// What the model is told besides the sketch: the landings that took more than
-// they meant, named by the block they covered. A whole block taken when only a
-// line was meant is the miss worth naming — the extent, not the anchor, is
-// what the model got wrong.
+// What the model is told beyond the sketch: landings that took a whole block
+// when only a line was meant — the extent it got wrong, named.
 fn notes(path: &str, before: &str, applied: &Applied) -> String {
     let old: Vec<&str> = before.lines().collect();
     let extents = by_row(path, before);
@@ -331,34 +326,28 @@ enum Row<'x> {
 }
 
 impl<'x> Row<'x> {
-    // A row of the file as it stands now that this edit did not touch.
     fn kept(n: usize, text: &'x str) -> Self {
         Self::Line { sign: ' ', n, text }
     }
 
-    // A row the edit displaced, numbered in the file it left.
     fn gone(n: usize, text: &'x str) -> Self {
         Self::Line { sign: '-', n, text }
     }
 
-    // A row the edit left behind that was not there before.
     fn come(n: usize, text: &'x str) -> Self {
         Self::Line { sign: '+', n, text }
     }
 
-    // Whether this row is one the edit left standing.
     fn is_kept(&self) -> bool {
         matches!(self, Self::Line { sign: ' ', .. })
     }
 
-    // A kept row with nothing on it: it places nothing, so a run of them
-    // shows as one.
+    // A blank kept row; runs of these collapse to one marker.
     fn is_blank(&self) -> bool {
         matches!(self, Self::Line { sign: ' ', text, .. } if text.trim().is_empty())
     }
 
-    // Whether this row carries the sign `mark`: how the head counts the rows
-    // the edit moved, and how one run is read apart from the next.
+    // The row's sign, used to count moved rows and split runs apart.
     fn has(&self, mark: char) -> bool {
         matches!(self, Self::Line { sign, .. } if *sign == mark)
     }
@@ -453,12 +442,8 @@ fn untouched<'x>(out: &mut Vec<Row<'x>>, lines: &[&'x str], from: usize, to: usi
     out.extend((from..=to).map(|n| Row::kept(n, lines[n - 1])));
 }
 
-// The rows an edit moved: what went under `-`, what came under `+`, and enough
-// of the rows that stayed to place them.
-//
-// One rendering for two readers. The model gets these bytes and the surface
-// draws them, so a later reading of the transcript sees what the screen showed
-// at the time rather than a second opinion on the same edit.
+// The moved rows: `-` for what went, `+` for what came, with enough kept
+// rows to place them. Rendered once, so model and UI show the same bytes.
 fn sketch(path: &str, applied: &Applied) -> String {
     // Shown without the mark, like every other view of the file: a row carrying
     // an invisible character is a row an anchor copied from it cannot match.
@@ -700,13 +685,9 @@ impl Tool for Edit {
             "edit applied"
         );
 
-        // Rendered once and read twice: what the model is answered with and
-        // what the surface draws are the same bytes, so whoever reads the
-        // transcript afterwards sees what the screen showed at the time.
         let patch = sketch(path, &applied);
-        // Counted in the text the patch resolved against: `apply` strips the
-        // byte-order mark, so a block starting on the first row would compare
-        // unequal line for line and lose its note.
+        // Compared against apply's own view: `apply` strips the BOM, so
+        // matching against raw content would miss a block starting on line 1.
         let (_, body) = edits::split_bom(&content);
         let mut report = notes(path, body, &applied);
         report.push_str(&patch);

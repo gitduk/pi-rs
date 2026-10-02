@@ -59,9 +59,7 @@ impl Registry {
         self.tools.is_empty()
     }
 
-    /// One tool gone, the rest untouched. `restrict` is the wrong shape for
-    /// this: it consumes `self` while `names()` borrows it, so taking a set
-    /// away means cloning every name to build the set that stays.
+    /// One tool gone, the rest untouched.
     ///
     /// A name that is not there is not an error — the caller is saying "not
     /// this one", and it already is not.

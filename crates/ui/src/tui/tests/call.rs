@@ -9,11 +9,8 @@ use pi_core::store::icons;
 
 use super::harness::*;
 
-// Both scrollback producers draw block ids from one counter. They used
-// not to: a rebuilt block was always `0`, which held only while nothing
-// looked one up — and `streaming_row` and `stream_fold` both do, taking the
-// last match, so two blocks sharing a number is two blocks the lookup
-// cannot tell apart.
+// Both `streaming_row` and `stream_fold` draw block ids from one counter;
+// sharing a number would make the two blocks indistinguishable to lookup.
 #[test]
 fn rebuilt_reasoning_blocks_get_ids_of_their_own() {
     use agent::session::Session;
@@ -65,9 +62,8 @@ fn rebuilt_empty_reasoning_blocks_are_ignored() {
     assert!(!rows.iter().any(Row::is_steps));
 }
 
-// A multi-line error body reaches the pending live line and the committed
-// entry alike, so adoption's equality check compares two rows born from
-// one source — and a dropped preview would panic right here.
+// The pending live line and the committed entry must carry the same body:
+// adoption's equality check compares rows born from one source.
 #[test]
 fn an_errored_tool_adopts_its_full_body() {
     use agent::session::{Entry, EntryId};
@@ -167,8 +163,7 @@ fn a_wrapped_pending_batch_tags_every_row_it_takes() {
         "both rows of the wrapped one, and the row after it: {tagged}"
     );
 
-    // The tail of the wrapped batch answers — the row the count used to
-    // miss — and the status line after the batch does not.
+    // The tail of the wrapped batch answers; the status line after it does not.
     ui.key(
         &lane,
         &mut view,
@@ -204,10 +199,8 @@ fn a_wrapped_pending_batch_tags_every_row_it_takes() {
     assert!(ui.live_tools_shown, "the status line is no click target");
 }
 
-// Two calls out at once hold a line each until one lands. The row that
-// opens then takes the other: the same hand-over as a call that starts
-// under a row already there, and the reason the row is read per frame
-// rather than settled when the call starts.
+// The same hand-over as a call starting under a row already there — why
+// the row is read per frame rather than settled when the call starts.
 #[test]
 fn a_batch_in_flight_hands_its_remainder_to_the_row_that_opens() {
     let mut ui = test_ui(80, 24);
@@ -240,9 +233,8 @@ fn a_batch_in_flight_hands_its_remainder_to_the_row_that_opens() {
     );
 }
 
-// A call that will not fold keeps its line in the live block: an edit's
-// result is a row of its own, so its line sits where that row will land
-// rather than in the summary row a check is about to leave behind.
+// An edit's result is a row of its own, so its line sits where that row
+// will land, not in the summary row a plain call leaves behind.
 #[test]
 fn a_modifying_call_keeps_its_line() {
     let mut ui = test_ui(80, 24);
@@ -274,10 +266,8 @@ fn a_modifying_call_keeps_its_line() {
     );
 }
 
-// A call that lands badly is never the row's: the row would name it, count
-// it and wear its ✗, then drop all three when its own row landed under it
-// — the move this change exists to remove, left standing on the one path
-// where a call does not fold in.
+// A failing call is never the row's: the row would name it, count it and
+// wear its ✗, then drop all three once its own row landed under it.
 #[test]
 fn a_failing_call_never_joins_the_row() {
     let mut ui = test_ui(80, 24);
@@ -357,9 +347,8 @@ fn a_stopped_tool_call_is_silenced_in_tui() {
     assert!(crate::tui::scrollback::f_entry(stopped_entry, &tui.ui.paint).is_none());
 }
 
-// The live region follows the lane's turn, not the clock beside it. One
-// field answering both meant every ending path had to put the clock back
-// or leave a status line running over a lane that had finished.
+// The live region tracks the turn, not the clock: one field for both would
+// force every ending path to reset the clock or leave the status line stuck.
 #[test]
 fn the_live_region_ends_with_the_turn_and_not_with_the_clock() {
     let ui = test_ui(80, 24);
@@ -392,8 +381,7 @@ fn live_pending_rows(ui: &crate::tui::Ui) -> usize {
         .count()
 }
 
-// A read's start, and the result the loop files under it: the two events
-// that decide what the screen draws.
+// One of the two events (with `read_landed`) that decide what the screen draws.
 fn read_started(ui: &mut crate::tui::Ui, lane: &mut Lane, view: &mut View, call: &str, path: &str) {
     ui.on_event(
         lane,

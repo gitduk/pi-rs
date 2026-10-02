@@ -10,9 +10,8 @@ fn ctx() -> (tempfile::TempDir, Ctx) {
     (dir, Ctx::new(ws))
 }
 
-// Skills live outside the workspace, so the workspace's gate does not cover
-// them: the skill directory is its own boundary, and a `file:` argument
-// cannot walk out of it.
+// Skills live outside the workspace, so the workspace's gate doesn't cover
+// them: the skill directory is its own boundary.
 #[tokio::test]
 async fn a_file_argument_cannot_leave_the_skill_directory() {
     let dir = tempfile::tempdir().unwrap();

@@ -82,9 +82,8 @@ fn a_transcript_under_budget_is_left_alone() {
     assert_eq!(r.before, r.after);
 }
 
-// Which results may stand in for which: the same call made again — any tool,
-// same name and arguments — supersedes the older answer. A different range of
-// the same file, a different file, a different edit: all different calls.
+// The same call again — same tool, name, arguments — supersedes the older
+// answer; a different range, file, or edit is a different call.
 #[test]
 fn only_the_same_call_made_again_supersedes() {
     let edit =
@@ -196,9 +195,8 @@ fn the_working_tail_survives_while_older_results_age_out() {
     assert_balanced(&m);
 }
 
-// The aging rung keeps a distinctive head and tail and omits the middle; a
-// result too small to be worth pruning, or whose ends alone cannot fit, is
-// left as the notice alone.
+// Keeps a distinctive head and tail and omits the middle; too small to
+// prune, or ends too big to fit, lowers to the notice alone.
 #[test]
 fn an_aged_out_result_keeps_its_ends_or_lowers_to_the_notice() {
     let rows: &[(&str, String, usize, bool)] = &[
@@ -300,15 +298,6 @@ fn dropping_history_keeps_the_task_and_stays_balanced() {
 
 #[test]
 fn a_dropped_exchange_never_orphans_the_result_that_answered_it() {
-    // The shape that broke it: a tool result followed straight away by a
-    // prompt. `context()` merged those two user messages into one, so the
-    // message list was shorter than the id list `plan` walked beside it — and
-    // the same index reached a different turn in each. What went into
-    // `dropped` was not what came out of the view, leaving a `tool_result`
-    // whose `tool_use` was gone and a request both formats refuse.
-    //
-    // One list now, `Seen` carrying its own id, so there is no second index to
-    // disagree with.
     // The weight sits in assistant prose, so result omission cannot reclaim it
     // and the drop tier is what has to run.
     let mut m = vec![Message::user("the original task")];
@@ -366,9 +355,8 @@ fn an_oversized_argument_goes_while_the_path_beside_it_stays() {
         )]);
     }
 
-    // `protect_tail` off: what is under test is the arguments tier, and with
-    // the default tail the remainder stays over budget and the drop tier —
-    // correctly — takes the exchanges instead.
+    // `protect_tail` off: with the default tail, the remainder stays over
+    // budget and the drop tier takes the exchanges instead of the args tier.
     let policy = Policy {
         protect_tail: 0,
         ..Policy::default()
@@ -484,9 +472,8 @@ fn a_transcript_that_cannot_fit_says_so_rather_than_pretending() {
 
 #[test]
 fn an_entry_elided_by_an_earlier_pass_is_not_elided_again() {
-    // Under the record model an omission lives in the compaction entry, not in
-    // the stored result — so "already omitted" is a fact about the session, not
-    // a prefix to sniff for in the body.
+    // An omission lives in the compaction entry, not the stored result, so
+    // "already omitted" is a fact about the session, not a prefix in the body.
     let messages = vec![
         Message::user("go"),
         call("c1", "read", json!({ "path": "a.rs" })),
@@ -547,10 +534,8 @@ mod budget {
 
     struct Never;
 
-    // A summary that does not come back. The manual pass always summarizes
-    // what it drops, so the one test that drops anything does reach a
-    // network — and an empty answer is not fatal, which is what lets the
-    // rest of `Never`'s neighbours keep asserting they never reach one.
+    // A summary that never comes back. The manual pass always summarizes
+    // what it drops, so this is the one test that reaches a network at all.
     struct Empty;
 
     #[async_trait]
@@ -584,9 +569,8 @@ mod budget {
         Agent::new(Arc::new(Never), spec)
     }
 
-    // The budget reserves room for output, but a reservation larger than the
-    // window itself would leave the transcript nothing, so it is capped; a
-    // normal window leaves most of itself to the transcript.
+    // Reserved output room is capped: uncapped, a reservation bigger than the
+    // window would leave the transcript nothing.
     #[test]
     fn the_budget_never_starves_the_transcript() {
         // 20k window against a spec declaring 64k of output: reserving it
@@ -661,9 +645,9 @@ mod budget {
         assert!(a.compact_now(&mut s, None).await.is_none());
     }
 }
-// user entries: six parallel results cost the planner six framings and the
-// sender one, so compaction planned against a budget the request never spent.
-// One entry, one message closes it — and this is what keeps it closed.
+
+// Six parallel results cost the planner six framings but the sender one, so
+// compaction must plan against the budget the request will actually spend.
 #[test]
 fn the_planner_and_the_sender_count_the_same_transcript() {
     let mut s = Session::new();
@@ -695,10 +679,8 @@ fn the_planner_and_the_sender_count_the_same_transcript() {
     );
 }
 
-// The summaries still in force are sent as text in the first user message, and
-// the planner has to count them: leaving them out reads a transcript as smaller
-// than the request it is about to make, so the compaction fires a turn late —
-// after the provider has already refused one.
+// Summaries ride the first user message, so the planner must count them too
+// — undercounting fires compaction late, after the provider already refused.
 #[test]
 fn the_planner_and_the_sender_count_the_summaries_the_same() {
     let mut s = Session::new();
@@ -720,12 +702,8 @@ fn the_planner_and_the_sender_count_the_summaries_the_same() {
     );
 }
 
-// An assistant turn is never omitted: its `tool_use` blocks have to stay for
-// the answers to them to be legal, so the sender carries the whole turn however
-// the record reads. One naming a turn — a transcript written elsewhere, since
-// the id list is not validated when one is loaded — used to leave the planner
-// pricing a turn the request still held: "fits" against a total it never
-// reaches.
+// An assistant turn is never omitted: its `tool_use` blocks must stay legal,
+// so the sender carries the whole turn however the record reads it.
 #[test]
 fn an_omission_naming_an_assistant_turn_is_read_the_same_by_both() {
     let mut s = Session::new();
@@ -767,11 +745,8 @@ fn an_omission_naming_an_assistant_turn_is_read_the_same_by_both() {
     );
 }
 
-// The same invariant over an entry the view has already replaced. A result
-// standing in as a notice is still a `tool_result` on the wire — the answering
-// `tool_use` has to find it — so the planner prices the block it will be sent
-// in, not the notice alone. It used to price the notice alone, and so read a
-// transcript as smaller than the request it was about to make.
+// A result standing in as a notice is still a `tool_result` on the wire, so
+// the planner must price the block it's sent in, not the notice alone.
 #[test]
 fn the_planner_and_the_sender_count_an_omitted_result_the_same() {
     let mut s = Session::new();
@@ -815,9 +790,8 @@ fn the_planner_and_the_sender_count_an_omitted_result_the_same() {
     );
 }
 
-// A `!` command's output is not a question. It used to be stored as the same
-// `Text` a prompt is, so the drop tier read it as one — and took it as a round
-// of its own, out from under the `fix that` that referred to it.
+// A `!` command's output is not a question, so it must not be dropped as a
+// round of its own, out from under the question that refers to it.
 #[test]
 fn a_bang_command_goes_with_the_question_that_refers_to_it() {
     let mut s = Session::new();
@@ -901,14 +875,8 @@ fn a_bang_command_can_be_shrunk_where_a_question_cannot() {
     assert!(joined.contains("fix that"), "and so does this one");
 }
 
-// What the round-sized unit is for. Dropping an assistant turn and its
-// results left the prompt that asked for them standing with nothing after it
-// — legal on both wires, and pure waste: a question already answered, whose
-// answer is gone, paid for on every turn from here on.
-//
-// One prompt may stand unanswered, and only one: the opening task, which is
-// kept on purpose. Whatever the rounds weigh — prose and tool work, or bare
-// text — they fall whole.
+// What the round-sized unit is for: dropping just a turn and its results
+// would leave the question that asked for them standing, answered but gone.
 #[test]
 fn dropping_leaves_no_question_without_its_answer() {
     // Tool-bearing rounds, cut by the default tail guard.

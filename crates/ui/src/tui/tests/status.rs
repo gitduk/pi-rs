@@ -36,9 +36,8 @@ fn a_flash_stands_beside_the_bar_rather_than_over_it() {
     );
 }
 
-// A retry is the run's state, so it waits on the status line; its reason —
-// often a whole error body — lands as a row of its own, and the next event
-// of any other kind ends the wait.
+// The reason (often a whole error body) lands as a row of its own; any
+// other event ends the wait.
 #[test]
 fn a_retry_waits_on_the_status_line_and_leaves_its_reason_in_a_row() {
     let mut ui = test_ui(80, 24);

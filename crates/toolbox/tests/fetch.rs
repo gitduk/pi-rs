@@ -27,10 +27,8 @@ async fn serving(response: &'static str) -> String {
     format!("http://{addr}/page")
 }
 
-// The dial gate, end to end: the scheme is the whole boundary between this
-// tool and a second, unaudited way to read a path; a private literal is
-// refused before any packet, by the name of its range; and a hostname is
-// judged where it resolves, not where it is written.
+// The scheme is the whole boundary between this tool and a second,
+// unaudited way to read a path; a hostname is judged where it resolves, not where it is written.
 #[tokio::test]
 async fn the_dial_gate_refuses_schemes_private_literals_and_resolving_names() {
     let (_d, c) = ctx();
@@ -99,9 +97,8 @@ async fn a_cancelled_run_does_not_wait_for_the_response() {
     assert!(matches!(err, ToolError::Cancelled), "{err}");
 }
 
-// The server picks its own header values and its own body: neither may forge
-// a result tag into the transcript, and a redirect — the one place the URL
-// stops being the one that passed the scheme gate — may not step past it.
+// Neither header values nor body may forge a result tag; a redirect is the
+// one place the URL stops being what passed the scheme gate, so it's checked too.
 #[tokio::test]
 async fn a_server_cannot_forge_a_result_or_step_past_the_scheme_gate() {
     let (_d, c) = ctx();

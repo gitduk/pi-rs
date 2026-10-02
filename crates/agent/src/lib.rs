@@ -31,8 +31,7 @@ pub use seams::{Approver, Archive, Compactor, Decision, Fitted, Steer, Untouched
 
 pub const DEFAULT_SYSTEM: &str = include_str!("../prompts/system.md");
 
-// Headroom for framing the estimate does not model. Compacting slightly early
-// costs a little quality; compacting late costs the whole turn.
+// Headroom for framing the estimate does not model.
 const SAFETY_MARGIN: usize = 2_000;
 
 // How hard to squeeze after the provider says the request did not fit. Our
@@ -42,9 +41,8 @@ const SQUEEZE: f64 = 0.6;
 // Attempts to shrink one turn before giving up on it.
 const MAX_SQUEEZE: usize = 3;
 
-// How much of a failed argument blob rides back to the model and the log.
-// Longer blobs show a window around serde's column, not the head: the parse
-// fails where the text stopped, and that is usually the tail.
+// How much of a failed argument blob rides back to the model and log; past
+// it, show a window around serde's column rather than the head.
 const MAX_INVALID_ARGS_SHOWN: usize = 400;
 
 /// How long a run has to wind down after its stop token is tripped before it
@@ -129,22 +127,17 @@ impl Agent {
     /// Put what the config and the workspace decided onto this agent: the
     /// tools, the ceiling, the system prompt, the effort — as one value.
     ///
-    /// Swapped whole rather than written field by field: a run in flight keeps
-    /// the brief it started on, and a reader sees one or the other, never half
-    /// of each. A caller that wants a subagent hangs it on the brief first —
-    /// see `pi/src/core/subagent.rs`.
+    /// Swapped whole rather than written field by field, so a run in flight
+    /// sees one brief or the other, never half of each.
     pub fn apply(&mut self, brief: Arc<Briefing>) {
         self.brief = brief;
     }
 
-    /// A run nobody is talking to. What a subagent, a one-shot and a test all
-    /// want: named for what it is rather than passed an empty mailbox at every
-    /// call site.
+    /// A run nobody is talking to — what a subagent, a one-shot and a test
+    /// all want, named for what it is rather than an empty mailbox each time.
     ///
-    /// `retry` is the schedule for a request the provider could not serve. Read
-    /// where the run starts rather than kept on the agent, so a `/reload` that
-    /// changed it reaches the next run without anything having to refresh a
-    /// copy.
+    /// `retry` is read where the run starts, not kept on the agent, so a
+    /// `/reload` that changed it reaches the next run without a refresh.
     pub async fn run(
         &self,
         session: &mut Session,
@@ -171,23 +164,20 @@ impl Agent {
         // says otherwise, this is what carries the correction forward.
         let mut scale = 1.0f64;
         // A window the provider named, which outranks whatever the spec says.
-        let mut hard: Option<usize> = None;
+        let mut named_window: Option<usize> = None;
         // Across the whole run, not the turn: a status line that reset this
         // every turn would report "not compacted" for a run that just was.
         let mut compactions = 0usize;
 
         for turn in 1.. {
-            // What was said while the run worked. Here and nowhere else: a
-            // `tool_use` must be answered by its results before anything else
-            // may speak, and this is the first point where all of them are.
+            // What was said while the run worked. Read here and nowhere else:
+            // a `tool_use` must be answered before anything else may speak.
             for said in steer.take() {
                 session.prompt(said);
             }
             say(tx, Event::TurnStart { turn });
-            // Entered around each await rather than held across them: a guard
-            // spanning an await point labels whatever else the runtime polls.
-            // A run and its subagents share one journal, and the spans of
-            // parallel children are indistinguishable by name alone.
+            // Entered around each await, not held across it — a guard spanning
+            // an await labels whatever else the runtime polls meanwhile.
             let span = tracing::info_span!(
                 target: "pi::loop",
                 "turn",
@@ -204,7 +194,8 @@ impl Agent {
             let mut used;
 
             let done = loop {
-                budget = ((hard.unwrap_or_else(|| self.budget()) as f64) * scale) as usize;
+                let window = named_window.unwrap_or(self.model.spec.context_window as usize);
+                budget = ((self.budget_within(window) as f64) * scale) as usize;
                 let fitted = self
                     .compactor
                     .compact(session, self.working(), budget, squeezes > 0, tx)
@@ -225,7 +216,7 @@ impl Agent {
                     budget,
                     squeezes,
                     scale,
-                    hard = hard.unwrap_or(0),
+                    window,
                     effort = ?self.brief.effort,
                     "sending"
                 );
@@ -233,7 +224,9 @@ impl Agent {
                     system: Some(self.brief.system.clone()),
                     messages: sent,
                     tools: self.brief.registry.defs(),
-                    max_output_tokens: None,
+                    // What the budget reserved: input + max_tokens past the
+                    // window is a refusal on Anthropic.
+                    max_output_tokens: Some(self.reply_within(window) as u32),
                     temperature: None,
                     effort: self.brief.effort,
                     tool_choice: Default::default(),
@@ -249,19 +242,16 @@ impl Agent {
                         if llm::classify(&e) == llm::Fault::Overflow && squeezes < MAX_SQUEEZE =>
                     {
                         squeezes += 1;
-                        // The refusal usually names the real window. Reading it
-                        // beats guessing when the estimate was wrong by an
-                        // unknown amount.
-                        match llm::fault::overflow_limit(&e) {
-                            Some(limit) => {
-                                // Every shrink so far was guesswork against the
-                                // window the spec claimed, and that baseline is
-                                // now replaced; corrections learned after this
-                                // still stack on top.
-                                if hard.is_none() {
+                        let named = llm::fault::overflow_limit(&e)
+                            .map(|limit| (limit, self.budget_within(limit)));
+                        match named {
+                            Some((limit, refit)) if refit < budget => {
+                                // Earlier squeezes guessed against the spec's
+                                // window; the provider's replaces that baseline.
+                                if named_window.is_none() {
                                     scale = 1.0;
                                 }
-                                hard = Some(self.budget_within(limit));
+                                named_window = Some(limit);
                                 say(
                                     tx,
                                     Event::Warning(format!(
@@ -269,13 +259,15 @@ impl Agent {
                                     )),
                                 );
                             }
-                            None => {
+                            // A window the request was already fitted to means
+                            // the estimate was off: refitting would resend it.
+                            _ => {
                                 scale *= SQUEEZE;
                                 say(
                                     tx,
                                     Event::Warning(format!(
-                                        "the request did not fit and named no limit; \
-                                     retrying at {}% of the estimated budget",
+                                        "the request did not fit and named no limit below the \
+                                     budget; retrying at {}% of the estimated budget",
                                         (scale * 100.0).round()
                                     )),
                                 );
@@ -298,9 +290,8 @@ impl Agent {
             totals.add(&done.usage);
             say(tx, Event::TurnEnd { usage: done.usage });
 
-            // Two providers accept an oversized request instead of refusing it:
-            // one silently, one by truncating and then having no room to answer.
-            // Both look like success and neither can be caught before the fact.
+            // Two providers accept an oversized request instead of refusing:
+            // one silently, one by truncating — both look like success.
             let window = self.model.spec.context_window as usize;
             let silently_truncated = done.usage.input as usize > window
                 || (done.stop == llm::StopReason::MaxTokens && done.usage.output == 0);
@@ -332,9 +323,8 @@ impl Agent {
             session.push_assistant(content);
 
             if calls.is_empty() {
-                // The model stopped, but the user spoke while it was speaking.
-                // Ending here would post `Done` and leave the line to start a
-                // second run saying what this one can still hear.
+                // The model stopped, but the user spoke while it was speaking:
+                // posting `Done` here would leave that line for a second run.
                 if !steer.is_empty() {
                     continue;
                 }
@@ -366,7 +356,7 @@ impl Agent {
                 .await;
             let ids = session.push_previewed(results);
             // A state update, not a drawing instruction: the renderer derives
-            // the results' rows from these entries through the A table.
+            // the results' rows from these entries through `f_entry`.
             say(
                 tx,
                 Event::Committed {
@@ -390,14 +380,9 @@ impl Agent {
 
     /// Compact now, at the user's word rather than the window's.
     ///
-    /// The target is the tail the agent is working from — the same number the
-    /// automatic pass protects — so this means "summarize everything but what I
-    /// am in the middle of". Unlike the automatic pass it runs even when the
-    /// transcript already fits: the point is that the user knows a phase has
-    /// ended, which no budget can tell.
-    ///
-    /// Asked of the compactor with the rest of what a pass needs; a compactor
-    /// that does nothing answers `None`.
+    /// Targets the same tail the automatic pass protects — "summarize
+    /// everything but what I'm in the middle of" — and runs even when the
+    /// transcript already fits, since the point is a phase ending, not a budget.
     pub async fn compact_now(
         &self,
         session: &mut Session,
@@ -408,9 +393,8 @@ impl Agent {
             .await
     }
 
-    /// The model doing the work and the wire it goes out on, for whatever needs
-    /// both: the compactor writes its summary with them when it has none of its
-    /// own.
+    /// The model and wire for whatever needs both — the compactor writes
+    /// its summary with these when it has no writer of its own.
     fn working(&self) -> Working<'_> {
         Working {
             transport: &*self.model.transport,
@@ -428,17 +412,19 @@ impl Agent {
     // The same accounting against a window the provider named instead of the
     // one the spec claims.
     fn budget_within(&self, window: usize) -> usize {
-        // A spec may declare an output cap larger than the window it is being
-        // used against — an overridden window, a proxy, a stale entry. Reserving
-        // it verbatim would leave the transcript nothing at all.
-        let reply = (self.model.spec.max_output_tokens as usize).min(window / 4);
         let fixed = llm::estimate::text(&self.brief.system)
             + llm::estimate::tool_defs(&self.brief.registry.defs())
-            + reply
+            + self.reply_within(window)
             + SAFETY_MARGIN;
         // Even an unworkable configuration leaves a floor: stripping the
         // transcript to nothing helps no one.
         window.saturating_sub(fixed).max(window / 4)
+    }
+
+    // The reply's share of `window`, reserved by the budget and sent as the
+    // request's output cap. A spec's cap may exceed the window it runs against.
+    fn reply_within(&self, window: usize) -> usize {
+        (self.model.spec.max_output_tokens as usize).min(window / 4)
     }
 
     // Run one request, retrying while the provider says it is a passing problem.
@@ -556,10 +542,8 @@ impl Agent {
             acc.push(ev);
         }
 
-        // What the host owed and did not send. Said once per session by the
-        // reporter itself, and said here rather than only in the journal: a
-        // turn that quietly came back smaller looks exactly like an ordinary
-        // one, which is the whole reason it needs saying.
+        // What the host owed and did not send, said once per session by the
+        // reporter. Said here too, not just the journal — else it looks ordinary.
         for gap in self.model.transport.gaps() {
             say(tx, Event::Warning(gap));
         }
@@ -567,11 +551,8 @@ impl Agent {
         Ok(acc.finish())
     }
 
-    // One result per call, in call order, except a cancelled call: it stays
-    // unanswered for `send_prompt` to close, and the flag says one was.
-    //
-    // `spent` is where a nested call's costs land — a subagent's whole run —
-    // so the run that called it reports them.
+    // One result per call, in call order, except a cancelled one, left
+    // unanswered for `send_prompt` to close; `spent` carries nested costs up.
     async fn run_calls(
         &self,
         calls: &[ToolCall],
@@ -638,14 +619,7 @@ impl Agent {
             }
         }
 
-        let exclusive = actions
-            .iter()
-            .any(|a| matches!(a, Action::Run(t) if t.concurrency() == Concurrency::Exclusive));
-
-        // One future per call, awaited positionally: results stay aligned with
-        // the calls; an Exclusive batch runs in turn, a Shared batch joins.
-        // Each says its own end the moment it has one, so a quick call in a
-        // batch does not read as running until the slowest is done.
+        // Awaited positionally, so results stay aligned with the calls.
         let futures: Vec<_> = calls
             .iter()
             .zip(&actions)
@@ -666,15 +640,19 @@ impl Agent {
                 .instrument(ran(call))
             })
             .collect();
-        let outcomes: Vec<Landed> = if exclusive {
-            let mut outcomes = Vec::with_capacity(futures.len());
-            for f in futures {
+        // Neighbouring Shared calls join; an Exclusive one waits for those
+        // ahead of it and holds back those behind.
+        let mut outcomes: Vec<Landed> = Vec::with_capacity(calls.len());
+        let mut shared = Vec::new();
+        for (f, action) in futures.into_iter().zip(&actions) {
+            if matches!(action, Action::Run(t) if t.concurrency() == Concurrency::Exclusive) {
+                outcomes.extend(futures::future::join_all(std::mem::take(&mut shared)).await);
                 outcomes.push(f.await);
+            } else {
+                shared.push(f);
             }
-            outcomes
-        } else {
-            futures::future::join_all(futures).await
-        };
+        }
+        outcomes.extend(futures::future::join_all(shared).await);
 
         let mut results = Vec::with_capacity(calls.len());
         let mut stopped = false;
@@ -697,9 +675,8 @@ impl Agent {
     }
 }
 
-// What one call came to. The preview is the copy the screen drew for this
-// result, sent with it so a rebuild draws those bytes rather than reading the
-// content again.
+// What one call came to. The preview is what the screen drew for it, sent
+// along so a rebuild redraws those bytes instead of re-reading the content.
 enum Landed {
     Stopped,
     Answered(ToolResult, Option<String>),
@@ -721,10 +698,8 @@ fn landed(
                 // instead of parsing the prose; the prose still leads.
                 body = format!("Error: {body} [code: {code}]");
             }
-            // The pending live line draws from this same text, so adoption's
-            // equality check gets both halves from one source; without it a
-            // multi-line error renders one way live and another after a
-            // rebuild.
+            // The pending live line draws from this same text, so a rebuild's
+            // equality check sees one source, not a live/rebuilt mismatch.
             say(
                 tx,
                 Event::ToolEnd {
@@ -764,10 +739,8 @@ fn ran(call: &ToolCall) -> tracing::Span {
     tracing::info_span!(target: "pi::tool", "tool", name = %call.name, call = %call.id)
 }
 
-// One failed argument blob as shown to the model and the journal: the whole
-// text when it fits, else a window around serde's column. serde numbers the
-// column from 1 over the trimmed bytes; windowing in chars is close enough,
-// and an error that names no column falls back to the tail.
+// Shown whole when it fits, else windowed around serde's 1-indexed column
+// (chars, not bytes — close enough); no column falls back to the tail.
 fn invalid_args_snippet(raw: &str, err: &str) -> String {
     let chars: Vec<char> = raw.chars().collect();
     if chars.len() <= MAX_INVALID_ARGS_SHOWN {

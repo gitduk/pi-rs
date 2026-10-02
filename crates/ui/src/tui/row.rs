@@ -1,16 +1,5 @@
-//! One row of scrollback, and the only place one can be made.
-//!
-//! Two producers fill the scrollback and always will: the live stream, which
-//! draws content the session does not hold yet, and a rebuild from the
-//! transcript, which is the only way back after a rewind. What can be stopped
-//! is the second half of that — the same kind of row having two ways to be
-//! built. Four of those drifted before this module existed, each found by
-//! someone noticing the screen looked different after `/resume` than it had a
-//! minute earlier.
-//!
-//! So `Kind` is private. A row is made by calling one of these constructors,
-//! or it is not made at all, and the two callers cannot disagree about what a
-//! row of a given kind looks like — there is only one of each.
+//! One row of scrollback, the only place one can be made. `Kind` is
+//! private, so the two producers (live stream, rebuild) can't disagree.
 
 use std::cell::RefCell;
 
@@ -68,18 +57,15 @@ impl FoldedTool {
 }
 
 // A call still in flight, as the group that will fold it draws it: the
-// row is where the call lands, so it draws the call from the moment it starts.
-// The live block has no line of it then, and nothing jumps up when the result
-// arrives.
+// row draws it from the moment it starts, so nothing jumps when it lands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingTool {
     /// The call's name and leading argument, read the way the live line read
     /// them — they already agree with the row the call will land as.
     pub name: String,
     pub preview: String,
-    /// Whether the call has landed yet. A call that lands badly is never the
-    /// row's — it is on its way to a line of its own — so what the row holds
-    /// is always a call it will keep.
+    /// Whether the call has landed yet. A call that lands badly is never
+    /// the row's — it's on its way to its own line.
     pub landed: bool,
     /// Whole seconds it has been out, once there are enough to be worth
     /// saying; `None` before that and once it has landed.
@@ -146,9 +132,8 @@ pub fn out_for(secs: Option<u64>) -> String {
     .unwrap_or_default()
 }
 
-// Whether the row still has a call out. Any of them, not the newest: the row
-// is the only place a call in flight shows, so its mark cannot settle while
-// one is still running.
+// Whether the row still has a call out. Any of them, not the newest:
+// the row is the only place a call in flight shows.
 fn running(pending: &[PendingTool]) -> bool {
     pending.iter().any(|p| !p.landed)
 }
@@ -163,8 +148,7 @@ fn thinking_now(steps: &[Step]) -> Option<usize> {
     })
 }
 
-// How many calls the row speaks for: the ones landed in it and the ones it
-// holds while they are out. One is its own line, so the count is part of
+// How many calls the row speaks for: landed plus still out. Part of
 // what decides whether it has a body to unfold.
 fn calls(steps: &[Step], pending: &[PendingTool]) -> usize {
     steps.iter().filter(|s| matches!(s, Step::Tool(_))).count() + pending.len()
@@ -199,9 +183,8 @@ fn expandable(steps: &[Step], pending: &[PendingTool]) -> bool {
     }
 }
 
-// The tool and its leading argument, named the one way every row that shows a
-// tool names it: the name alone when there is nothing under it, and the name
-// dropped when the line already carries it.
+// The tool and its leading argument, named the one way every row that
+// shows a tool does: name alone with nothing under it, dropped if redundant.
 fn desc_of(name: &str, preview: &str) -> String {
     let head = preview.lines().next().unwrap_or("").trim();
     if head.is_empty() {
@@ -235,24 +218,21 @@ pub enum Step {
 
 pub struct Row(Kind, Height);
 
-// The rows this row takes on screen at one width, wraps included, counted one
-// logical line at a time and remembered until the width or the content
-// changes.
+// The rows this row takes on screen at one width, wraps included —
+// counted per logical line and cached until width or content changes.
 #[derive(Default)]
 struct Height(RefCell<Option<Measured>>);
 
 struct Measured {
     width: usize,
-    // One entry per logical line, `None` until that line is wrapped. Kept per
-    // line rather than as one total so a tall row is never wrapped in full to
-    // answer for one of its lines.
+    // One entry per logical line, `None` until wrapped. Kept per line so
+    // a tall row is never wrapped whole just to answer for one line.
     lines: Vec<Option<usize>>,
 }
 
 impl Height {
-    // The measurement at this width, with room for `lines` of them. A width
-    // that has moved starts again; a row that has grown since keeps what was
-    // already counted, since nothing else can make its lines shorter.
+    // Measurement at this width, room for `lines` of them. A moved width
+    // restarts; a grown row keeps what's counted (lines can't shrink).
     fn at(&self, width: usize, lines: usize) -> std::cell::RefMut<'_, Measured> {
         let mut held = self.0.borrow_mut();
         match held.as_mut() {
@@ -279,9 +259,8 @@ impl Height {
             .and_then(|m| m.lines.get(i).copied().flatten())
     }
 
-    // The row's count, once every line of it has been. Nothing to answer with
-    // while a line is still unmeasured, so a caller that asks then measures
-    // what is missing — see `height`.
+    // The row's count, once every line has been measured; a caller that
+    // asks mid-measure fills the rest first (see `height`).
     fn total(&self, width: usize) -> Option<usize> {
         let held = self.0.borrow();
         let m = held.as_ref().filter(|m| m.width == width)?;
@@ -301,10 +280,8 @@ impl Height {
 }
 
 enum Kind {
-    // One logical line of a prompt the user said: the border and the body kept
-    // apart, so a wrap can repeat the border.
-    //
-    // `band` is the band the whole screen row sits in: `prompt.panel.said`.
+    // One logical line of a said prompt: border and body kept apart so
+    // a wrap can repeat the border. `band` is the whole row's background.
     Said {
         // The rule and its column: `SAID_RULE` in the prompt colour.
         border: Line<'static>,
@@ -312,30 +289,17 @@ enum Kind {
         body: Line<'static>,
         band: Option<RStyle>,
     },
-    // What the model answered, one row per line the markdown handed over.
-    // Its own kind rather than a notice — a notice is a thing only the screen
-    // knew, and an answer is half of what the conversation is.
+    // What the model answered, one row per markdown line. Its own kind,
+    // not a notice — an answer is half the conversation, not screen-only.
     Answer(Line<'static>),
-    // A painted line the screen alone knows about: the banner, a command's
-    // output, a warning. Colour does not depend on width, so painting it
-    // early costs nothing.
-    //
-    // `times` counts the same notice landing again with nothing between it
-    // and the last one: a key held down, or a refusal repeated. It renders as
-    // one row with a count rather than as a column of identical lines.
+    // A painted line the screen alone knows: banner, command output,
+    // warning. `times` collapses an identical repeat into one row+count.
     Notice {
         text: Line<'static>,
         times: usize,
     },
-    // A tool's result, kept as its parts. Clipping waits for the frame that
-    // needs it: a row clipped at the width it landed at can never grow back
-    // when the window does.
-    //
-    // `painted` holds the last frame's clipping, keyed by the width it was
-    // done at. The screen asks for one row at a time, and a result is as many
-    // rows as its diff has lines, so painting the whole result per row asked
-    // for made a redraw quadratic in the size of the diff — on every spinner
-    // tick, for as long as it stayed on screen.
+    // A tool's result, kept as its parts; clipped only when a frame needs
+    // it, since a row clipped to its landing width could never regrow.
     Result {
         ok: bool,
         name: String,
@@ -345,16 +309,16 @@ enum Kind {
         preview_lines: usize,
         expanded: bool,
         hovered: bool,
+        // Caches the last clip, keyed by width: painting the whole result
+        // per row made redraws quadratic in the diff's size.
         painted: RefCell<Option<(usize, Vec<Line<'static>>)>>,
     },
-    // The run's working behind one fold: read-only calls that landed well
-    // and the reasoning around them, in order.
-    //
-    // `pending` is the calls in flight this row draws: they are not in the
-    // scrollback yet, and the live block leaves them to the row, which is
-    // where they will land.
+    // The run's working behind one fold: read-only calls that landed
+    // well and the reasoning around them, in order.
     Steps {
         steps: Vec<Step>,
+        // Calls in flight this row draws: not in the scrollback yet, left
+        // to the row by the live block, since this is where they'll land.
         pending: Vec<PendingTool>,
         folded: bool,
         // The line under the mouse, when it is one a click opens or closes.
@@ -376,11 +340,8 @@ impl Row {
         matches!(&self.0, Kind::Said { .. } | Kind::Answer(_))
     }
 
-    /// Something only the screen ever knew, in the muted voice everything the
-    /// surface says for itself is said in: the tally line a run ends on, what
-    /// a lane answered, a warning about the turn. Free-form on purpose — a
-    /// session entry answers for one only where `push_screen` filed it, and
-    /// that entry holds the text, not the row.
+    /// Something only the screen ever knew (a tally line, a lane's
+    /// answer, a warning), in the surface's own muted voice.
     pub fn notice(line: impl Into<Line<'static>>) -> Self {
         Self::new(Kind::Notice {
             text: line.into(),
@@ -388,10 +349,8 @@ impl Row {
         })
     }
 
-    /// A run of plain text as notice rows, one per line: what the live stream
-    /// draws for a row it also files, and what a rebuild draws from the entry.
-    /// The two have to come out the same, so they come out of here — the
-    /// archived half is text, and nothing else knows how a screen row reads.
+    /// Plain text as notice rows, one per line — shared by the live
+    /// stream (which also files it) and a rebuild (from the archived text).
     pub fn notice_lines(text: &str, paint: &Paint) -> Vec<Self> {
         text.lines()
             .map(|l| Self::notice(Line::from(paint.span(&paint.theme.muted, l))))
@@ -572,9 +531,8 @@ impl Row {
         true
     }
 
-    /// Bring a row up to date before the frame is drawn: which of its lines
-    /// the mouse is over, the spinner's tick, and the calls in flight this
-    /// row draws for.
+    /// Brings a row up to date before the frame draws: hover line, spinner
+    /// tick, and the calls in flight this row draws.
     pub fn update_live(&mut self, hovered: Option<usize>, spin: usize, held: &[PendingTool]) {
         match &mut self.0 {
             Kind::Steps {
@@ -583,9 +541,8 @@ impl Row {
                 spinner,
                 ..
             } => {
-                // A call starting, ending or landing can change how many rows
-                // the row counts for; a second ticking by cannot, its lines
-                // being clipped to the width.
+                // A call starting, ending or landing can change the row's
+                // count; a tick alone can't — lines are clipped to width.
                 if pending.as_slice() != held {
                     let reshaped = pending.len() != held.len()
                         || pending.iter().zip(held).any(|(a, b)| {
@@ -630,10 +587,8 @@ impl Row {
         })
     }
 
-    /// The same row out of a stored result: the tool's own sketch when it made
-    /// one — that is what the stored content does not hold — and otherwise the
-    /// first line of that content, which is what `ToolOutput::preview` falls
-    /// back to.
+    /// The row for a stored result: the tool's own sketch if it made one
+    /// (`ToolResult` lacks it), else the content's first line.
     pub fn stored_result(r: &ToolResult, preview: Option<&str>) -> Self {
         let preview = preview.map(str::to_string).unwrap_or_else(|| {
             let body = result_text(r);
@@ -682,9 +637,8 @@ impl Row {
         Self::new(Kind::Said { border, body, band })
     }
 
-    /// A prompt's lines as the stream echoed them: the same bar the input
-    /// line wears, on a band one step off the one it was typed on, so a
-    /// landed line reads as the line that was typed.
+    /// A prompt's lines as the stream echoed them: the input bar, on a
+    /// band one step off where it was typed, so it reads as typed there.
     pub fn prompt(text: &str, paint: &Paint) -> Vec<Self> {
         let band = paint.band(&paint.theme.prompt.panel.said);
         if text.starts_with('!') {
@@ -764,9 +718,8 @@ impl Row {
         }
     }
 
-    /// Screen rows this row takes at `width`, wraps included, remembered by
-    /// width until the content changes. The scrolled-up view's accounting
-    /// reads these; a wrap is a row the count has to know about.
+    /// Screen rows this row takes at `width`, wraps included, cached by
+    /// width. The scrolled-up view's accounting reads these.
     pub fn height(&self, paint: &Paint, width: usize) -> usize {
         if let Some(total) = self.1.total(width) {
             return total;
@@ -776,10 +729,8 @@ impl Row {
             .sum()
     }
 
-    /// Screen rows logical line `i` takes at `width`, from the same
-    /// measurement `height` keeps. The window's walk reads one of these per
-    /// line it passes, so a line it is not going to show is counted without
-    /// being wrapped.
+    /// Screen rows logical line `i` takes, from the same cache `height`
+    /// keeps — a line never shown is counted without being wrapped.
     pub fn line_height(&self, i: usize, paint: &Paint, width: usize) -> usize {
         if let Some(h) = self.1.line(width, i) {
             return h;
@@ -790,11 +741,8 @@ impl Row {
         h
     }
 
-    /// What the screen renders for row `i` of this row, at this width: the
-    /// text, and the border its continuation rows must repeat. A said row
-    /// keeps the rule apart from the body so a line wider than the terminal
-    /// can carry it to every row it wraps to; anything else is a single text
-    /// with no border to keep.
+    /// What the screen renders for row `i` at this width: text, plus the
+    /// border continuation rows repeat (a said row only; others have none).
     pub fn line(
         &self,
         i: usize,
@@ -901,9 +849,8 @@ impl Row {
         }
     }
 
-    /// Block `id` has ended: behind a folded group it folds to its first line,
-    /// in view it stays as the reader watched it; it goes if it never had a
-    /// line. Says whether the group is left with no step at all.
+    /// Block `id` ended: folds to its first line if the group is folded,
+    /// stays open if not; goes if it never had a line.
     pub fn end_block(&mut self, id: u64) -> bool {
         let Kind::Steps { steps, folded, .. } = &mut self.0 else {
             return false;
@@ -940,14 +887,8 @@ impl Row {
         }
     }
 
-    /// What the screen opens with: the version, the endpoint requests go to,
-    /// and the instruction files this run stands on.
-    ///
-    /// Built rather than stored, so a `/reload` onto a new theme replaces the
-    /// rows instead of repainting the strings inside them — there is no way to
-    /// reach those. The files are shown here rather than said as a startup
-    /// note: they are what the run is standing on, not news, and a note about
-    /// them scrolls away while this stays at the top where it belongs.
+    /// What the screen opens with: version, endpoint, instruction files.
+    /// Built fresh (not stored), so a `/reload` theme change can repaint it.
     pub fn banner(resolved: &Resolved, paint: &Paint) -> Vec<Self> {
         let muted = |line: &str| Self::notice(Line::from(paint.span(&paint.theme.muted, line)));
         let mut rows = vec![muted(icons::VERSION_BANNER)];
@@ -1206,9 +1147,8 @@ fn step_index(steps: &[Step], i: usize) -> Option<usize> {
     }
 }
 
-// A group's own line. Listing its steps under it, it counts them. Folded, it
-// names its newest call, in flight or not, so the line holds still when the
-// result lands, and says what else it hides.
+// A group's own line: lists its steps, or (folded) names its newest
+// call so the line holds still when the result lands.
 fn steps_header(
     steps: &[Step],
     pending: &[PendingTool],
@@ -1337,9 +1277,8 @@ fn step_line(
 mod conversation_tests {
     use super::*;
 
-    // Browse mode is the whole reason the answer has a kind of its own: it
-    // shows what was said and what was answered, and nothing the conversation
-    // passed through on its way.
+    // Browse mode is the whole reason the answer has a kind of its own:
+    // it shows said/answered, nothing the conversation passed through.
     #[test]
     fn only_what_was_said_and_what_was_answered_is_the_conversation() {
         let paint = Paint::new(false);
@@ -1394,9 +1333,8 @@ mod steps_tests {
         format!("{}{n} calls", icons::PART_SEP)
     }
 
-    // Calls end in whatever order they end in, and the row is the only place
-    // one in flight shows: a call still out keeps the row pending however
-    // the call it names ended.
+    // Calls end in whatever order; the row is the only place one in
+    // flight shows, so it stays pending however the named call ended.
     #[test]
     fn a_call_still_out_keeps_the_row_pending() {
         let paint = Paint::new(true);
@@ -1421,10 +1359,8 @@ mod steps_tests {
         );
     }
 
-    // A row the user unfolded can lose the call that made it unfoldable — a
-    // failure leaves for a line of its own, and the row stops being the last
-    // one in the scrollback — so it shows as folded: with one call left,
-    // `toggle` refuses and the body would repeat the header.
+    // A row can lose the call that made it unfoldable (a failure gets
+    // its own line); with one call left it shows folded and won't toggle.
     #[test]
     fn a_row_left_with_one_call_shows_as_folded() {
         let mut row = bundle(vec![tool("read", "a.rs")]);
@@ -1467,9 +1403,8 @@ mod steps_tests {
             .collect()
     }
 
-    // Folded, the group is one line; unfolded, a line per step under a line
-    // that counts them; and each step opens on its own, the line a click
-    // lands on naming which.
+    // Folded is one line; unfolded, a line per step under a counting
+    // line — each step opens alone, named by the click's line.
     #[test]
     fn a_group_unfolds_to_its_steps_and_each_step_opens_alone() {
         let ran = FoldedTool::new("bash", "cat <<EOF", "cat <<EOF\nhi\nEOF", "hi\n");
@@ -1546,8 +1481,7 @@ mod steps_tests {
         assert_eq!(shown(&empty, 80), [crate::tui::THINKING]);
     }
 
-    // One call or many, the text runs up to what follows it, `…` on its end;
-    // a group's once stopped at 50 columns while a lone call ran to the edge.
+    // One call or many, the text runs up to what follows it, `…` on its end.
     #[test]
     fn a_long_call_fills_the_row_before_what_follows_it() {
         let long = "x".repeat(200);
@@ -1588,10 +1522,8 @@ mod steps_tests {
 mod height_tests {
     use super::*;
 
-    // The window reads one line's height at a time to pass over the rows a
-    // scrolled view does not show, while the view's own accounting reads the
-    // row whole. The two have to agree about where a row ends, whichever was
-    // asked first and at whichever width.
+    // The window reads one line's height at a time (skipping rows a
+    // scrolled view hides); both paths must agree on where a row ends.
     #[test]
     fn a_rows_height_is_the_sum_of_its_lines() {
         let paint = Paint::new(false);

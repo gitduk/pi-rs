@@ -1,13 +1,10 @@
-//! Standalone verification binary (WECHAT.md §5.1): login with a QR code,
-//! long-poll for inbound messages, echo every text back verbatim, and keep
-//! enough state under the pi root that a restart resumes without re-scanning.
-//!
-//! Run with `cargo run -p wechat --example verify`. State lives at
-//! `$PI_HOME/wechat.json` (default `~/.pi/wechat.json`), the same file the pi
-//! bridge uses, so the two can hand the session over to each other.
-//!
-//! This is the tool the design doc wants kept: it is the protocol layer's own
+//! Standalone verification binary (WECHAT.md §5.1): login with a QR, long-poll
+//! for messages, and echo them back verbatim — the protocol layer's own
 //! end-to-end check, independent of the agent.
+//!
+//! Run: `cargo run -p wechat --example verify`. State lives at
+//! `$PI_HOME/wechat.json`, the same file the pi bridge uses, so a restart
+//! resumes without re-scanning.
 
 use std::path::PathBuf;
 use std::sync::Arc;

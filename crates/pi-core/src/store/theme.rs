@@ -97,9 +97,8 @@ impl Serialize for Attr {
 /// and vice versa.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Color {
-    // A bare SGR parameter, 0-255, passed through exactly as written: the
-    // ANSI base colours are 30-37/40-47 and 90-107, whatever the terminal does
-    // with the rest is its business.
+    // A bare SGR parameter, 0-255, passed through as written — ANSI base
+    // colours are 30-37/40-47 and 90-107; the rest is the terminal's business.
     Basic(u8),
     // 256-colour palette index, `38;5;N`.
     Indexed(u8),
@@ -157,16 +156,14 @@ impl Serialize for Color {
 }
 
 /// One styled thing: an optional colour plus any number of text attributes.
-///
-/// A TOML string is shorthand for a colour alone (`code = "#58a6ff"`); a table
-/// is the full form `{ color = …, sgr = ["bold", "italic"] }`, either half
+/// Shorthand `code = "#58a6ff"`, or the full `{ color = …, sgr = ["bold"] }`,
+/// either half optional.
 #[derive(Debug, Clone)]
 pub struct Style {
     pub color: Option<Color>,
     pub sgr: Vec<Attr>,
-    // The one rendered SGR list behind `codes()`. A Style is immutable once
-    // loaded, while the painted rows re-read it on every frame, so the
-    // rendering is computed once rather than once per use.
+    // The rendered SGR list behind `codes()`, memoized since painted rows
+    // re-read a style every frame but it never changes after loading.
     rendered: OnceLock<String>,
 }
 
@@ -296,17 +293,8 @@ impl Serialize for Style {
     }
 }
 
-/// The SGR behind every Style the terminal uses.
-///
-/// Keys are grouped by what they style, not by colour: `diff.add` and
-/// `status.ok` share a code by default but stay separate so one can change
-/// without dragging the other along. `muted`, `heading` and `emphasis` are the
-/// text attributes markdown rendering opens; everything else is one Style each.
-/// `prompt.icon` and `prompt.normal` are the values that are neither colour
-/// nor attribute: a sigil is a shape. `prompt.panel.input` and
-/// `prompt.panel.said` are `Color`s rather than `Style`s — the bands the
-/// prompt sits on, written in the background slot — and they follow the
-/// terminal: whatever the config leaves unset is lifted from its background.
+/// The SGR behind every Style the terminal uses, grouped by what a key
+/// styles, not by colour, so `diff.add` and `status.ok` can change apart.
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -518,11 +506,8 @@ fn hex_digit(b: u8) -> Result<u8> {
 }
 
 /// The two bands for a terminal whose background is `bg`: opencode's own
-/// lift, every channel scaled by one factor, so a band keeps the background's
-/// hue rather than greying it out — which is what makes it read as that canvas
-/// lit up instead of as a slab laid over it. A landed line is two twelfths of
-/// the way towards white and the live one three; a light background goes the
-/// other way, towards black.
+/// lift, scaling every channel by one factor so a band keeps the
+/// background's hue instead of greying it out.
 pub fn bands_for(bg: (u8, u8, u8)) -> Bands {
     let (r, g, b) = (f64::from(bg.0), f64::from(bg.1), f64::from(bg.2));
     let lum = 0.299 * r + 0.587 * g + 0.114 * b;

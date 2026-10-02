@@ -1,11 +1,9 @@
 //! The disk, and the names the config speaks.
 //!
-//! Two things live here: the files a run reads and writes (`session.rs`,
-//! `archive.rs`, `journal.rs`, `config.rs`, `settings.rs`), and the vocabulary a
-//! config is written in — `theme.rs`, `keys/`, `status.rs`, `icons.rs`. The
-//! vocabulary is here rather than in `ui/` because it is what a setting is
-//! *called*, not how it is drawn: `ui/` reads these names and decides what they
-//! look like.
+//! Two things live here: the files a run reads/writes (`session.rs`,
+//! `archive.rs`, `journal.rs`, `config.rs`, `settings.rs`) and the config
+//! vocabulary (`theme.rs`, `keys/`, `status.rs`, `icons.rs`) — the latter is
+//! here, not in `ui/`, because it's what a setting is *called*, not drawn.
 
 use std::path::PathBuf;
 

@@ -1,11 +1,8 @@
-//! The QR login state machine, mirroring the reference client's
-//! `waitForWeixinLogin`: long-poll the QR status, refresh on expiry (bounded),
-//! follow IDC redirects, and hand back credentials on confirm.
+//! The QR login state machine, mirroring the reference's `waitForWeixinLogin`.
 //!
-//! Interaction with a person goes through the two callbacks so the same flow
-//! serves a plain terminal and pi's TUI. The `need_verifycode` state — the
-//! phone shows a code that has to be typed back — needs a reader callback;
-//! without one the login ends honestly instead of hanging.
+//! Interaction goes through two callbacks so the same flow serves a plain
+//! terminal and pi's TUI; without a verify-code reader, that prompt ends
+//! the login honestly instead of hanging.
 
 use std::time::{Duration, Instant};
 

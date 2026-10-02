@@ -136,9 +136,8 @@ pub fn resolve(
     let mut standing = context::workspace(root);
     standing.push_str(&context::boundary(workspace, tier));
     standing.push_str(&context::env(&stamp, tier));
-    // Appended rather than sent as a message: these are standing instructions,
-    // they do not change within a run, and the system prompt is the part of the
-    // request a provider will cache.
+    // Appended rather than sent as a message: standing instructions don't
+    // change within a run, and the system prompt is what a provider caches.
     let mut context = Vec::new();
     if !pinned.no_context_files {
         let loaded = context::load(root, crate::store::dir().as_deref());

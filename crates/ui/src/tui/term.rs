@@ -7,10 +7,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc::UnboundedReceiver;
 
-// crossterm reads blockingly, so the keyboard gets a thread of its own and
-// reaches the loop as just another channel.
-// What the reader waits on when nothing has been typed. `poll` returns the
-// moment a key arrives, so it costs idle wakeups and no latency.
+// crossterm reads blockingly, so input runs on its own thread. `poll`
+// wakes the moment a key arrives, costing only idle wakeups.
 const INPUT_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 
 // How long `park` waits to be told the reader stopped. Twice the poll: one
@@ -18,7 +16,6 @@ const INPUT_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 const PARK_WAIT: std::time::Duration =
     std::time::Duration::from_millis(INPUT_POLL.as_millis() as u64 * 2);
 
-// How often `park` looks while it waits.
 pub(super) const PARK_STEP: std::time::Duration = std::time::Duration::from_millis(10);
 
 // The reader's pause switch. Two readers on one stdin would split the user's
@@ -128,14 +125,12 @@ pub(super) fn reader() -> (UnboundedReceiver<TermEvent>, Hold) {
     (rx, hold)
 }
 
-// How long leaving waits for the runs it just cancelled. Long enough for a
-// turn to notice the token, short enough that a wedged one does not hold the
-// terminal hostage.
+// How long leaving waits for cancelled runs: long enough to notice the
+// token, short enough a wedged one won't hold the terminal hostage.
 pub(super) const EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
-// Where recalled prompts are kept between sessions.
-// `$VISUAL` before `$EDITOR` before `vi`, the order every terminal program
-// that asks uses.
+// `$VISUAL` before `$EDITOR` before `vi`: the order other terminal
+// programs use.
 pub(super) fn external_editor() -> (String, Vec<String>) {
     let raw = ["VISUAL", "EDITOR"]
         .into_iter()
@@ -178,9 +173,6 @@ pub(super) fn history_of(store: &Store, workspace: &std::path::Path) -> Vec<Stri
         .unwrap_or_default()
 }
 
-// The one file every workspace used to share. Its contents are the bug itself
-// — every project's lines in one list — so there is nothing in it worth
-// carrying into the buckets that replace it.
 pub(super) fn drop_shared_history() {
     if let Some(old) = pi_core::store::dir().map(|d| d.join("history")) {
         let _ = std::fs::remove_file(&old);

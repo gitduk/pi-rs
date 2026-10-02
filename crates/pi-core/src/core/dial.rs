@@ -10,10 +10,8 @@ use llm::transport::{Transport, anthropic::Anthropic, chat::ChatCompletions, ope
 use crate::args::Pinned;
 use crate::store::config;
 
-// `configured` is the config's `api_key`; the environment variable is the
-// fallback. The two OpenAI-family wires share `OPENAI_API_KEY`; Anthropic
-// takes `ANTHROPIC_API_KEY`. A key is never required: whichever is set rides
-// along, and an endpoint that needs one answers with its own refusal.
+// Falls back from config `api_key` to `OPENAI_API_KEY` (both OpenAI-family
+// wires) or `ANTHROPIC_API_KEY`; a key is never required.
 fn transport_for(spec: &ModelSpec, configured: Option<String>) -> Arc<dyn Transport> {
     let key = configured.or_else(|| {
         let var = match spec.format {
@@ -37,18 +35,13 @@ pub struct Dialled {
     /// startup (not under `--quiet`) and at every `/model`, which reports
     /// either way; a reload keeps the model and so has nothing new to say.
     pub assumed: Option<String>,
-    /// Said even under `--quiet`, which is why it is not one of the notes. An
-    /// exposed key is a fact about the machine rather than progress chatter,
-    /// and the run that asked for silence is the scripted one nobody is
-    /// watching — exactly the one that would never hear it again.
+    /// Said even under `--quiet`: an exposed key is a fact about the
+    /// machine, not progress chatter that silence should suppress.
     pub warning: Option<String>,
 }
 
-// Why this run wanted that model, for an endpoint that cannot serve it.
-//
-// Every name resolves now — an unlisted one is passed through with default
-// numbers — so the only way this fails is a config with no endpoint to send
-// it to, and the useful half of that message is who asked.
+// Every name resolves now (unlisted ones pass through with defaults), so
+// this only fires for a config with no endpoint — naming who asked helps.
 fn unknown(model: &str, named_by: config::ModelOrigin) -> String {
     format!(
         "`{model}`, named by {}, cannot be reached — see examples/pi.toml",
@@ -56,12 +49,8 @@ fn unknown(model: &str, named_by: config::ModelOrigin) -> String {
     )
 }
 
-/// Resolve a model name into something that can be talked to.
-///
-/// Startup and `/model` share this so the two cannot decide differently about
-/// the same name. The config is the only way in: a model worth talking to is
-/// worth four lines naming its endpoint and protocol, and every other field
-/// already defaults to claiming nothing.
+/// Resolve a model name; startup and `/model` share this so the two agree.
+/// The config is the only source of truth.
 pub fn dial(
     pinned: &Pinned,
     config: &config::Config,

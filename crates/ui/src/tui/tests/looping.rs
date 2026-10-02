@@ -5,9 +5,8 @@ use pi_core::input::{Builtin, Drive, Intent, Step};
 
 use super::harness::*;
 
-// The whole point of the command: what decides another round is the tree,
-// so a pass that believes it is finished is overruled by the file it just
-// changed.
+// What decides another round is the tree, not the pass's own belief that
+// it is finished.
 #[test]
 fn a_loop_goes_round_while_the_tree_keeps_changing() {
     let (_dir, mut lane) = a_running_lane();
@@ -25,10 +24,8 @@ fn a_loop_goes_round_while_the_tree_keeps_changing() {
         Some(Round::Again)
     ));
 
-    // The same file again, with different content — what a loop like this
-    // does most of the time is keep working the files it has already
-    // touched. A record that only counted writes would call this idle and
-    // stop; the fingerprint sees the rewrite.
+    // Same file, different content: a write-count alone would call this
+    // idle and stop, but the fingerprint sees the rewrite.
     started(&mut loops, &lane);
     wrote(
         &mut lane,
@@ -190,9 +187,8 @@ fn a_round_that_undoes_the_last_one_stops_as_oscillating() {
         Some(Round::Again)
     ));
 
-    // Round 2 rewrites at full size; round 3 puts the first bytes back —
-    // the tree is exactly what round 1 wore, and any later round would
-    // seesaw between the two.
+    // Round 2 rewrites at full size; round 3 puts the first bytes back, so
+    // the tree matches round 1 exactly — any later round would seesaw.
     started(&mut loops, &lane);
     wrote(&mut lane, "a.rs", six_more);
     assert!(matches!(
@@ -212,9 +208,8 @@ fn a_round_that_undoes_the_last_one_stops_as_oscillating() {
     assert!(!loops.active(lane.token()), "and the loop is gone");
 }
 
-// The fingerprint cannot catch a loop that keeps nibbling — one line an
-// hour, forever. Two such rounds in a row are the noise floor, and the
-// loop stops rather than polish past the point of return.
+// The fingerprint cannot catch a loop that keeps nibbling; two such rounds
+// in a row are the noise floor, and the loop stops there.
 #[test]
 fn rounds_that_only_nibble_stop_as_thin() {
     let (_dir, mut lane) = a_running_lane();
@@ -263,7 +258,6 @@ fn only_a_goal_that_starts_a_turn_is_looped() {
     }
 }
 
-// ------------------------------------------------------------- looping
 // The round the loop owes, handed out and started, as the surface does it.
 fn started(loops: &mut Loops, lane: &Lane) {
     loops.due(lane.token()).expect("a round is due");

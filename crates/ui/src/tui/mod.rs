@@ -1,11 +1,5 @@
-//! The interactive surface: one owner of the terminal for the whole session.
-//!
-//! The line-editing library that used to sit here owned the terminal only while
-//! it was reading a line, which is what made a key press during a run
-//! unreachable and left the renderer writing into a terminal nobody was
-//! managing. Here a single loop holds raw mode from start to finish and
-//! services three sources at once — the agent's events, the keyboard, and a
-//! timer for the animation — so nothing has to be bolted on beside it.
+//! The interactive surface: one loop holds raw mode for the whole session,
+//! servicing the agent's events, the keyboard, and the animation timer.
 
 mod bar;
 mod browse;
@@ -51,56 +45,39 @@ use view::{Queued, View, Views, front_view, prune_views, view_at};
 // What a folded run shows instead of what it is thinking.
 const THINKING: &str = "thinking…";
 
-// How close two Ctrl-C presses must be to read as one deliberate quit.
-//
-// Borrowed from pi, which uses the same 500ms. A latching flag looks simpler
-// and is wrong: clear one half-typed line, type another, clear that — and the
-// second clear reads as the second half of a double-tap and quits.
+// How close two Ctrl-C presses read as one quit, borrowed from pi (500ms).
+// A latching flag is wrong: clear-type-clear would read as a double-tap.
 const DOUBLE_TAP: std::time::Duration = std::time::Duration::from_millis(500);
 
 // How long a flash stays on the bar row: long enough to read a short line
 // without looking for it, short enough that a second try lands after it.
 const FLASH: std::time::Duration = std::time::Duration::from_secs(1);
 
-// One text each: three and two call sites had their own copy of these, and a
-// reworded one would have drifted.
+// Shared text for several call sites, so a reword can't drift between them.
 const NO_TRANSCRIPT: &str = "this checkout has no transcript — /new or /resume first";
 const NOTHING_TO_REWIND: &str = "nothing to rewind to";
 
-// What a `Step::Handled` leaves behind: its lines as the reply, and whatever
-// the command changed under the surface. A free function because a run in
-// flight lands them from inside its own borrow, where `self` is in pieces.
+// What a `Step::Handled` leaves behind: its lines as the reply, config
+// changes applied. A free fn since a run in flight calls it mid-borrow.
 fn land_handled(ui: &mut Ui, core: &Core, view: &mut View, rows: Listing) {
     ui.open_reply(rows);
     ui.adopt_config(core, view);
 }
 
-// A line submitted while the lane in front is working. What it may do is
-// settled before it runs: `command` cannot be asked and then ignored, because
-// asking is doing.
-//
-// Only queueing and refusing happen here. Anything that may run now goes back
-// to the loop's own dispatch, so a command takes the same path whether or not
-// a run is under way — and a `/worktree` that opens a lane is landed by the
-// same code that lands it from an idle prompt.
-
-// What the screen does to the lane itself, rather than asking the core to
-// answer something. A key can mean these and a line cannot: there is no
-// `/rewind` word, and `/new` and ctrl+l twice are one intent that goes the
-// other way round. They are answered one step early — `admit` says whether the
-// run in flight allows them — and then carried out here.
+// What the screen does to the lane itself, not the core. Admitted by
+// `admit` (which says whether a run allows them), then carried out here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Deed {
     // A key that moved the editor and nothing else.
     Nothing,
-    // The line being typed wants `$EDITOR`. The surface's own: the editor takes
-    // the terminal, which only the surface knows how to give away.
+    // The line being typed wants `$EDITOR`. The surface's own — only it
+    // knows how to give the terminal away.
     External,
-    // The rewind selector wants everywhere the session can go back to: only
-    // the surface can put a screen over the transcript.
+    // The rewind selector wants everywhere the session can go back to —
+    // only the surface can overlay the transcript.
     Rewind,
-    // A row chosen from it: the conversation rewinds there, and what the row
-    // was decides whether it is kept or unsent.
+    // A row chosen from it: the conversation rewinds there, kept or
+    // unsent depending on what the row was.
     To(agent::session::EntryId),
     // Stop the run: from esc, or from the phone's `/stop`.
     Interrupt,
@@ -121,9 +98,8 @@ impl Deed {
     }
 }
 
-// What a key asked for. The core answers an `Intent` however it arrived — the
-// keyboard, the phone, a typed line — and `Deed` is what the screen keeps for
-// itself, so the two never have to be told apart again downstream.
+// What a key asked for: `Intent` is what the core answers regardless of
+// origin; `Deed` is what the screen keeps for itself.
 #[derive(Debug)]
 enum Asked {
     Core(Intent),
@@ -143,10 +119,8 @@ enum Wake {
 
 pub struct Tui {
     core: Core,
-    // What each lane looks like, keyed by lane token. Held here rather than on
-    // the lane because a screen is the surface's: the lane list reorders and
-    // drops lanes, and a screen joined to a lane by identity cannot end up
-    // drawn for the wrong one when it does.
+    // What each lane looks like, keyed by token — held here, not on the
+    // lane, since the lane list reorders/drops lanes by identity.
     views: Views,
     ui: Ui,
     events: UnboundedReceiver<TermEvent>,
@@ -208,9 +182,8 @@ impl Tui {
         })
     }
 
-    // A surface on an in-memory screen, for tests that drive the loop's
-    // settle side. No reader thread and no history file: the terminal the
-    // test runner owns is not this test's to touch.
+    // A surface on an in-memory screen, for tests driving the loop's
+    // settle side. No reader thread, no history file to touch.
     #[cfg(test)]
     fn on_test_screen(mut core: Core, keys: Arc<Keys>) -> Self {
         let paint = Paint::with_theme(false, Arc::new(core.config.theme.clone()));
@@ -235,20 +208,8 @@ impl Tui {
         }
     }
 
-    // A line whose answer will land under it: onto the screen, at the newest
-    // row, and into the history file.
-    //
-    // One place rather than one per door. A fresh turn starts at the newest
-    // row — a view scrolled up to read would otherwise stream output out of
-    // sight — and the history is written per line rather than on the way out,
-    // because quitting with two Ctrl-Cs skips every tidy exit path there is.
-    // Every door a line can be submitted through calls this — the keyboard and
-    // the phone alike — because a line the user cannot see they sent is one
-    // they send twice.
-    //
-    // Which lines those are is `Intent::echoed`'s to say: a command answers
-    // over the menu in the reply, which is dismissed rather than kept, and a
-    // row left above an answer that never comes is the question standing alone.
+    // Lands a line (screen + history) from any door, once per line —
+    // history is written now, not on exit, which two Ctrl-Cs can skip.
     fn echo_sent(&mut self, line: &str) {
         let view = front_view(&mut self.views, self.core.lane());
         self.ui.submit(view, line);
@@ -267,19 +228,13 @@ impl Tui {
         let _ = tool::state::write_private(&path, editor::encode(keep).as_bytes());
     }
 
-    // Sessions change on the commands that create, delete or switch them;
-    // refresh the copy the completion menu reads.
-    // A turn or a switch can change what `/resume` would list. Dropped
-    // rather than recomputed: whoever asks next pays, and most of the time
-    // nobody does.
+    // Refreshes the completion menu's session list after it changes.
     fn refresh_sessions(&mut self) {
         self.ui.lists.forget();
     }
 
-    // Bring the screen into step with the lanes after a command. A switch
-    // parks the line being typed in the view of the lane it was typed at
-    // and takes the lane in front's own parked line back up; the lists
-    // follow, and what that lane posted while away is replayed here.
+    // Brings the screen into step after a lane switch: parks the old
+    // lane's draft, restores the new one's, follows lists, replays news.
     fn reconcile(&mut self, was: usize) {
         if was == self.core.current {
             return;
@@ -290,14 +245,12 @@ impl Tui {
         self.ui.editor.set_line(&parked);
         self.ui.lists.at(self.core.lane().root());
         self.ui.at_root = self.core.lane().root().to_path_buf();
-        // Recall follows the checkout for the same reason the lists do. The
-        // line just typed is already filed: `save_history` runs per line, and
-        // ran while this lane was still the one in front.
+        // Recall follows the checkout like the lists do; the line just
+        // typed is already filed (`save_history` ran while still in front).
         let lines = history_of(&self.core.store, self.core.lane().root());
         self.ui.editor.seed_history(lines);
-        // A lane opened later has no banner yet, and the files it stands on
-        // are its own. Nothing reads the screen here: the events below ask for
-        // it again, each in the lane it belongs to.
+        // A newly opened lane has no banner yet. Nothing reads the screen
+        // here — the events below ask for it again, in their own lane.
         view::opened(&mut self.views, self.core.lane(), &self.ui.paint);
         // Esc asked the prompt back before the screen moved on and the run ended
         // out of sight: a rewind wants the screen, so it waited for it.
@@ -320,12 +273,11 @@ impl Tui {
     }
 
     fn land_swap(&mut self, said: Listing) {
-        // A swap lands carrying its own transcript: the lane it moves to was
-        // opened with one, so this reads something even when the lane being
-        // left has a run writing it.
+        // Carries its own transcript: the lane it moves to was opened
+        // with one, even if the lane being left has a run writing it.
         self.rebuild_front();
-        // `at` forgets both lists, so it stands in for `refresh_sessions`: a
-        // swap that did not move repeats the root, and drops them either way.
+        // `at` forgets both lists, standing in for `refresh_sessions`: a
+        // swap that didn't move repeats the root, dropping them either way.
         self.ui.lists.at(self.core.lane_mut().root());
         self.ui.open_reply(said);
     }
@@ -345,9 +297,8 @@ impl Tui {
         }
     }
 
-    // Rebuild the bar before every draw: a run that ended out of sight has to
-    // reach the screen without anyone asking, and a step walks the order this
-    // builds — the bar and the ring are one list.
+    // Rebuilds the bar before every draw: an off-screen run must reach
+    // the screen unasked, and a step walks this same order (bar = ring).
     fn refresh_tabs(&mut self) {
         let current = self.core.current;
         let mut tabs: Vec<Tab> = self
@@ -388,15 +339,12 @@ impl Tui {
         self.ui.tabs = tabs;
     }
 
-    // Drop lanes whose checkout was deleted outside pi — idle ones only, a
-    // running or looping lane still answering to the index it was given.
-    //
-    // Silent: the lane going off the bar is what says the checkout is gone.
+    // Drops idle lanes whose checkout was deleted outside pi (a running
+    // or looping one keeps its index). Silent — the bar says it's gone.
     fn drop_vanished_lanes(&mut self) {
         let mut gone: Vec<usize> = Vec::new();
-        // Back to front, stopping at a working lane: removing one before it
-        // would shift the index a run in flight reports back by. That lane's
-        // turn over, the next pass drops what this one left.
+        // Back to front, stopping at a working lane: removing one before
+        // it would shift the index a run reports back by.
         for (at, lane) in self.core.lanes.iter().enumerate().rev() {
             if lane.is_running() || self.drivers.holds(lane.token()) {
                 break;
@@ -423,12 +371,8 @@ impl Tui {
         self.ui.lists.forget();
     }
 
-    // The front lane's screen out of its transcript: what a swap and a rewind
-    // both need, and neither has anything to add to it.
-    //
-    // A lane whose transcript a job took and could not read back has nothing to
-    // rebuild from. That state is named — `NO_TRANSCRIPT` — rather than fatal,
-    // so the screen is left as it stands.
+    // The front lane's screen rebuilt from its transcript, for a swap or
+    // rewind. `NO_TRANSCRIPT` names a dead session rather than panicking.
     fn rebuild_front(&mut self) {
         let Some(session) = self.core.lane().session() else {
             return;
@@ -437,17 +381,15 @@ impl Tui {
             .rebuild(front_view(&mut self.views, self.core.lane()), session);
     }
 
-    // A lane's news goes into that lane's own screen, never the one in front:
-    // it is read back beside the conversation it happened to. A lane never
-    // drawn gets its opening block first, so `reconcile` cannot replace the row.
+    // A lane's news goes to its own screen, never the one in front; a
+    // never-drawn lane gets its banner first so it can't replace the row.
     fn say_of(&mut self, lane: usize, what: impl Into<Line<'static>>) {
         let view = view::opened(&mut self.views, &self.core.lanes[lane], &self.ui.paint);
         self.ui.say_line(view, what.into());
     }
 
-    // The deeds the screen keeps for itself. They are here rather than in
-    // `dispatch` because only the surface can move the screen, the keyboard and
-    // the process — and only the surface knows which lane is in front.
+    // Deeds the screen keeps for itself: only the surface can move the
+    // screen, keyboard, and process, and knows which lane is in front.
     async fn carry(&mut self, deed: Deed) {
         match deed {
             Deed::Nothing => {}
@@ -459,15 +401,8 @@ impl Tui {
         }
     }
 
-    // The one gate every input passes: a key, the phone, or an intent coming
-    // back off the queue, so two ways of asking the same thing cannot get two
-    // different answers.
-    //
-    // The answer is in two halves and they live apart on purpose: whether a
-    // run is in flight is state, and is read here; what a question may do
-    // while one is, is a property of the question, and `fate` holds it. An
-    // idle lane admits everything, which is why `fate` never has to mention
-    // idleness — and why it is asked only once a run is known to be there.
+    // The one gate every input passes, so two ways of asking the same
+    // thing can't get different answers. `fate` decides only mid-run.
     fn admit(&mut self, asked: Asked, origin: Origin) -> Wake {
         if !self.core.lane().is_running() {
             return Wake::Do(asked);
@@ -506,11 +441,8 @@ impl Tui {
                         .push(Queued { intent, origin });
                     return Wake::Nothing;
                 };
-                // Spends the chance to unsend, exactly as the model's first
-                // word does: esc now means stop. Without this, esc after a
-                // line was said takes the prompt back and the line — never
-                // heard, handed back at `finish` — starts a turn of its own,
-                // which is the opposite of what the user just asked for.
+                // Spends the unsend chance, like the model's first word
+                // does: esc now stops, rather than starting an unheard turn.
                 front_view(&mut self.views, self.core.lane())
                     .state
                     .committed = true;
@@ -539,19 +471,15 @@ impl Tui {
         front_view(&mut self.views, self.core.lane()).state.stopping = true;
     }
 
-    /// Drive the terminal until the user leaves.
-    ///
-    /// No event channel is handed in any more: each lane owns the one its runs
-    /// post to, which is what lets a lane the screen has moved on from keep
-    /// working without its output landing on somebody else's view.
+    /// Drives the terminal until the user leaves. Each lane owns the
+    /// channel its runs post to, so a lane left behind keeps working.
     pub async fn run(mut self) -> Result<()> {
         // Every lane's runs report here when they end. One channel rather than a
         // handle per lane: the loop waits on it like any other source.
         let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel::<Done>();
         let mut tick = tokio::time::interval(status::SPIN);
-        // The branch is off while nothing runs, so the interval falls behind
-        // the clock; bursting to catch up would spin the loop the moment a run
-        // starts. One late tick, then the ordinary cadence.
+        // Off while nothing runs, so the interval falls behind; one
+        // late tick then ordinary cadence avoids a catch-up spin.
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             self.serve_lanes().await;
@@ -625,9 +553,8 @@ impl Tui {
                         None => Wake::Leave,
                     },
                     msg = self.drivers.inbound() => match msg {
-                        // The phone types at the lane in front, like a hand,
-                        // and its `/stop` is esc. Same intents, same gate, so
-                        // they cannot drift apart.
+                        // The phone types at the lane in front, like a
+                        // hand; its `/stop` is esc — same gate, same intents.
                         Some((from, channel::Inbound::Text { text })) => {
                             origin = from;
                             let intent = input::read(&text, &self.core.commands);
@@ -654,9 +581,8 @@ impl Tui {
                     },
                 }
             } else {
-                // One at a time, each still the intent it was read as. Joined
-                // as lines, a command and a prompt became one line and `read`
-                // saw only the first word.
+                // One at a time, each still the intent it was read as.
+                // Joined as lines, a command+prompt would lose its first word.
                 let queued = front_view(&mut self.views, self.core.lane())
                     .queued
                     .remove(0);
@@ -714,10 +640,8 @@ impl Tui {
                             .say(front_view(&mut self.views, self.core.lane()), line),
                     }
                 }
-                // What was submitted while the run worked is taken up by the
-                // top of this loop, one entry at a time and each read as what
-                // it is. Draining it here instead meant everything queued
-                // became the next prompt, whatever it had been typed as.
+                // Queued-during-run entries are taken one at a time at the
+                // loop's top; draining here would merge them into one prompt.
                 Step::Prompt { send, typed } => self.start_turn(send, typed, &done_tx),
             }
             // The driver that sent this line hears the end of the turn it began.
@@ -744,11 +668,8 @@ impl Tui {
                 self.ui.flash(NOTHING_TO_REWIND);
             }
             Ok(outcome) => {
-                // The transcript is the source of truth again: rebuild the
-                // whole view from it, so the screen returns to the node the
-                // conversation did instead of keeping the forgotten turns.
-                // It clears anything said before it: hence the notice after.
-                // A rewind is refused while a run has the transcript.
+                // The transcript is truth again: rebuild the whole view
+                // from it, back to the node the conversation returned to.
                 self.rebuild_front();
                 let said = match outcome {
                     Rewound::Unsent(_) if !self.ui.editor.is_empty() => {

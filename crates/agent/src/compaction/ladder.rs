@@ -14,9 +14,8 @@ const REPEATED: &str = "[omitted: the same call ran again later]";
 // What leads an aged-out result, ahead of the ends it keeps.
 const AGED_OUT: &str = "[omitted to fit the context window]";
 
-// What stands in for an argument the model no longer sees. Written into the
-// record as well as the view, so an archive says what went without the reader
-// having to know the rule.
+// What stands in for an argument the model no longer sees. Also written
+// into the record, so an archive says what went without knowing the rule.
 const ARGS_TAKEN: &str = "[omitted: the call has already run]";
 
 #[derive(Debug, Clone, Copy)]
@@ -25,12 +24,9 @@ pub struct Policy {
     /// they are what the agent is working from right now.
     pub protect_tail: usize,
     /// Text over this many chars is pruned to a bounded head and tail instead
-    /// of a one-line notice. The defaults keep both ends of a long output —
-    /// the part of a test run that says what broke — without the middle that
-    /// made it over budget. `prune_chars` is large enough for `head_chars`
-    /// plus the marker plus `tail_chars`, so one pass lands under the
-    /// threshold; a policy that breaks that still converges, because an
-    /// omitted entry is never omitted twice.
+    /// of a one-line notice, keeping both ends of a long output. Must exceed
+    /// `head_chars` + marker + `tail_chars` for one pass to land under budget;
+    /// even if not, it still converges — an omitted entry is never omitted twice.
     pub prune_chars: usize,
     pub head_chars: usize,
     pub tail_chars: usize,
@@ -71,15 +67,13 @@ impl Report {
 }
 
 // One entry as the plan currently intends to leave it. `tokens` tracks the
-// running estimate so the budget check is a sum, not a re-walk of the whole
-// transcript after every decision.
+// running estimate, so the budget check is a sum, not a re-walk each time.
 struct Item<'a> {
     id: EntryId,
     entry: &'a Entry,
     tokens: usize,
     // What the view already shows in its place, from this pass or an earlier
-    // one. `fresh` is what separates the two: only this pass's decisions go
-    // into the record, or every pass would restate the ones before it.
+    // one; `fresh` marks only this pass's decisions, so the record doesn't restate.
     notice: Option<String>,
     fresh: bool,
     gone: bool,
@@ -96,9 +90,8 @@ impl<'a> Item<'a> {
         }
     }
 
-    // The text an omission would stand in for. A tool's result, or a `!`
-    // command's output — the two things on the user's side that carry bulk
-    // nobody is waiting on.
+    // The text an omission would stand in for: a tool's result or a `!`
+    // command's output — the two things on the user's side nobody is waiting on.
     fn prunable(&self) -> Option<String> {
         if self.notice.is_some() {
             return None;
@@ -116,8 +109,7 @@ impl<'a> Item<'a> {
         match self.entry {
             Entry::Tool { .. } => true,
             // A `!` command's output is the other half of a question — bulk
-            // nothing downstream waits on — and the variant is what makes the
-            // two answerable apart at all.
+            // nothing downstream waits on.
             Entry::Bash { .. } => true,
             // A note is the same half: machine prose nothing downstream waits
             // on once the run it explains is past.
@@ -136,10 +128,8 @@ impl<'a> Item<'a> {
     }
 }
 
-/// What an entry costs once the view has replaced it with a notice. A result
-/// keeps its block: the notice goes inside the `tool_result` the answering
-/// `tool_use` still has to match, and a planner that priced the notice alone
-/// was planning against a total the request never reached.
+/// What an entry costs once replaced by a notice. A result keeps its block —
+/// the notice must still fill the `tool_result` its `tool_use` requires.
 fn omitted_tokens(entry: &Entry, notice: &str) -> usize {
     estimate::MESSAGE_OVERHEAD
         + match entry {
@@ -148,10 +138,8 @@ fn omitted_tokens(entry: &Entry, notice: &str) -> usize {
         }
 }
 
-// Per entry, not per wire message: several user entries merge into one
-// message, so this counts the framing more than once. That is the safe
-// direction — the estimate decides *when* to compact, and compacting a little
-// early costs tokens where compacting a little late costs the request.
+// Per entry, not per wire message, so framing may be counted more than
+// once — the safe direction, since compacting early costs less than late.
 fn tokens_of(seen: &Seen<'_>, spec: &ModelSpec, gone: &HashMap<(EntryId, usize), &str>) -> usize {
     let body: usize = match seen.entry() {
         Entry::Answer { id, blocks, .. } => Session::shown_blocks(blocks, *id, gone)
@@ -175,9 +163,8 @@ fn suffixes(items: &[Item<'_>]) -> Vec<usize> {
     out
 }
 
-// One text block standing in for a pruned entry: the notice, a bounded head,
-// a marker naming how much went, and a bounded tail. Chars are code points, so
-// slicing never splits a surrogate pair.
+// One text block standing in for a pruned entry: notice, bounded head,
+// a marker, bounded tail. Chars are code points, so slicing keeps pairs whole.
 fn pruned(notice: &str, text: &str, policy: &Policy) -> String {
     let c = text.chars().count();
     if c <= policy.prune_chars {
@@ -208,16 +195,10 @@ fn total(items: &[Item<'_>]) -> usize {
     items.iter().map(|i| i.tokens).sum()
 }
 
-/// Decide how to shrink the session's context to fit `budget`, cheapest measure
-/// first.
-///
-/// Nothing is mutated: the result is a record the caller appends to the session,
-/// and the view derives from it. That is what keeps a long session readable
-/// afterwards — a transcript compacted in place is a transcript destroyed.
-///
-/// Every entry keeps its place in the exchange. A `tool_use` with no answering
-/// `tool_result` makes the next request invalid on both formats, so content is
-/// replaced, never removed, except when a whole exchange goes at once.
+/// Decide how to shrink the session's context to fit `budget`, cheapest
+/// measure first. Returns a record for the caller to append rather than
+/// mutating the session. Content is replaced with a notice, not removed,
+/// except when a whole exchange goes at once — leaving no orphaned `tool_use`.
 pub fn plan(
     session: &Session,
     spec: &ModelSpec,
@@ -250,9 +231,8 @@ pub fn plan(
         })
         .collect();
 
-    // And the summaries `context` puts into the first user message: the view
-    // does not hold them, so a planner that stops at the items reads a
-    // transcript as smaller than the request it is about to make.
+    // Summaries `context` puts in the first user message aren't in the view,
+    // so a planner that stops at items would undercount the real request.
     let summaries: usize = session
         .summaries()
         .iter()
@@ -361,12 +341,8 @@ fn age_out(items: &mut [Item<'_>], f: &Frame<'_>, report: &mut Report) {
     }
 }
 
-// Oversized tool arguments: the file a `write` wrote, the bodies an `edit`
-// carried. The call has run and its result records what happened, so what
-// is left is the model's own carbon copy of the work, not context it still
-// needs — and it is the one weight on the assistant side worth taking.
-// Thinking blocks are deliberately not touched: the API filters prior ones
-// itself without billing them, and the last turn's may not be edited at all.
+// Args duplicate work the result already recorded, so they're safe to drop.
+// Reasoning blocks are not: the API filters and bills prior ones itself.
 fn take_args(items: &mut [Item<'_>], f: &Frame<'_>, report: &mut Report) {
     let suffix = suffixes(items);
     let mut gone = f.already_gone.clone();
@@ -439,13 +415,8 @@ fn drop_history(items: &mut [Item<'_>], f: &Frame<'_>, report: &mut Report) {
     }
 }
 
-// Where each round of the conversation begins.
-//
-// A round is a prompt and everything that answered it. What sits *ahead* of a
-// prompt with nothing between belongs to it, not to the round that ended
-// before: a `!` command is what the user ran in order to ask. Attaching it
-// backwards lets the drop tier take it out from under the question that
-// refers to it.
+// A round is a prompt plus everything that answered it. A `!` command
+// right before a prompt attaches to it, so both can be dropped together.
 fn round_starts(items: &[Item<'_>]) -> Vec<usize> {
     let is_prompt = |it: &Item<'_>| matches!(it.entry, Entry::Ask { .. });
     let leads_in = |it: &Item<'_>| matches!(it.entry, Entry::Bash { .. });
@@ -479,22 +450,8 @@ fn after_prompt(items: &[Item<'_>], start: usize, end: usize) -> usize {
         .map_or(start, |p| start + p + 1)
 }
 
-// What leaves the view next, oldest first.
-//
-// The unit is a round — a prompt and everything that answered it — because
-// the smaller one was an assistant turn and its results, which left the
-// question standing with its answer gone. A question nobody will answer is
-// not the answer's spare context; it is what someone asked.
-//
-// The opening prompt is the task itself and stays whatever happens to its
-// work, so round zero gives up its body and keeps its head.
-//
-// A round the working tail reaches is taken exchange by exchange instead.
-// That is not a weaker rule but the same one: inside a single round there is
-// only one question, it is the task, and it is already being kept — so there
-// is nothing left to orphan. It is also the only thing that works on the
-// shape most sessions actually have, one prompt and eighty tool calls, where
-// a round-sized unit can never fire at all.
+// A round — prompt plus its answers — is the drop unit, so a question is
+// never orphaned; the current round falls back to exchange-by-exchange.
 fn droppable(items: &[Item<'_>], policy: &Policy, suffix: &[usize]) -> Option<Vec<usize>> {
     let starts = round_starts(items);
     let tail = |end: usize| end < items.len() && suffix[end] >= policy.protect_tail;
@@ -530,13 +487,8 @@ fn droppable(items: &[Item<'_>], policy: &Policy, suffix: &[usize]) -> Option<Ve
     None
 }
 
-// One exchange: an assistant turn and the results answering it. The unit
-// `droppable` falls back to, inside the newest round.
-//
-// Joined by call id rather than by adjacency, because the invariant is the
-// pairing — a `tool_result` whose `tool_use` is gone makes the next request
-// invalid — and adjacency does not express it: a turn that called no tool has
-// no answers, so the entry after it belongs to whatever came next, not here.
+// One exchange: an assistant turn plus its answers — droppable's fallback
+// unit. Joined by call id, not adjacency, to keep every `tool_use` paired.
 fn exchange(items: &[Item<'_>], start: usize) -> Vec<usize> {
     let calls: Vec<&str> = items[start]
         .entry

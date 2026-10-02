@@ -157,9 +157,8 @@ mod tests {
         }
     }
 
-    // Over budget is the one thing the history certainly is, so the render
-    // never ships it whole: a block over its cap is clipped in place, and a
-    // whole history over the total keeps both ends and drops the middle.
+    // A block over its cap is clipped in place; a whole history over the
+    // total keeps both ends and drops the middle.
     #[test]
     fn oversize_history_is_clipped_rather_than_sent_whole() {
         let r = result("c", "read", "x".repeat(50_000));

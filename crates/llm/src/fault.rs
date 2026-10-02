@@ -18,9 +18,8 @@ pub enum Fault {
 /// is called, and retry policy should not depend on an empirical word list.
 pub fn classify(err: &LlmError) -> Fault {
     match err {
-        // 408 is a timeout, 409 a collision, 425 an early hint; 429 a
-        // throttle; 5xx (and 522/524/529 from CDNs) load. All are worth
-        // another attempt.
+        // 408 timeout, 409 collision, 425 early hint, 429 throttle, 5xx (plus
+        // 522/524/529 from CDNs) load — all worth another attempt.
         LlmError::Api {
             status: 408 | 409 | 425 | 429 | 500 | 502 | 503 | 504 | 522 | 524 | 529,
             ..
@@ -34,15 +33,8 @@ pub fn classify(err: &LlmError) -> Fault {
     }
 }
 
-/// The window the provider says it has, read out of an overflow message.
-///
-/// Most of them carry the numbers — "prompt is too long: 213462 tokens >
-/// 200000 maximum" — and the smaller of the two is always the limit. Reading it
-/// beats guessing at a correction factor when our own estimate was wrong by an
-/// unknown amount.
-///
-/// None when the message carries no usable number; the caller then falls back
-/// to squeezing blindly.
+/// The window the provider says it has, parsed from an overflow message
+/// (the smaller of any numbers found); `None` if no usable number is there.
 pub fn overflow_limit(err: &LlmError) -> Option<usize> {
     // Below this is a status code or a version, never a context window.
     const FLOOR: usize = 1_000;

@@ -27,8 +27,6 @@ pub fn target() -> i32 {
 }
 ";
 
-// The workspace is the write boundary: read may leave it, and no tool that
-// acts — write, bash, edit — may follow a path out.
 #[tokio::test]
 async fn read_leaves_the_workspace_but_write_bash_and_edit_do_not() {
     let (_d, c) = ctx();
@@ -65,8 +63,7 @@ async fn read_leaves_the_workspace_but_write_bash_and_edit_do_not() {
     assert!(matches!(e, Err(ToolError::Escape(_))), "{e:?}");
 }
 
-// The window arithmetic saturates: a limit past the end of the file reads to
-// the end rather than wrapping into a panic.
+// Saturates rather than wrapping into a panic past the end of the file.
 #[tokio::test]
 async fn read_huge_limit_stays_inside_the_file() {
     let (_d, c) = ctx();
@@ -105,8 +102,7 @@ async fn a_zero_timeout_is_not_an_instant_kill() {
     assert!(out.contains("hi"), "{out}");
 }
 
-// The tier is what each tool may reach — the gate the loop checks before a
-// call is made.
+// The gate the loop checks before a call is made.
 #[test]
 fn registry_tiers_name_what_each_tool_may_reach() {
     let r = toolbox::builtin();
@@ -116,8 +112,6 @@ fn registry_tiers_name_what_each_tool_may_reach() {
     assert_eq!(r.get("fetch").unwrap().tier(), Tier::Net);
 }
 
-// The size check runs before the read: a huge file is refused without ever
-// being read into memory.
 #[tokio::test]
 async fn a_huge_file_is_refused_before_it_is_read_into_memory() {
     let (_d, c) = ctx();
@@ -133,8 +127,7 @@ async fn a_huge_file_is_refused_before_it_is_read_into_memory() {
     assert!(out.flatten().contains("over the"), "{}", out.flatten());
 }
 
-// The output budget is spent in bytes, not characters: a char-counted clamp
-// on CJK output would blow past the cap.
+// Spent in bytes, not characters: a char-counted clamp would blow past the cap.
 #[tokio::test]
 async fn multibyte_output_respects_the_byte_budget_and_stays_valid_utf8() {
     let (_d, c) = ctx();
@@ -148,9 +141,8 @@ async fn multibyte_output_respects_the_byte_budget_and_stays_valid_utf8() {
     assert!(out.len() < 40_000, "clamped output was {} bytes", out.len());
 }
 
-// The parse gate refuses before anything is written: a replacement that
-// breaks the file, an overwrite that runs out mid-file, a replacement that
-// moves nothing — each is refused, and the file on disk is untouched.
+// Three cases, each refused with the file untouched: breaks the file, runs
+// out mid-file, or moves nothing at all.
 #[tokio::test]
 async fn an_edit_that_would_break_the_file_is_refused_and_writes_nothing() {
     let (_d, c) = ctx();
@@ -183,10 +175,8 @@ async fn an_edit_that_would_break_the_file_is_refused_and_writes_nothing() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), THREE_FNS);
 }
 
-// The gate's edges, where it has no standing to refuse: a file that never
-// parsed is usually the reason an edit is happening, a language the parser
-// does not know cannot be judged, a new file has nothing behind it to lose,
-// and empty content parses in every language the tree knows.
+// Four edges: never parsed, unknown language, a new file, and empty content
+// — none of which the gate can judge or has anything to lose by allowing.
 #[tokio::test]
 async fn the_parse_gate_leaves_files_it_has_no_standing_to_refuse() {
     let (_d, c) = ctx();
@@ -240,10 +230,8 @@ async fn the_parse_gate_leaves_files_it_has_no_standing_to_refuse() {
     .await;
 }
 
-// The drift-immunity payoff: two edits back to back with no read between
-// them, the second anchored on content the first one put there. Content
-// anchors cannot go stale, so this just works — no false staleness note, no
-// demand for a reread.
+// The second edit anchors on content the first put there; content anchors
+// cannot go stale, so no false staleness note and no demand for a reread.
 #[tokio::test]
 async fn a_second_edit_right_after_the_first_applies_without_a_reread() {
     let (_d, c) = ctx();
@@ -271,9 +259,8 @@ async fn a_second_edit_right_after_the_first_applies_without_a_reread() {
     );
 }
 
-// The view was recorded, so the gate can answer for the file moving: an
-// anchor that still matches applies, with the staleness note beside its
-// report; one whose text is gone refuses, and nothing may be written.
+// An anchor that still matches applies, with a staleness note beside the
+// report; one whose text is gone refuses, and nothing is written.
 #[tokio::test]
 async fn an_edit_answers_for_a_file_that_changed_since_its_view() {
     let (_d, c) = ctx();
@@ -310,9 +297,8 @@ async fn an_edit_answers_for_a_file_that_changed_since_its_view() {
     );
 }
 
-// The second edit's anchor matches nothing: the whole call refuses, and the
-// first edit — sound on its own — is not applied either. A half-applied call
-// is worse than a rejected one.
+// The whole call refuses if either anchor misses; a half-applied call is
+// worse than a rejected one.
 #[tokio::test]
 async fn an_edit_that_misses_leaves_its_sibling_unapplied() {
     let (_d, c) = ctx();
@@ -358,9 +344,8 @@ async fn two_edits_to_one_file_in_the_same_turn_do_not_clobber_each_other() {
     assert!(after.contains("THREE"), "{after:?}");
 }
 
-// A `whole_block` anchor names a block by one of its rows — the declaration, or
-// an annotation above it. Both are the same block: the annotated construct, not
-// the annotation on its own, and not two candidates that are really one.
+// A `whole_block` anchor names a block by any of its rows — declaration or
+// annotation — since both name the same construct, not two candidates.
 #[tokio::test]
 async fn a_whole_block_anchor_resolves_through_its_annotation() {
     let (_d, c) = ctx();
@@ -406,9 +391,8 @@ async fn a_whole_block_anchor_may_name_the_annotation() {
     );
 }
 
-// Over the cap the view is cut to a locator, and the spill file holds what
-// the result dropped — nothing is lost. A short output takes no spill at all:
-// no locator in the view, no file left behind.
+// Over the cap, a locator points to the spill that holds what was dropped;
+// a short output takes no spill at all — no locator, no file left behind.
 #[tokio::test]
 async fn an_over_long_output_is_kept_somewhere_the_model_can_reach() {
     let (dir, c) = common::spilling();
@@ -447,9 +431,8 @@ async fn an_over_long_output_is_kept_somewhere_the_model_can_reach() {
     );
 }
 
-// The view's cut lands between rows, not at a byte offset: every row that
-// survives carries the whole of the line it is numbered with, so an anchor
-// copied from any of them still matches.
+// The cut lands between rows, not at a byte offset, so every surviving row
+// carries its whole line — an anchor copied from it still matches.
 #[tokio::test]
 async fn read_spills_an_over_long_view_without_splitting_a_row() {
     let (_dir, c) = common::spilling();
@@ -473,8 +456,7 @@ async fn read_spills_an_over_long_view_without_splitting_a_row() {
     assert!(whole.contains("line 30000"), "the spill holds what went");
 }
 
-// A spill that cannot be written is a loud failure, not a view whose rows
-// quietly went missing.
+// Not a view whose rows quietly went missing.
 #[tokio::test]
 async fn a_spill_that_cannot_be_written_fails_loudly() {
     let (dir, c) = common::spilling();
@@ -507,9 +489,8 @@ async fn text_that_is_not_utf8_is_refused_rather_than_mangled() {
     );
 }
 
-// What a run wrote is taken as it writes, never from anything it says
-// afterwards — the account of a subagent's work is the one part of its result
-// nothing else checks. Reads leave no mark.
+// Taken as it writes, never from anything it says afterwards — a subagent's
+// own account of its work is the one part of its result nothing else checks.
 #[tokio::test]
 async fn what_a_run_wrote_is_recorded_as_it_writes() {
     let (_d, c) = ctx();
@@ -580,9 +561,8 @@ async fn a_run_with_its_own_record_writes_nothing_into_its_parents() {
     );
 }
 
-// The skeleton is drawn from the same stripped text the rest of a view is: a
-// mark left on row 1 is part of the text a later anchor copies, and an anchor
-// carrying it can never match.
+// Drawn from the same stripped text as the rest of a view: a mark left on
+// row 1 would sit in text a later anchor copies, and never match.
 #[tokio::test]
 async fn an_outline_does_not_show_the_byte_order_mark() {
     let (_d, c) = ctx();
@@ -599,9 +579,8 @@ async fn an_outline_does_not_show_the_byte_order_mark() {
     assert!(!out.flatten().contains('\u{FEFF}'), "{}", out.flatten());
 }
 
-// Two blocks can open on the same text, and the address a view prints in front
-// of a line is what tells them apart — the row it names is the one block the
-// model pointed at, and asking for more of the opening line cannot help.
+// Two blocks can open on the same text; the address a view prints is what
+// tells them apart — more of the opening line alone cannot.
 #[tokio::test]
 async fn a_whole_block_anchor_may_name_the_row_it_meant() {
     let (_d, c) = ctx();
@@ -638,9 +617,8 @@ async fn a_whole_block_anchor_may_name_the_row_it_meant() {
     );
 }
 
-// A row inside an annotation and the row of the declaration name one block:
-// matching both is not two candidates, and no longer anchor could tell them
-// apart — the block was simply unreachable by `whole_block`.
+// A row inside an annotation and the declaration's own row name one block:
+// matching both is one candidate, not two ambiguous ones.
 #[tokio::test]
 async fn a_whole_block_anchor_matching_two_rows_of_one_annotation_is_not_ambiguous() {
     let (_d, c) = ctx();

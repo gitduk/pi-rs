@@ -1,9 +1,9 @@
 //! Byte-anchored edits: the surface the edit tool speaks.
 //!
-//! An anchor is literal text found in the file, a landing is a byte range, and
-//! nothing is written unless every edit resolves against the original content.
-//! Lines matter in two places only: a block named by its first line, and the
-//! line numbers the echo reports.
+//! An anchor is literal text found in the file; a landing is the byte range
+//! it maps to, and nothing writes unless every edit resolves against the
+//! original content. Lines matter only for a block's first line and the line
+//! numbers reported back.
 
 use super::crop;
 use std::collections::BTreeMap;
@@ -59,8 +59,7 @@ pub struct Applied {
     pub content: String,
     pub landed: Vec<Landed>,
     /// The edits that emptied a line without taking its break, so a blank row
-    /// stands where it was: `new_string: ""` on an anchor that ends at the end
-    /// of a line. The tool says so rather than guessing the model's intent.
+    /// stands where it was: `new_string: ""` on an anchor ending at end-of-line.
     pub left_blank: Vec<usize>,
 }
 
@@ -166,9 +165,8 @@ pub fn apply(path: &str, content: &str, edits: &[Edit]) -> Result<Applied, Refus
     let crlf = body.contains("\r\n");
     let lines: Vec<&str> = body.lines().collect();
 
-    // Built on the first block anchor and kept for the rest: one parse however
-    // many whole-block edits the patch holds, and none at all when it holds
-    // just text, which is the common case.
+    // Parsed once and reused for later whole-block edits; skipped entirely
+    // when the patch is just text, the common case.
     let mut opens: Option<BTreeMap<usize, (usize, usize)>> = None;
     let mut placed: Vec<Placed> = Vec::new();
     for (index, edit) in edits.iter().enumerate() {
@@ -403,10 +401,8 @@ fn translate(text: &str, crlf: bool) -> String {
     out
 }
 
-/// A whole block's replacement text, spliced the way its lines were: the region
-/// is whole lines, so the new text takes the region's own line ending and the
-/// file's trailing-newline state is left as it was. An empty new text removes
-/// the lines and their break, leaving no blank behind.
+/// Keeps the region's line ending and trailing-newline state; empty `new`
+/// removes the lines and their break entirely.
 fn splice(region: &str, new: &str, term: &str) -> String {
     let kept = region.ends_with('\n');
     let normalized = new.replace("\r\n", "\n");
@@ -428,31 +424,25 @@ fn splice(region: &str, new: &str, term: &str) -> String {
     out
 }
 
-/// The block an anchor names: its bytes, and those bytes whole. The anchor is
-/// matched as a prefix of a block-opening line, with the `120-145:` a view
-/// prints stripped, since that is what gets copied back into it.
+/// The block an anchor names, as its bytes. Matched as a prefix of the
+/// opening line, after stripping any `120-145:` line-number prefix.
 fn block(
     path: &str,
-    // The rows that name a block, in row order, off one parse of the content.
     opens: &BTreeMap<usize, (usize, usize)>,
     body: &str,
     lines: &[&str],
     anchor: &str,
     index: usize,
 ) -> Result<(Range<usize>, String), Refusal> {
-    // The address a view prints leaves the line's own indentation on the
-    // text, which a prefix match against a trimmed opening line does not want —
-    // and the row it names is the one thing that tells two blocks opening on the
-    // same text apart, which is the whole reason the view prints it.
+    // The view's address strips indentation before matching the trimmed line;
+    // the row it names disambiguates blocks that open on the same text.
     let addressed = address(anchor).or_else(|| address(anchor.trim_start()));
     let (needle, named) = match addressed.filter(|(_, rest)| !rest.trim().is_empty()) {
         Some((row, rest)) => (rest.trim(), Some(row)),
         None => (anchor.trim(), None),
     };
     // One hit per block, not per row: every row an annotation spans names the
-    // same block, so two of them matching is not two candidates — the first row
-    // that names a block stands for it, and no later anchor could tell them
-    // apart anyway.
+    // same block, so multiple matching rows count as one candidate.
     let mut seen: Vec<(usize, usize)> = Vec::new();
     let mut hits: Vec<usize> = Vec::new();
     for row in opens.keys().copied() {
@@ -505,10 +495,8 @@ fn block(
     Ok((from..to, body[from..to].to_string()))
 }
 
-// The refusal hands over what the file does open, since the fix is copying one
-// of these back into the anchor. One line per block, off the row that block
-// opens on: a row inside an annotation names the same block and would offer a
-// line that is not the opening a patch writes.
+// Lists what the file does open, so the fix is copying one back into the
+// anchor. One line per block, keyed by its actual opening row.
 fn openings(lines: &[&str], opens: &BTreeMap<usize, (usize, usize)>) -> String {
     let mut starts: Vec<usize> = opens.values().map(|(start, _)| *start).collect();
     starts.sort_unstable();
@@ -537,9 +525,8 @@ fn openings(lines: &[&str], opens: &BTreeMap<usize, (usize, usize)>) -> String {
     }
 }
 
-/// The `120-145:` a view prints in front of a line, split off — the row it names
-/// first, and the text after it, which is what a model copies back along with
-/// the line itself.
+/// Splits the `120-145:` prefix a view prints from a line: the row it names,
+/// and the text after it.
 fn address(text: &str) -> Option<(usize, &str)> {
     let (head, rest) = text.split_once(':')?;
     let mut parts = head.split('-');

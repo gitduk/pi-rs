@@ -20,12 +20,8 @@ const FAILED: &str = "[tool error]";
 
 /// One exchange, from the request going out to the response coming back.
 ///
-/// Both wires go through this rather than calling a set of logging helpers at
-/// the right moments themselves. Sharing the words but not the control flow is
-/// how the two came to share a hole: `send().await?` returns on a refused
-/// connection, a DNS failure or a TLS failure without either wire noticing, so
-/// the journal showed a request and then nothing — the one class of failure a
-/// journal is most needed for. Owning the flow makes that unrecordable.
+/// Owns the whole flow rather than logging at scattered call sites: a bare
+/// `send().await?` can fail silently (DNS, TLS) without the journal seeing it.
 pub(crate) async fn exchange(
     format: &'static str,
     url: String,
@@ -58,9 +54,8 @@ pub(crate) async fn exchange(
                 target: "pi::wire",
                 format,
                 took_ms = began.elapsed().as_millis() as u64,
-                // As the trait object, so the journal unwinds the source chain.
-                // A reqwest error's own line says only "error sending request";
-                // `Connection refused` is two links down, and it is the answer.
+                // As the trait object, so the journal unwinds the source chain —
+                // reqwest's own line just says "error sending request".
                 error = &e as &dyn std::error::Error,
                 "unreachable"
             );
@@ -75,11 +70,8 @@ pub(crate) async fn exchange(
         return Ok(resp);
     }
 
-    // The refusal text in full where the level allows: providers put the real
-    // reason in it, and a status alone never says which of a dozen things
-    // went wrong. Capped so a giant page cannot flood the journal; the cut
-    // backs off to a digit boundary, so `overflow_limit` never reads a number
-    // halved by the cap itself.
+    // Full refusal text — only the provider's wording says what went wrong.
+    // Capped; the cut backs off to a digit boundary so `overflow_limit` stays intact.
     let body = resp
         .text()
         .await
@@ -106,10 +98,8 @@ pub(crate) async fn exchange(
 /// model id: identity is resolved once, into the spec.
 #[async_trait]
 pub trait Transport: Send + Sync {
-    // What this host owed and did not send, since the last time it was asked.
-    // Drained per turn and shown once per session, so a host quietly losing
-    // content is something the reader is told rather than something they have
-    // to go looking for.
+    // What this host owed and did not send since it was last asked. Drained
+    // per turn, so a host quietly losing content gets shown, not just logged.
     fn gaps(&self) -> Vec<String> {
         Vec::new()
     }
@@ -122,12 +112,7 @@ pub trait Transport: Send + Sync {
 }
 
 /// A `Gaps` shared between the transport that owns it and the stream it hands
-/// out. Cloneable, so the stream takes one rather than borrowing the transport.
-///
-/// The lock and its poison tolerance live here. They were four call sites that
-/// each had to get them right, and getting them wrong is silent: a reporter
-/// that cannot be reached reports nothing, which reads exactly like a host with
-/// nothing wrong.
+/// out. A poisoned lock still hands the reporter over.
 #[derive(Clone)]
 pub(crate) struct Shared(Arc<Mutex<Gaps>>);
 
@@ -138,10 +123,8 @@ impl Shared {
 
     /// The reporter, for the length of one frame.
     ///
-    /// Once per frame rather than once per field read: a malformed delta asks
-    /// twice, and a delta is the per-token path. A poisoned lock hands the
-    /// reporter over anyway — failing to report is never a reason to fail the
-    /// turn.
+    /// Locked once per frame, not per field: a delta is the per-token path.
+    /// Failing to report is never a reason to fail the turn.
     pub(crate) fn frame(&self) -> impl std::ops::DerefMut<Target = Gaps> + '_ {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -152,30 +135,15 @@ impl Shared {
     }
 }
 
-/// What a host owed this turn and did not deliver.
-///
-/// Deliberately not a schema check. Validating against the published protocols
-/// means carrying both of them and keeping them current — the same bet as a
-/// built-in model catalog, and it goes stale the same week a vendor ships. The
-/// question that needs no spec is narrower and the one that matters: the
-/// decoder reached for something, it was not there, and the turn came out
-/// smaller than the one the model produced. That only ever depends on what pi
-/// itself reads, so it cannot fall behind a vendor.
-///
-/// Both wires report through here rather than each logging in its own words.
-/// The two already shared a hole once by sharing the words and not the flow;
-/// a reader grepping for what a host got wrong should not have to know which
-/// transport was speaking.
+/// What a host owed this turn and did not deliver — not a schema check, just
+/// what the decoder reached for and didn't find.
 pub(crate) struct Gaps {
     format: &'static str,
-    // One line per (event, thing) for the life of the *session*, not the
-    // stream. A malformed delta otherwise repeats once per token and a missing
-    // field once per turn; a defect belongs to the host, and said every turn
-    // it teaches the reader to skip it.
+    // One line per (event, thing), for the *session*'s life, not the stream —
+    // said every turn, a host defect teaches the reader to skip it.
     said: BTreeSet<(String, String)>,
-    // Reported gaps waiting to reach the reader. The journal has them either
-    // way — this is the half that gets seen without being grepped for, which
-    // is the half that matters when every turn is quietly losing content.
+    // Gaps waiting to reach the reader. The journal has them either way; this
+    // is the half seen without being grepped for.
     pending: Vec<String>,
 }
 
@@ -234,7 +202,7 @@ impl Gaps {
     }
 
     /// Read a string field the frame owes. `None` says the host left it out,
-    /// and says so where a bare `?` used to drop the frame in silence.
+    /// rather than silently dropping the frame the way a bare `?` would.
     pub(crate) fn owed<'a>(
         &mut self,
         frame: &'a Value,

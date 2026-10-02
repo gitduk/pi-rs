@@ -8,8 +8,7 @@ use super::{DOUBLE_TAP, Ui, screen};
 use pi_core::store::keys::{Action, Mode};
 
 impl Ui {
-    // Back to Insert. The half-typed escape character goes with the mode: it
-    // belonged to a line nobody is commanding any more.
+    // Back to Insert; drop any half-typed escape char, it belonged to that mode.
     pub(super) fn leave_normal(&mut self) {
         if let Some(v) = &mut self.vim {
             v.mode = Mode::Insert;
@@ -18,8 +17,7 @@ impl Ui {
         self.show_mode();
     }
 
-    // The line, rewritten from nothing: `S`, or `cc` by its doubled spelling.
-    // Both leave, because what follows is typing.
+    // `S`/`cc`: clear the line and drop back to Insert, since typing follows.
     pub(super) fn change_line(&mut self) {
         self.editor.clear_line();
         self.leave_normal();
@@ -38,15 +36,8 @@ impl Ui {
         }
     }
 
-    // Put the mode where it can be seen: the shape of the caret, and the
-    // the prompt sigil where the theme gives the two modes different ones. It
-    // does not by default — one bar either way — because the caret is where
-    // the eye already is; a terminal that will not reshape it is what
-    // `prompt.normal` is for.
-    //
-    // This is what pays for the mode never resetting itself. A mode that
-    // persists across submitted lines and cannot be seen would be a trap;
-    // one that can be seen is just where you left it.
+    // Shows the mode via caret shape (and prompt icon, if themed) so a mode
+    // that persists across lines is visible, not a silent trap.
     pub(super) fn show_mode(&mut self) {
         // Three states, not two: vim off is not "Insert", and a caret shaped
         // for a mode nobody turned on is a change to somebody else's terminal.
@@ -61,13 +52,8 @@ impl Ui {
         self.screen.cursor_shape(normal);
     }
 
-    // Follow what the config says about the modal keys.
-    //
-    // Turning them off drops the state rather than parking it: coming back
-    // later in Normal, with no keystroke between having asked to go there,
-    // is the one surprise this has to rule out. Turning them off is also the
-    // only thing that changes the mode without a key — everything else keeps
-    // whichever mode was last asked for, submitted lines included.
+    // Turning modal keys off drops the state (not parks it), so coming back
+    // never resumes Normal without an intervening keystroke.
     pub(super) fn set_vim(&mut self, cfg: &pi_core::store::config::Vim) {
         match (&mut self.vim, cfg.enabled) {
             (slot @ None, true) => *slot = Some(Vim::new(cfg)),
@@ -78,8 +64,7 @@ impl Ui {
     }
 }
 
-// Whether a press lands inside the double-tap window of the previous one,
-// and records the press either way.
+// True if within the previous window; always records this press too.
 pub(super) fn double_tap(last: &mut Option<Instant>, now: Instant) -> bool {
     let hit = last.is_some_and(|p| now.duration_since(p) < DOUBLE_TAP);
     *last = Some(now);
@@ -90,35 +75,27 @@ pub(super) fn double_tap(last: &mut Option<Instant>, now: Instant) -> bool {
 pub(super) enum Typed {
     // It lands in the line, as it would with vim keys off.
     Insert,
-    // It closed the escape sequence: the half already on screen has to come
-    // back off, and the mode has changed.
+    // Closes the escape sequence: the half-typed char comes back off,
+    // mode changed.
     Escape,
-    // Normal mode. An unbound character commands nothing and types nothing —
-    // without this the mode would be a costume, every key still typing.
+    // Normal mode, unbound key: commands and types nothing — without this
+    // Normal would be a costume, since every key would still type.
     Ignore,
-    // Normal mode finished a doubled key (`dd`, `gg`, `cc`): the action it
-    // names, for the caller to answer.
+    // Normal mode, doubled key (`dd`, `gg`, `cc`) completed: the action for
+    // the caller to carry out.
     Command(Action),
 }
 
-// The modal keys' whole state: the mode that is up, the sequence that leaves
-// Insert, and the character that may be its first half.
-//
-// One struct rather than four fields on `Ui`: none of them means anything
-// without the others, and `Ui` already carries more loose state than it
-// should. `Ui` holds it as an `Option`, so vim being off is the absence of
-// the state rather than a flag beside it — "off, but in Normal" cannot be
-// written down.
+// Modal-key state, held as one `Option` on `Ui` rather than loose fields:
+// vim off is the absence of this, not a flag beside it.
 pub(super) struct Vim {
     pub(super) mode: Mode,
-    // The two characters that leave Insert, resolved once. `None` — an empty
-    // setting, or any other length — is no sequence, and with it no way into
-    // Normal at all.
+    // Two chars that leave Insert, resolved once from config. `None` means
+    // no valid sequence configured — no way into Normal at all.
     pub(super) escape: Option<(char, char)>,
     pub(super) window: std::time::Duration,
-    // The last character typed, and when. Lazy, like the double-taps: the
-    // character is on screen already and nothing is held pending, so the line
-    // is never a guess about a key that has not arrived.
+    // Last char typed, and when. Lazy like double-taps: nothing is held
+    // pending, so the line is never a guess at a key that hasn't arrived.
     pub(super) last: Option<(char, Instant)>,
 }
 
@@ -134,10 +111,8 @@ impl Vim {
         vim
     }
 
-    // Take what the config says about the sequence, resolving the two
-    // characters here rather than at every keystroke. Anything that is not
-    // exactly two of them is no sequence — the documented way to leave
-    // Normal unreachable while keeping the layer's bindings listed.
+    // Resolves the escape sequence from config once, not per keystroke.
+    // Anything but exactly two chars leaves Normal deliberately unreachable.
     pub(super) fn configure(&mut self, cfg: &pi_core::store::config::Vim) {
         self.escape = cfg.escape_pair();
         self.window = std::time::Duration::from_millis(cfg.escape_timeout_ms);

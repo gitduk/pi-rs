@@ -163,9 +163,8 @@ impl Tool for Grep {
                             return ignore::WalkState::Continue;
                         }
 
-                        // Searched lossily, not raw: one stray byte would make the
-                        // UTF-8 sink error out and drop the whole file in silence.
-                        // It also makes the tag identical to the one `read` emits.
+                        // Searched lossily: a stray byte would make the UTF-8 sink
+                        // error out and drop the file silently; also matches read's tag.
                         let text = String::from_utf8_lossy(&bytes);
 
                         let mut lines: Vec<(u64, String)> = Vec::new();
@@ -295,9 +294,8 @@ impl Tool for Grep {
             }
             ctx.note_view(&ctx.workspace.root().join(&h.path), &h.hash);
             let mut section = format!("{}\n", crate::rows::header(&h.path));
-            // The one view that prints addresses without spans: a match is
-            // rarely a construct's opening row, and a parse per hit file would
-            // cost more than a view that only points is worth.
+            // Prints addresses without spans: a match is rarely a construct's
+            // opening row, and parsing every hit file would cost more than it's worth.
             let spans = std::collections::HashMap::new();
             for (n, text) in &h.lines {
                 if shown >= limit {

@@ -1,8 +1,5 @@
-//! The bar over the input line: its rows drawn from the layout, and the
-//! script at `~/.pi/bar.rs` that may replace that layout.
-//!
-//! The script runs off the loop whenever what it is told changes, and on its
-//! own clock when it asks for one; the frame never waits on it.
+//! The bar over the input line: rows from the layout, or from the script
+//! at `~/.pi/bar.rs`, which the frame never waits on.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
@@ -26,7 +23,7 @@ const GAP: usize = 2;
 const TIMEOUT: Duration = Duration::from_secs(120);
 // A script asking for less would spend a process on every frame or two.
 const MIN_REFRESH: f64 = 0.5;
-// A failed run is tried again: the cause may have passed, or the file been fixed.
+// Retried: the cause may have passed, or the file been fixed.
 const RETRY: Duration = Duration::from_secs(5);
 
 /// What the bar reads off the lane in front, and what the script is told.
@@ -40,8 +37,8 @@ pub(super) struct Facts {
     pub worktree: Option<String>,
     /// Used against budget, in tokens, as the last turn left it.
     pub ctx: Option<(usize, usize)>,
-    /// What the session has spent, in dollars: turns that ended, not the one
-    /// streaming, so it moves a few times a run rather than every frame.
+    /// What the session has spent, in dollars: completed turns only, so it
+    /// moves a few times a run rather than every frame.
     pub spent: f64,
 }
 

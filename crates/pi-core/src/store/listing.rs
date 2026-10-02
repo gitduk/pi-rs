@@ -1,20 +1,14 @@
 //! The shape of a read-only answer: the rows a command has to show, before
 //! anyone lays them out.
 //!
-//! Here rather than beside `Step`, which carries one, because the store is
-//! where a shape several layers have to agree on lives — and a command table
-//! fills one in too (`store/keys/mod.rs`), which `input` could not be reached
-//! from without the two reading each other.
+//! Lives here rather than beside `Step` because `store/keys/mod.rs`'s
+//! command table also fills one in, and `input` can't be reached from there.
 
-/// A read-only answer, as rows of cells.
+/// A read-only answer, as rows of cells: the layout is decided by whoever
+/// draws it, not here.
 ///
-/// Cells rather than lines because the layout belongs to whoever draws it: how
-/// wide the columns end up is not knowable where the answer is built, and the
-/// answer outlives the frame it was made in.
-///
-/// One shape for every such answer — `/keys`, `/help`, `/resume`, `/worktree`,
-/// `/model`, `/status` — because they differ in what the cells say, not in how
-/// a row is read.
+/// One shape for every such answer (`/keys`, `/help`, `/resume`, `/worktree`,
+/// `/model`, `/status`) since they differ in content, not in how a row reads.
 #[derive(Debug, Default, PartialEq)]
 pub struct Listing {
     pub rows: Vec<Row>,

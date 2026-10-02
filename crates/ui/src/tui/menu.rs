@@ -21,21 +21,14 @@ use ratatui::widgets::ListItem;
 use std::time::Instant;
 
 impl Ui {
-    // A reply is up: it owns the space the menu draws in, and the completion
-    // list waits. Also what puts the menu's own keys in force while it is
-    // open — see `Menu` in `store::keys`.
+    // A reply is up: it owns the menu's space, and the completion list
+    // waits. Also forces the menu's own key layer while open.
     pub(super) fn overlay(&self) -> bool {
         self.reply.is_some()
     }
 
-    // What the line could still become: a completion while a command word is
-    // being typed, or — with the rewind selector open — the user messages a
-    // conversation can be rewound to.
-    //
-    // A run does not close it. The editor is a queue then, but `/help`,
-    // `/status` and `/model` answer on the spot and the rest queue as what they
-    // are, so the word being typed is still worth completing. `esc` reaches
-    // `run.interrupt` past the list — see `pi_core::store::keys::Menu`.
+    // What the line could become: a completion while a command word is
+    // typed, or (rewind selector open) a message to rewind to.
     pub(super) fn menu(&mut self) -> Vec<MenuEntry> {
         if self.overlay() {
             return Vec::new();
@@ -134,9 +127,8 @@ impl Ui {
             .collect()
     }
 
-    // The line the surface took from the user, onto the screen: the row its
-    // answer will land under. Called from `Tui::echo_sent` and nowhere else,
-    // because only the answer knows whether there is anything to land under.
+    // The submitted line onto the screen: the row its answer lands under.
+    // Called only from `Tui::echo_sent`, which alone knows if there's one.
     pub(super) fn submit(&mut self, view: &mut View, line: &str) {
         let rows = Row::prompt(line, &self.paint);
         view.surface.scrollback.extend(rows);
@@ -179,11 +171,8 @@ impl Ui {
                 return Asked::Own(Deed::Nothing);
             }
             TermEvent::Mouse(mouse) => {
-                // A reply is the topmost thing here, as it is for the keys: the
-                // wheel is its scrolling while it is up, never the transcript's
-                // underneath it. Everything else the mouse does still lands
-                // where it is drawn — the reply covers the menu, not the
-                // history above it.
+                // A reply is topmost, as for keys: the wheel scrolls it
+                // while up, never the transcript underneath.
                 if self.reply.is_some() {
                     let room = self.regions.menu.height as usize;
                     let width = self.screen.usable();
@@ -206,10 +195,8 @@ impl Ui {
                 }
                 return Asked::Own(Deed::Nothing);
             }
-            // Windows reports both press and release; acting on each would
-            // double every keystroke. Any key other than Esc breaks the
-            // rewind double-tap: an armed press that typing interrupted must
-            // not fire later.
+            // Windows reports both press and release; acting on both would
+            // double every keystroke. Any non-Esc key breaks the rewind double-tap.
             TermEvent::Key(k) if k.kind != KeyEventKind::Release => {
                 if k.code != KeyCode::Esc {
                     self.last_esc = None;
@@ -218,18 +205,14 @@ impl Ui {
             }
             _ => return Asked::Own(Deed::Nothing),
         };
-        // Browse mode takes the keyboard whole: its keys command where the
-        // view sits, and the editor's table has nothing on screen to aim at.
-        // A reply outranks it — it can open onto a browse the user never left,
-        // off the queue or the phone, and it is drawn over everything.
+        // Browse mode takes the keyboard whole — the editor's table has
+        // nothing on screen to aim at. A reply (drawn over everything) outranks it.
         if self.browsing && !self.overlay() {
             return self.browse_key(view, key);
         }
         let press = Press::of(key.code, key.modifiers);
-        // A reply counts as a menu: its own keys are the Menu bindings, and
-        // `menu()` is empty while it is open, so the layer has to
-        // be forced on. The layer is computed before `action`, not inside it:
-        // `menu()` mutates the @-completion cache while `keys` stays borrowed.
+        // A reply counts as a menu (its keys are the Menu bindings) and
+        // forces the layer on, computed here since `menu()` mutates state.
         let menu = if self.overlay() {
             Menu::On
         } else if self.menu().is_empty() {
@@ -257,12 +240,8 @@ impl Ui {
             v.last = None;
         }
 
-        // The reply is an answer drawn over the menu, not a mode over the
-        // keyboard. The keys it reads are its own — its scrolling, its
-        // dismissal, and the presses that mean what they mean wherever they are
-        // made — and a key that is none of them is someone typing the next
-        // line, which takes it down on the way past. Held for every press, a
-        // reply would swallow the letters of whatever was typed over it.
+        // The reply reads only its own keys (scroll, dismiss, global
+        // presses); anything else is typing and takes it down first.
         if self.reply.is_some() && !super::reply::owns(bound, key) {
             self.reply = None;
         }
@@ -292,9 +271,8 @@ impl Ui {
         match bound {
             Some(Action::AppCancel) => return self.interrupt_or_quit(running),
             Some(Action::LineSubmit) => {
-                // Enter while a menu is open runs what it highlights. The
-                // typed text is a prefix; the highlighted word is the intent.
-                // The menu reads the editor, so pick before draining it.
+                // Enter with a menu open runs what's highlighted, the typed
+                // text a mere prefix. Pick before draining the editor.
                 match self.highlighted() {
                     Some(MenuEntry::Message { id, .. }) => {
                         self.rewind.clear();
@@ -302,9 +280,8 @@ impl Ui {
                     }
                     Some(MenuEntry::Completion(c)) => {
                         let line = c.line;
-                        // The completion's line is what runs; the typed prefix
-                        // that produced it goes, so it cannot be re-submitted
-                        // as a stray prompt later.
+                        // The completion's line runs; the prefix that
+                        // produced it goes, so it can't resubmit as a stray prompt.
                         self.editor.take();
                         if input::recallable(&line, &self.commands) {
                             self.editor.remember(&line);
@@ -360,9 +337,8 @@ impl Ui {
                 return Asked::Own(Deed::Interrupt);
             }
             Some(Action::Rewind) => {
-                // Double Esc with an empty line opens the rewind selector.
-                // The first press only arms it; the second, inside the
-                // window, asks the loop for the session's messages.
+                // Double Esc on an empty line opens the rewind selector:
+                // first press arms it, second (in window) asks for messages.
                 if !self.editor.is_empty() {
                     return Asked::Own(Deed::Nothing);
                 }
@@ -393,9 +369,8 @@ impl Ui {
                         return Asked::Core(Intent::Builtin(Builtin::New));
                     }
                 } else {
-                    // The armed half goes with the line: a quick second press
-                    // must not start a new session on the line this one just
-                    // cleared.
+                    // The armed half goes with the line: a quick second
+                    // press must not start a session on the line just cleared.
                     self.last_l = None;
                     self.editor.clear();
                 }
@@ -475,9 +450,8 @@ impl Ui {
                     .toggle_current(&mut view.surface.scrollback);
             }
             Some(Action::ThinkFoldAll) => {
-                // Every group in the scrollback, the last one included, and
-                // the switch with them: one key presses the whole screen to a
-                // single state.
+                // Every group in the scrollback, last one included, and
+                // the switch with them: one key resets the whole screen.
                 view.surface.folds.flip_all(&mut view.surface.scrollback);
                 // A fold-all reflows groups above the view too; re-baseline.
                 view.surface.counted = None;
@@ -525,10 +499,8 @@ impl Ui {
             Some(Action::MenuDismiss) => {
                 let was_rewind = !self.rewind.is_empty();
                 self.rewind.clear();
-                // The completion list is recorded against the text, so any
-                // edit brings it back: this means "not that", not "never
-                // again". The rewind selector dismisses without recording,
-                // so the completion list stays available after it.
+                // Keyed to the text, so any edit brings the list back —
+                // "not that", not "never again". Rewind doesn't record this.
                 if !was_rewind {
                     self.dismissed_at = Some(self.editor.text().to_string());
                 }
@@ -539,9 +511,8 @@ impl Ui {
                 if let Some(c) = pi_core::store::keys::bare_letter(&key) {
                     match self.vim.as_mut().map(|v| v.typed(c, Instant::now())) {
                         Some(Typed::Ignore) => {}
-                        // The sequence's first half is already on screen: take
-                        // it back, so the line says what it means at every
-                        // point rather than only once the mode has changed.
+                        // The sequence's first half is on screen already;
+                        // take it back so the line always shows what it means.
                         Some(Typed::Escape) => {
                             self.editor.backspace();
                             self.show_mode();
@@ -573,9 +544,8 @@ impl Ui {
         Asked::Own(Deed::Nothing)
     }
 
-    // One key, two meanings, and the escalation travels with the binding
-    // rather than with Ctrl-C: stop the run, or — pressed twice inside the
-    // window — leave.
+    // One key, two meanings: stop the run, or — pressed twice inside the
+    // window — leave. The escalation lives with the binding, not Ctrl-C.
     fn interrupt_or_quit(&mut self, running: bool) -> Asked {
         if double_tap(&mut self.last_interrupt, Instant::now()) {
             return Asked::Core(Intent::Builtin(Builtin::Quit));
@@ -631,14 +601,8 @@ impl MenuEntry {
     }
 }
 
-// What the workspace-dependent completions answer with, each read the first
-// time one is asked for.
-//
-// Lazy because reading the sessions means opening every archive for this
-// workspace and listing the worktrees forks git, while most runs type neither
-// `/resume` nor `/worktree` — reading them up front was the whole of a
-// noticeable startup pause. Neither command's bare form comes through here;
-// both ask directly, as they always did.
+// What workspace-dependent completions answer with, read lazily: opening
+// every archive and forking git upfront was a noticeable startup pause.
 pub(super) struct Lists {
     pub(super) store: Store,
     pub(super) workspace: std::path::PathBuf,
@@ -679,24 +643,21 @@ impl Lists {
         })
     }
 
-    // What is known about the checkouts without asking git: `None` until
-    // something reads them, and nothing forks here either way. The bar reads
-    // this one, so a frame never waits for the list.
+    // What's known about the checkouts without asking git: `None` until
+    // read, and never forks. The bar reads this so a frame never waits.
     pub(super) fn worktrees_read(&self) -> Option<&[Choice]> {
         self.worktrees.get().map(Vec::as_slice)
     }
 
-    // A turn or a switch can change what either list would say — a session
-    // saved, a worktree the model added. Dropped rather than recomputed:
-    // whoever asks next pays, and most of the time nobody does.
+    // A turn or switch can change either list. Dropped, not recomputed —
+    // whoever asks next pays, and usually nobody does.
     pub(super) fn forget(&mut self) {
         self.sessions.take();
         self.worktrees.take();
     }
 
-    // Point at a workspace, dropping what the last one answered with. Both
-    // lists are keyed by it, so after a `/worktree` move neither is merely
-    // stale — each is another tree's.
+    // Points at a workspace, dropping the last one's answers — both
+    // lists are keyed by it, so after a move neither is merely stale.
     pub(super) fn at(&mut self, workspace: &std::path::Path) {
         self.workspace = workspace.to_path_buf();
         self.forget();

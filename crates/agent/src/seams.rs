@@ -36,9 +36,8 @@ pub trait Approver: Send + Sync {
 /// This layer says what it needs and the surface provides it; what a child
 /// spent travels back on the tool result instead.
 pub trait Archive: Send + Sync {
-    // A subagent has no screen, so its transcript is the only account of what
-    // it did. Called once with the whole transcript, whether the run finished
-    // or was cut short; `parent` is the session whose turn made the call.
+    // No screen, so the transcript is the only record. Called once with the
+    // whole transcript, finished or cut short; `parent` is the calling session.
     fn keep(&self, parent: &str, id: &str, session: Session);
 }
 
@@ -53,11 +52,9 @@ pub struct Fitted {
 
 /// Who pays for a turn: the model doing the work, and the wire it goes out on.
 ///
-/// A compactor is handed it because a summary is a model call like any other —
-/// written by the compactor's own summarizer when one is configured, and by
-/// this pair when none is. Handed in rather than kept, because a model switched
-/// mid-session has to take its summaries with it: a spec held from startup
-/// would send them to the endpoint and the key the session has left behind.
+/// Handed to the compactor rather than kept, because a summary is a model
+/// call too — a spec held from startup would send it to the endpoint and key
+/// a mid-session model switch already left behind.
 #[derive(Clone, Copy)]
 pub struct Working<'a> {
     pub transport: &'a dyn Transport,
@@ -66,12 +63,9 @@ pub struct Working<'a> {
 
 /// What a transcript is shrunk by when it outgrows the window.
 ///
-/// The loop measures and asks; the implementation decides what goes and what
-/// the summary says. Every method defaults to touching nothing, and that is the
-/// contract rather than a convenience: a transcript nobody shrinks is still a
-/// transcript, and the loop carries on with what it measured. Compaction buys
-/// room for the next turn — nothing in the loop needs an entry gone — so
-/// [`Untouched`] is a compactor like any other.
+/// The loop measures and asks; the implementation decides what goes. Every
+/// method defaults to touching nothing — a real contract, not a convenience,
+/// since the loop only ever needs the budget met — so [`Untouched`] qualifies.
 #[async_trait]
 pub trait Compactor: Send + Sync {
     /// Fit `session` into `budget` tokens if it is over, saying on `tx` what
@@ -125,15 +119,9 @@ impl Compactor for Untouched {}
 /// Lines said after the run began, waiting for the next point where the
 /// transcript can legally take one.
 ///
-/// Shared rather than a channel, because both ends need it: the run takes what
-/// is there at each seam, and the surface can still see what has not been
-/// taken — count it on the status line, hand it back when the run ends. A
-/// receiver is dropped by a run that was ending anyway, and a line sent into it
-/// in that instant is lost with nobody left to say so.
-///
-/// Nothing here waits. The run looks once a turn, at the one point where a user
-/// message may follow the results without stranding a `tool_use`, so there is
-/// nothing an await could bring forward.
+/// Shared, not a channel: the surface still needs to see what hasn't been
+/// taken yet (status line, hand-back at run end). Read once a turn, at the
+/// one seam a user message can follow results without stranding a `tool_use`.
 #[derive(Clone, Default)]
 pub struct Steer(Arc<Mutex<Vec<String>>>);
 
@@ -157,9 +145,8 @@ impl Steer {
         self.lock().is_empty()
     }
 
-    // A push and a take on a `Vec`, neither of which can panic, so the lock
-    // cannot in fact be poisoned. Recovering rather than unwrapping keeps a
-    // later one from taking the run down with it.
+    // Push and take on a `Vec` can't panic, so this lock can't actually be
+    // poisoned; recovering rather than unwrapping keeps one bad call local.
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<String>> {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
     }

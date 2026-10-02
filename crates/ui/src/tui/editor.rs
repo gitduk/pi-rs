@@ -77,12 +77,8 @@ impl Editor {
         }
         self.at = self.history.len();
     }
-    /// Hand over the line being composed, and clear to the bottom of recall.
-    ///
-    /// While Up is browsing history the composed line is parked in `draft`
-    /// and `text` shows a recalled one; a lane switch must keep the first,
-    /// or the half-typed prompt would still be lost to the switch. Nothing
-    /// is remembered.
+    /// Hand over the composed line (parked in `draft` while browsing
+    /// history), clearing back to the bottom of recall.
     pub fn take_composing(&mut self) -> String {
         let line = if self.at == self.history.len() {
             std::mem::take(&mut self.text)
@@ -100,9 +96,8 @@ impl Editor {
         self.cursor
     }
 
-    /// Replace `[start..end)` with `s`, the caret landing after it. For
-    /// applying an @-completion mid-line: `set_line` would strand the caret
-    /// at the end of whatever followed the token.
+    /// Replace `[start..end)` with `s`, caret landing after it. For an
+    /// @-completion mid-line — `set_line` would strand the caret at the end.
     pub fn splice(&mut self, start: usize, end: usize, s: &str) {
         self.text.replace_range(start..end, s);
         self.cursor = start + s.len();
@@ -171,9 +166,8 @@ impl Editor {
         self.cursor = self.word_end();
     }
 
-    /// Past this word and the space after it, so the caret lands where the
-    /// next word starts. `word_right` stops at the end of this one — the two
-    /// are vim's `w` and `e`, and only the second one existed.
+    /// Past this word and its trailing space, landing at the next word's
+    /// start — vim's `w`, as `word_right` is vim's `e`.
     pub fn word_next(&mut self) {
         let tail = &self.text[self.cursor..];
         let word = tail.len() - tail.trim_start_matches(|c: char| !c.is_whitespace()).len();
@@ -335,16 +329,10 @@ impl Editor {
         true
     }
 
-    /// The rows to paint and where the caret sits among them.
-    ///
-    /// Wrapping is done here rather than left to the terminal: the live region
-    /// is repainted by counting rows back, and a row the terminal wrapped on
-    /// its own is a row the count does not know about. Continuation rows
-    /// indent under the prompt, so a wrapped line stays aligned under the
-    /// first; the prompt's width is measured, never assumed.
+    /// The rows to paint and the caret's position among them. Wrapped here
+    /// (not by the terminal) so the live region's row-counting repaint works.
     pub fn view(&self, paint: &Paint, width: usize) -> (Vec<Line<'static>>, (u16, u16)) {
-        // A line starting with `!` is a shell command; the bang takes the
-        // prompt's place so the line reads `! cmd` rather than `┃ ! cmd`.
+        // `!` at the start is a shell command; the bang line uses `prompt_bang`.
         let bang = self.text.starts_with('!');
         let body = if bang {
             &self.text[1..]
@@ -526,9 +514,8 @@ mod tests {
         assert!(m.cursor < 4);
     }
 
-    // The first line of a multi-line buffer has nothing above it to move
-    // through, so Up hands over to the entry before it — and the last line
-    // hands over to the one after, the way a single-line buffer does.
+    // The first line has nothing above it to walk, so Up hands over to
+    // the entry before it — same for the last line and Down.
     #[test]
     fn a_multi_line_entry_is_walked_and_then_passed_on() {
         let mut e = Editor::default();

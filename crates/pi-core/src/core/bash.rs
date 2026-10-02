@@ -11,10 +11,6 @@ use tool::{Tool, ToolError};
 /// confuse: one is written to the transcript, the other drawn on the screen.
 pub struct Bashed {
     /// What the model reads: the command *and* its output.
-    ///
-    /// Storing only the command left the rebuilt scrollback printing
-    /// `Ran \`git status\`` as a prompt with the output indented under it —
-    /// the live path never did that, because it had the typed line.
     pub text: String,
     /// Said on screen only — `cancelled`, or why the runner refused. There
     /// is no entry to file, so there is nothing to rebuild from either.
@@ -25,8 +21,7 @@ pub struct Bashed {
 /// `bash` tool; `ctx` carries the token that lets Esc stop it.
 ///
 /// Free of `Core` so the surface can spawn it: holding `&mut Core` across the
-/// await pinned the whole loop, which is what left the `!` path with an event
-/// loop of its own. Recording the result is the caller's, and needs no await.
+/// await pinned the whole loop.
 pub async fn run_bash(ctx: &tool::Ctx, command: &str) -> Bashed {
     let refused = |flash: String| Bashed {
         text: String::new(),

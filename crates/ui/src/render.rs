@@ -424,16 +424,11 @@ pub fn fmt_delay(ms: u64) -> String {
     }
 }
 
-/// A run's line for one event, and for a tool that offers one, the rows of
-/// detail under it — one `Line` per screen row, because the caller decides
-/// what a row is: the interactive surface repaints a region and hands them
-/// over one at a time.
+/// A run's line for one event, plus detail rows for a tool that offers them —
+/// one `Line` per screen row, caller's to place.
 ///
-/// Both renderers call this, over the same naming (`named`): a
-/// tool call reads the same either way, and a second copy of the wording would
-/// drift on the first edit. `None` is the caller's to place — the two deltas,
-/// which are a fragment rather than a line, and `Done`, which is a status line
-/// the surface composes itself.
+/// Shared by both renderers so tool wording never drifts between them.
+/// `None` covers the two deltas and `Done`, which the surface composes itself.
 pub fn describe(
     event: &Event,
     p: &Paint,
@@ -441,9 +436,8 @@ pub fn describe(
 ) -> Option<Vec<ratatui::text::Line<'static>>> {
     let room = width.saturating_sub(2).max(20);
     let line = match event {
-        // The name and its argument in one span, through the same naming every
-        // other line that shows a call uses: this one is not a place to spell a
-        // tool differently.
+        // Same naming every line that shows a call uses — not a place to
+        // spell a tool differently.
         Event::ToolStart { name, args, .. } => Line::from(vec![
             p.span(&p.theme.muted, icons::PENDING_MARK),
             Span::raw(format!(" {}", named(name, &summarize(args)))),
@@ -622,9 +616,6 @@ impl Renderer {
     }
 }
 
-// Says what was given up, not just how much. A silent shrink looks like the
-// agent forgetting things for no reason.
-//
 // Public because the scrollback draws it too: a rebuild must read the same
 // line the live event did, and one function is the only way to promise that.
 pub fn compaction_line(r: &agent::Report) -> String {
@@ -663,11 +654,8 @@ pub fn compaction_line(r: &agent::Report) -> String {
     format!("compacted {} → {} tokens{detail}{warn}", r.before, r.after)
 }
 
-/// A tool and the argument its summary picked out, with the prefix the caller
-/// draws left off: a spinner while it runs, ⚙ on the phone, a mark once it has
-/// ended. The row a finished call lands as names it from the other side — the
-/// head of its result, through `tui::row`'s own rule — because what came back
-/// is not what was asked for.
+/// A tool name plus the one argument its summary picked out; the caller
+/// draws the prefix (spinner, ⚙, or a finished mark) itself.
 pub fn named(name: &str, summary: &str) -> String {
     if summary.is_empty() {
         name.to_string()

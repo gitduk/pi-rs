@@ -17,13 +17,8 @@ use pi_core::core::resolve::Resolved;
 use pi_core::driver::Origin;
 use pi_core::input::Intent;
 
-// Everything the terminal shows, and nothing the session knows.
-/// What one lane looks like on screen: its conversation, the stream filling
-/// it, where it is scrolled, and the half-typed line parked when the surface
-/// left it. The surface holds one per lane, keyed by the lane's token, so the
-/// lane list can reorder and drop lanes without a screen following the wrong
-/// one; everything on `Ui` around it is the one terminal, the one keyboard and
-/// whatever menu is open over them.
+/// One lane's screen: conversation, stream, scroll, and parked draft.
+/// Keyed by lane token, so lanes can reorder or drop without confusion.
 #[derive(Default)]
 pub struct View {
     // What this screen shows: a rewind replaces it whole.
@@ -31,14 +26,11 @@ pub struct View {
     // This run's readings and interaction state: it lives and dies with the
     // run, and `arm_view` resets it.
     pub(super) state: State,
-    // What arrived while the run was working, kept as intents rather than
-    // lines: their fate was settled at the door, and re-reading them on the
-    // way out would ask a question that has already been answered.
+    // What arrived while the run worked, kept as intents (not lines): their
+    // fate was settled at the door, so re-reading them wouldn't be right.
     pub(super) queued: Vec<Queued>,
-    // Whether this lane's opening block has been built. A rebuild builds the
-    // whole surface, banner not among it, and marks it drawn for that reason —
-    // neither an empty scrollback nor a zero `opened` can stand in for "never
-    // drawn" — and drawing it a second time would stack two banners on one lane.
+    // Whether the opening banner has been drawn; drawing it twice would
+    // stack two banners on one lane.
     pub(super) drawn: bool,
     // The model in force. Copied in before the run borrows the agent, which
     // is what puts it out of reach for the rest of the turn.
@@ -52,10 +44,8 @@ pub struct View {
 // and the layout between.
 #[derive(Default)]
 pub struct Surface {
-    // The conversation as the screen holds it: finished rows, oldest first,
-    // everything above the editor. Not a projection of the session — it also
-    // carries what only the screen ever knew, the banner and every notice a
-    // command or a warning left behind, interleaved where they happened.
+    // Finished rows, oldest first, above the editor. Not a pure session
+    // projection — also carries banners and notices only the screen knows.
     pub(super) scrollback: Vec<Row>,
     // The stream still writing the next row, and which kind it is.
     pub(super) stream: Stream,
@@ -69,48 +59,40 @@ pub struct Surface {
     // The rows the scrolled-up view measured last: growth folds into
     // `scroll`. `None` re-bases — a reflow must not move the view.
     pub(super) counted: Option<usize>,
-    // The id of the last entry this surface adopted into the scrollback.
-    // Entries beyond it are folded in through the A table as they commit, so
-    // live never waits on a rebuild to show what happened.
+    // Id of the last entry adopted into scrollback. Entries beyond it fold
+    // in as they commit, so live doesn't wait on a rebuild.
     pub(super) tail: Option<EntryId>,
 }
 
-// What this run is doing, as far as the screen knows. It ends with the run:
-// no tools running, no clock. What the run has cost is the lane's tally, which
-// outlives the screen it was drawn on.
+// What this run is doing, as far as the screen knows; ends with the run.
+// Cost tally lives on the lane, outliving this screen.
 #[derive(Default)]
 pub struct State {
-    // Calls in flight, plus ended calls whose entries are not adopted yet:
-    // their row parks until the commit checks it against what the entry
-    // itself derives to, and `abandon_tools` files the rest.
+    // Calls in flight, plus ended calls not yet adopted: parked until the
+    // commit checks them, `abandon_tools` files the rest.
     pub(super) tools: Vec<RunTool>,
-    // When the work in flight began, for the segment that times it. A clock
-    // and nothing else: whether a run is on is `Lane::turn`'s to say, and one
-    // field answering both left every ending path to put the clock back or
-    // leave a spinner running over a finished lane.
+    // When work began, for the timing segment. `Lane::turn` says whether a
+    // run is on; this field alone must not decide that.
     pub(super) started: Option<Instant>,
     // Whether this run has produced anything yet — a word, a thought, a call.
     // Once it has, Esc means stop rather than unsend.
     pub(super) committed: bool,
     // The run has been asked to stop and is still winding down.
     pub(super) stopping: bool,
-    // The retry the run is waiting out, worded for the status line; the next
-    // event of any other kind means the wait is over.
+    // The retry the run is waiting out, worded for the status line; any
+    // other event means the wait is over.
     pub(super) retry: Option<String>,
 }
 
-// The stream still writing itself into the screen, and the kind of line it
-// is completing. The model emits one interleaved sequence — a reasoning
-// delta and an answer delta never arrive together — so one buffer with one
-// kind is the whole state space: two half lines, one of each kind, cannot
-// be written down.
+// The stream still writing into the screen, tagged with which kind of
+// line it is completing — reasoning and answer deltas never interleave.
 #[derive(Default)]
 pub struct Stream {
-    // Which pipeline a completed line lands through: reasoning appends into
-    // the fold blocks, the answer goes through markdown into the scrollback.
+    // Which pipeline a completed line uses: reasoning folds into blocks,
+    // answer goes through markdown into scrollback.
     pub(super) kind: StreamKind,
-    // Model output with no newline after it yet. Kept live because it is
-    // still being written; a completed line goes straight to scrollback.
+    // Model output with no trailing newline yet, kept live while still
+    // being written; a completed line goes straight to scrollback.
     pub(super) text: String,
 }
 
@@ -132,19 +114,14 @@ pub(super) struct Queued {
 
 pub(super) type Views = std::collections::BTreeMap<u64, View>;
 
-// The screen one lane's token names, built on first sight: a lane the core
-// opened while the surface was busy with another has none yet. A screen whose
-// lane is gone goes unasked for until the next prune.
+// The screen for a lane's token, built lazily: a newly opened lane has
+// none yet. A screen whose lane is gone stays unasked-for until prune.
 pub(super) fn view_at(views: &mut Views, token: u64) -> &mut View {
     views.entry(token).or_default()
 }
 
-// The screen of the lane in front. Fields rather than `&mut self`, and the lane
-// rather than the core behind it: a caller holding this screen still reads and
-// writes the rest of the lane it belongs to.
-// What a lane's status line is drawn from: the numbers the events carried, and
-// the two they cannot say — when this turn started, and what is queued behind
-// it.
+// What a lane's status line is drawn from: what events can't say —
+// when the turn started, what's queued behind it.
 pub(super) fn snapshot(lane: &Lane, view: &View) -> Snapshot {
     lane.snapshot(
         &view.model,
@@ -153,13 +130,14 @@ pub(super) fn snapshot(lane: &Lane, view: &View) -> Snapshot {
     )
 }
 
+// Fields rather than `&mut self`: the caller still reads/writes the
+// rest of the lane this screen belongs to.
 pub(super) fn front_view<'a>(views: &'a mut Views, lane: &Lane) -> &'a mut View {
     view_at(views, lane.token())
 }
 
-// Drop the screens of lanes that are gone. A lane can be removed without the
-// surface being told — `/worktree` removes one to leave it — so this reads the
-// lane list rather than tracking it.
+// Drops screens for lanes that are gone. `/worktree` can remove a lane
+// without telling the surface, so this reads the lane list instead.
 pub(super) fn prune_views(core: &Core, views: &mut Views) {
     views.retain(|token, _| core.position_of(*token).is_some());
 }
@@ -188,11 +166,8 @@ pub(super) fn tail_of(session: &agent::session::Session) -> Option<EntryId> {
     session.entries().last().map(|e| e.id())
 }
 
-// The screen of a lane nobody has drawn yet: the banner naming what it stands
-// on. Both callers that can be the first to a lane need it — the one that moves
-// it in front, and the one that says something into a lane nobody is looking at
-// — because a rebuild replaces a screen it finds undrawn, and the row said into
-// it would go with the old drawing.
+// The screen for an undrawn lane, with the opening banner: a rebuild
+// replaces an undrawn screen, so any earlier row into it would be lost.
 pub(super) fn opened<'a>(views: &'a mut Views, lane: &Lane, paint: &Paint) -> &'a mut View {
     let view = view_at(views, lane.token());
     if !view.drawn {

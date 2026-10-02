@@ -19,13 +19,11 @@ use crate::text::clip;
 pub struct Stored {
     pub id: String,
     pub workspace: String,
-    /// Which model this session ran, as the endpoint names it. One name for
-    /// it everywhere now: the archive used to spell it differently from the
-    /// config and from the wire, and was the one place a reader could not tell
-    /// the three apart.
+    /// Which model this session ran, as the endpoint names it — one
+    /// consistent name across the archive, the config and the wire.
     pub model: String,
-    /// When the session began. Rewritten on every save it would be a
-    /// last-touched time under a name that says otherwise.
+    /// When the session began. Never rewritten on save — doing so would make
+    /// it a last-touched time under a name that says otherwise.
     pub created: u64,
     /// What the user calls this session. Ids are a timestamp and a pid, which
     /// nobody recognises a week later.
@@ -35,9 +33,8 @@ pub struct Stored {
     pub session: Session,
 }
 
-// A save as its parts, borrowed. `Stored` owns a deep copy of the session;
-// serializing through this keeps the same file without ever building one —
-// `save` is called from inside tool calls, several subagents at once.
+// A save as its parts, borrowed, so serializing never needs a `Stored`
+// clone — `save` runs from inside tool calls, several subagents at once.
 #[derive(Serialize)]
 struct StoredRef<'a> {
     id: &'a str,
@@ -50,18 +47,14 @@ struct StoredRef<'a> {
     session: &'a Session,
 }
 
-// An archive read only as far as the listing needs.
-//
-// The identity fields are required, exactly as `Stored` requires them, so a
-// session that lists is a session that loads. Everything under them is
-// optional and shallow: `serde` skips a field no struct here names without
-// building it, and what it skips is the whole of the transcript.
+// An archive read only as far as the listing needs: identity fields
+// required like `Stored`'s, everything else optional and left unbuilt.
 #[derive(Deserialize)]
 struct Peek {
     id: String,
     workspace: String,
-    // Unused, and required anyway: it is what separates an archive this build
-    // can resume from one written before the provider rename.
+    // Unused, and required anyway: it's what separates an archive this
+    // build can resume from an incompatible one.
     #[allow(dead_code)]
     model: String,
     #[serde(default)]
@@ -123,13 +116,10 @@ pub struct ResumeChoice {
 const RESUME_WIDTH: usize = 60;
 
 impl ResumeChoice {
-    /// What a row calls this session: the name the user gave it, then the
-    /// first thing it was asked. The name leads because it is the handle —
-    /// it was given precisely because a first question stops meaning anything
-    /// a week later — and the question follows as what the name was given to.
+    /// What a row calls this session: the name, if any, then the first
+    /// question — named because a first question stops meaning much later.
     ///
-    /// Here rather than at each surface, because both offer the same sessions
-    /// and a row that read two ways is how a user picks the wrong one.
+    /// Here, not at each surface, so a session reads the same way everywhere.
     pub fn label(&self) -> String {
         let prompt = self.prompt.trim();
         let name = self
@@ -157,9 +147,8 @@ impl Stored {
     }
 }
 
-// A session whose workspace is gone is unreachable, but a path can be absent
-// for a morning as well as for good. Nothing younger than this is swept, so
-// an unmounted disk costs a delay and never a transcript.
+// A path can be absent for a morning as well as for good, so nothing
+// younger than this is swept — an unmounted disk costs a delay, not a transcript.
 const UNREACHED_KEEP: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 60 * 60);
 
 // Just enough of an archive to say which tree it belongs to.
@@ -195,18 +184,9 @@ pub fn new_id() -> String {
     format!("{}-{}-{nth}", now(), std::process::id())
 }
 
-// The transcript one session directory holds. Named once: four readers look
-// it up, and one of them naming it differently is a session that quietly
-// stops being found.
-/// A path as a single directory name, for grouping a machine's state by
-/// workspace: every character that is not a letter or a digit becomes `-`, so
-/// `/home/u/pi-rs` is `-home-u-pi-rs`. Claude Code buckets its projects the
-/// same way, and that fold is not injective here either — `/a/b` and `/a-b`
-/// land in one bucket — which is accepted rather than solved: what a bucket
-/// holds is read off the workspace each transcript records, never off its
-/// name. Distinct from `file_stem` (which mints `_` for the same characters)
-/// because the two name different things: a file a session owns, and the
-/// bucket that groups them.
+/// A path as a single directory name: non-alphanumeric becomes `-`. Not
+/// injective (`/a/b` and `/a-b` collide), accepted since a bucket's contents
+/// are read off each transcript's own workspace field, never off its name.
 pub fn key_of(path: &Path) -> String {
     path.display()
         .to_string()
@@ -215,6 +195,8 @@ pub fn key_of(path: &Path) -> String {
         .collect()
 }
 
+// Named once: four readers look it up, and naming it differently in one
+// would be a session that quietly stops being found.
 const TRANSCRIPT: &str = "session.json";
 // Beside a session's transcript: the subagents its turns called, one file each.
 const SUBAGENTS: &str = "subagents";
@@ -244,9 +226,8 @@ fn write(
         // the write, not after: no moment when the data sits world-readable.
         let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
     }
-    // Serialized by reference, straight into the file: a transcript is
-    // megabytes by the end, and a `Stored` clone plus a `to_vec` buffer is
-    // a second full copy that several parallel subagents each pay for.
+    // Serialized by reference: a transcript is megabytes by the end, and
+    // cloning it plus buffering would cost every parallel subagent a copy.
     let stored = StoredRef {
         id,
         workspace: workspace.display().to_string(),
@@ -264,9 +245,8 @@ fn write(
     Ok(path.to_path_buf())
 }
 
-// The transcripts one bucket holds, one per session in that workspace. The
-// bucket also holds `history`, which is a file, and asking for a transcript
-// inside each entry is what skips it.
+// One transcript per session directory in the bucket; asking for the
+// transcript inside each entry skips the bucket's own `history` file.
 fn bucket_transcripts(bucket: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(bucket) else {
         return Vec::new();
@@ -278,9 +258,8 @@ fn bucket_transcripts(bucket: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-// The workspace a transcript says it was saved under, or None when it cannot
-// be read. The record inside the file is the authority on who a session
-// belongs to; the bucket name only encodes the path, and lossily.
+// The workspace a transcript says it was saved under: the record inside
+// is authoritative, since the bucket name only encodes the path lossily.
 fn belongs(transcript: &Path) -> Option<Belongs> {
     let text = std::fs::read_to_string(transcript).ok()?;
     serde_json::from_str(&text).ok()
@@ -303,20 +282,17 @@ impl Store {
         self.root.join(key_of(workspace))
     }
 
-    /// What `k` recalls in this workspace. Beside the transcripts rather than
-    /// in a tree of its own: it answers to the same key, and it stops meaning
-    /// anything at the same moment they do.
+    /// What `k` recalls in this workspace, kept beside the transcripts
+    /// since it answers to the same key and expires with them.
     ///
-    /// Per workspace and not per session on purpose — the line you are
-    /// reaching back for is usually one you typed before `/new`.
+    /// Per workspace, not per session: what you're reaching back for is
+    /// usually something typed before `/new`.
     pub fn history_path(&self, workspace: &Path) -> PathBuf {
         self.dir_of(workspace).join("history")
     }
 
-    /// Where a session's journal is written. Beside its transcript, so that
-    /// dropping the session drops the record of how it went with it — the two
-    /// used to live in different trees under different rules, and a swept
-    /// bucket left its logs behind for a fortnight.
+    /// Where a session's journal is written, beside its transcript, so
+    /// dropping the session drops the record of how it went with it.
     pub fn journal_path(&self, workspace: &Path, id: &str) -> PathBuf {
         self.dir_of(workspace)
             .join(tool::state::file_stem(id))
@@ -328,9 +304,8 @@ impl Store {
         &self.root
     }
 
-    // Every bucket under the store root, each with its transcripts. The
-    // sweep and the removal walk the same tree; they differ in what they do
-    // with each bucket, not in how they find one.
+    // Every bucket with its transcripts; the sweep and the removal walk
+    // the same tree and differ only in what they do with each bucket.
     fn buckets(&self) -> Vec<(PathBuf, Vec<PathBuf>)> {
         let Ok(dirs) = std::fs::read_dir(&self.root) else {
             return Vec::new();
@@ -401,10 +376,8 @@ impl Store {
         )
     }
 
-    /// Load a transcript by id. `id` is unique across workspaces, so the
-    /// bucket is found by searching the store's directories rather than by
-    /// knowing which workspace saved it. Sessions saved before the bucketed
-    /// layout sit flat under the root; the search falls back to that path.
+    /// Load a transcript by id: `id` is unique across workspaces, so this
+    /// searches the store's directories rather than needing to know which one saved it.
     pub fn load(&self, id: &str) -> Result<Stored> {
         let stem = tool::state::file_stem(id);
         let mut match_: Option<PathBuf> = None;
@@ -429,9 +402,7 @@ impl Store {
     }
 
     // Every session recorded for this workspace, newest first, read as
-    // shallowly as the answer allows. Buckets written under the old
-    // separator-folding key are refiled at startup, so they show up here
-    // under their workspace's key as usual.
+    // shallowly as the answer allows.
     fn peek(&self, workspace: &Path) -> Vec<Peek> {
         let want = workspace.display().to_string();
         let mut found: Vec<Peek> = bucket_transcripts(&self.dir_of(workspace))
@@ -454,25 +425,17 @@ impl Store {
             .collect();
         let mut seen = HashSet::new();
         found.retain(|p| seen.insert(p.id.clone()));
-        // Newest by last activity, not by creation. `/resume` is reached for
-        // to pick up where you left off, and a session started last week and
-        // worked on this morning is the one you mean.
-        //
-        // The id breaks a tie. It has to break somehow — a stamp is seconds,
-        // and two sessions touched in the same one are common — and left to
-        // `read_dir` the answer is whatever order the filesystem hands back,
-        // which differs between machines and between runs on one.
+        // Newest by last activity, not creation — `/resume` wants where you
+        // left off. Ties break by id, since a stamp is only seconds.
         found.sort_by(|a, b| b.touched().cmp(&a.touched()).then_with(|| b.id.cmp(&a.id)));
         found
     }
 
-    /// Sweep buckets nobody can reach. `/resume` lists one workspace's
-    /// sessions, so a workspace that is gone has taken the only way back to
-    /// them with it — a removed worktree, a deleted checkout.
+    /// Sweeps buckets whose workspace is gone — a removed worktree, a
+    /// deleted checkout — since `/resume` has no other way back to them.
     ///
-    /// Reachability alone would not be safe: a path is also absent when a disk
-    /// is not mounted this morning, and that must not cost a transcript. Age is
-    /// what separates the two, so nothing recent goes whatever the path says.
+    /// Reachability alone isn't safe: an unmounted disk looks gone too. Age
+    /// is what tells the two apart.
     pub fn prune(&self) {
         self.prune_older_than(UNREACHED_KEEP);
     }
@@ -482,10 +445,8 @@ impl Store {
     fn prune_older_than(&self, keep: std::time::Duration) {
         let now = std::time::SystemTime::now();
         for (bucket, transcripts) in self.buckets() {
-            // Nothing here says which tree this bucket belongs to, so nothing
-            // here can say it is gone. `remove_dir` takes the bucket only if it
-            // is genuinely empty: one holding recall and no transcripts is
-            // still somebody's, and is left alone.
+            // No transcripts here means nothing says whether the tree is
+            // gone; `remove_dir` only takes a genuinely empty bucket.
             if transcripts.is_empty() {
                 let _ = std::fs::remove_dir(&bucket);
                 continue;
@@ -500,12 +461,8 @@ impl Store {
             if recent {
                 continue;
             }
-            // Per transcript, never per bucket: the key is a fold, so two
-            // trees `/a/b` and `/a-b` share one bucket, and one of them going
-            // away must not take the other's transcripts with it. A bucket
-            // goes whole only when every transcript in it was recorded under
-            // a path that is gone — which still takes a stale copy of recall
-            // with it, unreachable either way.
+            // Per transcript, not per bucket: two trees can fold to one
+            // bucket, so one going away must not take the other's sessions.
             let mut all_gone = !transcripts.is_empty();
             for transcript in &transcripts {
                 match workspace_of(std::slice::from_ref(transcript)) {
@@ -522,15 +479,11 @@ impl Store {
             }
         }
     }
-    /// Remove the records recorded under `root` — a checkout being removed
-    /// takes its transcripts and journals with it now, rather than after the
-    /// sweep's month of grace. Returns how many transcripts went, so the
-    /// removal can say what it did.
+    /// Removes the records under `root` immediately, rather than waiting
+    /// for the sweep's month of grace. Returns how many transcripts went.
     ///
-    /// One session at a time rather than whole buckets: the transcripts, not
-    /// the bucket name, are the authority on what a bucket holds — so a
-    /// bucket goes whole only when every transcript in it was recorded under
-    /// `root`.
+    /// One session at a time: a bucket goes whole only when every
+    /// transcript in it was recorded under `root`.
     pub fn drop_under(&self, root: &Path) -> usize {
         let mut dropped = 0;
         for (bucket, transcripts) in self.buckets() {
@@ -624,11 +577,8 @@ mod tests {
         Session::from_messages(messages)
     }
 
-    // Set what `touched()` reads — the last entry's stamp.
-    //
-    // A stamp is seconds, so archives saved in one second tie, and a tie is
-    // settled by the id rather than by recency. Forced through the JSON
-    // because an entry's stamp is the session's to set, not a caller's.
+    // Sets what `touched()` reads. Forced through raw JSON because an
+    // entry's stamp is the session's to set, not a caller's.
     fn touched_at(store: &Store, workspace: &Path, id: &str, at: u64) {
         let path = store.path_of(workspace, id);
         let mut raw: serde_json::Value =
@@ -651,9 +601,8 @@ mod tests {
         Message::tool_results(vec![llm::message::ToolResult::text("c1", "read", "body")])
     }
 
-    // Unreachability is not enough on its own: a checkout that is merely
-    // unmounted looks exactly like one that was removed, and only the second
-    // is a reason to drop a transcript. Age is what tells them apart.
+    // Unreachable isn't enough alone: an unmounted checkout looks like a
+    // removed one. Age is what tells them apart.
     #[test]
     fn a_bucket_goes_when_its_tree_is_gone_and_not_before() {
         let tmp = tempfile::tempdir().unwrap();
@@ -680,10 +629,8 @@ mod tests {
             "nothing can reach a bucket whose tree went"
         );
     }
-    // Two trees whose names fold to one bucket share it, so pruning has to
-    // judge each transcript by the workspace it records. Judging the bucket
-    // by whichever transcript came first would take a live tree's sessions
-    // with the one that went.
+    // Two trees that fold to one bucket share it, so pruning must judge
+    // each transcript by its own workspace, not the bucket as a whole.
     #[test]
     fn pruning_a_shared_bucket_spares_the_tree_that_is_still_there() {
         let tmp = tempfile::tempdir().unwrap();
@@ -715,10 +662,8 @@ mod tests {
         );
     }
 
-    // `/worktree rm` drops a tree's buckets outright — transcripts, journals
-    // and recall — where the sweep only waits out the month of grace. A run
-    // started in a subdirectory of the tree belongs to it too, and a sibling
-    // tree's records must survive.
+    // `/worktree rm` drops a tree's buckets immediately rather than
+    // waiting for the sweep; a sibling tree's records must survive.
     #[test]
     fn drop_under_removes_the_buckets_of_one_checkout_and_no_others() {
         let tmp = tempfile::tempdir().unwrap();
@@ -740,11 +685,8 @@ mod tests {
         assert!(store.load("in-deep").is_err());
         assert!(store.load("in-sibling").is_ok());
     }
-    // Two trees that fold to one bucket key (`feature-x` and `feature/x`)
-    // share that bucket, the way they do under Claude Code's project
-    // buckets. Removing one still must not take the other's sessions with
-    // it: which bucket a transcript sits in says nothing, the workspace it
-    // records says everything.
+    // Two trees folding to one bucket key share it; removing one must not
+    // take the other's — the recorded workspace decides, not the bucket.
     #[test]
     fn drop_under_spares_a_sibling_that_folds_to_the_same_bucket() {
         let tmp = tempfile::tempdir().unwrap();
@@ -890,11 +832,8 @@ mod tests {
         assert!(store.latest(std::path::Path::new("/nowhere")).is_err());
     }
 
-    // A path folded to one directory name, and the fold is deliberately not
-    // injective: `/home/u/pi-rs` and `/home/u/pi/rs` share a bucket the way
-    // they do under Claude Code's project buckets. Accepted, because the
-    // transcripts inside carry the workspace each was recorded under and the
-    // bucket name is never read as the answer.
+    // Deliberately not injective — `/home/u/pi-rs` and `/home/u/pi/rs`
+    // share a bucket; accepted, since the bucket name is never read as the answer.
     #[test]
     fn a_workspace_key_is_its_path_with_every_separator_dashed() {
         use std::path::Path;
@@ -943,9 +882,8 @@ mod tests {
             .save("z", std::path::Path::new("/w"), "m", None, 1, &log)
             .unwrap();
 
-        // Recency, decided on the field the sort reads. The expected order is
-        // the reverse of the ids' own, so a list that fell back to breaking
-        // ties by id would fail here rather than look right by accident.
+        // Expected order is the reverse of the ids' own, so a list that
+        // fell back to breaking ties by id would fail, not pass by accident.
         touched_at(&store, std::path::Path::new("/w"), "a", 300);
         touched_at(&store, std::path::Path::new("/w"), "b", 200);
         touched_at(&store, std::path::Path::new("/w"), "z", 100);

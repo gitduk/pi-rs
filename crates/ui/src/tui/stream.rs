@@ -32,8 +32,7 @@ impl Ui {
         }
     }
 
-    // `say` in the muted voice, for the callers that used to hand a painted
-    // string through it.
+    // `say` in the muted voice.
     pub(super) fn say_muted(&mut self, view: &mut View, line: impl Into<String>) {
         for text in line.into().lines() {
             let line = Line::from(self.paint.span(&self.paint.theme.muted, text));
@@ -52,14 +51,8 @@ impl Ui {
         view.surface.scrollback.push(Row::notice(line));
     }
 
-    // Answer one keypress on the bar row and leave nothing behind.
-    //
-    // The scrollback is a transcript, and what a press did *not* do is not
-    // part of one — sent there it also stacked a row per press, which is how
-    // holding the step key in a single checkout wrote a screenful of one line.
-    // Muted here rather than at the callers, which had drifted apart on it.
-    // A flash is a short answer nobody reads back; anything longer, or worth
-    // copying, belongs in the scrollback instead.
+    // A short answer nobody reads back, for the bar row: no scrollback
+    // entry, since what a press did *not* do isn't part of the transcript.
     pub(super) fn flash(&mut self, line: impl Into<String>) {
         self.flash = Some((line.into(), Instant::now()));
     }
@@ -110,9 +103,8 @@ impl Ui {
             self.close(view);
             view.surface.stream.kind = kind;
             if reasoning {
-                // A new reasoning block: `close` just settled the previous
-                // one; this one gets a fresh id and joins the last group, or
-                // starts one.
+                // `close` settled the previous block; this one joins the last
+                // group or starts one.
                 view.surface.folds.start(&mut view.surface.scrollback);
             }
         }
@@ -158,45 +150,31 @@ impl Ui {
                 // Still running as far as the screen is concerned: `turn`
                 // clears the clock only once the loop returns.
                 let snap = snapshot(lane, view);
-                // Asked now rather than at every draw: a run whose segments
-                // all had nothing to say leaves no row, and a blank one is
-                // worse than none.
+                // A run whose segments all had nothing to say leaves no row.
                 let parts = status::parts(&self.status, &snap);
                 if !parts.is_empty() {
-                    // Filed, not just drawn: the numbers are the run's own and
-                    // nothing else holds them, so a row that was not filed is
-                    // one a rebuild cannot draw.
+                    // Filed, not just drawn: nothing else holds these numbers,
+                    // so a rebuild could not draw an unfiled row.
                     let line = parts.join(icons::PART_SEP);
                     self.file_screen(lane, view, &line);
                 }
             }
-            // A warning about the turn itself: the prompt was reshaped, the
-            // reply came back short, a field the host owes was never sent.
-            // Filed the same way — it is the answer being degraded, and a run
-            // that quietly came back smaller is exactly the one worth finding
-            // again later. It is not news to the model, which is why nothing
-            // goes to the wire. Drawn muted like its archived half is, rather
-            // than in `describe`'s red mark: the entry holds text, so a
-            // rebuild could not give the mark its colour back.
+            // A warning about the turn — reshaped prompt, short reply, dropped
+            // field. Filed and drawn muted, since a rebuild can't recolor it.
             Event::Warning(w) => {
                 self.close(view);
                 let line = format!("{} {w}", icons::WARN_MARK);
                 self.file_screen(lane, view, &line);
             }
-            // What the compaction gave up. The numbers live in the pass's own
-            // report and nowhere else — the record the session keeps holds what
-            // went, not what it cost — so they are filed as they were worded.
+            // What compaction gave up; the numbers live only in the pass's
+            // own report, so they're filed as worded here.
             Event::Compacted(r) => {
                 self.close(view);
                 let line = render::compaction_line(r);
                 self.file_screen(lane, view, &line);
             }
-            // A call's two events are one line here: the start either hands
-            // the call to the group above or takes a line in the live
-            // region (where the spinner can animate it), and the end settles
-            // that line to the ✗/✓ mark it lands with. Parallel calls each
-            // hold a place of their own, matched back by id because they end
-            // out of order.
+            // A call's two events are one line here: start takes a place in
+            // the group or live region; end settles it, matched back by id.
             Event::ToolStart { id, name, args, .. } => {
                 self.close(view);
                 view.surface.folds.ask(id, args);
@@ -215,23 +193,20 @@ impl Ui {
                 preview,
             } => {
                 self.close(view);
-                // Not a row yet: the row the entry will adopt parks here
-                // until the committed entries arrive, and adoption checks it
-                // against what the entry itself derives to.
+                // Parked until the entry commits; adoption checks it against
+                // what the entry derives to.
                 if let Some(t) = view.state.tools.iter_mut().find(|t| t.id == *id) {
                     t.done = Some(Row::result(!*is_error, name.clone(), preview.clone()));
                 }
             }
-            // The transcript gained entries. Derive their rows through the A
-            // table, check them against the pending live-region lines, and
-            // file them: the event carries state, never drawing instructions.
+            // New entries: derive rows via `f_entry`, check them against
+            // pending live-region lines, and file — never draw directly.
             Event::Committed { entries } => {
                 self.close(view);
                 self.adopt(view, entries);
             }
-            // Transport news, not a step of the answer: the wait goes on the
-            // status line, the reason — often a whole error body — in a row
-            // of its own where it can be read in full.
+            // Transport news, not part of the answer: wait goes on the
+            // status line, the reason in its own row for full reading.
             Event::Retrying {
                 attempt,
                 delay_ms,
@@ -255,11 +230,8 @@ impl Ui {
         }
     }
 
-    // A row for this lane's screen and nothing else: filed so a rebuild draws
-    // it too, and drawn here so it shows now. One function because the two
-    // halves have to be the same row — and because the cursor that says what
-    // this screen has drawn is this one's to move: the entry is drawn as it is
-    // filed, so an adopt that found it above the cursor would draw it again.
+    // Files this lane's row and draws it now, so a rebuild draws the same
+    // thing; moves the tail cursor here so a later adopt won't redraw it.
     pub(super) fn file_screen(&self, lane: &mut Lane, view: &mut View, line: &str) {
         let filed = lane.push_screen(line);
         view.surface
@@ -270,10 +242,8 @@ impl Ui {
         }
     }
 
-    // A run that ended without answering a call leaves its animated row
-    // dangling. The call's own end event is never sent — a cancelled run
-    // returns before its results are reported — so give the scrollback the
-    // start line the row stood for and clear the row.
+    // A run that ended without answering a call leaves its row dangling
+    // (the call's own end event is never sent), so file the start line.
     pub(super) fn abandon_tools(&mut self, view: &mut View) {
         for t in std::mem::take(&mut view.state.tools) {
             view.surface.folds.take_asked(&t.id);
@@ -284,11 +254,8 @@ impl Ui {
         }
     }
 
-    // Fold freshly committed entries into the scrollback through the A table
-    // itself, and retire the pending live-region lines they supersede. The
-    // two lines are built from different halves — the event's facts and the
-    // entry's content — so their equality is the drift alarm the
-    // two-producer layout used to lack.
+    // Folds freshly committed entries through `f_entry`, retiring the
+    // pending live-region lines they supersede — checked for drift.
     pub(super) fn adopt(&self, view: &mut View, entries: &[LogEntry]) {
         let width = self.screen.usable();
         for entry in entries {
@@ -314,9 +281,8 @@ impl Ui {
         }
     }
 
-    // Retire the row a `ToolEnd` parked, checking it against the row the
-    // committed entry derives to. Equality is expected; anything else is
-    // drift the old layout shipped silently.
+    // Retires the row `ToolEnd` parked, checked against what the entry
+    // derives to; disagreement is drift, caught only in debug builds.
     fn check_pending(&self, view: &mut View, call: &str, row: Option<&Row>, width: usize) {
         let Some(at) = view.state.tools.iter().position(|t| t.id == call) else {
             return;
@@ -334,10 +300,8 @@ impl Ui {
     pub(super) fn flush(&mut self, lane: &Lane, view: &mut View) {
         let menu = self.menu();
         let width = self.screen.usable();
-        // Browse mode is the conversation alone: the thinking, the calls, the
-        // notices and the editor itself all go, and one predicate says so. The
-        // tally that follows the scroll and the window that draws it read the
-        // same one, so a scrolled-up browse measures what it shows.
+        // Browse mode is the conversation alone (no thinking, calls, notices,
+        // editor); the tally and window share this one predicate.
         let browse = self.browsing;
         let keep = move |row: &Row| !browse || row.is_conversation();
         let mut bar = self.bar_lines(&Facts::of(lane), &snapshot(lane, view), width);
@@ -361,17 +325,8 @@ impl Ui {
         let input_view: Vec<Line<'static>> =
             input.into_iter().skip(editor_top).take(editor_h).collect();
         let caret_in_view = (caret.0 as usize).saturating_sub(editor_top);
-        // From the bottom up: the input line is pinned, the menu sits above
-        // it, and the scrolled history fills what is left. The caret's row
-        // therefore depends only on the pinned rows, never on how the
-        // history wraps.
-        // One space, one thing in it: both draw over the menu, and the
-        // surface holds one at a time — the reply first, then whatever the
-        // line is completing to.
-        // Both branches leave the bar its row: a menu tall enough to take it
-        // would drop whatever that row is saying. The reply is asked for no
-        // more than that, and answers in rows rather than lines — it wraps
-        // what it shows itself, so the count and the drawing agree.
+        // Bottom-up: input pinned, menu above it (reply or completions, one
+        // at a time), history fills the rest — bar always keeps its row.
         let room = (self.screen.height as usize).saturating_sub(editor_h + bar_h + 1);
         let reply = self.reply.as_ref().map(|r| r.view(room, width));
         let menu_h = if let Some(reply) = &reply {
@@ -381,15 +336,13 @@ impl Ui {
         } else {
             menu.len().min(room)
         };
-        // Every pinned row, the bar's included: this is what `Fill(1)` will
-        // be left with, and `Rows` fills top-down — a row over that count is
-        // dropped off the bottom, where the newest one is.
+        // Every pinned row, bar included: what `Fill(1)` is left with;
+        // `Rows` fills top-down and drops overflow off the bottom (newest).
         let hist_view = (self.screen.height as usize)
             .saturating_sub(editor_h + menu_h + bar_h)
             .max(1);
-        // The group the calls in flight fold into, when it is the last
-        // thing in the scrollback: its line is where they show, so they are
-        // its to draw and the live block leaves them alone.
+        // The group live calls fold into, when it's the last scrollback
+        // row: theirs to draw, so the live block leaves them alone.
         let last = view.surface.scrollback.len().checked_sub(1);
         let row_holds = view.surface.scrollback.last().is_some_and(Row::is_steps);
         let now = std::time::Instant::now();
@@ -407,12 +360,8 @@ impl Ui {
         }
         let (live, pending_rows) = self.live(lane, view, row_holds, now);
 
-        // While the view is scrolled up, rows the bottom gained fold back
-        // into `scroll` — a sum of per-row cached heights, where a wrap counts
-        // for exactly the rows it takes. Measured in rows, not lines: a line
-        // wider than the terminal is several rows, and counting lines here
-        // would put more rows in the area than fit — pushing the newest ones
-        // off the bottom, underneath the input, where nothing shows them.
+        // While scrolled up, bottom growth folds into `scroll` via cached row
+        // heights — counting lines instead would misfill the visible area.
         if view.surface.scroll > 0 {
             let total = view
                 .surface
@@ -473,9 +422,8 @@ impl Ui {
             .min(menu.len().saturating_sub(1));
         let highlight = self.rat_style(&self.paint.theme.menu.selected);
         let _ = self.screen.draw(|frame| {
-            // The input line is last, so the caret sits on the bottom row and
-            // the bar reads as the edge of the history above it rather than
-            // as something hanging off the line being typed.
+            // Input last, so the caret sits on the bottom row and the bar
+            // reads as history's edge, not something hanging off the typed line.
             let regions =
                 Regions::layout(frame.area(), menu_h as u16, bar_h as u16, editor_h as u16);
             self.regions = regions;
@@ -511,13 +459,8 @@ impl Ui {
         });
     }
 
-    // Rebuild the history from the transcript, forgetting everything the old
-    // drawing showed: a rewind changes what the conversation is, and the
-    // screen has to show the new one, not the old one with a note on it.
-    //
-    // Drawn, whatever the view was before: the banner went with the rest, and a
-    // lane read as never drawn would have a fresh opening block laid over this
-    // transcript the moment it came to the front.
+    // Rebuilds from the transcript, discarding the old drawing — a rewind
+    // changes the conversation, not just adds a note to the old one.
     pub(super) fn rebuild(&mut self, view: &mut View, session: &agent::session::Session) {
         let folded = view.surface.folds.folded;
         view.surface = Surface::from(session, &self.paint, folded);

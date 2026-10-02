@@ -4,15 +4,8 @@ use common::ctx;
 use serde_json::json;
 use tool::Tool;
 
-// A row elided from the transcript is only recoverable through the spill file,
-// so "something was elided" and "the whole of it was kept on disk" have to be
-// one decision. They were two — a transcript budget and a spill threshold, each
-// read off a differently assembled string — and between the two thresholds sat
-// three bytes where rows vanished behind `…` with no locator to fetch them.
-//
-// Three bytes is why the sweep is wide and walks one byte at a time: aiming at
-// the window means re-deriving the arithmetic that got it wrong, and any change
-// to the header, the gap mark or the row format moves it.
+// "Something was elided" and "the whole of it was kept on disk" must be one
+// decision, or a row can vanish behind `…` with no locator to recover it.
 #[tokio::test]
 async fn nothing_is_elided_without_somewhere_to_recover_it_from() {
     let (_d, c) = ctx();

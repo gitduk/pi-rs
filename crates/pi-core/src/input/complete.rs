@@ -42,12 +42,8 @@ pub fn at_prefix(line: &str, cursor: usize) -> Option<(usize, usize, &str)> {
 
 /// Ranked candidates for the text after the `@`, best first, at most `TOP`.
 ///
-/// A query naming a directory (`src/`, `src/fo`) scopes the walk there and
-/// the answers carry that prefix back; an empty query, or one ending in
-/// `/`, lists that directory's own children only.
-///
-/// Absolute, `~` and `..` scopes are refused: the completer names
-/// workspace-relative paths only.
+/// A directory query (`src/`, `src/fo`) scopes the walk there; absolute,
+/// `~` and `..` scopes are refused — workspace-relative paths only.
 pub fn candidates(query: &str, root: &Path) -> Vec<FileEntry> {
     if root.as_os_str().is_empty() {
         return Vec::new();

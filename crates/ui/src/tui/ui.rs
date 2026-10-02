@@ -47,17 +47,14 @@ pub(super) struct Ui {
     // The bar's separator, painted once beside the two above it: the bar
     // is rebuilt every frame and this depends only on the theme.
     pub(super) tab_sep: Span<'static>,
-    // Which row of the open list is highlighted; kept rather than the list
-    // itself, which is a function of what has been typed. `None` anchors a
-    // fresh list on its bottom row, the best match, beside the input line.
+    // Which row of the list is highlighted; the list itself is derived
+    // from what's typed. `None` anchors a fresh list on its bottom row.
     pub(super) picked: Option<usize>,
-    // The text the list was dismissed at. Any edit changes the text and the
-    // list comes back, which is what makes Esc mean "not that" rather than
-    // "never again".
+    // Text the list was dismissed at. Any edit brings the list back —
+    // Esc means "not that", not "never again".
     pub(super) dismissed_at: Option<String>,
-    // A line was submitted through the editor. The echo is this side's — the
-    // view is in hand — but the recall list is written by the surface, so it is
-    // told once per line rather than left to guess.
+    // A line was submitted. Echo happens here (the view is in hand), but
+    // the recall list is the surface's, so it's told once per line.
     pub(super) submitted: bool,
     // What `/model` can complete to. A copy rather than a borrow of the
     // config: the loop holds the session mutably while it draws.
@@ -100,19 +97,16 @@ pub(super) struct Ui {
     // Where the frame's regions landed last. The click handler reads them
     // back: a screen row only means something inside a named region.
     pub(super) regions: Regions,
-    // Whether the live block lists every call in flight it draws or only the
-    // newest with a count — the ones the group holds are drawn there
-    // whatever this says. A click on a pending row flips it; it outlives the
-    // calls.
+    // Whether the live block lists every call in flight or just the newest
+    // with a count; a click flips it. Outlives the calls themselves.
     pub(super) live_tools_shown: bool,
     // The conversation alone. The one thing on this surface that hides the
     // editor rather than sitting over it; `browse.rs` draws it.
     pub(super) browsing: bool,
 }
 
-// What to call a checkout. The root answers to its directory name, as
-// `worktree list` already names it — a fixed word would collide with a
-// checkout that happens to be called that.
+// What to call a checkout: the root answers to its directory name (as
+// `worktree list` does), so a fixed word wouldn't collide with one.
 pub(super) fn lane_name(lane: &Lane) -> String {
     lane.worktree().map(str::to_string).unwrap_or_else(|| {
         lane.root()
@@ -122,14 +116,8 @@ pub(super) fn lane_name(lane: &Lane) -> String {
     })
 }
 
-// How a checkout shows on the bottom bar: whether it is the one in front, how
-// its last run ended, its plain name and nothing more, or `Unopened` — one the
-// disk has and no lane has opened. A run in flight shows nothing here — the bar
-// answers what a checkout has finished, not what it is doing, and one working
-// out of sight is still just a checkout.
-//
-// A lane that ended says so in colour and not in a glyph, and only until you
-// look at the checkout it belongs to — `Done`/`Failed` are unread, not history.
+// How a checkout shows on the bar: front, how its last run ended, plain
+// name, or `Unopened`. A run in flight shows nothing — only finished state.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Mark {
     Front,
@@ -140,9 +128,8 @@ pub(super) enum Mark {
 }
 
 impl Mark {
-    // Whether a checkout is wearing a mark someone may not have read. The bar
-    // drops a quiet one first — a coloured name off the edge is a run that
-    // ended unseen.
+    // Whether this mark might be unread yet. The bar drops quiet ones
+    // first — a colored name pushed off the edge is a run nobody saw end.
     pub(super) fn quiet(self) -> bool {
         matches!(self, Mark::Plain | Mark::Unopened)
     }
@@ -156,11 +143,8 @@ pub(super) struct Tab {
 }
 
 impl Ui {
-    // What leaves with the checkout being left: the half-typed line, parked
-    // in its lane's view — the editor is the surface's, and a line left
-    // standing in it would be filed in whichever checkout came next — and
-    // the state built against that lane: a flash, the rewind selector over
-    // its transcript.
+    // What leaves with the checkout: the half-typed line (parked in its
+    // lane's view, not the shared editor) and lane-scoped state (flash, rewind).
     pub(super) fn leave_lane(&mut self, view: &mut View) {
         view.draft = self.editor.take_composing();
         self.flash = None;
@@ -217,9 +201,8 @@ impl Ui {
         }
     }
 
-    // The separator between lanes on the bar: the one every other line on
-    // this surface uses, dimmed so the names it divides are what the eye
-    // lands on.
+    // The separator between lanes on the bar, dimmed so the names it
+    // divides are what the eye lands on.
     pub(super) fn paint_sep(paint: &Paint) -> Span<'static> {
         paint.span(&paint.theme.muted, icons::PART_SEP)
     }
@@ -234,11 +217,8 @@ impl Ui {
         crate::sgr::style_to_ratatui(s)
     }
 
-    // The rows above the input line: the calls in flight the group is
-    // not drawing, the open stream, and the status line. The editor draws
-    // separately, pinned to the bottom. With the rows comes the count that
-    // leads them: the pending calls', which a click opens — only the producer
-    // knows which rows those are.
+    // Rows above the input: calls in flight the group isn't drawing, the
+    // open stream, the status line. Includes the count leading pending calls.
     pub(super) fn live(
         &self,
         lane: &Lane,
@@ -252,10 +232,8 @@ impl Ui {
         // way to it: the calls in flight, the thinking and the spinner all go.
         let thinking = view.surface.stream.kind == StreamKind::Reasoning;
 
-        // The calls that keep a line here: a foldable one does not while the
-        // group above is holding it. Collapsed the newest of them is
-        // named with a count for the rest, opened one each, in the shape it
-        // will fold into.
+        // Calls kept here: a foldable one doesn't show while the group
+        // above holds it. Collapsed: newest named with a count for the rest.
         let shown = drawn(&view.state.tools, row_holds);
         let mut pending = Vec::new();
         if !self.browsing {
@@ -302,9 +280,8 @@ impl Ui {
 
         if lane.is_running() && !self.browsing {
             let mut parts = status::parts(&self.status, &snapshot(lane, view));
-            // A run that is stopping says so; an ordinary running line needs
-            // no word for it — its clock ticking is what says the turn is on,
-            // and a call out turns on its own line.
+            // A stopping run says so; an ordinary one needs no word — its
+            // ticking clock already says the turn is on.
             parts.extend(view.state.retry.clone());
             if view.state.stopping {
                 parts.push(format!("stopping{}", icons::ELLIPSIS));
@@ -369,9 +346,8 @@ impl Ui {
                 (lo < front).then(|| quiet(lo)),
                 (hi > front).then(|| quiet(hi)),
             );
-            // A quiet end goes before a marked one, and of two alike the one
-            // farther from the front; a tie goes right, which leaves the
-            // checkouts that opened earlier standing.
+            // A quiet end drops before a marked one; of two alike, the one
+            // farther from the front. A tie goes right (older checkouts stay).
             let drop_right = match (left, right) {
                 (Some(true), Some(false)) => false,
                 (Some(false), Some(true)) => true,
@@ -405,9 +381,8 @@ impl Ui {
         screen::fit(&Line::from(spans), strip).remove(0).spans
     }
 
-    // The checkout a step from this one, wrapping at either end — where the
-    // Normal `L`/`H` go; None when there is nowhere else to go. The ring is the
-    // order the bar shows, which the bar is built to carry whole.
+    // The checkout a step from this one (Normal `L`/`H`), wrapping at
+    // either end; None with nowhere else to go.
     pub(super) fn step_checkout(&self, lane: &Lane, forward: bool) -> Option<String> {
         let trees = self.lists.worktrees();
         let n = trees.len();

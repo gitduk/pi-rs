@@ -6,14 +6,8 @@ use pi_core::store::icons;
 use pi_core::store::listing::Listing;
 use pi_core::text;
 
-/// The rows as text: the first cell of every row padded to the widest first
-/// cell among the rows that have more than one, so the columns line up, and the
-/// note after the cells.
-///
-/// Padded here rather than where the answer was built, because the width a row
-/// has to fit in exists only where the drawing happens — and there are two
-/// drawings. A row of one cell is prose: it is what it says, and padding it
-/// would indent it under a column that is not its.
+/// Rows as text, each multi-cell row's first cell padded to the widest such
+/// cell — done here, since only drawing knows the width to fit.
 pub fn lines(listing: &Listing) -> Vec<String> {
     let width = listing
         .rows

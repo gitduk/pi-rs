@@ -167,9 +167,8 @@ fn flush_assistant(text: &mut String, out: &mut Vec<Value>) {
     }
 }
 
-// The `input` item array. Nothing joins: `input` is flat and has no
-// alternation rule, so one entry leaves as one item — the opposite of the
-// Anthropic encoder, and the reason the join is the encoder's job.
+// The `input` item array. Nothing joins: `input` is flat with no
+// alternation rule — the opposite of the Anthropic encoder.
 fn encode(msgs: &[Message], spec: &ModelSpec) -> Vec<Value> {
     let mut out = Vec::new();
     for m in msgs {
@@ -246,13 +245,8 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
     body
 }
 
-// `input_tokens` counts the cached prefix and the newly written one as well as
-// the fresh tokens, so both come out of it. Subtracting only the read half —
-// which is what the Chat Completions decoder did — bills the write twice.
-//
-// `cache_write_tokens` is in OpenAI's own usage type but not every
-// implementation fills it: DeepSeek's Responses endpoint sends only
-// `cached_tokens`. Absent, it reads as zero and the arithmetic still balances.
+// `input_tokens` includes both cache halves; subtracting only the read half
+// double-bills the write. `cache_write_tokens` is absent on some hosts (zero).
 fn usage_of(u: &Value) -> Usage {
     let details = &u["input_tokens_details"];
     let cache_read = details["cached_tokens"].as_u64().unwrap_or(0);
@@ -311,9 +305,8 @@ fn read_output(
                 if let Some(enc) = item["encrypted_content"].as_str() {
                     parts.push(ReasoningContent::Encrypted(enc.to_string()));
                 }
-                // Body and summary are two separate streams of the same
-                // thinking. The body is the real one; the summary stands in
-                // when an org is not shown the body.
+                // Body and summary are two streams of the same thinking; the
+                // summary stands in when an org isn't shown the body.
                 let mut text = text_of(&item["content"], "text");
                 if text.is_empty() {
                     text = text_of(&item["summary"], "text");
@@ -361,9 +354,8 @@ fn read_output(
                 };
                 content.push(AssistantContent::ToolCall(ToolCall { id, name, args }));
             }
-            // An item kind this build does not know, sitting in the frame that
-            // states the turn: whatever the model put there is now missing from
-            // it, so this is a loss and not a curiosity.
+            // An item kind this build doesn't know, in the frame stating the
+            // turn: whatever the model put there is now missing — a loss.
             other => gaps.lost("response.output", other.unwrap_or("(untyped)")),
         }
     }
@@ -381,11 +373,8 @@ struct Decoder {
 }
 
 impl Decoder {
-    // Takes the whole identity rather than a model name. It stamps every
-    // reasoning block it decodes, and `replay_for` later compares that stamp
-    // against `spec.model.clone()` — so a decoder that names the provider itself
-    // can only ever name it wrong, and the ciphertext it stamped stops
-    // replaying without anything failing.
+    // Takes the whole identity, not just a model name: it stamps every block
+    // decoded, and a wrong stamp makes replay silently stop, not fail loudly.
     fn new(origin: String, gaps: Shared) -> Self {
         Self {
             origin,
@@ -399,9 +388,8 @@ impl Decoder {
         let Some(event) = gaps.owed(data, "frame", "type") else {
             return Vec::new();
         };
-        // The output index rides only the per-item frames: response.created
-        // and friends never carry one, and reading it there reports a gap
-        // every stream.
+        // The output index rides only per-item frames — response.created and
+        // friends never carry one, and reading it there reports a gap every stream.
         match event {
             "response.output_item.added" => {
                 let index = gaps.owed_index(data, "frame", "output_index");
@@ -470,14 +458,8 @@ impl Decoder {
             "response.completed" | "response.incomplete" => {
                 let response = &data["response"];
                 let mut events = Vec::new();
-                // `output` is required on the Response this frame carries, so a
-                // host omitting it is out of spec — but saying nothing is still
-                // not saying the turn was empty. Read as a statement, an absent
-                // `output` threw away a tool call the deltas had already
-                // delivered and ended the run after the thinking, looking
-                // ordinary. The deltas stand instead, and the host is named:
-                // the quirk belongs in whatever gateway is doing this, and it
-                // cannot be fixed there while it is invisible here.
+                // `output` is required, but absent doesn't mean empty — a host
+                // may have silently dropped a tool call, so it's named via `lost`.
                 if response["output"].is_null() {
                     gaps.lost(event, "output");
                 } else {
@@ -491,9 +473,8 @@ impl Decoder {
                 });
                 events
             }
-            // Bookkeeping, or an event added after this was written. Costs the
-            // turn nothing: these frames only paint, and what the model said
-            // arrives either in the terminal frame or in the deltas.
+            // Bookkeeping, or an event added after this was written — costs
+            // nothing: what the model said arrives via the terminal frame or the deltas.
             other => {
                 gaps.ignored("frame", other);
                 Vec::new()
@@ -540,9 +521,8 @@ impl Transport for OpenAi {
                             );
                             vec![Err(LlmError::Stream(data["error"].to_string()))]
                         }
-                        // A run that failed server-side reports it here, not
-                        // as a status: without this the turn ends looking
-                        // ordinary and empty.
+                        // A run that failed server-side reports it here, not as
+                        // a status — without this the turn ends looking empty.
                         Ok(data) if data["type"] == "response.failed" => {
                             let detail = &data["response"]["error"];
                             tracing::warn!(
@@ -580,12 +560,8 @@ mod tests {
         build_body(&spec(), &req)
     }
 
-    // ─── decoding ────────────────────────────────────────────────────────
-    //
-    // The fixture below is hand-written from the SDK's event types, not
-    // recorded off a live endpoint. That is weaker evidence than a replay and
-    // is worth remembering: it proves pi reads what the types say, not what
-    // the server sends.
+    // Hand-written from the SDK's event types, not recorded off a live
+    // endpoint — weaker evidence: it proves pi reads the types, not the server.
 
     fn drive(frames: &[Value]) -> crate::stream::Completion {
         let mut dec = Decoder::new(spec().model, Shared::new("openai"));
@@ -609,9 +585,8 @@ mod tests {
         drive(&frames)
     }
 
-    // One `function_call` on the wire must be one call in the turn. Recorded
-    // off the gateway, whose terminal frame states no output, so the whole
-    // turn is rebuilt from the deltas.
+    // One `function_call` on the wire must be one call in the turn — recorded
+    // off a gateway whose terminal frame states no output.
     #[test]
     fn one_streamed_call_is_one_call() {
         let done = replay(include_str!("../../tests/fixtures/responses_one_call.sse"));
@@ -629,10 +604,8 @@ mod tests {
         assert_eq!(calls[0].args["path"], "a.txt");
     }
 
-    // Recorded against a local gateway translating for DeepSeek, 2026-08-30.
-    // Its terminal frame carries status and usage and no `output` at all, so
-    // the turn is only ever stated by the deltas — the shape that ended every
-    // tool-calling run after the thinking and before the call.
+    // Recorded against a gateway whose terminal frame carries no `output`, so
+    // the turn is stated only by the deltas.
     #[test]
     fn a_terminal_frame_that_states_no_output_leaves_the_deltas_standing() {
         let done = replay(include_str!("../../tests/fixtures/responses_no_output.sse"));
@@ -652,11 +625,8 @@ mod tests {
         assert_eq!(done.stop, StopReason::ToolUse);
     }
 
-    // The seam neither suite either side of it crossed. One drove a stream and
-    // read what came out; the other replayed reasoning it had built by hand.
-    // Between them sat the decoder's idea of who produced the block, and while
-    // it named the provider itself, every ciphertext it stamped quietly
-    // demoted to prose on the way back out — with both suites still green.
+    // Regression test: the decoder must stamp the block with the model's real
+    // identity, or replay silently demotes it to prose instead of failing loudly.
     #[test]
     fn reasoning_decoded_from_a_stream_replays_as_reasoning() {
         let done = replay(include_str!("../../tests/fixtures/responses_reason.sse"));
@@ -732,9 +702,8 @@ mod tests {
         );
     }
 
-    // `input_tokens` counts both halves of the cache. Taking out only the read
-    // half — which is what the Chat Completions decoder did — bills the write
-    // twice, once as fresh input and once as a write.
+    // `input_tokens` counts both cache halves; subtracting only the read half
+    // (as Chat Completions does) double-bills the write.
     #[test]
     fn the_three_token_counts_add_back_up_to_what_was_billed() {
         let done = drive(&a_turn());

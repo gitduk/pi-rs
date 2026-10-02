@@ -1,15 +1,9 @@
-//! What the terminal will say about itself.
+//! Asks the terminal once for its background colour via `OSC 11`, the only
+//! way to know it, so a band can read as a lift of the canvas rather than a
+//! block on top of it.
 //!
-//! One question, asked once: xterm's `OSC 11`, which answers with the colour
-//! the terminal paints behind everything. A band has to be a lift of that
-//! colour to read as part of the terminal's own canvas rather than as a block
-//! laid over it, and this is the only way to know what the canvas is.
-//!
-//! The answer is not a keystroke: the reply has no newline and no key that
-//! names it, so it is read as bytes, before the keyboard reader starts — and
-//! every byte of it goes, so none of it reaches the editor as text. What the
-//! user typed while the question was out is read here too, and comes back with
-//! the answer: nothing else would ever see it again.
+//! The reply has no newline, so it is read as raw bytes before the keyboard
+//! reader starts; anything typed meanwhile is captured here, not lost.
 
 #[cfg(unix)]
 use std::io::Write;
@@ -196,17 +190,14 @@ fn text_of(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// The background an answer names, if one is in there.
+/// The background an answer names, if one is in there. Found, not matched
+/// whole, since the query itself may precede the answer.
 ///
-/// Found rather than matched whole: the answer arrives alone, or behind the
-/// query a terminal read back to us, and both carry the marker and a colour.
-/// The forms a terminal answers in are `rgb:RRRR/GGGG/BBBB` and `#rrggbb`; the
-/// high byte of each component is the colour.
+/// Forms: `rgb:RRRR/GGGG/BBBB` or `#rrggbb`; the high byte of each
+/// component is the colour.
 #[cfg(unix)]
 fn parse(bytes: &[u8]) -> Option<(u8, u8, u8)> {
     let text = String::from_utf8_lossy(bytes);
-    // Every marker is tried: the query itself may be in front of the answer,
-    // and only one of them carries a colour.
     text.match_indices(OPENING)
         .find_map(|(at, _)| colour(&text[at + OPENING.len()..]))
 }
@@ -280,8 +271,8 @@ mod tests {
         assert_eq!(parse(b"\x1b]11;?\x1b\\"), None);
     }
 
-    // Half an answer is no answer: a partial read is what the next poll will
-    // complete, and a colour guessed from `rg` is a colour nobody asked for.
+    // A partial read is what the next poll will complete; a colour guessed
+    // from `rg` is a colour nobody asked for.
     #[test]
     fn a_partial_answer_is_not_a_colour() {
         for partial in [
@@ -299,7 +290,7 @@ mod tests {
         assert_eq!(parse(b"fix the bug\n"), None);
     }
 
-    // What the wait keeps of the user's bytes: text, whole, and no key in it.
+    // Multi-byte text is kept whole; control bytes are dropped as keys.
     #[test]
     fn what_the_user_typed_comes_back_as_text() {
         assert_eq!(text_of(b"look at src/ui.rs"), "look at src/ui.rs");
@@ -337,8 +328,6 @@ mod tests {
         (asked, String::from_utf8_lossy(&left).into_owned())
     }
 
-    // The user pressed Escape while the question was out: the reply behind it
-    // is still a reply, and none of it may come back as text.
     #[test]
     fn an_escape_before_the_answer_does_not_spill_it() {
         let (asked, left) = answer(b"\x1b\x1b]11;rgb:0d0d/1111/1717\x1b\\");
@@ -367,8 +356,6 @@ mod tests {
         assert_eq!(answer(b"\x1b[M !\"hello").0.typed, "hello");
     }
 
-    // An answer that ends without a colour is not an answer, and it must not
-    // swallow what comes after it either.
     #[test]
     fn a_broken_answer_does_not_take_the_next_bytes_with_it() {
         let (asked, left) = answer(b"\x1b]11;rgb:x0d0d/1111/1717\x07hello");

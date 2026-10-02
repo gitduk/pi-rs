@@ -1,5 +1,3 @@
-// Kept here so the agent's public name (`agent::Totals`) survives the move:
-// the type now lives in `llm`, where `tool` can carry it on a `ToolOutput`.
 use llm::stream::Usage;
 pub use llm::totals::Totals;
 
@@ -44,12 +42,8 @@ pub enum Event {
     },
     // Something the run recovered from but the user should know about.
     Warning(String),
-    // What the turn has used so far, as the provider has reported it.
-    //
-    // Cumulative for the turn, not a delta, and not every wire sends one: the
-    // Anthropic wire states the input count before the first token, while an
-    // OpenAI host reports nothing until the stream ends. A surface that shows
-    // a running count treats its absence as "not known yet", never as zero.
+    // Cumulative for the turn, not a delta. Not every wire sends one (Anthropic
+    // reports early, OpenAI only at stream end); absence means unknown, not zero.
     Usage(Usage),
 
     TurnEnd {
@@ -64,23 +58,15 @@ pub enum Event {
         // How many times the transcript was shrunk to fit during this run.
         compactions: usize,
     },
-    // The transcript gained entries — clones of what just landed. A state
-    // update, not a drawing instruction: the renderer derives their rows
-    // through the A table itself.
+    // The transcript gained entries — a state update, not a drawing
+    // instruction: the renderer derives their rows through `f_entry` itself.
     Committed {
         entries: Vec<crate::session::Entry>,
     },
 }
 
-/// Say it to the user, and to the journal, in that order and in one call.
-///
-/// The two answer different questions — a rendered line says what is happening
-/// now, a record says what happened — but every fact on this list is already
-/// stated here once, and stating them twice is how the two drift apart.
-///
-/// Called where the fact occurs rather than where the event is consumed: a
-/// renderer runs in its own task, so a tap there records a true set of facts in
-/// an order that never happened, under whichever span the renderer is in.
+/// Says to the user and journals it, in that order, in one call — call this
+/// where the fact occurs, not where the event is consumed, or order drifts.
 pub(crate) fn say(tx: &tokio::sync::mpsc::UnboundedSender<Event>, event: Event) {
     note(&event);
     let _ = tx.send(event);
@@ -99,10 +85,8 @@ fn note(event: &Event) {
         Event::TurnStart { turn } => tracing::info!(target: "pi::loop", turn, "turn start"),
         Event::ToolStart { id, name, args } => {
             tracing::info!(target: "pi::tool", call = %id, tool = %name, "call");
-            // One level down, and in its own record: the arguments are a whole
-            // file's worth of rows, the transcript already holds them, and a
-            // field on the record above would serialize all of it on every call
-            // only for the length cap to throw it away.
+            // Logged separately at debug: args can be a whole file's worth, and
+            // the info-level record above would serialize it all just to truncate it.
             tracing::debug!(target: "pi::tool", call = %id, args = %args, "arguments");
         }
         Event::ToolEnd {

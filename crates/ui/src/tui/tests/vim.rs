@@ -82,9 +82,8 @@ fn an_at_token_completes_against_the_lane_in_front() {
     assert_eq!(tui.ui.editor.text(), "see @marker.rs ");
 }
 
-// The sequence is read where unbound characters are typed, and its first
-// half is a real `j` on a real line until the `k` arrives — nothing is
-// held pending, so the screen is never a guess.
+// The sequence is read where unbound characters are typed; `j` is a real
+// `j` on a real line until `k` arrives — nothing is held pending.
 #[test]
 fn jk_leaves_insert_and_takes_its_first_half_back_off_the_line() {
     let mut ui = vim_ui();
@@ -135,9 +134,8 @@ fn a_bound_key_between_the_halves_breaks_the_sequence() {
     assert_eq!(mode(&ui), Some(Mode::Insert));
 }
 
-// Normal has to refuse the keys it does not bind. Without this the mode
-// is a costume: `z` would still type a `z` and only the bound keys would
-// behave, which is worse than no mode at all.
+// Normal must refuse unbound keys, or the mode is a costume: `z` would
+// still type a `z`, worse than no mode at all.
 #[test]
 fn an_unbound_character_types_nothing_in_normal() {
     let mut ui = vim_ui();
@@ -355,9 +353,8 @@ fn an_empty_line_sends_gg_and_g_to_the_history_ends() {
     assert_eq!(view.surface.scroll, up, "the history stayed where it was");
 }
 
-// `ctrl+l` weighs the line: with text to lose one press clears it, with
-// nothing there the session is what a press would replace, so it takes
-// two. The press that cleared the line arms nothing toward the second.
+// `ctrl+l` weighs the line: text costs one press to clear, an empty line
+// costs two since a new session is what a press would replace.
 #[test]
 fn ctrl_l_clears_the_line_and_twice_starts_a_session() {
     let mut ui = test_ui(80, 24);
@@ -397,8 +394,8 @@ fn an_empty_line_takes_two_presses_for_a_new_session() {
     );
 }
 
-// `ctrl+c` gave up clearing the line: it stops the run, and the second
-// press inside the window is the one that leaves.
+// `ctrl+c` never clears the line the way `ctrl+l` does; it goes straight
+// to stopping the run instead.
 #[test]
 fn ctrl_c_stops_the_run_and_leaves_the_line() {
     let mut ui = test_ui(80, 24);
@@ -487,9 +484,8 @@ fn v_opens_the_conversation_view_on_an_empty_line() {
     );
 }
 
-// Turning the keys off is the one thing that moves the mode without a
-// keystroke — otherwise switching back on would land in Normal with
-// nothing having asked to go there.
+// Turning vim off moves the mode without a keystroke, so switching back on
+// must land in Insert rather than a stray Normal.
 #[test]
 fn turning_the_keys_off_drops_the_mode_rather_than_parking_it() {
     let mut ui = vim_ui();

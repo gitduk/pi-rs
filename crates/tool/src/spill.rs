@@ -32,14 +32,10 @@ impl SpillRef {
     }
 }
 
-/// Where spills live when no session is in force: a one-shot run, which keeps
-/// nothing and so has no tree of its own to put them in.
+/// Where spills live with no session: a one-shot run has no tree of its own.
 ///
-/// Per process rather than one fixed name. The temp directory is world-writable,
-/// so a fixed name there is one somebody else can hold first — and `allocate`
-/// cannot harden a directory this process does not own, so the `0700` would
-/// quietly not take effect and the namespace under it would be shared with
-/// whoever did hold it. A name already taken is skipped, whatever took it.
+/// Per process, not fixed: the temp dir is world-writable, so a fixed name
+/// might already be held — `allocate`'s `0700` must not touch someone else's.
 pub fn temp() -> PathBuf {
     let base = std::env::temp_dir();
     let free = |dir: &PathBuf| std::fs::symlink_metadata(dir).is_err();
@@ -101,9 +97,8 @@ pub(crate) fn allocate(ctx: &Ctx) -> Result<(PathBuf, String), ToolError> {
 
 /// Write `body` to a fresh spill file. Storage failure is a loud error, never
 /// a silent fallback: a locator the model cannot read back is worse than none.
-/// One deliberate exception: the output gate in `output` folds a spill
-/// failure into a truncation notice instead of failing the result, because
-/// the gate must not flood.
+/// Exception: `output::bound` folds a spill failure into a truncation notice
+/// instead, since the gate must not flood.
 pub(crate) fn persist(ctx: &Ctx, body: &[u8]) -> Result<SpillRef, ToolError> {
     let (path, locator) = allocate(ctx)?;
     state::write_private(&path, body)
@@ -143,18 +138,10 @@ pub fn prune(body: &str) -> String {
     elided(h, body.len(), t)
 }
 
-/// A body assembled from items that must not be split, held to the transcript's
-/// budget with the whole of it spilled for recall.
+/// A body assembled from items that must not be split, held to the
+/// transcript's budget with the whole of it spilled for recall.
 ///
-/// Whole items rather than bytes, which is what separates this from `prune`: a
-/// grep section cut loose from its `[path]` header carries no path, and a row
-/// cut mid-line reads as an address whose text no anchor could ever match.
-/// Items go from the tail, since a view whose items are independent has no end
-/// worth keeping the way a file's has.
-///
-/// The count is said in `unit`s because the caller's own `notice` cannot know
-/// it: that one reports what the search's limit dropped, and a body reading
-/// "3 more matches" beside a locator holding four hundred is worse than silence.
+/// Whole items, not bytes, so a mid-item cut never leaves unmatchable text.
 pub fn fit(ctx: &Ctx, items: &[String], unit: &str, notice: &str) -> Result<String, ToolError> {
     let mut full = items.concat();
     full.push_str(notice);
@@ -202,9 +189,8 @@ pub fn fits<T>(
 
 #[cfg(test)]
 mod tests {
-    // The root is one this process can call its own: a name that is already
-    // held is skipped rather than used, or the `0700` below would be asked of a
-    // directory this process does not own.
+    // A name already held is skipped, not reused — else the `0700` below
+    // would be asked of a directory this process does not own.
     #[test]
     fn a_temp_root_already_held_is_skipped() {
         let held = temp();
@@ -269,8 +255,7 @@ mod tests {
         );
     }
 
-    // Under the cap a body passes untouched; over it, both ends survive and
-    // what was taken is named.
+    // Under the cap the body passes untouched.
     #[test]
     fn prune_keeps_both_ends_and_names_what_it_took() {
         assert_eq!(prune("small"), "small");

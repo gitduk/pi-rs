@@ -1,9 +1,7 @@
 //! Fixtures shared by the integration tests.
 //!
-//! `ModelSpec` has no `Default` on purpose — an id, a model and a base url
-//! have no sensible empty value in production — so every test file that needs
-//! one has to build the whole struct. Here once, rather than drifting apart in
-//! each of them.
+//! `ModelSpec` has no `Default`: id, model and base url have no sensible
+//! empty value in production, so every test builds the whole struct here.
 
 use llm::model::{CacheControl, Format, ModelSpec, Pricing, ReplayThinking, ThinkingControl};
 

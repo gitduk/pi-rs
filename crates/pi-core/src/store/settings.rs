@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-// `over`'s keys replace `base`'s, table by table; anything else replaces whole.
 fn overlay(base: &mut toml::Value, over: &toml::Value) {
     match (base, over) {
         (toml::Value::Table(base), toml::Value::Table(over)) => {
@@ -83,8 +82,7 @@ impl Settings {
 mod tests {
     use super::*;
 
-    // The project's file wins key by key, tables merged rather than replaced,
-    // and says which keys are its own.
+    // Tables merge, don't replace, and each file's own keys are tracked separately.
     #[test]
     fn the_project_file_lays_over_the_user_file_key_by_key() {
         let user = toml::from_str(

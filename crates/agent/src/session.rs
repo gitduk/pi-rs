@@ -27,11 +27,8 @@ pub struct Omission {
     /// Which block of an assistant turn, when what went is one tool call's
     /// arguments rather than the entry. `None` addresses the entry itself.
     ///
-    /// The first crack in "an assistant turn is addressed whole", and kept as
-    /// narrow as the reason for it: only a `tool_use`'s oversized arguments.
-    /// Its thinking blocks are never touched — the API filters prior ones on
-    /// its own and does not bill them, and the last turn's may not be edited
-    /// at all.
+    /// Kept as narrow as the reason for it: only oversized tool-call
+    /// arguments. Reasoning blocks are never touched — the API filters them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block: Option<usize>,
     pub notice: String,
@@ -91,10 +88,8 @@ pub struct Compaction {
 /// One thing the user side said, kept in both voices: what the model reads,
 /// and — when the two differ — what the person saw.
 ///
-/// `text` is the only field that reaches the wire. `shown` is the screen
-/// echo and the rewind menu's label; `image` is a picture pasted with an
-/// ask, and an ask is its only carrier. Notes carry neither, which is why
-/// a note is a bare `String`.
+/// `text` reaches the wire; `shown` is the screen echo and rewind label;
+/// `image` rides only with an ask. A note carries neither, hence a bare `String`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Prompt {
     /// What the model reads.
@@ -133,39 +128,29 @@ pub enum Author {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Entry {
-    // What the user asked. It opens a round, and compaction's drop tier is a
-    // round: a question and everything that answered it go together or not at
-    // all. Never omitted — what someone asked is not the answer's spare
-    // context.
+    // Opens a round; compaction's drop unit is a round, so a question and
+    // its answers go together or not at all. Never omitted on its own.
     Ask {
         id: EntryId,
         at: u64,
         ask: Prompt,
     },
-    // A `!` command with its output. `run.text` is what the model reads (the
-    // command named, the output under it); `run.shown` is the `!cmd` line the
-    // screen echoes. The screen's output rows derive from `run.text`, so a
-    // rebuild and a live run draw from one source.
+    // A `!` command with its output. `run.text` is what the model reads;
+    // `run.shown` is the `!cmd` line the screen echoes, both from one source.
     Bash {
         id: EntryId,
         at: u64,
         run: Prompt,
     },
-    // One response, whole. Its blocks are never addressed separately: nothing
-    // reads them apart, and holding them together is what keeps a `tool_use`
-    // beside the reasoning that produced it.
+    // One response, whole — never addressed block by block, which keeps a
+    // `tool_use` beside the reasoning that produced it.
     Answer {
         id: EntryId,
         at: u64,
         blocks: Vec<AssistantContent>,
     },
-    // A tool's result, and the copy the screen drew for it — an edit's diff
-    // rows without its notes, a read's header that the content never carries.
-    //
-    // `preview` sits beside the result rather than inside it: `ToolResult` is
-    // the wire type, and a screen-only field there would be one every encoder
-    // has to remember not to send, and one the token estimate would count for
-    // bytes that never leave.
+    // A tool's result, plus the copy the screen drew for it. `preview` sits
+    // beside `ToolResult` rather than inside it, so no wire encoder sends it.
     Tool {
         id: EntryId,
         at: u64,
@@ -173,9 +158,8 @@ pub enum Entry {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         preview: Option<String>,
     },
-    // Machine prose in the user's voice — a stopped run's cause, the loop's
-    // round note. The model reads it; the screen shows it as a muted notice.
-    // It opens no round and names no session, and it is omittable.
+    // Machine prose in the user's voice — a stopped run's cause, a round
+    // note. The model reads it; the screen shows it muted. Omittable.
     Note {
         id: EntryId,
         at: u64,
@@ -188,11 +172,8 @@ pub enum Entry {
         at: u64,
         record: Compaction,
     },
-    // A row the screen shows and the model never reads: a run's tally line, a
-    // warning about the turn. The surface words it, so this is the one entry
-    // whose text nobody else parses — and it is kept at all so that a rebuild
-    // draws the same screen the live path drew, which is the only way a row
-    // worth happening stays a row worth reading back.
+    // A row the screen shows and the model never reads: a tally line, a
+    // turn warning. Kept so a rebuild draws the same screen the live path did.
     Screen {
         id: EntryId,
         at: u64,
@@ -270,11 +251,9 @@ impl Entry {
 
 /// One place the conversation can be rewound to.
 ///
-/// The two are not one operation with a flag. Going back to something the
-/// user said means unsending it: the message leaves the transcript and its
-/// text returns to the editor, because half the reason to rewind is to ask
-/// it differently. Going back to an answer keeps the answer — that is the
-/// state the conversation carries on from.
+/// Not one operation with a flag: going back to something the user said
+/// unsends it — text returns to the editor — while going back to an answer
+/// keeps it, since that is what the conversation carries on from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Node {
     Ask { id: EntryId, show: String },
@@ -343,30 +322,26 @@ impl<'a> Seen<'a> {
     }
 }
 
-/// The whole conversation: every prompt, tool result, response, and compaction
-/// record, in order.
+/// The whole conversation: every prompt, tool result, response, and
+/// compaction record, in order.
 ///
-/// Held by the caller so a run that ends in an error still leaves behind
-/// everything it produced. What the model sees is *derived* from this, never
-/// stored in place of it: compaction writes a record and `view` applies it.
-/// Anything else loses the session the moment it grows long enough to need
-/// shrinking.
+/// Held by the caller so a run that errors still leaves everything it
+/// produced. What the model sees is *derived* from this — never stored in
+/// place of it — since compaction writes a record and `view` applies it.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Session {
     #[serde(default)]
     entries: Vec<Entry>,
     #[serde(default)]
     next: u64,
-    // Why the last run ended unanswered. Saved, so a resumed session still
-    // knows; cleared by the next prompt, and by a rewind that cuts the round
-    // it describes.
+    // Why the last run ended unanswered. Cleared by the next prompt, or by
+    // a rewind that cuts the round it describes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     interrupted: Option<StopCause>,
 }
 
-// Why the most recent run ended before its prompt was answered, if it did.
-// The transcript alone cannot say whether the stop was the user's or the
-// run's own, so the caller records it here and the next prompt carries it on.
+// Why the most recent run ended before its prompt was answered, if it did:
+// the transcript alone can't say whose stop it was.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum StopCause {
     // The user asked the run to stop: Esc, `/stop`, an interrupt.
@@ -394,8 +369,8 @@ pub const STOPPED_CALL: &str = "The user stopped this call before it returned.";
 /// Whether a tool result was synthesized to close an interrupted call.
 pub fn is_stopped_call(r: &ToolResult) -> bool {
     r.content.iter().any(|c| match c {
-        // The bare stem also matches the wording before 05e26ec, which lives
-        // on in transcripts written before then.
+        // The bare stem also matches older wording, still recorded in
+        // transcripts written before it changed.
         ToolResultContent::Text(t) => t.text.starts_with("The user stopped this call"),
         _ => false,
     })
@@ -434,11 +409,9 @@ impl Session {
     }
 
     /// Build a session from a transcript's worth of messages. A user
-    /// message's text and image merge into one ask — the shape an entry
-    /// keeps — while each tool result lands as its own entry. The seam exists
-    /// because a message is what a request looks like while an entry is what
-    /// the session stores; nothing in the run needs it, but a test that wants
-    /// to say "given this conversation" does.
+    /// message's text and image merge into one ask; each tool result lands
+    /// as its own entry. Nothing in the run needs this — a message is the
+    /// wire shape, an entry the session's — but a test wants it.
     pub fn from_messages(messages: impl IntoIterator<Item = Message>) -> Self {
         let mut log = Self::new();
         for m in messages {
@@ -603,15 +576,10 @@ impl Session {
         self.interrupted = Some(cause);
     }
 
-    /// Continue with a new prompt, repairing a turn that may have died
-    /// mid-call. An assistant turn whose tool calls were never answered would
-    /// make the next request invalid (a `tool_use` with no `tool_result`);
-    /// each is closed with a result naming the interruption instead. An unknown
-    /// failure that ended a run unanswered is named with a note, while a user stop
-    /// leaves direction to the new prompt. The prompt is appended as its own entry.
-    /// `shown` is what the user typed, when that differs from what the model
-    /// is sent — a `!cmd` line becomes the command *and its output*, and the
-    /// screen has to show the line, not the transcript of running it.
+    /// Continue with a new prompt, repairing a turn that died mid-call:
+    /// unanswered tool calls are closed with a result naming the
+    /// interruption, and an unknown failure adds a note first. `shown` is
+    /// what the user typed, when it differs from what the model reads.
     pub fn send_prompt(&mut self, prompt: impl Into<String>, shown: Option<String>) {
         let answered: HashSet<&str> = self
             .entries
@@ -649,22 +617,11 @@ impl Session {
         self.push_ask(ask);
     }
 
-    /// Everywhere the conversation can be rewound to, in session order.
+    /// Everywhere the conversation can be rewound to, in session order:
+    /// what the user said (asks and `!` asides), never an answer.
     ///
-    /// Asides included, and deliberately: rewinding to before a `!` command is
-    /// a thing someone wants. What *names* the session is a different question
-    /// with a different answer, and the resume listing asks that one against
-    /// the archive without loading it.
-    ///
-    /// What the user said, and nothing the model answered: a rewind takes back
-    /// something said, and an answer is a place the conversation carries on
-    /// from, not one it goes back to.
-    ///
-    /// Reads `history`, not `view`: a prompt compaction dropped is still one
-    /// the user asked, so the rewind menu can reach it — and rewinding past a
-    /// compaction entry truncates that too, which undoes the compaction and
-    /// brings the content back. It also keeps the session's name from changing
-    /// the first time its opening turn is compacted away.
+    /// Reads `history`, not `view`: a compacted-away prompt stays reachable,
+    /// and rewinding past its compaction entry undoes the compaction too.
     pub fn rewind_nodes(&self) -> Vec<Node> {
         self.entries
             .iter()
@@ -702,11 +659,10 @@ impl Session {
         })
     }
 
-    /// Rewind to an entry, keeping it: everything after it is removed from the
-    /// session, and returns how many entries that was.
+    /// Rewind to an entry, keeping it: everything after is removed and the
+    /// count returned.
     ///
-    /// Removed, not compacted: a compaction only records what the model stopped
-    /// seeing, while this deletes. A `Compaction` entry caught in the cut takes
+    /// Removed, not compacted: a `Compaction` entry caught in the cut takes
     /// its record with it, so the content that pass dropped comes back.
     pub fn rollback_to(&mut self, entry: EntryId) -> usize {
         self.truncate(entry, true)
@@ -755,18 +711,11 @@ impl Session {
             .collect()
     }
 
-    // Later passes win: an entry omitted as superseded and later aged out
-    // shows the newer notice. Whole-entry omissions only — the ones naming a
-    // block are `block_omissions`, and mixing them would let a block notice
-    // hide an entry that is still shown in full.
+    // Later passes win: an entry omitted then re-omitted shows the newer
+    // notice. Whole-entry only — block-level lives in `block_omissions`.
     fn omissions(&self) -> HashMap<EntryId, &str> {
-        // An assistant turn is never omitted — its `tool_use` blocks have to
-        // stay for the answers to them to be legal, so `context` sends it whole
-        // and a block-level omission is the most it can carry. A whole-entry
-        // record naming one is read that way too: the record is not validated
-        // when the transcript is loaded, and a planner that priced such a turn
-        // as its notice alone would plan against a total the request never
-        // reaches.
+        // An assistant turn is never whole-entry omitted — its `tool_use`
+        // blocks must stay legal, so only block-level omissions apply to it.
         let answers: HashSet<EntryId> = self
             .entries
             .iter()
@@ -822,35 +771,18 @@ impl Session {
             .collect()
     }
 
-    /// What the model can see right now, in session order.
-    ///
-    /// Compaction records and task lists are inputs to this, not content, so
-    /// they are skipped; dropped entries are gone; omitted ones keep their
-    /// shell. Nothing is merged — that is the wire's business, and doing it
-    /// here is what once made two lists of different lengths share an index.
-    /// What a person can see: everything, in order, compaction or no.
-    ///
-    /// The other half of `view`, and the split is the whole point —
-    /// **compaction is the model losing sight of history, not the user**.
-    /// Not destroying the transcript is only worth something if it can still be
-    /// read afterwards, and the one surface that reads it to a human was
-    /// reading the model's copy: the conversation sat complete on disk and the
-    /// screen showed it truncated.
-    ///
-    /// Readers divide cleanly. `view`: estimate, encode, compact — anything
-    /// asking what the model is sent. `history`: the screen, the rewind menu,
-    /// the session's own name.
+    /// Everything, in order, compaction or no — what a person can see, as
+    /// against `view` (what the model can). Used by the screen, the rewind
+    /// menu, and the session's own name.
     pub fn history(&self) -> impl Iterator<Item = &Entry> {
         self.entries.iter()
     }
 
-    /// Every entry the model has stopped seeing — dropped by a compaction, or
-    /// shown to it as a notice. What the screen marks rather than hides.
+    /// Every entry the model has stopped seeing — dropped, or shown as a
+    /// notice. What the screen marks rather than hides.
     ///
-    /// The whole set, not one lookup: the only caller walks the transcript, and
-    /// answering per entry meant rebuilding both maps from every entry each
-    /// time. That is quadratic, and a rebuild is exactly when the transcript is
-    /// longest.
+    /// The whole set, not one lookup: per-entry answers would rebuild both
+    /// maps every time — quadratic, right when the transcript is longest.
     pub fn out_of_view(&self) -> HashSet<EntryId> {
         let mut out = self.dropped();
         out.extend(self.omissions().keys().copied());
@@ -1012,9 +944,8 @@ mod tests {
     use super::*;
     use llm::message::{Text as MsgText, ToolCall, ToolResult};
 
-    // The contract the Anthropic encoder's join is written against: what a
-    // turn holds arrives as separate messages, and joining them is the wire's
-    // business, not this projection's.
+    // The contract the Anthropic encoder's join is written against: joining
+    // per-turn messages into one is the wire's business, not this projection's.
     #[test]
     fn the_view_hands_over_one_message_per_entry() {
         let mut s = Session::new();
@@ -1046,10 +977,8 @@ mod tests {
         }
     }
 
-    // Compaction is the model losing sight of history, not the user. What
-    // names a session is read out of the archive, so it has to stay in the
-    // archive — a compaction that removed it would rename the session the
-    // first time the window filled.
+    // What names a session is read out of the archive, so a compaction that
+    // removed it would rename the session the first time the window filled.
     #[test]
     fn compacting_the_opening_turn_leaves_it_in_the_transcript() {
         let mut s = Session::new();
@@ -1124,9 +1053,8 @@ mod tests {
         assert_eq!(s.rewind_nodes().len(), 1, "the first turn, the ask alone");
     }
 
-    // The menu lists what was said, never what came back: an answer is a place
-    // the conversation carries on from, and a turn that only called tools is a
-    // step of the work rather than a place in it.
+    // The menu lists what was said, never what came back: an answer is a
+    // place to continue from, a tool-only turn just a step of the work.
     #[test]
     fn only_asks_reach_the_rewind_menu() {
         let mut s = Session::new();
@@ -1147,9 +1075,8 @@ mod tests {
         assert!(matches!(nodes[0], Node::Ask { .. }));
     }
 
-    // What the last run did decides what precedes the next prompt: an answer
-    // and a user stop add nothing, a death is named — with its cause where
-    // one is known. One note per dead run; the sends after stay clean.
+    // An answer and a user stop add no note; a death is named, with its
+    // cause where known. One note per dead run; sends after stay clean.
     #[test]
     fn the_outcome_of_a_run_decides_the_note_before_the_next_prompt() {
         // An answer that did full tool work asks for no note.
@@ -1215,10 +1142,8 @@ mod tests {
         }
     }
 
-    // A screen row is the one entry the model never reads. It is kept so the
-    // rebuild draws what the live path drew, and it stops there: a status line
-    // or a warning about the turn in the prompt would be context spent on
-    // numbers nothing can act on.
+    // Kept so a rebuild draws what the live path drew — but a status line in
+    // the prompt would be context spent on numbers nothing can act on.
     #[test]
     fn a_screen_row_is_kept_and_never_read() {
         let mut s = Session::new();
@@ -1267,7 +1192,6 @@ mod tests {
         assert_eq!(back, s);
     }
 
-    // A rewind cuts the round the marker described; the marker goes with it.
     #[test]
     fn rewinding_drops_the_stop_marker() {
         let mut s = Session::new();
@@ -1287,9 +1211,6 @@ mod tests {
         assert!(matches!(&entries[0], Entry::Ask { .. }));
     }
 
-    // Rewinding to an answer is the opposite call: the answer stays, and the
-    // conversation continues from it.
-    // An unanswered tool call is repaired with a non-error stopped result.
     #[test]
     fn an_unanswered_tool_call_is_repaired_without_error() {
         let mut s = Session::new();
@@ -1325,6 +1246,8 @@ mod tests {
         assert!(is_stopped_call(&result));
     }
 
+    // Rewinding to an answer is the opposite call: the answer stays, and the
+    // conversation continues from it.
     #[test]
     fn rewinding_to_an_answer_keeps_it() {
         let mut s = Session::new();

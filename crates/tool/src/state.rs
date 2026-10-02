@@ -48,8 +48,6 @@ pub fn file_stem(id: &str) -> String {
 mod tests {
     use super::file_stem;
 
-    // The stem is the id when it is well formed, and something inert when it
-    // is not: an id can never name a path outside its directory.
     #[test]
     fn an_id_cannot_name_a_path_outside_its_directory() {
         assert_eq!(file_stem("1787426708-4135307"), "1787426708-4135307");

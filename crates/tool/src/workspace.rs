@@ -5,8 +5,7 @@ use crate::{Tier, ToolError};
 /// The workspace root every relative tool path is resolved against. Absolute
 /// paths pass through untouched; nothing else in this crate calls the
 /// filesystem directly. `write_roots` widen the boundary every tier above
-/// read is held to — `bash`'s working directory as well as what `write` and
-/// `edit` may touch.
+/// read is held to: `bash`'s working directory, and what `write`/`edit` touch.
 #[derive(Debug, Clone)]
 pub struct Workspace {
     root: PathBuf,
@@ -29,12 +28,8 @@ fn normalize(p: &Path) -> PathBuf {
     out
 }
 
-// Canonicalize the deepest existing ancestor and hand back the missing tail:
-// an existing resolvable symlink is resolved away, and what is merely absent
-// is returned so the caller can check it for links that never resolve (a
-// dangling link exists but canonicalizes to nothing). None when no ancestor
-// resolved at all — nothing was checked for links, so the caller must refuse
-// rather than test a boundary against it.
+// Canonicalizes the deepest existing ancestor and returns the missing tail
+// separately. None when nothing resolved — the caller must refuse outright.
 fn real_until_missing(p: &Path) -> Option<(PathBuf, Vec<std::ffi::OsString>)> {
     let mut ancestor = p;
     let mut tail: Vec<std::ffi::OsString> = Vec::new();
@@ -62,14 +57,10 @@ fn rejoin(real: PathBuf, tail: &[std::ffi::OsString]) -> PathBuf {
     out
 }
 
-// A tail component that already sits on disk as a symlink would be crossed by
-// whatever the caller creates under the rejoined path, so creating through it
-// is refused. Real directories are fine; once a component is missing nothing
-// below it is on disk and the walk stops there.
+// A tail component on disk as a symlink would be crossed by whatever gets
+// created under it, so that's refused; real directories are fine.
 fn tail_crosses_a_link(real: &Path, tail: &[std::ffi::OsString]) -> bool {
     let mut prefix = real.to_path_buf();
-    // The tail is stored deepest-first; walk it outward-in, so each prefix is
-    // exactly what the rejoined path will have on disk at that depth.
     for name in tail.iter().rev() {
         prefix.push(name);
         match std::fs::symlink_metadata(&prefix) {
@@ -90,13 +81,8 @@ impl Workspace {
     }
 
     /// Widen the boundary to extra absolute directories, for every tier above
-    /// read: `bash` may work in one as well as `write` and `edit`. Entries
-    /// must be absolute; one that does not exist yet is fine — the write tool
-    /// creates it on first use. A component that sits on disk as a dangling
-    /// symlink is refused here, since nothing below it can ever be created
-    /// through. Each is reduced the way `resolve` reduces a target, so an
-    /// existing resolvable symlink cannot sneak a narrower root past the
-    /// check.
+    /// read (`bash`, `write`, `edit`). Absolute, needn't exist yet, dangling
+    /// symlinks refused; reduced like `resolve` so one can't sneak a root in.
     pub fn with_write_roots(mut self, extra: &[impl AsRef<Path>]) -> std::io::Result<Self> {
         for dir in extra {
             let dir = dir.as_ref();
@@ -131,15 +117,9 @@ impl Workspace {
         &self.root
     }
 
-    /// Resolve a model-supplied path. Relative paths join the workspace
-    /// root; absolute paths are used as-is. The tier sets the boundary:
-    /// `Tier::Read` may reach anywhere on the filesystem; write and exec
-    /// tools must stay inside the workspace root or a configured write root,
-    /// and a path that would escape both is refused. Canonicalizing the
-    /// deepest existing ancestor is what stops a resolvable symlink from
-    /// pointing outside the boundary; the remaining components cannot resolve
-    /// as links, and one that exists as a dangling link is refused outright
-    /// rather than created through.
+    /// Resolves a model-supplied path against the workspace. `Tier::Read` may
+    /// reach anywhere; write/exec must stay within the workspace or a write root.
+    /// Symlinks are resolved first, so none can point the result outside it.
     pub fn resolve(&self, input: &str, tier: Tier) -> Result<PathBuf, ToolError> {
         if input.is_empty() {
             return Err(ToolError::Invalid("empty path".into()));
@@ -303,9 +283,8 @@ mod tests {
         assert_eq!(p, root.join("x.txt"));
     }
 
-    // A write root widens every tier above read, `bash`'s working directory
-    // included. Documented as such because it is what the check does: the
-    // boundary turns on `tier != Read`, not on the tier being `Write`.
+    // The boundary check is `tier != Read`, not `tier == Write` — that's why
+    // exec widens too.
     #[test]
     fn a_write_root_widens_the_exec_tier_too() {
         let (_d, ws) = ws();
@@ -346,9 +325,7 @@ mod tests {
         assert_eq!(ws.display(&p), "a/b/c/d.txt");
     }
 
-    // The claim `with_write_roots` makes: a write root is reduced the way a
-    // target is, so a symlink standing where the root is named cannot widen
-    // the boundary to whatever it points at.
+    // Mirrors the claim `with_write_roots` makes: a symlink can't widen the boundary.
     #[cfg(unix)]
     #[test]
     fn a_symlinked_write_root_is_reduced_to_what_it_points_at() {
@@ -376,7 +353,6 @@ mod tests {
         ));
     }
 
-    // A symlink inside a write root cannot carry a write back out of it.
     #[cfg(unix)]
     #[test]
     fn a_symlink_inside_a_write_root_cannot_escape_it() {

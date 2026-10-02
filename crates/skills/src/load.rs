@@ -75,8 +75,7 @@ fn sibling_files(dir: &std::path::Path) -> Vec<String> {
         };
         for entry in entries.flatten() {
             // Inside the loop, not only at each descent: a directory holding a
-            // thousand files at its own level would otherwise name every one of
-            // them in a message that goes to the provider.
+            // thousand files at one level would otherwise name every one of them.
             if out.len() >= CAP {
                 return;
             }

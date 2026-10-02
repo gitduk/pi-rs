@@ -14,8 +14,7 @@ pub(crate) fn header(path: &str) -> String {
 }
 
 /// Content hash for the staleness note: a file that changed underneath the
-/// model since its last view gets a note beside the report. Not a gate any
-/// more — the anchors are the gate.
+/// model since its last view gets a note beside the report.
 pub(crate) fn view_hash(content: &str) -> String {
     let mut h: u32 = 0x811c_9dc5;
     for b in content.as_bytes() {
@@ -27,12 +26,9 @@ pub(crate) fn view_hash(content: &str) -> String {
 
 /// Where each construct that opens on a row ends, keyed by the row it opens on.
 ///
-/// Only the constructs spanning more than one row. A single-line item needs no
-/// entry: `addr` renders `N-N` for any row it does not find here, so a row
-/// carries a span exactly when the span says something the row does not.
-///
-/// Every construct, not only the declarations an outline lists: a range ending
-/// one line off a `match` or a struct literal is what breaks a file.
+/// Only constructs spanning more than one row — `addr` renders `N-N` when a
+/// row has no entry. Every construct, not just outline declarations: a range
+/// ending one line off a `match` or struct literal is what breaks a file.
 pub(crate) fn spans(path: &str, content: &str) -> HashMap<usize, usize> {
     let Some(lang) = crate::syntax::Lang::of(path) else {
         return HashMap::new();

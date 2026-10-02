@@ -12,12 +12,10 @@
 # The endpoint.
 #
 # `format` is the shape pi speaks, not the vendor: `anthropic` is the Messages
-# API, `openai` is the Responses API. Those are the two native shapes and pi
-# speaks nothing else — a server offering only /v1/chat/completions belongs
-# behind a gateway that translates.
+# API, `openai` the Responses API, `chat` Chat Completions.
 # ---------------------------------------------------------------------------
 base_url = "https://api.anthropic.com"
-format   = "anthropic"           # anthropic | openai
+format   = "anthropic"           # anthropic | openai | chat
 
 # A `$` reads the environment; anything else is the key itself. A literal key
 # beginning with `$` cannot be written here — put it in a variable.
@@ -56,7 +54,7 @@ model = "claude-sonnet-5"
 summarize_model = "claude-haiku-4-5"
 
 effort = "medium"                # off | low | medium | high
-tier   = "exec"                  # read | write | exec
+tier   = "exec"                  # read | write | exec | net
 
 # How many rounds a `/loop` may run before it stops on its own. Unset is 10 —
 # a loop ends on its own when a round changes nothing, when a round undoes the

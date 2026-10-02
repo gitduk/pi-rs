@@ -9,14 +9,12 @@ use pi_core::store::keys::{Keys, Mode};
 use pi_core::store::session::Store;
 use ratatui::text::Line;
 
-// The rows the scrollback draws, one string each.
 pub(super) fn drawn_rows(view: &View) -> Vec<String> {
     ScrollbackRows::new(&view.surface.scrollback, &Paint::new(false), 80, |_| true)
         .map(text)
         .collect()
 }
 
-// A closed reasoning block of id `id` and `n` lines in the scrollback.
 pub(super) fn block(id: u64, n: usize, folded: bool) -> Row {
     Row::thinking(
         id,
@@ -25,9 +23,8 @@ pub(super) fn block(id: u64, n: usize, folded: bool) -> Row {
     )
 }
 
-// The text one line of the view shows, read the way a frame reads it: the
-// walk hands over what it has not built yet, so a test asks for the screen
-// rows and joins them.
+// The text one line of the view shows: the walk hands over pieces not yet
+// built into rows, so this joins them the way a screen would.
 pub(super) fn text(piece: crate::tui::scrollback::Piece<'_>) -> String {
     screen::Piece::pieces(piece).iter().map(plain).collect()
 }
@@ -53,11 +50,8 @@ pub(super) fn frame(
     rows.into_iter().map(|l| plain(&l)).collect()
 }
 
-// ---------------------------------------------------------- settling
-// A lane wired up enough to be settled: a real transcript, a real agent,
-// and a `Run::Running` standing in for the job that is about to report.
-// A lane and the directory it lives in — the guard comes back so the
-// caller keeps it alive for as long as the lane is used.
+// A lane just real enough to settle (real transcript/agent, `Run::Running`
+// standing in for the job); the temp-dir guard comes back so it stays alive.
 pub(super) fn a_running_lane() -> (tempfile::TempDir, Lane) {
     let dir = tempfile::tempdir().expect("a temp dir");
     let lane = running_lane(dir.path());

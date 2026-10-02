@@ -1,9 +1,8 @@
 //! The textual form of a key press: what `ctrl+shift+y` means, and how a
 //! binding is written back out.
 //!
-//! Second half of the module next door: `mod.rs` says what the table is,
-//! this says how a key is spelled in it — the config file's side, and the
-//! `/keys` listing's.
+//! Second half of `mod.rs`: that says what the table is, this says how a key
+//! is spelled in it — the config file's side, and the `/keys` listing's.
 
 use anyhow::{Result, bail};
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -13,8 +12,7 @@ use crate::store::listing::{Listing, Row};
 
 impl Keys {
     /// What is bound right now: the id it is rebound by, the keys that reach
-    /// it, and what it does. A rebindable system with no way to see the ids is
-    /// one nobody can rebind.
+    /// it, and what it does.
     ///
     /// No cell says which mode a binding belongs to, because the ids do:
     /// `normal.` is on everyone that needed telling apart.

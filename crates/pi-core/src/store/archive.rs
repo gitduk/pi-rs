@@ -12,9 +12,8 @@ use agent::session::Session;
 
 use crate::store::session::{Store, now};
 
-// The saves a subagent handed off to a background thread, still in flight.
-// The exit path drains these — a transcript promised on disk has to be there
-// when the process goes, or the handoff was just a faster way to lose it.
+// Saves handed off to a background thread, still in flight; the exit path
+// drains these so a promised transcript is actually on disk before exit.
 fn pending() -> &'static std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>> {
     static PENDING: OnceLock<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> = OnceLock::new();
     PENDING.get_or_init(|| std::sync::Mutex::new(Vec::new()))
@@ -60,9 +59,8 @@ impl Archive for Nowhere {
 }
 
 impl Archive for Filed {
-    // The save runs on a blocking thread so several parallel subagents do not
-    // each serialize megabytes on the tool path; the handle is registered so
-    // [`flush`] can wait for it before the process goes.
+    // Blocking thread: several subagents saving in parallel must not each
+    // serialize megabytes on the tool path. The handle lets `flush` await it.
     fn keep(&self, parent: &str, id: &str, session: Session) {
         let (store, root, model, parent, id) = (
             self.store.clone(),

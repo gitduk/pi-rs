@@ -41,13 +41,8 @@ fn read_prompt(args: &Args) -> Result<Option<String>> {
 // Conventional exit code for a process killed by SIGINT.
 const INTERRUPTED: i32 = 130;
 
-// First Ctrl-C cancels the run; a second one leaves. The terminal's own policy,
-// which is why it sits here rather than in the agent: it writes to stderr and
-// ends the process.
-//
-// `tokio::signal::ctrl_c` replaces SIGINT's default action for the whole
-// process and never restores it, so a handler that only fires once leaves no
-// way out at all — the second press has to do the killing itself.
+// First Ctrl-C cancels, second exits: `ctrl_c` replaces SIGINT's default for
+// the whole process and never restores it, so only a second handler gets out.
 fn cancel_on_interrupt() -> tokio_util::sync::CancellationToken {
     let token = tokio_util::sync::CancellationToken::new();
     let child = token.clone();
@@ -99,15 +94,13 @@ async fn main() -> Result<()> {
         .with_context(within)?;
 
     let store = session::Store::default();
-    // Off the startup path, like the journal's own sweep: it stats every
-    // bucket and almost never has anything to take. A run that exits first
-    // loses nothing — the next one sweeps.
+    // Off the startup path: stats every bucket, almost never has anything to
+    // take. A run that exits first loses nothing — the next one sweeps.
     tokio::task::spawn_blocking({
         let store = store.clone();
         move || {
-            // The journals live in the buckets now, so the two sweeps walk one
-            // tree. Transcripts go by reach, journals by age — a run worth
-            // reading back is a fortnight old at most, and the work is not.
+            // One tree, two prune rules: transcripts by reach, journals by
+            // age — a run worth reading back is a fortnight old at most.
             journal::prune(store.root());
             store.prune();
         }
@@ -122,9 +115,8 @@ async fn main() -> Result<()> {
     // `-c`/`--resume`. A one-shot prompt leaves nothing behind, not even a log.
     let keeps = prior.is_some() || prompt.is_none();
 
-    // The one surface needs the terminal at both ends: keys come in one side,
-    // the repaint goes out the other. Asked before the journal and the session
-    // directory are made, so a run that cannot start leaves neither behind.
+    // The one surface needs the terminal at both ends. Asked before the
+    // journal and session directory are made, so a failed start leaves neither.
     if prompt.is_none() && !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
         bail!(
             "interactive mode needs a terminal on both stdin and stdout \
@@ -166,14 +158,10 @@ async fn main() -> Result<()> {
 
     let mut ag = agent::Agent::new(dialled.transport, dialled.spec);
     // Resolved here rather than lazily: a name that does not exist should be a
-    // startup error, not a surprise the first time history gets long enough to
-    // compact.
+    // startup error, not a surprise once compaction first needs it.
     let writer = summary_writer(&pinned, &config, &model_id)?;
-    // A resumed session keeps its journal too, so the whole of it reads as one
-    // file however many runs it took. Installed after every step that can
-    // refuse to start and before the run: a start that refuses leaves no
-    // session directory behind, and one that goes ahead has its log from the
-    // first turn.
+    // A resumed session shares its journal file across runs. Installed after
+    // every step that can refuse to start: a refused start leaves no directory.
     if keeps {
         journal::install(
             &store.journal_path(workspace.root(), &id),
@@ -189,9 +177,8 @@ async fn main() -> Result<()> {
         );
     }
     let retry = config.retry();
-    // Installed last: the compactor watches its own stream by the run's idle
-    // timeout, which `Config::retry` just settled. Without one the transcript
-    // is never shrunk — see `agent::Compactor`.
+    // Installed last: the compactor watches its stream by the idle timeout
+    // `Config::retry` just settled. Without one the transcript is never shrunk.
     ag.compactor = Arc::new(agent::Summarizing::new(writer, retry.idle));
     let archive = if keeps {
         archive::Filed::armed(store.clone(), root.clone(), model_id.clone())
@@ -216,9 +203,8 @@ async fn main() -> Result<()> {
     let resumed = carried.context().len();
 
     let Some(prompt) = prompt else {
-        // Before `id` moves into the Core: the context borrows it to name the
-        // session its spills belong to. `commands` is what the Core shows for
-        // the front lane; the lane's own copy travels in `resolved`.
+        // Before `id` moves into the Core, since `ctx` still needs to borrow it.
+        // `commands` is the Core's copy for the front lane; `resolved` keeps its own.
         let commands = resolved.commands.clone();
         let ctx = tool::Ctx::new(workspace).with_session(&id, pi_core::store::spill_root());
         let mut first = lane::Lane::opened(lane::Opening {
@@ -251,9 +237,8 @@ async fn main() -> Result<()> {
         return out;
     };
 
-    // A skill command is a prompt, so it means here what it means at the
-    // terminal. The built-ins are not: they operate on a session, and a run
-    // that answers once has none to operate on.
+    // A skill command is a prompt, so it means the same here as at the
+    // terminal; built-ins aren't — they operate on a session this run has none of.
     let prompt = match expand(&resolved.commands, &prompt) {
         Some(Ok(instructions)) => instructions,
         Some(Err(why)) => bail!("{why}"),

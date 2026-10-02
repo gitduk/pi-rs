@@ -14,12 +14,8 @@ use crate::render::{self, Paint};
 use pi_core::core;
 use pi_core::store::icons;
 
-// Whether groups are folded to their one line, and which block of reasoning
-// the stream is filling right now.
-//
-// The screen is repainted from its rows every frame, so a group already shown
-// can still be folded. A group's own state lasts only while it is last; the
-// next group pushes it back to `folded`, the switch.
+// Whether groups are folded, and which reasoning block streams now. A
+// group's fold state resets to `folded` once it stops being last.
 pub(super) struct Folds {
     // The next block id; a block keeps the id it was born with, so `land`
     // appends only to the open block.
@@ -29,21 +25,16 @@ pub(super) struct Folds {
     // What untouched groups are folded to: the value a group that stops being
     // last folds back to, and the target a global flip is measured from.
     pub(super) folded: bool,
-    // How the last group — the one `ctrl+t` names — is folded. It survives
-    // the group itself, so the next group is born with it until the key flips
-    // it again.
+    // How the last group — the one `ctrl+t` names — is folded; survives
+    // the group itself until the key flips it again.
     pub(super) last: bool,
     // Each call's whole leading argument, by call id, from the answer that
     // made it until its result lands: the result does not carry it.
     pub(super) asked: HashMap<String, String>,
 }
 
-// Shut: the working is worth a glance while it runs and almost never worth
-// the scrollback it costs afterwards.
-//
-// The only constructor, because a derived one would answer `false` here — the
-// opposite of what the type says two lines up, in the one place nobody would
-// think to look.
+// Default is folded=true: results are rarely worth the scrollback space.
+// Hand-written because `derive` would give `false` here.
 impl Default for Folds {
     fn default() -> Self {
         Self {
@@ -163,10 +154,8 @@ impl Folds {
         self.last
     }
 
-    // Fold or unfold every group in the scrollback and move the switch with
-    // them, the last one included: rows and switch must never disagree, or
-    // the next group is born with a stale value and a mixed screen can never
-    // fold back to a single state.
+    // Folds/unfolds every group and moves the switch with them: rows and
+    // switch must never disagree, or the next group is born stale.
     pub(super) fn flip_all(&mut self, scrollback: &mut [Row]) {
         self.folded = !self.folded;
         self.last = self.folded;
@@ -194,9 +183,8 @@ fn last_group(scrollback: &mut [Row]) -> Option<&mut Row> {
     scrollback.iter_mut().rev().find(|r| r.is_steps())
 }
 
-// The scrollback as rows, walked from either end without flattening the
-// whole history: `window` only ever needs the newest `want` rows, and an
-// unfolded thinking block is not worth re-materializing per frame.
+// The scrollback as rows, walked from either end without flattening:
+// `window` only needs the newest `want` rows.
 pub(super) struct ScrollbackRows<'a> {
     rows: &'a [Row],
     // The frame's width, for the rows that clip to fit.
@@ -213,12 +201,8 @@ pub(super) struct ScrollbackRows<'a> {
     lens: Vec<usize>,
 }
 
-/// One line of the view as the window walks it: a scrollback row's line, which
-/// waits for the frame that shows it, or a live line already in hand.
-///
-/// The split is what a scrolled view costs. The walk passes over every line
-/// above where the window starts, and a row's line is asked for only once the
-/// window has reached it — the walk itself reads the row's own count.
+/// One line of the view: a scrollback row's line (asked for once the
+/// window reaches it) or a live line already in hand.
 pub(super) enum Piece<'a> {
     Row {
         row: &'a Row,
@@ -284,10 +268,8 @@ impl<'a> DoubleEndedIterator for IndexedScrollbackRows<'a> {
 }
 
 impl<'a> ScrollbackRows<'a> {
-    /// The window's rows, and `keep` says which of them it is for: browse
-    /// mode shows the conversation alone. A dropped row is counted as having
-    /// no lines at all, which is the whole of the filter for the window — the
-    /// caller's own height tally filters for itself.
+    /// The window's rows; `keep` filters for browse mode (conversation
+    /// only). A dropped row counts as zero lines for the window.
     pub(super) fn new(
         rows: &'a [Row],
         paint: &'a Paint,
@@ -314,9 +296,8 @@ impl<'a> ScrollbackRows<'a> {
         IndexedScrollbackRows(self)
     }
 
-    // Line `line` of row `idx` as the window wants it: the row itself, whose
-    // count per line is already measured and whose text waits until a frame
-    // shows it.
+    // Row `idx` line `line`, as the window wants it — count already
+    // measured, text deferred until a frame shows it.
     pub(super) fn piece(&self, idx: usize, line: usize) -> Piece<'a> {
         Piece::Row {
             row: &self.rows[idx],
@@ -391,12 +372,8 @@ impl<'a> DoubleEndedIterator for ScrollbackRows<'a> {
     }
 }
 
-// The rows between the scrollback and the status line: the reasoning window,
-// and the paragraph still being written.
-//
-// A free function because it is where both of this feature's bugs lived and
-// `Ui` cannot be built without a terminal — a decision no test can reach is
-// one that gets its second chance in front of the user.
+// Rows between the scrollback and status line: the reasoning window,
+// plus the paragraph still being written.
 pub(super) fn body(
     folds: &Folds,
     scrollback: &[Row],
@@ -409,8 +386,8 @@ pub(super) fn body(
     if folds.holds(reasoning, scrollback) || partial.is_empty() {
         return Vec::new();
     }
-    // All of it, not the rows the terminal has room for: this is the only copy
-    // until `close` lands it, and a scroll up has to reach its head.
+    // All of it, not just the visible rows: this is the only copy until
+    // `close` lands it, and scrolling up must reach its head.
     if reasoning {
         // Indented like the lines it will join.
         let indent = folds.stream_indent(scrollback).unwrap_or_default();
@@ -424,18 +401,15 @@ pub(super) fn body(
             .collect()
     }
 }
-// The transcript as rows, exactly as the live stream would have drawn them:
-// prompts with their sigil, answers as markdown, tool calls as their result
-// lines, reasoning as a foldable block. A rewind rebuilds the screen from
-// this, so the view returns to the point the conversation did.
+// The transcript as rows, exactly as the live stream would draw them.
+// A rewind rebuilds from this, so the view returns to where it left off.
 pub(super) fn scrollback_from(
     session: &agent::session::Session,
     paint: &Paint,
     folds: &mut Folds,
 ) -> Vec<Row> {
-    // A call whose result is in the session shows only its result row; one that
-    // never got an answer (an interrupted turn) shows the start line instead,
-    // the way `abandon_tools` leaves it.
+    // A call with a session result shows only its result row; an
+    // interrupted one shows the start line, as `abandon_tools` leaves it.
     let answered: HashSet<String> = session
         .history()
         .filter_map(|e| match e {
@@ -485,9 +459,8 @@ pub(super) fn scrollback_from(
                             ));
                         }
                         AssistantContent::Reasoning(r) => {
-                            // Muted, exactly as the live stream paints a
-                            // reasoning line: a rebuilt block must not come
-                            // out brighter than the one it replaces.
+                            // Muted, exactly as the live stream paints reasoning:
+                            // a rebuilt block must not come out brighter.
                             let lines: Vec<Line<'static>> = r
                                 .content
                                 .iter()
@@ -501,12 +474,8 @@ pub(super) fn scrollback_from(
                             if lines.is_empty() {
                                 continue;
                             }
-                            // From the same counter the live stream draws
-                            // from, because there is only one rule for what a
-                            // block id is. Handing every rebuilt block `0`
-                            // worked only for as long as nothing looked one up
-                            // by id — and `streaming_row` and `stream_fold` both
-                            // do, taking the last match.
+                            // From the live stream's id counter: lookups match
+                            // by id, so every block needs a real, unique one.
                             let block = folds.take_id();
                             folds.join(
                                 &mut out,
@@ -523,7 +492,7 @@ pub(super) fn scrollback_from(
             }
             // Neither is anything the screen shows.
             LogEntry::Compaction { .. } => {}
-            // Everything else the A table covers, the rebuild and a fresh
+            // Everything else `f_entry` covers, the rebuild and a fresh
             // adoption draw from one place.
             other => {
                 if let Some(rows) = f_entry(other, paint) {
@@ -541,9 +510,8 @@ pub(super) fn scrollback_from(
     out
 }
 
-/// One entry's rows, as the rebuild and a fresh adoption both draw them:
-/// the A table without its cross-entry markers. Answers do not pass through
-/// here — their streamed rows are adopted by construction.
+/// One entry's rows, as both the rebuild and a fresh adoption draw them.
+/// Answers don't pass through here — their rows stream directly.
 pub(super) fn f_entry(entry: &LogEntry, paint: &Paint) -> Option<Vec<Row>> {
     match entry {
         LogEntry::Ask { ask, .. } => Some(Row::prompt(ask.shown_text(), paint)),
@@ -559,9 +527,8 @@ pub(super) fn f_entry(entry: &LogEntry, paint: &Paint) -> Option<Vec<Row>> {
         // Machine prose, not the user's line: rebuilt in the muted voice of
         // a screen notice rather than under the prompt sigil.
         LogEntry::Note { note, .. } => Some(Row::notice_lines(note, paint)),
-        // The same voice for the rows only the screen ever knew: a run's tally
-        // line, a warning about the turn. The surface worded them, so the
-        // rebuild draws the text it filed rather than wording it again.
+        // Same voice for screen-only rows — a tally line, a turn warning —
+        // so the rebuild reuses the text the surface already worded.
         LogEntry::Screen { text, .. } => Some(Row::notice_lines(text, paint)),
         LogEntry::Tool {
             result: r, preview, ..

@@ -53,9 +53,8 @@ fn encode_image(img: &Image) -> Value {
     json!({ "type": "image_url", "image_url": { "url": url } })
 }
 
-// A tool result becomes a `tool` message keyed by the call id, exactly as the
-// Chat Completions schema wants it. `flatten_text` renders each part the way
-// the other two wires read a string result body.
+// A tool result becomes a `tool` message keyed by the call id, per the Chat
+// Completions schema. `flatten_text` renders it the way the other wires do.
 fn encode_tool_result(r: &ToolResult) -> Value {
     let mut parts: Vec<String> = Vec::new();
     if r.is_error {
@@ -69,9 +68,8 @@ fn encode_tool_result(r: &ToolResult) -> Value {
     })
 }
 
-// One stored assistant turn as the chat wire wants it: content and tool calls
-// on the same message. The wire keeps no ordering between the two, so the
-// merge is lossless up to that.
+// One stored assistant turn as the chat wire wants it: content and tool
+// calls on the same message, merged losslessly up to their relative order.
 fn encode_assistant(content: &[AssistantContent], spec: &ModelSpec, out: &mut Vec<Value>) {
     let mut text = String::new();
     let mut calls: Vec<Value> = Vec::new();
@@ -79,9 +77,8 @@ fn encode_assistant(content: &[AssistantContent], spec: &ModelSpec, out: &mut Ve
         match b {
             AssistantContent::Text(t) => text.push_str(&t.text),
             AssistantContent::Reasoning(r) => {
-                // Demoted reasoning ships as ` thinking`-wrapped prose, the
-                // same demotion the other wires do. Signed and encrypted are
-                // unreachable for this format, so only demotion ships.
+                // Demoted reasoning ships as `<think>`-wrapped prose, like
+                // the other wires; signed/encrypted are unreachable here.
                 if let Replay::Demoted = r.replay_for(spec) {
                     text.push_str(&tagged(&r.text()));
                 }
@@ -162,9 +159,8 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
             .unwrap()
             .insert(0, json!({ "role": "system", "content": system }));
     }
-    // The thinking switch. DeepSeek's chat wire takes `thinking: {type}` with
-    // `reasoning_effort`; a model that takes no thinking instruction gets no
-    // such field.
+    // DeepSeek's chat wire takes `thinking: {type}` with `reasoning_effort`;
+    // a model with no thinking instruction gets no such field.
     if let Some(ThinkingControl::Effort) = spec.thinking {
         if let Some(effort) = req.effort.as_openai() {
             body["thinking"] = json!({ "type": "enabled", "reasoning_effort": effort });
@@ -206,12 +202,8 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
     body
 }
 
-// DeepSeek's chat wire reports the cached and uncached prompt halves
-// separately: `prompt_tokens` is their sum, so the fresh input is the
-// difference. A host that omits `prompt_cache_miss_tokens` (plain OpenAI)
-// leaves the miss to be derived from the other two; only when the whole
-// usage block is missing does every token bill as fresh — the same direction
-// the Responses subtraction takes, and the safe one for a budget.
+// DeepSeek splits cached/uncached prompt halves (`prompt_tokens` is their
+// sum); a missing usage block bills everything as fresh, the safe default.
 fn usage_of(u: &Value) -> Usage {
     let cache_read = u["prompt_cache_hit_tokens"].as_u64().unwrap_or(0);
     let miss = u["prompt_cache_miss_tokens"].as_u64().unwrap_or_else(|| {
@@ -233,26 +225,22 @@ fn stop_of(finish: &str) -> StopReason {
         "tool_calls" => StopReason::ToolUse,
         "length" => StopReason::MaxTokens,
         "content_filter" => StopReason::Refusal,
-        // "stop", an unrecognised reason, and a resource-interrupted turn all
-        // end the turn; the accumulator turns it into a tool use when calls
-        // are pending.
+        // "stop", an unrecognised reason, or a resource-interrupted turn: the
+        // accumulator upgrades it to tool-use when calls are pending.
         _ => StopReason::EndTurn,
     }
 }
 
-// The accumulator's block indices, synthesized because the chat wire has no
-// native output index. Indexes are handed out in arrival order from one
-// counter — reasoning reaches the wire before text, so it keeps that position
-// after the fold — and a block reuses its index for every later delta.
+// Block indices, synthesized in arrival order since the chat wire has none
+// of its own; a block reuses its index for every later delta.
 struct Decoder {
     gaps: Shared,
     text_index: Option<usize>,
     reasoning_index: Option<usize>,
     // Wire tool index → accumulator index, assigned on first sight.
     tools: std::collections::BTreeMap<usize, usize>,
-    // Wire tool indexes that already got their `BlockStart`. A host may resend
-    // a call's id or name on a later delta; re-emitting `BlockStart` would
-    // overwrite the id and name the accumulator already holds.
+    // Wire tool indexes that already got their `BlockStart` — resending it
+    // would let a later delta overwrite the id/name the accumulator holds.
     started: std::collections::BTreeSet<usize>,
     next_free: usize,
 }
@@ -319,9 +307,8 @@ impl Decoder {
             });
         }
 
-        // Tool calls stream one `tool_calls` array per chunk. The id and name
-        // arrive on the first delta of a call, the arguments over the rest;
-        // the block is started once, so a later delta can only add arguments.
+        // Id and name arrive on a call's first delta, arguments over the rest;
+        // the block starts once, so a later delta can only add arguments.
         if let Some(calls) = delta["tool_calls"].as_array() {
             for call in calls {
                 let wire = self.gaps.frame().owed_index(call, "tool_call", "index");
@@ -358,9 +345,8 @@ impl Decoder {
             }
         }
 
-        // The terminal chunk states `finish_reason` and carries the usage. The
-        // documentation is explicit that no usage-only chunk is emitted: the
-        // statistics ride this one.
+        // The terminal chunk states `finish_reason` and carries the usage —
+        // no usage-only chunk is ever emitted, per the docs.
         if let Some(finish) = choice["finish_reason"].as_str() {
             events.push(StreamEvent::Done {
                 stop: stop_of(finish),
@@ -447,9 +433,8 @@ mod tests {
 
     #[test]
     fn a_host_without_the_cache_split_bills_the_whole_prompt_fresh() {
-        // Plain OpenAI reports only `prompt_tokens`; the miss half is absent,
-        // so the whole prompt counts as fresh rather than cached — the safe
-        // direction for a budget.
+        // Plain OpenAI reports only `prompt_tokens`; with no miss half, the
+        // whole prompt counts as fresh — the safe direction for a budget.
         let u = usage_of(&json!({
             "prompt_tokens": 1_000,
             "completion_tokens": 42,
@@ -525,9 +510,8 @@ mod tests {
 
     #[test]
     fn reasoning_streams_first_and_keeps_its_position() {
-        // The wire sends reasoning_content before content. Indexes are handed
-        // out in arrival order, so the fold must put reasoning ahead of text —
-        // the same shape the sibling transports persist.
+        // The wire sends reasoning_content before content; indexes hand out
+        // in arrival order, so the fold must put reasoning ahead of text.
         let mut acc = Accumulator::new("test-model".into());
         let mut dec = Decoder::new(Shared::new("chat"));
         for e in dec.frame(&json!({
@@ -550,9 +534,8 @@ mod tests {
 
     #[test]
     fn a_resent_tool_delta_does_not_reopen_the_block() {
-        // Some hosts resend a call's id or name on a later delta. The block is
-        // started once, so the resent fields must not overwrite the id and
-        // name the first delta carried.
+        // Some hosts resend a call's id or name on a later delta; the block
+        // starts once, so resent fields must not overwrite what came first.
         let mut acc = Accumulator::new("test-model".into());
         let mut dec = Decoder::new(Shared::new("chat"));
         for d in [

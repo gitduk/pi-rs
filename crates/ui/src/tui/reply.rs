@@ -1,14 +1,5 @@
-//! What a slash command answered: the lines it printed, drawn over the menu
-//! until they are closed.
-//!
-//! The only place a command's own words go. Its output is neither a notice in
-//! a transcript — none of it is in the session, and none of it reaches the
-//! model — nor a flash, which is one row for a second: it is something the
-//! user asked for and has not finished reading.
-//!
-//! It rides the menu's plumbing, in the region the menu draws in:
-//! `MenuNext` / `MenuPrevious` move, `MenuDismiss` and `MenuAccept` close, and
-//! the browsing keys `j` / `k` / `q` sit beside them as a fixed vocabulary.
+//! What a slash command answered, drawn over the menu until closed — not
+//! a transcript notice or a flash, but unread output the user asked for.
 
 use crossterm::event::KeyEvent;
 use ratatui::text::Line;
@@ -25,9 +16,8 @@ pub struct Reply {
     /// Rows rather than lines: the width a row has to fit in is known at the
     /// drawing, not where the answer was built.
     content: Listing,
-    // The first line drawn. Clamped against the room the menu has — told to
-    // the reply at each press, and again at each draw — so a resize or a
-    // shorter terminal cannot leave the window past the end of the reply.
+    // First line drawn, clamped against the menu's room at each press and
+    // draw, so a resize can't leave the window past the reply's end.
     first: usize,
 }
 
@@ -36,11 +26,8 @@ impl Reply {
         Self { content, first: 0 }
     }
 
-    /// The rows a reply takes on screen: a line wider than the surface is a
-    /// row it wraps to, and the window is measured in what the drawing counts.
-    /// Fitted here rather than left to `Rows`, because
-    /// the room this is given is a row count — a wrapped line is one the count
-    /// would miss, and the menu would then draw over the bar.
+    /// Reply rows, wrapped to `width`; fitted here so the row count used by
+    /// the menu can't miss a wrapped line and draw over the bar.
     fn rows(&self, width: usize) -> Vec<Line<'static>> {
         listing::lines(&self.content)
             .into_iter()
@@ -48,9 +35,8 @@ impl Reply {
             .collect()
     }
 
-    /// The window's rows: what the reply has to show of itself in `room` rows,
-    /// the last of them counting what is above and below when it does not all
-    /// fit. A reply that fits is drawn whole and says nothing about keys.
+    /// The window's `room` rows to draw; the last one names what's above and
+    /// below when the reply doesn't fit whole.
     pub fn view(&self, room: usize, width: usize) -> Vec<Line<'static>> {
         let room = room.max(1);
         let rows = self.rows(width);
@@ -81,13 +67,8 @@ impl Reply {
     }
 }
 
-/// Whether a press is the reply's to read: the keys the table binds for a menu,
-/// which are the keys every other list on this surface answers to, plus the two
-/// presses that mean what they mean wherever they are made.
-///
-/// Letters are deliberately not among them. A reply is an answer drawn over the
-/// menu, not a mode over the keyboard, and a letter it read for itself would be
-/// a letter missing from the line being typed underneath it.
+/// Whether a press is the reply's: menu-table keys, plus letters
+/// excluded, since a letter it ate would be missing from the line below.
 pub(super) fn owns(bound: Option<Action>, _key: KeyEvent) -> bool {
     const OWN: [Action; 6] = [
         Action::MenuNext,
@@ -105,9 +86,8 @@ impl Ui {
     /// the ones `owns` lets through — nothing else reaches here.
     pub(super) fn reply_key(&mut self, bound: Option<Action>, _key: KeyEvent) -> Asked {
         let room = self.regions.menu.height as usize;
-        // The width the drawing wraps at, not the terminal's own: a row this
-        // counts as one and the painter wraps into two is a row at the end of
-        // the reply that nothing can scroll to.
+        // Wraps at the drawing's width, not the terminal's: a row that wraps
+        // after this count would end up unreachable to scroll to.
         let width = self.screen.usable();
         match bound {
             Some(Action::MenuDismiss | Action::MenuAccept) => self.reply = None,
@@ -118,9 +98,8 @@ impl Ui {
         Asked::Own(Deed::Nothing)
     }
 
-    /// Move the window over the reply. `room` and `width` are what the menu
-    /// last showed it, which is what the bound on the last row is measured
-    /// against.
+    /// Move the window over the reply, using the `room`/`width` the menu
+    /// last showed it — what the last row's bound is measured against.
     pub(super) fn scrolled(&mut self, by: isize, room: usize, width: usize) -> Asked {
         if let Some(reply) = &mut self.reply {
             reply.scroll(by, room, width);
@@ -128,14 +107,8 @@ impl Ui {
         Asked::Own(Deed::Nothing)
     }
 
-    /// Put what a slash command answered up, over everything else.
-    ///
-    /// Nothing on it is in the session, so a reply that is gone is gone; one
-    /// with no lines is not opened at all — an overlay the user has to dismiss
-    /// for nothing is worse than silence, and several commands answer with
-    /// nothing when there is nothing to say. It takes down whatever was there
-    /// either way: an answer that was not given is not the answer to this line,
-    /// and the last one left standing would read as if it were.
+    /// Shows a command's reply, replacing any prior one. Empty output opens
+    /// nothing, since dismissing an empty overlay is worse than silence.
     pub(super) fn open_reply(&mut self, content: Listing) {
         self.reply = (!content.is_empty()).then(|| Reply::new(content));
     }
@@ -179,9 +152,8 @@ mod tests {
         assert_eq!(rows[2], "  1-2 of 4  ·  esc close, ↓/↑ scroll");
     }
 
-    // A line wider than the surface is a row it wraps to, and the count is of
-    // rows: a reply measured in lines puts more rows into the menu than the
-    // menu has, and the rows it pushes out are the bar's.
+    // A line wider than the surface wraps to more than one row; unwrapped
+    // counting would push extra rows into the bar's space.
     #[test]
     fn a_wrapped_row_counts_as_one() {
         let reply = Reply::new(Listing::say(["x".repeat(30), "last".into()]));
@@ -196,8 +168,6 @@ mod tests {
         assert_eq!(rows[2], "  1-2 of 4  ·  esc close, ↓/↑ scroll");
     }
 
-    // Scrolling stops with the last line on the bottom row: one more press
-    // moves nothing, so the window cannot be pushed off the end.
     #[test]
     fn the_window_stops_at_the_end() {
         let mut reply = reply(10);
@@ -208,10 +178,8 @@ mod tests {
         assert_eq!(reply.first, 0);
     }
 
-    // A window past the end — a resize, or a press made before the frame that
-    // sized it — is pulled back to fit rather than drawn off the end. What it
-    // is pulled back to is the last screenful, not the top: the window the user
-    // moved is the one that stays.
+    // Can happen via resize, or a press before the frame that sized it.
+    // Pulled back to the last screenful, not the top — user's position stays.
     #[test]
     fn a_window_past_the_end_is_pulled_back() {
         let mut reply = reply(10);

@@ -1,10 +1,8 @@
 //! One checkout being worked in: its run state machine, its transcript, and
-//! what the Core does to the lanes it holds — opening one, removing one,
-//! starting a session in it, saving it, resuming another.
+//! what the Core does to the lanes it holds.
 //!
-//! The verbs stay on `Core` because most of them read the store, the config and
-//! the settings it holds; a `Lanes` type would be those four passed down one
-//! at a time.
+//! The verbs stay on `Core` since most read the store, config and settings
+//! it holds.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -42,17 +40,11 @@ use crate::store::session::{self, Stored};
 pub enum Run {
     // Nothing running, nothing waiting to be looked at.
     Idle,
-    // A run under way.
     Running {
         // What `esc` cancels, and only for the lane in front.
         cancel: CancellationToken,
-        // Where a line typed mid-run goes, when the job in flight is a run
-        // and can hear one: the run takes it at its next turn boundary.
-        //
-        // `None` for a `!` or a `/compact`. Neither calls a model, so neither
-        // has a boundary to take a line at, and a line typed at one waits for
-        // the lane the way every line used to. Optional rather than an empty
-        // mailbox on every job, because the two are not the same thing to say.
+        // Where a line typed mid-run goes, taken at the next turn boundary.
+        // `None` for a `!` or `/compact`, which call no model and have none.
         steer: Option<Steer>,
         // Esc caught the prompt on its way out: stop the run, then unsend it.
         // Set while the run works, acted on when it ends.
@@ -152,17 +144,11 @@ struct Runner {
     inbox: UnboundedReceiver<Event>,
 }
 
-/// Arm an agent for one checkout: hang the subagent tool on the brief, put that
-/// brief on the agent, and hand back the bundle the lane keeps.
+/// Arm an agent for one checkout: hang the subagent tool on the brief, put
+/// that brief on the agent, and hand back the bundle the lane keeps.
 ///
-/// The one place a lane's brief is assembled, which is what keeps startup,
-/// `/reload` and an opened checkout from arming an agent differently. The
-/// compactor is not in here: it holds the summarizer's own connection, so the
-/// two callers that own one install it on the agent first, and a checkout
-/// opened later inherits it by cloning that agent.
-///
-/// The bundle keeps the brief without the subagent: the tool is offered, not
-/// forced, so a re-arm after `/model` must not find the old one holding the name.
+/// One place a brief is assembled, so startup, `/reload` and an opened
+/// checkout arm an agent the same way.
 pub fn arm(
     agent: &mut Agent,
     resolved: Arc<Resolved>,
@@ -302,8 +288,6 @@ impl Lane {
         matches!(self.runner.run, Run::Running { .. })
     }
 
-    // ------------------------------------------------------- what a run does
-
     /// A run has taken this lane. `steer` is the mailbox it hears at the next
     /// turn boundary; a job that calls no model has none to hear from.
     pub fn begin(&mut self, cancel: CancellationToken, steer: Option<Steer>) {
@@ -350,8 +334,6 @@ impl Lane {
         &self.runner.run
     }
 
-    // ------------------------------------------------------- the checkout
-
     /// Change the agent, then put the brief back on it under `resolved`. One
     /// call: a brief armed on an agent other than the one in force is stale.
     pub fn rearm(
@@ -376,8 +358,6 @@ impl Lane {
         &self.checkout.ctx.workspace
     }
 
-    // ---------------------------------------------------- what a surface reads
-
     /// What a surface draws this lane from: where it is, what it is doing, and
     /// what it is doing it under. One call rather than four reaches into it.
     pub fn snapshot(
@@ -386,10 +366,8 @@ impl Lane {
         started: Option<std::time::Duration>,
         queued: usize,
     ) -> Snapshot {
-        // Both the lines queued on the surface and the ones said mid-run are
-        // lines the user has given it that have not reached the model. Which
-        // side of the seam one waits on is the loop's business, not the
-        // reader's.
+        // Queued (surface) and steered (mid-run) lines are both unreached by
+        // the model; which side one waits on is the loop's business.
         self.talk.tally.snapshot(
             model,
             self.checkout.worktree.as_deref(),
@@ -469,8 +447,6 @@ impl Lane {
         &self.talk.tally
     }
 
-    // ------------------------------------------------------------- the meter
-
     /// Fold an event into the meter. The loop's facts arrive here and nowhere
     /// else: what a run has spent is only known from them.
     pub fn note(&mut self, event: &Event) {
@@ -503,8 +479,6 @@ impl Lane {
         };
         self.charge(&spent);
     }
-
-    // -------------------------------------------------------- the transcript
 
     /// Lend the transcript to a job for the length of its run.
     pub fn take_session(&mut self) -> Option<Session> {
@@ -541,14 +515,11 @@ impl Lane {
         }
     }
 
-    /// A row for this lane's screen and nothing else: the tally line a run
-    /// ends on, a warning about it. Filed rather than only drawn, so that
-    /// rebuilding the screen from the transcript draws it too — and held when
-    /// a run has the transcript, since that is when those rows are filed.
+    /// A row for this lane's screen and nothing else, filed so a rebuild
+    /// from the transcript draws it too; held when a run has the transcript.
     ///
-    /// The id comes back for the surface that drew the row: its cursor for what
-    /// it has drawn has to move past the entry, or the next adopt draws it a
-    /// second time. Nothing comes back for a held row, which is filed later.
+    /// Returns the id so the surface's draw cursor can skip past it; `None`
+    /// for a held row, filed later.
     pub fn push_screen(&mut self, text: &str) -> Option<EntryId> {
         match self.talk.session.as_mut() {
             Some(session) => Some(session.push_screen(text)),
@@ -616,9 +587,8 @@ impl Core {
     /// Rewind the conversation to an entry and write the shorter transcript
     /// back.
     ///
-    /// The entry decides which of the two it is — the caller cannot get the
-    /// pairing wrong, and a menu row that went stale against the transcript
-    /// falls through to removing nothing.
+    /// The entry decides which of the two it is; a stale menu row falls
+    /// through to removing nothing.
     pub fn rewind_to(&mut self, entry: agent::session::EntryId) -> anyhow::Result<Rewound> {
         // A rewind is refused while a run has the transcript, so this is the
         // idle path; without it there is nothing to go back through.
@@ -639,9 +609,8 @@ impl Core {
             None => Rewound::Kept,
         })
     }
-    // Become the session `talk` holds: the journal it writes to and the
-    // namespace its spills are filed under follow it. Replaced whole, so no
-    // part of the session being left — its bill, its held rows — carries over.
+    // Become the session `talk` holds: the journal and spill namespace
+    // follow it, replaced whole — nothing of the old session carries over.
     fn becomes(&mut self, talk: Conversation) {
         let lane = self.lane_mut();
         lane.talk = talk;
@@ -655,13 +624,8 @@ impl Core {
             .journal_path(self.lane().root(), &self.lane().talk.id);
         journal::switched(&path, &self.lane().talk.id);
     }
-    // Drop the in-memory conversation and open a fresh session under a new
-    // id, unnamed: a name identifies one session. The old transcript stays on
-    // disk.
-    //
-    // Says nothing: the screen it is rebuilt into is empty, which is the
-    // whole of the news, and the id it opened under is the surface's own
-    // business — as with a resumed one.
+    // Fresh, unnamed session; the old transcript stays on disk. Says nothing:
+    // the rebuilt screen is already empty and the id is the surface's business.
     pub(super) fn fresh_session(&mut self) {
         self.becomes(Conversation::new(
             session::new_id(),
@@ -680,19 +644,15 @@ impl Core {
             Some(stored.into_session()),
             name,
         ));
-        // The id is a timestamp with a pid in it — nothing to read, and the
-        // transcript coming back on screen already says what was resumed. A
-        // name is worth a line, being what the user called it.
+        // The id (timestamp+pid) is nothing to read; only a name — what the
+        // user called it — is worth a line.
         match self.lane().talk.name.as_deref() {
             Some(name) => vec![format!("resumed “{name}”")],
             None => Vec::new(),
         }
     }
-    // Open a checkout as a lane of its own, and put it in front.
-    //
-    // Whole or not at all, like every other path that reads a config: a tree
-    // whose skills will not resolve leaves the run where it was. The config is
-    // the one in force, not re-read for this tree: `/reload` does that.
+    // Open a checkout as a new lane, in front; whole or not at all — a tree
+    // whose skills won't resolve leaves the run where it was.
     pub(super) fn open_lane(
         &mut self,
         ws: tool::Workspace,
@@ -774,21 +734,11 @@ impl Core {
         out.push("resume one by typing /resume and Tab".into());
         out
     }
-    // Switch to a saved session: its transcript, name and id become this
-    // one's, and every further turn extends it. The session being left is
-    // saved first, so nothing is lost on the way out.
-    //
-    // The model in charge does not change — that stays the prompt's decision
-    // — so reasoning a different model wrote is demoted the way it is after
-    // a `/model` switch.
+    // Switches transcript, name and id; the model does not change — reasoning
+    // from a different model is demoted the same way as after `/model`.
     pub(super) fn resume(&mut self, id: &str) -> Result<Vec<String>, String> {
-        // Resuming the session already running is no switch; going through
-        // would only zero the totals the bar is mid-way through showing.
-        //
-        // Unless there is nothing there to resume: a job that panicked and could
-        // not read its transcript back leaves the lane's own id naming a session
-        // the archive does not hold, and "no switch" would answer that with a
-        // screen that never comes back.
+        // Same id is normally a no-op (else totals would zero); unless the
+        // transcript itself is gone (a panicked job), which must be reported.
         if id == self.lane().talk.id {
             if self.lane().session().is_none() {
                 return Err(
@@ -827,9 +777,8 @@ mod tests {
         std::sync::Arc::make_mut(&mut agent.model).spec.pricing = pricing;
     }
 
-    // `/model` is answered at once, a run included. The run it cuts across is
-    // still charged at the rate it started on, or the figure `/status` reports
-    // would be the price of a model that never ran those tokens.
+    // `/model` applies at once, but a run in flight stays charged at the
+    // rate it started — else `/status` prices tokens the new model never ran.
     #[test]
     fn a_switch_mid_run_does_not_reprice_the_run_in_flight() {
         let cheap = Pricing {
@@ -857,11 +806,8 @@ mod tests {
         assert_eq!(lane.talk.totals.cost, 3.0 + 15.0);
     }
 
-    // A run holds the transcript for as long as it works, and the rows that
-    // outlive a run — the tally line, a warning about it — are filed exactly
-    // then. They wait for the transcript rather than being dropped: a rebuild
-    // draws what the transcript holds, so a row filed into nothing is a row
-    // `/resume` loses.
+    // Screen rows filed while a run holds the transcript wait rather than
+    // drop — a rebuild reads only the transcript; `/resume` would lose them.
     #[test]
     fn a_row_filed_while_a_run_holds_the_transcript_lands_with_it() {
         let mut lane = a_lane("s");

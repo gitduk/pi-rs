@@ -23,11 +23,8 @@ struct State {
     context_token: Option<String>,
 }
 
-// The byte budget for one outbound message. The protocol documents no limit
-// and the reference implementation never splits, so this is a floor we chose,
-// not a ceiling anyone published. Bytes rather than characters: nothing says
-// whether the server counts UTF-8 bytes or UTF-16 units, and for the CJK an
-// answer is likely to contain, bytes are the smaller of the two budgets.
+// No documented limit — a floor we chose, not a published ceiling. Bytes, not
+// chars, since server counting is unspecified and bytes are the smaller CJK budget.
 const MESSAGE_LIMIT: usize = 2000;
 
 // The typing indicator's shared state: the ticket cache, serialized with
@@ -87,9 +84,8 @@ impl WeChat {
         }
     }
 
-    // The client for the base the session currently talks to. A redirected
-    // login saves its host to state; the client is rebuilt only when that
-    // host changed, so a session keeps one connection pool.
+    // The client for the base the session currently talks to; rebuilt only
+    // when a redirected login changed the saved host, keeping one pool otherwise.
     async fn client(&self) -> crate::Client {
         let base = base_of(&*self.state.lock().await);
         let mut client = self.client.lock().unwrap_or_else(PoisonError::into_inner);
@@ -230,9 +226,8 @@ async fn login(mut client: crate::Client, state: Arc<Kept>, tx: Inbox, abort: Ca
     }
 }
 
-// The long-poll loop. Client-side timeouts are the normal empty result, real
-// errors back off (2s, 30s after three in a row — the reference's rhythm);
-// a stale token is reported and stops the channel until a fresh login.
+// Client-side timeouts are the normal empty result; real errors back off
+// (the reference's 2s/30s rhythm); a stale token stops the channel until re-login.
 async fn poll(client: crate::Client, state: Arc<Kept>, tx: Inbox, abort: CancellationToken) {
     let mut failures = 0u32;
     let mut timeout = crate::client::LONG_POLL_TIMEOUT;

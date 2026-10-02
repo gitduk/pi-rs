@@ -1,10 +1,5 @@
-//! One run's life, from the moment it is armed to the moment it is closed:
-//! starting a turn, a `!` line or a `/compact` off the loop, and putting the
-//! transcript back when it comes home.
-//!
-//! The loop in `mod.rs` starts these and stops them; what happens in between —
-//! what a lane is charged, what the screen is told, which lane's line is drawn
-//! where — is here.
+//! One run's life, armed to closed: starting a turn, a `!` line, or a
+//! `/compact` off the loop, and putting the transcript back when it returns.
 
 use agent::session::{Entry as LogEntry, Session};
 use agent::{AgentError, Event};
@@ -28,11 +23,8 @@ pub(super) enum Kind {
     // A turn: the agent loop ran, and `ran` says how it went. Its output
     // reached the view through the lane's event channel as it happened.
     Turn,
-    // A `!` command, and the lines it printed. They come home whole rather
-    // than as events, so settling is the only place they can be shown.
-    //
-    // Kept apart from a turn: a `!` answers no channel, and ending a turn for
-    // the relays here would send a half-written answer as if finished.
+    // A `!` command and the lines it printed, home whole rather than as
+    // events — kept apart from Turn since a `!` answers no channel.
     Bash {
         // The output lines, derived by the same function the rebuild draws
         // with — plus the flash for a command that never ran.
@@ -43,24 +35,18 @@ pub(super) enum Kind {
     Compact(Option<(agent::Report, llm::stream::Usage)>),
 }
 
-// A job that ran off the loop, reporting back to the loop that started it.
-//
-// The transcript comes home this way rather than through a `JoinHandle`, so
-// one channel serves every lane and nothing has to poll a growing list of
-// them. `ran` is None only when the job panicked and took its copy down.
+// A job that ran off the loop, reporting back via one channel (not a
+// `JoinHandle`) so nothing polls a growing list of lanes.
 pub(super) struct Done {
     pub(super) token: u64,
     pub(super) kind: Kind,
-    // The transcript back, and how the job went. None when it panicked and
-    // took its copy down with it — one field, because those two are never
-    // separately absent.
+    // The transcript back, and how the job went. None only if it
+    // panicked — the two are never separately absent.
     pub(super) ran: Option<(Session, Result<llm::stream::Usage, AgentError>)>,
 }
 
-// Run `job` off the loop, turning a panic into a `None` the settle side can
-// act on. One guard for every task that carries the transcript, so the
-// panic contract is written once: a job that never reports leaves its lane
-// looking "working" forever.
+// Runs `job` off the loop, turning a panic into `None` — without this
+// a job that never reports leaves its lane looking "working" forever.
 pub(super) async fn guard<F, T>(job: F) -> Option<T>
 where
     F: std::future::Future<Output = T>,
@@ -69,15 +55,8 @@ where
 }
 
 impl Tui {
-    // Start a turn on the lane in front and come straight back.
-    //
-    // The run keeps the transcript for its length and posts what it is doing
-    // to that lane's own channel, so the loop is free to draw, read keys and
-    // serve the other lanes — including this one after the screen moves on.
-    // Hand the view over to a job about to start: the clock runs, the run's
-    // own figures start at nothing, and the session's earlier runs are handed
-    // to the tally as the base `/status` reports against.
-    // `committed` says whether the prompt behind it can still be taken back.
+    // Hands the view to a job about to start: clock running, run figures
+    // at zero. `committed` says whether the prompt can still be taken back.
     pub(super) fn arm_view(&mut self, committed: bool) {
         let view = front_view(&mut self.views, self.core.lane());
         view.state.started = Some(std::time::Instant::now());
@@ -87,23 +66,23 @@ impl Tui {
         self.core.lane_mut().seed_meter();
     }
 
+    // Starts a turn on the lane in front and returns immediately: the run
+    // posts to that lane's channel, freeing the loop to draw and serve others.
     pub(super) fn start_turn(
         &mut self,
         prompt: String,
         typed: Option<String>,
         done: &UnboundedSender<Done>,
     ) {
-        // Lent to the run for the length of the turn. A lane with a run under
-        // way refuses another, so the only way it is missing here is the lane
-        // whose transcript a panic took and whose archive would not read back.
+        // Lent to the run for the turn's length. Missing only when a panic
+        // took the transcript and the archive won't read back.
         let Some(mut carried) = self.core.lane_mut().take_session() else {
             self.ui.flash(NO_TRANSCRIPT);
             return;
         };
         carried.send_prompt(prompt, typed);
-        // The repair results and the stop note the send filed are entries
-        // now: derive their rows like any commit, so they show without a
-        // rebuild. The ask itself stays unadopted — the door echoed it.
+        // The repair results and stop note the send filed are entries now:
+        // derive rows like any commit so they show without a rebuild.
         let view = front_view(&mut self.views, self.core.lane());
         let tail = view.surface.tail;
         let fresh: Vec<LogEntry> = carried
@@ -143,6 +122,8 @@ impl Tui {
         self.core.lane_mut().begin(cancel, Some(steer));
     }
 
+    // Runs a `!` command off the loop, so the screen stays live. Borrows
+    // the transcript like a turn — the result is filed in it meanwhile.
     pub(super) fn start_bash(&mut self, command: String, done: &UnboundedSender<Done>) {
         let Some(mut carried) = self.core.lane_mut().take_session() else {
             self.ui.flash(NO_TRANSCRIPT);
@@ -183,9 +164,8 @@ impl Tui {
         self.core.lane_mut().begin(cancel, None);
     }
 
-    // Run a `/compact` off the loop. It can spend real time — summarising
-    // what it drops is a model call — and the lane must keep drawing and
-    // serving the others meanwhile.
+    // Runs `/compact` off the loop — summarizing what it drops is a model
+    // call — while the lane keeps drawing and serving the others.
     pub(super) fn start_compact(&mut self, focus: Option<String>, done: &UnboundedSender<Done>) {
         let Some(mut carried) = self.core.lane_mut().take_session() else {
             self.ui.flash(NO_TRANSCRIPT);
@@ -227,15 +207,8 @@ impl Tui {
         self.core.lane_mut().begin(cancel, None);
     }
 
-    // Run a `!` command the way a turn runs: off the loop, so the screen stays
-    // live and the lane can be left to it.
-    //
-    // It borrows the transcript like a turn, and for the same reason: the
-    // result is filed in it, and nothing else may replace it meanwhile.
-    // Hand the terminal to `$EDITOR` on `path` and take it back. Nothing
-    // between the leave and the resume may return early: the surface would be
-    // left invisible. On its own thread: a run in flight still has a stream to
-    // serve. Answers with how the editor ended, and whether the screen came back.
+    // Hands the terminal to `$EDITOR` on `path`, on its own thread (a
+    // stream may still need serving), and takes it back.
     async fn in_editor(
         &mut self,
         path: &std::path::Path,
@@ -365,10 +338,8 @@ impl Tui {
     // A job came home. Every kind settles on the lane that lent it the
     // transcript, whichever lane is on screen by the time it lands.
     pub(super) async fn settle(&mut self, done: Done) {
-        // The run posts its last events and only then says it is over, so both
-        // are in flight at once and the end can win the race. Take what is
-        // waiting before closing anything, or a tool row still open is frozen
-        // as abandoned and the elapsed figure is read off a cleared clock.
+        // Events arrive before the end that follows them, so both race;
+        // take what's waiting first, or a tool row freezes mid-abandon.
         self.serve_lanes().await;
         let Some(lane) = self.core.position_of(done.token) else {
             return;
@@ -394,12 +365,8 @@ impl Tui {
         }
     }
 
-    // A turn or a `!` has ended. Put the transcript back and save it,
-    // whichever lane it belongs to; show the end of it only when that lane
-    // is the one on screen.
-    //
-    // The saving cannot wait — a lane the user never returns to still has to
-    // have its work on disk — but nothing about drawing it does.
+    // A turn or `!` ended: puts the transcript back and saves it; shows
+    // the end only if that lane is on screen. Saving can't wait for that.
     async fn settle_run(&mut self, lane: usize, done: Done, unsend: bool) {
         let Done { ran, kind, .. } = done;
         // Only a turn is a request the model was working on, and only a turn's
@@ -416,11 +383,8 @@ impl Tui {
         // below has the same transcript and knows nothing about the run.
         let ran_back = ran.is_some();
 
-        // The task carried the whole transcript, not just this turn, and a
-        // panic in it dropped that copy. The archive is the last good one;
-        // carrying the empty stand-in forward would save it over the real one
-        // at the end of the next turn, which loses the conversation rather
-        // than the turn.
+        // A panic drops the carried transcript; the archive is the last
+        // good copy, so recovering it instead avoids overwriting it later.
         let (recovered, out) = match ran {
             Some((session, out)) => {
                 self.core.lanes[lane].return_session(session);
@@ -441,17 +405,14 @@ impl Tui {
                 .tail = tail;
         }
 
-        // A panic never came back, and Esc that took the prompt back produced
-        // nothing to misread as a task: neither has anything to tell. Nor does
-        // a `!` the user stopped — the shell command was theirs, and calling
-        // it a cancelled run tells the model to abandon a request it never had.
+        // A panic, or an unsent prompt, has nothing to tell the model; nor
+        // does a user-stopped `!`, which was never the model's request.
         if ran_back && !unsend && was_turn && self.core.lanes[lane].session().is_some() {
             self.core.lanes[lane].note_outcome(&out);
         }
 
-        // Saved either way: an interrupted turn is exactly the one worth
-        // keeping. Not when the transcript never came back, though — the empty
-        // one standing in for it would land on top of what is on disk.
+        // Saved either way — an interrupted turn is worth keeping — unless
+        // the transcript never came back, which would overwrite the disk copy.
         if recovered && let Err(e) = self.core.save_lane(lane) {
             self.say_of(lane, core::not_saved(&e));
         }
@@ -480,11 +441,8 @@ impl Tui {
                 .extend(rows);
         }
 
-        // Before the split below, so a round that ended off-screen still makes
-        // the next one due — it goes when that lane is next in front and free.
-        //
-        // A run that never came back has no outcome to read, so it is named the
-        // failure it is whatever stood in for one.
+        // Before the split, so an off-screen round still comes due. A run
+        // that never came back is named the failure it stood in for.
         let how = if unsend {
             Ended::Unsent
         } else if !ran_back {
@@ -548,8 +506,8 @@ impl Tui {
             }
             self.refresh_sessions();
         } else if stopped {
-            // Nothing was written, so there is nothing to report and nothing
-            // to save — only the same word a stopped turn ends on.
+            // Nothing written, nothing to report or save — same word a
+            // stopped turn ends on.
             self.say_of(
                 lane,
                 self.ui.paint.span(&self.ui.paint.theme.muted, "stopped"),
@@ -570,10 +528,8 @@ impl Tui {
             .started = None;
     }
 
-    // Put back the archive when the job that borrowed the live transcript
-    // never returned it, naming the job as `verb`. Says whether the lane now
-    // holds something safe to write over its save — without one it refuses
-    // work until `/new`, where exiting would cost every other lane its run.
+    // Puts back the archive when a job never returned the borrowed
+    // transcript, naming it `verb`. Says if it's safe to save over.
     fn recover_session(&mut self, lane: usize, verb: &str) -> bool {
         let id = self.core.lanes[lane].id().to_string();
         match self.core.store.load(&id) {
@@ -602,9 +558,8 @@ impl Tui {
     pub(super) fn close_run(&mut self, lane: usize, out: Result<llm::stream::Usage, AgentError>) {
         let view = view_at(&mut self.views, self.core.lanes[lane].token());
         self.ui.close(view);
-        // A cancelled run's calls got no `ToolEnd`; their animated rows have to
-        // reach scrollback some other way before the next flush draws them as a
-        // frozen spinner.
+        // A cancelled run's calls got no `ToolEnd`; their animated rows
+        // need to reach scrollback before the next flush freezes them.
         self.ui.abandon_tools(view);
         view.state.started = None;
         view.state.retry = None;
@@ -622,13 +577,8 @@ impl Tui {
         }
     }
 
-    // Stop every lane still working and settle it, so leaving cannot drop a
-    // transcript that lives in a task.
-    //
-    // Cancelling, not waiting for the work to finish: a run stops at its next
-    // cancellation point, which is the wait Esc already asks of anyone. The
-    // deadline is for the run that will not stop — what is on disk is then the
-    // last save, which is what leaving without this gave every time.
+    // Stops every working lane and settles it, so leaving can't drop a
+    // transcript living in a task. Cancels rather than waits for it to finish.
     pub(super) async fn settle_all(&mut self, done: &mut UnboundedReceiver<Done>) {
         let mut left = 0;
         for lane in &self.core.lanes {

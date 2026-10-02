@@ -19,8 +19,7 @@ fn tree() -> (tempfile::TempDir, Ctx) {
     (dir, Ctx::new(ws))
 }
 
-// The parallel walker finishes files in whatever order it likes; two
-// identical searches must still answer in the same order.
+// The parallel walker finishes files in whatever order it likes.
 #[tokio::test]
 async fn grep_order_does_not_change_between_identical_searches() {
     let (_d, c) = tree();
@@ -29,8 +28,7 @@ async fn grep_order_does_not_change_between_identical_searches() {
     assert_eq!(a, b);
 }
 
-// Overlapping roots must not report one file twice: the dedup is what keeps a
-// count honest when the targets nest.
+// The dedup is what keeps a count honest when the targets nest.
 #[tokio::test]
 async fn overlapping_roots_report_one_file_once() {
     let (_d, c) = tree();
@@ -62,10 +60,8 @@ async fn a_file_with_invalid_utf8_still_reports_its_matches() {
     assert!(out.contains("2:"), "{out}");
 }
 
-// Over the window the cut lands between whole sections — never inside a row —
-// the count answers for what was dropped, and the spill holds the rest. A
-// single section bigger than the whole window is not split: it goes whole,
-// leaving only the locator.
+// The cut lands between whole sections, never inside a row; the count
+// answers for what was dropped. A section bigger than the window goes whole, unsplit.
 #[tokio::test]
 async fn an_over_long_grep_drops_whole_sections_and_spills_the_rest() {
     let (_d, c) = common::spilling();

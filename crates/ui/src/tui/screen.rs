@@ -1,11 +1,5 @@
-//! The whole terminal, rendered through ratatui's cell buffer.
-//!
-//! Every row Pi shows is written into the buffer each frame and diffed by
-//! ratatui against the previous frame, so only what changed reaches the
-//! terminal. History is part of the conversation and has to be rebuildable
-//! when it changes — a rewind forgets a turn, and the screen has to forget
-//! it too — so the buffer is rebuilt from the transcript rather than kept
-//! as terminal scrollback.
+//! The whole terminal, via ratatui's diffed cell buffer. History rebuilds
+//! from the transcript, not terminal scrollback, so a rewind can forget it.
 
 use std::io::Stdout;
 use std::io::Write;
@@ -23,14 +17,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use unicode_width::UnicodeWidthChar;
 
-/// Break a styled line into lines that each occupy exactly one terminal row.
-///
-/// Repainting works by counting rows, so a line that wraps on its own would
-/// throw the count off by however many times it wrapped. Styles ride on the
-/// spans, the line's own folded into each, so a wrapped coloured line keeps
-/// its colour past the first row without anything re-opening an escape
-/// sequence. Escape sequences found in the content itself — outside noise a
-/// tool's output carried in — take no columns and no cells.
+/// Wraps a line to rows of exactly `width`. Escape sequences embedded in
+/// the content (tool output noise) take no columns and are dropped.
 pub fn fit(line: &Line<'_>, width: usize) -> Vec<Line<'static>> {
     let width = width.max(1);
     let mut out: Vec<Line<'static>> = Vec::new();
@@ -41,8 +29,7 @@ pub fn fit(line: &Line<'_>, width: usize) -> Vec<Line<'static>> {
         let mut chars = span.content.chars();
         while let Some(c) = chars.next() {
             if c == '\x1b' {
-                // An escape in the content is outside noise: no columns, no
-                // cells, nothing the spans do not already say. Consume it.
+                // Outside noise (tool output): no columns, no cells.
                 let mut esc = pi_core::text::Escape::new();
                 for n in chars.by_ref() {
                     if esc.closed(n) {
@@ -72,23 +59,14 @@ pub fn fit(line: &Line<'_>, width: usize) -> Vec<Line<'static>> {
     out
 }
 
-/// One column short of the real width, so nothing ever lands on the last cell.
-///
-/// Terminals disagree about whether a character written to the last cell has
-/// already wrapped, so a row that reaches it may be joined to the next one on
-/// resize. Stopping a column short keeps every row a hard break, and the row
-/// count stays stable across a resize.
+/// One short of real width: terminals disagree on whether the last
+/// cell already wrapped, so this keeps every row a hard break.
 pub fn usable(width: u16) -> usize {
     width.saturating_sub(1).max(1) as usize
 }
 
-/// One line of the view as the window walks it: how many screen rows it takes
-/// at the width it was sized for, and the text itself.
-///
-/// The text is asked for only by the lines the window shows. A scrolled view
-/// walks back over everything above where it starts, so a line it passes has
-/// to cost its count and nothing else — wrapping every one of them on the way
-/// is what made scrolling cost what had been scrolled.
+/// One view line: how many screen rows it takes at its sized width,
+/// and the text — asked for only by the lines the window actually shows.
 pub trait Piece {
     /// Screen rows this line takes at the width it was sized for.
     fn height(&self) -> usize;
@@ -98,16 +76,8 @@ pub trait Piece {
     fn pieces(self) -> Vec<Line<'static>>;
 }
 
-/// A line in hand, sized by wrapping it at the width it was built for: the
-/// live block's lines, which are nothing but text, and what the layout tests
-/// hand the window — where the scrollback hands it a row's line it would
-/// rather not build. A live line is not a said one, so there is no border for
-/// its wrapped rows to repeat.
-///
-/// Counted by wrapping rather than taken as the one row a fitted line usually
-/// is: the count the window walks on and the rows it goes on to take have to
-/// agree about every line, and only the wrap makes them do it whatever the
-/// live block hands over.
+/// A line in hand, sized by wrapping at the width it was built for —
+/// live-block text with no said-row border to repeat.
 pub struct Ready<'a> {
     pub line: Line<'a>,
     pub width: usize,
@@ -127,16 +97,8 @@ impl Piece for Ready<'_> {
 /// The clamp below brings it back to the oldest rows the area can hold.
 pub const TOP: usize = usize::MAX;
 
-/// The window of rows to show: the last `room` rows of `lines`, with `scroll`
-/// rows held back from the bottom. The clamped scroll comes back with them.
-///
-/// A line is not a row — anything wider than the terminal wraps — so the
-/// window has to be measured after wrapping. Measuring it in lines instead
-/// puts more rows in the area than fit and the newest ones fall off the
-/// bottom, out of sight below the input. The walk starts from the newest line
-/// and stops as soon as the window is full, so a long history is not built in
-/// full on every frame; each line says how many rows it takes, so the rows the
-/// window scrolls past are counted and dropped, unwrapped and unbuilt.
+/// `room` rows from `lines`, `scroll` back from the bottom — measured in
+/// wrapped rows, not lines, or the newest rows fall off screen.
 pub fn window_tagged<T: Clone, P: Piece>(
     lines: impl DoubleEndedIterator<Item = (P, T)>,
     room: usize,
@@ -162,9 +124,8 @@ pub fn window_tagged<T: Clone, P: Piece>(
         if back.len() >= room {
             break;
         }
-        // A line the window still has rows to hold back is passed over by its
-        // count alone; from the one it stops inside, nothing is asked but the
-        // text.
+        // A line still fully held back is skipped by its count alone; the
+        // one the skip stops inside is asked for its text.
         if skip > 0 {
             let height = line.height();
             if skip >= height {
@@ -172,9 +133,8 @@ pub fn window_tagged<T: Clone, P: Piece>(
                 continue;
             }
         }
-        // Newest screen row first, the direction the walk came from, with the
-        // rows held back dropped off the front of it and the window's remaining
-        // room taken off the back.
+        // Newest row first (the walk's direction): held-back rows drop off
+        // the front, remaining room caps the back.
         let mut rows = line.pieces();
         rows.reverse();
         let left = room - back.len();
@@ -216,17 +176,14 @@ pub fn window<'a>(
     (rows.into_iter().map(|(r, ())| r).collect(), scroll)
 }
 
-/// Break a line into pieces that each occupy exactly one terminal row — a
-/// bordered line repeats its border on every piece, so a said line keeps its
-/// rule unbroken down the rows it wraps to instead of cutting it at the first.
+/// Breaks a line into one-row pieces; a bordered line repeats its border
+/// on each piece instead of cutting the rule at the first row.
 pub fn wrap(border: Option<&Line<'_>>, line: &Line<'_>, width: usize) -> Vec<Line<'static>> {
     let Some(border) = border else {
         return fit(line, width);
     };
-    // The rule needs its columns and the body needs at least one. A frame too
-    // narrow to spare both drops the rule rather than overflowing: a row wider
-    // than `width` wraps again under whatever paints it, and `window` counted
-    // the rows on the promise that none of them would.
+    // Rule needs its columns, body needs at least one; a frame too narrow
+    // drops the rule rather than overflow the row count `window` promised.
     let spare = width.checked_sub(border.width()).filter(|avail| *avail > 0);
     let Some(avail) = spare else {
         return fit(line, width);
@@ -241,9 +198,8 @@ pub fn wrap(border: Option<&Line<'_>>, line: &Line<'_>, width: usize) -> Vec<Lin
         .collect()
 }
 
-/// Lay one screen row in a band: its colour goes under every span — so the
-/// text keeps its own foreground — and fills the columns past the text, so a
-/// row reads as one rectangle rather than as text of uneven length.
+/// Lays one row in a band: color goes under every span (text keeps its
+/// own foreground) and fills columns past the text into one rectangle.
 pub fn banded(line: Line<'static>, band: RStyle, width: usize) -> Line<'static> {
     let used = line.width();
     let mut spans: Vec<Span<'static>> = line
@@ -265,7 +221,7 @@ fn write_line(line: &Line<'_>, x: u16, y: u16, buf: &mut Buffer) {
         let mut chars = span.content.chars();
         while let Some(c) = chars.next() {
             if c == '\x1b' {
-                // Same deal as `fit`: outside noise, not a cell. Consume it.
+                // Same as `fit`: outside noise, not a cell.
                 let mut esc = pi_core::text::Escape::new();
                 for n in chars.by_ref() {
                     if esc.closed(n) {
@@ -320,14 +276,12 @@ impl Widget for Rows<'_> {
     }
 }
 
-// The terminal this screen draws on. An enum rather than a generic so the
-// backend stays out of `Screen`'s type — and out of `Ui`'s and `Tui`'s with
-// it, which is the whole reason the surface was untestable.
+// The terminal this draws on. An enum, not a generic, keeps the backend
+// out of `Screen`/`Ui`/`Tui`'s types — what makes the surface testable.
 enum Term {
     Live(Terminal<CrosstermBackend<Stdout>>),
-    // An in-memory grid. It never enters raw mode or the alternate screen, so
-    // `leave` has nothing to undo — which is what keeps a test off the
-    // terminal the test runner itself is using.
+    // An in-memory grid: never enters raw mode or the alt screen, so
+    // `leave` has nothing to undo, keeping tests off the real terminal.
     #[cfg(test)]
     Test(Terminal<ratatui::backend::TestBackend>),
 }
@@ -355,9 +309,8 @@ fn enter(stdout: &mut Stdout) -> std::io::Result<()> {
     stdout.flush()
 }
 
-// All-motion mouse reports every move, which is what hover needs; the
-// normal capture mode only reports press and release. Off again whenever
-// the surface is given back, in the panic hook and in `leave`.
+// All-motion mouse reports every move (hover needs it); normal capture
+// only reports press/release. Disabled in the panic hook and `leave`.
 fn disable_all_motion() {
     let mut out = std::io::stdout();
     let _ = out.write_all(b"\x1b[?1003l");
@@ -373,9 +326,8 @@ fn prior_hook() -> std::sync::MutexGuard<'static, Option<PriorHook>> {
     PRIOR_HOOK.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-// The terminal-restoring panic hook: raw mode off, alternate screen left, the
-// process's former hook chained behind. `leave` hands that former hook back,
-// so anything that re-enters the terminal must set this again.
+// Terminal-restoring panic hook: raw mode off, alt screen left, the
+// prior hook chained behind. `leave` restores that prior hook.
 fn set_escape_hook() {
     std::panic::set_hook(Box::new(|info| {
         let _ = crossterm::terminal::disable_raw_mode();
@@ -398,9 +350,8 @@ impl Screen {
         let mut stdout = std::io::stdout();
         enter(&mut stdout)?;
 
-        // A panic in raw mode otherwise leaves a terminal the user has to
-        // `reset`, with the panic message itself unreadable. The hook that
-        // was there before is kept above for `leave` to put back.
+        // A panic in raw mode leaves a terminal the user must `reset`,
+        // the panic message itself unreadable. Prior hook saved for `leave`.
         *prior_hook() = Some(std::panic::take_hook());
         set_escape_hook();
         let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
@@ -433,9 +384,8 @@ impl Screen {
         self.height = height;
     }
 
-    /// Redraw one frame. The closure draws into ratatui's buffer; ratatui
-    /// diffs it against the last frame, so only the rows that changed reach
-    /// the terminal.
+    /// Redraws one frame; the closure draws into ratatui's buffer, which
+    /// diffs against the last so only changed rows reach the terminal.
     pub fn draw(&mut self, f: impl FnOnce(&mut ratatui::Frame<'_>)) -> std::io::Result<()> {
         match &mut self.term {
             Term::Live(t) => {
@@ -463,14 +413,8 @@ impl Screen {
         }
     }
 
-    /// Shape the caret to say which mode is up: a block commands, a bar types,
-    /// and `None` — vim off — hands the shape back, so nobody who never asked
-    /// for modal keys ends up with a caret they did not choose. The one part
-    /// of the mode no repaint carries: the caret is the terminal's to draw,
-    /// not ratatui's.
-    ///
-    /// Live terminals only — a test screen has none to shape, and writing to
-    /// stdout there would mark the runner's own caret.
+    /// Shapes the caret for the mode: block for Normal, bar for Insert,
+    /// `None` (vim off) hands the shape back. Live terminals only.
     pub fn cursor_shape(&mut self, normal: Option<bool>) {
         if !matches!(self.term, Term::Live(_)) {
             return;
@@ -484,16 +428,14 @@ impl Screen {
         let _ = crossterm::execute!(std::io::stdout(), style);
     }
 
-    /// Give the terminal back: leave the alternate screen and restore raw.
-    /// Nothing to give back when nothing was taken, so a test screen is a
-    /// no-op here — it must not disable raw mode on the runner's own terminal.
+    /// Gives the terminal back: leaves the alt screen, restores raw mode.
+    /// A no-op on a test screen — must not touch the runner's own terminal.
     pub fn leave(&mut self) {
         if !matches!(self.term, Term::Live(_)) {
             return;
         }
-        // Straight to stdout rather than through the terminal's backend, which
-        // is the same thing it writes to and the same way the panic hook above
-        // restores it.
+        // Straight to stdout, not the terminal's backend — the same
+        // target and path the panic hook above uses to restore it.
         let _ = crossterm::execute!(
             std::io::stdout(),
             crossterm::cursor::Show,
@@ -580,9 +522,7 @@ mod tests {
 
     #[test]
     fn a_wrapped_line_counts_as_the_rows_it_takes() {
-        // The bug this replaced counted lines: "abcdef" is one line and two
-        // rows at width 3, so a two-row window that took two lines drew four
-        // rows into it and the newest two landed below the area, under the input.
+        // "abcdef" wraps to two rows at width 3, so the window counts by rows.
         assert_eq!(shown(&["abcdef", "gh"], 3, 2, 0), vec!["def", "gh"]);
     }
 
@@ -591,9 +531,8 @@ mod tests {
         assert_eq!(shown(&["a", "b", "c", "d"], 10, 2, 1), vec!["b", "c"]);
     }
 
-    // The walk counts screen rows, so a window whose oldest row starts inside a
-    // wrapped line takes the rows of that line it reaches and cuts the rest —
-    // the line is not taken whole, and the rows held back are not taken at all.
+    // The walk counts screen rows: a window whose oldest row starts inside
+    // a wrapped line takes only the rows it reaches, not the line whole.
     #[test]
     fn a_window_that_starts_inside_a_wrapped_line_cuts_that_line() {
         // At width 2: "abcdef" is three rows, "gh" and "ij" one each.

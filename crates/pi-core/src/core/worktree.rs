@@ -1,10 +1,7 @@
 //! Parallel checkouts of one repository, and moving the session between them.
 //!
-//! A worktree lives at `<repo>.worktrees/<name>`, beside the repository rather
-//! than inside it, on a branch of the same name,
-//! so one word names the directory, the branch and the command argument.
-//! Git refuses to check one branch out twice, so the alternative to a branch
-//! per worktree is a detached HEAD — commits reachable only through the reflog.
+//! A worktree lives at `<repo>.worktrees/<name>`, beside the repository, on
+//! a branch of the same name — one word names the directory, branch and arg.
 
 use super::Core;
 use crate::input::Step;
@@ -54,10 +51,8 @@ impl Tree {
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<std::process::Output> {
-    // -C rather than the inherited cwd: a stale working directory silently
-    // resolves against the wrong repository.
-    // No advice: git's refusal is shown as git wrote it, and hints are not
-    // part of any reason. Older gits ignore the variable and add a hint.
+    // -C avoids resolving against a stale inherited cwd; GIT_ADVICE=0 drops
+    // hints so refusals are shown exactly as git wrote them.
     let out = Command::new("git")
         .env("GIT_ADVICE", "0")
         .arg("-C")
@@ -111,11 +106,8 @@ fn branch_exists(dir: &Path, name: &str) -> Result<bool> {
 /// the others hang off.
 pub fn list(dir: &Path) -> Result<Vec<Tree>> {
     let listed = checked(dir, &["worktree", "list", "--porcelain"])?;
-    // The flag beside each tree is git's `prunable`: the checkout's directory
-    // is gone, but the metadata naming it lives until `worktree prune` runs.
-    // Kept while parsing and dropped at the end rather than as it arrives —
-    // the attribute's place in a record is git's to change, and popping the
-    // entry would strand the lines after it on the tree before.
+    // `prunable` (dir gone, metadata lingers until `worktree prune`) is kept
+    // while parsing and dropped at the end, so reordered fields aren't stranded.
     let mut out: Vec<(Tree, bool)> = Vec::new();
     let mut root = PathBuf::new();
     // Records are blank-line separated, `worktree <path>` always first.
@@ -168,8 +160,7 @@ fn name_of(path: &Path, root: &Path, main: bool) -> String {
 }
 
 // Refuse a name that would not stay under `home`, or that git would not
-// take as a branch. The check is on the name rather than the joined path
-// because the error should say which word was wrong.
+// take as a branch; checked before joining so the error names the word.
 fn vetted(name: &str) -> Result<&str> {
     let name = name.trim().trim_end_matches('/');
     if name.is_empty() {
@@ -241,9 +232,8 @@ pub fn enter(dir: &Path, name: &str) -> Result<Tree> {
         checked(dir, &["worktree", "add", "-b", name, &target])
     };
     if let Err(e) = added {
-        // Git speaks for the path when it owns it; a directory sitting there
-        // that git never registered is the one case worth naming ourselves —
-        // including when a third party dropped it in mid-add.
+        // Git speaks for the path it owns; an unregistered directory sitting
+        // there is the one case worth naming ourselves.
         if path.exists() {
             bail!("{} exists but is not a registered worktree", path.display());
         }
@@ -278,14 +268,10 @@ pub struct Removed {
     pub note: Option<String>,
 }
 
-/// Remove the checkout `name` refers to, and the branch it is on once that
-/// branch is merged. Unmerged, its commits exist nowhere else, so it stays and
-/// the receipt says so.
+/// Remove the checkout `name` refers to, and its branch once merged;
+/// unmerged, the branch stays and the receipt says so.
 ///
-/// The directory goes first, then the branch: git will not delete a branch
-/// another checkout holds, and until the remove this checkout is that
-/// checkout. Git also refuses a checkout with changes in it unless forced,
-/// and that refusal is passed on unchanged — forcing would throw work away.
+/// A dirty checkout's refusal from git is passed through, not forced.
 pub fn remove(dir: &Path, name: &str) -> Result<Removed> {
     let name = vetted(name)?;
     let trees = list(dir)?;
@@ -338,14 +324,8 @@ pub fn remove(dir: &Path, name: &str) -> Result<Removed> {
 }
 
 impl Core {
-    // `/worktree <name>`: create or reuse a checkout of this repository and
-    // move the session into it.
-    //
-    // Each tree keeps its own transcript rather than one transcript following
-    // the move: paths in it are workspace-relative, so under another root the
-    // same string names a different file, and the file locks and edit shifts
-    // are keyed by absolute path. Coming back therefore resumes what was being
-    // said in that tree, not an empty page.
+    // Each tree keeps its own transcript: paths in it are workspace-relative
+    // and locks are keyed by absolute path, so a shared one would misresolve.
     pub(super) fn enter_worktree(&mut self, name: &str) -> Result<Step, String> {
         let from = self.lane_mut().root().to_path_buf();
         let tree = enter(&from, name).map_err(|e| refused("worktree", e))?;
@@ -357,9 +337,8 @@ impl Core {
         if ws.root() == from {
             return Ok(Step::Flash(format!("already in {}", tree.name)));
         }
-        // Against the root it belongs to, so before the move, not after. An
-        // empty session — nothing said yet — has nothing to keep, and one a run
-        // has is saved by the run.
+        // Saved before the move, against the root it belongs to; an empty
+        // session has nothing to keep, and a run in flight saves its own.
         if self.lane().session().is_some_and(|s| !s.is_empty())
             && let Err(e) = self.save()
         {
@@ -375,10 +354,8 @@ impl Core {
         let said = self.open_lane(ws, (!tree.main).then(|| tree.name.clone()))?;
         Ok(Step::Swap(Listing::say(said)))
     }
-    // `/worktree rm <name>`: remove the checkout `name` refers to — its
-    // directory, the branch it was on, and every transcript recorded under
-    // it. Git says no to a checkout with changes in it, and that refusal is
-    // passed on rather than forced past.
+    // Removes the checkout, its branch, and every transcript under it; a
+    // dirty checkout's refusal from git is passed on, not forced past.
     pub(super) fn remove_worktree(&mut self, name: &str) -> Result<Step, String> {
         let from = self.lane().root().to_path_buf();
         if let Some(target) = list(&from)
@@ -569,10 +546,8 @@ mod tests {
         assert!(trees[0].main);
     }
 
-    // A checkout deleted from the shell rather than through git stays
-    // registered until `worktree prune` runs, and git goes on listing it —
-    // marked `prunable`. Listing it here would offer a switch into a
-    // directory that is not there.
+    // Deleted from the shell (not git), it stays registered as `prunable`
+    // until `worktree prune` runs; listing it would offer a dead directory.
     #[test]
     fn a_checkout_deleted_behind_gits_back_stops_being_listed() {
         let dir = repo();
@@ -644,8 +619,6 @@ mod tests {
         std::fs::remove_dir_all(home(dir.path()).unwrap().join("one")).unwrap();
         checked(dir.path(), &["worktree", "prune"]).unwrap();
         checked(dir.path(), &["-C", "elsewhere", "checkout", "-q", "one"]).unwrap();
-        // Git refuses to check one branch out twice, and `enter` must surface
-        // that refusal rather than plow ahead.
         assert!(enter(dir.path(), "one").is_err());
     }
 

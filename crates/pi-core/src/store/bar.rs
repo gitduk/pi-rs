@@ -1,9 +1,8 @@
 //! The layout the bar is drawn from: `~/.pi/bar.rs` prints one, and without
 //! it the default below stands.
 //!
-//! The script says where things go; what a part reads as is filled in by the
-//! surface on every frame, so a flash or a `/model` switch shows at once
-//! rather than after the script next runs.
+//! The script says where things go; what a part reads as is filled by the
+//! surface each frame, so a `/model` switch shows at once, not after rerun.
 
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer};
@@ -313,7 +312,6 @@ mod tests {
         assert!(serde_json::from_str::<Layout>(bad).is_err());
     }
 
-    // What a script author reads when a layout is refused: where, and why.
     #[test]
     fn a_refusal_says_where_and_why() {
         let bad = r#"{"lines":[{"left":["tabs",{"part":"model","style":{"color":"add"}}]}]}"#;

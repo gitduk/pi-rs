@@ -7,28 +7,24 @@ use super::Ui;
 use super::view::View;
 
 impl Ui {
-    // Nudge the scrolled history window by `step` rows, up or down.
     pub(super) fn scroll_view(&mut self, view: &mut View, up: bool, step: usize) {
         view.surface.scroll = if up {
             view.surface.scroll.saturating_add(step)
         } else {
             view.surface.scroll.saturating_sub(step)
         };
-        // The row under the mouse changed: the old hover index no longer
-        // names the screen position, so drop it until the next move.
+        // Screen positions shifted, so the old hover index is stale.
         self.hovered_scrollback = None;
     }
 
-    // What the row at this screen row sits on: the history region names
-    // the frame, the target names the block inside it.
     fn target_at(&self, row: u16) -> Option<Target> {
         self.row_targets
             .get(row.checked_sub(self.regions.history.y)? as usize)
             .copied()
     }
 
-    /// The scrollback row the mouse is over and the line of it a click there
-    /// opens or closes, if the cursor is on that line's text.
+    /// The scrollback row and line under the cursor, if the cursor is over
+    /// that line's own text.
     fn hovered_row(&self, view: &View, col: u16, row: u16) -> Option<(usize, usize)> {
         let Target::Scrollback(idx, line) = self.target_at(row)? else {
             return None;
@@ -36,8 +32,7 @@ impl Ui {
         let row = view.surface.scrollback.get(idx)?;
         let width = self.screen.usable();
         let line = row.click_line(line, width)?;
-        // The mouse must cover the line's own text, not the empty rest of the
-        // row.
+        // Excludes the empty rest of the row past the text.
         let (text, border) = row.line(line, &self.paint, width);
         let start = border.map_or(0, |b| b.width());
         (start..start + text.width())
@@ -51,8 +46,7 @@ impl Ui {
 
     pub(super) fn on_mouse_click(&mut self, view: &mut View, col: u16, row: u16) {
         match self.target_at(row) {
-            // The pending batch opens and closes where it stands: the live
-            // rows are rebuilt every frame, so the flip is all it takes.
+            // Live rows rebuild every frame, so a flag flip is enough.
             Some(Target::PendingTools) => self.live_tools_shown = !self.live_tools_shown,
             _ => {
                 let width = self.screen.usable();
@@ -80,10 +74,7 @@ impl Ui {
     }
 }
 
-// What one rendered row of the history area sits on, as a click sees it:
-// which block, named the only way a block in that region can be — a
-// scrollback row by index and the line of it, the live region's pending-call
-// rows, or nothing.
+// What block a rendered history row belongs to, for click handling.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Target {
     None,
@@ -105,8 +96,6 @@ pub(super) struct Regions {
     pub(super) editor: Rect,
 }
 
-// The menu row's left column for an @ path: the file's own name, `/` when
-// it is a directory the walk can descend into.
 pub(super) fn at_row_name(path: &str, dir: bool) -> String {
     let name = path.rsplit('/').find(|s| !s.is_empty()).unwrap_or(path);
     if dir {

@@ -1,10 +1,9 @@
-//! Wire types for the Weixin iLink bot API (HTTP/JSON long-poll).
+//! Wire types for the Weixin iLink bot API (HTTP/JSON long-poll), mirroring
+//! `@tencent-weixin/openclaw-weixin` 2.4.8.
 //!
-//! Mirrors `@tencent-weixin/openclaw-weixin` 2.4.8, the package this client was
-//! verified against. Unknown fields are ignored by construction (no
-//! `deny_unknown_fields`): the server has added fields between versions — a
-//! `group_id` on messages, bookkeeping fields on responses — and a decoder that
-//! dies on them breaks the whole long-poll loop.
+//! Unknown fields are ignored by construction (no `deny_unknown_fields`): the
+//! server adds fields between versions, and a decoder that dies on them
+//! breaks the whole long-poll loop.
 
 use serde::Deserialize;
 

@@ -11,16 +11,11 @@ use llm::model::Pricing;
 use llm::stream::Usage;
 use llm::totals::Totals;
 
-/// Every value a status line can draw on, as far as it is known right now.
+/// Every value a status line can draw on, as far as it is known right now:
+/// the run in flight's own figures, not the session's.
 ///
-/// The spend figures are the run in flight's own, not the session's: what this
-/// answer has cost since it was submitted, which is what the line is read for.
-///
-/// A zero count is the provider having stated nothing, and reads as a dash;
-/// every other zero drops its segment rather than standing in for a
-/// measurement. Owned rather than borrowed: a finished run's snapshot outlives
-/// the lane it was taken from, sitting in the scrollback until the screen is
-/// rebuilt.
+/// A zero count reads as a dash (the provider stated nothing); every other
+/// zero drops its segment. Owned, not borrowed, so it outlives the lane.
 #[derive(Debug, Default, Clone)]
 pub struct Snapshot {
     pub elapsed: Option<Duration>,
@@ -46,22 +41,19 @@ pub struct Snapshot {
 /// holding the run in flight for the lines and the session for `/status`.
 #[derive(Debug, Default, Clone)]
 pub struct Tally {
-    // What earlier runs of this session had spent when this one started.
-    // The surface injects it; absent it is zero, and `session` reads what
-    // this run spent alone — which is what a one-shot run sees.
+    // What earlier runs had spent when this one started, injected by the
+    // surface; absent (a one-shot run) it is zero.
     base: Totals,
     // Turns of this run that have reported, and what they were priced at.
     settled: Totals,
-    // The turn in flight, as far as the provider has said. Superseded rather
-    // than added to when its `TurnEnd` lands, or the input would count twice.
-    // Unpriced: a turn is costed when it ends.
+    // The turn in flight; superseded (not added to) on `TurnEnd`, else the
+    // input would count twice. Unpriced until it ends.
     turn: Usage,
     turns: usize,
     ctx: Option<(usize, usize)>,
     compactions: usize,
-    // The rate this run is priced at, pinned when the meter is seeded: every
-    // event and every charge of this run is costed at what its own model
-    // charges, whatever `/model` does to the lane meanwhile.
+    // The rate this run is priced at, pinned at seed: costed at its own
+    // model's rate regardless of what `/model` does meanwhile.
     pricing: Pricing,
 }
 
@@ -102,12 +94,8 @@ impl Tally {
             }
             agent::Event::Context { used, budget } => self.ctx = Some((*used, *budget)),
             agent::Event::Compacted(_) => self.compactions += 1,
-            // The run's own word, which replaces the running count rather
-            // than adding to it. Not merely the same sum: an automatic
-            // compaction's summary is a call the run pays for and no event
-            // states, so only the total that comes home includes it — priced
-            // at this run's rate, which is where a summarizer on a cheaper
-            // model gets rounded up.
+            // Replaces the running count (not adds): a compaction summary
+            // is a paid call with no event of its own, only caught here.
             agent::Event::Done {
                 turns,
                 usage,
@@ -177,12 +165,8 @@ impl Tally {
     }
 }
 
-// Enough about a model to choose between them: who serves it, how much it
-// holds, and what it costs where that is known.
-//
-// Takes the three pieces rather than a config entry, because the running model
-// may never have been one — a name passed through with default numbers has no
-// entry to read.
+// Takes the three pieces rather than a config entry: the running model may
+// never have had one — a passed-through name has no entry to read.
 pub(super) fn summary(format: &str, window: u32, p: &llm::model::Pricing) -> String {
     let mut parts = vec![format.to_string(), format!("{}k", window / 1000)];
     if p.input_per_mtok > 0.0 || p.output_per_mtok > 0.0 {
@@ -246,9 +230,8 @@ mod tests {
         assert_eq!(s.cost, 0.004);
     }
 
-    // A run's own total replaces the running one rather than joining it: the
-    // two count the same turns, and an automatic compaction's summary is in
-    // the first and in no event at all.
+    // A run's own total replaces the running one (same turns counted once):
+    // an automatic compaction's summary is in it but in no event at all.
     #[test]
     fn a_finished_run_states_the_total_rather_than_adding_to_it() {
         let mut t = seeded();
@@ -272,9 +255,8 @@ mod tests {
         assert_eq!(s.compactions, 1);
     }
 
-    // The tally is seeded with what the session spent before this run, and
-    // that figure stays off the lines: a line reads the run in flight, and
-    // `session` is where the whole of it is asked for.
+    // Seeded with what the session spent before this run; that stays off
+    // the lines — `session` is where the whole figure is asked for.
     #[test]
     fn a_seeded_tally_keeps_the_session_off_the_line() {
         let base = Totals {
@@ -341,9 +323,8 @@ mod tests {
         assert_eq!((s.input, s.output), (0, 0));
     }
 
-    // Every field the events can fill is filled here, and the four they
-    // cannot are the surface's own — there is nowhere else for a caller to
-    // patch one in afterwards.
+    // Every field the events can fill is filled here; the rest (the
+    // surface's own) has nowhere else to be patched in afterwards.
     #[test]
     fn a_snapshot_asks_for_what_no_event_states() {
         let s = Tally::default().snapshot("sonnet", Some("f1"), Some(Duration::from_secs(3)), 2);

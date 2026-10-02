@@ -10,15 +10,8 @@ use super::Core;
 use crate::store::journal;
 
 impl Core {
-    // What this run stands on, in one place: the tail of the system prompt as
-    // the model receives it, the two files a person opens when a run goes
-    // wrong, and what the session has spent. The instruction files are named
-    // rather than quoted — `standing` carries them whole, and their content is
-    // in the files themselves.
-    //
-    // The spend is the session's — the status lines carry the run's own — read
-    // live from the lane's tally rather than the lane's settled totals, so a run
-    // under way is counted rather than waiting for it to end.
+    // Instruction files are named, not quoted — `standing` carries them whole.
+    // Spend reads the live tally, not settled totals, so a run in flight counts.
     pub(super) fn status_lines(&self) -> Vec<String> {
         let lane = self.lane();
         let mut out = standing_head(&lane.resolved().standing);
@@ -55,11 +48,8 @@ impl Core {
     }
 }
 
-// What becomes of the transcript's reasoning once another model is reading it.
-//
-// Only ever asked about a model that did not write it — the origin recorded on
-// each block cannot match after a switch — so the signed path is out and one of
-// these three is what the transport will do with it.
+// What becomes of prior-turn reasoning once another model reads it — the
+// signed path is out, so it's one of these three.
 pub(super) fn demotion(replay: llm::model::ReplayThinking) -> &'static str {
     use llm::model::ReplayThinking as R;
     match replay {
@@ -68,11 +58,8 @@ pub(super) fn demotion(replay: llm::model::ReplayThinking) -> &'static str {
     }
 }
 
-// Whether the transcript holds any prior-turn reasoning at all.
-//
-// Worth saying at a switch: it is the one part of the history that does not
-// survive intact, and a model that suddenly reads its own earlier thinking as
-// quoted prose is otherwise an unexplained change in tone.
+// Whether the transcript holds prior-turn reasoning — worth saying at a
+// switch, since it's the one part of history that doesn't survive intact.
 pub(super) fn carries_reasoning(session: &agent::session::Session) -> bool {
     // The view, not every entry: what compaction has already dropped is not
     // going to reach the new model in any form, demoted or otherwise.
@@ -84,10 +71,8 @@ pub(super) fn carries_reasoning(session: &agent::session::Session) -> bool {
     })
 }
 
-// What the system prompt's tail says about the run, which is all of it up to
-// the first instruction file. Split on the tag rather than counting parts, so
-// that a field added to the head shows up here without being told to; the
-// files are named separately because `standing` carries them whole.
+// The system prompt's tail up to the first instruction file. Split on the
+// tag, not a count, so a field added to the head shows up automatically.
 fn standing_head(standing: &str) -> Vec<String> {
     standing
         .split("<instructions")

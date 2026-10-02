@@ -10,9 +10,8 @@ use pi_core::store::status::Segment;
 
 use super::harness::*;
 
-// Recall belongs to the checkout, like the transcripts and the completion
-// lists. One file for the whole machine put the lines typed in one project
-// under `k` in another — a leak as much as a nuisance.
+// Recall belongs to the checkout, like transcripts and completion lists:
+// one shared file would leak lines from one project into `k` in another.
 #[tokio::test]
 async fn recall_follows_the_checkout() {
     let first = tempfile::tempdir().expect("a checkout");
@@ -28,9 +27,8 @@ async fn recall_follows_the_checkout() {
     file(first.path(), "what the first was asked");
     file(second.path(), "what the second was asked");
 
-    // `on_test_screen` skips the startup seed `Tui::new` does, so stand in
-    // for it. What is under test is that a switch replaces this, and that
-    // it does not reach for the bucket of the checkout being left.
+    // `on_test_screen` skips the startup seed `Tui::new` does, so this
+    // stands in for it: a switch must replace it, not re-read the old bucket.
     tui.ui
         .editor
         .seed_history(vec!["what the first was asked".to_string()]);
@@ -45,9 +43,8 @@ async fn recall_follows_the_checkout() {
     assert_eq!(landed.len(), 1, "replaced, not appended: {landed:?}");
 }
 
-// A flash belongs to the lane it answered. Carried across a switch it
-// names the wrong checkout, and it does it on the row the bar uses to say
-// which checkout is in front.
+// A flash belongs to the lane it answered: carried across a switch it
+// would name the wrong checkout on the row that says which one is in front.
 #[tokio::test]
 async fn a_flash_does_not_follow_the_surface_to_another_lane() {
     let dir = tempfile::tempdir().expect("a temp dir");
@@ -58,10 +55,8 @@ async fn a_flash_does_not_follow_the_surface_to_another_lane() {
     assert!(tui.ui.flash.is_none(), "the flash was left behind");
 }
 
-// A rebuilt lane has already been drawn, whatever its row counts say.
-// `rebuild` clears the banner along with the rest — `/resume` and a
-// rewind both do it — so a switch back must not read that as a lane
-// never drawn and lay a fresh opening block over the transcript.
+// `rebuild` (used by `/resume` and a rewind) clears the banner along with
+// the rest, so a switch back must not read that as never drawn and re-open it.
 #[tokio::test]
 async fn switching_back_to_a_rebuilt_lane_keeps_its_transcript() {
     let dir = tempfile::tempdir().expect("a temp dir");
@@ -120,10 +115,8 @@ async fn what_a_lane_out_of_front_posted_is_in_its_view_already() {
     );
 }
 
-// The bug this guards: `/compact` used to settle without ever putting the
-// lane back to `Idle`, and a lane left `Running` queues every later
-// prompt into a queue that only drains once it is not running — so the
-// checkout was wedged for good. Every kind has to come back idle.
+// A lane left `Running` queues every later prompt into a queue that only
+// drains once it stops running, so every job kind must come back idle.
 #[tokio::test]
 async fn every_kind_of_job_leaves_its_lane_idle() {
     let dir = tempfile::tempdir().expect("a temp dir");
@@ -178,8 +171,8 @@ async fn every_kind_of_job_leaves_its_lane_idle() {
     }
 }
 
-// A `!` that panicked brings no cursor home. Reading that as "nothing is
-// drawn yet" laid the recovered transcript over the screen a second time.
+// A `!` that panicked brings no cursor home; reading that as "nothing yet
+// drawn" would lay the recovered transcript over the screen a second time.
 #[tokio::test]
 async fn a_panicked_bang_does_not_lay_its_transcript_down_again() {
     use agent::session::{Prompt, Session};
@@ -262,9 +255,8 @@ async fn a_stopped_run_does_not_tell_the_model_a_request_was_cancelled() {
     );
 }
 
-// An interrupted turn never states its own word, so the spend the view
-// was already showing is what lands in the totals — the next run's base
-// carries it rather than stepping back to what the session had before.
+// An interrupted turn states no word of its own, so the spend already
+// shown is what lands in the totals — the next run's base carries it.
 #[tokio::test]
 async fn an_interrupted_turn_keeps_its_spend_in_the_session_totals() {
     let dir = tempfile::tempdir().expect("a temp dir");
@@ -355,9 +347,8 @@ fn a_flash_is_transient_and_stays_out_of_the_transcript() {
     assert!(ui.flash.is_none(), "the expired flash was dropped");
 }
 
-// The bar's row is the bar's whether or not it is saying anything: a row
-// that came and went would take the transcript above it along, and the
-// newest line would sit a row lower for the second a flash is up.
+// The bar's row is the bar's whether or not it says anything — a coming
+// and going row would drop the newest line for the second a flash is up.
 #[test]
 fn the_bar_keeps_its_row_when_a_flash_comes_and_goes() {
     let mut ui = test_ui(40, 8);
@@ -377,9 +368,8 @@ fn the_bar_keeps_its_row_when_a_flash_comes_and_goes() {
     );
 }
 
-// The bar carries the whole ring, the lanes' own and the disk's alike: a
-// checkout no lane has open is on it as soon as the list has been read, so
-// what `H`/`L` would reach is read off the bar before either is pressed.
+// The bar carries the whole ring, lanes' own and disk's alike: a checkout
+// no lane has open is on it as soon as read, so `H`/`L` can reach it unpressed.
 #[test]
 fn the_bar_lists_the_checkouts_no_lane_has_open() {
     let dir = tempfile::tempdir().expect("a temp dir");
@@ -413,10 +403,8 @@ fn the_bar_lists_the_checkouts_no_lane_has_open() {
     );
 }
 
-// The Normal `L` walks the checkouts in a ring forward; `H` walks it
-// back. Every checkout on disk is in it, not only the open ones
-// — the main one first, because that is the order `core::worktree::list`
-// reports and a lane in it carries no name.
+// `L`/`H` walk the checkout ring forward/back; every checkout on disk is
+// in it (not just open ones), main one first per `core::worktree::list`.
 #[test]
 fn stepping_the_checkouts_walks_the_ring_and_wraps_both_ways() {
     let ring = |at: Option<&str>, forward: bool| {
@@ -444,9 +432,8 @@ fn stepping_the_checkouts_walks_the_ring_and_wraps_both_ways() {
     assert_eq!(ring(Some("f2"), false).as_deref(), Some("f1"));
 }
 
-// The ring agrees with the tabs the bar shows: a step lands on the next
-// checkout in the order they were opened, not the order git reports
-// them, with the ones not open yet after the open ones.
+// A step lands on the next checkout in the order tabs were opened, not
+// git's order, with checkouts not open yet after the open ones.
 #[test]
 fn the_ring_walks_the_tabs_order_not_gits() {
     let mut ui = test_ui(80, 24);
@@ -491,9 +478,8 @@ fn the_ring_walks_the_tabs_order_not_gits() {
     assert_eq!(ui.step_checkout(&lane, false).as_deref(), Some("fw-rm"));
 }
 
-// A checkout deleted from the shell leaves its lane a dead end; the loop
-// drops idle ones so the bar's tab and the step ring stop pretending it
-// is there, and the lane in front keeps its place.
+// A checkout deleted from the shell leaves its lane a dead end; dropping
+// idle ones keeps the bar's tab and step ring honest, with front unmoved.
 #[test]
 fn a_lane_whose_checkout_vanished_is_dropped_and_current_follows() {
     let dir = tempfile::tempdir().expect("a checkout");
@@ -556,9 +542,8 @@ fn a_vanished_lane_before_a_running_one_waits_for_it() {
     assert_eq!(tui.core.lanes.len(), 2);
 }
 
-// The bar answers what a lane has finished, not what it is doing: a lane
-// working out of sight wears its plain name, and only a run that ended wears
-// a mark.
+// The bar answers what a lane has finished, not what it's doing: a lane
+// working out of sight is plain, and only an ended run wears a mark.
 #[test]
 fn only_a_finished_lane_wears_a_mark_in_the_bar() {
     let dir = tempfile::tempdir().expect("a checkout");
@@ -635,10 +620,8 @@ fn a_lone_checkout_has_no_next() {
     assert_eq!(ui.step_checkout(&lane, false), None);
 }
 
-// The half-typed line belongs to the lane it was typed at. A switch
-// parks it on that lane — the editor is the surface's, and Enter on the
-// checkout just landed on must not file another lane's draft into its
-// session — and it comes back to the editor when the lane does.
+// A half-typed line belongs to the lane it was typed at: a switch parks
+// it on that lane's view, and it returns to the editor when the lane does.
 #[tokio::test]
 async fn a_draft_is_parked_on_the_lane_it_was_typed_at_and_comes_back() {
     let first = tempfile::tempdir().expect("a checkout");
@@ -698,9 +681,8 @@ async fn a_switch_mid_recall_keeps_the_line_being_typed() {
     );
 }
 
-// Normal mode: `L` is the next checkout and `H` the previous one, and the
-// lowercase pair is left to the caret. `J`/`K` take the window in the
-// same hand, half a screen at a time.
+// Normal: `L`/`H` step checkouts, the lowercase pair is left to the caret,
+// and `J`/`K` take the window half a screen at a time.
 #[test]
 fn normal_capitals_step_the_checkouts_and_the_window() {
     let mut ui = vim_ui();
@@ -728,7 +710,7 @@ fn normal_capitals_step_the_checkouts_and_the_window() {
         "{prev:?}"
     );
 
-    // The lowercase pair no longer leaves the lane it is typed in.
+    // The lowercase pair stays in the lane it is typed in.
     for lower in ['h', 'l'] {
         let intent = ui.key(&lane, &mut view, typed(lower), false);
         assert!(
@@ -750,9 +732,8 @@ fn normal_capitals_step_the_checkouts_and_the_window() {
     );
 }
 
-// What `/settings` does once the editor closes: the project's file is read
-// back and reaches the surface, and a key the files set that a flag still
-// outranks is named rather than silently ignored.
+// Once `/settings` closes, the project file is read back and reaches the
+// surface; a key a flag still outranks is named, not silently ignored.
 #[tokio::test]
 async fn an_edited_project_file_reaches_the_surface_and_names_what_outranks_it() {
     let dir = tempfile::tempdir().expect("a temp dir");
@@ -779,10 +760,8 @@ async fn an_edited_project_file_reaches_the_surface_and_names_what_outranks_it()
     assert_eq!(tui.ui.status, vec![Segment::Model]);
 }
 
-// A reload reaches everything the config installed, not only the values the
-// lanes read directly. The compactor is the one object here: it holds the
-// summarizer's own connection, so a `summarize_model` that changed has to be
-// dialled again rather than left as the one the run started with.
+// A reload reaches everything the config installed, not just what lanes
+// read directly: the compactor holds its own connection, re-dialled on change.
 #[test]
 fn a_reload_installs_a_new_compactor() {
     let dir = tempfile::tempdir().expect("a checkout");
@@ -893,10 +872,8 @@ fn vanished_lane(name: &str) -> Lane {
     lane
 }
 
-// A lane whose transcript is gone — a job that panicked and could not read its
-// own back — cannot resume what it is running: answering "no switch" leaves the
-// user waiting for a screen that never comes back, with nothing said. The
-// refusal is an answer like any other.
+// A lane whose transcript is gone cannot resume what it is running;
+// answering "no switch" would leave the user waiting with nothing said.
 #[test]
 fn resuming_an_own_id_with_no_transcript_says_so() {
     let dir = tempfile::tempdir().expect("a checkout");
@@ -915,11 +892,8 @@ fn resuming_an_own_id_with_no_transcript_says_so() {
     );
 }
 
-// `fate()` says `Now` only for what may run while a run has the transcript.
-// This is that claim, kept for the intents whose whole effect is this call: each
-// is dispatched against a lane holding a transcript, and none may read it away
-// or hand one back. `/reload`, `/worktree` and `/wechat` are `Now` too, and are
-// exercised where their effects are.
+// `fate()`'s `Now` claim: none of these may read the transcript away or
+// hand one back while a run holds it. Other `Now` intents are exercised elsewhere.
 #[test]
 fn a_now_intent_runs_with_the_transcript_a_run_has() {
     let dir = tempfile::tempdir().expect("a checkout");
@@ -980,9 +954,8 @@ async fn a_queued_line_remembers_the_channel_it_came_from() {
     assert_eq!(from, [Origin::Channel("wechat"), Origin::Typed]);
 }
 
-// A line the phone steered in that the run ended before hearing comes back
-// bare from the run; it has to come back as the phone's, or its answer stays
-// on the terminal.
+// A line the phone steered in that the run never heard comes back bare;
+// it must come back as the phone's, or its answer lands on the terminal instead.
 #[tokio::test]
 async fn a_steered_line_the_run_never_heard_comes_back_as_its_channels() {
     let dir = tempfile::tempdir().expect("a checkout");

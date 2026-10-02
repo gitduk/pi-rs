@@ -36,11 +36,8 @@ pub use workspace::Workspace;
 /// What a call is permitted to touch. The approval gate reads this; it is a
 /// static classification, not a guess about any particular argument.
 ///
-/// Not a ladder, which is why there is no `Ord`. `Read`, `Write` and `Exec`
-/// are one — each reaches further into this machine than the last — but `Net`
-/// sits beside them: the outside world is a different direction, and a run
-/// that may read the tree and search the web while changing nothing here is a
-/// shape no single line can name.
+/// Not a ladder, which is why there is no `Ord`: `Read`/`Write`/`Exec` nest,
+/// but `Net` is a different direction — reaching the web changes nothing here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier {
     Read,
@@ -65,11 +62,10 @@ impl Tier {
     }
 
     /// Whether a path this tier resolves is held inside the workspace. Reading
-    /// may name anything on the machine; changing it and running in it may not.
+    /// may name anything on the machine; changing it or running in it may not.
     ///
-    /// A `match` rather than `!= Read`, which is what it came from: the two
-    /// agree today, and the match is what makes a tier added later fail to
-    /// compile until someone has decided which side it belongs on.
+    /// A `match`, not `!= Read`: a tier added later fails to compile until
+    /// someone decides which side it belongs on.
     pub fn fenced(self) -> bool {
         match self {
             Tier::Read => false,
@@ -85,22 +81,18 @@ impl Tier {
 mod tier_tests {
     use super::Tier::{self, Exec, Net, Read, Write};
 
-    // Every tier, for the tests that have to try them all.
     const ALL: [Tier; 4] = [Read, Write, Exec, Net];
 
-    // `ALL` cannot be checked against the enum by the compiler, but this can:
-    // a fifth variant makes this match non-exhaustive, and whoever adds it
-    // has to come here — where `ALL` is one line up — to say so.
+    // The compiler can't check `ALL` against the enum, but this can: a fifth
+    // variant makes this match non-exhaustive, forcing it to be added here too.
     fn _every_tier_is_in_all(t: Tier) {
         match t {
             Read | Write | Exec | Net => assert!(ALL.contains(&t)),
         }
     }
 
-    // The shape of the thing, stated once: what each ceiling reaches; the
-    // whole reason `Net` is a tier and not a rung — a run may reach the web
-    // without gaining the right to change anything here, and a run that may
-    // only read the tree does not silently gain the web.
+    // Why `Net` is a tier, not a rung: reaching the web must not silently
+    // grant the right to change anything, nor the reverse.
     #[test]
     fn the_tier_lattice_reaches_as_documented() {
         let reach = |c: Tier| ALL.into_iter().filter(|t| t.under(c)).collect::<Vec<_>>();
@@ -112,8 +104,6 @@ mod tier_tests {
         assert!(!Net.under(Write));
         assert!(!Write.under(Net));
         assert!(!Net.under(Read));
-        // Exec is the exception, and deliberately: `sh` can `curl`, so
-        // refusing the fetch tool there would deny nothing.
         assert!(Net.under(Exec));
     }
 }
@@ -145,11 +135,9 @@ pub enum ToolError {
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
 
-    // The command ran past its deadline and the process group was killed.
     #[error("timed out after {ms}ms; the command and everything it spawned were killed")]
     Timeout { ms: u64 },
 
-    // An over-long output could not be persisted for later reading.
     #[error("could not spill oversized output: {0}")]
     Spill(String),
 }
@@ -239,11 +227,8 @@ pub struct Ctx {
     /// The content hash each file's last view was built on. Feeds the
     /// staleness note and the read-before-edit rule.
     pub viewed: Viewed,
-    // Every path a tool in this run has reported changing. Split from a
-    // cloned parent's rather
-    // than shared, unlike the locks and the shifts: those describe the tree,
-    // which parent and child share, while this answers what *one* run did —
-    // and a shared set hands a caller its own edits back as the child's.
+    // Paths this run has changed. Split from a cloned parent's rather than
+    // shared: this answers what *this* run did, not what the whole tree got.
     writes: std::sync::Arc<std::sync::Mutex<Written>>,
     // The session this context runs in. None in tests and for embedders;
     // spills then land in the process temp directory.
@@ -257,9 +242,8 @@ pub type FileLocks =
 
 pub type FileLock = std::sync::Arc<tokio::sync::Mutex<()>>;
 
-// What a run has changed: the distinct paths. A set answers "did anything
-// happen just now" — the loop that used to count writes now hashes the tree,
-// so there is no second question to answer here.
+// The distinct paths a run has changed — a set, not a count: nothing here
+// asks how many times.
 #[derive(Default)]
 struct Written {
     paths: std::collections::BTreeSet<std::path::PathBuf>,
@@ -323,7 +307,6 @@ impl Ctx {
         self.session.as_deref()
     }
 
-    /// The namespace new spills are filed under.
     pub fn spill_namespace(&self) -> &str {
         self.session.as_deref().unwrap_or("default")
     }
@@ -335,8 +318,6 @@ impl Ctx {
         spill::locate(&self.spill_root, locator)
     }
 
-    /// Record that an edit renumbered `path` from `from` on. Kept at the lowest
-    /// line reported, since the model's addresses all date from one read.
     /// Record the content hash a view of `path` was built on. Feeds the
     /// staleness note beside an edit's report and the read-before-edit rule.
     pub fn note_view(&self, path: &std::path::Path, hash: &str) {

@@ -23,8 +23,6 @@ pub(super) struct RunTool {
     pub(super) done: Option<Row>,
 }
 
-// A call not heard back from yet has been out this long, in whole seconds
-// once there are enough of them to be worth saying.
 fn out_secs(t: &RunTool, now: Instant) -> Option<u64> {
     let secs = now.saturating_duration_since(t.started).as_secs();
     (t.done.is_none() && secs >= SHOWN_AFTER).then_some(secs)
@@ -34,10 +32,8 @@ fn out_secs(t: &RunTool, now: Instant) -> Option<u64> {
 // only to vanish reads as a flicker.
 const SHOWN_AFTER: u64 = 2;
 
-// The line a call holds in the live block: its turning mark, its text
-// shimmering and how long it has been out while it runs, and the mark it will
-// land with once it has ended. A modifying call never folds, so it is drawn
-// here even after it ends.
+// The call's line in the live block: mark, shimmering text, elapsed time.
+// A modifying call never folds, so it stays drawn here after it ends.
 pub(super) fn pending_line(now: Instant, tick: usize, t: &RunTool, paint: &Paint) -> Line<'static> {
     let ended = if is_modifying_tool(&t.name) {
         None
@@ -47,8 +43,7 @@ pub(super) fn pending_line(now: Instant, tick: usize, t: &RunTool, paint: &Paint
     let muted = |s: String| paint.span(&paint.theme.muted, s);
     let named = named(&t.name, &t.summary);
     match ended {
-        // The mark leads, as it will in the row this call lands as: a frame
-        // beside it would be animating a call that is over.
+        // Mark leads, matching the row this call lands as once folded.
         Some(ok) => {
             let mark = if ok {
                 icons::DONE_MARK
@@ -70,18 +65,14 @@ fn is_modifying_tool(name: &str) -> bool {
     name == toolbox::edit::Edit::NAME || name == toolbox::write::Write::NAME
 }
 
-// Whether the group draws for this call: the row is where a foldable
-// call lands, so it is the row's from the moment it starts — and only while it
-// can still land there. One that has ended badly is on its way to a line of
-// its own, and the row must not name, count or mark what it will not keep.
+// Whether the group draws this call: true from when a foldable call
+// starts until it ends badly — a failed call is on its way to its own line.
 fn holds(t: &RunTool) -> bool {
     !is_modifying_tool(&t.name) && t.done.as_ref().is_none_or(|row| row.ok() == Some(true))
 }
 
-// The calls the group draws, in the order they started, each with the
-// state the row shows for it. A call lands as the foldable row it is drawn
-// as, so showing it there from the start is what keeps the line from jumping
-// up into the row when the result arrives.
+// Foldable calls, shown from the start so the row doesn't visually jump
+// when the result lands.
 pub(super) fn held(tools: &[RunTool], now: Instant) -> Vec<PendingTool> {
     tools
         .iter()
@@ -95,8 +86,7 @@ pub(super) fn held(tools: &[RunTool], now: Instant) -> Vec<PendingTool> {
         .collect()
 }
 
-// The calls in flight the live block draws: what is left when the group
-// is drawing the foldable ones.
+// Calls the live block draws: the complement of `held`'s foldable set.
 pub(super) fn drawn(tools: &[RunTool], row_holds: bool) -> Vec<&RunTool> {
     tools.iter().filter(|t| !(row_holds && holds(t))).collect()
 }

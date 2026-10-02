@@ -141,9 +141,8 @@ fn encode_message(msg: &Message, spec: &ModelSpec) -> Option<Value> {
     }
 }
 
-// Anthropic takes one `role:"user"` message per turn, so a turn's separate
-// user entries join here. Responses wants them apart, which is why the join is
-// the encoder's job and not the session view's.
+// Anthropic takes one `role:"user"` message per turn, so separate user
+// entries join here — Responses wants them apart, so this stays per-encoder.
 fn encode_messages(msgs: &[Message], spec: &ModelSpec) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
     for mut msg in msgs.iter().filter_map(|m| encode_message(m, spec)) {
@@ -310,9 +309,8 @@ fn decode_frame(
                     id: block["id"].as_str().map(str::to_string),
                     name: gaps.owed(block, "tool_use", "name")?.to_string(),
                 },
-                // A block type added after this was written. Dropped, and the
-                // model did say it: unreported, a new one reaches the reader
-                // as the model having said less than it did.
+                // A block type added after this was written: dropped, but
+                // unreported it would read as the model having said less.
                 other => {
                     gaps.lost(event, other);
                     return None;
@@ -497,13 +495,8 @@ mod tests {
         assert_eq!(done.cache_write, 0);
     }
 
-    // The estimate and the encoder must answer the same question. They are
-    // separate walks of the same transcript — one decides when to compact, the
-    // other decides what ships — and a gap between them is invisible: the
-    // budget simply runs out early, and what pays is real context dropped to
-    // make room for bytes that were never sent. Measured on real sessions the
-    // gap was 53%, because prior reasoning was counted whatever the spec did
-    // with it.
+    // The estimate and encoder must agree on what ships; a gap between them
+    // silently drops real context to make room for bytes never sent.
     #[test]
     fn the_estimate_counts_what_the_wire_carries() {
         let thinking = "z".repeat(20_000);

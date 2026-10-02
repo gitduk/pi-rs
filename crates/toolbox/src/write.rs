@@ -22,11 +22,11 @@ fn is_header(line: &str) -> bool {
         return false;
     };
     match inner.rsplit_once('#') {
-        // A tag a view used to print, still stripped for old sessions.
+        // Old sessions still carry this tag shape; stripped for compatibility.
         Some((path, tag)) => {
             !path.is_empty() && tag.len() == 4 && tag.chars().all(|c| c.is_ascii_hexdigit())
         }
-        // The header `rows` prints now: just the path.
+        // The header `rows` prints: just the path.
         None => !inner.is_empty(),
     }
 }
@@ -82,10 +82,9 @@ struct Args {
 
 /// Undo whatever decoration `read` and `grep` put on their output.
 ///
-/// The numbered format invites pasting it straight back, and a file written
-/// that way is corrupt in a way nothing downstream notices. Both tests are
-/// deliberately strict — a lone `[path#ABCD]` header, and *every* line
-/// numbered — so real content that merely resembles them survives untouched.
+/// The numbered format invites pasting it straight back, silently corrupting
+/// a file. Both tests stay strict — a lone header, every line numbered — so
+/// real content that merely resembles them survives untouched.
 pub fn clean(content: &str) -> String {
     let body = undecorate(content);
     if numbered_throughout(body) {
@@ -167,10 +166,8 @@ impl Tool for Write {
         if tokio::fs::metadata(&path).await.is_ok_and(|m| m.is_dir()) {
             return Err(ToolError::Invalid(format!("{rel} is a directory")));
         }
-        // Only an overwrite is gated. A new file that does not parse is a stub
-        // or a scaffold, and there is nothing behind it to lose; an overwrite
-        // that does not parse is most often content that ran short, and the
-        // tail of a working file goes with it, unmentioned by either side.
+        // Only an overwrite is gated: a new file that fails to parse is just a
+        // stub with nothing to lose, but an overwrite that fails is usually content that ran short.
         if let Ok(old) = tokio::fs::read_to_string(&path).await
             && let Some((row, text)) = crate::parses::broke(&rel, Some(&old), &content)
         {
@@ -203,9 +200,8 @@ impl Tool for Write {
         let unit = if lines == 1 { "line" } else { "lines" };
         let hash = crate::rows::view_hash(&content);
         ctx.note_view(&path, &hash);
-        // Same split as read: the model's line names the version an edit
-        // matches against, the display and the log do not need it in front of
-        // a person, and the log keeps it anyway for when an edit goes wrong.
+        // Same split as read: the model's line names the version an edit matches
+        // against; the log keeps the hash too, for when an edit goes wrong.
         tracing::info!(target: "pi::write", path = %rel, hash = %hash, "wrote");
         Ok(ToolOutput::text(format!(
             "{} wrote {lines} {unit}, {} bytes{note}",

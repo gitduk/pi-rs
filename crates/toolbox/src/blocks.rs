@@ -3,16 +3,10 @@
 
 use std::collections::BTreeMap;
 
-/// The rows that name a block, mapped to that block's inclusive 1-based rows.
+/// The rows that name a block, mapped to its inclusive 1-based span.
 ///
-/// A construct's own row names it, and so does every row of an annotation above
-/// it: naming either is asking about the same block, the one the annotation
-/// belongs to. Where two blocks claim one row — `#[inline]` is a construct of
-/// its own and also part of the function under it — the wider one wins, which
-/// is the answer an anchor on that row is after either way.
-///
-/// Ordered by row, which is the order a refusal offers what the file opens in:
-/// a reader wanting them in order takes the keys as they come.
+/// A row names the block it's in, including an annotation's row above it;
+/// where two blocks claim a row, the wider one wins.
 pub(crate) fn by_row(path: &str, content: &str) -> BTreeMap<usize, (usize, usize)> {
     let Some(lang) = crate::syntax::Lang::of(path) else {
         return BTreeMap::new();

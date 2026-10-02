@@ -48,15 +48,11 @@ pub enum Builtin {
     Channel(&'static str, String),
     // What to run over and over, or empty to stop the loop in force.
     Loop(String),
-    // `/new`, and `ctrl+l` twice: a fresh session, the old one kept on disk,
-    // and the screen rebuilt from the empty one. One variant, because they
-    // are one intent however it was expressed.
+    // `/new` and `ctrl+l` twice are one variant: a fresh session, old one
+    // kept on disk, screen rebuilt empty — one intent, however expressed.
     New,
-    // Leave now — `/exit`, `/quit`, `ctrl+d`, a double `ctrl+c`. One intent,
-    // so the four of them cannot answer differently. What a key can ask for
-    // and a line cannot is not here: those are the screen's own deeds, in
-    // `ui/tui`; a key that means a command, like `ctrl+l` twice for `/new`,
-    // arrives here already read.
+    // Leave now — `/exit`, `/quit`, `ctrl+d`, double `ctrl+c` — one intent,
+    // so the four cannot answer differently.
     Quit,
 }
 
@@ -71,11 +67,8 @@ pub enum Fate {
     Now,
     // Goes to the model, or needs the surface free, so it waits.
     Queued,
-    // Prose, while a run is working: it goes to the run rather than waiting
-    // for it, and is read at the run's next turn boundary.
-    //
-    // Carries the text because answering it took a read of the line, and
-    // reading the line a second time is how two readings drift apart.
+    // Prose while a run works: read at its next turn boundary rather than
+    // queued; carries the text so a second read of the line can't drift.
     Steered(String),
     // Would move what the run stands on. Says this rather than doing it.
     Refused(&'static str),
@@ -84,12 +77,8 @@ pub enum Fate {
 impl Intent {
     /// Whether the surface shows the line this was read from, above the answer.
     ///
-    /// It does when the answer lands under it: a turn streams rows below the
-    /// line, and a `!` command's output is filed as one. It does not when the
-    /// answer is a command's, which goes to the reply over the menu — the reply
-    /// is dismissed rather than kept, so a row left behind would be a question
-    /// standing with no answer under it. The line is still in the recall list
-    /// either way, and still in the history file.
+    /// Shown when the answer lands under it (a turn, a `!`'s output); not for
+    /// a command's reply, which is dismissed rather than kept.
     pub fn echoed(&self) -> bool {
         !matches!(self, Intent::Builtin(_))
     }
@@ -133,9 +122,8 @@ impl Intent {
             Intent::Other { .. } => Fate::Queued,
             // Its first round is due at once, and a round wants the lane free.
             Intent::Builtin(Builtin::Loop(_)) => Fate::Queued,
-            // Prose reaches the run that is already talking to the model:
-            // waiting for it is what makes a correction arrive too late to be
-            // one.
+            // Prose reaches the run already talking to the model — waiting
+            // would make a correction arrive too late to be one.
             Intent::Prompt(text) => Fate::Steered(text.clone()),
             // A `!` files its result in the transcript, which the run has.
             Intent::Bash(_) => Fate::Queued,
@@ -146,24 +134,16 @@ impl Intent {
     }
 }
 
-// Slash commands are recognized before anything reaches the model, so a line
-// that merely starts with a slash never becomes a prompt by accident.
-// A command that changed nothing, said once to the user and once to the
-// journal. Nothing-happened is the hardest kind of bug to read back: the
-// terminal has scrolled and the config on disk is whatever it is now.
+// Said once to the user and once to the journal: nothing-happened is hard
+// to read back later, once the terminal has scrolled and disk has moved on.
 pub(crate) fn refused(what: &str, e: anyhow::Error) -> String {
     let detail = format!("{e:#}");
     tracing::warn!(target: "pi::session", command = what, error = %detail, "refused");
     detail
 }
 
-// A skill command as a message the user could have typed, or why it could not
-// be read.
-//
-// The body goes in whole rather than as an instruction to go and fetch it:
-// `/commit` says the user has already chosen those instructions, and a model
-// that must call the `skill` tool to learn what it just agreed to has spent a
-// turn on a decision that was made before it was asked.
+// Body goes in whole, not fetched later: the model shouldn't spend a turn
+// re-learning instructions `/commit` says the user already chose.
 fn expanded(skill: &Skill, args: &str) -> Result<String, String> {
     let text = std::fs::read_to_string(skill.dir.join("SKILL.md")).map_err(|e| {
         let why = refused(&skill.name, anyhow::anyhow!("{}: {e}", skill.dir.display()));
@@ -190,7 +170,7 @@ fn expanded(skill: &Skill, args: &str) -> Result<String, String> {
 }
 
 // The skill a word names, if it names one. A built-in never reaches here —
-// `parse` has already turned those into their own variants.
+// `read` has already turned those into their own variants.
 pub(crate) fn skill_for<'a>(commands: &'a [Command], word: &str) -> Option<&'a Skill> {
     match &commands.iter().find(|c| c.word.as_ref() == word)?.source {
         Source::Skill(skill) => Some(skill),
@@ -208,7 +188,7 @@ pub fn recallable(line: &str, commands: &[Command]) -> bool {
     }
 }
 
-// A word `parse` did not know: a skill to run, or a typo to name.
+// A word `read` did not know: a skill to run, or a typo to name.
 pub(crate) fn step_for(commands: &[Command], word: &str, args: &str) -> Step {
     let Some(skill) = skill_for(commands, word) else {
         return Step::Flash(format!("unknown command {word} — /help lists them"));
@@ -224,17 +204,11 @@ pub(crate) fn step_for(commands: &[Command], word: &str, args: &str) -> Step {
 
 /// What a one-shot prompt turns into when it names a skill.
 ///
-/// `pi "/commit fix the tests"` means at the command line what it means at the
-/// terminal. That is the whole guarantee, and it is deliberately narrower than
-/// the terminal's: everything else that starts with a slash is left alone.
+/// `pi "/commit ..."` means what it means at the terminal; everything else
+/// starting with a slash is left alone — deliberately narrower.
 ///
-/// The built-ins are operations on a session, and a run that answers once has
-/// no session for them to operate on. A word that names nothing is not a typo
-/// to be refused either, because here the argument is a prompt rather than a
-/// line at a prompt — `pi "/usr/bin is missing"` and `pi "/2 of the tests
-/// fail"` are prose, and refusing them to catch `/comit` trades a recoverable
-/// mistake for an unrecoverable one. The model can ask what `/comit` meant; a
-/// user whose sentence was rejected has to reword it.
+/// An unknown word reads as prose, not a refused typo: refusing trades a
+/// recoverable "what did you mean" for an unrecoverable one.
 pub fn expand(commands: &[Command], line: &str) -> Option<Result<String, String>> {
     let Intent::Other { word, args } = read(line, commands) else {
         return None;
@@ -242,11 +216,8 @@ pub fn expand(commands: &[Command], line: &str) -> Option<Result<String, String>
     Some(expanded(skill_for(commands, &word)?, &args))
 }
 
-// What a line starting with `!` asks to run, when it names a command.
-//
-// `!` alone is prose (a prompt, like any other line); `!cmd` runs `cmd`.
-// `!!cmd` keeps its second bang: in shell grammar `! cmd` negates the exit
-// code, which is what a non-interactive shell will do with it.
+// `!` alone is prose; `!cmd` runs `cmd`. `!!cmd` keeps its second bang:
+// shell grammar reads `! cmd` as negating the exit code.
 fn bash_command(line: &str) -> Option<&str> {
     let cmd = line.strip_prefix('!')?.trim();
     (!cmd.is_empty()).then_some(cmd)
@@ -267,9 +238,8 @@ pub fn read(line: &str, commands: &[Command]) -> Intent {
         return Intent::Prompt(line.to_string());
     }
     let args = rest(line);
-    // The table is the only list of words there is: a built-in row says what it
-    // means, a skill's row hands the line on, and a word no row matches is the
-    // same nothing as a skill is, until `step_for` says otherwise.
+    // The table is the only list of words: a built-in row says what it
+    // means, a skill's hands the line on; no match is nothing till `step_for`.
     match commands.iter().find(|c| c.word == word) {
         Some(found) => (found.intent)(word, args),
         None => Intent::Other {
@@ -299,23 +269,14 @@ pub enum Rewound {
 
 #[derive(Debug)]
 pub enum Step {
-    // One line whose whole content is "nothing happened": a verb that is not
-    // one, a command refused, a checkout you are already in. No state moved
-    // and there is no detail to come back to, so a minute later the line says
-    // nothing the screen does not already show.
-    //
-    // Said where a one-line answer goes — the reply over the editor — and
-    // filed nowhere: there is nothing here a rebuild should draw. An error
-    // carrying detail is the other side of that line and stays in the
-    // transcript.
+    // "Nothing happened" shown once over the editor, filed nowhere — no
+    // state moved, so there's nothing for a rebuild to draw later.
     Flash(String),
     // A `!` command to run. The surface runs and records it, because only it
     // can await; `run_bash` does the work and `record_bash` files it.
     Bash(String),
-    // What to send, and — when a skill expanded into it — the line that was
-    // typed. `rewind_nodes()` reads the second: a rewind menu offering four
-    // thousand characters of `SKILL.md` is offering the wrong thing, and so
-    // is a session named after one.
+    // What to send, and the typed line when a skill expanded into it —
+    // `rewind_nodes()` reads the latter so a menu doesn't offer raw SKILL.md.
     Prompt { send: String, typed: Option<String> },
     // Needs the network, so the surface runs it and reports.
     Compact(Option<String>),
@@ -331,9 +292,8 @@ pub enum Step {
     // The session was replaced — a `/new` or a `/resume` — so the surface
     // has to rebuild its view from the new one, not just show the rows.
     Swap(Listing),
-    // The set of worktrees changed under the surface — a removal — so it
-    // shows the rows and forgets the cached list, which would keep naming
-    // the checkout that just went.
+    // The set of worktrees changed (a removal): show the rows and drop the
+    // cached list, which would keep naming the checkout that just went.
     Worktrees(Listing),
     Quit,
 }

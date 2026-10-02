@@ -11,18 +11,11 @@ use crate::store::config::{self, Config};
 use crate::store::icons;
 
 impl Core {
-    /// Re-read the config and everything it decides.
+    /// Re-read the config and everything it decides, whole or not at all:
+    /// nothing is touched until it is all computed.
     ///
-    /// Whole or not at all: on any failure nothing changes, which is why the
-    /// new state is computed in full before a field is touched. Pi separates
-    /// global from project so a broken one of each does not take the other
-    /// down; here the whole reload is refused instead, and what was running
-    /// keeps running — the case that separation protects against cannot arise
-    /// when nothing is applied.
-    ///
-    /// What the session owns is untouched by construction: the transcript, the
-    /// name, the history, the model. Only what the config decides is
-    /// replaced.
+    /// Session-owned state (transcript, name, history, model) is untouched;
+    /// only what the config decides is replaced.
     pub fn reload(&mut self) -> Vec<String> {
         let root = self.lane().root().to_path_buf();
         if let Err(e) = self.settings.reread(self.pinned.config.as_deref(), &root) {
@@ -38,10 +31,8 @@ impl Core {
         }
         said
     }
-    // Take this config as the one in force: recompute everything it decides
-    // and swap it in. Whole or not at all — nothing is touched until all of
-    // it has been computed. `/reload` reads the file first; `/settings`
-    // hands over a tree it has just edited.
+    // Take this config as the one in force, whole or not at all — nothing
+    // is touched until it is all computed.
     fn adopt(&mut self, config: Config) -> Result<Vec<String>, String> {
         let root = self.lane().root().to_path_buf();
         let failed = |e| Err(format!("nothing reloaded — {}", refused("reload", e)));
@@ -54,10 +45,8 @@ impl Core {
             Ok(r) => r,
             Err(e) => return failed(e),
         };
-        // The model stays — which one runs was a decision, not a preference —
-        // but its entry is re-read, through the same `dial` startup used.
-        // A failed dial keeps the old transport and says so: the model's
-        // entry breaking is no reason to refuse the rest of the file.
+        // The model stays; its entry is re-read via the same `dial` path.
+        // A failed dial keeps the old transport rather than refusing the file.
         let running = self.lane().agent().spec().clone();
         let mut notes: Vec<String> = Vec::new();
         let retarget = match crate::core::dial::dial(
@@ -79,9 +68,8 @@ impl Core {
         let model = retarget
             .as_ref()
             .map_or(running.model, |(_, s)| s.model.clone());
-        // The one thing here that is an object rather than a value: the
-        // compactor holds the summarizer's own connection, so it is rebuilt
-        // here or `summarize_model` and `idle_timeout` never follow a reload.
+        // The compactor holds the summarizer's connection, so it's rebuilt
+        // here or `summarize_model`/`idle_timeout` never follow a reload.
         let retry = config.retry();
         let writer = crate::core::dial::summary_writer(&self.pinned, &config, &model)
             .map_err(|e| format!("nothing reloaded — {}", refused("summarize_model", e)))?;
@@ -162,11 +150,8 @@ impl Core {
             })
             .collect()
     }
-    // Point this lane at a new endpoint, and rebuild the subagent behind it.
-    //
-    // `Subagent` holds a snapshot of the agent it was built from, so a retarget
-    // that stopped at the lane would leave the child on the old provider —
-    // with the old key — while the status line named the new model.
+    // Rebuilds the subagent too: it snapshots the agent it was built from,
+    // so stopping at the lane would leave it on the old provider/key.
     pub(super) fn retarget(
         &mut self,
         transport: std::sync::Arc<dyn llm::Transport>,
@@ -183,18 +168,13 @@ impl Core {
 }
 
 impl Core {
-    /// Move this session to another model.
+    /// Move this session to another model; the transcript comes with it.
     ///
-    /// The transcript comes with it. Reasoning blocks carry the model that
-    /// produced them and every transport demotes one it did not write —
-    /// signature dropped, replayed as text or as `<think>` per the new model's
-    /// `thinking_replay` — so the history stays sendable instead of becoming a
-    /// 400 on the next turn. Nothing is rewritten on the way: switch back and
-    /// the original blocks are native again.
+    /// A transport demotes reasoning blocks it did not write, so history
+    /// stays sendable instead of a 400; switching back restores them.
     ///
-    /// What has been spent stays spent. Each turn was priced by the spec in
-    /// force when it ran, and the total is the sum of those, so a switch to a
-    /// dearer model does not reprice the cheap turns behind it.
+    /// Past spend stays priced at the spec each turn ran under; a switch
+    /// does not reprice turns already spent.
     pub fn switch(&mut self, name: &str) -> Vec<String> {
         let dialled = match crate::core::dial::dial(
             &self.pinned,
@@ -208,11 +188,8 @@ impl Core {
                 return vec![format!("still on {held} — {}", refused("switch", e))];
             }
         };
-        // Compared after resolving, not before: `find` accepts a model's
-        // `wire_id` as well as its table name, so the name typed and the id it
-        // lands on need not be the same string. Comparing the typed one would
-        // re-dial the model already running and then announce a reasoning
-        // demotion that never happened.
+        // Compared after resolving: `find` also accepts a `wire_id`, so the
+        // typed name may differ from the id it resolves to.
         if dialled.spec.model == self.lane_mut().agent().spec().model {
             return vec![format!(
                 "already on {}",

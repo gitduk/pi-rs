@@ -29,14 +29,8 @@ fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_SNIFF).any(|b| *b == 0)
 }
 
-// A numbered view, held as rows until the transcript's budget is spent on it.
-//
-// The rows stay apart from the text they will become for two reasons that are
-// really one: the budget is then spent in whole rows, so no row is cut through
-// the middle and left carrying a line number it no longer holds; and the line
-// naming what survived is read off the same decision that built the body.
-// Naming it from what the caller *meant* to send is how it came to name rows
-// the model was never shown.
+// Held as rows, not joined text: the budget cuts whole rows, and the shown
+// range is read off the same cut, so it never names rows the model wasn't sent.
 struct View {
     // The `[path]` line naming the file this view came from.
     head: String,
@@ -47,9 +41,8 @@ struct View {
     kind: Kind,
 }
 
-// What the view is, which is what decides how it names itself. One field, not
-// a `whole` flag beside an `outline` option: a skeleton is never a run of
-// lines, and two flags can say it is.
+// What the view is, deciding how it names itself: one field, not a `whole`
+// flag beside `outline` — two flags could disagree about which the view is.
 enum Kind {
     // A run of file lines; `whole` when they reached both ends of the file.
     Lines { whole: bool },
@@ -62,9 +55,8 @@ enum Kind {
 type Cut = Option<(usize, usize)>;
 
 impl View {
-    // The view as the model reads it: every row, or the ends of them with
-    // `cut`'s middle elided. One assembly, so the spill copy and the
-    // transcript copy cannot come to disagree about anything but the middle.
+    // The view as the model reads it: every row, or the ends with `cut`'s
+    // middle elided — one assembly, so spill and transcript can't disagree.
     fn text(&self, cut: Cut) -> String {
         let total: usize = self.rows.iter().map(|(_, r)| r.len()).sum();
         let mut out = String::with_capacity(self.head.len() + 1 + total + self.note.len());
@@ -86,9 +78,8 @@ impl View {
         out
     }
 
-    // Whole rows from each end until the budget is gone. The alternative —
-    // cutting the assembled text at a byte offset — lands mid-row about as
-    // often as not, and half a line under a line number reads as content.
+    // Whole rows from each end until the budget is gone: cutting assembled text
+    // at a byte offset lands mid-row, and half a line under a number reads as content.
     fn cut(&self) -> Cut {
         let spent = self.head.len() + self.note.len() + crate::rows::GAP.len();
         let room = spill::MAX_OUTPUT.saturating_sub(spent);
@@ -145,17 +136,11 @@ impl View {
     }
 }
 
-// Deliver the view: the model's copy, the whole of it spilled when it is too
-// long for the transcript, and the one line a person sees.
-//
-// Both halves from here, because they used to be spelt at each return and a
-// read has several: the tag belongs to one of them and kept turning up in the
-// other. What the model reads carries it, and what a person reads never does.
+// The model's copy (spilled when too long) and the one line a person sees,
+// built together so the tag lands only in the model's.
 fn deliver(ctx: &Ctx, rel: &str, view: View) -> Result<ToolOutput, ToolError> {
-    // One length check decides both halves. Two — the transcript's budget and
-    // the spill threshold, each read off a differently assembled string — can
-    // disagree at the margin, and the margin is where rows get elided behind
-    // `…` with no locator to recover them from.
+    // One length check decides both halves: two checks off differently
+    // assembled strings can disagree at the margin, eliding rows with no way back.
     let full = view.text(None);
     let Some(spilled) = spill::write(ctx, &full)? else {
         return Ok(ToolOutput::text(full).with_preview(view.shown(rel, None)));
@@ -212,9 +197,8 @@ impl Tool for Read {
 
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
         let args: Args = tool::parse_args(args)?;
-        // A `spill:` path names a file in the session's spill directory. Only
-        // locators our own writer mints resolve; anything else is refused
-        // before the filesystem is touched.
+        // A `spill:` path names a file in the session's spill directory; only
+        // locators our own writer minted resolve, refused before touching the filesystem.
         let is_spill = args.path.starts_with("spill:");
         let (path, rel) = match args.path.strip_prefix("spill:") {
             Some(_) => {
@@ -274,10 +258,8 @@ impl Tool for Read {
             )));
         }
 
-        // Sniffing needs the whole file in memory, so the guard precedes the
-        // read. A spill locator names a file this very session wrote — the
-        // model asked for it by locator, and the retrieval hint promised read
-        // would serve it — so the cap does not apply there.
+        // Sniffing needs the whole file in memory, so the size guard precedes
+        // the read; a spill locator is exempt since read promised to serve it by locator.
         if meta.len() > MAX_BYTES && !is_spill {
             return Ok(ToolOutput::text(over_limit(&rel, meta.len())));
         }
@@ -288,9 +270,8 @@ impl Tool for Read {
                 meta.len()
             )));
         }
-        // Lossy decoding would hand back a wall of U+FFFD, and a model that
-        // writes any of it back corrupts the file for real. grep can afford
-        // lossy — a matching line is still a match — but read cannot.
+        // Lossy decoding would hand back U+FFFD that a model could write back
+        // and corrupt the file for real; grep can afford lossy, read cannot.
         let content = match std::str::from_utf8(&bytes) {
             Ok(text) => text,
             Err(e) => {
@@ -303,14 +284,12 @@ impl Tool for Read {
         };
         let hash = view_hash(content);
         tracing::info!(target: "pi::read", path = %rel, hash = %hash, "read");
-        // The numbering about to be shown is the current one. A window read
-        // clears the whole file rather than its own rows: the case worth
-        // catching is an edit built with no read between it and the last one.
+        // The numbering shown is current; a window read clears the whole file,
+        // not just its own rows — catching an edit built with no read since the last one.
         ctx.note_view(&path, &hash);
 
-        // A byte-order mark is invisible in a terminal but is a character at
-        // the head of line 1: what the model copies back has to be what the
-        // edit matches, so it is stripped from the view and kept on disk.
+        // A BOM is invisible in a terminal but is a character on line 1:
+        // stripped from the view so what the model copies back is what an edit can match.
         let shown = content.strip_prefix('\u{FEFF}').unwrap_or(content);
         let all: Vec<&str> = shown.lines().collect();
 
@@ -327,9 +306,8 @@ impl Tool for Read {
                 let rows = items
                     .iter()
                     .map(|item| {
-                        // The span, not just the opening row: it is what an edit
-                        // names, and a skeleton is the only view of a long file
-                        // that shows where anything ends.
+                        // The span, not just the opening row: it's what an edit
+                        // names, and the only view of a long file that shows where anything ends.
                         let mut row = crate::rows::addr(item.line, &spans);
                         for _ in 0..item.depth {
                             row.push_str("  ");
@@ -366,9 +344,8 @@ impl Tool for Read {
         }
 
         let end = start.saturating_add(limit).min(all.len());
-        // A construct opening inside the window often closes outside it, and a
-        // row that says where it ends is the difference between one read and
-        // two.
+        // A construct opening inside the window often closes outside it; a row
+        // that says where it ends saves a second read.
         let spans = crate::rows::spans(&rel, content);
         let rows = all[start..end]
             .iter()

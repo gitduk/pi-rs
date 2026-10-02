@@ -1,10 +1,7 @@
 //! What drives a lane from outside the keyboard: a chat channel, a `/loop`.
 //!
-//! A driver hears the end of the turns its own lines began, and of no others.
-//! `Drivers` keeps that ledger — who sent which line, who is owed which turn —
-//! so the surface marks each line with its `Origin` and reports what became
-//! of it, and never asks which driver cares. Nothing here touches the screen:
-//! what a driver has to say comes back as lines for the surface to place.
+//! A driver hears only the end of turns its own lines began; `Drivers`
+//! keeps that ledger so the surface need not know which driver cares.
 
 mod channel;
 pub mod looping;

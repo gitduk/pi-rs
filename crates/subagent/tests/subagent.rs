@@ -133,10 +133,8 @@ impl Tool for Probe {
     }
 }
 
-// Finishes only when its token is tripped, so a test of the limits does not
-// have to win a race with a scripted stream that is ready the instant it is
-// polled. A real provider is never that fast, which is why the limits work in
-// production and cannot be observed here any other way.
+// Finishes only when its token is tripped — a scripted stream is ready
+// instantly, so this avoids racing it the way a slow real provider wouldn't.
 struct Sleeper;
 
 #[async_trait]
@@ -288,10 +286,8 @@ async fn the_child_shares_the_tree_and_its_bookkeeping() {
     ]);
     let _ = drive(&agent, &ctx, "go").await;
 
-    // §4.1, the three that must be one: same tree, and the two tables that
-    // record what has been written and renumbered in it. Sharing the tree while
-    // splitting the tables is how two writers both succeed and one edit
-    // vanishes, which is exactly what lanes never have to worry about.
+    // §4.1: same tree, same write/renumber tables — sharing the tree while
+    // splitting those tables is how two writers succeed and one edit vanishes.
     assert_eq!(
         seen.root.lock().unwrap().clone().unwrap(),
         ctx.workspace.root(),
@@ -304,10 +300,8 @@ async fn the_child_shares_the_tree_and_its_bookkeeping() {
         seen.viewed.lock().unwrap().as_ref().unwrap(),
         &ctx.viewed
     ));
-    // And the tree its spills land in, which is the fourth thing that cannot
-    // differ: a `spill:<ns>/<n>` the child prints is a name the parent has to
-    // resolve, and a one-shot run's spills belong in the temp directory its
-    // parent chose rather than in the one a session would use.
+    // And the spill root: a `spill:<ns>/<n>` the child prints is a name the
+    // parent must resolve, so a one-shot run's spills stay in the parent's temp dir.
     assert_eq!(
         seen.spill.lock().unwrap().clone().unwrap(),
         ctx.spill_root(),
@@ -345,10 +339,8 @@ async fn the_child_cannot_send_out_a_child_of_its_own() {
     );
 }
 
-// A child cut off by the deadline still answers with the work it did: the work
-// done before it is still work, and the caller's turn survives the answer.
-// Handing it back as an error means the caller paid for it and got nothing;
-// handing it back as `Cancelled` would end the caller's turn outright.
+// Work done before the cutoff is still work: answering beats an error (caller
+// paid, got nothing) or `Cancelled` (would end the caller's whole turn).
 #[tokio::test]
 async fn a_child_cut_off_by_the_deadline_answers_rather_than_fails() {
     let (_dir, agent, ctx, _seen, _kept) = rigged(
@@ -373,14 +365,8 @@ async fn a_child_cut_off_by_the_deadline_answers_rather_than_fails() {
     assert!(transcript.contains("unfinished"), "{transcript}");
 }
 
-// The deadline bounds silence, not the run: a child that keeps the events
-// coming outlives it; the whole-run clock would have cut it off. Nor does a
-// turn count bound it any more: twenty-five child turns, and no ceiling to hit.
-//
-// Fifty milliseconds rather than three: the scripted turns are instant, so
-// what this measures is how long the scheduler may leave the child alone
-// between them, and three milliseconds lost that race under a loaded suite —
-// the same test failed for the same reason before any of this moved.
+// The deadline bounds silence, not the run or turn count — a child that
+// keeps events coming outlives it. 50ms gives the scheduler slack under load.
 #[tokio::test]
 async fn a_child_that_keeps_talking_outlives_the_deadline() {
     let mut turns = vec![call_turn(
@@ -455,10 +441,8 @@ async fn esc_reaches_through_the_child_and_ends_the_callers_turn() {
     );
     let (_session, out) = drive(&agent, &ctx, "go").await;
 
-    // The one mapping that must not be got wrong. `Cancelled` is the single
-    // error the loop never hands back to the model, so the watchdog answering
-    // with it would silently end the caller's turn — and Esc answering with anything
-    // else would leave the caller talking to a model the user just stopped.
+    // The mapping that must not be wrong: only Esc may answer with `Cancelled`,
+    // the one error never shown to the model — a mix-up hides Esc or masks a hang.
     assert!(
         matches!(out, Err(agent::AgentError::Cancelled)),
         "esc ends the whole turn, not just the child: {out:?}"
@@ -467,12 +451,8 @@ async fn esc_reaches_through_the_child_and_ends_the_callers_turn() {
 
 #[tokio::test]
 async fn the_child_gets_no_tool_the_parent_was_denied() {
-    // The parent is built with `probe` only. The child is cloned from that,
-    // so whatever the parent does not hold cannot be reached by delegating —
-    // which would otherwise make `subagent` a way around the parent's own limits.
-    // `write` is a real builtin: a child that fell back to the default
-    // registry would resolve it (and fail on its missing arguments), which
-    // is exactly what this assertion must never see.
+    // The parent holds only `probe`, so `subagent` can't be a way around its
+    // limits — a default-registry fallback would wrongly resolve `write` here.
     let dir = tempfile::tempdir().unwrap();
     let ws = Workspace::new(dir.path()).unwrap();
     let seen = Arc::new(Seen::default());
@@ -563,9 +543,8 @@ async fn the_child_is_told_what_the_checkout_says() {
     );
 }
 
-// The child's account of its own work is the one part of the result nothing
-// else checks, and it cannot be asked again. What the tree recorded as the
-// child wrote it comes back beside that account, whatever the account says.
+// The child's account of its own work is the one part nothing else checks
+// and can't be re-asked; what the tree recorded comes back beside it regardless.
 #[tokio::test]
 async fn what_the_child_wrote_comes_back_beside_what_it_says() {
     let (_dir, agent, ctx, _seen, _kept) = harness(vec![
@@ -597,9 +576,8 @@ async fn what_the_child_wrote_comes_back_beside_what_it_says() {
         .split_once("[wrote ")
         .expect("a ledger: {transcript}");
     let ledger = after.split_once(']').expect("a closed ledger").0;
-    // The two runs share a tree but not a record. A shared one would hand the
-    // caller its own edit back as the child's — worse than no record at all,
-    // because it reads as corroboration.
+    // The two runs share a tree but not a record — a shared one would hand
+    // the caller its own edit back as the child's, reading as false corroboration.
     assert_eq!(
         ledger, "1 file: child.rs",
         "the child's writes, and only those: {transcript}"
@@ -631,9 +609,8 @@ async fn a_child_that_ran_out_of_time_is_still_checked() {
         .flatten();
 
     assert!(out.contains("unfinished"), "{out}");
-    // The child's own token is tripped by its deadline. Running the check
-    // against that token answers `cancelled` at the one ending whose state
-    // nobody can vouch for — which is the ending a check is most wanted at.
+    // The child's token is already tripped by the deadline; checking against
+    // it would cancel the check exactly when a check is most wanted — the timeout.
     assert!(out.contains("[verify `true`: exit 0]"), "{out}");
 }
 
@@ -668,9 +645,8 @@ fn two_call_turn(a: (&str, &str), b: (&str, &str)) -> Vec<StreamEvent> {
     events
 }
 
-// A turn that names two subagents runs two children. Everything above this is
-// written per call and every check in it is positional, so a fold that kept
-// only the first block would read as the model having asked for one job.
+// A turn naming two subagents runs two children — everything above is
+// written per call, so a fold keeping only the first block would look right.
 #[tokio::test]
 async fn two_calls_in_one_turn_both_reach_the_child() {
     let (_dir, agent, ctx, _seen, kept) = harness(vec![

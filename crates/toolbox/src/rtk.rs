@@ -25,14 +25,10 @@ const MAX_ANSWER: u64 = 64 * 1024;
 /// wedged binary does not hold a command that would otherwise have run.
 const TIMEOUT: Duration = Duration::from_secs(2);
 
-/// `command` in its rtk form, or `None` to run it as it was written.
+/// `command` in its rtk form, or `None` to run it as written.
 ///
-/// `cwd` is the directory the command will run in, which is also the one rtk
-/// is asked from: it reads a project's `.rtk/filters.toml` from the current
-/// directory, and those are the filters that belong to this command.
-///
-/// Fail-open throughout: no binary, an old one, one that will not answer, an
-/// empty command and a command rtk has no filter for all come back `None`.
+/// Asked from `cwd`, which is where `.rtk/filters.toml` lives; fails open
+/// throughout — no binary, an old one, no answer, or no filter all return `None`.
 pub async fn rewrite(command: &str, cwd: &Path) -> Option<String> {
     // The switch rtk's own hooks read, so a machine that turned rtk off for
     // one agent turns it off here too.
@@ -43,11 +39,8 @@ pub async fn rewrite(command: &str, cwd: &Path) -> Option<String> {
         return None;
     }
     let (code, answer) = ask(&["rewrite", command], Some(cwd)).await.ok().flatten()?;
-    // 0 rewrites; 3 rewrites after asking the host to confirm, which is Claude
-    // Code's permission model and not pi's. 1 is "no rtk equivalent". 2 is a
-    // deny rule out of that agent's own config: pi's gate is the tier, and
-    // running a command denied elsewhere under another name is the one
-    // outcome worth refusing.
+    // 0 and 3 (host-confirmed) rewrite; 1 is no rtk equivalent; 2 is another
+    // agent's own deny — not pi's concern, since pi's tier is the real gate.
     if code != 0 && code != 3 {
         return None;
     }
@@ -62,9 +55,8 @@ fn disabled() -> bool {
     std::env::var_os("RTK_DISABLED").is_some_and(|v| v.to_str() == Some("1"))
 }
 
-/// Whether rtk answers at all. Asked once — it is a property of this machine,
-/// and it does not change under a running process — except that a probe which
-/// timed out is left uncached, so one slow moment is not a session without rtk.
+/// Whether rtk answers at all, asked once and cached — except a timed-out
+/// probe, left uncached so one slow moment isn't a session without rtk.
 async fn installed() -> bool {
     static INSTALLED: OnceCell<bool> = OnceCell::const_new();
     INSTALLED
@@ -74,10 +66,8 @@ async fn installed() -> bool {
         .unwrap_or(false)
 }
 
-/// `Some` when rtk said something about itself: a binary too old for `rtk
-/// rewrite` answers here and answers 1 per command instead — one extra spawn
-/// on an old machine, and no difference in what runs — so the version is not
-/// read. `None` is the silence of a deadline, which is not an answer.
+/// `Some` when rtk answered at all — an old binary answers here but 1 per
+/// command instead, one extra spawn and no behavior change. `None` is a timeout.
 async fn probe() -> Option<bool> {
     match ask(&["--version"], None).await {
         Ok(Some((code, _))) => Some(code == 0),
@@ -87,13 +77,8 @@ async fn probe() -> Option<bool> {
     }
 }
 
-/// Run `rtk` with these arguments, in `cwd` when there is one: its exit code
-/// and stdout, `Ok(None)` when it was killed at the deadline, `Err` when it
-/// could not be started at all.
-///
-/// The answer is another program's, so both pipes are drained while it runs —
-/// one left full would stop the writer — and neither is read past
-/// [`MAX_ANSWER`]. A binary that keeps writing regardless ends at [`TIMEOUT`].
+/// `rtk`'s exit code and stdout; `Ok(None)` on timeout, `Err` if it never
+/// started. Both pipes are drained live, capped at [`MAX_ANSWER`], deadline [`TIMEOUT`].
 async fn ask(args: &[&str], cwd: Option<&Path>) -> Result<Option<(i32, String)>, std::io::Error> {
     let mut cmd = Command::new(BINARY);
     cmd.args(args)

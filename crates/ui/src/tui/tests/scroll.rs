@@ -7,10 +7,8 @@ use ratatui::text::Line;
 
 use super::harness::*;
 
-// The rows of one result are painted once per width and handed out one at
-// a time, so a stale cache would show the narrow frame's clipping in the
-// wide one — and only below the head row, where the single-row case
-// cannot see it.
+// Rows are painted once per width; a stale cache would leak the narrow
+// frame's clipping into the wide one, visible only below the head row.
 #[test]
 fn every_row_of_a_result_is_repainted_when_the_window_changes() {
     let paint = Paint::new(false);
@@ -58,10 +56,8 @@ fn a_configured_band_outlives_the_terminals() {
     assert_ne!(mixed.prompt.panel.input, theme.prompt.panel.input);
 }
 
-// What browse mode is built on: a row the caller does not want is passed
-// over by its count alone, and the two walks have to agree about where the
-// rows it does want are — the back walk especially, which starts inside
-// the last row there is.
+// A skipped row costs only its count; both walks must agree on where kept
+// rows are — the back walk especially, which starts inside the last row.
 #[test]
 fn a_filtered_window_reads_the_rows_it_keeps_and_skips_the_rest() {
     let paint = Paint::new(false);
@@ -91,9 +87,8 @@ fn a_filtered_window_reads_the_rows_it_keeps_and_skips_the_rest() {
 
 #[test]
 fn an_empty_scrollback_iterates_to_nothing() {
-    // Both walks index `rows[0]` before comparing their pointers, so an
-    // empty scrollback panicked. The back walk kept doing it after the
-    // front was fixed, and `screen::window` is the one that walks back.
+    // Both walks index `rows[0]` before comparing pointers; an empty
+    // scrollback panics there if either forgets to guard it.
     let paint = Paint::new(false);
     let rows: Vec<String> = ScrollbackRows::new(&[], &paint, 80, |_| true)
         .map(text)
@@ -216,9 +211,8 @@ fn a_block_after_a_call_joins_its_group() {
 
 #[test]
 fn a_block_after_an_answer_starts_a_group_and_inherits_the_flip() {
-    // Past an answer the next block is a new group and the new last: the
-    // one before folds back to the switch, and the new one is born the way
-    // `ctrl+t` left the last group.
+    // Past an answer the next block is a new group and new last: the one
+    // before folds back, and the new one is born the way `ctrl+t` left it.
     let mut t = Folds::default();
     let mut scrollback = Vec::new();
     streamed(&mut t, &mut scrollback);
@@ -247,9 +241,8 @@ fn a_block_that_ends_without_a_line_leaves_nothing() {
 
 #[test]
 fn the_live_text_follows_the_streaming_group() {
-    // The live region reads the group's own state, not the last value: a
-    // group the user unfolded streams its lines even though the switch
-    // still says folded.
+    // The live region reads the group's own state, not the switch: a group
+    // the user unfolded streams even though the switch still says folded.
     let mut t = Folds::default();
     let mut scrollback = Vec::new();
     t.start(&mut scrollback);
@@ -260,10 +253,8 @@ fn the_live_text_follows_the_streaming_group() {
 
 #[test]
 fn a_global_flip_takes_the_current_group_with_it() {
-    // The case that named the key: everything else unfolded, the current
-    // group folded on its own. The global key folds the whole screen — the
-    // current group keeps its fold, because the fold is where the rest are
-    // going.
+    // Everything else unfolded, the current group folded on its own; the
+    // global key still folds it too, since the fold is where the rest go.
     let mut t = Folds {
         folded: false,
         ..Default::default()
@@ -278,9 +269,8 @@ fn a_global_flip_takes_the_current_group_with_it() {
 
 #[test]
 fn flipping_every_group_moves_the_switch_with_them() {
-    // The global key folds or unfolds every group, the current one
-    // included, and moves the switch with them: rows and switch never
-    // disagree, so the screen always folds back to a single state.
+    // The global key folds every group, current one included, and moves
+    // the switch with them: rows and switch never disagree.
     let mut t = Folds::default();
     let mut scrollback = Vec::new();
     streamed(&mut t, &mut scrollback);
@@ -299,9 +289,8 @@ fn flipping_every_group_moves_the_switch_with_them() {
 
 #[test]
 fn a_flip_applies_to_each_new_last_group_until_flipped_back() {
-    // `ctrl+t` controls the last group, whatever it is: the first one is
-    // born unfolded, and each new group that takes over as last is born
-    // unfolded too, while the one it displaces folds back to the switch.
+    // `ctrl+t` controls whichever group is last: each new one is born
+    // unfolded, and the one it displaces folds back to the switch.
     let mut t = Folds::default();
 
     // Startup: the key names a group that does not exist yet.

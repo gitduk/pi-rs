@@ -1,9 +1,8 @@
 //! The iLink protocol client: fixed headers, the six endpoints pi uses, and
-//! the two long-polling calls that treat a client-side timeout as the normal
-//! empty result rather than an error.
+//! two long-polls that treat a client timeout as empty, not an error.
 //!
-//! Everything here is protocol only — no session, no persistence. The channel
-//! in `adapter` owns state and decides what a message means.
+//! Protocol only — no session, no persistence; `adapter` owns state and
+//! message meaning.
 
 use std::time::Duration;
 
@@ -246,9 +245,8 @@ impl Client {
     }
 }
 
-// Percent-encode everything a query value may not carry raw. The unreserved
-// set stays readable; everything else goes hex so `&`, `#` and space cannot
-// change what the server reads.
+// Percent-encode everything a query value may not carry raw, so `&`, `#`
+// and space in it cannot change what the server reads.
 fn urlencode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {

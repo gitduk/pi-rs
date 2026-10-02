@@ -1,13 +1,9 @@
 //! What a key press means, and where that is written down.
 //!
-//! Two ideas, neither of them Pi's. First, the namespace is the object acted
-//! on — `edit.*` changes the buffer, `move.*` only the caret, `menu.*` what is
-//! open over the editor — where Pi's `tui.` prefix says nothing, everything
-//! being tui. Second, and following from it, the namespace decides *when* a
-//! binding is live, so two actions may share a key as long as they are never
-//! live together. `up` is `menu.previous` while a list is open and
-//! `history.older` when it is not, which is not a conflict and cannot be
-//! expressed as one in a flat table.
+//! The namespace is the object acted on (`edit.*`, `move.*`, `menu.*`), and,
+//! following from that, it decides *when* a binding is live — so two actions
+//! may share a key as long as they are never live together: `up` is
+//! `menu.previous` while a list is open, `history.older` when it is not.
 
 mod text;
 
@@ -41,12 +37,11 @@ pub enum When {
     Run,
     // Only in that mode, and only while vim keys are on at all.
     Mode(Mode),
-    // Normal with nothing on the line. Tried before `Mode`, so a key that
-    // names the empty line wins over the layer that holds either way: the
-    // history and the session are all an empty one has left to reach.
+    // Normal with nothing on the line. Tried before `Mode`, so a key naming
+    // the empty line wins over the layer that holds either way.
     NormalEmpty,
-    // Always — in both modes, so the thirty bindings that were here before
-    // vim existed keep working under it.
+    // Always — in both modes, so bindings older than the vim layer keep
+    // working under it.
     Editor,
 }
 
@@ -153,9 +148,8 @@ struct Binding {
     /// Written the way a config writes them, so the parser is exercised by the
     /// defaults themselves rather than only by what a user types.
     pub keys: &'static [&'static str],
-    /// Only where the id under-describes. Getting the naming right is what
-    /// makes most of these empty — `move.word.left` needs no gloss, and a
-    /// column that restated every id would bury the four that say something.
+    /// Only where the id under-describes; getting naming right keeps most
+    /// of these empty, so the few that say something aren't buried.
     pub note: &'static str,
 }
 
@@ -373,15 +367,8 @@ const BINDINGS: &[Binding] = &[
         keys: &["ctrl+shift+t", "alt+t"],
         note: "every group of calls and reasoning, the last one included",
     },
-    // Normal mode from here down. Every key is a bare character, and that is a
-    // rule rather than a coincidence: the layer sits above `Editor`, so
-    // anything it claims it also takes away — and no binding that existed
-    // before vim is a bare character. Bound to one, this layer is pure
-    // addition.
-    //
-    // The ids carry a `normal.` prefix only where one is needed:
-    // `move.char.left` is already taken, `mode.insert` cannot be, since the
-    // Insert layer is empty and nothing else can ask to leave a mode.
+    // Normal mode from here down: every key is a bare character, since this
+    // layer only adds atop `Editor`. `normal.` prefixes an id only where needed.
     Binding {
         id: "normal.lane.prev",
         action: A::LanePrev,
@@ -588,19 +575,8 @@ const BINDINGS: &[Binding] = &[
     },
 ];
 
-/// A key press, normalized.
-///
-/// Shift folds into a bare character rather than being dropped: `A`,
-/// `shift+a`, and `a` with the shift bit all arrive as `A`, which is the
-/// same press reported three ways depending on the terminal, and stays
-/// distinct from `a`. Dropping it instead would collapse the two, and a
-/// modal keymap needs `D` to mean something other than `d`. Ctrl and Alt
-/// name the unshifted letter, because there the terminals disagree about
-/// the character rather than about the modifier — `ctrl+shift+t` stays
-/// distinct from `ctrl+t` on the ones that report shift, and degrades to it
-/// on the ones that do not, which is why a reachable alternate is worth
-/// binding beside it. Named keys keep shift, so `shift+enter` stays
-/// expressible.
+/// A key press, normalized. Shift folds into the character (`shift+a` is `A`);
+/// ctrl/alt name the unshifted letter, where terminals disagree about the character.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Press {
     pub code: KeyCode,
@@ -648,10 +624,8 @@ pub fn bare_letter(key: &crossterm::event::KeyEvent) -> Option<char> {
 #[derive(Debug)]
 pub struct Keys {
     map: HashMap<(When, Press), Action>,
-    // Which binding owns each key. `resolve` builds this to catch conflicts
-    // and it used to be thrown away; keeping it is what lets `listing` ask
-    // "what is bound to this id" instead of reconstructing the answer from
-    // the action, which two ids in one layer are allowed to share.
+    // Which binding owns each key, so `listing` can ask "what's bound to
+    // this id" instead of reconstructing it from the action.
     who: HashMap<(When, Press), &'static str>,
 }
 
@@ -662,14 +636,8 @@ impl Default for Keys {
 }
 
 impl Keys {
-    /// Defaults, with `overrides` replacing the key list of any id it names.
-    ///
-    /// Replacing rather than adding: a user removing `ctrl+h` from
-    /// delete-char-back has no other way to say so, and an override that could
-    /// only add would make the defaults permanent. An explicit binding also
-    /// wins over a default on the same key — that is how a config that copied
-    /// the old defaults keeps working when a default splits into two ids —
-    /// and only two explicit bindings on one key are an error.
+    /// Defaults, with `overrides` replacing (not adding to) the key list of
+    /// any id it names. An explicit binding wins over a default on the same key.
     pub fn resolve(overrides: &BTreeMap<String, Vec<String>>) -> Result<Self> {
         for id in overrides.keys() {
             if !BINDINGS.iter().any(|b| b.id == id) {
@@ -692,9 +660,8 @@ impl Keys {
                 }
             }
         }
-        // Defaults fill what the user has not claimed; one that lands on an
-        // explicitly bound key yields, and one that repeats another default
-        // is a table bug the same error catches.
+        // Defaults fill what the user hasn't claimed; one landing on an
+        // explicit key yields, one repeating another default is a table bug.
         for b in BINDINGS {
             if overrides.contains_key(b.id) {
                 continue;
@@ -717,10 +684,8 @@ impl Keys {
     /// What this press means, given what is on screen.
     pub fn action(&self, press: Press, layers: Layers) -> Option<Action> {
         let mut live = Vec::with_capacity(5);
-        // Over the run, which costs `esc` — the one key `menu.dismiss` and
-        // `run.interrupt` both claim. It costs it only for a press: dismissing
-        // records the line it happened at, so the list is gone by the next
-        // press and that one reaches the run. Innermost first.
+        // Innermost first: `menu.dismiss` and `run.interrupt` both claim
+        // `esc`; dismissing clears the menu so the next press reaches the run.
         if layers.menu != Menu::Off {
             live.push(When::Menu);
         }
@@ -742,10 +707,8 @@ impl Keys {
         {
             return hit;
         }
-        // A shift-riding press that nothing owns — `ctrl+shift+t` has its
-        // own binding, but the terminals that do not report shift make
-        // `ctrl+shift+w` arrive as `ctrl+w`. Falling back to the bare press
-        // keeps those keys working on both kinds of terminal.
+        // Terminals that don't report shift send `ctrl+shift+w` as `ctrl+w`;
+        // falling back to the bare press keeps it working either way.
         if press.mods.contains(KeyModifiers::SHIFT) {
             let bare = Press {
                 mods: press.mods - KeyModifiers::SHIFT,
@@ -762,9 +725,8 @@ mod tests {
 
     #[test]
     fn folding_the_reasoning_is_reachable_while_a_run_is_in_flight() {
-        // The window is only worth having while the reasoning is arriving, so
-        // a binding that resolved between turns and not during them would be
-        // the one context it is useless in.
+        // Only worth having while reasoning arrives; a binding that resolved
+        // between turns, not during them, would be useless in the one context.
         let keys = Keys::resolve(&BTreeMap::new()).unwrap();
         for (menu, running) in [(Menu::Off, false), (Menu::Off, true), (Menu::On, true)] {
             assert_eq!(
@@ -835,11 +797,8 @@ mod tests {
         );
     }
 
-    // `menu.dismiss` and `run.interrupt` are the only two bindings that claim
-    // one key. With nothing over the editor the run gets it in every mode —
-    // which is the whole of the common case, since an empty line completes to
-    // nothing and raises no list. Read from the table rather than written as
-    // `esc`, so rebinding either one does not make this pass by never firing.
+    // `menu.dismiss` and `run.interrupt` share one key. Read from the table,
+    // not hardcoded, so rebinding either can't make this pass by never firing.
     #[test]
     fn nothing_over_the_editor_leaves_the_stop_key_to_the_run() {
         let k = Keys::default();
@@ -904,16 +863,12 @@ mod tests {
 
     #[test]
     fn the_normal_layer_takes_nothing_away() {
-        // The premise the whole table rests on: Normal binds bare characters,
-        // and nothing bound before vim existed is one, so every older binding
-        // still answers under it. A Normal key on a modifier combination would
-        // quietly shadow one — the layer sits above `Editor` — and this is the
-        // only thing that would notice.
+        // The premise the whole table rests on: Normal binds only bare
+        // characters, so every binding older than vim still answers under it.
         let k = Keys::default();
         for b in BINDINGS {
-            // Both halves of Normal: this is about what Normal does to the
-            // bindings that were here before vim, and the modal keys are not
-            // among them.
+            // Both halves of Normal: about what it does to pre-vim bindings,
+            // not the modal keys themselves.
             if matches!(b.when, W::Mode(Mode::Normal) | W::NormalEmpty) {
                 continue;
             }
@@ -964,8 +919,8 @@ mod tests {
     }
     #[test]
     fn normal_tells_a_capital_from_its_lowercase() {
-        // What the shift-folding change bought, spent: `x` and `X` delete in
-        // two directions, and before it they were one press.
+        // What shift-folding buys: `x` and `X` delete in two directions,
+        // distinct presses rather than one collapsed together.
         let k = Keys::default();
         let normal = Layers {
             mode: Some(Mode::Normal),
@@ -1011,9 +966,8 @@ mod tests {
         }
     }
 
-    // `v` names the state of the line, not the mode: with nothing on it there
-    // is a whole conversation to show, and with something on it the key is the
-    // character vim made it.
+    // `v` names the state of the line, not the mode: empty shows the whole
+    // conversation, otherwise it's just the character vim made it.
     #[test]
     fn browse_is_the_empty_lines_v() {
         let k = Keys::default();
@@ -1065,9 +1019,8 @@ mod tests {
 
     #[test]
     fn a_config_copied_from_the_old_scroll_defaults_still_resolves() {
-        // view.scroll-up used to default to ["pageup", "ctrl+b"]; after the
-        // half-page split its ctrl+b would collide with the new half-up
-        // default, and the explicit copy must win, not error.
+        // A user's explicit ctrl+b on view.scroll-up collides with the
+        // half-up default; the explicit binding must win, not error.
         let mut o = BTreeMap::new();
         o.insert(
             "view.scroll-up".to_string(),
@@ -1108,10 +1061,8 @@ mod tests {
 
     #[test]
     fn shift_rides_the_character_rather_than_the_modifier() {
-        // Terminals disagree about whether shift+a arrives as Char('A'),
-        // Char('A') with SHIFT, or Char('a') with SHIFT. All three are one
-        // press and must converge; a table that distinguished them would work
-        // on some terminals and not others.
+        // Terminals disagree whether shift+a arrives as Char('A'), Char('A')
+        // +SHIFT, or Char('a')+SHIFT; all three must converge to one press.
         let reports = [
             Press::of(KeyCode::Char('A'), KeyModifiers::NONE),
             Press::of(KeyCode::Char('A'), KeyModifiers::SHIFT),
@@ -1151,8 +1102,8 @@ mod tests {
 
     #[test]
     fn a_capital_and_its_lowercase_can_hold_two_bindings_at_once() {
-        // The payoff: before shift folded into the character these collided
-        // as one press, and a table wanting both had to give one of them up.
+        // The payoff: `D` and `d` are now distinct presses, so a table
+        // can bind both instead of giving one up.
         let mut o = BTreeMap::new();
         o.insert("move.line.start".to_string(), vec!["D".to_string()]);
         o.insert("move.line.end".to_string(), vec!["d".to_string()]);
@@ -1169,9 +1120,8 @@ mod tests {
 
     #[test]
     fn a_shift_riding_press_falls_back_to_the_bare_key() {
-        // `ctrl+shift+w` is its own press only on the terminals that report
-        // the shift; on the ones that swallow it, it is `ctrl+w`. The lookup
-        // falls back, so the key does the same thing everywhere.
+        // `ctrl+shift+w` is its own press only where terminals report shift;
+        // elsewhere it's `ctrl+w`. The fallback makes it work everywhere.
         let keys = Keys::default();
         assert_eq!(
             keys.action(press("ctrl+shift+w"), Layers::default()),
@@ -1186,9 +1136,8 @@ mod tests {
 
     #[test]
     fn the_global_fold_is_reachable_on_the_terminals_that_report_shift() {
-        // Ctrl+Shift+T is ctrl+t on terminals that swallow the shift; on the
-        // ones that report it, it must reach the action it is bound to. Alt+T
-        // stays bound too, so the degrade has a reachable alternate.
+        // ctrl+shift+t degrades to ctrl+t where terminals swallow shift, so
+        // alt+t stays bound as a reachable alternate either way.
         let keys = Keys::default();
         assert_eq!(
             keys.action(press("ctrl+shift+t"), Layers::default()),

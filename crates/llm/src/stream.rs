@@ -76,16 +76,8 @@ pub enum StreamEvent {
     BlockEnd {
         index: usize,
     },
-    // The turn's finished content, handed over whole rather than folded from
-    // the deltas before it.
-    //
-    // Responses puts the complete `output[]` on `response.completed`, so the
-    // deltas are free to be what they are — something to paint on screen, with
-    // no claim to correctness. It is also the only way to get
-    // `encrypted_content` intact: the copy on `output_item.added` may be
-    // truncated, and a truncated one is not rejected, just unreadable next
-    // turn. Anthropic's terminal frame carries usage and nothing else, so that
-    // wire still folds.
+    // Handed over whole, not folded from deltas: Responses sends the complete
+    // `output[]` on completion; deltas may carry truncated `encrypted_content`.
     Complete {
         content: Vec<AssistantContent>,
         invalid: Vec<InvalidToolArgs>,
@@ -193,14 +185,8 @@ impl Accumulator {
         }
     }
 
-    // The provider's own id, or a local stand-in when it named none. Only
-    // gateways that drop the field reach the second arm; both native formats
-    // make the id mandatory.
-    //
-    // Ids repeated within one turn are deliberately not rewritten. Every
-    // archive checked had the provider's id used verbatim, and a host that
-    // repeats one is answered by the wire's own duplicate-id refusal rather
-    // than by carrying a de-duplicating table for a case never observed.
+    // Provider's own id, or a local stand-in if none. Duplicate ids within a
+    // turn are not rewritten — the wire's own duplicate-id refusal handles that.
     fn call_id(&mut self, provider: Option<String>) -> String {
         provider.unwrap_or_else(|| {
             self.next_local_id += 1;
@@ -214,12 +200,8 @@ impl Accumulator {
             None => self.fold(),
         };
 
-        // Every call gets exactly one result, and a result is addressed by the
-        // call's id — so an id that arrives twice cannot be answered at all.
-        // Kept: the first, which is the one the deltas filled in. Observed once
-        // against a translating gateway and not reproducible on demand, so this
-        // guards the invariant rather than the cause: whatever sends it, the
-        // turn is unsendable the moment two calls share an id.
+        // A result is addressed by its call's id, so a repeated id can't be
+        // answered at all; the first (the one the deltas filled in) is kept.
         let mut seen: BTreeSet<String> = BTreeSet::new();
         let mut repeated = Vec::new();
         content.retain(|c| match c {
@@ -314,9 +296,8 @@ impl Accumulator {
 mod tests {
     use super::*;
 
-    // A result is addressed by its call's id, so two calls sharing one can
-    // never both be answered — the next request is invalid whichever result
-    // goes back. Seen once against a translating gateway.
+    // Two calls sharing an id can never both be answered — the next request
+    // is invalid regardless of which result goes back.
     #[test]
     fn a_call_id_the_turn_names_twice_is_answered_once() {
         let mut a = acc();
@@ -389,9 +370,8 @@ mod tests {
 
     #[test]
     fn a_call_the_provider_did_not_name_gets_a_local_id() {
-        // Both native formats make the id mandatory, so only a gateway that
-        // drops it reaches this path — and the pair still has to agree, since
-        // the result keys on whatever the call carries.
+        // Both native formats make the id mandatory; only a gateway that drops
+        // it reaches this path, and the result must key on whatever it carries.
         let mut a = acc();
         for (i, (id, name)) in [(Some("toolu_1"), "read"), (None, "grep")]
             .into_iter()
