@@ -131,7 +131,7 @@ impl Core {
             Intent::Builtin(Builtin::Help) => Step::Handled(Listing::say(help(&self.commands))),
             Intent::Builtin(Builtin::Keys) => Step::Handled(self.keys.listing()),
             Intent::Builtin(Builtin::Reload) => Step::Handled(Listing::say(self.reload())),
-            Intent::Builtin(Builtin::Status) => Step::Handled(Listing::say(self.status_lines())),
+            Intent::Builtin(Builtin::Status) => Step::Handled(self.status()),
             Intent::Builtin(Builtin::New) => {
                 self.fresh_session();
                 Step::Swap(Listing::default())

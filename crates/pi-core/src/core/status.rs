@@ -5,37 +5,94 @@
 //! is where the values come from.
 
 use agent::Totals;
+use agent::context::short;
+use llm::figures;
 
 use super::Core;
+use crate::store::icons;
 use crate::store::journal;
+use crate::store::listing::{Listing, Row};
 
 impl Core {
-    // Instruction files are named, not quoted — `standing` carries them whole.
-    // Spend reads the live tally, not settled totals, so a run in flight counts.
-    pub(super) fn status_lines(&self) -> Vec<String> {
+    /// What `/status` shows: what the lane runs on, what it holds and has
+    /// spent, how far it may reach, and where it keeps its records.
+    pub(super) fn status(&self) -> Listing {
         let lane = self.lane();
-        let mut out = standing_head(&lane.resolved().standing);
-        out.extend(lane.resolved().endpoint.clone());
-        if !lane.resolved().context.is_empty() {
-            out.push("context:".into());
-            out.extend(lane.resolved().context.iter().map(|c| format!("- {c}")));
+        let resolved = lane.resolved();
+        let spec = lane.agent().spec();
+        let root = lane.root();
+        let sep = icons::PART_SEP;
+        let mut rows = Vec::new();
+
+        let effort = format!("{:?}", lane.agent().brief.effort).to_lowercase();
+        rows.push(Row::new([
+            "model".into(),
+            format!(
+                "{}{sep}effort {effort}{sep}{} window",
+                spec.model,
+                figures::short(spec.context_window.into())
+            ),
+        ]));
+        if let Some(endpoint) = &resolved.endpoint {
+            let endpoint = endpoint.strip_prefix("endpoint: ").unwrap_or(endpoint);
+            rows.push(Row::new(["endpoint", endpoint]));
         }
-        out.push(match journal::path() {
-            Some(p) => format!("journal: {}", p.display()),
-            None => "journal: not recording — PI_LOG is off, or it would not open".into(),
+
+        // The last run's own count when there was one; before any, an estimate.
+        let held = lane.tally().ctx().or_else(|| {
+            let used = llm::estimate::tokens(&lane.session()?.context(), spec);
+            Some((used, lane.agent().budget()))
         });
-        out.push(format!(
-            "session: {}",
-            self.store.path_of(lane.root(), lane.id()).display()
-        ));
+        if let Some((used, budget)) = held.filter(|&(_, b)| b > 0) {
+            rows.push(Row::new([
+                "context".into(),
+                format!(
+                    "{} / {} ({}%)",
+                    figures::short(used as u64),
+                    figures::short(budget as u64),
+                    used * 100 / budget
+                ),
+            ]));
+        }
         // Left out until something has been spent: a session nothing has been
         // asked of yet has no figure, and a row of dashes is not one.
         let spent = lane.tally().session();
         if spent != Totals::default() {
-            out.push(format!("spent: {}", crate::text::spent(&spent)));
+            rows.push(Row::new(["spent".into(), crate::text::spent(&spent)]));
         }
-        out
+
+        let tier = format!("{:?}", resolved.ceiling).to_lowercase();
+        rows.push(Row::new(["tier", &tier]));
+        let mut workspace = agent::context::home()
+            .and_then(|h| Some(format!("~/{}", root.strip_prefix(h).ok()?.display())))
+            .unwrap_or_else(|| root.display().to_string());
+        if let Some(tree) = lane.worktree() {
+            workspace.push_str(&format!("{sep}worktree {tree}"));
+        }
+        rows.push(Row::new(["workspace".into(), workspace]));
+        let extra = lane.workspace().write_roots();
+        if tool::Tier::Write.under(resolved.ceiling) && !extra.is_empty() {
+            let extra: Vec<_> = extra.iter().map(|p| short(p, root)).collect();
+            rows.push(Row::new(["also writes".into(), extra.join(", ")]));
+        }
+        if !resolved.context.is_empty() {
+            rows.push(Row::new([
+                "instructions".into(),
+                resolved.context.join(", "),
+            ]));
+        }
+
+        rows.push(Row::new([
+            "session".into(),
+            short(&self.store.path_of(root, lane.id()), root),
+        ]));
+        rows.push(match journal::path() {
+            Some(p) => Row::new(["journal".into(), short(&p, root)]),
+            None => Row::new(["journal", "off"]).noting("PI_LOG is off, or it would not open"),
+        });
+        Listing::of(rows)
     }
+
     /// What a named lane's transcript occupies now, for the line that says why
     /// there was nothing to compact. Zero while a run has it.
     pub fn tokens_now_at(&self, at: usize) -> usize {
@@ -69,17 +126,4 @@ pub(super) fn carries_reasoning(session: &agent::session::Session) -> bool {
                 .any(|b| matches!(b, llm::message::AssistantContent::Reasoning(_)))
         })
     })
-}
-
-// The system prompt's tail up to the first instruction file. Split on the
-// tag, not a count, so a field added to the head shows up automatically.
-fn standing_head(standing: &str) -> Vec<String> {
-    standing
-        .split("<instructions")
-        .next()
-        .unwrap_or_default()
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(str::to_string)
-        .collect()
 }
