@@ -2,6 +2,8 @@
 
 A terminal coding agent in Rust. One binary, `pi`.
 
+The goal: I need a capability, so I have it.
+
 It began as a rewrite of the core of
 [oh-my-pi](https://github.com/can1357/oh-my-pi); the message model is copied
 from [rig](https://github.com/0xPlaygrounds/rig).
