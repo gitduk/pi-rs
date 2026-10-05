@@ -760,6 +760,39 @@ async fn an_edited_project_file_reaches_the_surface_and_names_what_outranks_it()
     assert_eq!(tui.ui.status, vec![Segment::Model]);
 }
 
+// Saving a file is the whole gesture: it lands within a look, a broken one
+// is named once rather than every second, and fixing it lands again.
+#[test]
+fn a_saved_settings_file_lands_without_being_asked_and_a_broken_one_once() {
+    let dir = tempfile::tempdir().expect("a checkout");
+    let mut tui = surface(dir.path());
+    let file = dir.path().join("settings.toml");
+    std::fs::write(&file, "").expect("a settings file");
+    tui.core.pinned.config = Some(file.display().to_string());
+    tui.core.refresh_config();
+    assert_eq!(tui.core.refresh_config(), None, "nothing moved");
+
+    std::fs::write(&file, "effort = \"high\"\n").expect("an edit");
+    let said = tui.core.refresh_config().expect("the edit is taken up");
+    assert!(said[0].starts_with("reloaded — "), "{said:?}");
+    assert_eq!(
+        tui.core.lane().agent().brief.effort,
+        llm::request::Effort::High
+    );
+
+    std::fs::write(&file, "effort = ").expect("a half-written file");
+    let said = tui.core.refresh_config().expect("said once");
+    assert!(said[0].starts_with("nothing reloaded"), "{said:?}");
+    assert_eq!(tui.core.refresh_config(), None, "and not again");
+
+    std::fs::write(&file, "effort = \"low\"\n").expect("the fix");
+    assert!(tui.core.refresh_config().is_some());
+    assert_eq!(
+        tui.core.lane().agent().brief.effort,
+        llm::request::Effort::Low
+    );
+}
+
 // A reload reaches everything the config installed, not just what lanes
 // read directly: the compactor holds its own connection, re-dialled on change.
 #[test]

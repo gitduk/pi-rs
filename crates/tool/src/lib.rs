@@ -30,7 +30,7 @@ pub mod spill;
 pub mod state;
 pub mod workspace;
 
-pub use registry::Registry;
+pub use registry::{Registry, Source};
 pub use workspace::Workspace;
 
 /// What a call is permitted to touch. The approval gate reads this; it is a

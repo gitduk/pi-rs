@@ -208,7 +208,7 @@ impl Config {
     }
 
     /// The retry schedule, with the defaults the file may leave out. Read where
-    /// a run starts rather than kept on the agent, so `/reload` reaches it.
+    /// a run starts rather than kept on the agent, so a reload reaches it.
     pub fn retry(&self) -> agent::Retry {
         let mut retry = agent::Retry::default();
         if let Some(n) = self.retries {
@@ -640,9 +640,14 @@ pub fn load_tree(explicit: Option<&str>) -> Result<toml::Value> {
     Ok(found.unwrap_or_else(|| toml::Value::Table(Default::default())))
 }
 
+/// The nearest `.pi.toml` at or above `workspace`, if there is one.
+pub fn project_file(workspace: &Path) -> Option<PathBuf> {
+    project_path(workspace, home().as_deref())
+}
+
 /// The nearest `.pi.toml` at or above `workspace`, and its tree.
 pub fn load_project(workspace: &Path) -> Result<Option<(PathBuf, toml::Value)>> {
-    let Some(path) = project_path(workspace, home().as_deref()) else {
+    let Some(path) = project_file(workspace) else {
         return Ok(None);
     };
     Ok(read_tree(&path, true)?.map(|tree| (path, tree)))
@@ -667,7 +672,7 @@ impl Config {
 
     /// The config a run uses: the tree, the environment's endpoint over it,
     /// and every model checked against the endpoint it ends up with. Startup,
-    /// `/reload` and `/settings` all come through here, so none of them
+    /// a reload and `/settings` all come through here, so none of them
     /// accepts what another would refuse.
     pub fn in_force(tree: toml::Value) -> Result<Config> {
         let mut config = Self::from_tree(tree)?;

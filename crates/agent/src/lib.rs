@@ -69,7 +69,7 @@ pub struct Model {
     pub spec: ModelSpec,
 }
 
-/// What a run is allowed to do and what it is told. Rebuilt whole by `/reload`
+/// What a run is allowed to do and what it is told. Rebuilt whole by a reload
 /// and by an opened checkout; a subagent derives its own from its caller's.
 #[derive(Clone)]
 pub struct Briefing {
@@ -137,7 +137,7 @@ impl Agent {
     /// all want, named for what it is rather than an empty mailbox each time.
     ///
     /// `retry` is read where the run starts, not kept on the agent, so a
-    /// `/reload` that changed it reaches the next run without a refresh.
+    /// a reload that changed it reaches the next run without a refresh.
     pub async fn run(
         &self,
         session: &mut Session,

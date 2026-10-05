@@ -1,5 +1,5 @@
 //! A model name turned into something that can be talked to: its spec and the
-//! client for its wire. Startup, `/model` and `/reload` all come through here.
+//! client for its wire. Startup, `/model` and a reload all come through here.
 
 use std::sync::Arc;
 

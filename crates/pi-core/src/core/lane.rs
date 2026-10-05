@@ -89,7 +89,7 @@ struct Checkout {
     // a run in flight keeps the agent it started on.
     agent: Arc<Agent>,
     // The agent's brief, key map, command table and instruction files: one
-    // value, swapped whole by `/reload` and by an opened checkout.
+    // value, swapped whole by a reload and by an opened checkout.
     resolved: Arc<Resolved>,
     // Carried across turns: the file locks and edit shifts outlive any one run.
     ctx: Ctx,
@@ -147,7 +147,7 @@ struct Runner {
 /// Arm an agent for one checkout: hang the subagent tool on the brief, put
 /// that brief on the agent, and hand back the bundle the lane keeps.
 ///
-/// One place a brief is assembled, so startup, `/reload` and an opened
+/// One place a brief is assembled, so startup, a reload and an opened
 /// checkout arm an agent the same way.
 pub fn arm(
     agent: &mut Agent,
@@ -188,6 +188,9 @@ pub fn a_resolved(standing: &str) -> Arc<Resolved> {
         ceiling: tool::Tier::Exec,
         keys: Arc::new(pi_store::keys::Keys::default()),
         commands: Arc::new(Vec::new()),
+        watched: Vec::new(),
+        shelf: None,
+        shelf_seen: 0,
         notes: Vec::new(),
         context: Vec::new(),
         memory: Vec::new(),
@@ -349,6 +352,12 @@ impl Lane {
         self.checkout.resolved = arm(agent, resolved, archive, retry);
     }
 
+    /// Replace what was decided where the agent holds none of it — the
+    /// command table — without re-arming anything.
+    pub(super) fn keep(&mut self, resolved: Arc<Resolved>) {
+        self.checkout.resolved = resolved;
+    }
+
     /// What this checkout and the config decide.
     pub fn resolved(&self) -> &Arc<Resolved> {
         &self.checkout.resolved
@@ -402,6 +411,11 @@ impl Lane {
     /// The checkout's context, for what measures the tree between turns.
     pub fn ctx(&self) -> &Ctx {
         &self.checkout.ctx
+    }
+
+    /// The context runs start from. A run already going keeps its own copy.
+    pub fn ctx_mut(&mut self) -> &mut Ctx {
+        &mut self.checkout.ctx
     }
 
     /// The context a job runs with: this lane's, with the job's own way out.
@@ -537,10 +551,6 @@ impl Lane {
 impl Lane {
     pub fn set_worktree(&mut self, name: Option<String>) {
         self.checkout.worktree = name;
-    }
-
-    pub fn ctx_mut(&mut self) -> &mut Ctx {
-        &mut self.checkout.ctx
     }
 
     pub fn totals(&self) -> &Totals {

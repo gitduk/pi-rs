@@ -2,7 +2,7 @@
 //! laid over it key by key.
 //!
 //! There is no session layer: `/settings` opens the project's file in an
-//! editor, and `/reload` re-reads both.
+//! editor, and a reload re-reads both.
 
 use std::path::{Path, PathBuf};
 

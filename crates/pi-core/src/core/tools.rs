@@ -14,7 +14,6 @@ pub fn modifies(name: &str) -> bool {
             .names()
             .into_iter()
             .filter(|n| tools.get(n).is_some_and(|t| t.tier() == Tier::Write))
-            .map(String::from)
             .collect()
     });
     WRITERS.iter().any(|w| w == name)

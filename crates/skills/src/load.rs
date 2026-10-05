@@ -6,7 +6,12 @@ use crate::{Skill, body};
 use tool::limit::{MAX_BYTES, over_limit};
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};
 
-const NAME: &str = "skill";
+impl Load {
+    /// The name the tool answers to.
+    pub const NAME: &'static str = "skill";
+}
+
+const NAME: &str = Load::NAME;
 
 #[derive(Deserialize)]
 struct Args {

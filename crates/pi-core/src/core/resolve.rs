@@ -1,8 +1,8 @@
 //! What the config and the workspace decide for one checkout: the tools, the
-//! prompt, the ceiling, the commands. Startup, `/reload` and every new lane
+//! prompt, the ceiling, the commands. Startup, a reload and every new lane
 //! come through here.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -16,7 +16,7 @@ use pi_store::settings::Settings;
 use pi_store::{config, journal};
 
 /// Everything the config and the workspace decide, as opposed to what the
-/// command line fixed for the whole run. `/reload` recomputes exactly this.
+/// command line fixed for the whole run. A reload recomputes exactly this.
 #[derive(Clone)]
 pub struct Resolved {
     /// What the agent runs on: the tools, the prompt, the ceiling, the effort.
@@ -36,6 +36,13 @@ pub struct Resolved {
     /// because a skill discovered at reload has to reach the prompt the same
     /// way everything else the config decides does.
     pub commands: std::sync::Arc<Vec<Command>>,
+    /// Every file this was built from, as it stood: when one moves, the lane
+    /// is resolved again. Skills and scripts are read live and are not here.
+    pub watched: Vec<Stamp>,
+    /// Where skills are read from, live; `None` under `--no-skills`.
+    pub shelf: Option<std::sync::Arc<skills::Shelf>>,
+    /// Which state of the shelf `commands` was built from.
+    pub shelf_seen: u64,
     /// Worth saying once, at startup and at each reload.
     pub notes: Vec<String>,
     /// The instruction files folded into the system prompt, named as a person
@@ -63,7 +70,7 @@ fn offer(
 }
 
 /// Fails whole or not at all. A half-applied config is worse than a stale one,
-/// which is why `/reload` computes all of this before touching anything.
+/// which is why a reload computes all of this before touching anything.
 pub fn resolve(
     pinned: &Pinned,
     workspace: &tool::Workspace,
@@ -72,31 +79,33 @@ pub fn resolve(
 ) -> Result<Resolved> {
     let root = workspace.root();
     let mut notes = Vec::new();
+    // Before any of it is read, so a write landing meanwhile reads as a change.
+    let read_from = watched(pinned, config, root);
 
     // Sources offer their tools in order, built-ins first.
     let mut registry = toolbox::builtin();
-    let skills = if pinned.no_skills {
-        Vec::new()
-    } else {
-        let found = pi_store::dir()
-            .map(|pi| skills::discover(&pi.join("skills")))
-            .unwrap_or_default();
-        // A skill that silently fails to appear is one the user goes looking
-        // for in the wrong place.
-        notes.extend(
-            found
-                .problems
-                .iter()
-                .map(|p| format!("skill skipped — {p}")),
-        );
-        found.skills
-    };
-    // Before the move: a skill is two things at once, a command the user can
-    // type and a body the model can load, and both read the same list.
-    let commands = commands(&skills, &mut notes);
-    let tool = skills::Load::new(skills);
-    if !tool.is_empty() {
-        offer(&mut registry, &mut notes, "skill", Arc::new(tool));
+    // Read live, like the scripts: a skill written while pi runs can be loaded
+    // on the next turn, and typed once `Core::refresh_skills` has seen it.
+    let shelf = pi_store::dir()
+        .filter(|_| !pinned.no_skills)
+        .map(|pi| Arc::new(skills::Shelf::new(pi.join("skills"))));
+    let (found, shelf_seen) = shelf.as_ref().map(|s| s.now()).unwrap_or_default();
+    // A skill that silently fails to appear is one the user goes looking
+    // for in the wrong place.
+    notes.extend(
+        found
+            .problems
+            .iter()
+            .map(|p| format!("skill skipped — {p}")),
+    );
+    // A skill is two things at once, a command the user can type and a body
+    // the model can load, and both read the same list.
+    let commands = commands(&found.skills, &mut notes);
+    if let Some(shelf) = &shelf {
+        if registry.get(skills::Load::NAME).is_some() {
+            notes.push("tool skipped — skill: the name is taken".to_string());
+        }
+        registry.read(shelf.clone());
     }
 
     // A judgment endpoint is opt-in by section: no `[judge]` in the file, no
@@ -106,17 +115,34 @@ pub fn resolve(
         offer(&mut registry, &mut notes, "judge", Arc::new(judge));
     }
 
-    let (scripts, skipped) = pi_store::dir()
-        .map(|root| toolbox::scripts::discover_in(&root.join("tools")))
-        .unwrap_or_default();
-    notes.extend(skipped.iter().map(|p| format!("tool skipped — {p}")));
-    for script in scripts {
-        offer(&mut registry, &mut notes, "user script", Arc::new(script));
+    // Read live: a script written while pi runs is a tool from the next turn.
+    let scripts =
+        pi_store::dir().map(|root| Arc::new(toolbox::scripts::Dir::new(root.join("tools"))));
+    if let Some(scripts) = &scripts {
+        notes.extend(
+            scripts
+                .skipped()
+                .iter()
+                .map(|p| format!("tool skipped — {p}")),
+        );
+        // Offered tools win a name, the subagent among them though it is
+        // offered later, per lane.
+        for script in tool::Source::tools(&**scripts) {
+            if registry.get(script.name()).is_some() || script.name() == subagent::Subagent::NAME {
+                notes.push(format!(
+                    "tool skipped — user script {}: the name is taken",
+                    script.name()
+                ));
+            }
+        }
     }
     // Offered per lane after all of the above, so a holder of its name is
     // known here: say so once, not on every re-arm.
     if registry.get(subagent::Subagent::NAME).is_some() {
         notes.push("tool skipped — subagent: the name is taken".to_string());
+    }
+    if let Some(scripts) = scripts {
+        registry.read(scripts);
     }
 
     let settled = config.settle(config::Flags {
@@ -174,11 +200,56 @@ pub fn resolve(
         ceiling: tier,
         keys: std::sync::Arc::new(config.key_map()?),
         commands: std::sync::Arc::new(commands),
+        watched: read_from,
+        shelf,
+        shelf_seen,
         notes,
         context,
         memory,
         endpoint: endpoint(pinned, config, settings, root),
     })
+}
+
+/// A file as last seen: its path, time and size.
+pub type Stamp = (PathBuf, Option<std::time::SystemTime>, u64);
+
+/// The files a resolve in `root` reads, as they stand now: the settings, the
+/// system prompt, the instructions and memory. Missing ones are left out, so
+/// one appearing is a change too.
+pub fn watched(pinned: &Pinned, config: &config::Config, root: &Path) -> Vec<Stamp> {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    paths.extend(
+        pinned
+            .config
+            .as_ref()
+            .map(PathBuf::from)
+            .or_else(config::global_path),
+    );
+    paths.extend(config::project_file(root));
+    paths.extend(
+        pinned
+            .system
+            .as_ref()
+            .or(config.system.as_ref())
+            .map(PathBuf::from),
+    );
+    if !pinned.no_context_files {
+        let pi = pi_store::dir();
+        paths.extend(context::paths(
+            root,
+            context::home().as_deref(),
+            pi.as_deref(),
+        ));
+        let memory = pi_store::memory::Memory::default();
+        paths.extend(memory.paths(&crate::core::worktree::main_root(root)));
+    }
+    paths
+        .into_iter()
+        .filter_map(|path| {
+            let meta = std::fs::metadata(&path).ok()?;
+            Some((path, meta.modified().ok(), meta.len()))
+        })
+        .collect()
 }
 
 // The url requests go to, and the one source it came from, in the order

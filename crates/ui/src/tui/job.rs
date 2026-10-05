@@ -106,7 +106,7 @@ impl Tui {
         let sent = self.core.lane_mut().sender().clone();
         let token = self.core.lane().token();
         let done = done.clone();
-        // Read where the run starts, not carried on the agent: a `/reload`
+        // Read where the run starts, not carried on the agent: a reload
         // between two turns reaches the next one this way.
         let retry = self.core.config.retry();
         // The run's own handle on the mailbox; the lane keeps the other.

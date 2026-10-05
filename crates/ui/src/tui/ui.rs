@@ -430,7 +430,7 @@ impl Ui {
         self.band = self.paint.band(&self.paint.theme.prompt.panel.input);
         self.show_mode();
         // The opening block is painted once at construction; rebuild it so a
-        // /reload lands on the new theme instead of the old.
+        // reload lands on the new theme instead of the old.
         let opening = Row::banner(resolved, &self.paint);
         let rest = view.surface.scrollback.split_off(view.surface.opened);
         view.surface.opened = opening.len();
@@ -438,14 +438,14 @@ impl Ui {
     }
 
     // Every copy of the config the surface keeps, brought up to date — the one
-    // landing `/reload` and `/settings` share.
+    // landing a reload and `/settings` share.
     pub(super) fn adopt_config(&mut self, core: &Core, view: &mut View) {
         // The key map lives in two places; a reload has to reach both or the
         // screen keeps answering to the old bindings.
         if !Arc::ptr_eq(&self.keys, &core.keys) {
             self.keys = core.keys.clone();
         }
-        // Likewise the completion list: /reload is allowed to define models —
+        // Likewise the completion list: a reload is allowed to define models —
         // and skills — the last one did not.
         self.choices = core.choices();
         // The theme takes the view it was painted into — the opening block is

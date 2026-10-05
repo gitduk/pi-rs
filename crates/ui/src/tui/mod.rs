@@ -478,6 +478,7 @@ impl Tui {
         // handle per lane: the loop waits on it like any other source.
         let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel::<Done>();
         let mut tick = tokio::time::interval(status::SPIN);
+        let mut looked = std::time::Instant::now();
         // Off while nothing runs, so the interval falls behind; one
         // late tick then ordinary cadence avoids a catch-up spin.
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -490,6 +491,26 @@ impl Tui {
             for said in self.drivers.retain(|t| core.position_of(t).is_some()) {
                 self.ui
                     .say(front_view(&mut self.views, self.core.lane()), said);
+            }
+            // What changed on disk is taken up within a second: settings,
+            // instructions and memory resolve the lane again, a skill's word
+            // starts to answer. Not on every frame: each look is a walk.
+            if looked.elapsed() >= std::time::Duration::from_secs(1) {
+                looked = std::time::Instant::now();
+                if let Some(said) = self.core.refresh_config() {
+                    let view = front_view(&mut self.views, self.core.lane());
+                    for line in said {
+                        self.ui.say_muted(view, line);
+                    }
+                    self.ui.adopt_config(&self.core, view);
+                }
+                if let Some(said) = self.core.refresh_skills() {
+                    self.ui.commands = self.core.commands.clone();
+                    let view = front_view(&mut self.views, self.core.lane());
+                    for line in said {
+                        self.ui.say_muted(view, line);
+                    }
+                }
             }
             self.refresh_tabs();
             self.bar.poke(self.core.lane());

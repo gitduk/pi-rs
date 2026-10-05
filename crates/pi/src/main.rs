@@ -287,6 +287,7 @@ async fn main() -> Result<ExitCode> {
             settings,
             current: 0,
             lanes: vec![first],
+            refused: Default::default(),
         };
         let (saved, keep) = pi_store::private_file("wechat.json");
         let channels: Vec<Arc<dyn channel::Channel>> = vec![Arc::new(wechat::WeChat::new(

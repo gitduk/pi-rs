@@ -11,9 +11,83 @@
 
 mod script;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::SystemTime;
+
+use tool::Tool;
 
 pub use script::{Script, cargo_script, run_script};
+
+/// The tools directory as a `tool::Source`: looked at whenever the tool set
+/// is asked, parsed again only when a file in it changed.
+pub struct Dir {
+    dir: PathBuf,
+    seen: Mutex<Seen>,
+}
+
+#[derive(Default)]
+struct Seen {
+    stamps: Vec<(PathBuf, Option<SystemTime>, u64)>,
+    tools: Vec<Arc<dyn Tool>>,
+    skipped: Vec<String>,
+}
+
+impl Dir {
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        Self {
+            dir: dir.into(),
+            seen: Mutex::default(),
+        }
+    }
+
+    /// The scripts that could not be registered, and why.
+    pub fn skipped(&self) -> Vec<String> {
+        self.fresh(|seen| seen.skipped.clone())
+    }
+
+    fn fresh<T>(&self, read: impl FnOnce(&Seen) -> T) -> T {
+        let stamps = stamps(&self.dir);
+        let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
+        if seen.stamps != stamps {
+            let (tools, skipped) = discover_in(&self.dir);
+            for why in &skipped {
+                tracing::warn!(target: "pi::tools", %why, "script skipped");
+            }
+            *seen = Seen {
+                stamps,
+                tools: tools
+                    .into_iter()
+                    .map(|t| Arc::new(t) as Arc<dyn Tool>)
+                    .collect(),
+                skipped,
+            };
+        }
+        read(&seen)
+    }
+}
+
+impl tool::Source for Dir {
+    fn tools(&self) -> Vec<Arc<dyn Tool>> {
+        self.fresh(|seen| seen.tools.clone())
+    }
+}
+
+// What says a script changed without reading it: its name, time and size.
+fn stamps(dir: &Path) -> Vec<(PathBuf, Option<SystemTime>, u64)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<_> = entries
+        .flatten()
+        .filter_map(|e| {
+            let meta = e.metadata().ok()?;
+            Some((e.path(), meta.modified().ok(), meta.len()))
+        })
+        .collect();
+    out.sort();
+    out
+}
 
 /// Scan the given directory for `.rs` files; anything else is not a script.
 /// One whose frontmatter carries no description is not registered — a tool
@@ -136,6 +210,23 @@ mod tests {
         assert_eq!(interface(unfenced).unwrap_err(), "no --- frontmatter");
         let unclosed = "---\n[package]\ndescription = \"x\"\nfn main() {}\n";
         assert_eq!(interface(unclosed).unwrap_err(), "no --- frontmatter");
+    }
+
+    #[test]
+    fn a_script_written_later_is_a_tool_on_the_next_look() {
+        use tool::Source as _;
+        let dir = tempfile::tempdir().unwrap();
+        let scripts = Dir::new(dir.path());
+        assert!(scripts.tools().is_empty());
+        std::fs::write(
+            dir.path().join("count.rs"),
+            "---\n[package]\ndescription = \"Count\"\n---\nfn main() {}\n",
+        )
+        .unwrap();
+        assert_eq!(scripts.tools()[0].name(), "count");
+        std::fs::write(dir.path().join("count.rs"), "fn main() {}\n").unwrap();
+        assert!(scripts.tools().is_empty());
+        assert_eq!(scripts.skipped().len(), 1);
     }
 
     #[test]

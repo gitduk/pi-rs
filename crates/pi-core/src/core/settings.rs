@@ -1,4 +1,4 @@
-//! What `/reload`, `/settings` and `/model` do to the Core.
+//! What a reload, `/settings` and `/model` do to the Core.
 //!
 //! The value itself is `pi_store::settings`; this is what the Core does to it.
 
@@ -17,28 +17,40 @@ impl Core {
     /// Session-owned state (transcript, name, history, model) is untouched;
     /// only what the config decides is replaced.
     pub fn reload(&mut self) -> Vec<String> {
+        self.try_reload().unwrap_or_else(|why| vec![why])
+    }
+
+    /// The same, with a refusal as `Err`: why nothing was reloaded.
+    pub fn try_reload(&mut self) -> Result<Vec<String>, String> {
         let root = self.lane().root().to_path_buf();
         if let Err(e) = self.settings.reread(self.pinned.config.as_deref(), &root) {
-            return vec![format!("nothing reloaded — {}", refused("reload", e))];
+            return Err(format!("nothing reloaded — {}", refused("reload", e)));
         }
         let before = self.lane().resolved().endpoint.clone();
-        let mut said = self.rebuild();
+        let mut said = self.rebuilt()?;
         // The banner is drawn once, so a moved endpoint is said here instead.
         // An edit needs no such line: it names the value it wrote.
         let after = &self.lane().resolved().endpoint;
         if *after != before {
             said.extend(after.clone());
         }
-        said
+        Ok(said)
     }
     // Take this config as the one in force, whole or not at all — nothing
     // is touched until it is all computed.
     fn adopt(&mut self, config: Config) -> Result<Vec<String>, String> {
         let root = self.lane().root().to_path_buf();
         let failed = |e| Err(format!("nothing reloaded — {}", refused("reload", e)));
+        // `write_roots` widen the workspace, so it is built again from them.
+        let workspace = match tool::Workspace::new(&root)
+            .and_then(|ws| ws.with_write_roots(&config.write_roots))
+        {
+            Ok(ws) => ws,
+            Err(e) => return failed(e.into()),
+        };
         let resolved = match crate::core::resolve::resolve(
             &self.pinned,
-            self.lane().workspace(),
+            &workspace,
             &config,
             &self.settings,
         ) {
@@ -78,6 +90,7 @@ impl Core {
         // one `rearm`, so the copy a run in flight forces is taken once.
         let archive = self.archive(root.clone(), model);
         let idle = retry.idle;
+        self.lane_mut().ctx_mut().workspace = workspace;
         self.lane_mut()
             .rearm(std::sync::Arc::new(resolved), archive, retry, |ag| {
                 ag.compactor = std::sync::Arc::new(agent::Summarizing::new(writer, idle));
@@ -98,13 +111,13 @@ impl Core {
         );
         Ok(notes)
     }
-    // Recompute the config from the file trees, and adopt it.
-    fn rebuild(&mut self) -> Vec<String> {
-        self.rebuilt().unwrap_or_else(|why| vec![why])
-    }
-    // The same, saying why when nothing could be adopted.
+    // Recompute the config from the file trees and adopt it, saying why when
+    // nothing could be adopted.
     fn rebuilt(&mut self) -> Result<Vec<String>, String> {
-        let config = self.settings.config().map_err(|e| refused("settings", e))?;
+        let config = self
+            .settings
+            .config()
+            .map_err(|e| format!("nothing reloaded — {}", refused("settings", e)))?;
         self.adopt(config)
     }
     /// After `/settings` closed the editor: reload, and name what the files

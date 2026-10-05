@@ -31,7 +31,6 @@ pub enum Builtin {
     Help,
     Keys,
     Status,
-    Reload,
     Name(String),
     // The session to switch to, or empty to list what there is.
     Resume(String),
@@ -86,8 +85,8 @@ impl Intent {
     /// Exhaustive on purpose, with no catch-all arm: an intent added without an
     /// answer here should fail to compile rather than default to one.
     ///
-    /// What it cannot check is an arm's body: `Reload` and `Model` are `Now`
-    /// because they write through `Arc::make_mut`, not because a rule says so.
+    /// What it cannot check is an arm's body: `Model` is `Now` because it
+    /// writes through `Arc::make_mut`, not because a rule says so.
     pub fn fate(&self) -> Fate {
         match self {
             // Answered from the config, the key map or the lane's own tally
@@ -95,7 +94,7 @@ impl Intent {
             Intent::Builtin(Builtin::Help | Builtin::Keys | Builtin::Status | Builtin::Name(_)) => {
                 Fate::Now
             }
-            Intent::Builtin(Builtin::Reload | Builtin::Model(_)) => Fate::Now,
+            Intent::Builtin(Builtin::Model(_)) => Fate::Now,
             // Bare, these only list what there is.
             Intent::Builtin(Builtin::Resume(name) | Builtin::Worktree(name))
                 if name.trim().is_empty() =>

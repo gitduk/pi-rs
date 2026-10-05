@@ -38,3 +38,31 @@ async fn a_file_argument_cannot_leave_the_skill_directory() {
         .await;
     assert!(matches!(r, Err(ToolError::Escape(_))), "{r:?}");
 }
+
+// Read live: a skill written while pi runs is loadable on the next turn, and
+// the generation is what tells the command table to follow.
+#[test]
+fn a_skill_written_later_is_on_the_shelf_at_the_next_look() {
+    use tool::Source as _;
+    let dir = tempfile::tempdir().unwrap();
+    let shelf = skills::Shelf::new(dir.path());
+    assert!(shelf.tools().is_empty());
+    let (_, before) = shelf.now();
+    assert_eq!(shelf.now().1, before, "nothing changed, nothing moves");
+
+    let skill = dir.path().join("haiku");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\ndescription: write haiku\n---\nbody\n",
+    )
+    .unwrap();
+    let (found, after) = shelf.now();
+    assert_ne!(after, before);
+    assert_eq!(found.skills[0].name, "haiku");
+    assert!(
+        shelf.tools()[0]
+            .description()
+            .contains("haiku: write haiku")
+    );
+}

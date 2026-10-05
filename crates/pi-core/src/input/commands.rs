@@ -106,12 +106,6 @@ pub(crate) const BUILTIN: &[Command] = &[
         |_, rest| Intent::Builtin(Builtin::Loop(rest)),
     ),
     Command::builtin(
-        "/reload",
-        "",
-        "re-read ~/.pi/settings.toml, the instructions and the skills",
-        |_, _| Intent::Builtin(Builtin::Reload),
-    ),
-    Command::builtin(
         "/status",
         "",
         "what this session stands on, has spent, and where it writes",

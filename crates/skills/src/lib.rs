@@ -5,6 +5,8 @@ pub use load::{Load, instructions};
 use llm::slice::head_bytes;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::SystemTime;
 use tool::limit::{MAX_BYTES, over_limit};
 
 // One line in the tool catalog: past this, the description costs more than
@@ -142,6 +144,83 @@ pub struct Found {
 // How far below the skills directory a skill may sit — collections group by
 // category, so a bound also keeps a stray symlink from a full filesystem walk.
 const MAX_DEPTH: usize = 3;
+
+/// The skills directory as a `tool::Source`: the `skill` tool as the
+/// directory now stands, rebuilt only when a `SKILL.md` under it changed.
+pub struct Shelf {
+    dir: PathBuf,
+    seen: Mutex<Seen>,
+}
+
+#[derive(Default)]
+struct Seen {
+    stamps: Option<Vec<Stamp>>,
+    found: Arc<Found>,
+    tool: Option<Arc<dyn tool::Tool>>,
+    generation: u64,
+}
+
+type Stamp = (PathBuf, Option<SystemTime>, u64);
+
+impl Shelf {
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        Self {
+            dir: dir.into(),
+            seen: Mutex::default(),
+        }
+    }
+
+    /// The skills as they stand, and a number that moves when they change.
+    pub fn now(&self) -> (Arc<Found>, u64) {
+        self.fresh(|seen| (seen.found.clone(), seen.generation))
+    }
+
+    fn fresh<T>(&self, read: impl FnOnce(&Seen) -> T) -> T {
+        let mut stamps = Vec::new();
+        stamp(&self.dir, MAX_DEPTH, &mut stamps);
+        let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
+        if seen.stamps.as_ref() != Some(&stamps) {
+            let found = discover(&self.dir);
+            seen.tool = (!found.skills.is_empty())
+                .then(|| Arc::new(Load::new(found.skills.clone())) as Arc<dyn tool::Tool>);
+            seen.found = Arc::new(found);
+            seen.stamps = Some(stamps);
+            seen.generation += 1;
+        }
+        read(&seen)
+    }
+}
+
+impl tool::Source for Shelf {
+    fn tools(&self) -> Vec<Arc<dyn tool::Tool>> {
+        self.fresh(|seen| seen.tool.clone().into_iter().collect())
+    }
+}
+
+// Every `SKILL.md` `walk` would read, by path, time and size: what says a
+// skill changed without parsing one.
+fn stamp(dir: &Path, depth: usize, out: &mut Vec<Stamp>) {
+    let file = dir.join("SKILL.md");
+    if let Ok(meta) = std::fs::metadata(&file) {
+        out.push((file, meta.modified().ok(), meta.len()));
+        return;
+    }
+    if depth == 0 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut kids: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    kids.sort();
+    for kid in kids {
+        stamp(&kid, depth - 1, out);
+    }
+}
 
 /// Every skill under `dir`, sorted by name.
 pub fn discover(dir: &Path) -> Found {

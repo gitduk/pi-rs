@@ -37,12 +37,12 @@ pub struct Core {
     /// Held so `/keys` can show what is actually in force, overrides included.
     pub keys: std::sync::Arc<pi_store::keys::Keys>,
     /// The config in force, as opposed to the one on disk. `/model` picks from
-    /// this, so a switch cannot quietly apply an edit `/reload` has not.
+    /// this, so a switch cannot quietly apply an edit a reload has not.
     pub config: std::sync::Arc<config::Config>,
     /// The command line's say over the config, re-applied over every reload.
     pub pinned: crate::args::Pinned,
     /// What a slash answers to: built-ins, channels and skills. Rebuilt by
-    /// `/reload`, since a skill can appear between one turn and the next.
+    /// a reload, since a skill can appear between one turn and the next.
     ///
     /// Shared rather than copied: the terminal holds the same table and
     /// re-reads it whenever this is replaced.
@@ -50,13 +50,16 @@ pub struct Core {
     /// The commands of the run's channels, in every table put in force.
     pub channels: Vec<Command>,
     /// The config files as last read: what `/settings` writes into and
-    /// `/reload` reads again.
+    /// a reload reads again.
     pub settings: Settings,
     /// Every checkout open in this run, in the order they were opened. The
     /// main one is first, because that is where a run starts.
     pub lanes: Vec<Lane>,
     /// Which of them is in front. The surface shows one at a time.
     pub current: usize,
+    /// By lane token, the files as they stood when a reload last refused
+    /// them, so a broken file is said once rather than once a second.
+    pub refused: std::collections::HashMap<u64, Vec<resolve::Stamp>>,
 }
 
 impl Core {
@@ -65,6 +68,75 @@ impl Core {
     fn in_force(&mut self) {
         self.keys = self.lane().resolved().keys.clone();
         self.commands = with_channels(&self.lane().resolved().commands, &self.channels);
+    }
+
+    /// Resolve the lane in front again when a file it was built from changed
+    /// on disk. `Some` with what to say when it did; nothing to do otherwise.
+    pub fn refresh_config(&mut self) -> Option<Vec<String>> {
+        let lane = self.lane();
+        let now = resolve::watched(&self.pinned, &self.config, lane.root());
+        let was = &lane.resolved().watched;
+        let token = lane.token();
+        if &now == was || self.refused.get(&token) == Some(&now) {
+            return None;
+        }
+        let root = lane.root().to_path_buf();
+        let moved: Vec<String> = now
+            .iter()
+            .filter(|s| !was.contains(s))
+            .chain(was.iter().filter(|s| !now.iter().any(|n| n.0 == s.0)))
+            .map(|(path, ..)| agent::context::short(path, &root))
+            .collect();
+        match self.try_reload() {
+            Ok(mut said) => {
+                self.refused.remove(&token);
+                said.insert(0, format!("reloaded — {}", moved.join(", ")));
+                Some(said)
+            }
+            Err(why) => {
+                self.refused.insert(token, now);
+                Some(vec![why])
+            }
+        }
+    }
+
+    /// Give each lane the skill commands its shelf now holds. `Some` when the
+    /// table in force changed, with what is worth saying about the new skills;
+    /// cheap when nothing did: one look at the directory, no parsing.
+    pub fn refresh_skills(&mut self) -> Option<Vec<String>> {
+        let mut moved = false;
+        let mut said = Vec::new();
+        for lane in &mut self.lanes {
+            let resolved = lane.resolved();
+            let Some(shelf) = &resolved.shelf else {
+                continue;
+            };
+            let (found, seen) = shelf.now();
+            if seen == resolved.shelf_seen {
+                continue;
+            }
+            let mut notes = Vec::new();
+            let mut fresh = (**resolved).clone();
+            fresh.commands =
+                std::sync::Arc::new(crate::input::commands::commands(&found.skills, &mut notes));
+            fresh.shelf_seen = seen;
+            said.extend(
+                found
+                    .problems
+                    .iter()
+                    .map(|p| format!("skill skipped — {p}")),
+            );
+            said.extend(notes);
+            lane.keep(std::sync::Arc::new(fresh));
+            moved = true;
+        }
+        if !moved {
+            return None;
+        }
+        self.in_force();
+        said.sort();
+        said.dedup();
+        Some(said)
     }
 
     /// Give each of `channels` its `/<name>` command.
@@ -132,7 +204,6 @@ impl Core {
             Intent::Builtin(Builtin::Quit) => Step::Quit,
             Intent::Builtin(Builtin::Help) => Step::Handled(Listing::say(help(&self.commands))),
             Intent::Builtin(Builtin::Keys) => Step::Handled(self.keys.listing()),
-            Intent::Builtin(Builtin::Reload) => Step::Handled(Listing::say(self.reload())),
             Intent::Builtin(Builtin::Status) => Step::Handled(self.status()),
             Intent::Builtin(Builtin::New) => {
                 self.fresh_session();
@@ -273,6 +344,27 @@ mod tests {
     }
 
     #[test]
+    fn a_skill_written_mid_run_is_a_command_without_a_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let transport = std::sync::Arc::new(Recording::default());
+        let mut core = a_repl(dir.path(), transport, "model-a");
+        let shelf = dir.path().join("skills");
+        let mut resolved = (**core.lane().resolved()).clone();
+        resolved.shelf = Some(std::sync::Arc::new(skills::Shelf::new(&shelf)));
+        core.lane_mut().keep(std::sync::Arc::new(resolved));
+        core.refresh_skills();
+        assert!(
+            core.refresh_skills().is_none(),
+            "nothing new, nothing to do"
+        );
+
+        std::fs::create_dir_all(shelf.join("haiku")).unwrap();
+        std::fs::write(shelf.join("haiku/SKILL.md"), "---\ndescription: d\n---\n").unwrap();
+        assert!(core.refresh_skills().is_some());
+        assert!(core.commands.iter().any(|c| c.word == "/haiku"));
+    }
+
+    #[test]
     fn a_skill_cannot_take_a_built_in_word() {
         // A skill that could redefine /new would make a copied-in file the
         // owner of a word the session depends on.
@@ -322,7 +414,6 @@ mod tests {
             Intent::Builtin(Builtin::Status),
             Intent::Builtin(Builtin::Help),
             Intent::Builtin(Builtin::Keys),
-            Intent::Builtin(Builtin::Reload),
             Intent::Builtin(Builtin::Model(String::new())),
             Intent::Builtin(Builtin::Worktree("tree".into())),
             Intent::Builtin(Builtin::Channel("wechat".into(), "on".into())),
@@ -495,6 +586,7 @@ mod tests {
                 None,
             ),
             lanes: vec![lane],
+            refused: Default::default(),
             current: 0,
         }
     }

@@ -882,7 +882,7 @@ impl Row {
     }
 
     /// What the screen opens with: version, endpoint, instruction files.
-    /// Built fresh (not stored), so a `/reload` theme change can repaint it.
+    /// Built fresh (not stored), so a reload theme change can repaint it.
     pub fn banner(resolved: &Resolved, paint: &Paint) -> Vec<Self> {
         let muted = |line: &str| Self::notice(Line::from(paint.span(&paint.theme.muted, line)));
         let mut rows = vec![muted(icons::VERSION_BANNER)];

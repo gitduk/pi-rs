@@ -65,6 +65,24 @@ impl Memory {
             .join(format!("{}.md", key_of(project)))
     }
 
+    /// Every file `files` would read, whether or not it holds anything.
+    pub fn paths(&self, project: &Path) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = std::fs::read_dir(&self.dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(global_name)
+            })
+            .collect();
+        out.sort();
+        out.push(self.project_path(project));
+        out
+    }
+
     /// The project's file, then every global one by name: what a
     /// distillation is shown and what the prompt carries. Empty ones are left out.
     pub fn files(&self, project: &Path) -> Vec<File> {

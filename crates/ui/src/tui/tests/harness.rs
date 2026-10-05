@@ -111,6 +111,7 @@ pub(super) fn surface(dir: &std::path::Path) -> crate::tui::Tui {
         channels: Vec::new(),
         settings: pi_store::settings::Settings::new(toml::Value::Table(Default::default()), None),
         lanes: vec![running_lane(dir)],
+        refused: Default::default(),
         current: 0,
     };
     crate::tui::Tui::on_test_screen(core, keys)

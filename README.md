@@ -46,6 +46,10 @@ A `.pi.toml` between the workspace and the repository root overrides the same
 keys, `base_url`, `api_key`, `system` and `write_roots` included. Read the one
 in a checkout you did not write before running pi there.
 
+Nothing needs a restart. Within a second of a save to the settings, a system
+prompt file, an `AGENTS.md` or memory, the lane in front is rebuilt from them;
+a file that does not parse is named once and the old config stays.
+
 ## Run
 
 ```bash
@@ -82,7 +86,7 @@ Esc.
 | `/worktree [name]`, `/worktree rm` | work in `<repo>.worktrees/<name>`             |
 | `/compact [focus]`                 | summarize everything but the working tail     |
 | `/loop <line>`                     | resubmit a line until a round edits no file   |
-| `/reload`, `/settings`             | re-read the config, or edit the project's     |
+| `/settings`                        | edit the project's config                     |
 | `/status`, `/keys`, `/help`        | session paths and spend; bindings; commands   |
 | `/wechat on`, `/wechat off`        | bridge the session to a WeChat chat           |
 | `/<skill> [args]`                  | run a skill (also one-shot: `pi "/commit"`)   |
@@ -97,6 +101,9 @@ Esc.
 - One tool per cargo script in `~/.pi/tools/*.rs`. Its `[package] description`
   is the tool's description and `[package.metadata.pi.args]` its arguments.
   Needs `cargo +nightly -Zscript`.
+
+Scripts and skills are read live: one written while pi runs is offered to the
+model from its next turn, and a skill's `/name` answers the next time you type.
 
 `fetch` speaks http and https and refuses loopback, private and link-local
 addresses. With [rtk](https://github.com/rtk-ai/rtk) on `PATH`, `bash` runs
