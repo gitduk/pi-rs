@@ -64,9 +64,6 @@ pub struct WeChat {
 }
 
 impl WeChat {
-    /// The word `/wechat` answers to; the command table reads it from here.
-    pub const NAME: &'static str = "wechat";
-
     /// `saved` is what `keep` was last handed, if anything; a missing or
     /// unreadable one starts logged out.
     pub fn new(saved: Option<&[u8]>, keep: Keep) -> Self {
@@ -99,7 +96,7 @@ impl WeChat {
 #[async_trait]
 impl Channel for WeChat {
     fn name(&self) -> &'static str {
-        Self::NAME
+        "wechat"
     }
 
     fn help(&self) -> &'static str {
