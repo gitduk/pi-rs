@@ -334,7 +334,7 @@ impl BarScript {
         let ctx = lane.ctx_for(tokio_util::sync::CancellationToken::new());
         let (path, tx) = (path.clone(), self.tx.clone());
         tokio::spawn(async move {
-            let _ = tx.send(bar::run(&path, input, &ctx).await);
+            let _ = tx.send(pi_core::core::bar::run(&path, input, &ctx).await);
         });
     }
 

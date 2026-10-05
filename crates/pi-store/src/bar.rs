@@ -4,24 +4,11 @@
 //! The script says where things go; what a part reads as is filled by the
 //! surface each frame, so a `/model` switch shows at once, not after rerun.
 
-use std::path::Path;
-use std::time::Duration;
-
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
 use crate::status::Segment;
-
-// A first run builds the script and its dependencies, which takes a while.
-const TIMEOUT: Duration = Duration::from_secs(120);
-
-/// Run the script at `path`, `input` on its stdin, and read what it printed.
-pub async fn run(path: &Path, input: Vec<u8>, ctx: &tool::Ctx) -> Result<Layout, String> {
-    toolbox::scripts::run_script(path, input, TIMEOUT, ctx)
-        .await
-        .and_then(|out| parse(&out))
-}
 
 /// A script's output read as a layout. A refusal names where it went wrong —
 /// `lines[0].left[2]` — and why, rather than that nothing matched.

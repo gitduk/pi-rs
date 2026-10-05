@@ -4,6 +4,7 @@
 //! Each verb lives with its state — see `settings.rs`, `lane.rs`,
 //! `status.rs`, `meter.rs`, `bash.rs`, `driver/`.
 
+pub mod bar;
 pub mod bash;
 pub mod dial;
 pub mod lane;
