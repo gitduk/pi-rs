@@ -30,13 +30,7 @@ impl FoldedTool {
     pub fn new(name: &str, preview: &str, asked: &str, output: &str) -> Self {
         let mut body: Vec<String> = asked.lines().skip(1).map(str::to_string).collect();
         let asked = body.len();
-        let bash = name == toolbox::bash::Bash::NAME;
-        body.extend(
-            output
-                .lines()
-                .filter(|l| !(bash && pi_core::core::bash::is_stream_tag(l)))
-                .map(str::to_string),
-        );
+        body.extend(pi_core::core::tools::shown(name, output).map(str::to_string));
         Self {
             name: name.to_string(),
             preview: preview.to_string(),

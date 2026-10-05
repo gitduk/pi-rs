@@ -325,6 +325,9 @@ mod tests {
         fn name(&self) -> &'static str {
             "fake"
         }
+        fn help(&self) -> &'static str {
+            "a channel that only records"
+        }
         fn limit(&self) -> usize {
             40
         }

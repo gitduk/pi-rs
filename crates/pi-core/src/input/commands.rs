@@ -2,6 +2,7 @@
 //! and what it completes to.
 
 use std::borrow::Cow;
+use std::sync::Arc;
 
 use skills::Skill;
 
@@ -131,12 +132,6 @@ pub(crate) const BUILTIN: &[Command] = &[
         "edit the project's .pi.toml, then reload",
         |_, rest| Intent::Builtin(Builtin::Settings(rest)),
     ),
-    Command::builtin(
-        "/wechat",
-        "[on|off]",
-        "bridge this session to WeChat (scan a QR on first connect)",
-        |_, rest| Intent::Builtin(Builtin::Channel(wechat::WeChat::NAME, rest)),
-    ),
     Command::builtin("/exit", "", "leave (Ctrl-D does the same)", |_, _| {
         Intent::Builtin(Builtin::Quit)
     }),
@@ -179,6 +174,41 @@ pub fn commands(skills: &[Skill], notes: &mut Vec<String>) -> Vec<Command> {
         });
     }
     out
+}
+
+/// The command that turns `channel` on and off: `/wechat` for `wechat`.
+pub fn channel_command(channel: &dyn ::channel::Channel) -> Command {
+    Command {
+        word: Cow::Owned(format!("/{}", channel.name())),
+        args: "[on|off]",
+        help: Cow::Borrowed(channel.help()),
+        intent: |word, rest| {
+            Intent::Builtin(Builtin::Channel(
+                word.trim_start_matches('/').to_string(),
+                rest,
+            ))
+        },
+        source: Source::Builtin,
+    }
+}
+
+/// `table` with `channels` among its built-ins, where `help` lists them. A
+/// channel's word is a built-in's, so a skill of the same name gives way.
+pub fn with_channels(table: &Arc<Vec<Command>>, channels: &[Command]) -> Arc<Vec<Command>> {
+    if channels.is_empty() {
+        return table.clone();
+    }
+    let mut out: Vec<Command> = table
+        .iter()
+        .filter(|c| channels.iter().all(|ch| ch.word != c.word))
+        .cloned()
+        .collect();
+    let at = out
+        .iter()
+        .position(|c| !matches!(c.source, Source::Builtin))
+        .unwrap_or(out.len());
+    out.splice(at..at, channels.iter().cloned());
+    Arc::new(out)
 }
 
 pub(crate) fn help(commands: &[Command]) -> Vec<String> {

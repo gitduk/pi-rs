@@ -87,7 +87,7 @@ impl Drivers {
     /// Carry out a driver's command, given on `lane`.
     pub fn command(&mut self, drive: Drive, lane: u64, ctx: &Ctx) -> Said {
         match drive {
-            Drive::Channel(name, cmd) => Said::Reply(self.channels.command(name, cmd)),
+            Drive::Channel(name, cmd) => Said::Reply(self.channels.command(&name, cmd)),
             Drive::Loop(Some(goal)) => match self.loops.start(lane, goal, ctx) {
                 Ok(()) => Said::Nothing,
                 Err(why) => Said::Reply(vec![why]),

@@ -108,6 +108,7 @@ pub(super) fn surface(dir: &std::path::Path) -> crate::tui::Tui {
         config: std::sync::Arc::new(pi_core::store::config::Config::default()),
         pinned: pi_core::args::Pinned::default(),
         commands: std::sync::Arc::new(Vec::new()),
+        channels: Vec::new(),
         settings: pi_core::store::settings::Settings::new(
             toml::Value::Table(Default::default()),
             None,

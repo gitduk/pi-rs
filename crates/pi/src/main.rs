@@ -215,21 +215,24 @@ async fn main() -> Result<()> {
             ..lane::Opening::new(Arc::new(ag), resolved, ctx)
         });
         first.return_session(carried);
-        let core = Core {
+        let mut core = Core {
             store,
             keys: key_map.clone(),
             config: config.clone(),
             pinned: pinned.clone(),
             commands,
+            channels: Vec::new(),
             settings,
             current: 0,
             lanes: vec![first],
         };
         let (saved, keep) = pi_core::store::private_file("wechat.json");
-        let drivers = pi_core::driver::Drivers::new(vec![Arc::new(wechat::WeChat::new(
+        let channels: Vec<Arc<dyn channel::Channel>> = vec![Arc::new(wechat::WeChat::new(
             saved.as_deref(),
             Arc::new(keep),
-        ))]);
+        ))];
+        core.add_channels(&channels);
+        let drivers = pi_core::driver::Drivers::new(channels);
         let out = tui::Tui::new(core, key_map, drivers)?.run().await;
         // Subagents handed their transcripts to a background save; wait
         // for those to land before the runtime goes with them.

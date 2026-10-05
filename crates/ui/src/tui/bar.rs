@@ -19,8 +19,6 @@ use pi_core::store::icons;
 const MUTED: Look = Look::Tone(Tone::Muted);
 // Room between the two sides of a row.
 const GAP: usize = 2;
-// A first run builds the script and its dependencies, which takes a while.
-const TIMEOUT: Duration = Duration::from_secs(120);
 // A script asking for less would spend a process on every frame or two.
 const MIN_REFRESH: f64 = 0.5;
 // Retried: the cause may have passed, or the file been fixed.
@@ -336,10 +334,7 @@ impl BarScript {
         let ctx = lane.ctx_for(tokio_util::sync::CancellationToken::new());
         let (path, tx) = (path.clone(), self.tx.clone());
         tokio::spawn(async move {
-            let out = toolbox::scripts::run_script(&path, input, TIMEOUT, &ctx)
-                .await
-                .and_then(|out| bar::parse(&out));
-            let _ = tx.send(out);
+            let _ = tx.send(bar::run(&path, input, &ctx).await);
         });
     }
 

@@ -15,7 +15,6 @@ llm.workspace = true
 channel.workspace = true
 tool.workspace = true
 toolbox.workspace = true
-wechat.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 clap.workspace = true

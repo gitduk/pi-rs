@@ -102,6 +102,10 @@ impl Channel for WeChat {
         Self::NAME
     }
 
+    fn help(&self) -> &'static str {
+        "bridge this session to WeChat (scan a QR on first connect)"
+    }
+
     fn limit(&self) -> usize {
         MESSAGE_LIMIT
     }

@@ -49,6 +49,8 @@ impl Inbox {
 pub trait Channel: Send + Sync {
     /// The word its command answers to: `wechat` is `/wechat`.
     fn name(&self) -> &'static str;
+    /// What its command does, in one line of `/help`.
+    fn help(&self) -> &'static str;
     /// Bytes one outbound message may hold. Bytes because they never
     /// undercount: a platform that limits characters is safe under it too.
     fn limit(&self) -> usize;

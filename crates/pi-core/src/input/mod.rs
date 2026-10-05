@@ -45,7 +45,7 @@ pub enum Builtin {
     // after the word is refused.
     Settings(String),
     // A channel's command: its name, then "" = status, "on" or "off".
-    Channel(&'static str, String),
+    Channel(String, String),
     // What to run over and over, or empty to stop the loop in force.
     Loop(String),
     // `/new` and `ctrl+l` twice are one variant: a fresh session, old one
@@ -302,7 +302,7 @@ pub enum Step {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Drive {
     /// `/<channel>`, which starts, stops or reports the named channel.
-    Channel(&'static str, ChannelCmd),
+    Channel(String, ChannelCmd),
     /// `/loop` over a goal already known to start a turn; `None` stops it.
     Loop(Option<String>),
 }

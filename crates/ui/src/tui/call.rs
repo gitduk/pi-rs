@@ -9,6 +9,7 @@ use ratatui::text::Line;
 use super::row::{self, PendingTool, Row};
 use super::scrollback::Folds;
 use crate::render::{Paint, named};
+use pi_core::core::tools::modifies;
 use pi_core::store::icons;
 
 // A tool call still running. Its line is drawn by the group it will fold
@@ -35,7 +36,7 @@ const SHOWN_AFTER: u64 = 2;
 // The call's line in the live block: mark, shimmering text, elapsed time.
 // A modifying call never folds, so it stays drawn here after it ends.
 pub(super) fn pending_line(now: Instant, tick: usize, t: &RunTool, paint: &Paint) -> Line<'static> {
-    let ended = if is_modifying_tool(&t.name) {
+    let ended = if modifies(&t.name) {
         None
     } else {
         t.done.as_ref().and_then(Row::ok)
@@ -61,14 +62,10 @@ pub(super) fn pending_line(now: Instant, tick: usize, t: &RunTool, paint: &Paint
     }
 }
 
-fn is_modifying_tool(name: &str) -> bool {
-    name == toolbox::edit::Edit::NAME || name == toolbox::write::Write::NAME
-}
-
 // Whether the group draws this call: true from when a foldable call
 // starts until it ends badly — a failed call is on its way to its own line.
 fn holds(t: &RunTool) -> bool {
-    !is_modifying_tool(&t.name) && t.done.as_ref().is_none_or(|row| row.ok() == Some(true))
+    !modifies(&t.name) && t.done.as_ref().is_none_or(|row| row.ok() == Some(true))
 }
 
 // Foldable calls, shown from the start so the row doesn't visually jump
@@ -91,8 +88,8 @@ pub(super) fn drawn(tools: &[RunTool], row_holds: bool) -> Vec<&RunTool> {
     tools.iter().filter(|t| !(row_holds && holds(t))).collect()
 }
 
-// Where a tool's row goes: a read-only call that landed well is a step of
-// the group, and anything else a line of its own that ends the group.
+// Where a tool's row goes: a call that landed well and is not a write is a
+// step of the group; anything else is a line of its own that ends it.
 pub(super) fn push_tool_row(
     scrollback: &mut Vec<Row>,
     folds: &mut Folds,
@@ -100,7 +97,7 @@ pub(super) fn push_tool_row(
     result: &ToolResult,
 ) {
     let asked = folds.take_asked(&result.call);
-    if let Some(name) = row.tool_name().filter(|&n| !is_modifying_tool(n))
+    if let Some(name) = row.tool_name().filter(|&n| !modifies(n))
         && row.ok() == Some(true)
     {
         let tool = row::FoldedTool::new(

@@ -1717,6 +1717,7 @@ version = "1.23.4"
 dependencies = [
  "agent",
  "anyhow",
+ "channel",
  "clap",
  "llm",
  "pi-core",
@@ -1755,7 +1756,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "unicode-width",
- "wechat",
 ]
 
 [[package]]
@@ -3251,7 +3251,6 @@ dependencies = [
  "tokio-util",
  "toml",
  "tool",
- "toolbox",
  "tracing",
  "tui-markdown",
  "unicode-width",

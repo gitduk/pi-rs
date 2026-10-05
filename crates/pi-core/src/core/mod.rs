@@ -11,10 +11,11 @@ pub mod meter;
 pub mod resolve;
 pub mod settings;
 pub mod status;
+pub mod tools;
 pub mod worktree;
 
 use crate::core::lane::Lane;
-use crate::input::commands::{Command, help};
+use crate::input::commands::{Command, channel_command, help, with_channels};
 use crate::input::{Builtin, ChannelCmd, Drive, Intent, Step, lines, step_for};
 use crate::store::config;
 use crate::store::listing::Listing;
@@ -38,12 +39,14 @@ pub struct Core {
     pub config: std::sync::Arc<config::Config>,
     /// The command line's say over the config, re-applied over every reload.
     pub pinned: crate::args::Pinned,
-    /// What a slash answers to, built-ins and skills together. Rebuilt by
+    /// What a slash answers to: built-ins, channels and skills. Rebuilt by
     /// `/reload`, since a skill can appear between one turn and the next.
     ///
     /// Shared rather than copied: the terminal holds the same table and
     /// re-reads it whenever this is replaced.
     pub commands: std::sync::Arc<Vec<Command>>,
+    /// The commands of the run's channels, in every table put in force.
+    pub channels: Vec<Command>,
     /// The config files as last read: what `/settings` writes into and
     /// `/reload` reads again.
     pub settings: Settings,
@@ -59,7 +62,16 @@ impl Core {
     // and a rebound key belong to one tree, not another.
     fn in_force(&mut self) {
         self.keys = self.lane().resolved().keys.clone();
-        self.commands = self.lane().resolved().commands.clone();
+        self.commands = with_channels(&self.lane().resolved().commands, &self.channels);
+    }
+
+    /// Give each of `channels` its `/<name>` command.
+    pub fn add_channels(&mut self, channels: &[std::sync::Arc<dyn ::channel::Channel>]) {
+        self.channels = channels
+            .iter()
+            .map(|c| channel_command(c.as_ref()))
+            .collect();
+        self.in_force();
     }
 
     /// The checkout in front. Indexing is safe by construction: `lanes` is
@@ -311,7 +323,7 @@ mod tests {
             Intent::Builtin(Builtin::Reload),
             Intent::Builtin(Builtin::Model(String::new())),
             Intent::Builtin(Builtin::Worktree("tree".into())),
-            Intent::Builtin(Builtin::Channel("wechat", "on".into())),
+            Intent::Builtin(Builtin::Channel("wechat".into(), "on".into())),
         ] {
             assert!(
                 matches!(intent.fate(), Fate::Now),
@@ -475,6 +487,7 @@ mod tests {
             config: std::sync::Arc::new(crate::store::config::Config::default()),
             pinned: crate::args::Pinned::default(),
             commands,
+            channels: Vec::new(),
             settings: crate::store::settings::Settings::new(
                 toml::Value::Table(Default::default()),
                 None,
