@@ -70,6 +70,8 @@ struct Peek {
 #[derive(Deserialize)]
 struct PeekEntry {
     #[serde(default)]
+    id: u64,
+    #[serde(default)]
     at: u64,
     /// The ask, when this entry is one — what names the session.
     #[serde(default)]
@@ -155,6 +157,20 @@ const UNREACHED_KEEP: std::time::Duration = std::time::Duration::from_secs(30 * 
 #[derive(Deserialize)]
 struct Belongs {
     workspace: String,
+}
+
+/// One saved session, as far as it has got.
+#[derive(Debug)]
+pub struct Progress {
+    pub id: String,
+    /// The id of its last entry.
+    pub last: u64,
+    /// When it began.
+    pub created: u64,
+    /// When it was last worked on.
+    pub touched: u64,
+    /// Its transcript, for `Store::read`.
+    pub path: PathBuf,
 }
 
 /// Where transcripts live. Held as a value rather than read from the
@@ -380,6 +396,33 @@ impl Store {
             created,
             session,
         )
+    }
+
+    /// How far every saved session has got, across all workspaces, read
+    /// without building a single transcript.
+    pub fn progress(&self) -> Vec<Progress> {
+        self.buckets()
+            .into_iter()
+            .flat_map(|(_, t)| t)
+            .filter_map(|path| {
+                let body = std::fs::read_to_string(&path).ok()?;
+                let peek: Peek = serde_json::from_str(&body).ok()?;
+                Some(Progress {
+                    last: peek.entries.last()?.id,
+                    touched: peek.touched(),
+                    created: peek.created,
+                    id: peek.id,
+                    path,
+                })
+            })
+            .collect()
+    }
+
+    /// Read the transcript at `path`, as `progress` names it.
+    pub fn read(path: &Path) -> Result<Stored> {
+        let body = std::fs::read_to_string(path)
+            .with_context(|| format!("cannot read {}", path.display()))?;
+        Ok(serde_json::from_str(&body)?)
     }
 
     /// Load a transcript by id: `id` is unique across workspaces, so this

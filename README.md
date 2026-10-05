@@ -104,6 +104,12 @@ When the transcript outgrows the window, pi drops repeated and old tool
 results first and summarizes whole rounds last. The saved session keeps
 everything; only the model's view shrinks.
 
+pi remembers without being asked. When pi exits, a process it leaves behind
+reads what sessions said since it last looked and updates `~/.pi/memory/`,
+with `summarize_model` when one is set; the next start carries the result. The
+files are plain markdown, named by `/status`; edit or delete them freely.
+Memory starts with the first session to end and never reads tool output.
+
 ## Files
 
 `PI_HOME` moves `~/.pi`.
@@ -113,6 +119,7 @@ everything; only the model's view shrinks.
 | `~/.pi/settings.toml`                    | endpoint, models, `[keys]`, `[theme]`      |
 | `~/.pi/AGENTS.md`, `AGENTS.md`           | standing instructions: yours, a project's  |
 | `~/.pi/skills/`                          | skills: a directory with a `SKILL.md`      |
+| `~/.pi/memory/*.md`, `projects/*.md`     | memory: global, and one file per project   |
 | `~/.pi/tools/*.rs`                       | script tools                               |
 | `~/.pi/bar.rs`                           | a cargo script that lays out the bar       |
 | `~/.pi/sessions/<project>/<session>/`    | the transcript and `journal.jsonl`         |

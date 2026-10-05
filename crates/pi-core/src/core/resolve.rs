@@ -42,6 +42,8 @@ pub struct Resolved {
     /// would. Shown under the banner rather than said as a note: it is what
     /// this run is standing on, not news.
     pub context: Vec<String>,
+    /// The memory files folded into the prompt, by the name an edit uses.
+    pub memory: Vec<String>,
     /// Where requests go and which source said so, for the banner and
     /// `/status`: two files can each name one now.
     pub endpoint: Option<String>,
@@ -142,6 +144,7 @@ pub fn resolve(
     // Appended rather than sent as a message: standing instructions don't
     // change within a run, and the system prompt is what a provider caches.
     let mut context = Vec::new();
+    let mut memory = Vec::new();
     if !pinned.no_context_files {
         let loaded = context::load(root, pi_store::dir().as_deref());
         context = loaded
@@ -150,6 +153,10 @@ pub fn resolve(
             .map(|p| context::short(p, root))
             .collect();
         standing.push_str(&loaded.text);
+        // Last: what was learned is read in light of what the user wrote down.
+        let (block, files) = crate::core::memory::block(&pi_store::memory::Memory::default(), root);
+        standing.push_str(&block);
+        memory = files;
     }
     system.push_str(&standing);
 
@@ -169,6 +176,7 @@ pub fn resolve(
         commands: std::sync::Arc::new(commands),
         notes,
         context,
+        memory,
         endpoint: endpoint(pinned, config, settings, root),
     })
 }

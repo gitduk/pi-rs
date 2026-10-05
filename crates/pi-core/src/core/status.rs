@@ -81,6 +81,9 @@ impl Core {
                 resolved.context.join(", "),
             ]));
         }
+        if !resolved.memory.is_empty() {
+            rows.push(Row::new(["memory".into(), resolved.memory.join(", ")]));
+        }
 
         rows.push(Row::new([
             "session".into(),

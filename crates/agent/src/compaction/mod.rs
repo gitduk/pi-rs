@@ -5,6 +5,9 @@ pub mod ladder;
 mod oneshot;
 mod summary;
 
+pub use oneshot::ask;
+pub use summary::render;
+
 use std::sync::Arc;
 use std::time::Duration;
 

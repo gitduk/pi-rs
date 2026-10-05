@@ -71,13 +71,18 @@ pub struct Args {
     #[arg(long)]
     pub no_skills: bool,
 
-    /// Ignore ~/.pi/AGENTS.md and the project's.
+    /// Ignore ~/.pi/AGENTS.md, the project's, and memory.
     #[arg(long)]
     pub no_context_files: bool,
 
     /// Answer only; no progress, no usage line.
     #[arg(short, long)]
     pub quiet: bool,
+
+    /// Distill memory and exit: what pi starts behind itself as it leaves,
+    /// naming the session that just ended.
+    #[arg(long, hide = true, value_name = "ID")]
+    pub distill: Option<String>,
 }
 
 /// The flags that outrank the config for the whole run, and so are applied

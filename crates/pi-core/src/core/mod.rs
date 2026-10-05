@@ -8,6 +8,7 @@ pub mod bar;
 pub mod bash;
 pub mod dial;
 pub mod lane;
+pub mod memory;
 pub mod meter;
 pub mod resolve;
 pub mod settings;

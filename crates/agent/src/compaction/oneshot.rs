@@ -1,7 +1,7 @@
 //! One turn, no tools, no reasoning.
 //!
-//! Shared by both compaction judgements, so `effort` and `tool_choice`
-//! cannot drift between them.
+//! Shared by both compaction judgements and by memory, so `effort` and
+//! `tool_choice` cannot drift between them.
 
 use futures::StreamExt;
 use llm::message::Message;
@@ -10,7 +10,8 @@ use llm::request::{Effort, Request, ToolChoice};
 use llm::stream::{Accumulator, Usage};
 use llm::transport::Transport;
 
-pub(crate) async fn ask(
+/// Ask `transport` one question under `system` and read back the text.
+pub async fn ask(
     transport: &dyn Transport,
     spec: &ModelSpec,
     system: &str,

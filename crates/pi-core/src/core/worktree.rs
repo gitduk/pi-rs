@@ -196,6 +196,30 @@ pub fn holding<'a>(trees: &'a [Tree], path: &Path) -> Option<&'a Tree> {
         .max_by_key(|t| t.path.as_os_str().len())
 }
 
+/// The main checkout of the repository holding `dir`, or `dir` outside one.
+/// Read off `.git` rather than asked of git: it runs on every resolve.
+pub fn main_root(dir: &Path) -> PathBuf {
+    for here in dir.ancestors() {
+        let git = here.join(".git");
+        if git.is_dir() {
+            return here.to_path_buf();
+        }
+        // A worktree's `.git` is a file naming `<main>/.git/worktrees/<name>`.
+        if let Ok(link) = std::fs::read_to_string(&git) {
+            let named = link.trim().strip_prefix("gitdir: ").map(|p| here.join(p));
+            let main = named.as_deref().and_then(|p| {
+                let worktrees = p.parent()?;
+                let dot_git = worktrees.parent()?;
+                (worktrees.ends_with("worktrees") && dot_git.ends_with(".git"))
+                    .then(|| dot_git.parent())
+                    .flatten()
+            });
+            return main.map_or_else(|| here.to_path_buf(), Path::to_path_buf);
+        }
+    }
+    dir.to_path_buf()
+}
+
 /// The worktree `dir` sits in, or None in the repository's own checkout and
 /// None outside a repository, where there is nothing to name.
 pub fn current(dir: &Path) -> Option<String> {
@@ -490,6 +514,19 @@ mod tests {
         assert!(!tree.main);
         assert!(tree.path.join("a.txt").is_file());
         assert_eq!(tree.path, home(dir.path()).unwrap().join("feature-one"));
+    }
+
+    // Memory is keyed by this: a worktree answering for itself would get a
+    // memory of its own, and nobody would notice the split.
+    #[test]
+    fn a_worktree_and_a_subdirectory_answer_with_the_main_checkout() {
+        let dir = repo();
+        let tree = enter(dir.path(), "feature-one").unwrap();
+        std::fs::create_dir(tree.path.join("sub")).unwrap();
+        assert_eq!(main_root(&tree.path.join("sub")), dir.path());
+        assert_eq!(main_root(dir.path()), dir.path());
+        let outside = tempfile::tempdir().unwrap();
+        assert_eq!(main_root(outside.path()), outside.path());
     }
 
     #[test]

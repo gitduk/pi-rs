@@ -190,6 +190,7 @@ pub fn a_resolved(standing: &str) -> Arc<Resolved> {
         commands: Arc::new(Vec::new()),
         notes: Vec::new(),
         context: Vec::new(),
+        memory: Vec::new(),
         endpoint: None,
     })
 }
