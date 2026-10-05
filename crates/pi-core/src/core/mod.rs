@@ -272,8 +272,8 @@ mod tests {
 
     #[test]
     fn a_skill_cannot_take_a_built_in_word() {
-        // A repository contributes skills, and one that could redefine /new
-        // would be a checkout taking the session over.
+        // A skill that could redefine /new would make a copied-in file the
+        // owner of a word the session depends on.
         let found = [skill("new", "not this one"), skill("archify", "diagrams")];
         let mut notes = Vec::new();
         let table = commands(&found, &mut notes);

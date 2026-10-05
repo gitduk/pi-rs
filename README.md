@@ -112,7 +112,7 @@ everything; only the model's view shrinks.
 | ---------------------------------------- | ------------------------------------------ |
 | `~/.pi/settings.toml`                    | endpoint, models, `[keys]`, `[theme]`      |
 | `~/.pi/AGENTS.md`, `AGENTS.md`           | standing instructions: yours, a project's  |
-| `~/.agents/skills/`, `.agents/skills/`   | skills: a directory with a `SKILL.md`      |
+| `~/.pi/skills/`                          | skills: a directory with a `SKILL.md`      |
 | `~/.pi/tools/*.rs`                       | script tools                               |
 | `~/.pi/bar.rs`                           | a cargo script that lays out the bar       |
 | `~/.pi/sessions/<project>/<session>/`    | the transcript and `journal.jsonl`         |

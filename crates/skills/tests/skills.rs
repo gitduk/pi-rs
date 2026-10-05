@@ -1,5 +1,5 @@
 use serde_json::json;
-use skills::{Load, discover_from};
+use skills::{Load, discover};
 use tool::{Ctx, Tool, ToolError, Workspace};
 
 // A workspace of its own, so the gate under test is this call's and not
@@ -27,7 +27,7 @@ async fn a_file_argument_cannot_leave_the_skill_directory() {
     let neighbour = dir.path().join("skills/commit");
     std::fs::create_dir_all(&neighbour).unwrap();
     std::fs::write(neighbour.join("SKILL.md"), "# Commit\n").unwrap();
-    let found = discover_from(&[dir.path().join("skills")]);
+    let found = discover(&dir.path().join("skills"));
 
     let (_w, c) = ctx();
     let r = Load::new(found.skills)

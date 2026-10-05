@@ -67,37 +67,6 @@ pub fn body(text: &str) -> &str {
     }
 }
 
-fn home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
-}
-
-// `.agents/skills` in every ancestor up to the repo root — a monorepo keeps
-// shared skills at the top. Never reaches `$HOME`; that one is added separately.
-fn ancestral_agents(workspace: &Path) -> Vec<PathBuf> {
-    let home = home();
-    let mut out = Vec::new();
-    for dir in workspace.ancestors() {
-        if home.as_deref() == Some(dir) {
-            break;
-        }
-        out.push(dir.join(".agents/skills"));
-        if dir.join(".git").exists() {
-            break;
-        }
-    }
-    out
-}
-
-/// Where skills come from, nearest first.
-///
-/// Always `.agents/skills` — the shared, vendor-neutral name. A directory
-/// under another name can still join the list by symlinking into this one.
-pub fn sources(workspace: &Path) -> Vec<PathBuf> {
-    let mut out = ancestral_agents(workspace);
-    out.extend(home().map(|h| h.join(".agents/skills")));
-    out
-}
-
 // What a skill directory turned out to be.
 enum Read {
     Skill(Box<Skill>),
@@ -170,25 +139,14 @@ pub struct Found {
     pub problems: Vec<String>,
 }
 
-/// Every skill reachable from `workspace`, sorted by name.
-pub fn discover(workspace: &Path) -> Found {
-    discover_from(&sources(workspace))
-}
-
-// How far below a source directory a skill may sit — collections group by
+// How far below the skills directory a skill may sit — collections group by
 // category, so a bound also keeps a stray symlink from a full filesystem walk.
 const MAX_DEPTH: usize = 3;
 
-/// The same, over explicit directories. Taking them as an argument keeps the
-/// environment out of the call, which is what lets tests run in parallel.
-///
-/// A nearer source wins a name collision, so a project can shadow a personal
-/// skill.
-pub fn discover_from(sources: &[PathBuf]) -> Found {
+/// Every skill under `dir`, sorted by name.
+pub fn discover(dir: &Path) -> Found {
     let mut found = Found::default();
-    for source in sources {
-        walk(source, MAX_DEPTH, &mut found);
-    }
+    walk(dir, MAX_DEPTH, &mut found);
     found.skills.sort_by(|a, b| a.name.cmp(&b.name));
     found
 }
@@ -222,10 +180,11 @@ fn walk(dir: &Path, depth: usize, found: &mut Found) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
+    // `Path::is_dir` follows links, so a skill kept elsewhere joins by symlink.
     let mut kids: Vec<PathBuf> = entries
         .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .map(|e| e.path())
+        .filter(|p| p.is_dir())
         .collect();
     // Stable order, so a collision resolves the same way on every machine.
     kids.sort();
@@ -238,8 +197,8 @@ fn walk(dir: &Path, depth: usize, found: &mut Found) {
 mod tests {
     use super::*;
 
-    // Casing and hyphen style are left alone on purpose: a shared
-    // `.agents/skills` holds skills written to other tools' rules.
+    // Casing and hyphen style are left alone on purpose: skills are often
+    // copied in from other tools, written to their rules.
     #[test]
     fn a_name_that_could_leave_the_directory_is_refused() {
         assert!(!usable("../escape"));

@@ -75,7 +75,9 @@ pub fn resolve(
     let skills = if pinned.no_skills {
         Vec::new()
     } else {
-        let found = skills::discover(root);
+        let found = crate::store::dir()
+            .map(|pi| skills::discover(&pi.join("skills")))
+            .unwrap_or_default();
         // A skill that silently fails to appear is one the user goes looking
         // for in the wrong place.
         notes.extend(
