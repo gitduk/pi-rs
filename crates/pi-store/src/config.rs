@@ -79,10 +79,10 @@ pub struct Config {
     pub keys: BTreeMap<String, Binds>,
     /// The SGR codes behind every colour the terminal uses.
     #[serde(default)]
-    pub theme: crate::store::theme::Theme,
+    pub theme: crate::theme::Theme,
     /// Which parts the status line under the answer shows, running or done.
     #[serde(default)]
-    pub status: crate::store::status::Parts,
+    pub status: crate::status::Parts,
     /// Vim keys: on unless a file turns them off.
     #[serde(default)]
     pub vim: Vim,
@@ -198,13 +198,13 @@ impl Binds {
 
 impl Config {
     /// The key table this config asks for, defaults included.
-    pub fn key_map(&self) -> Result<crate::store::keys::Keys> {
+    pub fn key_map(&self) -> Result<crate::keys::Keys> {
         let overrides = self
             .keys
             .iter()
             .map(|(id, b)| (id.clone(), b.clone().into_vec()))
             .collect();
-        crate::store::keys::Keys::resolve(&overrides)
+        crate::keys::Keys::resolve(&overrides)
     }
 
     /// The retry schedule, with the defaults the file may leave out. Read where
@@ -707,7 +707,7 @@ mod tests {
     // a renamed or removed key from rotting in it.
     #[test]
     fn the_shipped_example_is_a_valid_config() {
-        let example = include_str!("../../../../examples/pi.toml");
+        let example = include_str!("../../../examples/pi.toml");
         let config = Config::from_tree(toml::from_str(example).unwrap());
         assert!(config.is_ok(), "{:?}", config.err());
     }

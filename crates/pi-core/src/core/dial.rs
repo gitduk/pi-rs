@@ -8,7 +8,7 @@ use llm::model::{Format, ModelSpec};
 use llm::transport::{Transport, anthropic::Anthropic, chat::ChatCompletions, openai::OpenAi};
 
 use crate::args::Pinned;
-use crate::store::config;
+use pi_store::config;
 
 // Falls back from config `api_key` to `OPENAI_API_KEY` (both OpenAI-family
 // wires) or `ANTHROPIC_API_KEY`; a key is never required.

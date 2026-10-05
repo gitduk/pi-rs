@@ -117,7 +117,7 @@ fn clip(s: &str, cap: usize) -> Value {
 
 // RFC 3339, UTC, milliseconds. Hand-rolled: a calendar is thirty lines and a
 // date crate is a dependency the rest of the binary has no use for.
-pub(crate) fn rfc3339(t: SystemTime) -> String {
+pub fn rfc3339(t: SystemTime) -> String {
     let d = t.duration_since(UNIX_EPOCH).unwrap_or_default();
     let secs = d.as_secs() as i64;
     let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
@@ -580,18 +580,19 @@ pub fn install(path: &Path, level: LogLevel) {
 /// session, all settled before the journal opened and stated rather than observed.
 pub fn opening(
     id: &str,
-    args: &crate::args::Args,
-    config: &crate::store::config::Config,
+    // The `--config` the run was given, if any.
+    config_path: Option<&str>,
+    config: &crate::config::Config,
     project: Option<&Path>,
     root: &Path,
-    prior: Option<&crate::store::session::Stored>,
+    prior: Option<&crate::session::Stored>,
 ) {
     tracing::info!(
         target: "pi::session",
         version = env!("CARGO_PKG_VERSION"),
         argv = %std::env::args().skip(1).collect::<Vec<_>>().join(" "),
         workspace = %root.display(),
-        config = args.config.as_deref().unwrap_or("~/.pi/settings.toml"),
+        config = config_path.unwrap_or("~/.pi/settings.toml"),
         models = config.names().len(),
         rebound_keys = config.keys.len(),
         model = config.model.as_deref().unwrap_or("-"),
@@ -606,8 +607,8 @@ pub fn opening(
         // Written out rather than debug-printed: the point is to compare it
         // against what the user meant to write, not against the enum.
         let keys = match binds {
-            crate::store::config::Binds::One(k) => k.clone(),
-            crate::store::config::Binds::Many(k) => k.join(", "),
+            crate::config::Binds::One(k) => k.clone(),
+            crate::config::Binds::Many(k) => k.join(", "),
         };
         tracing::debug!(target: "pi::keys", action, keys, "rebound");
     }
@@ -691,7 +692,7 @@ mod tests {
         let Value::String(s) = clip(&long, 33) else {
             panic!("a string clips to a string")
         };
-        assert!(s.contains(&format!("{}+", crate::store::icons::ELLIPSIS)));
+        assert!(s.contains(&format!("{}+", crate::icons::ELLIPSIS)));
         // Would have panicked on construction if the cut split the é.
         assert!(s.starts_with("élan"));
         assert_eq!(clip("short", 33), Value::String("short".into()));
@@ -843,7 +844,7 @@ mod tests {
             at_info[0]["patch"]
                 .as_str()
                 .unwrap()
-                .contains(&format!("{}+", crate::store::icons::ELLIPSIS))
+                .contains(&format!("{}+", crate::icons::ELLIPSIS))
         );
         assert_eq!(at_debug[0]["patch"].as_str().unwrap().len(), 4_000);
     }

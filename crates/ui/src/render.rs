@@ -1,8 +1,8 @@
 //! Drawing: what a painted span is, how a theme's style becomes one, and the
 //! renderer that writes a one-shot run's rows.
 //!
-//! What a config names is below this (`store/theme.rs`), and so is what a
-//! string occupies (`text.rs`); what is here puts the two on a screen.
+//! What a config names is below this (`pi_store::theme`), and so is what a
+//! string occupies (`pi_store::text`); what is here puts the two on a screen.
 
 use std::fmt::Write as _;
 use std::io::{IsTerminal, Write};
@@ -14,9 +14,9 @@ use llm::model::Pricing;
 use ratatui::text::{Line, Span};
 
 use crate::sgr::{band_to_ratatui, style_to_ratatui};
-use pi_core::store::icons;
-use pi_core::store::theme::{Attr, Color, Style, Theme, push_sep};
-use pi_core::text::{RESET, clip};
+use pi_store::icons;
+use pi_store::text::{RESET, clip};
+use pi_store::theme::{Attr, Color, Style, Theme, push_sep};
 
 /// Whether the surface being written to can carry colour, and the theme behind
 /// the codes it uses.
@@ -492,7 +492,7 @@ pub struct Renderer {
     quiet: bool,
     // The segments this renderer ends a run with. A one-shot run times nothing
     // and queues nothing, so `elapsed` and `queued` have nothing to say here.
-    status: Vec<pi_core::store::status::Segment>,
+    status: Vec<pi_store::status::Segment>,
     // Read off the same events the terminal reads, so a one-shot run ends on
     // the line the terminal would have shown it.
     tally: pi_core::core::meter::Tally,
@@ -511,7 +511,7 @@ impl Renderer {
     pub fn new(
         quiet: bool,
         theme: Arc<Theme>,
-        status: Vec<pi_core::store::status::Segment>,
+        status: Vec<pi_store::status::Segment>,
         model: String,
         pricing: Pricing,
         worktree: Option<String>,
@@ -702,7 +702,7 @@ mod tests {
         let mut r = super::Renderer::new(
             false,
             std::sync::Arc::new(super::Theme::default()),
-            pi_core::store::status::default_parts(),
+            pi_store::status::default_parts(),
             String::new(),
             llm::model::Pricing::default(),
             None,

@@ -8,11 +8,12 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use llm::request::Effort;
 
-use crate::args::{EffortArg, Pinned};
+use crate::args::Pinned;
 use crate::input::commands::{Command, commands};
-use crate::store::settings::Settings;
-use crate::store::{config, journal};
 use agent::context;
+use pi_store::args::EffortArg;
+use pi_store::settings::Settings;
+use pi_store::{config, journal};
 
 /// Everything the config and the workspace decide, as opposed to what the
 /// command line fixed for the whole run. `/reload` recomputes exactly this.
@@ -30,7 +31,7 @@ pub struct Resolved {
     /// subagent, offered after this set is cut, belongs in it.
     pub ceiling: tool::Tier,
     /// The key table this tree asked for, defaults included.
-    pub keys: std::sync::Arc<crate::store::keys::Keys>,
+    pub keys: std::sync::Arc<pi_store::keys::Keys>,
     /// The built-ins plus one command per skill. Here rather than in the Core
     /// because a skill discovered at reload has to reach the prompt the same
     /// way everything else the config decides does.
@@ -75,7 +76,7 @@ pub fn resolve(
     let skills = if pinned.no_skills {
         Vec::new()
     } else {
-        let found = crate::store::dir()
+        let found = pi_store::dir()
             .map(|pi| skills::discover(&pi.join("skills")))
             .unwrap_or_default();
         // A skill that silently fails to appear is one the user goes looking
@@ -103,7 +104,7 @@ pub fn resolve(
         offer(&mut registry, &mut notes, "judge", Arc::new(judge));
     }
 
-    let (scripts, skipped) = crate::store::dir()
+    let (scripts, skipped) = pi_store::dir()
         .map(|root| toolbox::scripts::discover_in(&root.join("tools")))
         .unwrap_or_default();
     notes.extend(skipped.iter().map(|p| format!("tool skipped — {p}")));
@@ -142,7 +143,7 @@ pub fn resolve(
     // change within a run, and the system prompt is what a provider caches.
     let mut context = Vec::new();
     if !pinned.no_context_files {
-        let loaded = context::load(root, crate::store::dir().as_deref());
+        let loaded = context::load(root, pi_store::dir().as_deref());
         context = loaded
             .files
             .iter()

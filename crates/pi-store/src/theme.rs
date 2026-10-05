@@ -11,7 +11,7 @@ use anyhow::{Result, bail};
 use serde::de::{Error as _, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::store::icons;
+use crate::icons;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// One text attribute: bold, dim, italic — whatever SGR can set besides colour.

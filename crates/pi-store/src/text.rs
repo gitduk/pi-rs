@@ -6,7 +6,7 @@
 
 use llm::figures::{in_out, short};
 
-use crate::store::icons;
+use crate::icons;
 
 pub const RESET: &str = "\x1b[0m";
 

@@ -2,9 +2,9 @@
 
 use unicode_width::UnicodeWidthStr;
 
-use pi_core::store::icons;
-use pi_core::store::listing::Listing;
-use pi_core::text;
+use pi_store::icons;
+use pi_store::listing::Listing;
+use pi_store::text;
 
 /// Rows as text, each multi-cell row's first cell padded to the widest such
 /// cell — done here, since only drawing knows the width to fit.
@@ -43,7 +43,7 @@ pub fn lines(listing: &Listing) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use pi_core::store::keys::{Keys, parse};
+    use pi_store::keys::{Keys, parse};
 
     use super::*;
 

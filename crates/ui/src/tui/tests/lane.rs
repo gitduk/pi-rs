@@ -4,9 +4,9 @@ use agent::Event;
 use pi_core::core::lane::Lane;
 use pi_core::input::commands::Choice;
 use pi_core::input::{Builtin, Drive};
-use pi_core::store::keys::Mode;
-use pi_core::store::listing::Listing;
-use pi_core::store::status::Segment;
+use pi_store::keys::Mode;
+use pi_store::listing::Listing;
+use pi_store::status::Segment;
 
 use super::harness::*;
 
@@ -743,7 +743,7 @@ async fn an_edited_project_file_reaches_the_surface_and_names_what_outranks_it()
     let user = dir.path().join("settings.toml");
     std::fs::write(&user, "").expect("an empty settings file");
     tui.core.pinned.config = Some(user.display().to_string());
-    tui.core.pinned.effort = Some(pi_core::args::EffortArg::High);
+    tui.core.pinned.effort = Some(pi_store::args::EffortArg::High);
 
     std::fs::write(
         dir.path().join(".pi.toml"),

@@ -9,7 +9,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 
 use super::view::View;
 use super::{Asked, Deed, Ui, screen};
-use pi_core::store::keys;
+use pi_store::keys;
 
 impl Ui {
     /// Take the conversation view up, on the newest rows.

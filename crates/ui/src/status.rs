@@ -1,5 +1,5 @@
 //! Draws the status line from parts; which parts show is the config's, in
-//! `store/status.rs`. Repainted while a turn runs, its last frame kept in
+//! `pi_store::status`. Repainted while a turn runs, its last frame kept in
 //! scrollback once it ends.
 //!
 //! Shows only the run in flight, not the whole session's total.
@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use pi_core::core::meter::Snapshot;
-use pi_core::store::status::Segment;
+use pi_store::status::Segment;
 
 pub const SPIN: Duration = Duration::from_millis(90);
 
@@ -53,5 +53,5 @@ pub fn parts(segments: &[Segment], s: &Snapshot) -> Vec<String> {
 
 /// Those parts as one line.
 pub fn line(segments: &[Segment], s: &Snapshot) -> String {
-    parts(segments, s).join(pi_core::store::icons::PART_SEP)
+    parts(segments, s).join(pi_store::icons::PART_SEP)
 }

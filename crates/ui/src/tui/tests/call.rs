@@ -5,7 +5,7 @@ use crate::tui::row::Row;
 use crate::tui::screen::plain;
 use crate::tui::scrollback::{Folds, scrollback_from};
 use pi_core::core::lane::Lane;
-use pi_core::store::icons;
+use pi_store::icons;
 
 use super::harness::*;
 

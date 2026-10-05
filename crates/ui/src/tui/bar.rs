@@ -10,11 +10,11 @@ use serde::Serialize;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use super::{FLASH, Mark, Ui, screen};
-use pi_core::args::TierArg;
 use pi_core::core::lane::Lane;
 use pi_core::core::meter::Snapshot;
-use pi_core::store::bar::{self, Item, Layout, Look, Part, Tone};
-use pi_core::store::icons;
+use pi_store::args::TierArg;
+use pi_store::bar::{self, Item, Layout, Look, Part, Tone};
+use pi_store::icons;
 
 const MUTED: Look = Look::Tone(Tone::Muted);
 // Room between the two sides of a row.
@@ -200,7 +200,7 @@ impl Ui {
         })
     }
 
-    fn tone<'a>(&'a self, look: &'a Look) -> &'a pi_core::store::theme::Style {
+    fn tone<'a>(&'a self, look: &'a Look) -> &'a pi_store::theme::Style {
         let theme = &self.paint.theme;
         let tone = match look {
             Look::Style(style) => return style,
@@ -290,7 +290,7 @@ pub(super) struct BarScript {
 impl BarScript {
     /// `bar.rs` in the pi root, if one is there.
     pub(super) fn find() -> Self {
-        let path = pi_core::store::dir()
+        let path = pi_store::dir()
             .map(|d| d.join("bar.rs"))
             .filter(|p| p.is_file());
         Self::at(path)

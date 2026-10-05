@@ -1,14 +1,14 @@
 //! What `/reload`, `/settings` and `/model` do to the Core.
 //!
-//! The value itself is `store/settings.rs`; this is what the Core does to it.
+//! The value itself is `pi_store::settings`; this is what the Core does to it.
 
 use super::Core;
 use super::meter::summary;
 use super::status::{carries_reasoning, demotion};
 use crate::input::commands::Choice;
 use crate::input::refused;
-use crate::store::config::{self, Config};
-use crate::store::icons;
+use pi_store::config::{self, Config};
+use pi_store::icons;
 
 impl Core {
     /// Re-read the config and everything it decides, whole or not at all:

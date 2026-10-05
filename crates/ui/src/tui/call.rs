@@ -10,7 +10,7 @@ use super::row::{self, PendingTool, Row};
 use super::scrollback::Folds;
 use crate::render::{Paint, named};
 use pi_core::core::tools::modifies;
-use pi_core::store::icons;
+use pi_store::icons;
 
 // A tool call still running. Its line is drawn by the group it will fold
 // into when there is one, and by the live block when there is not.

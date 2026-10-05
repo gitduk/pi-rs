@@ -7,7 +7,7 @@ fn facts(model: &str) -> crate::tui::bar::Facts {
     crate::tui::bar::Facts {
         model: model.into(),
         effort: llm::request::Effort::Off,
-        tier: pi_core::args::TierArg::Exec,
+        tier: pi_store::args::TierArg::Exec,
         running: false,
         root: std::path::PathBuf::new(),
         worktree: None,

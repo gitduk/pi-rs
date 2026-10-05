@@ -1,13 +1,14 @@
 //! The disk, and the names the config speaks.
 //!
-//! Two things live here: the files a run reads/writes (`session.rs`,
-//! `archive.rs`, `journal.rs`, `config.rs`, `settings.rs`) and the config
-//! vocabulary (`theme.rs`, `keys/`, `status.rs`, `icons.rs`) — the latter is
-//! here, not in `ui/`, because it's what a setting is *called*, not drawn.
+//! Two things live here: the files a run reads/writes (`session`, `archive`,
+//! `journal`, `config`, `settings`, `bar`) and the config vocabulary (`theme`,
+//! `keys`, `status`, `icons`, `args`, `text`, `listing`) — the latter is here,
+//! not in `ui`, because it's what a setting is *called*, not drawn.
 
 use std::path::PathBuf;
 
 pub mod archive;
+pub mod args;
 pub mod bar;
 pub mod config;
 pub mod icons;
@@ -17,6 +18,7 @@ pub mod listing;
 pub mod session;
 pub mod settings;
 pub mod status;
+pub mod text;
 pub mod theme;
 
 /// The pi root: `$PI_HOME` when set, else `~/.pi`.

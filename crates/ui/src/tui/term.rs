@@ -2,7 +2,7 @@
 //! holding it while a child owns the screen, and the file an external editor
 //! works in.
 use crossterm::event::Event as TermEvent;
-use pi_core::store::session::Store;
+use pi_store::session::Store;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -174,7 +174,7 @@ pub(super) fn history_of(store: &Store, workspace: &std::path::Path) -> Vec<Stri
 }
 
 pub(super) fn drop_shared_history() {
-    if let Some(old) = pi_core::store::dir().map(|d| d.join("history")) {
+    if let Some(old) = pi_store::dir().map(|d| d.join("history")) {
         let _ = std::fs::remove_file(&old);
         let _ = std::fs::remove_dir_all(&old);
     }

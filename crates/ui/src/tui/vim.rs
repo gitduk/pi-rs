@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use super::view::View;
 use super::{DOUBLE_TAP, Ui, screen};
-use pi_core::store::keys::{Action, Mode};
+use pi_store::keys::{Action, Mode};
 
 impl Ui {
     // Back to Insert; drop any half-typed escape char, it belonged to that mode.
@@ -54,7 +54,7 @@ impl Ui {
 
     // Turning modal keys off drops the state (not parks it), so coming back
     // never resumes Normal without an intervening keystroke.
-    pub(super) fn set_vim(&mut self, cfg: &pi_core::store::config::Vim) {
+    pub(super) fn set_vim(&mut self, cfg: &pi_store::config::Vim) {
         match (&mut self.vim, cfg.enabled) {
             (slot @ None, true) => *slot = Some(Vim::new(cfg)),
             (slot, false) => *slot = None,
@@ -100,7 +100,7 @@ pub(super) struct Vim {
 }
 
 impl Vim {
-    pub(super) fn new(cfg: &pi_core::store::config::Vim) -> Self {
+    pub(super) fn new(cfg: &pi_store::config::Vim) -> Self {
         let mut vim = Self {
             mode: Mode::Insert,
             escape: None,
@@ -113,7 +113,7 @@ impl Vim {
 
     // Resolves the escape sequence from config once, not per keystroke.
     // Anything but exactly two chars leaves Normal deliberately unreachable.
-    pub(super) fn configure(&mut self, cfg: &pi_core::store::config::Vim) {
+    pub(super) fn configure(&mut self, cfg: &pi_store::config::Vim) {
         self.escape = cfg.escape_pair();
         self.window = std::time::Duration::from_millis(cfg.escape_timeout_ms);
     }

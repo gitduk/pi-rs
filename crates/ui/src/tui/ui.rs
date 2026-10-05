@@ -23,11 +23,11 @@ use pi_core::core::Core;
 use pi_core::core::lane::Lane;
 use pi_core::core::resolve::Resolved;
 use pi_core::input::commands::{Choice, Command};
-use pi_core::store::icons;
-use pi_core::store::keys::Keys;
-use pi_core::store::status::{Segment, default_parts};
-use pi_core::store::theme::Style as ThemeStyle;
-use pi_core::store::theme::{Theme, bands_for};
+use pi_store::icons;
+use pi_store::keys::Keys;
+use pi_store::status::{Segment, default_parts};
+use pi_store::theme::Style as ThemeStyle;
+use pi_store::theme::{Theme, bands_for};
 
 pub(super) struct Ui {
     pub(super) screen: Screen,
@@ -89,7 +89,7 @@ pub(super) struct Ui {
     // where the layout puts it for `FLASH` and then goes — see `bar_lines`.
     pub(super) flash: Option<(String, Instant)>,
     // What the bar's rows hold: the script's last answer, or the default.
-    pub(super) layout: pi_core::store::bar::Layout,
+    pub(super) layout: pi_store::bar::Layout,
     // The scrollback row and line under the mouse, when a click there
     // opens or closes something.
     pub(super) hovered_scrollback: Option<(usize, usize)>,
@@ -422,7 +422,7 @@ impl Ui {
         &mut self,
         view: &mut View,
         resolved: &Resolved,
-        theme: Arc<pi_core::store::theme::Theme>,
+        theme: Arc<pi_store::theme::Theme>,
     ) {
         self.paint.theme = theme;
         self.bang_prompt = Self::paint_prompt(&self.paint, icons::BANG_SIGIL);
@@ -471,7 +471,7 @@ pub(super) fn following_terminal(theme: &Theme, bg: Option<(u8, u8, u8)>) -> The
         return theme;
     };
     let bands = bands_for(bg);
-    let default = pi_core::store::theme::Bands::default();
+    let default = pi_store::theme::Bands::default();
     if theme.prompt.panel.input == default.input {
         theme.prompt.panel.input = bands.input;
     }

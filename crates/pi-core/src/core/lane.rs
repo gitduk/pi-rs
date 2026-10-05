@@ -28,9 +28,9 @@ use crate::core::meter::{Snapshot, Tally};
 use crate::core::resolve::Resolved;
 use crate::input::commands::ago;
 use crate::input::{Rewound, refused};
-use crate::store::icons;
-use crate::store::journal;
-use crate::store::session::{self, Stored};
+use pi_store::icons;
+use pi_store::journal;
+use pi_store::session::{self, Stored};
 
 /// Where this lane's run stands.
 ///
@@ -186,7 +186,7 @@ pub fn a_resolved(standing: &str) -> Arc<Resolved> {
         }),
         standing: standing.into(),
         ceiling: tool::Tier::Exec,
-        keys: Arc::new(crate::store::keys::Keys::default()),
+        keys: Arc::new(pi_store::keys::Keys::default()),
         commands: Arc::new(Vec::new()),
         notes: Vec::new(),
         context: Vec::new(),
@@ -618,7 +618,7 @@ impl Core {
             .checkout
             .ctx
             .clone()
-            .with_session(&lane.talk.id, crate::store::spill_root());
+            .with_session(&lane.talk.id, pi_store::spill_root());
         let path = self
             .store
             .journal_path(self.lane().root(), &self.lane().talk.id);
@@ -726,7 +726,7 @@ impl Core {
                 format!(
                     "{} {}  {:>10}",
                     if *mark { icons::CURRENT_ITEM } else { " " },
-                    crate::text::pad(text, width),
+                    pi_store::text::pad(text, width),
                     ago(*created)
                 )
             })

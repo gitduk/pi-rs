@@ -11,7 +11,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::render::named;
 use crate::render::{self, Paint};
 use pi_core::core::resolve::Resolved;
-use pi_core::store::icons;
+use pi_store::icons;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FoldedTool {

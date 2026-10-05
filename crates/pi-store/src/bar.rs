@@ -11,7 +11,7 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
-use crate::store::status::Segment;
+use crate::status::Segment;
 
 // A first run builds the script and its dependencies, which takes a while.
 const TIMEOUT: Duration = Duration::from_secs(120);
@@ -145,7 +145,7 @@ pub struct Text {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Look {
     Tone(Tone),
-    Style(crate::store::theme::Style),
+    Style(crate::theme::Style),
 }
 
 impl Default for Look {
@@ -175,7 +175,7 @@ impl<'de> Deserialize<'de> for Item {
 impl<'de> Deserialize<'de> for Look {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let v = Value::deserialize(d)?;
-        let style = |v| crate::store::theme::Style::deserialize(v).map(Look::Style);
+        let style = |v| crate::theme::Style::deserialize(v).map(Look::Style);
         let look = match &v {
             Value::String(_) => match Tone::deserialize(v.clone()) {
                 Ok(tone) => Ok(Look::Tone(tone)),

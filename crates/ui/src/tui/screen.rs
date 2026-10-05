@@ -30,7 +30,7 @@ pub fn fit(line: &Line<'_>, width: usize) -> Vec<Line<'static>> {
         while let Some(c) = chars.next() {
             if c == '\x1b' {
                 // Outside noise (tool output): no columns, no cells.
-                let mut esc = pi_core::text::Escape::new();
+                let mut esc = pi_store::text::Escape::new();
                 for n in chars.by_ref() {
                     if esc.closed(n) {
                         break;
@@ -222,7 +222,7 @@ fn write_line(line: &Line<'_>, x: u16, y: u16, buf: &mut Buffer) {
         while let Some(c) = chars.next() {
             if c == '\x1b' {
                 // Same as `fit`: outside noise, not a cell.
-                let mut esc = pi_core::text::Escape::new();
+                let mut esc = pi_store::text::Escape::new();
                 for n in chars.by_ref() {
                     if esc.closed(n) {
                         break;

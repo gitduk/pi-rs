@@ -7,9 +7,9 @@ use ratatui::text::Line;
 use super::screen::fit;
 use super::{Asked, Deed, Ui};
 use crate::listing;
-use pi_core::store::icons;
-use pi_core::store::keys::Action;
-use pi_core::store::listing::Listing;
+use pi_store::icons;
+use pi_store::keys::Action;
+use pi_store::listing::Listing;
 
 /// The rows a command answered with, and where the window over them starts.
 pub struct Reply {
@@ -117,7 +117,7 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::Reply;
-    use pi_core::store::listing::Listing;
+    use pi_store::listing::Listing;
 
     fn reply(n: usize) -> Reply {
         Reply::new(Listing::say((1..=n).map(|i| format!("line {i}"))))

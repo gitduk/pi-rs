@@ -458,8 +458,8 @@ mod tests {
         let mut e = Editor::default();
         let paint = paint();
         e.set_prompts(
-            crate::tui::Ui::paint_prompt(&paint, pi_core::store::icons::INPUT_SIGIL),
-            crate::tui::Ui::paint_prompt(&paint, pi_core::store::icons::BANG_SIGIL),
+            crate::tui::Ui::paint_prompt(&paint, pi_store::icons::INPUT_SIGIL),
+            crate::tui::Ui::paint_prompt(&paint, pi_store::icons::BANG_SIGIL),
         );
         e.insert_str(s);
         e

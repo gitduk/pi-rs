@@ -10,9 +10,9 @@ use pi_core::core::dial::{dial, summary_writer};
 use pi_core::core::resolve::resolve;
 use pi_core::core::{self, Core, lane, worktree};
 use pi_core::input::expand;
-use pi_core::store::icons;
-use pi_core::store::settings::Settings;
-use pi_core::store::{archive, journal, session};
+use pi_store::icons;
+use pi_store::settings::Settings;
+use pi_store::{archive, journal, session};
 use ui::{render, tui};
 
 // The prompt, or None when the run should ask for one.
@@ -64,8 +64,8 @@ fn cancel_on_interrupt() -> tokio_util::sync::CancellationToken {
 fn paint(
     mut rx: mpsc::UnboundedReceiver<agent::Event>,
     quiet: bool,
-    theme: std::sync::Arc<pi_core::store::theme::Theme>,
-    status: Vec<pi_core::store::status::Segment>,
+    theme: std::sync::Arc<pi_store::theme::Theme>,
+    status: Vec<pi_store::status::Segment>,
     model: String,
     pricing: llm::model::Pricing,
     worktree: Option<String>,
@@ -169,7 +169,7 @@ async fn main() -> Result<()> {
         );
         journal::opening(
             &id,
-            &args,
+            args.config.as_deref(),
             &config,
             settings.project(),
             workspace.root(),
@@ -206,7 +206,7 @@ async fn main() -> Result<()> {
         // Before `id` moves into the Core, since `ctx` still needs to borrow it.
         // `commands` is the Core's copy for the front lane; `resolved` keeps its own.
         let commands = resolved.commands.clone();
-        let ctx = tool::Ctx::new(workspace).with_session(&id, pi_core::store::spill_root());
+        let ctx = tool::Ctx::new(workspace).with_session(&id, pi_store::spill_root());
         let mut first = lane::Lane::opened(lane::Opening {
             id,
             created,
@@ -226,7 +226,7 @@ async fn main() -> Result<()> {
             current: 0,
             lanes: vec![first],
         };
-        let (saved, keep) = pi_core::store::private_file("wechat.json");
+        let (saved, keep) = pi_store::private_file("wechat.json");
         let channels: Vec<Arc<dyn channel::Channel>> = vec![Arc::new(wechat::WeChat::new(
             saved.as_deref(),
             Arc::new(keep),
@@ -264,7 +264,7 @@ async fn main() -> Result<()> {
     let mut ctx = tool::Ctx::new(workspace).with_cancel(cancel_on_interrupt());
     // Without a session the spills land in the temp dir rather than `~/.pi`.
     if keeps {
-        ctx = ctx.with_session(&id, pi_core::store::spill_root());
+        ctx = ctx.with_session(&id, pi_store::spill_root());
     }
 
     // Always through the log: a loaded session whose view happens to be empty

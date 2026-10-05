@@ -1,7 +1,7 @@
 use crate::tui::{Asked, Deed, Intent, View, view_at};
 use pi_core::input::commands::{Command, Source};
 use pi_core::input::{Builtin, Fate};
-use pi_core::store::listing::Listing;
+use pi_store::listing::Listing;
 
 use super::harness::*;
 

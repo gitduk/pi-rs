@@ -14,7 +14,7 @@ use crate::status;
 use agent::Event;
 use agent::session::Entry as LogEntry;
 use pi_core::core::lane::Lane;
-use pi_core::store::icons;
+use pi_store::icons;
 use ratatui::layout::Rect;
 use ratatui::text::Line;
 use ratatui::widgets::{List, ListState};

@@ -2,7 +2,7 @@ use crate::render::Paint;
 use crate::tui::row::{FoldedTool, Row, Step};
 use crate::tui::scrollback::{Folds, ScrollbackRows};
 use crate::tui::{View, following_terminal};
-use pi_core::store::theme::{Color, Theme};
+use pi_store::theme::{Color, Theme};
 use ratatui::text::Line;
 
 use super::harness::*;

@@ -15,7 +15,7 @@ use super::{NO_TRANSCRIPT, Tui};
 use pi_core::core;
 use pi_core::driver::Ended;
 use pi_core::input::Intent;
-use pi_core::store::listing::Listing;
+use pi_store::listing::Listing;
 
 // What kind of job a finished `Done` was, carrying what only that kind
 // leaves behind — so no arm can be built holding another's.

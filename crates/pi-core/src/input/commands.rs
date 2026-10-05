@@ -7,7 +7,7 @@ use std::sync::Arc;
 use skills::Skill;
 
 use super::{Builtin, Intent};
-use crate::store::session::ResumeChoice;
+use pi_store::session::ResumeChoice;
 
 #[derive(Clone)]
 pub enum Source {
@@ -146,7 +146,7 @@ fn gist(description: &str) -> String {
     let first = description
         .split_once(". ")
         .map_or(description, |(head, _)| head);
-    crate::text::clip(first.trim().trim_end_matches('.'), GIST)
+    pi_store::text::clip(first.trim().trim_end_matches('.'), GIST)
 }
 
 /// What a slash answers to: the built-ins, then one command per skill.

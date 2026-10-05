@@ -45,8 +45,8 @@ impl Settings {
     /// `root`.
     pub fn load(at: Option<&str>, root: &Path) -> Result<Self> {
         Ok(Self::new(
-            crate::store::config::load_tree(at)?,
-            crate::store::config::load_project(root)?,
+            crate::config::load_tree(at)?,
+            crate::config::load_project(root)?,
         ))
     }
 
@@ -57,8 +57,8 @@ impl Settings {
     }
 
     /// The config in force: the files, then the environment.
-    pub fn config(&self) -> Result<crate::store::config::Config> {
-        crate::store::config::Config::in_force(self.file.clone())
+    pub fn config(&self) -> Result<crate::config::Config> {
+        crate::config::Config::in_force(self.file.clone())
     }
 
     /// The project file read, if one was found.

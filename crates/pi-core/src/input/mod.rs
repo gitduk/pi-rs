@@ -7,7 +7,7 @@ pub mod complete;
 use skills::Skill;
 
 use crate::input::commands::{Command, Source};
-use crate::store::listing::Listing;
+use pi_store::listing::Listing;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Intent {

@@ -12,7 +12,7 @@ use super::row::{Row, Step};
 use super::screen;
 use crate::render::{self, Paint};
 use pi_core::core;
-use pi_core::store::icons;
+use pi_store::icons;
 
 // Whether groups are folded, and which reasoning block streams now. A
 // group's fold state resets to `folded` once it stops being last.

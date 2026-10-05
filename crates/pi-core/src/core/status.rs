@@ -1,7 +1,7 @@
 //! What a status line reads: the parts of a lane a reader is shown, and the
 //! numbers behind them.
 //!
-//! The vocabulary is `store/status.rs` and the drawing is `ui/status.rs`; this
+//! The vocabulary is `pi_store::status` and the drawing is `ui/status.rs`; this
 //! is where the values come from.
 
 use agent::Totals;
@@ -9,9 +9,9 @@ use agent::context::short;
 use llm::figures;
 
 use super::Core;
-use crate::store::icons;
-use crate::store::journal;
-use crate::store::listing::{Listing, Row};
+use pi_store::icons;
+use pi_store::journal;
+use pi_store::listing::{Listing, Row};
 
 impl Core {
     /// What `/status` shows: what the lane runs on, what it holds and has
@@ -58,7 +58,7 @@ impl Core {
         // asked of yet has no figure, and a row of dashes is not one.
         let spent = lane.tally().session();
         if spent != Totals::default() {
-            rows.push(Row::new(["spent".into(), crate::text::spent(&spent)]));
+            rows.push(Row::new(["spent".into(), pi_store::text::spent(&spent)]));
         }
 
         let tier = format!("{:?}", resolved.ceiling).to_lowercase();

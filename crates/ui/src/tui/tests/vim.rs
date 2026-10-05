@@ -2,7 +2,7 @@ use crate::tui::row::Row;
 use crate::tui::screen::{self};
 use crate::tui::{Asked, Deed, Intent, View, view_at};
 use pi_core::input::Builtin;
-use pi_core::store::keys::Mode;
+use pi_store::keys::Mode;
 
 use super::harness::*;
 
@@ -491,13 +491,13 @@ fn turning_the_keys_off_drops_the_mode_rather_than_parking_it() {
     let mut ui = vim_ui();
     ui.vim.as_mut().unwrap().mode = Mode::Normal;
 
-    ui.set_vim(&pi_core::store::config::Vim {
+    ui.set_vim(&pi_store::config::Vim {
         enabled: false,
         ..Default::default()
     });
     assert!(ui.vim.is_none());
 
-    ui.set_vim(&pi_core::store::config::Vim {
+    ui.set_vim(&pi_store::config::Vim {
         enabled: true,
         ..Default::default()
     });

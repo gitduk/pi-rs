@@ -30,8 +30,8 @@ use pi_core::core::lane::Run;
 use pi_core::core::{self, Core};
 use pi_core::driver::{Drivers, Origin, Said};
 use pi_core::input::{self, Fate, Intent, Rewound, Step};
-use pi_core::store::keys::Keys;
-use pi_core::store::listing::Listing;
+use pi_store::keys::Keys;
+use pi_store::listing::Listing;
 use ratatui::text::Line;
 use screen::Screen;
 use std::sync::Arc;
@@ -687,7 +687,7 @@ impl Tui {
                             .lane()
                             .session()
                             .and_then(|s| s.last_node())
-                            .map(|n| pi_core::text::clip(n.show(), 60))
+                            .map(|n| pi_store::text::clip(n.show(), 60))
                             .filter(|t| !t.is_empty())
                             .map(|t| format!(" — the transcript now ends at {t}"))
                             .unwrap_or_default();
@@ -720,7 +720,7 @@ impl Tui {
             .into_iter()
             .map(|node| MenuEntry::Message {
                 id: node.id(),
-                show: pi_core::text::clip(node.show(), 60),
+                show: pi_store::text::clip(node.show(), 60),
                 help: "you — unsends it",
             })
             .collect();

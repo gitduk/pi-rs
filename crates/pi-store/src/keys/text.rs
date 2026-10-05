@@ -8,7 +8,7 @@ use anyhow::{Result, bail};
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use super::{BINDINGS, Keys, Press};
-use crate::store::listing::{Listing, Row};
+use crate::listing::{Listing, Row};
 
 impl Keys {
     /// What is bound right now: the id it is rebound by, the keys that reach

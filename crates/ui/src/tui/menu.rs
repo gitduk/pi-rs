@@ -12,9 +12,9 @@ use pi_core::core::lane::Lane;
 use pi_core::input::Builtin;
 use pi_core::input::commands::{Candidate, Choice};
 use pi_core::input::{self, Intent};
-use pi_core::store::keys::{Action, Layers, Menu, Press};
-use pi_core::store::session::ResumeChoice;
-use pi_core::store::session::Store;
+use pi_store::keys::{Action, Layers, Menu, Press};
+use pi_store::session::ResumeChoice;
+use pi_store::session::Store;
 use ratatui::text::Line;
 use ratatui::text::Span;
 use ratatui::widgets::ListItem;
@@ -121,7 +121,7 @@ impl Ui {
         let muted = self.rat_style(&self.paint.theme.muted);
         menu.iter()
             .map(|c| {
-                let line = format!("  {}  {}", pi_core::text::pad(c.show(), head), c.help());
+                let line = format!("  {}  {}", pi_store::text::pad(c.show(), head), c.help());
                 ListItem::new(Line::from(Span::styled(line, muted)))
             })
             .collect()
@@ -508,7 +508,7 @@ impl Ui {
             // Unbound and printable is the one thing no table has to say —
             // except in Normal, where it is the table saying no.
             None => {
-                if let Some(c) = pi_core::store::keys::bare_letter(&key) {
+                if let Some(c) = pi_store::keys::bare_letter(&key) {
                     match self.vim.as_mut().map(|v| v.typed(c, Instant::now())) {
                         Some(Typed::Ignore) => {}
                         // The sequence's first half is on screen already;

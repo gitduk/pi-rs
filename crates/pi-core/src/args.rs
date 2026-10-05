@@ -1,79 +1,8 @@
 //! The command line: what one run was started with.
 
-use clap::{Parser, ValueEnum};
-use llm::model::{CacheControl, Format};
+use clap::Parser;
 
-/// The three below are both flags and config values, so a config file names a
-/// tier the same way the command line does.
-#[derive(Debug, Clone, Copy, PartialEq, ValueEnum, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum FormatArg {
-    Anthropic,
-    Openai,
-    Chat,
-}
-
-impl FormatArg {
-    // Caching stays off: nothing on this path was measured, and an
-    // unknown top-level field is a 400 on some servers.
-    fn format(self) -> Format {
-        match self {
-            FormatArg::Anthropic => Format::Anthropic {
-                cache_control: CacheControl::Off,
-            },
-            FormatArg::Openai => Format::OpenAi,
-            FormatArg::Chat => Format::Chat,
-        }
-    }
-
-    /// Delegated rather than matched again, so a model `/model` lists and one
-    /// it has just switched to cannot print two names for the same protocol.
-    pub fn name(self) -> &'static str {
-        self.format().name()
-    }
-}
-
-/// `tool::Tier` as the command line and the config files spell it. Not
-/// ordered, because the tiers are not: see `tool::Tier`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TierArg {
-    Read,
-    Write,
-    Exec,
-    Net,
-}
-
-impl From<TierArg> for tool::Tier {
-    fn from(arg: TierArg) -> Self {
-        match arg {
-            TierArg::Read => tool::Tier::Read,
-            TierArg::Write => tool::Tier::Write,
-            TierArg::Exec => tool::Tier::Exec,
-            TierArg::Net => tool::Tier::Net,
-        }
-    }
-}
-
-impl From<tool::Tier> for TierArg {
-    fn from(tier: tool::Tier) -> Self {
-        match tier {
-            tool::Tier::Read => TierArg::Read,
-            tool::Tier::Write => TierArg::Write,
-            tool::Tier::Exec => TierArg::Exec,
-            tool::Tier::Net => TierArg::Net,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, ValueEnum, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum EffortArg {
-    Off,
-    Low,
-    Medium,
-    High,
-}
+use pi_store::args::{EffortArg, TierArg};
 
 #[derive(Parser, Debug)]
 #[command(

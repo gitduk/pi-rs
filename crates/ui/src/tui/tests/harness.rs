@@ -5,8 +5,8 @@ use crate::tui::screen::{self, plain};
 use crate::tui::scrollback::{ScrollbackRows, absorb_growth};
 use pi_core::core::Core;
 use pi_core::core::lane::Lane;
-use pi_core::store::keys::{Keys, Mode};
-use pi_core::store::session::Store;
+use pi_store::keys::{Keys, Mode};
+use pi_store::session::Store;
 use ratatui::text::Line;
 
 pub(super) fn drawn_rows(view: &View) -> Vec<String> {
@@ -105,14 +105,11 @@ pub(super) fn surface(dir: &std::path::Path) -> crate::tui::Tui {
     let core = Core {
         store: Store::new(dir.join("state")),
         keys: keys.clone(),
-        config: std::sync::Arc::new(pi_core::store::config::Config::default()),
+        config: std::sync::Arc::new(pi_store::config::Config::default()),
         pinned: pi_core::args::Pinned::default(),
         commands: std::sync::Arc::new(Vec::new()),
         channels: Vec::new(),
-        settings: pi_core::store::settings::Settings::new(
-            toml::Value::Table(Default::default()),
-            None,
-        ),
+        settings: pi_store::settings::Settings::new(toml::Value::Table(Default::default()), None),
         lanes: vec![running_lane(dir)],
         current: 0,
     };
@@ -130,7 +127,7 @@ pub(super) fn switch_to(tui: &mut crate::tui::Tui, lane: Lane) {
 
 pub(super) fn vim_ui() -> crate::tui::Ui {
     let mut ui = test_ui(80, 24);
-    ui.set_vim(&pi_core::store::config::Vim {
+    ui.set_vim(&pi_store::config::Vim {
         enabled: true,
         ..Default::default()
     });

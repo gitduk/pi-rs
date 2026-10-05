@@ -3,7 +3,7 @@
 //! Nothing here draws: the tally is a reading taken from a run's events, and
 //! the snapshot is what a surface reads once it is time to say it.
 
-use crate::store::icons;
+use pi_store::icons;
 
 use std::time::Duration;
 

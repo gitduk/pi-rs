@@ -1,8 +1,8 @@
 //! The shape of a read-only answer: the rows a command has to show, before
 //! anyone lays them out.
 //!
-//! Lives here rather than beside `Step` because `store/keys/mod.rs`'s
-//! command table also fills one in, and `input` can't be reached from there.
+//! Lives here rather than beside `Step` because the key table in `keys`
+//! also fills one in, and `pi-core`'s `input` can't be reached from here.
 
 /// A read-only answer, as rows of cells: the layout is decided by whoever
 /// draws it, not here.

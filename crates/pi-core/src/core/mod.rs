@@ -17,10 +17,10 @@ pub mod worktree;
 use crate::core::lane::Lane;
 use crate::input::commands::{Command, channel_command, help, with_channels};
 use crate::input::{Builtin, ChannelCmd, Drive, Intent, Step, lines, step_for};
-use crate::store::config;
-use crate::store::listing::Listing;
-use crate::store::session::Store;
-use crate::store::settings::Settings;
+use pi_store::config;
+use pi_store::listing::Listing;
+use pi_store::session::Store;
+use pi_store::settings::Settings;
 
 /// What every surface says when the transcript did not reach the disk: one
 /// sentence, so a reworded copy cannot make one failure read as two.
@@ -33,7 +33,7 @@ pub fn not_saved(e: &impl std::fmt::Display) -> String {
 pub struct Core {
     pub store: Store,
     /// Held so `/keys` can show what is actually in force, overrides included.
-    pub keys: std::sync::Arc<crate::store::keys::Keys>,
+    pub keys: std::sync::Arc<pi_store::keys::Keys>,
     /// The config in force, as opposed to the one on disk. `/model` picks from
     /// this, so a switch cannot quietly apply an edit `/reload` has not.
     pub config: std::sync::Arc<config::Config>,
@@ -87,7 +87,7 @@ impl Core {
         root: std::path::PathBuf,
         model: String,
     ) -> std::sync::Arc<dyn agent::Archive> {
-        crate::store::archive::Filed::armed(self.store.clone(), root, model)
+        pi_store::archive::Filed::armed(self.store.clone(), root, model)
     }
 
     pub fn lane_mut(&mut self) -> &mut Lane {
@@ -201,7 +201,7 @@ impl Core {
             // Only the bare word opens the file; an argument is refused
             // rather than half-remembered as a verb.
             Intent::Builtin(Builtin::Settings(rest)) if rest.trim().is_empty() => {
-                match crate::store::config::project_target(self.lane().root()) {
+                match pi_store::config::project_target(self.lane().root()) {
                     Some(file) => Step::EditConfig(file),
                     None => {
                         Step::Flash("no project here: a .pi.toml in $HOME is never read".into())
@@ -226,7 +226,7 @@ mod tests {
     #[test]
     fn a_line_asks_for_the_lists_only_when_it_completes_against_one() {
         let asked = std::cell::RefCell::new(Vec::new());
-        let sessions = || -> &[crate::store::session::ResumeChoice] {
+        let sessions = || -> &[pi_store::session::ResumeChoice] {
             asked.borrow_mut().push("sessions");
             &[]
         };
@@ -250,7 +250,7 @@ mod tests {
         assert_eq!(line("/worktree rm "), "worktrees");
 
         // And what the call asks for is what it completes against.
-        let one = [crate::store::session::ResumeChoice {
+        let one = [pi_store::session::ResumeChoice {
             id: "s1".into(),
             prompt: "fix the flaky test".into(),
             name: None,
@@ -458,12 +458,12 @@ mod tests {
     ) -> crate::core::Core {
         let ws = tool::Workspace::new(root).unwrap();
         let mut agent = agent::Agent::new(transport, test_spec(model));
-        let store = crate::store::session::Store::new(root.join("state"));
+        let store = pi_store::session::Store::new(root.join("state"));
         let resolved = crate::core::lane::arm(
             &mut agent,
             crate::core::lane::a_resolved("standing"),
-            crate::store::archive::Filed::armed(
-                crate::store::session::Store::new(root.join("state")),
+            pi_store::archive::Filed::armed(
+                pi_store::session::Store::new(root.join("state")),
                 root.to_path_buf(),
                 model.into(),
             ),
@@ -484,11 +484,11 @@ mod tests {
         crate::core::Core {
             store,
             keys,
-            config: std::sync::Arc::new(crate::store::config::Config::default()),
+            config: std::sync::Arc::new(pi_store::config::Config::default()),
             pinned: crate::args::Pinned::default(),
             commands,
             channels: Vec::new(),
-            settings: crate::store::settings::Settings::new(
+            settings: pi_store::settings::Settings::new(
                 toml::Value::Table(Default::default()),
                 None,
             ),

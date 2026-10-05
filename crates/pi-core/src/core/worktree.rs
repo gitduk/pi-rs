@@ -6,7 +6,7 @@
 use super::Core;
 use crate::input::Step;
 use crate::input::refused;
-use crate::store::listing::Listing;
+use pi_store::listing::Listing;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -417,7 +417,7 @@ impl Core {
                 } else {
                     " "
                 };
-                let name = crate::text::pad(&t.name, width);
+                let name = pi_store::text::pad(&t.name, width);
                 let on = t
                     .branch_note()
                     .map(|on| format!("  {on}"))

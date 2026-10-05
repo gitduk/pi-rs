@@ -1,6 +1,6 @@
 //! A theme's styles as ratatui draws them.
 
-use pi_core::store::theme::{Color, Style};
+use pi_store::theme::{Color, Style};
 
 /// A theme style as ratatui sees it. Through the SGR list, so a bare code —
 /// `muted = "2"` — stays the attribute it names rather than becoming a palette
