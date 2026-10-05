@@ -184,14 +184,20 @@ pub fn new_id() -> String {
     format!("{}-{}-{nth}", now(), std::process::id())
 }
 
-/// A path as a single directory name: non-alphanumeric becomes `-`. Not
-/// injective (`/a/b` and `/a-b` collide), accepted since a bucket's contents
-/// are read off each transcript's own workspace field, never off its name.
+/// A path as a single directory name: anything but ASCII letters, digits and
+/// `_` becomes `-`. Not injective (`/a/b` and `/a-b` collide), accepted since
+/// a bucket's contents are read off each transcript's own workspace field.
 pub fn key_of(path: &Path) -> String {
     path.display()
         .to_string()
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect()
 }
 
@@ -838,6 +844,7 @@ mod tests {
     fn a_workspace_key_is_its_path_with_every_separator_dashed() {
         use std::path::Path;
         assert_eq!(key_of(Path::new("/home/dev/pi-rs")), "-home-dev-pi-rs");
+        assert_eq!(key_of(Path::new("/home/dev/api_v2")), "-home-dev-api_v2");
         assert_eq!(key_of(Path::new("/")), "-");
         assert_eq!(key_of(Path::new(".")), "-");
         assert_eq!(
