@@ -19,6 +19,9 @@ use tool::Tool;
 
 pub use script::{Script, cargo_script, run_script};
 
+/// The built-in `pi-tool` skill: how to write a script tool, and a skill.
+pub const SKILL: &str = include_str!("../../skills/pi-tool/SKILL.md");
+
 /// The tools directory as a `tool::Source`: looked at whenever the tool set
 /// is asked, parsed again only when a file in it changed.
 pub struct Dir {
@@ -191,6 +194,21 @@ fn frontmatter(text: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The skill is how a model learns to write a script; if its example stops
+    // parsing, every script written from it is skipped without a word.
+    #[test]
+    fn the_pi_tool_example_is_a_script_pi_accepts() {
+        let example = SKILL
+            .split("```rust\n")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .expect("a rust example");
+        let (description, args) = interface(example).unwrap();
+        assert!(!description.is_empty());
+        assert_eq!(args.len(), 1, "{args:?}");
+        assert!(example.contains(&format!("std::env::var(\"{}\")", args[0].0)));
+    }
 
     #[test]
     fn the_frontmatter_declares_description_and_args() {

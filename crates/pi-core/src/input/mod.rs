@@ -144,7 +144,7 @@ pub(crate) fn refused(what: &str, e: anyhow::Error) -> String {
 // Body goes in whole, not fetched later: the model shouldn't spend a turn
 // re-learning instructions `/commit` says the user already chose.
 fn expanded(skill: &Skill, args: &str) -> Result<String, String> {
-    let text = std::fs::read_to_string(skill.dir.join("SKILL.md")).map_err(|e| {
+    let text = skill.text().map_err(|e| {
         let why = refused(&skill.name, anyhow::anyhow!("{}: {e}", skill.dir.display()));
         format!("cannot run {} — {why}", skill.name)
     })?;

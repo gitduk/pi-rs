@@ -43,7 +43,7 @@ max_output_tokens = 64_000
 refused at load.
 
 A `.pi.toml` between the workspace and the repository root overrides the same
-keys, `base_url`, `api_key`, `system` and `write_roots` included. Read the one
+keys, `base_url`, `api_key` and `write_roots` included. Read the one
 in a checkout you did not write before running pi there.
 
 Nothing needs a restart. Within a second of a save to the settings, a system
@@ -107,6 +107,9 @@ Esc.
 Scripts and skills are read live: one written while pi runs is offered to the
 model from its next turn, and a skill's `/name` answers the next time you type.
 
+The built-in `pi-tool` skill teaches the model to write both, so a capability
+it lacks is one it can add. A skill of that name in `~/.pi/skills/` replaces it.
+
 `fetch` speaks http and https and refuses loopback, private and link-local
 addresses. With [rtk](https://github.com/rtk-ai/rtk) on `PATH`, `bash` runs
 each command through `rtk rewrite`; `RTK_DISABLED=1` turns that off.
@@ -132,6 +135,7 @@ Memory starts with the first session to end and never reads tool output.
 | Path                                     | Holds                                      |
 | ---------------------------------------- | ------------------------------------------ |
 | `~/.pi/settings.toml`                    | endpoint, models, `[keys]`, `[theme]`      |
+| `~/.pi/SYSTEM.md`                        | replaces the built-in system prompt        |
 | `~/.pi/AGENTS.md`, `AGENTS.md`           | standing instructions: yours, a project's  |
 | `~/.pi/skills/`                          | skills: a directory with a `SKILL.md`      |
 | `~/.pi/memory/*.md`, `projects/*.md`     | memory: global, and one file per project   |

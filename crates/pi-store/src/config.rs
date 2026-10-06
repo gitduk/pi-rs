@@ -58,9 +58,6 @@ pub struct Config {
     pub effort: Option<EffortArg>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tier: Option<TierArg>,
-    /// Path to a file replacing the built-in system prompt.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub system: Option<String>,
 
     /// Absolute directories every tool above the read tier may reach beyond
     /// the workspace root — `bash` may work in one, not only `write` and
@@ -585,6 +582,11 @@ fn home() -> Option<PathBuf> {
 /// Where the user's own config lives when they have not said otherwise.
 pub fn global_path() -> Option<PathBuf> {
     super::dir().map(|root| root.join("settings.toml"))
+}
+
+/// The file that, where it exists, replaces the built-in system prompt.
+pub fn system_file() -> Option<PathBuf> {
+    super::dir().map(|root| root.join("SYSTEM.md"))
 }
 
 /// The nearest project file at or above `start`, stopping at the repo root.

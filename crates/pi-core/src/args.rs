@@ -63,7 +63,7 @@ pub struct Args {
     #[arg(long, value_name = "TOKENS")]
     pub context: Option<u32>,
 
-    /// Replace the built-in system prompt.
+    /// Replace the system prompt, `SYSTEM.md` in pi's home included.
     #[arg(long)]
     pub system: Option<String>,
 

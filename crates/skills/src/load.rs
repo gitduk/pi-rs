@@ -107,6 +107,9 @@ fn sibling_files(dir: &std::path::Path) -> Vec<String> {
 /// own files are reached.
 pub fn instructions(skill: &Skill, text: &str) -> String {
     let mut out = body(text).to_string();
+    if skill.builtin.is_some() {
+        return out;
+    }
     // Skills usually live outside the workspace; instructions that point at a
     // sibling are useless unless the way to fetch it arrives with them.
     let siblings = sibling_files(&skill.dir);
@@ -155,6 +158,17 @@ impl Tool for Load {
         let args: Args = tool::parse_args(args)?;
         let skill = self.find(&args.name)?;
 
+        if let Some(text) = skill.builtin {
+            return match args.file {
+                Some(rel) => Err(ToolError::Invalid(format!(
+                    "{}/{rel}: a built-in skill has no files",
+                    args.name
+                ))),
+                None => Ok(
+                    ToolOutput::text(instructions(skill, text)).with_preview(skill.name.clone())
+                ),
+            };
+        }
         let Some(rel) = args.file else {
             // The instructions go to the transcript whole; a multi-megabyte
             // SKILL.md is refused, not read.

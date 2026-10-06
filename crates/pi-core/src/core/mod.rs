@@ -74,7 +74,7 @@ impl Core {
     /// on disk. `Some` with what to say when it did; nothing to do otherwise.
     pub fn refresh_config(&mut self) -> Option<Vec<String>> {
         let lane = self.lane();
-        let now = resolve::watched(&self.pinned, &self.config, lane.root());
+        let now = resolve::watched(&self.pinned, lane.root());
         let was = &lane.resolved().watched;
         let token = lane.token();
         if &now == was || self.refused.get(&token) == Some(&now) {
@@ -340,6 +340,7 @@ mod tests {
             name: name.to_string(),
             description: description.to_string(),
             dir: std::path::PathBuf::from("/nowhere").join(name),
+            builtin: None,
         }
     }
 

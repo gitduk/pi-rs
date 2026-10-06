@@ -155,8 +155,7 @@ impl Tool for Subagent {
          The result ends with every path it changed through `write` or `edit`, \
          and the exit status of `verify` if you gave one. A change it made by \
          running a command is not in that list, which is what `verify` covers. \
-         Send one \
-         whenever the job has something checkable behind it: a test suite, a \
+         Send one whenever the job has something checkable behind it: a test suite, a \
          build, a linter. What the subagent says about its own work is the only \
          part of the answer nothing else checks, and it cannot reach you to be \
          asked again."

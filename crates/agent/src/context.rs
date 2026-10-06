@@ -51,10 +51,25 @@ fn escaped(path: impl std::fmt::Display) -> String {
         .replace('"', "&quot;")
 }
 
-/// The anchor for "every path is relative to it": the model needs to know
-/// which directory that is before the rest of the system prompt makes sense.
+/// The directory the run works in, and what that means for a path. Said
+/// here rather than in the system prompt, which the user may replace.
 pub fn workspace(root: &Path) -> String {
-    format!("\n\n<workspace path=\"{}\"/>", escaped(root.display()))
+    format!(
+        "\n\n<workspace path=\"{}\"/>\n\nThe workspace is the directory you work in. Every \
+path you name is relative to it, and commands start in it. Writing stays inside it unless a \
+`<write_paths>` block names more places; reading may go further — an absolute path reaches \
+the rest of this machine, a URL the rest of the world.",
+        escaped(root.display())
+    )
+}
+
+/// pi's home, for a run that may add tools and skills to it.
+pub fn pi_home(dir: &Path) -> String {
+    format!(
+        "\n\n<pi_home path=\"{}\">\npi's own home, read live: a tool or skill written here is \
+offered from your next turn, with no restart. The `pi-tool` skill says how to write one.\n</pi_home>",
+        escaped(dir.display())
+    )
 }
 
 /// What the model may change, and where — the workspace root plus every
@@ -152,6 +167,14 @@ fn from(workspace: &Path, home: Option<&Path>, root: Option<&Path>) -> Loaded {
         };
         if body.trim().is_empty() {
             continue;
+        }
+        if loaded.files.is_empty() {
+            loaded.text.push_str(
+                "\n\nThe `<instructions>` blocks below are the user's standing instructions, \
+for this machine and this project, most general first. Follow them; where two disagree, the \
+later one, nearer the workspace, wins. They say how to work here; the user's message says what \
+to do now.",
+            );
         }
         // Tagged rather than headed: the content is arbitrary markdown with
         // headings of its own, so a `#` delimiter would not delimit anything.

@@ -19,6 +19,32 @@ pub struct Skill {
     pub name: String,
     pub description: String,
     pub dir: PathBuf,
+    /// The whole `SKILL.md` when it is compiled in rather than kept in `dir`.
+    pub builtin: Option<&'static str>,
+}
+
+impl Skill {
+    /// A skill compiled into the binary, from its whole `SKILL.md`, which
+    /// must name it; `None` when the header gives no usable name or description.
+    pub fn builtin(text: &'static str) -> Option<Self> {
+        let (Some(name), Some(description)) = frontmatter(text).ok()? else {
+            return None;
+        };
+        usable(&name).then(|| Self {
+            name,
+            description,
+            dir: PathBuf::new(),
+            builtin: Some(text),
+        })
+    }
+
+    /// Its `SKILL.md` as it stands.
+    pub fn text(&self) -> std::io::Result<String> {
+        match self.builtin {
+            Some(text) => Ok(text.to_string()),
+            None => std::fs::read_to_string(self.dir.join("SKILL.md")),
+        }
+    }
 }
 
 // A name that cannot leave the skills directory it was found in.
@@ -131,6 +157,7 @@ fn read_one(dir: &Path) -> Read {
         name,
         description,
         dir: dir.to_path_buf(),
+        builtin: None,
     }))
 }
 
@@ -149,6 +176,7 @@ const MAX_DEPTH: usize = 3;
 /// directory now stands, rebuilt only when a `SKILL.md` under it changed.
 pub struct Shelf {
     dir: PathBuf,
+    builtins: Vec<Skill>,
     seen: Mutex<Seen>,
 }
 
@@ -166,8 +194,15 @@ impl Shelf {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self {
             dir: dir.into(),
+            builtins: Vec::new(),
             seen: Mutex::default(),
         }
+    }
+
+    /// Offer `skill` too, unless one on disk has its name.
+    pub fn with_builtin(mut self, skill: Skill) -> Self {
+        self.builtins.push(skill);
+        self
     }
 
     /// The skills as they stand, and a number that moves when they change.
@@ -180,7 +215,13 @@ impl Shelf {
         stamp(&self.dir, MAX_DEPTH, &mut stamps);
         let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
         if seen.stamps.as_ref() != Some(&stamps) {
-            let found = discover(&self.dir);
+            let mut found = discover(&self.dir);
+            for builtin in &self.builtins {
+                if !found.skills.iter().any(|s| s.name == builtin.name) {
+                    found.skills.push(builtin.clone());
+                }
+            }
+            found.skills.sort_by(|a, b| a.name.cmp(&b.name));
             seen.tool = (!found.skills.is_empty())
                 .then(|| Arc::new(Load::new(found.skills.clone())) as Arc<dyn tool::Tool>);
             seen.found = Arc::new(found);

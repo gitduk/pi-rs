@@ -75,6 +75,9 @@ impl Core {
             let extra: Vec<_> = extra.iter().map(|p| short(p, root)).collect();
             rows.push(Row::new(["also writes".into(), extra.join(", ")]));
         }
+        if let Some(system) = &resolved.system {
+            rows.push(Row::new(["system prompt".into(), short(system, root)]));
+        }
         if !resolved.context.is_empty() {
             rows.push(Row::new([
                 "instructions".into(),

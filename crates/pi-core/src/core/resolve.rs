@@ -51,6 +51,8 @@ pub struct Resolved {
     pub context: Vec<String>,
     /// The memory files folded into the prompt, by the name an edit uses.
     pub memory: Vec<String>,
+    /// The file that replaced the built-in system prompt, if one did.
+    pub system: Option<PathBuf>,
     /// Where requests go and which source said so, for the banner and
     /// `/status`: two files can each name one now.
     pub endpoint: Option<String>,
@@ -80,15 +82,19 @@ pub fn resolve(
     let root = workspace.root();
     let mut notes = Vec::new();
     // Before any of it is read, so a write landing meanwhile reads as a change.
-    let read_from = watched(pinned, config, root);
+    let read_from = watched(pinned, root);
 
     // Sources offer their tools in order, built-ins first.
     let mut registry = toolbox::builtin();
     // Read live, like the scripts: a skill written while pi runs can be loaded
     // on the next turn, and typed once `Core::refresh_skills` has seen it.
-    let shelf = pi_store::dir()
-        .filter(|_| !pinned.no_skills)
-        .map(|pi| Arc::new(skills::Shelf::new(pi.join("skills"))));
+    let shelf = pi_store::dir().filter(|_| !pinned.no_skills).map(|pi| {
+        let shelf = skills::Shelf::new(pi.join("skills"));
+        Arc::new(match skills::Skill::builtin(toolbox::scripts::SKILL) {
+            Some(pi_tool) => shelf.with_builtin(pi_tool),
+            None => shelf,
+        })
+    });
     let (found, shelf_seen) = shelf.as_ref().map(|s| s.now()).unwrap_or_default();
     // A skill that silently fails to appear is one the user goes looking
     // for in the wrong place.
@@ -157,15 +163,29 @@ pub fn resolve(
         EffortArg::High => Effort::High,
     };
 
-    let mut system = match pinned.system.as_ref().or(config.system.as_ref()) {
+    // The flag's file has to be there; `SYSTEM.md` only when it is.
+    let system_file = system_file(pinned).filter(|path| pinned.system.is_some() || path.is_file());
+    let mut system = match &system_file {
         Some(path) => std::fs::read_to_string(path)
-            .with_context(|| format!("cannot read system prompt {path}"))?,
+            .with_context(|| format!("cannot read system prompt {}", path.display()))?,
         None => agent::DEFAULT_SYSTEM.to_string(),
     };
-    // The system prompt's "relative to it" needs the workspace named.
+    // Everything the run needs to know about pi rides here rather than in the
+    // system prompt, so that a replaced or empty one loses none of it.
     let stamp = journal::rfc3339(std::time::SystemTime::now());
     let mut standing = context::workspace(root);
     standing.push_str(&context::boundary(workspace, tier));
+    // Said only where `pi-tool` is offered and the home may be written; the
+    // write tool's own check, so a symlinked home is judged as it is.
+    if let Some(home) = pi_store::dir()
+        && found.skills.iter().any(|s| s.name == "pi-tool")
+        && tool::Tier::Write.under(tier)
+        && home
+            .to_str()
+            .is_some_and(|h| workspace.resolve(h, tool::Tier::Write).is_ok())
+    {
+        standing.push_str(&context::pi_home(&home));
+    }
     standing.push_str(&context::env(&stamp, tier));
     // Appended rather than sent as a message: standing instructions don't
     // change within a run, and the system prompt is what a provider caches.
@@ -206,8 +226,19 @@ pub fn resolve(
         notes,
         context,
         memory,
+        system: system_file,
         endpoint: endpoint(pinned, config, settings, root),
     })
+}
+
+// The file that replaces the built-in system prompt: the flag's, else
+// `SYSTEM.md` in pi's home, whether or not that one exists yet.
+fn system_file(pinned: &Pinned) -> Option<PathBuf> {
+    pinned
+        .system
+        .as_ref()
+        .map(PathBuf::from)
+        .or_else(config::system_file)
 }
 
 /// A file as last seen: its path, time and size.
@@ -216,7 +247,7 @@ pub type Stamp = (PathBuf, Option<std::time::SystemTime>, u64);
 /// The files a resolve in `root` reads, as they stand now: the settings, the
 /// system prompt, the instructions and memory. Missing ones are left out, so
 /// one appearing is a change too.
-pub fn watched(pinned: &Pinned, config: &config::Config, root: &Path) -> Vec<Stamp> {
+pub fn watched(pinned: &Pinned, root: &Path) -> Vec<Stamp> {
     let mut paths: Vec<PathBuf> = Vec::new();
     paths.extend(
         pinned
@@ -226,13 +257,7 @@ pub fn watched(pinned: &Pinned, config: &config::Config, root: &Path) -> Vec<Sta
             .or_else(config::global_path),
     );
     paths.extend(config::project_file(root));
-    paths.extend(
-        pinned
-            .system
-            .as_ref()
-            .or(config.system.as_ref())
-            .map(PathBuf::from),
-    );
+    paths.extend(system_file(pinned));
     if !pinned.no_context_files {
         let pi = pi_store::dir();
         paths.extend(context::paths(
@@ -279,4 +304,21 @@ fn endpoint(
         }
     };
     Some(format!("endpoint: {url} ({from})"))
+}
+
+#[cfg(test)]
+mod tests {
+    // `pi-tool` is dropped without a word when its header does not parse.
+    #[test]
+    fn pi_tool_is_a_builtin_skill_and_its_skill_example_parses() {
+        let pi_tool = skills::Skill::builtin(toolbox::scripts::SKILL).expect("pi-tool parses");
+        assert_eq!(pi_tool.name, "pi-tool");
+        let example = toolbox::scripts::SKILL
+            .split("```markdown\n")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .expect("a skill example");
+        let (_, description) = skills::frontmatter(example).unwrap();
+        assert!(description.is_some_and(|d| !d.is_empty()));
+    }
 }

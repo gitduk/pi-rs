@@ -31,9 +31,10 @@ impl Tool for Bash {
     fn description(&self) -> &str {
         "Run a shell command in the workspace. Each call is a fresh shell: cd and \
          environment changes do not carry over — pass cwd rather than prefixing \
-         cd. Prefer read, edit and write over cat, heredocs and sed -i: they \
-        report failures you can act on. File moves and deletions belong \
-        here too (mv, rm); content edits belong to edit."
+         cd. Prefer read and write over cat and heredocs, and edit over sed \
+         when the lines are picked by what they say: those report failures you \
+         can act on. A substitution picked by pattern or position belongs here \
+         (sed, perl, awk), and so do moves and deletions (mv, rm)."
     }
 
     fn schema(&self) -> Value {

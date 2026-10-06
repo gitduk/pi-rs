@@ -139,7 +139,6 @@ impl Core {
             ("format", env),
             ("effort", flag(self.pinned.effort.is_some(), "--effort")),
             ("tier", flag(self.pinned.tier.is_some(), "--tier")),
-            ("system", flag(self.pinned.system.is_some(), "--system")),
         ]
         .into_iter()
         .filter(|(path, _)| self.settings.sets(path))

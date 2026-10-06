@@ -73,10 +73,6 @@ loop_max_rounds = 10
 retries = 4
 idle_timeout = 300
 
-# Replaces the built-in system prompt. Rarely what you want: the built-in one
-# is what the tools were written against.
-# system = "~/.pi/system.md"
-
 # Absolute directories the tools above the read tier may reach besides the
 # workspace root — this widens where `bash` may work as well as what write and
 # edit may touch, so grant it the way you would a shell. Entries must be
