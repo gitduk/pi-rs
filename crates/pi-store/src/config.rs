@@ -197,6 +197,14 @@ impl Binds {
 }
 
 impl Config {
+    /// Where runs may write besides the workspace: `write_roots`, and pi's
+    /// own home, so a tool or a skill can be written where pi reads it.
+    pub fn writable(&self) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = self.write_roots.iter().map(PathBuf::from).collect();
+        out.extend(crate::dir().filter(|home| home.is_absolute()));
+        out
+    }
+
     /// The key table this config asks for, defaults included.
     pub fn key_map(&self) -> Result<crate::keys::Keys> {
         let overrides = self

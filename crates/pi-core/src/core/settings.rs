@@ -43,7 +43,7 @@ impl Core {
         let failed = |e| Err(format!("nothing reloaded — {}", refused("reload", e)));
         // `write_roots` widen the workspace, so it is built again from them.
         let workspace = match tool::Workspace::new(&root)
-            .and_then(|ws| ws.with_write_roots(&config.write_roots))
+            .and_then(|ws| ws.with_write_roots(&config.writable()))
         {
             Ok(ws) => ws,
             Err(e) => return failed(e.into()),

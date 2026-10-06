@@ -151,7 +151,7 @@ async fn main() -> Result<ExitCode> {
     let settings = Settings::load(args.config.as_deref(), workspace.root())?;
     let config = Arc::new(settings.config()?);
     let workspace = workspace
-        .with_write_roots(&config.write_roots)
+        .with_write_roots(&config.writable())
         .with_context(within)?;
 
     let store = session::Store::default();

@@ -55,8 +55,8 @@ the list as it is now, not as it was when you started.
 
 What the run may reach is another matter. The tier and the write boundary are
 the user's to set: a tool beyond them is not offered, and a limit is not
-something to build around. When one stands in the way, including a home
-outside `write_roots`, say what it would take instead.
+something to build around. When one stands in the way, say what it would take
+instead.
 
 To change a file, choose by what picks the lines. When they are picked by what
 they say — this line, this function, every line containing a string — use edit:

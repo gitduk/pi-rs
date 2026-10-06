@@ -69,8 +69,10 @@ pi -C ~/repo --tier read  # another directory, read-only
 | `exec`  | everything, through a shell. **The default.** |
 | `net`   | `read`, plus the web                          |
 
-**`bash` is not sandboxed.** `write` and `edit` are held inside the workspace
-and `write_roots`, symlinks resolved. `bash` runs `sh -c` with only its working
+**`bash` is not sandboxed.** `write` and `edit` are held inside the workspace,
+`write_roots` and pi's home, symlinks resolved. The home is writable so the
+model can make its own tools and skills, which means it can also edit
+`settings.toml`, and an edit there takes effect within a second. `bash` runs `sh -c` with only its working
 directory held there, and pi never asks before a call. Use `--tier` when that
 is too much.
 

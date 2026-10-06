@@ -356,7 +356,7 @@ impl Core {
         // Built before the comparison: both sides are then canonical, and a
         // path git and the workspace spell differently is still one directory.
         let ws = tool::Workspace::new(&tree.path)
-            .and_then(|ws| ws.with_write_roots(&self.config.write_roots))
+            .and_then(|ws| ws.with_write_roots(&self.config.writable()))
             .map_err(|e| refused("worktree", anyhow::anyhow!("{}: {e}", tree.path.display())))?;
         if ws.root() == from {
             return Ok(Step::Flash(format!("already in {}", tree.name)));
