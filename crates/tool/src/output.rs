@@ -13,6 +13,7 @@ use llm::slice::{head_bytes, tail_bytes};
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
+use crate::fold::fold_repeats;
 use crate::spill::{self, SpillRef};
 use crate::{Ctx, Tool, ToolError, ToolOutput};
 
@@ -26,7 +27,8 @@ const VIEW: usize = spill::MAX_OUTPUT / 2;
 pub struct Captured {
     pub total: usize,
     /// The whole stream when it fits the window; head, an omitted marker and
-    /// tail when it does not. Bounded either way — safe to interpolate.
+    /// tail when it does not. Bounded either way — safe to interpolate. Runs
+    /// printed again verbatim are folded to a line naming the first copy.
     pub text: String,
     pub spill: Option<SpillRef>,
 }
@@ -110,7 +112,7 @@ impl Capture {
         let Some((_, locator)) = file else {
             return Captured {
                 total,
-                text: String::from_utf8_lossy(&front).into_owned(),
+                text: fold_repeats(&String::from_utf8_lossy(&front)),
                 spill: None,
             };
         };
@@ -120,7 +122,7 @@ impl Capture {
         let tail = tail_bytes(&tail, VIEW);
         Captured {
             total,
-            text: spill::elided(head, total, tail),
+            text: fold_repeats(&spill::elided(head, total, tail)),
             spill: Some(SpillRef {
                 bytes: total,
                 locator,

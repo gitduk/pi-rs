@@ -111,6 +111,10 @@ model from its next turn, and a skill's `/name` answers the next time you type.
 addresses. With [rtk](https://github.com/rtk-ai/rtk) on `PATH`, `bash` runs
 each command through `rtk rewrite`; `RTK_DISABLED=1` turns that off.
 
+What a command prints twice reaches the model once. A run of six or more lines
+repeating an earlier one byte for byte, like the same diff printed for every
+failing test, becomes one line quoting where the first copy begins.
+
 When the transcript outgrows the window, pi drops repeated and old tool
 results first and summarizes whole rounds last. The saved session keeps
 everything; only the model's view shrinks.

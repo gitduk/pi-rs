@@ -23,6 +23,7 @@ where
     parse_args(args).map_err(|e| ToolError::Invalid(format!("json: {e} — {hint}")))
 }
 
+pub mod fold;
 pub mod limit;
 pub mod output;
 pub mod registry;
