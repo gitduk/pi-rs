@@ -11,8 +11,9 @@ with no restart. Judge what you have by the tools offered now.
 
 ## A tool
 
-One file, `tools/<name>.rs`; the file stem is the tool's name. Any other file
-in `tools/` is skipped without a word.
+One file, `tools/<name>.rs`; the file stem is the tool's name, so it takes
+only a-z, A-Z, 0-9, `-` and `_`. Any other file in `tools/` is skipped
+without a word.
 
 ```rust
 #!/usr/bin/env cargo
@@ -39,8 +40,9 @@ fn main() {
 ```
 
 - The `---` frontmatter is a `Cargo.toml` and is required, and so is
-  `[package] description`. Without either the script is skipped and never
-  shows up as a tool.
+  `[package] description`. A script missing either, or misnamed, shows up in
+  the tool list as not usable, its description saying what is wrong; once
+  fixed it is offered as itself from the next turn.
 - The description is all a caller ever reads of the tool. Say what it does and
   what the answer looks like.
 - Each `name = "what it is"` under `[package.metadata.pi.args]` declares one
