@@ -17,6 +17,7 @@ use std::time::SystemTime;
 
 use tool::Tool;
 
+use script::Runner;
 pub use script::{Script, cargo_script, run_script};
 
 /// The built-in `pi-tool` skill: how to write a script tool, and a skill.
@@ -113,15 +114,15 @@ fn stamps(dir: &Path) -> Vec<(PathBuf, Option<SystemTime>, u64)> {
     out
 }
 
-/// Scan the given directory for `.rs` files; anything else is not a script.
-/// One whose frontmatter carries no description is not registered — a tool
-/// the model cannot see described is a trap — and is named in the skipped
-/// list instead.
+/// Scan the given directory for scripts: a `.rs` cargo script, or any file
+/// whose first line is a `#!`. Anything else is not a script. One whose
+/// interface does not read is not registered — a tool the model cannot see
+/// described is a trap — and is named in the skipped list instead.
 pub fn discover_in(dir: &Path) -> (Vec<Script>, Vec<Skip>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return (Vec::new(), Vec::new());
     };
-    let mut tools = Vec::new();
+    let mut tools: Vec<Script> = Vec::new();
     let mut skipped = Vec::new();
     // Sorted, so the tool list and which of two clashing names wins hold
     // still from run to run; `read_dir` promises no order.
@@ -135,9 +136,21 @@ pub fn discover_in(dir: &Path) -> (Vec<Script>, Vec<Skip>) {
         {
             continue;
         }
-        if path.extension().is_none_or(|e| e != "rs") {
-            continue;
-        }
+        let rust = path.extension().is_some_and(|e| e == "rs");
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(_) if rust => {
+                let why = "not utf-8".to_string();
+                skipped.push(Skip { path, why });
+                continue;
+            }
+            Err(_) => continue,
+        };
+        let runner = match (rust, script::shebang(&text)) {
+            (true, _) => Runner::Cargo,
+            (false, Some((program, arg))) => Runner::Shebang(program, arg),
+            (false, None) => continue,
+        };
         let Some(name) = path.file_stem().and_then(|n| n.to_str()) else {
             continue;
         };
@@ -148,12 +161,16 @@ pub fn discover_in(dir: &Path) -> (Vec<Script>, Vec<Skip>) {
             skipped.push(Skip { path, why });
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            let why = "not utf-8".to_string();
+        if let Some(first) = tools.iter().find(|t| t.name == name) {
+            let why = format!("`{name}` is taken by {}", first.path.display());
             skipped.push(Skip { path, why });
             continue;
+        }
+        let read = match runner {
+            Runner::Cargo => interface(&text),
+            Runner::Shebang(..) => header(&text),
         };
-        let (description, args) = match interface(&text) {
+        let (description, args) = match read {
             Ok(found) => found,
             Err(why) => {
                 skipped.push(Skip { path, why });
@@ -165,6 +182,7 @@ pub fn discover_in(dir: &Path) -> (Vec<Script>, Vec<Skip>) {
             description,
             args,
             path,
+            runner,
         });
     }
     (tools, skipped)
@@ -245,22 +263,72 @@ fn interface(text: &str) -> Result<Interface, String> {
         .map(str::trim)
         .filter(|d| !d.is_empty())
         .ok_or("no [package] description")?;
-    let mut args = Vec::new();
     let declared = package
         .and_then(|p| p.get("metadata"))
         .and_then(|m| m.get("pi"))
         .and_then(|p| p.get("args"));
-    if let Some(declared) = declared {
-        let declared = declared
-            .as_table()
-            .ok_or("[package.metadata.pi.args] is not a table")?;
-        for (name, what) in declared {
+    let args = declared_args(declared, "[package.metadata.pi.args]")?;
+    Ok((description.to_string(), args))
+}
+
+// Each `name = "what it is"` in the table a header names its arguments in.
+fn declared_args(
+    table: Option<&toml::Value>,
+    called: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let Some(table) = table else {
+        return Ok(Vec::new());
+    };
+    let table = table.as_table().ok_or(format!("{called} is not a table"))?;
+    table
+        .iter()
+        .map(|(name, what)| {
             let what = what
                 .as_str()
                 .ok_or_else(|| format!("argument {name}: describe it as a string"))?;
-            args.push((name.clone(), what.to_string()));
+            Ok((name.clone(), what.to_string()))
+        })
+        .collect()
+}
+
+/// Any other script's interface: TOML in a comment block right after the
+/// `#!` line, between `---` fences that carry the comment's own prefix —
+/// `# ---`, `// ---` — with `description` and an `[args]` table.
+fn header(text: &str) -> Result<Interface, String> {
+    const NONE: &str = "no `# ---` header after the #! line";
+    let mut lines = text.lines().skip(1).skip_while(|l| l.trim().is_empty());
+    let fence = lines.next().ok_or(NONE)?.trim_end();
+    let prefix = fence
+        .strip_suffix("---")
+        .filter(|p| !p.trim().is_empty())
+        .ok_or(NONE)?;
+    let bare = prefix.trim_end();
+    let mut toml = String::new();
+    let mut closed = false;
+    for line in lines {
+        let line = line.trim_end();
+        if line == fence {
+            closed = true;
+            break;
         }
+        let body = line
+            .strip_prefix(prefix)
+            .or_else(|| line.strip_prefix(bare))
+            .ok_or("a header line is not a comment; close it with the same `---` line")?;
+        toml.push_str(body);
+        toml.push('\n');
     }
+    if !closed {
+        return Err("the header is not closed by a second `---` line".into());
+    }
+    let table: toml::Table = toml.parse().map_err(|e| format!("header: {e}"))?;
+    let description = table
+        .get("description")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .ok_or("no description in the header")?;
+    let args = declared_args(table.get("args"), "[args]")?;
     Ok((description.to_string(), args))
 }
 
@@ -301,6 +369,17 @@ mod tests {
         assert!(!description.is_empty());
         assert_eq!(args.len(), 1, "{args:?}");
         assert!(example.contains(&format!("std::env::var(\"{}\")", args[0].0)));
+
+        let example = SKILL
+            .split("```sh\n")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .expect("a script example");
+        assert!(script::shebang(example).is_some());
+        let (description, args) = header(example).unwrap();
+        assert!(!description.is_empty());
+        assert_eq!(args.len(), 1, "{args:?}");
+        assert!(example.contains(&format!("\"${}\"", args[0].0)));
     }
 
     #[test]
@@ -382,21 +461,37 @@ mod tests {
     }
 
     #[test]
-    fn only_rust_scripts_are_registered_and_the_rest_are_ignored() {
+    fn a_script_is_rust_or_names_its_interpreter() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("count.rs"),
+        let write = |name: &str, body: &str| std::fs::write(dir.path().join(name), body).unwrap();
+        write(
+            "count.rs",
             "---\n[package]\ndescription = \"Count\"\n---\nfn main() {}\n",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.path().join("old.sh"),
-            "#!/usr/bin/env bash\n# description: x\n",
-        )
-        .unwrap();
+        );
+        write(
+            "greet.sh",
+            "#!/usr/bin/env bash\n# ---\n# description = \"Greet\"\n# [args]\n# who = \"whom\"\n# ---\necho hi\n",
+        );
+        write("notes.md", "# not a script\n");
+        write("old.sh", "#!/usr/bin/env bash\n# description: x\n");
         let (found, skipped) = discover_in(dir.path());
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].name, "count");
-        assert!(skipped.is_empty(), "{skipped:?}");
+        let names: Vec<_> = found.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["count", "greet"]);
+        assert_eq!(found[1].args, [("who".to_string(), "whom".to_string())]);
+        assert!(
+            matches!(&found[1].runner, Runner::Shebang(p, Some(a)) if p == "/usr/bin/env" && a == "bash")
+        );
+        assert_eq!(skipped.len(), 1, "{skipped:?}");
+        assert!(skipped[0].why.contains("no `# ---` header"), "{skipped:?}");
+    }
+
+    #[test]
+    fn a_header_reads_in_its_own_comment_style() {
+        let js = "#!/usr/bin/env node\n\n// ---\n// description = \"Hi\"\n//\n// ---\n";
+        assert_eq!(header(js).unwrap().0, "Hi");
+        let open = "#!/bin/sh\n# ---\n# description = \"Hi\"\n";
+        assert!(header(open).unwrap_err().contains("not closed"));
+        let stray = "#!/bin/sh\n# ---\ndescription = \"Hi\"\n# ---\n";
+        assert!(header(stray).unwrap_err().contains("not a comment"));
     }
 }

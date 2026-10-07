@@ -101,9 +101,12 @@ Esc.
 `read` `write` `edit` `glob` `grep` `bash` `fetch` `skill` `subagent`, plus:
 
 - `judge`, when the config has a `[judge]` section.
-- One tool per cargo script in `~/.pi/tools/*.rs`. Its `[package] description`
-  is the tool's description and `[package.metadata.pi.args]` its arguments.
-  Needs `cargo +nightly -Zscript`.
+- One tool per script in `~/.pi/tools/`: any file whose first line is a `#!`,
+  its `description` and `[args]` written as TOML in a `# ---` comment block
+  under that line; or a cargo script `*.rs`, described by its
+  `[package] description` and `[package.metadata.pi.args]`, which needs
+  `cargo +nightly -Zscript`. A script that does not read is listed as not
+  usable, with the reason.
 
 Scripts and skills are read live: one written while pi runs is offered to the
 model from its next turn, and a skill's `/name` answers the next time you type.
@@ -140,7 +143,7 @@ Memory starts with the first session to end and never reads tool output.
 | `~/.pi/AGENTS.md`, `AGENTS.md`           | standing instructions: yours, a project's  |
 | `~/.pi/skills/`                          | skills: a directory with a `SKILL.md`      |
 | `~/.pi/memory/*.md`, `projects/*.md`     | memory: global, and one file per project   |
-| `~/.pi/tools/*.rs`                       | script tools                               |
+| `~/.pi/tools/`                           | script tools                               |
 | `~/.pi/bar.rs`                           | a cargo script that lays out the bar       |
 | `~/.pi/sessions/<project>/<session>/`    | the transcript and `journal.jsonl`         |
 

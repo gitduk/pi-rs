@@ -24,9 +24,44 @@ pub struct Script {
     pub(crate) description: String,
     pub(crate) args: Vec<(String, String)>,
     pub(crate) path: PathBuf,
+    pub(crate) runner: Runner,
+}
+
+/// How a script is started.
+pub(crate) enum Runner {
+    // A cargo script, built on its first run.
+    Cargo,
+    // The interpreter its `#!` line names, and the one argument the line may
+    // add: read here rather than by the kernel, so no execute bit is needed.
+    Shebang(String, Option<String>),
+}
+
+/// The interpreter a `#!` first line names, split as the kernel splits it:
+/// the program, then everything after it as one argument.
+pub(crate) fn shebang(text: &str) -> Option<(String, Option<String>)> {
+    let line = text.lines().next()?.strip_prefix("#!")?.trim();
+    let (program, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+    let rest = rest.trim();
+    (!program.is_empty()).then(|| {
+        (
+            program.to_string(),
+            (!rest.is_empty()).then(|| rest.to_string()),
+        )
+    })
 }
 
 impl Script {
+    fn command(&self) -> tokio::process::Command {
+        match &self.runner {
+            Runner::Cargo => cargo_script(&self.path),
+            Runner::Shebang(program, arg) => {
+                let mut command = tokio::process::Command::new(program);
+                command.args(arg).arg(&self.path);
+                command
+            }
+        }
+    }
+
     // Declared string args also ride in as environment, under three guards: a
     // portable name, an inherited value that always wins, and a size cap.
     fn env<'a>(&'a self, args: &'a Value) -> impl Iterator<Item = (&'a str, &'a str)> {
@@ -104,7 +139,7 @@ impl Tool for Script {
     }
 
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
-        let mut command = cargo_script(&self.path);
+        let mut command = self.command();
         command
             // Cargo finds a script's config from the script's directory, not
             // this one, so the workspace cannot configure the build.
@@ -152,6 +187,7 @@ mod tests {
                 ("bad-name".into(), "not portable".into()),
             ],
             path: PathBuf::from("spy.rs"),
+            runner: Runner::Cargo,
         };
         let args = json!({
             "PATH": "/hijacked",
@@ -160,5 +196,20 @@ mod tests {
         });
         let env: Vec<_> = script.env(&args).collect();
         assert_eq!(env, vec![("file", "a.txt")]);
+    }
+
+    #[test]
+    fn a_shebang_splits_as_the_kernel_splits_it() {
+        assert_eq!(
+            shebang("#!/usr/bin/env python3\n"),
+            Some(("/usr/bin/env".into(), Some("python3".into())))
+        );
+        assert_eq!(
+            shebang("#!/usr/bin/env -S deno run -A\n"),
+            Some(("/usr/bin/env".into(), Some("-S deno run -A".into())))
+        );
+        assert_eq!(shebang("#!/bin/sh"), Some(("/bin/sh".into(), None)));
+        assert_eq!(shebang("echo hi\n"), None);
+        assert_eq!(shebang("#!\n"), None);
     }
 }
