@@ -151,6 +151,14 @@ replay_thinking = "tagged"
 
 [keys]
 # An entry replaces that action's defaults rather than adding to them.
+# `/keys` lists every id. Two presses apart by a space are a pair.
 "menu.accept"   = ["tab"]
 "menu.next"     = ["down", "ctrl+n"]
 "menu.previous" = ["up", "ctrl+p"]
+"mode.normal"   = ["j k"]   # Insert to Normal; [] leaves no way in
+
+[vim]
+enabled = true
+# How long the first of a pair of bare characters (`j k`, `g g`, `d d`)
+# waits for the second. Pairs with ctrl, alt or a named key wait 500 ms.
+pair_timeout_ms = 250
