@@ -112,6 +112,12 @@ pub(crate) const BUILTIN: &[Command] = &[
         |_, _| Intent::Builtin(Builtin::Status),
     ),
     Command::builtin(
+        "/content",
+        "",
+        "everything the model is given before your first word, AGENTS.md included",
+        |_, _| Intent::Builtin(Builtin::Content),
+    ),
+    Command::builtin(
         "/keys",
         "",
         "what every key does, and the id to rebind it under",

@@ -90,6 +90,7 @@ Esc.
 | `/loop <line>`                     | resubmit a line until a round edits no file   |
 | `/settings`                        | edit the project's config                     |
 | `/status`, `/keys`, `/help`        | session paths and spend; bindings; commands   |
+| `/content`                         | everything the model is given before you type |
 | `/wechat on`, `/wechat off`        | bridge the session to a WeChat chat           |
 | `/<skill> [args]`                  | run a skill (also one-shot: `pi "/commit"`)   |
 | `! <command>`                      | run a shell command and record its output     |

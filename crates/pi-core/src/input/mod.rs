@@ -31,6 +31,7 @@ pub enum Builtin {
     Help,
     Keys,
     Status,
+    Content,
     Name(String),
     // The session to switch to, or empty to list what there is.
     Resume(String),
@@ -91,9 +92,13 @@ impl Intent {
         match self {
             // Answered from the config, the key map or the lane's own tally
             // — none of which the run is holding.
-            Intent::Builtin(Builtin::Help | Builtin::Keys | Builtin::Status | Builtin::Name(_)) => {
-                Fate::Now
-            }
+            Intent::Builtin(
+                Builtin::Help
+                | Builtin::Keys
+                | Builtin::Status
+                | Builtin::Content
+                | Builtin::Name(_),
+            ) => Fate::Now,
             Intent::Builtin(Builtin::Model(_)) => Fate::Now,
             // Bare, these only list what there is.
             Intent::Builtin(Builtin::Resume(name) | Builtin::Worktree(name))

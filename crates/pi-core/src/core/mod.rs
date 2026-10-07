@@ -6,6 +6,7 @@
 
 pub mod bar;
 pub mod bash;
+pub mod content;
 pub mod dial;
 pub mod lane;
 pub mod memory;
@@ -205,6 +206,7 @@ impl Core {
             Intent::Builtin(Builtin::Help) => Step::Handled(Listing::say(help(&self.commands))),
             Intent::Builtin(Builtin::Keys) => Step::Handled(self.keys.listing()),
             Intent::Builtin(Builtin::Status) => Step::Handled(self.status()),
+            Intent::Builtin(Builtin::Content) => Step::Handled(self.content()),
             Intent::Builtin(Builtin::New) => {
                 self.fresh_session();
                 Step::Swap(Listing::default())

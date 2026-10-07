@@ -8,9 +8,8 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Default)]
 pub struct Loaded {
-    /// Ready to append to the system prompt, or empty.
-    pub text: String,
-    pub files: Vec<PathBuf>,
+    /// Each file that applies and is not blank, with its text.
+    pub files: Vec<(PathBuf, String)>,
 }
 
 pub fn home() -> Option<PathBuf> {
@@ -41,83 +40,6 @@ pub fn short(path: &Path, root: &Path) -> String {
     }
     path.display().to_string()
 }
-// An XML reader ends a node where a quote or a `<` says it does, so a path
-// riding inside one loses those to the references first.
-fn escaped(path: impl std::fmt::Display) -> String {
-    path.to_string()
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
-/// The directory the run works in, and what that means for a path. Said
-/// here rather than in the system prompt, which the user may replace.
-pub fn workspace(root: &Path) -> String {
-    format!(
-        "\n\n<workspace path=\"{}\"/>\n\nThe workspace is the directory you work in. Every \
-path you name is relative to it, and commands start in it. Writing stays inside it unless a \
-`<write_paths>` block names more places; reading may go further — an absolute path reaches \
-the rest of this machine, a URL the rest of the world.",
-        escaped(root.display())
-    )
-}
-
-/// pi's home, for a run that may add tools and skills to it.
-pub fn pi_home(dir: &Path) -> String {
-    format!(
-        "\n\n<pi_home path=\"{}\">\npi's own home, read live: a tool or skill written here is \
-offered from your next turn, with no restart. The `pi-tool` skill says how to write one.\n</pi_home>",
-        escaped(dir.display())
-    )
-}
-
-/// What the model may change, and where — the workspace root plus every
-/// configured write root, as far as this run's ceiling reaches. The write and
-/// exec tools enforce exactly this set, spelled out here so the escape
-/// refusal is not the model's first hint of the boundary.
-pub fn boundary(ws: &tool::Workspace, tier: tool::Tier) -> String {
-    let extras = ws.write_roots();
-    // Nothing to say when the run may not write at all, or when the workspace
-    // is the whole boundary — the `<workspace>` tag already names that.
-    if !tool::Tier::Write.under(tier) || extras.is_empty() {
-        return String::new();
-    }
-    let mut out = format!(
-        "\n\n<write_paths root=\"{}\">",
-        escaped(ws.root().display())
-    );
-    for root in extras {
-        out.push_str(&format!("\n  {}", escaped(root.display())));
-    }
-    out.push_str(
-        "\n</write_paths>\n\nPaths inside these directories are writable; elsewhere write and \
-edit refuse.",
-    );
-    if tool::Tier::Exec.under(tier) {
-        // Said only where it holds: a run capped below `exec` may not run `sh`.
-        out.push_str(" bash can still write anywhere its redirections name.");
-    }
-    out
-}
-
-/// What this run is, as against what it is working on.
-///
-/// Fields here hold still for the whole run, since this rides the cached
-/// system-prompt prefix; only `stamp`'s day is kept, so runs an hour apart
-/// still share one cache entry.
-pub fn env(stamp: &str, tier: tool::Tier) -> String {
-    let day = stamp.split_once('T').map_or(stamp, |(day, _)| day);
-    // `sh`, not `$SHELL`: the bash tool runs `Command::new("sh")` whatever the
-    // login shell is, and the tool's own name is what misleads about it.
-    let tier = format!("{tier:?}").to_lowercase();
-    format!(
-        "\n\n<env date=\"{day}\" platform=\"{}\" shell=\"sh\" pi=\"{}\" tier=\"{tier}\"/>",
-        std::env::consts::OS,
-        env!("CARGO_PKG_VERSION"),
-    )
-}
-
 /// Every instructions file that applies, most general first.
 ///
 /// The nearest directory speaks last, so where files disagree the more
@@ -168,69 +90,19 @@ fn from(workspace: &Path, home: Option<&Path>, root: Option<&Path>) -> Loaded {
         if body.trim().is_empty() {
             continue;
         }
-        if loaded.files.is_empty() {
-            loaded.text.push_str(
-                "\n\nThe `<instructions>` blocks below are the user's standing instructions, \
-for this machine and this project, most general first. Follow them; where two disagree, the \
-later one, nearer the workspace, wins. They say how to work here; the user's message says what \
-to do now.",
-            );
-        }
-        // Tagged rather than headed: the content is arbitrary markdown with
-        // headings of its own, so a `#` delimiter would not delimit anything.
-        loaded.text.push_str(&format!(
-            "\n\n<instructions path=\"{}\">\n{}\n</instructions>",
-            escaped(path.display()),
-            body.trim_end()
-        ));
-        loaded.files.push(path);
+        loaded.files.push((path, body));
     }
     loaded
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{boundary, env, paths};
+    use super::paths;
     use std::path::Path;
 
     fn write(path: &Path, body: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, body).unwrap();
-    }
-
-    #[test]
-    fn the_write_block_claims_only_what_the_ceiling_allows() {
-        let dir = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let ws = tool::Workspace::new(dir.path())
-            .unwrap()
-            .with_write_roots(&[outside.path()])
-            .unwrap();
-
-        assert!(boundary(&ws, tool::Tier::Read).is_empty());
-        assert!(boundary(&ws, tool::Tier::Net).is_empty());
-
-        // Printed as `resolve` admits it, which an existing tempdir may spell
-        // differently once its links are gone.
-        let shown = outside.path().canonicalize().unwrap();
-        let shown = shown.to_str().unwrap();
-        let write = boundary(&ws, tool::Tier::Write);
-        assert!(write.contains(shown), "{write}");
-        assert!(!write.contains("bash"), "{write}");
-        assert!(boundary(&ws, tool::Tier::Exec).contains("bash"));
-
-        // No write root beyond the workspace: `<workspace>` already names the
-        // whole boundary, so there is nothing to add.
-        let bare = tool::Workspace::new(dir.path()).unwrap();
-        assert!(boundary(&bare, tool::Tier::Exec).is_empty());
-    }
-
-    #[test]
-    fn the_env_date_moves_once_a_day_not_every_run() {
-        let got = env("2026-09-21T12:00:00.000Z", tool::Tier::Read);
-        assert!(got.contains("date=\"2026-09-21\""), "{got}");
-        assert_eq!(got, env("2026-09-21T13:00:00.000Z", tool::Tier::Read));
-        assert_ne!(got, env("2026-09-22T12:00:00.000Z", tool::Tier::Read));
     }
 
     #[test]

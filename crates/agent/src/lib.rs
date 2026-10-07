@@ -17,6 +17,7 @@ pub mod approval;
 pub mod compaction;
 pub mod context;
 pub mod event;
+pub mod prompt;
 pub mod retry;
 pub mod seams;
 pub mod session;

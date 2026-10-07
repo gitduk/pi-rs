@@ -10,7 +10,7 @@ use std::time::Duration;
 use agent::session::Entry;
 use llm::model::ModelSpec;
 use llm::transport::Transport;
-use pi_store::memory::{self, File, Memory};
+use pi_store::memory::{self, Memory};
 use pi_store::session::{Progress, Store, Stored};
 
 use super::worktree::main_root;
@@ -26,9 +26,8 @@ const PER_RUN: usize = 10;
 /// rest is left out rather than the prompt growing without bound.
 const BUDGET: usize = 16 * 1024;
 
-/// The `<memory>` block for a run in `dir`, and the files that went into
-/// it. Nothing at all when nothing is remembered.
-pub fn block(memory: &Memory, dir: &Path) -> (String, Vec<String>) {
+/// The memory files a run in `dir` carries, by name, within the budget.
+pub fn kept(memory: &Memory, dir: &Path) -> Vec<(String, String)> {
     let mut used = 0;
     let mut kept = Vec::new();
     for file in memory.files(&main_root(dir)) {
@@ -39,17 +38,7 @@ pub fn block(memory: &Memory, dir: &Path) -> (String, Vec<String>) {
         used += file.body.len();
         kept.push(file);
     }
-    if kept.is_empty() {
-        return (String::new(), Vec::new());
-    }
-    let block = format!(
-        "\n\n<memory>\nWhat you have come to know in earlier sessions. Let it shape what \
-you do the way a colleague's experience does: act on it without announcing it or saying \
-you remember. Say where something came from only if asked. It can be out of date; what \
-the user says now wins.\n{}\n</memory>",
-        tagged(&kept)
-    );
-    (block, kept.into_iter().map(|f| f.name).collect())
+    kept.into_iter().map(|f| (f.name, f.body)).collect()
 }
 
 /// Read what changed in the sessions since the last distillation and fold it
@@ -133,7 +122,12 @@ async fn once(
         "Memory now:\n{}\n\nSession in {}, {}:\n{history}",
         match memory.files(&project) {
             files if files.is_empty() => "(nothing yet)".into(),
-            files => tagged(&files),
+            files => agent::prompt::files(
+                &files
+                    .into_iter()
+                    .map(|f| (f.name, f.body))
+                    .collect::<Vec<_>>()
+            ),
         },
         stored.workspace,
         day.split_once('T').map_or(day.as_str(), |(d, _)| d),
@@ -179,14 +173,6 @@ fn save(memory: &Memory, marks: &BTreeMap<String, u64>) {
     if let Err(e) = memory.save_marks(marks) {
         tracing::warn!(target: "pi::memory", error = %e, "distillation marks not saved");
     }
-}
-
-fn tagged(files: &[File]) -> String {
-    files
-        .iter()
-        .map(|f| format!("<file name=\"{}\">\n{}\n</file>", f.name, f.body.trim_end()))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 #[cfg(test)]

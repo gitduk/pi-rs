@@ -173,37 +173,43 @@ pub fn resolve(
     // Everything the run needs to know about pi rides here rather than in the
     // system prompt, so that a replaced or empty one loses none of it.
     let stamp = journal::rfc3339(std::time::SystemTime::now());
-    let mut standing = context::workspace(root);
-    standing.push_str(&context::boundary(workspace, tier));
     // Said only where `pi-tool` is offered and the home may be written; the
     // write tool's own check, so a symlinked home is judged as it is.
-    if let Some(home) = pi_store::dir()
-        && found.skills.iter().any(|s| s.name == "pi-tool")
-        && tool::Tier::Write.under(tier)
-        && home
-            .to_str()
-            .is_some_and(|h| workspace.resolve(h, tool::Tier::Write).is_ok())
-    {
-        standing.push_str(&context::pi_home(&home));
-    }
-    standing.push_str(&context::env(&stamp, tier));
+    let pi_home = pi_store::dir().filter(|home| {
+        found.skills.iter().any(|s| s.name == "pi-tool")
+            && tool::Tier::Write.under(tier)
+            && home
+                .to_str()
+                .is_some_and(|h| workspace.resolve(h, tool::Tier::Write).is_ok())
+    });
+    let (instructions, memory) = if pinned.no_context_files {
+        (Vec::new(), Vec::new())
+    } else {
+        (
+            context::load(root, pi_store::dir().as_deref()).files,
+            crate::core::memory::kept(&pi_store::memory::Memory::default(), root),
+        )
+    };
+    let context = instructions
+        .iter()
+        .map(|(p, _)| context::short(p, root))
+        .collect();
+    let memory_names = memory.iter().map(|(name, _)| name.clone()).collect();
     // Appended rather than sent as a message: standing instructions don't
     // change within a run, and the system prompt is what a provider caches.
-    let mut context = Vec::new();
-    let mut memory = Vec::new();
-    if !pinned.no_context_files {
-        let loaded = context::load(root, pi_store::dir().as_deref());
-        context = loaded
-            .files
-            .iter()
-            .map(|p| context::short(p, root))
-            .collect();
-        standing.push_str(&loaded.text);
-        // Last: what was learned is read in light of what the user wrote down.
-        let (block, files) = crate::core::memory::block(&pi_store::memory::Memory::default(), root);
-        standing.push_str(&block);
-        memory = files;
+    let standing = agent::prompt::Standing {
+        workspace: root.to_path_buf(),
+        write_paths: workspace.write_roots().to_vec(),
+        pi_home,
+        instructions,
+        memory,
+        day: stamp
+            .split_once('T')
+            .map_or(&*stamp, |(day, _)| day)
+            .to_string(),
+        tier,
     }
+    .render();
     system.push_str(&standing);
 
     Ok(Resolved {
@@ -225,7 +231,7 @@ pub fn resolve(
         shelf_seen,
         notes,
         context,
-        memory,
+        memory: memory_names,
         system: system_file,
         endpoint: endpoint(pinned, config, settings, root),
     })
