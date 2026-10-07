@@ -73,7 +73,6 @@ fn read_answer(fd: RawFd) -> Answer {
     let mut asked = Answer::default();
     let mut held: Vec<u8> = Vec::new();
     let mut typed: Vec<u8> = Vec::new();
-    let mut one = [0u8; 1];
     let opening = OPENING.as_bytes();
     loop {
         // A reply already in hand is waited out: its bytes are on their way,
@@ -83,10 +82,9 @@ fn read_answer(fd: RawFd) -> Answer {
             None if held.is_empty() => break,
             None => TAIL,
         };
-        if !wait_on(fd, left) || read_bytes(fd, &mut one).is_none() {
+        let Some(byte) = read_byte(fd, left) else {
             break;
-        }
-        let byte = one[0];
+        };
         // Text is what the user typed; the one byte a reply opens with is
         // held, and the next bytes say whether it was one.
         if held.is_empty() {
@@ -125,8 +123,8 @@ fn read_answer(fd: RawFd) -> Answer {
         if let Some(bg) = parse(&held) {
             // A reply ended in `ST` is `ESC` and one more byte, and that byte
             // is not part of the colour: it must not be left behind either.
-            if byte == 0x1b && wait_on(fd, TAIL) {
-                let _ = read_bytes(fd, &mut one);
+            if byte == 0x1b {
+                let _ = read_byte(fd, TAIL);
             }
             asked.bg = Some(bg);
             held.clear();
@@ -142,13 +140,12 @@ fn read_answer(fd: RawFd) -> Answer {
 // included. `ESC [ M` is an X10 mouse report, whose three bytes follow it.
 #[cfg(unix)]
 fn eat_key(fd: RawFd) {
-    let mut one = [0u8; 1];
     let mut first = true;
-    while wait_on(fd, TAIL) && read_bytes(fd, &mut one).is_some() {
-        if (0x40..=0x7e).contains(&one[0]) {
-            let mouse = first && one[0] == b'M';
+    while let Some(byte) = read_byte(fd, TAIL) {
+        if (0x40..=0x7e).contains(&byte) {
+            let mouse = first && byte == b'M';
             for _ in 0..if mouse { 3 } else { 0 } {
-                if !wait_on(fd, TAIL) || read_bytes(fd, &mut one).is_none() {
+                if read_byte(fd, TAIL).is_none() {
                     return;
                 }
             }
@@ -156,6 +153,13 @@ fn eat_key(fd: RawFd) {
         }
         first = false;
     }
+}
+
+// One byte, if the terminal has it within `within`.
+#[cfg(unix)]
+fn read_byte(fd: RawFd, within: Duration) -> Option<u8> {
+    let mut one = [0u8; 1];
+    (wait_on(fd, within) && read_bytes(fd, &mut one).is_some()).then_some(one[0])
 }
 
 // What is waiting in the terminal, if anything: `poll` has just said there is

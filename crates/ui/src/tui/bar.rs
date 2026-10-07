@@ -55,13 +55,6 @@ impl Facts {
     }
 }
 
-// The tier as the command line and the config spell it.
-fn tier_name(tier: TierArg) -> String {
-    clap::ValueEnum::to_possible_value(&tier)
-        .map(|v| v.get_name().to_string())
-        .unwrap_or_default()
-}
-
 // A part of a row before the row is fitted: the checkouts take whatever
 // room the rest leaves, so they are drawn last.
 enum Piece {
@@ -186,7 +179,7 @@ impl Ui {
             Part::Model => facts.model.clone(),
             Part::Effort if facts.effort == Effort::Off => return None,
             Part::Effort => facts.effort.name().to_string(),
-            Part::Tier => tier_name(facts.tier),
+            Part::Tier => facts.tier.name(),
             Part::Status(segment) => return crate::status::render(segment, snap),
         })
     }

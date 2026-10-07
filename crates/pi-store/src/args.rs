@@ -42,6 +42,15 @@ pub enum TierArg {
     Net,
 }
 
+impl TierArg {
+    /// As the command line and the config files spell it.
+    pub fn name(self) -> String {
+        self.to_possible_value()
+            .map(|v| v.get_name().to_string())
+            .unwrap_or_default()
+    }
+}
+
 impl From<TierArg> for tool::Tier {
     fn from(arg: TierArg) -> Self {
         match arg {

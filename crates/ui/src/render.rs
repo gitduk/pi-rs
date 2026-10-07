@@ -122,28 +122,16 @@ fn write_sgr(out: &mut String, code: u8) {
 
 fn append_color(out: &mut String, color: ratatui::style::Color, bg: bool) {
     use ratatui::style::Color as RColor;
-    let base = if bg { 40 } else { 30 };
-    let bright = if bg { 100 } else { 90 };
+    // The tables `parse_sgr` reads, run backwards: both ends speak one list.
+    let (base, bright) = if bg { (40, 100) } else { (30, 90) };
+    if let Some(i) = crate::sgr::NAMED.iter().position(|&c| c == color) {
+        return write_sgr(out, base + i as u8);
+    }
+    if let Some(i) = crate::sgr::BRIGHT.iter().position(|&c| c == color) {
+        return write_sgr(out, bright + i as u8);
+    }
     match color {
         RColor::Reset => write_sgr(out, if bg { 49 } else { 39 }),
-        RColor::Black => write_sgr(out, base),
-        RColor::Red => write_sgr(out, base + 1),
-        RColor::Green => write_sgr(out, base + 2),
-        RColor::Yellow => write_sgr(out, base + 3),
-        RColor::Blue => write_sgr(out, base + 4),
-        RColor::Magenta => write_sgr(out, base + 5),
-        RColor::Cyan => write_sgr(out, base + 6),
-        // Gray is the eighth named colour, DarkGray the bright black; keeping
-        // them apart is what makes SGR 37 survive a row and a block alike.
-        RColor::Gray => write_sgr(out, base + 7),
-        RColor::DarkGray => write_sgr(out, bright),
-        RColor::LightRed => write_sgr(out, bright + 1),
-        RColor::LightGreen => write_sgr(out, bright + 2),
-        RColor::LightYellow => write_sgr(out, bright + 3),
-        RColor::LightBlue => write_sgr(out, bright + 4),
-        RColor::LightMagenta => write_sgr(out, bright + 5),
-        RColor::LightCyan => write_sgr(out, bright + 6),
-        RColor::White => write_sgr(out, bright + 7),
         RColor::Indexed(n) => {
             push_sep(out);
             let prefix = if bg { "48;5;" } else { "38;5;" };
@@ -156,6 +144,7 @@ fn append_color(out: &mut String, color: ratatui::style::Color, bg: bool) {
             out.push_str(prefix);
             let _ = write!(out, "{r};{g};{b}");
         }
+        _ => {}
     }
 }
 

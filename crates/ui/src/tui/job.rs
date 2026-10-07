@@ -55,6 +55,15 @@ where
 }
 
 impl Tui {
+    // The front lane's transcript, for a job about to run on it.
+    fn take_carried(&mut self) -> Option<Session> {
+        let carried = self.core.lane_mut().take_session();
+        if carried.is_none() {
+            self.ui.flash(NO_TRANSCRIPT);
+        }
+        carried
+    }
+
     // Hands the view to a job about to start: clock running, run figures
     // at zero. `committed` says whether the prompt can still be taken back.
     pub(super) fn arm_view(&mut self, committed: bool) {
@@ -76,8 +85,7 @@ impl Tui {
     ) {
         // Lent to the run for the turn's length. Missing only when a panic
         // took the transcript and the archive won't read back.
-        let Some(mut carried) = self.core.lane_mut().take_session() else {
-            self.ui.flash(NO_TRANSCRIPT);
+        let Some(mut carried) = self.take_carried() else {
             return;
         };
         carried.send_prompt(prompt, typed);
@@ -125,8 +133,7 @@ impl Tui {
     // Runs a `!` command off the loop, so the screen stays live. Borrows
     // the transcript like a turn — the result is filed in it meanwhile.
     pub(super) fn start_bash(&mut self, command: String, done: &UnboundedSender<Done>) {
-        let Some(mut carried) = self.core.lane_mut().take_session() else {
-            self.ui.flash(NO_TRANSCRIPT);
+        let Some(mut carried) = self.take_carried() else {
             return;
         };
         let cancel = CancellationToken::new();
@@ -167,8 +174,7 @@ impl Tui {
     // Runs `/compact` off the loop — summarizing what it drops is a model
     // call — while the lane keeps drawing and serving the others.
     pub(super) fn start_compact(&mut self, focus: Option<String>, done: &UnboundedSender<Done>) {
-        let Some(mut carried) = self.core.lane_mut().take_session() else {
-            self.ui.flash(NO_TRANSCRIPT);
+        let Some(mut carried) = self.take_carried() else {
             return;
         };
         let cancel = CancellationToken::new();

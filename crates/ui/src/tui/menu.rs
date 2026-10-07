@@ -279,23 +279,10 @@ impl Ui {
                         return Asked::Own(Deed::To(id));
                     }
                     Some(MenuEntry::Completion(c)) => {
-                        let line = c.line;
                         // The completion's line runs; the prefix that
                         // produced it goes, so it can't resubmit as a stray prompt.
                         self.editor.take();
-                        if input::recallable(&line, &self.commands) {
-                            self.editor.remember(&line);
-                        }
-                        if line.trim().is_empty() {
-                            return Asked::Own(Deed::Nothing);
-                        }
-                        let intent = input::read(&line, &self.commands);
-                        if intent.echoed() {
-                            self.submit(view, &line);
-                            view.surface.scroll = 0;
-                        }
-                        self.submitted = true;
-                        return Asked::Core(intent);
+                        return self.run_line(view, c.line);
                     }
                     Some(MenuEntry::File {
                         start,
@@ -311,19 +298,7 @@ impl Ui {
                     }
                     None => {
                         let typed = self.editor.take();
-                        if input::recallable(&typed, &self.commands) {
-                            self.editor.remember(&typed);
-                        }
-                        if typed.trim().is_empty() {
-                            return Asked::Own(Deed::Nothing);
-                        }
-                        let intent = input::read(&typed, &self.commands);
-                        if intent.echoed() {
-                            self.submit(view, &typed);
-                            view.surface.scroll = 0;
-                        }
-                        self.submitted = true;
-                        return Asked::Core(intent);
+                        return self.run_line(view, typed);
                     }
                 }
             }
@@ -483,15 +458,14 @@ impl Ui {
                     None => {}
                 }
             }
-            Some(Action::MenuNext) => {
+            Some(action @ (Action::MenuNext | Action::MenuPrevious)) => {
                 let n = self.menu().len().saturating_sub(1);
                 let at = self.picked.unwrap_or(n).min(n);
-                self.picked = Some(at.saturating_add(1).min(n));
-            }
-            Some(Action::MenuPrevious) => {
-                let n = self.menu().len().saturating_sub(1);
-                let at = self.picked.unwrap_or(n).min(n);
-                self.picked = Some(at.saturating_sub(1));
+                self.picked = Some(if action == Action::MenuNext {
+                    at.saturating_add(1).min(n)
+                } else {
+                    at.saturating_sub(1)
+                });
             }
             // Answered in the first match, which returns; named here because
             // this one has no catch-all and should not grow one.
@@ -542,6 +516,23 @@ impl Ui {
             }
         }
         Asked::Own(Deed::Nothing)
+    }
+
+    // Submit `line` as typed: kept in history if it can be recalled, then read.
+    fn run_line(&mut self, view: &mut View, line: String) -> Asked {
+        if input::recallable(&line, &self.commands) {
+            self.editor.remember(&line);
+        }
+        if line.trim().is_empty() {
+            return Asked::Own(Deed::Nothing);
+        }
+        let intent = input::read(&line, &self.commands);
+        if intent.echoed() {
+            self.submit(view, &line);
+            view.surface.scroll = 0;
+        }
+        self.submitted = true;
+        Asked::Core(intent)
     }
 
     // One key, two meanings: stop the run, or — pressed twice inside the

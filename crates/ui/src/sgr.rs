@@ -21,6 +21,31 @@ pub fn band_to_ratatui(c: &Color) -> ratatui::style::Style {
     parse_sgr(&params, ratatui::style::Style::default())
 }
 
+use ratatui::style::Color as RColor;
+
+// SGR 30-37 and 90-97 name these eight each, in order. Gray is the eighth
+// named colour and DarkGray the bright black, so SGR 37 survives a round trip.
+pub(crate) const NAMED: [RColor; 8] = [
+    RColor::Black,
+    RColor::Red,
+    RColor::Green,
+    RColor::Yellow,
+    RColor::Blue,
+    RColor::Magenta,
+    RColor::Cyan,
+    RColor::Gray,
+];
+pub(crate) const BRIGHT: [RColor; 8] = [
+    RColor::DarkGray,
+    RColor::LightRed,
+    RColor::LightGreen,
+    RColor::LightYellow,
+    RColor::LightBlue,
+    RColor::LightMagenta,
+    RColor::LightCyan,
+    RColor::White,
+];
+
 /// The style the SGR parameters `codes` writes add up to —
 /// `"1;3;38;2;88;166;255"` read back as ratatui sees it.
 ///
@@ -28,27 +53,6 @@ pub fn band_to_ratatui(c: &Color) -> ratatui::style::Style {
 /// ignored, matching the resilience the terminal itself provides.
 pub fn parse_sgr(params: &str, mut style: ratatui::style::Style) -> ratatui::style::Style {
     use ratatui::style::{Color as RColor, Modifier as RModifier, Style as RStyle};
-    // SGR 30-37 and 90-97 name these eight each, in order.
-    const NAMED: [RColor; 8] = [
-        RColor::Black,
-        RColor::Red,
-        RColor::Green,
-        RColor::Yellow,
-        RColor::Blue,
-        RColor::Magenta,
-        RColor::Cyan,
-        RColor::Gray,
-    ];
-    const BRIGHT: [RColor; 8] = [
-        RColor::DarkGray,
-        RColor::LightRed,
-        RColor::LightGreen,
-        RColor::LightYellow,
-        RColor::LightBlue,
-        RColor::LightMagenta,
-        RColor::LightCyan,
-        RColor::White,
-    ];
     let mut it = params
         .split(';')
         .map(|p| p.parse::<u8>().unwrap_or(0))
