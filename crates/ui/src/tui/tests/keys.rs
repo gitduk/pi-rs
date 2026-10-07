@@ -178,36 +178,41 @@ async fn a_command_is_not_echoed_and_a_prompt_is() {
     );
 }
 
-// A reply reads only the menu's own keys; any other key takes it down on
-// the way past and lands in the editor — else that letter goes missing.
+// A reply has the keyboard: one place takes keys at a time, so a stray
+// letter neither types into the hidden line nor takes the reply down.
 #[tokio::test]
-async fn a_reply_reads_the_menus_keys_and_yields_everything_else() {
+async fn a_reply_has_the_keyboard_until_closed() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
     tui.ui.open_reply(Listing::say(["/status answered this"]));
     let token = tui.core.lane().token();
+    let press = |code| crate::tui::TermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
 
-    // The menu's own: the window moves and the reply stays up.
-    let down = crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-    let lane = tui.core.lane_mut();
-    tui.ui
-        .key(lane, view_at(&mut tui.views, token), down, false);
-    assert!(tui.ui.reply.is_some(), "a menu key is the reply's");
+    for code in [KeyCode::Down, KeyCode::Char('j'), KeyCode::Char('x')] {
+        let lane = tui.core.lane_mut();
+        let asked = tui
+            .ui
+            .key(lane, view_at(&mut tui.views, token), press(code), false);
+        assert!(tui.ui.reply.is_some(), "{code:?} is the reply's");
+        assert!(matches!(asked, Asked::Own(Deed::Nothing)), "{asked:?}");
+    }
+    assert!(tui.ui.editor.is_empty(), "nothing typed behind it");
 
-    // Not the menu's: a letter meant for the next line comes down here, and
-    // is left for the caller to read as what it was typed as.
-    let j = crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
     let lane = tui.core.lane_mut();
-    let asked = tui.ui.key(lane, view_at(&mut tui.views, token), j, false);
-    assert!(tui.ui.reply.is_none(), "the letter took it down");
-    assert!(matches!(asked, Asked::Own(Deed::Nothing)), "{asked:?}");
+    tui.ui.key(
+        lane,
+        view_at(&mut tui.views, token),
+        press(KeyCode::Char('q')),
+        false,
+    );
+    assert!(tui.ui.reply.is_none(), "`q` closes it");
 }
 
-// Enter and `ctrl+c` are never the reply's to swallow — a run blocked from
-// stopping by a refusal-reply on screen would be worse than the refusal.
+// Enter closes a reply without sending the line behind it; `ctrl+c` closes
+// it and, with a run in flight, still stops the run.
 #[tokio::test]
-async fn the_line_and_the_stop_are_not_the_replys_to_take() {
+async fn enter_and_the_stop_close_a_reply() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
@@ -217,23 +222,21 @@ async fn the_line_and_the_stop_are_not_the_replys_to_take() {
     let token = tui.core.lane().token();
     let enter = crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     let lane = tui.core.lane_mut();
-    tui.ui.key(
-        lane,
-        view_at(&mut tui.views, token),
-        enter,
-        /* running */ false,
-    );
-    assert!(tui.ui.reply.is_none(), "the line took it down");
-    assert!(tui.ui.took_submit(), "and the line it was written for went");
-    assert!(tui.ui.editor.is_empty(), "taken off the line");
+    tui.ui
+        .key(lane, view_at(&mut tui.views, token), enter, false);
+    assert!(tui.ui.reply.is_none(), "Enter closed it");
+    assert!(!tui.ui.took_submit(), "and sent nothing");
+    assert_eq!(tui.ui.editor.text(), "/help", "the line waits");
 
     tui.ui.open_reply(Listing::say(["/status answered this"]));
     let ctrl_c =
         crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
     let lane = tui.core.lane_mut();
-    tui.ui
+    let asked = tui
+        .ui
         .key(lane, view_at(&mut tui.views, token), ctrl_c, true);
     assert!(tui.ui.reply.is_none(), "`ctrl+c` took it down too");
+    assert!(!matches!(asked, Asked::Own(Deed::Nothing)), "{asked:?}");
 }
 
 // The draw cursor must move past a filed row, else the next adopt redraws

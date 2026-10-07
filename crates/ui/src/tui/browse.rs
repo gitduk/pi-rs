@@ -5,7 +5,7 @@
 
 use std::time::Instant;
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::view::View;
 use super::{Asked, Deed, Ui, screen};
@@ -24,46 +24,74 @@ impl Ui {
         view.surface.scroll = 0;
     }
 
-    /// One keypress while browsing. Everything but scroll/exit keys is
+    /// One keypress while browsing. Everything but the pager keys and `v` is
     /// swallowed, to avoid typing into a hidden line.
     pub(super) fn browse_key(&mut self, view: &mut View, key: KeyEvent) -> Asked {
         // Reset so `esc` here isn't read as half of the editor's double-esc.
         self.last_esc = None;
-        // Bare letters only; modified ones are menu keys, not used here.
-        let bare = keys::bare_letter(&key).is_some();
-        let page = self.page_scroll_step();
-        let half = self.half_scroll_step();
-        // A non-`g` press cancels a pending `gg`: `g`, `k`, `g` isn't a repeat.
-        if !matches!(key.code, KeyCode::Char('g') if bare)
-            && let Some(v) = &mut self.vim
-        {
-            v.last = None;
-        }
-        match key.code {
-            KeyCode::Down => self.scroll_view(view, false, 1),
-            KeyCode::Up => self.scroll_view(view, true, 1),
-            KeyCode::PageDown => self.scroll_view(view, false, page),
-            KeyCode::PageUp => self.scroll_view(view, true, page),
-            KeyCode::Char('j') if bare => self.scroll_view(view, false, 1),
-            KeyCode::Char('k') if bare => self.scroll_view(view, true, 1),
-            KeyCode::Char('J') if bare => self.scroll_view(view, false, half),
-            KeyCode::Char('K') if bare => self.scroll_view(view, true, half),
-            KeyCode::Char('G') if bare => self.scroll_view(view, false, screen::TOP),
-            KeyCode::Char('g') if bare => self.doubled_g(view),
-            KeyCode::Esc => self.leave_browse(view),
-            KeyCode::Char('q' | 'v') if bare => self.leave_browse(view),
-            _ => {}
+        let step = |ui: &Self, s: Step| match s {
+            Step::Line => 1,
+            Step::Half => ui.half_scroll_step(),
+            Step::Page => ui.page_scroll_step(),
+            Step::End => screen::TOP,
+        };
+        match self.pager(&key) {
+            Some(Page::Up(s)) => self.scroll_view(view, true, step(self, s)),
+            Some(Page::Down(s)) => self.scroll_view(view, false, step(self, s)),
+            Some(Page::Close) => self.leave_browse(view),
+            None if keys::bare_letter(&key) == Some('v') => self.leave_browse(view),
+            None => {}
         }
         Asked::Own(Deed::Nothing)
     }
 
-    fn doubled_g(&mut self, view: &mut View) {
-        let doubled = self
-            .vim
-            .as_mut()
-            .is_some_and(|v| v.completes('g', Instant::now()));
-        if doubled {
-            self.scroll_view(view, true, screen::TOP);
+    /// What a pager key asks of a scrolled view — the conversation view and a
+    /// command's reply read the same vim keys.
+    pub(super) fn pager(&mut self, key: &KeyEvent) -> Option<Page> {
+        let bare = keys::bare_letter(key);
+        let ctrl = key.modifiers == KeyModifiers::CONTROL;
+        // A non-`g` press cancels a pending `gg`: `g`, `k`, `g` isn't a repeat.
+        if bare != Some('g')
+            && let Some(v) = &mut self.vim
+        {
+            v.last = None;
         }
+        Some(match (key.code, bare) {
+            (KeyCode::Down, _) | (_, Some('j')) => Page::Down(Step::Line),
+            (KeyCode::Up, _) | (_, Some('k')) => Page::Up(Step::Line),
+            (_, Some('J')) => Page::Down(Step::Half),
+            (_, Some('K')) => Page::Up(Step::Half),
+            (KeyCode::Char('d'), _) if ctrl => Page::Down(Step::Half),
+            (KeyCode::Char('u'), _) if ctrl => Page::Up(Step::Half),
+            (KeyCode::PageDown, _) => Page::Down(Step::Page),
+            (KeyCode::PageUp, _) => Page::Up(Step::Page),
+            (KeyCode::Char('f'), _) if ctrl => Page::Down(Step::Page),
+            (KeyCode::Char('b'), _) if ctrl => Page::Up(Step::Page),
+            (_, Some('G')) => Page::Down(Step::End),
+            (_, Some('g')) if self.doubled_g() => Page::Up(Step::End),
+            (KeyCode::Esc, _) | (_, Some('q')) => Page::Close,
+            _ => return None,
+        })
     }
+
+    fn doubled_g(&mut self) -> bool {
+        self.vim
+            .as_mut()
+            .is_some_and(|v| v.completes('g', Instant::now()))
+    }
+}
+
+/// A move through a scrolled view.
+pub(super) enum Page {
+    Up(Step),
+    Down(Step),
+    Close,
+}
+
+pub(super) enum Step {
+    Line,
+    Half,
+    Page,
+    // As far as the view goes.
+    End,
 }

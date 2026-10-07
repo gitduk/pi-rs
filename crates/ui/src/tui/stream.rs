@@ -452,7 +452,9 @@ impl Ui {
                 );
             }
             frame.render_widget(Rows(&input_view), regions.editor);
-            if !self.browsing {
+            // The caret marks where keys land: nowhere in the line while a
+            // reply has them.
+            if !self.browsing && self.reply.is_none() {
                 let caret_row = regions.editor.y + caret_in_view as u16;
                 frame.set_cursor_position((caret.1, caret_row));
             }

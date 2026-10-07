@@ -6,7 +6,7 @@ use super::view::View;
 use super::vim::{Typed, double_tap};
 use super::{Asked, Deed, Ui};
 use agent::session::EntryId;
-use crossterm::event::{Event as TermEvent, KeyCode, KeyEventKind, MouseEventKind};
+use crossterm::event::{Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use pi_core::core;
 use pi_core::core::lane::Lane;
 use pi_core::input::Builtin;
@@ -22,7 +22,7 @@ use std::time::Instant;
 
 impl Ui {
     // A reply is up: it owns the menu's space, and the completion list
-    // waits. Also forces the menu's own key layer while open.
+    // waits. It has the keyboard while open.
     pub(super) fn overlay(&self) -> bool {
         self.reply.is_some()
     }
@@ -163,9 +163,9 @@ impl Ui {
                 if let Some(v) = &mut self.vim {
                     v.last = None;
                 }
-                // Browse mode hides the line: text pasted into it would land
-                // where nobody can see it, and be there on the way out.
-                if !self.browsing {
+                // Browse mode and a reply hide the line: text pasted into it
+                // would land where nobody can see it, and be there on the way out.
+                if !self.browsing && !self.overlay() {
                     self.editor.insert_str(&text.replace('\r', "\n"));
                 }
                 return Asked::Own(Deed::Nothing);
@@ -205,17 +205,23 @@ impl Ui {
             }
             _ => return Asked::Own(Deed::Nothing),
         };
-        // Browse mode takes the keyboard whole — the editor's table has
-        // nothing on screen to aim at. A reply (drawn over everything) outranks it.
-        if self.browsing && !self.overlay() {
+        // A reply, then browse mode, takes the keyboard whole: one place has
+        // the focus, and the editor's table has nothing on screen to aim at.
+        if self.overlay() {
+            // Except the stop: a reply on screen must not stand between the
+            // user and a run they want stopped.
+            let stop = key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL;
+            if !(running && stop) {
+                return self.reply_key(key);
+            }
+            self.reply = None;
+        }
+        if self.browsing {
             return self.browse_key(view, key);
         }
         let press = Press::of(key.code, key.modifiers);
-        // A reply counts as a menu (its keys are the Menu bindings) and
-        // forces the layer on, computed here since `menu()` mutates state.
-        let menu = if self.overlay() {
-            Menu::On
-        } else if self.menu().is_empty() {
+        // Computed here since `menu()` mutates state.
+        let menu = if self.menu().is_empty() {
             Menu::Off
         } else {
             Menu::On
@@ -238,19 +244,6 @@ impl Ui {
             && let Some(v) = &mut self.vim
         {
             v.last = None;
-        }
-
-        // The reply reads only its own keys (scroll, dismiss, global
-        // presses); anything else is typing and takes it down first.
-        if self.reply.is_some() && !super::reply::owns(bound, key) {
-            self.reply = None;
-        }
-        if self.reply.is_some() {
-            if matches!(bound, Some(Action::LineSubmit | Action::AppCancel)) {
-                self.reply = None;
-            } else {
-                return self.reply_key(bound, key);
-            }
         }
 
         if !self.rewind.is_empty()

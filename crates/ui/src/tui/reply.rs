@@ -1,14 +1,14 @@
 //! What a slash command answered, drawn over the menu until closed — not
 //! a transcript notice or a flash, but unread output the user asked for.
 
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::Line;
 
+use super::browse::{Page, Step};
 use super::screen::fit;
 use super::{Asked, Deed, Ui};
 use crate::listing;
 use pi_store::icons;
-use pi_store::keys::Action;
 use pi_store::listing::Listing;
 
 /// The rows a command answered with, and where the window over them starts.
@@ -38,62 +38,64 @@ impl Reply {
     /// The window's `room` rows to draw; the last one names what's above and
     /// below when the reply doesn't fit whole.
     pub fn view(&self, room: usize, width: usize) -> Vec<Line<'static>> {
-        let room = room.max(1);
         let rows = self.rows(width);
-        let start = self.first.min(rows.len().saturating_sub(room));
-        let end = (start + room).min(rows.len());
-        let mut out = rows[start..end].to_vec();
-        if start > 0 || end < rows.len() {
-            // The window was full, so the row the count takes is one of them:
-            // what it names is the row it displaces, plus everything below.
-            out.pop();
-            let shown = out.len();
-            out.push(Line::from(format!(
-                "  {}-{} of {}{}esc close, ↓/↑ scroll",
-                start + 1,
-                start + shown,
-                rows.len(),
-                icons::KEY_NOTE_SEP,
-            )));
-        }
+        let Some(shown) = window(rows.len(), room) else {
+            return rows;
+        };
+        let start = self.first.min(rows.len() - shown);
+        let mut out = rows[start..start + shown].to_vec();
+        out.push(Line::from(format!(
+            "  {}-{} of {}{}j/k scroll, q close",
+            start + 1,
+            start + shown,
+            rows.len(),
+            icons::KEY_NOTE_SEP,
+        )));
         out
     }
 
     /// Move the window `by` rows, `room` being what the menu has for it: the
     /// last row comes to the bottom and no further.
     pub fn scroll(&mut self, by: isize, room: usize, width: usize) {
-        let last = self.rows(width).len().saturating_sub(room.max(1));
+        let len = self.rows(width).len();
+        let last = window(len, room).map_or(0, |shown| len - shown);
         self.first = self.first.saturating_add_signed(by).min(last);
     }
 }
 
-/// Whether a press is the reply's: menu-table keys, plus letters
-/// excluded, since a letter it ate would be missing from the line below.
-pub(super) fn owns(bound: Option<Action>, _key: KeyEvent) -> bool {
-    const OWN: [Action; 6] = [
-        Action::MenuNext,
-        Action::MenuPrevious,
-        Action::MenuDismiss,
-        Action::MenuAccept,
-        Action::LineSubmit,
-        Action::AppCancel,
-    ];
-    bound.is_some_and(|a| OWN.contains(&a))
+// How many of `len` rows a window of `room` shows when they do not all fit:
+// one row of it goes to the count. `None` when they fit.
+fn window(len: usize, room: usize) -> Option<usize> {
+    let room = room.max(1);
+    (len > room).then(|| (room - 1).max(1))
 }
 
 impl Ui {
-    /// What a press does while a reply is up: the menu's own keys, which are
-    /// the ones `owns` lets through — nothing else reaches here.
-    pub(super) fn reply_key(&mut self, bound: Option<Action>, _key: KeyEvent) -> Asked {
+    /// One keypress while a reply is up. The reply has the keyboard: pager
+    /// keys move it, Enter and Ctrl-C close it too, and the rest is swallowed
+    /// so nothing lands in the line hidden behind it.
+    pub(super) fn reply_key(&mut self, key: KeyEvent) -> Asked {
+        self.last_esc = None;
         let room = self.regions.menu.height as usize;
         // Wraps at the drawing's width, not the terminal's: a row that wraps
         // after this count would end up unreachable to scroll to.
         let width = self.screen.usable();
-        match bound {
-            Some(Action::MenuDismiss | Action::MenuAccept) => self.reply = None,
-            Some(Action::MenuNext) => return self.scrolled(1, room, width),
-            Some(Action::MenuPrevious) => return self.scrolled(-1, room, width),
-            _ => {}
+        // The last row of a full window is the count, not the reply.
+        let page = room.saturating_sub(1).max(1) as isize;
+        let by = |s: Step| match s {
+            Step::Line => 1,
+            Step::Half => (page / 2).max(1),
+            Step::Page => page,
+            Step::End => isize::MAX,
+        };
+        let close = matches!(key.code, KeyCode::Enter)
+            || (key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL);
+        match self.pager(&key) {
+            Some(Page::Up(s)) => return self.scrolled(-by(s), room, width),
+            Some(Page::Down(s)) => return self.scrolled(by(s), room, width),
+            Some(Page::Close) => self.reply = None,
+            None if close => self.reply = None,
+            None => {}
         }
         Asked::Own(Deed::Nothing)
     }
@@ -149,7 +151,7 @@ mod tests {
         let rows = shown(&reply(4), 3);
         assert_eq!(rows.len(), 3, "the window is the room it was given");
         assert_eq!(rows[0], "line 1");
-        assert_eq!(rows[2], "  1-2 of 4  ·  esc close, ↓/↑ scroll");
+        assert_eq!(rows[2], "  1-2 of 4  ·  j/k scroll, q close");
     }
 
     // A line wider than the surface wraps to more than one row; unwrapped
@@ -165,15 +167,17 @@ mod tests {
         let tight = reply.view(3, 10);
         let rows: Vec<String> = tight.iter().map(|l| l.to_string()).collect();
         assert_eq!(rows.len(), 3);
-        assert_eq!(rows[2], "  1-2 of 4  ·  esc close, ↓/↑ scroll");
+        assert_eq!(rows[2], "  1-2 of 4  ·  j/k scroll, q close");
     }
 
+    // At the end the last line shows above the count, which takes a row of
+    // the window: three lines of ten in a room of four.
     #[test]
     fn the_window_stops_at_the_end() {
         let mut reply = reply(10);
         reply.scroll(100, 4, WIDE);
-        assert_eq!(reply.first, 6);
-        assert_eq!(shown(&reply, 4)[0], "line 7");
+        assert_eq!(reply.first, 7);
+        assert_eq!(shown(&reply, 4)[..3], ["line 8", "line 9", "line 10"]);
         reply.scroll(-100, 4, WIDE);
         assert_eq!(reply.first, 0);
     }
@@ -184,10 +188,10 @@ mod tests {
     fn a_window_past_the_end_is_pulled_back() {
         let mut reply = reply(10);
         reply.scroll(7, 4, WIDE);
-        assert_eq!(reply.first, 6);
+        assert_eq!(reply.first, 7);
         let roomier = shown(&reply, 9);
         assert_eq!(
-            roomier[0], "line 2",
+            roomier[0], "line 3",
             "the last screenful, from the top it can reach"
         );
         assert_eq!(roomier.len(), 9);
