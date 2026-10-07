@@ -90,9 +90,10 @@ impl Core {
         // one `rearm`, so the copy a run in flight forces is taken once.
         let archive = self.archive(root.clone(), model);
         let idle = retry.idle;
+        let later = self.later.clone();
         self.lane_mut().ctx_mut().workspace = workspace;
         self.lane_mut()
-            .rearm(std::sync::Arc::new(resolved), archive, retry, |ag| {
+            .rearm(std::sync::Arc::new(resolved), archive, retry, later, |ag| {
                 ag.compactor = std::sync::Arc::new(agent::Summarizing::new(writer, idle));
                 if let Some((transport, spec)) = retarget {
                     ag.retarget(transport, spec);
@@ -174,8 +175,11 @@ impl Core {
         let retry = self.config.retry();
         // The child is built from this agent, so the tool is hung again for it
         // to run on the model this session just moved to.
+        let later = self.later.clone();
         self.lane_mut()
-            .rearm(resolved, archive, retry, |ag| ag.retarget(transport, spec));
+            .rearm(resolved, archive, retry, later, |ag| {
+                ag.retarget(transport, spec)
+            });
     }
 }
 

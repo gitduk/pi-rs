@@ -61,6 +61,9 @@ pub struct Core {
     /// By lane token, the files as they stood when a reload last refused
     /// them, so a broken file is said once rather than once a second.
     pub refused: std::collections::HashMap<u64, Vec<resolve::Stamp>>,
+    /// Where `later` leaves its prompts, when a surface serves them; a run
+    /// with nothing to come back to offers no such tool.
+    pub later: Option<std::sync::Arc<crate::driver::later::Table>>,
 }
 
 impl Core {
@@ -140,6 +143,20 @@ impl Core {
         Some(said)
     }
 
+    /// Offer `later` on every lane, writing into `table`, which the surface
+    /// serves: lanes armed before this are armed again.
+    pub fn enable_later(&mut self, table: std::sync::Arc<crate::driver::later::Table>) {
+        self.later = Some(table);
+        let retry = self.config.retry();
+        for at in 0..self.lanes.len() {
+            let lane = &self.lanes[at];
+            let archive =
+                self.archive(lane.root().to_path_buf(), lane.agent().spec().model.clone());
+            let resolved = lane.resolved().clone();
+            self.lanes[at].rearm(resolved, archive, retry, self.later.clone(), |_| {});
+        }
+    }
+
     /// Give each of `channels` its `/<name>` command.
     pub fn add_channels(&mut self, channels: &[std::sync::Arc<dyn ::channel::Channel>]) {
         self.channels = channels
@@ -195,6 +212,7 @@ impl Core {
         match intent {
             Intent::Bash(command) => Step::Bash(command),
             Intent::Prompt(send) => Step::Prompt { send, typed: None },
+            Intent::Builtin(Builtin::Later(arg)) => Step::Drive(Drive::Later(arg)),
             Intent::Builtin(Builtin::Loop(goal)) => match goal.trim() {
                 "" => Step::Drive(Drive::Loop(None)),
                 goal if self.starts_turn(goal) => Step::Drive(Drive::Loop(Some(goal.to_string()))),
@@ -564,6 +582,7 @@ mod tests {
                 model.into(),
             ),
             agent::Retry::default(),
+            None,
         );
 
         let keys = resolved.keys.clone();
@@ -590,6 +609,7 @@ mod tests {
             ),
             lanes: vec![lane],
             refused: Default::default(),
+            later: None,
             current: 0,
         }
     }

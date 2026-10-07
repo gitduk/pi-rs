@@ -248,7 +248,7 @@ async fn main() -> Result<ExitCode> {
     };
     // Armed here rather than field by field: the brief the lane keeps and the
     // one the agent runs on are the same value, subagent tool and all.
-    let resolved = lane::arm(&mut ag, Arc::new(resolved), archive, retry);
+    let resolved = lane::arm(&mut ag, Arc::new(resolved), archive, retry, None);
     let key_map = resolved.keys.clone();
 
     // An explicit --name renames a resumed session; otherwise it keeps its own.
@@ -288,6 +288,7 @@ async fn main() -> Result<ExitCode> {
             current: 0,
             lanes: vec![first],
             refused: Default::default(),
+            later: None,
         };
         let (saved, keep) = pi_store::private_file("wechat.json");
         let channels: Vec<Arc<dyn channel::Channel>> = vec![Arc::new(wechat::WeChat::new(
@@ -296,6 +297,7 @@ async fn main() -> Result<ExitCode> {
         ))];
         core.add_channels(&channels);
         let drivers = pi_core::driver::Drivers::new(channels);
+        core.enable_later(drivers.later());
         let out = tui::Tui::new(core, key_map, drivers)?.run().await;
         // Subagents handed their transcripts to a background save; wait
         // for those to land before the runtime goes with them.

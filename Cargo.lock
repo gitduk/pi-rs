@@ -1741,6 +1741,7 @@ dependencies = [
  "clap",
  "futures",
  "ignore",
+ "libc",
  "llm",
  "pi-store",
  "serde_json",

@@ -88,6 +88,7 @@ Esc.
 | `/worktree [name]`, `/worktree rm` | work in `<repo>.worktrees/<name>`             |
 | `/compact [focus]`                 | summarize everything but the working tail     |
 | `/loop <line>`                     | resubmit a line until a round edits no file   |
+| `/later`, `/later rm <id>`         | what the model left for later; cancel one     |
 | `/settings`                        | edit the project's config                     |
 | `/status`, `/keys`, `/help`        | session paths and spend; bindings; commands   |
 | `/content`                         | everything the model is given before you type |
@@ -101,6 +102,10 @@ Esc.
 `read` `write` `edit` `glob` `grep` `bash` `fetch` `skill` `subagent`, plus:
 
 - `judge`, when the config has a `[judge]` section.
+- `later`, in the terminal: a prompt the model leaves itself, which comes back
+  as a turn of its own after a delay, on a period, or when a background
+  command exits. It waits until the checkout is in front and idle, and lasts
+  while pi runs; past that, schedule `pi "..."` with the system's cron.
 - One tool per script in `~/.pi/tools/`: any file whose first line is a `#!`,
   its `description` and `[args]` written as TOML in a `# ---` comment block
   under that line; or a cargo script `*.rs`, described by its

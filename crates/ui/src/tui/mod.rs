@@ -529,8 +529,10 @@ impl Tui {
             let mut origin = Origin::Typed;
             // A driver's line goes only when the lane is free and nothing typed
             // is waiting: what the user says comes first.
-            let next = (!running && !waiting)
-                .then(|| self.drivers.next(self.core.lane().token()))
+            let free = !running && !waiting;
+            let lane = self.core.lane();
+            let next = free
+                .then(|| self.drivers.next(lane.token(), lane.root()))
                 .flatten();
             let woke = if let Some(next) = next {
                 origin = next.origin;
@@ -543,6 +545,10 @@ impl Tui {
                 Wake::Do(Asked::Core(input::read(&next.line, &self.core.commands)))
             } else if !waiting || running {
                 let bar_due = self.bar.due().map(tokio::time::Instant::from_std);
+                // Only while the lane is free: a prompt due under a run would
+                // wake this loop again and again with nothing it may do.
+                let later = self.drivers.later();
+                let later_due = free.then(|| later.next_due(lane.root())).flatten();
                 // Every branch must be cancel-safe: a loser is dropped mid-poll.
                 // `recv()` and `tick()` are; a blocking read gets its own thread.
                 tokio::select! {
@@ -561,6 +567,10 @@ impl Tui {
                     }
                     _ = tokio::time::sleep_until(bar_due.unwrap_or_else(tokio::time::Instant::now)),
                         if bar_due.is_some() => Wake::Nothing,
+                    // Something was left, cancelled or finished: look again.
+                    _ = later.changed().notified() => Wake::Nothing,
+                    _ = tokio::time::sleep_until(later_due.unwrap_or_else(tokio::time::Instant::now)),
+                        if later_due.is_some() => Wake::Nothing,
                     key = self.events.recv() => match key {
                         Some(key) => {
                             let lane = self.core.lane();

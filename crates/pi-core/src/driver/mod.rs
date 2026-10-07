@@ -4,6 +4,7 @@
 //! keeps that ledger so the surface need not know which driver cares.
 
 mod channel;
+pub mod later;
 pub mod looping;
 
 use std::sync::Arc;
@@ -21,6 +22,7 @@ pub enum Origin {
     Typed,
     Channel(&'static str),
     Loop,
+    Later,
 }
 
 /// How a turn ended, as every driver that began it is told.
@@ -52,6 +54,7 @@ pub struct Next {
 pub struct Drivers {
     channels: Channels,
     loops: Loops,
+    later: Arc<later::Table>,
     // Where each line steered into a running turn came from, by lane token,
     // in the order said: a run hands back what it never heard bare.
     steered: Vec<(u64, Origin)>,
@@ -62,19 +65,31 @@ impl Drivers {
         Self {
             channels: Channels::new(channels),
             loops: Loops::default(),
+            later: Arc::default(),
             steered: Vec::new(),
         }
     }
 
-    /// The line a driver sends `lane` next. Asked only when the lane is free
-    /// and nothing typed is waiting: what the user says comes first.
-    pub fn next(&mut self, lane: u64) -> Option<Next> {
-        let due = self.loops.due(lane)?;
-        Some(Next {
-            line: due.goal,
-            note: due.note,
-            origin: Origin::Loop,
-        })
+    /// What `later` writes into: the lanes' tool and this driver share it.
+    pub fn later(&self) -> Arc<later::Table> {
+        self.later.clone()
+    }
+
+    /// The line a driver sends `lane`, the checkout at `root`, next. Asked
+    /// only when the lane is free and nothing typed is waiting: what the user
+    /// says comes first.
+    ///
+    /// `later` first: it was due at a time, and a loop's next round can wait
+    /// one turn where a loop that never settles would hold it off for good.
+    pub fn next(&mut self, lane: u64, root: &std::path::Path) -> Option<Next> {
+        let (line, note, origin) = match self.later.take_due(root) {
+            Some(due) => (due.line, due.note, Origin::Later),
+            None => {
+                let due = self.loops.due(lane)?;
+                (due.goal, due.note, Origin::Loop)
+            }
+        };
+        Some(Next { line, note, origin })
     }
 
     /// What a channel says, stamped with who said it. Cancel-safe, so the
@@ -92,6 +107,7 @@ impl Drivers {
                 Ok(()) => Said::Nothing,
                 Err(why) => Said::Reply(vec![why]),
             },
+            Drive::Later(arg) => Said::Reply(self.later_command(&arg, ctx)),
             Drive::Loop(None) => match self.loops.stop(lane) {
                 // A loop really ended: that belongs in the transcript.
                 Some(said) => Said::Transcript(said),
@@ -118,7 +134,7 @@ impl Drivers {
             Origin::Channel(name) if prompt && started => self.channels.ask(name, lane),
             Origin::Loop if started => self.loops.ask(lane),
             Origin::Loop => return self.loops.unstarted(lane),
-            Origin::Channel(_) | Origin::Typed => {}
+            Origin::Channel(_) | Origin::Typed | Origin::Later => {}
         }
         None
     }
@@ -183,5 +199,27 @@ impl Drivers {
     #[cfg(any(test, feature = "testing"))]
     pub fn steered_lines(&self) -> &[(u64, Origin)] {
         &self.steered
+    }
+}
+
+impl Drivers {
+    // `/later`: what is pending here, or `rm <id>` to cancel one.
+    fn later_command(&self, arg: &str, ctx: &Ctx) -> Vec<String> {
+        let root = ctx.workspace.root();
+        match arg.split_whitespace().collect::<Vec<_>>().as_slice() {
+            [] => {
+                let pending = self.later.listing(root);
+                if pending.is_empty() {
+                    vec!["nothing left for later here".into()]
+                } else {
+                    pending
+                }
+            }
+            ["rm", id] => match id.trim_start_matches('#').parse() {
+                Ok(id) => vec![self.later.cancel(root, id).unwrap_or_else(|e| e)],
+                Err(_) => vec![format!("`{id}` is not an id; /later lists them")],
+            },
+            _ => vec!["/later lists what is pending; /later rm <id> cancels one".into()],
+        }
     }
 }

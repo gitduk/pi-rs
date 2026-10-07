@@ -154,6 +154,7 @@ pub fn arm(
     resolved: Arc<Resolved>,
     archive: Arc<dyn Archive>,
     retry: agent::Retry,
+    later: Option<Arc<crate::driver::later::Table>>,
 ) -> Arc<Resolved> {
     let subagent = Subagent::new(
         agent,
@@ -167,6 +168,14 @@ pub fn arm(
     let mut brief = resolved.brief.clone();
     if subagent.tier().under(resolved.ceiling) {
         Arc::make_mut(&mut brief).registry.offer(Arc::new(subagent));
+    }
+    // The lane's copy only, as with the subagent: a child cannot reach the
+    // lane its prompt would come back to.
+    if let Some(table) = later
+        && tool::Tier::Exec.under(resolved.ceiling)
+    {
+        let later = crate::driver::later::Later::new(table);
+        Arc::make_mut(&mut brief).registry.offer(Arc::new(later));
     }
     agent.apply(brief);
     resolved
@@ -346,11 +355,12 @@ impl Lane {
         resolved: Arc<Resolved>,
         archive: Arc<dyn Archive>,
         retry: agent::Retry,
+        later: Option<Arc<crate::driver::later::Table>>,
         change: impl FnOnce(&mut Agent),
     ) {
         let agent = Arc::make_mut(&mut self.checkout.agent);
         change(agent);
-        self.checkout.resolved = arm(agent, resolved, archive, retry);
+        self.checkout.resolved = arm(agent, resolved, archive, retry, later);
     }
 
     /// Replace what was decided where the agent holds none of it — the
@@ -683,7 +693,13 @@ impl Core {
             self.lane().checkout.agent.spec().model.clone(),
         );
         let mut ag = (*self.lane().checkout.agent).clone();
-        let resolved = arm(&mut ag, Arc::new(resolved), archive, self.config.retry());
+        let resolved = arm(
+            &mut ag,
+            Arc::new(resolved),
+            archive,
+            self.config.retry(),
+            self.later.clone(),
+        );
 
         // Built, not cloned from the lane being left: a `Ctx`'s tables key on
         // absolute paths in one tree, and none of that lane's describe this.

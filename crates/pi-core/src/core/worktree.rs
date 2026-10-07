@@ -402,6 +402,9 @@ impl Core {
             }
         }
         let dropped = self.store.drop_under(&removed.path);
+        if let Some(later) = &self.later {
+            later.drop_under(&removed.path);
+        }
         let mut said = vec![
             format!("removed {name}"),
             removed.path.display().to_string(),

@@ -100,6 +100,12 @@ pub(crate) const BUILTIN: &[Command] = &[
         |_, rest| Intent::Builtin(Builtin::Compact(rest)),
     ),
     Command::builtin(
+        "/later",
+        "[rm id]",
+        "what the model left to come back here later; rm cancels one",
+        |_, rest| Intent::Builtin(Builtin::Later(rest)),
+    ),
+    Command::builtin(
         "/loop",
         "[text]",
         "repeat a line while it keeps changing the tree; bare, stop one",
