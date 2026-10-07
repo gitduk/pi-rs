@@ -8,6 +8,7 @@ use super::row::{PendingTool, Row};
 use super::screen;
 use super::screen::Rows;
 use super::scrollback::{Piece, ScrollbackRows, absorb_growth, f_entry};
+use super::ui::Focus;
 use super::view::{StreamKind, Surface, View, snapshot};
 use crate::render;
 use crate::status;
@@ -302,7 +303,7 @@ impl Ui {
         let width = self.screen.usable();
         // Browse mode is the conversation alone (no thinking, calls, notices,
         // editor); the tally and window share this one predicate.
-        let browse = self.browsing;
+        let browse = self.browsing();
         let keep = move |row: &Row| !browse || row.is_conversation();
         let mut bar = self.bar_lines(&Facts::of(lane), &snapshot(lane, view), width);
         // The bar's rows are not worth a terminal that cannot hold them, a row
@@ -328,7 +329,10 @@ impl Ui {
         // Bottom-up: input pinned, menu above it (reply or completions, one
         // at a time), history fills the rest — bar always keeps its row.
         let room = (self.screen.height as usize).saturating_sub(editor_h + bar_h + 1);
-        let reply = self.reply.as_ref().map(|r| r.view(room, width));
+        let reply = match &self.focus {
+            Focus::Reply(r) => Some(r.view(room, width)),
+            _ => None,
+        };
         let menu_h = if let Some(reply) = &reply {
             reply.len()
         } else if menu.is_empty() {
@@ -452,9 +456,9 @@ impl Ui {
                 );
             }
             frame.render_widget(Rows(&input_view), regions.editor);
-            // The caret marks where keys land: nowhere in the line while a
-            // reply has them.
-            if !self.browsing && self.reply.is_none() {
+            // The caret marks where keys land: nowhere in the line while
+            // something else has them.
+            if matches!(self.focus, Focus::Editor) {
                 let caret_row = regions.editor.y + caret_in_view as u16;
                 frame.set_cursor_position((caret.1, caret_row));
             }

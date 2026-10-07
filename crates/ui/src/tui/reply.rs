@@ -1,11 +1,10 @@
 //! What a slash command answered, drawn over the menu until closed — not
 //! a transcript notice or a flash, but unread output the user asked for.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::Line;
 
-use super::browse::{Page, Step};
 use super::screen::fit;
+use super::ui::Focus;
 use super::{Asked, Deed, Ui};
 use crate::listing;
 use pi_store::icons;
@@ -71,39 +70,10 @@ fn window(len: usize, room: usize) -> Option<usize> {
 }
 
 impl Ui {
-    /// One keypress while a reply is up. The reply has the keyboard: pager
-    /// keys move it, Enter and Ctrl-C close it too, and the rest is swallowed
-    /// so nothing lands in the line hidden behind it.
-    pub(super) fn reply_key(&mut self, key: KeyEvent) -> Asked {
-        self.last_esc = None;
-        let room = self.regions.menu.height as usize;
-        // Wraps at the drawing's width, not the terminal's: a row that wraps
-        // after this count would end up unreachable to scroll to.
-        let width = self.screen.usable();
-        // The last row of a full window is the count, not the reply.
-        let page = room.saturating_sub(1).max(1) as isize;
-        let by = |s: Step| match s {
-            Step::Line => 1,
-            Step::Half => (page / 2).max(1),
-            Step::Page => page,
-            Step::End => isize::MAX,
-        };
-        let close = matches!(key.code, KeyCode::Enter)
-            || (key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL);
-        match self.pager(&key) {
-            Some(Page::Up(s)) => return self.scrolled(-by(s), room, width),
-            Some(Page::Down(s)) => return self.scrolled(by(s), room, width),
-            Some(Page::Close) => self.reply = None,
-            None if close => self.reply = None,
-            None => {}
-        }
-        Asked::Own(Deed::Nothing)
-    }
-
     /// Move the window over the reply, using the `room`/`width` the menu
     /// last showed it — what the last row's bound is measured against.
     pub(super) fn scrolled(&mut self, by: isize, room: usize, width: usize) -> Asked {
-        if let Some(reply) = &mut self.reply {
+        if let Focus::Reply(reply) = &mut self.focus {
             reply.scroll(by, room, width);
         }
         Asked::Own(Deed::Nothing)
@@ -112,7 +82,11 @@ impl Ui {
     /// Shows a command's reply, replacing any prior one. Empty output opens
     /// nothing, since dismissing an empty overlay is worse than silence.
     pub(super) fn open_reply(&mut self, content: Listing) {
-        self.reply = (!content.is_empty()).then(|| Reply::new(content));
+        if !content.is_empty() {
+            self.focus = Focus::Reply(Reply::new(content));
+        } else if matches!(self.focus, Focus::Reply(_)) {
+            self.focus = Focus::Editor;
+        }
     }
 }
 

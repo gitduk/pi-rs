@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap};
 use anyhow::{Result, bail};
 use crossterm::event::{KeyCode, KeyModifiers};
 
-pub use text::parse;
+pub use text::{chord, parse};
 
 /// Which of the two modal states the editor is in. Exclusive: exactly one
 /// holds at a time, which is why it is a value of its own rather than two
@@ -31,7 +31,10 @@ pub enum Mode {
 /// the menu claims never reaches the editor underneath it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum When {
-    // While something is up over the editor — see `Menu` for what counts.
+    // A view read, not typed into — a reply, the conversation alone. It has
+    // the keyboard: the editor's layers are not consulted under it.
+    Pager,
+    // While a list is up over the editor — see `Over::Menu`.
     Menu,
     // A turn is in flight.
     Run,
@@ -43,23 +46,28 @@ pub enum When {
     // Always — in both modes, so bindings older than the vim layer keep
     // working under it.
     Editor,
+    // Whatever has the keyboard: the stop and the way out.
+    App,
 }
 
-/// What is up over the editor: nothing, or the menu's own keys.
+/// What is up over the editor, which decides the layers consulted first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Menu {
+pub enum Over {
     #[default]
-    Off,
-    // A completion list, the rewind selector, or a command's reply:
-    // the menu's movement and dismissal keys, and nothing more.
-    On,
+    None,
+    // A completion list or the rewind selector: the list's movement and
+    // dismissal keys, over the editor's.
+    Menu,
+    // A command's reply or the conversation view: its own keys, and the
+    // editor's not at all.
+    Pager,
 }
 
 /// Which layers are up when a key is pressed. One value rather than three
 /// bare fields — they are usually live at once, and a swapped pair compiles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Layers {
-    pub menu: Menu,
+    pub over: Over,
     pub run: bool,
     /// The mode, or `None` when vim keys are off. Three legal states in three
     /// representations: a separate `vim: bool` beside a `Mode` would make
@@ -78,8 +86,7 @@ pub enum Action {
     DeleteWordBack,
     DeleteToLineEnd,
     DeleteToLineStart,
-    // The line, whole. Vim spells it `dd` — a doubled key the tui resolves
-    // beside its escape pair, so no single press and no binding reaches it.
+    // The line, whole: vim's `dd`.
     DeleteLine,
     MoveCharLeft,
     MoveCharRight,
@@ -92,14 +99,15 @@ pub enum Action {
     MoveLineEnd,
     MoveLineFirstNonBlank,
     // The ends of the whole text, or of the history when the line is empty.
-    // `G` is a press; the top is `gg`, vim's other doubled key.
     MoveBufferStart,
     MoveBufferEnd,
     HistoryOlder,
     HistoryNewer,
     LineSubmit,
-    // The line, cleared; twice quickly with nothing to clear, a new session.
+    // The line, cleared.
     LineClear,
+    // A fresh session, the old one kept on disk.
+    SessionNew,
     MenuAccept,
     MenuNext,
     MenuPrevious,
@@ -114,15 +122,17 @@ pub enum Action {
     ScrollHalfUp,
     ScrollHalfDown,
     AppExit,
-    // The run in flight stopped; twice quickly with nothing to stop, the app
-    // leaves.
+    // The run in flight stopped, or whatever is over the editor closed.
     AppCancel,
+    // Leave, from anywhere: the cancel key twice.
+    AppQuit,
     LanePrev,
     LaneNext,
     ThinkFold,
     ThinkFoldAll,
-    // Leaving Normal. There is no action for entering it: `jk` is a sequence,
-    // not a press, and it is read where unbound characters are typed.
+    // Into Normal from Insert; the sequence's first character comes back off
+    // the line.
+    ModeNormal,
     ModeInsert,
     ModeInsertAfter,
     ModeInsertLineStart,
@@ -139,6 +149,15 @@ pub enum Action {
     OpenLineAbove,
     // The line, in `$EDITOR`. The one action that leaves the process.
     EditExternally,
+    PagerDown,
+    PagerUp,
+    PagerHalfDown,
+    PagerHalfUp,
+    PagerPageDown,
+    PagerPageUp,
+    PagerTop,
+    PagerBottom,
+    PagerClose,
 }
 
 struct Binding {
@@ -267,7 +286,14 @@ const BINDINGS: &[Binding] = &[
         action: A::LineClear,
         when: W::Editor,
         keys: &["ctrl+l"],
-        note: "the line; twice quickly with nothing on it, a new session",
+        note: "",
+    },
+    Binding {
+        id: "session.new",
+        action: A::SessionNew,
+        when: W::Editor,
+        keys: &["ctrl+l ctrl+l"],
+        note: "with nothing on the line; this one kept on disk",
     },
     Binding {
         id: "menu.accept",
@@ -308,8 +334,8 @@ const BINDINGS: &[Binding] = &[
         id: "conversation.rewind",
         action: A::Rewind,
         when: W::Editor,
-        keys: &["esc"],
-        note: "twice with an empty line to go back to a message or an answer",
+        keys: &["esc esc"],
+        note: "with an empty line, to go back to a message or an answer",
     },
     Binding {
         id: "view.scroll-up",
@@ -349,9 +375,16 @@ const BINDINGS: &[Binding] = &[
     Binding {
         id: "app.cancel",
         action: A::AppCancel,
-        when: W::Editor,
+        when: W::App,
         keys: &["ctrl+c"],
-        note: "stops the run in flight; twice quickly to quit",
+        note: "stops the run in flight, closing whatever is over the editor",
+    },
+    Binding {
+        id: "app.quit",
+        action: A::AppQuit,
+        when: W::App,
+        keys: &["ctrl+c ctrl+c"],
+        note: "",
     },
     Binding {
         id: "think.fold",
@@ -469,6 +502,20 @@ const BINDINGS: &[Binding] = &[
         note: "the history's end when the line is empty",
     },
     Binding {
+        id: "normal.move.buffer.start",
+        action: A::MoveBufferStart,
+        when: W::Mode(Mode::Normal),
+        keys: &["g g"],
+        note: "the history's start when the line is empty",
+    },
+    Binding {
+        id: "normal.delete.line",
+        action: A::DeleteLine,
+        when: W::Mode(Mode::Normal),
+        keys: &["d d"],
+        note: "",
+    },
+    Binding {
         id: "normal.history.older",
         action: A::HistoryOlder,
         when: W::Mode(Mode::Normal),
@@ -521,7 +568,7 @@ const BINDINGS: &[Binding] = &[
         id: "normal.change.line",
         action: A::ChangeLine,
         when: W::Mode(Mode::Normal),
-        keys: &["S"],
+        keys: &["S", "c c"],
         note: "the whole line, then Insert",
     },
     Binding {
@@ -544,6 +591,13 @@ const BINDINGS: &[Binding] = &[
         when: W::Mode(Mode::Normal),
         keys: &["E"],
         note: "the line in $VISUAL/$EDITOR, and back",
+    },
+    Binding {
+        id: "mode.normal",
+        action: A::ModeNormal,
+        when: W::Mode(Mode::Insert),
+        keys: &["j k"],
+        note: "typed quickly; the j comes back off the line",
     },
     Binding {
         id: "mode.insert",
@@ -573,6 +627,69 @@ const BINDINGS: &[Binding] = &[
         keys: &["A"],
         note: "",
     },
+    Binding {
+        id: "pager.down",
+        action: A::PagerDown,
+        when: W::Pager,
+        keys: &["j", "down"],
+        note: "",
+    },
+    Binding {
+        id: "pager.up",
+        action: A::PagerUp,
+        when: W::Pager,
+        keys: &["k", "up"],
+        note: "",
+    },
+    Binding {
+        id: "pager.half-down",
+        action: A::PagerHalfDown,
+        when: W::Pager,
+        keys: &["ctrl+d", "J"],
+        note: "",
+    },
+    Binding {
+        id: "pager.half-up",
+        action: A::PagerHalfUp,
+        when: W::Pager,
+        keys: &["ctrl+u", "K"],
+        note: "",
+    },
+    Binding {
+        id: "pager.page-down",
+        action: A::PagerPageDown,
+        when: W::Pager,
+        keys: &["ctrl+f", "pagedown"],
+        note: "",
+    },
+    Binding {
+        id: "pager.page-up",
+        action: A::PagerPageUp,
+        when: W::Pager,
+        keys: &["ctrl+b", "pageup"],
+        note: "",
+    },
+    Binding {
+        id: "pager.top",
+        action: A::PagerTop,
+        when: W::Pager,
+        keys: &["g g"],
+        note: "",
+    },
+    Binding {
+        id: "pager.bottom",
+        action: A::PagerBottom,
+        when: W::Pager,
+        keys: &["G"],
+        note: "",
+    },
+    Binding {
+        id: "pager.close",
+        action: A::PagerClose,
+        when: W::Pager,
+        keys: &["q", "esc", "enter", "v"],
+        note: "a command's reply, or the conversation view",
+    },
 ];
 
 /// A key press, normalized. Shift folds into the character (`shift+a` is `A`);
@@ -584,6 +701,14 @@ pub struct Press {
 }
 
 impl Press {
+    /// A character with no `ctrl` or `alt` on it: text as much as a key.
+    pub fn is_bare(&self) -> bool {
+        matches!(self.code, KeyCode::Char(_))
+            && !self
+                .mods
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    }
+
     pub fn of(code: KeyCode, mods: KeyModifiers) -> Self {
         let mods = mods & (KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT);
         match code {
@@ -611,22 +736,36 @@ impl Press {
 /// is the same rule every screen with a letter vocabulary reads — browse and a
 /// reply — so it is written down once, here.
 pub fn bare_letter(key: &crossterm::event::KeyEvent) -> Option<char> {
-    let bare = !key
-        .modifiers
-        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
     match key.code {
-        KeyCode::Char(c) if bare => Some(c),
+        KeyCode::Char(c) if Press::of(key.code, key.modifiers).is_bare() => Some(c),
         _ => None,
     }
+}
+
+/// What a binding is written as: one press, or two in quick succession —
+/// `g g`, `ctrl+c ctrl+c`. The second press of a pair is read against the
+/// first only when the first is still fresh; the caller decides what fresh is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Chord {
+    One(Press),
+    Two(Press, Press),
+}
+
+/// What a press resolved to, and whether it finished a pair rather than
+/// standing alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hit {
+    pub action: Action,
+    pub pair: bool,
 }
 
 /// Every binding in force, resolved once at startup.
 #[derive(Debug)]
 pub struct Keys {
-    map: HashMap<(When, Press), Action>,
-    // Which binding owns each key, so `listing` can ask "what's bound to
+    map: HashMap<(When, Chord), Action>,
+    // Which binding owns each chord, so `listing` can ask "what's bound to
     // this id" instead of reconstructing it from the action.
-    who: HashMap<(When, Press), &'static str>,
+    who: HashMap<(When, Chord), &'static str>,
 }
 
 impl Default for Keys {
@@ -645,18 +784,18 @@ impl Keys {
                 bail!("unknown key action `{id}`; known: {}", known.join(", "));
             }
         }
-        let mut map: HashMap<(When, Press), Action> = HashMap::new();
-        let mut who: HashMap<(When, Press), &str> = HashMap::new();
+        let mut map: HashMap<(When, Chord), Action> = HashMap::new();
+        let mut who: HashMap<(When, Chord), &str> = HashMap::new();
         // Explicit bindings first: they are authoritative over defaults, and
         // two of them on one key in one context is a genuine conflict.
         for b in BINDINGS {
             if let Some(v) = overrides.get(b.id) {
                 for spec in v {
-                    let press = parse(spec).map_err(|e| anyhow::anyhow!("{}: {e}", b.id))?;
-                    if let Some(other) = who.insert((b.when, press), b.id) {
+                    let chord = chord(spec).map_err(|e| anyhow::anyhow!("{}: {e}", b.id))?;
+                    if let Some(other) = who.insert((b.when, chord), b.id) {
                         bail!("`{spec}` is bound to both {other} and {} at once", b.id);
                     }
-                    map.insert((b.when, press), b.action);
+                    map.insert((b.when, chord), b.action);
                 }
             }
         }
@@ -667,57 +806,86 @@ impl Keys {
                 continue;
             }
             for spec in b.keys {
-                let press = parse(spec).map_err(|e| anyhow::anyhow!("{}: {e}", b.id))?;
-                if let Some(other) = who.get(&(b.when, press)) {
+                let chord = chord(spec).map_err(|e| anyhow::anyhow!("{}: {e}", b.id))?;
+                if let Some(other) = who.get(&(b.when, chord)) {
                     if overrides.contains_key(*other) {
                         continue;
                     }
                     bail!("`{spec}` is bound to both {other} and {} at once", b.id);
                 }
-                who.insert((b.when, press), b.id);
-                map.insert((b.when, press), b.action);
+                who.insert((b.when, chord), b.id);
+                map.insert((b.when, chord), b.action);
             }
         }
         Ok(Self { map, who })
     }
 
-    /// What this press means, given what is on screen.
+    /// What this press means on its own, given what is on screen.
     pub fn action(&self, press: Press, layers: Layers) -> Option<Action> {
-        let mut live = Vec::with_capacity(5);
-        // Innermost first: `menu.dismiss` and `run.interrupt` both claim
-        // `esc`; dismissing clears the menu so the next press reaches the run.
-        if layers.menu != Menu::Off {
-            live.push(When::Menu);
-        }
-        if layers.run {
-            live.push(When::Run);
-        }
-        if let Some(mode) = layers.mode {
-            // The line's own layer first: a key that names the empty line wins
-            // over the layer that holds whether or not there is one.
-            if mode == Mode::Normal && layers.line_empty {
-                live.push(When::NormalEmpty);
-            }
-            live.push(When::Mode(mode));
-        }
-        live.push(When::Editor);
-        if let hit @ Some(_) = live
-            .iter()
-            .find_map(|w| self.map.get(&(*w, press)).copied())
-        {
+        self.hit(None, press, layers).map(|h| h.action)
+    }
+
+    /// What this press means, `prev` being the press before it when that one
+    /// is fresh enough to pair with. Layer by layer, innermost first, a pair
+    /// is tried before the press alone: within a layer the pair is the more
+    /// specific, and a nearer layer's single key still outranks a farther pair.
+    pub fn hit(&self, prev: Option<Press>, press: Press, layers: Layers) -> Option<Hit> {
+        let live = live(layers);
+        let find = |press: Press| {
+            live.iter().find_map(|w| {
+                if let Some(prev) = prev
+                    && let Some(&action) = self.map.get(&(*w, Chord::Two(prev, press)))
+                {
+                    return Some(Hit { action, pair: true });
+                }
+                let action = *self.map.get(&(*w, Chord::One(press)))?;
+                Some(Hit {
+                    action,
+                    pair: false,
+                })
+            })
+        };
+        if let hit @ Some(_) = find(press) {
             return hit;
         }
         // Terminals that don't report shift send `ctrl+shift+w` as `ctrl+w`;
         // falling back to the bare press keeps it working either way.
         if press.mods.contains(KeyModifiers::SHIFT) {
-            let bare = Press {
+            return find(Press {
                 mods: press.mods - KeyModifiers::SHIFT,
                 ..press
-            };
-            return live.iter().find_map(|w| self.map.get(&(*w, bare)).copied());
+            });
         }
         None
     }
+}
+
+// The layers consulted for `layers`, innermost first.
+fn live(layers: Layers) -> Vec<When> {
+    // A pager has the keyboard: nothing of the editor's reaches past it.
+    if layers.over == Over::Pager {
+        return vec![When::Pager, When::App];
+    }
+    let mut live = Vec::with_capacity(6);
+    // `menu.dismiss` and `run.interrupt` both claim `esc`; dismissing clears
+    // the menu so the next press reaches the run.
+    if layers.over == Over::Menu {
+        live.push(When::Menu);
+    }
+    if layers.run {
+        live.push(When::Run);
+    }
+    if let Some(mode) = layers.mode {
+        // The line's own layer first: a key that names the empty line wins
+        // over the layer that holds whether or not there is one.
+        if mode == Mode::Normal && layers.line_empty {
+            live.push(When::NormalEmpty);
+        }
+        live.push(When::Mode(mode));
+    }
+    live.push(When::Editor);
+    live.push(When::App);
+    live
 }
 
 #[cfg(test)]
@@ -728,18 +896,18 @@ mod tests {
         // Only worth having while reasoning arrives; a binding that resolved
         // between turns, not during them, would be useless in the one context.
         let keys = Keys::resolve(&BTreeMap::new()).unwrap();
-        for (menu, running) in [(Menu::Off, false), (Menu::Off, true), (Menu::On, true)] {
+        for (over, running) in [(Over::None, false), (Over::None, true), (Over::Menu, true)] {
             assert_eq!(
                 keys.action(
                     press("ctrl+t"),
                     Layers {
-                        menu,
+                        over,
                         run: running,
                         ..Layers::default()
                     }
                 ),
                 Some(Action::ThinkFold),
-                "menu={menu:?} running={running}"
+                "over={over:?} running={running}"
             );
         }
     }
@@ -747,6 +915,65 @@ mod tests {
 
     pub(super) fn press(s: &str) -> Press {
         parse(s).unwrap()
+    }
+
+    // A reply or the conversation view reads its own keys and the app's,
+    // never the editor's: one place has the keyboard.
+    #[test]
+    fn a_pager_has_the_keyboard() {
+        let k = Keys::default();
+        let pager = Layers {
+            over: Over::Pager,
+            run: true,
+            mode: Some(Mode::Normal),
+            line_empty: true,
+        };
+        assert_eq!(k.action(press("j"), pager), Some(Action::PagerDown));
+        assert_eq!(
+            k.action(press("ctrl+d"), pager),
+            Some(Action::PagerHalfDown)
+        );
+        assert_eq!(k.action(press("ctrl+w"), pager), None, "the editor's");
+        assert_eq!(k.action(press("ctrl+c"), pager), Some(Action::AppCancel));
+        assert_eq!(
+            k.hit(Some(press("g")), press("g"), pager),
+            Some(Hit {
+                action: Action::PagerTop,
+                pair: true
+            })
+        );
+    }
+
+    // `esc esc` is a rewind only where nothing nearer claims `esc`: with a
+    // run in flight the second press stops it, as the first did.
+    #[test]
+    fn a_nearer_single_key_outranks_a_farther_pair() {
+        let k = Keys::default();
+        let running = Layers {
+            run: true,
+            ..Layers::default()
+        };
+        assert_eq!(
+            k.hit(Some(press("esc")), press("esc"), running)
+                .map(|h| h.action),
+            Some(Action::RunInterrupt)
+        );
+        // Within one layer the pair is the more specific.
+        assert_eq!(
+            k.hit(Some(press("ctrl+c")), press("ctrl+c"), running),
+            Some(Hit {
+                action: Action::AppQuit,
+                pair: true
+            })
+        );
+    }
+
+    #[test]
+    fn a_binding_is_one_press_or_a_pair() {
+        assert!(matches!(chord("g g"), Ok(Chord::Two(..))));
+        assert!(matches!(chord("ctrl+c"), Ok(Chord::One(_))));
+        assert!(chord("g g g").is_err());
+        assert!(chord("  ").is_err());
     }
 
     #[test]
@@ -769,7 +996,7 @@ mod tests {
             k.action(
                 press("up"),
                 Layers {
-                    menu: Menu::On,
+                    over: Over::Menu,
                     ..Layers::default()
                 }
             ),
@@ -783,7 +1010,7 @@ mod tests {
             k.action(
                 press("esc"),
                 Layers {
-                    menu: Menu::On,
+                    over: Over::Menu,
                     run: true,
                     mode: None,
                     line_empty: false,
@@ -792,8 +1019,11 @@ mod tests {
             Some(Action::MenuDismiss)
         );
         assert_eq!(
-            k.action(press("esc"), Layers::default()),
-            Some(Action::Rewind)
+            k.hit(Some(press("esc")), press("esc"), Layers::default()),
+            Some(Hit {
+                action: Action::Rewind,
+                pair: true
+            })
         );
     }
 
@@ -813,7 +1043,7 @@ mod tests {
                     k.action(
                         key,
                         Layers {
-                            menu: Menu::Off,
+                            over: Over::None,
                             run: true,
                             mode,
                             line_empty: false,
@@ -849,7 +1079,7 @@ mod tests {
     fn the_menu_leaves_the_letters_to_the_list() {
         let k = Keys::default();
         let listing = Layers {
-            menu: Menu::On,
+            over: Over::Menu,
             ..Layers::default()
         };
         for letter in ["x", "e", "j", "k"] {
@@ -869,24 +1099,28 @@ mod tests {
         for b in BINDINGS {
             // Both halves of Normal: about what it does to pre-vim bindings,
             // not the modal keys themselves.
-            if matches!(b.when, W::Mode(Mode::Normal) | W::NormalEmpty) {
+            if matches!(b.when, W::Mode(_) | W::NormalEmpty | W::Pager) {
                 continue;
             }
             for spec in b.keys {
-                let press = parse(spec).unwrap();
+                let (prev, press) = match chord(spec).unwrap() {
+                    Chord::One(p) => (None, p),
+                    Chord::Two(a, p) => (Some(a), p),
+                };
                 let insert = Layers {
-                    menu: if b.when == W::Menu {
-                        Menu::On
+                    over: if b.when == W::Menu {
+                        Over::Menu
                     } else {
-                        Menu::Off
+                        Over::None
                     },
                     run: b.when == W::Run,
                     mode: None,
                     line_empty: false,
                 };
                 assert_eq!(
-                    k.action(press, insert),
-                    k.action(
+                    k.hit(prev, press, insert),
+                    k.hit(
+                        prev,
                         press,
                         Layers {
                             mode: Some(Mode::Normal),

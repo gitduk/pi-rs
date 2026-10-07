@@ -1,3 +1,4 @@
+use crate::tui::ui::Focus;
 use crate::tui::{Asked, Deed, Intent, View, view_at};
 use pi_core::input::commands::{Command, Source};
 use pi_core::input::{Builtin, Fate};
@@ -78,7 +79,7 @@ async fn an_idle_lane_opens_the_rewind_selector() {
     };
     tui.carry(deed).await;
     assert!(
-        !tui.ui.rewind.is_empty(),
+        matches!(tui.ui.focus, Focus::Rewind(_)),
         "the selector opened on what the user said"
     );
     assert!(tui.ui.flash.is_none(), "and nothing was refused");
@@ -112,7 +113,10 @@ async fn the_rewind_of_a_lane_with_no_transcript_says_so() {
     };
     tui.carry(deed).await;
 
-    assert!(tui.ui.rewind.is_empty(), "there is nothing to go back to");
+    assert!(
+        !matches!(tui.ui.focus, Focus::Rewind(_)),
+        "there is nothing to go back to"
+    );
 }
 
 // `/new`, `/worktree` to an open checkout, and `/loop` (which only arms a
@@ -122,7 +126,7 @@ async fn an_empty_reply_is_not_opened() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
     tui.ui.open_reply(Listing::default());
-    assert!(tui.ui.reply.is_none());
+    assert!(!matches!(tui.ui.focus, Focus::Reply(_)));
 }
 
 // Esc goes to the reply, not past it: reaching the run would stop a turn
@@ -140,7 +144,10 @@ async fn esc_closes_the_reply_rather_than_reaching_the_run() {
         .ui
         .key(tui.core.lane(), view_at(&mut tui.views, token), esc, false);
     assert!(matches!(asked, Asked::Own(Deed::Nothing)), "{asked:?}");
-    assert!(tui.ui.reply.is_none(), "the esc closed it");
+    assert!(
+        !matches!(tui.ui.focus, Focus::Reply(_)),
+        "the esc closed it"
+    );
 }
 
 // A command's answer is a dismissed reply, so echoing it strands the line
@@ -194,7 +201,10 @@ async fn a_reply_has_the_keyboard_until_closed() {
         let asked = tui
             .ui
             .key(lane, view_at(&mut tui.views, token), press(code), false);
-        assert!(tui.ui.reply.is_some(), "{code:?} is the reply's");
+        assert!(
+            matches!(tui.ui.focus, Focus::Reply(_)),
+            "{code:?} is the reply's"
+        );
         assert!(matches!(asked, Asked::Own(Deed::Nothing)), "{asked:?}");
     }
     assert!(tui.ui.editor.is_empty(), "nothing typed behind it");
@@ -206,7 +216,7 @@ async fn a_reply_has_the_keyboard_until_closed() {
         press(KeyCode::Char('q')),
         false,
     );
-    assert!(tui.ui.reply.is_none(), "`q` closes it");
+    assert!(!matches!(tui.ui.focus, Focus::Reply(_)), "`q` closes it");
 }
 
 // Enter closes a reply without sending the line behind it; `ctrl+c` closes
@@ -224,7 +234,7 @@ async fn enter_and_the_stop_close_a_reply() {
     let lane = tui.core.lane_mut();
     tui.ui
         .key(lane, view_at(&mut tui.views, token), enter, false);
-    assert!(tui.ui.reply.is_none(), "Enter closed it");
+    assert!(!matches!(tui.ui.focus, Focus::Reply(_)), "Enter closed it");
     assert!(!tui.ui.took_submit(), "and sent nothing");
     assert_eq!(tui.ui.editor.text(), "/help", "the line waits");
 
@@ -235,7 +245,10 @@ async fn enter_and_the_stop_close_a_reply() {
     let asked = tui
         .ui
         .key(lane, view_at(&mut tui.views, token), ctrl_c, true);
-    assert!(tui.ui.reply.is_none(), "`ctrl+c` took it down too");
+    assert!(
+        !matches!(tui.ui.focus, Focus::Reply(_)),
+        "`ctrl+c` took it down too"
+    );
     assert!(!matches!(asked, Asked::Own(Deed::Nothing)), "{asked:?}");
 }
 
@@ -318,4 +331,97 @@ fn esc_takes_the_list_first_and_the_run_next() {
         "/new",
         "the half-typed word was completed"
     );
+}
+
+// A `ctrl+c` that closed something is not the first of a quit: two quick
+// presses to put a reply away must not leave the app.
+#[tokio::test]
+async fn the_stop_that_closed_a_reply_is_not_half_a_quit() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let dir = tempfile::tempdir().expect("a checkout");
+    let mut tui = surface(dir.path());
+    tui.ui.open_reply(Listing::say(["/status answered this"]));
+    let token = tui.core.lane().token();
+    let ctrl_c =
+        || crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+    let lane = tui.core.lane_mut();
+    tui.ui
+        .key(lane, view_at(&mut tui.views, token), ctrl_c(), false);
+    assert!(matches!(tui.ui.focus, Focus::Editor), "the first closed it");
+    let lane = tui.core.lane_mut();
+    let asked = tui
+        .ui
+        .key(lane, view_at(&mut tui.views, token), ctrl_c(), false);
+    assert!(matches!(asked, Asked::Own(Deed::Nothing)), "{asked:?}");
+    assert!(tui.ui.flash.is_some(), "the second only warns");
+}
+
+// The rewind selector has the keyboard too: a letter neither types nor
+// closes it, and the `esc` that closes it is not the first of another.
+#[tokio::test]
+async fn the_rewind_selector_has_the_keyboard() {
+    use crate::tui::menu::MenuEntry;
+    use agent::session::EntryId;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let dir = tempfile::tempdir().expect("a checkout");
+    let mut tui = surface(dir.path());
+    tui.ui.open_rewind(vec![MenuEntry::Message {
+        id: EntryId(1),
+        show: "the first question".into(),
+        help: "",
+    }]);
+    let token = tui.core.lane().token();
+    let press = |code| crate::tui::TermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
+
+    let lane = tui.core.lane_mut();
+    tui.ui.key(
+        lane,
+        view_at(&mut tui.views, token),
+        press(KeyCode::Char('x')),
+        false,
+    );
+    assert!(
+        matches!(tui.ui.focus, Focus::Rewind(_)),
+        "a letter is swallowed"
+    );
+    assert!(tui.ui.editor.is_empty());
+
+    for (n, expect_open) in [(1, false), (2, false)] {
+        let lane = tui.core.lane_mut();
+        let asked = tui.ui.key(
+            lane,
+            view_at(&mut tui.views, token),
+            press(KeyCode::Esc),
+            false,
+        );
+        assert!(
+            matches!(asked, Asked::Own(Deed::Nothing)),
+            "esc {n}: {asked:?}"
+        );
+        assert_eq!(matches!(tui.ui.focus, Focus::Rewind(_)), expect_open);
+    }
+}
+
+// The `esc` that closed a reply is not the first of `esc esc`: a quick
+// second press on the empty line must not open the rewind selector.
+#[tokio::test]
+async fn the_esc_that_closed_a_reply_is_not_half_a_rewind() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let dir = tempfile::tempdir().expect("a checkout");
+    let mut tui = surface(dir.path());
+    tui.ui.open_reply(Listing::say(["/status answered this"]));
+    let token = tui.core.lane().token();
+    let esc = || crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+    for n in 1..=2 {
+        let lane = tui.core.lane_mut();
+        let asked = tui
+            .ui
+            .key(lane, view_at(&mut tui.views, token), esc(), false);
+        assert!(
+            matches!(asked, Asked::Own(Deed::Nothing)),
+            "esc {n}: {asked:?}"
+        );
+    }
 }

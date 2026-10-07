@@ -45,8 +45,8 @@ use view::{Queued, View, Views, front_view, prune_views, view_at};
 // What a folded run shows instead of what it is thinking.
 const THINKING: &str = "thinking…";
 
-// How close two Ctrl-C presses read as one quit, borrowed from pi (500ms).
-// A latching flag is wrong: clear-type-clear would read as a double-tap.
+// How close the halves of a named or modified pair must be (`esc esc`),
+// borrowed from pi. A latching flag would read clear-type-clear as a pair.
 const DOUBLE_TAP: std::time::Duration = std::time::Duration::from_millis(500);
 
 // How long a flash stays on the bar row: long enough to read a short line

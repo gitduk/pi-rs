@@ -43,7 +43,7 @@ pub fn lines(listing: &Listing) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use pi_store::keys::{Keys, parse};
+    use pi_store::keys::{Keys, chord};
 
     use super::*;
 
@@ -56,7 +56,7 @@ mod tests {
             let keys = row.split(icons::KEY_NOTE_SEP).next().unwrap();
             let keys = keys.split_once("  ").expect("id then keys").1;
             for spec in keys.trim().split(", ") {
-                assert!(parse(spec).is_ok(), "cannot re-read `{spec}`");
+                assert!(chord(spec).is_ok(), "cannot re-read `{spec}`");
             }
         }
     }

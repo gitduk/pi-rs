@@ -7,7 +7,7 @@
 use anyhow::{Result, bail};
 use crossterm::event::{KeyCode, KeyModifiers};
 
-use super::{BINDINGS, Keys, Press};
+use super::{BINDINGS, Chord, Keys, Press};
 use crate::listing::{Listing, Row};
 
 impl Keys {
@@ -22,7 +22,7 @@ impl Keys {
                 .who
                 .iter()
                 .filter(|(_, id)| **id == b.id)
-                .map(|((_, p), _)| show(*p))
+                .map(|((_, c), _)| show_chord(*c))
                 .collect();
             keys.sort();
             let row = Row::new([b.id.to_string(), keys.join(", ")]);
@@ -31,6 +31,14 @@ impl Keys {
                 false => row.noting(b.note),
             }
         }))
+    }
+}
+
+// A chord written the way a config would write it: presses apart by a space.
+fn show_chord(c: Chord) -> String {
+    match c {
+        Chord::One(p) => show(p),
+        Chord::Two(a, b) => format!("{} {}", show(a), show(b)),
     }
 }
 
@@ -81,6 +89,17 @@ fn named(word: &str) -> Option<KeyCode> {
             KeyCode::F(n)
         }
     })
+}
+
+/// One press, or two apart by a space: `ctrl+w`, `g g`, `ctrl+c ctrl+c`.
+pub fn chord(spec: &str) -> Result<Chord> {
+    let presses: Vec<&str> = spec.split_whitespace().collect();
+    match presses.as_slice() {
+        [one] => Ok(Chord::One(parse(one)?)),
+        [a, b] => Ok(Chord::Two(parse(a)?, parse(b)?)),
+        [] => bail!("`{spec}` names no key"),
+        _ => bail!("`{spec}` is more than two presses; a binding is one press or a pair"),
+    }
 }
 
 /// `ctrl+shift+y`, `alt+left`, `f5`, `?`, `D`.

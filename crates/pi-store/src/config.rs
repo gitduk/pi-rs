@@ -123,38 +123,18 @@ pub struct Config {
 pub struct Vim {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
-    /// Two characters typed inside the window below. Empty turns the sequence
-    /// off, and with it the only way into Normal — `esc` keeps all three of
-    /// the jobs it already has rather than becoming a mode key.
-    #[serde(default = "default_escape")]
-    pub escape: String,
-    /// How long the first half of a two-press sequence waits for its second —
-    /// the escape pair in Insert, and the doubled keys in Normal.
-    #[serde(default = "default_escape_ms")]
-    pub escape_timeout_ms: u64,
-}
-
-impl Vim {
-    /// The escape sequence as the exactly-two characters it must be, or `None`
-    /// — an empty setting, or any other length, is no sequence at all.
-    pub fn escape_pair(&self) -> Option<(char, char)> {
-        let mut chars = self.escape.chars();
-        match (chars.next(), chars.next(), chars.next()) {
-            (Some(a), Some(b), None) => Some((a, b)),
-            _ => None,
-        }
-    }
+    /// How long the first of a pair of bare characters waits for the second —
+    /// `j k` into Normal, `d d`, `g g`. Short, since the same characters are
+    /// typed as text; the pairs themselves are `[keys]` bindings.
+    #[serde(default = "default_pair_ms")]
+    pub pair_timeout_ms: u64,
 }
 
 fn default_enabled() -> bool {
     true
 }
 
-fn default_escape() -> String {
-    "jk".to_string()
-}
-
-fn default_escape_ms() -> u64 {
+fn default_pair_ms() -> u64 {
     250
 }
 fn default_loop_max_rounds() -> Option<usize> {
@@ -168,8 +148,7 @@ impl Default for Vim {
     fn default() -> Self {
         Self {
             enabled: default_enabled(),
-            escape: default_escape(),
-            escape_timeout_ms: default_escape_ms(),
+            pair_timeout_ms: default_pair_ms(),
         }
     }
 }

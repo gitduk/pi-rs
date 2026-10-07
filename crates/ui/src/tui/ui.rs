@@ -16,7 +16,6 @@ use super::row::{Row, count};
 use super::screen::{self, Screen};
 use super::scrollback::body;
 use super::view::{StreamKind, View, snapshot};
-use super::vim::Vim;
 use crate::render::Paint;
 use crate::status;
 use pi_core::core::Core;
@@ -62,17 +61,13 @@ pub(super) struct Ui {
     pub(super) lists: Lists,
     // The same copy, of the same list `/help` prints.
     pub(super) commands: Arc<Vec<Command>>,
-    // What a slash command last answered, or None. Read-only; while it is up
-    // it owns the menu rows and intercepts the menu keys before the editor.
-    pub(super) reply: Option<Reply>,
-    // When the last `ctrl+l` was pressed, for the new-session double-tap.
-    pub(super) last_l: Option<Instant>,
-    pub(super) last_interrupt: Option<Instant>,
-    // When the last Esc was pressed, for the rewind selector's double-tap.
-    pub(super) last_esc: Option<Instant>,
-    // The rewind selector's rows, session order, newest last. Empty is closed;
-    // while it is open it replaces the completion list in the same rows.
-    pub(super) rewind: Vec<MenuEntry>,
+    // Where keys land. One place at a time: what draws a caret, takes a
+    // paste or answers the wheel is read off this, not off flags beside it.
+    pub(super) focus: Focus,
+    // The press before this one, for the pairs the key table binds.
+    pub(super) last_press: Option<LastPress>,
+    // How long a bare character waits for the second of its pair.
+    pub(super) pair_window: std::time::Duration,
     // The @-completion cache, keyed by the query the walk was built for —
     // a directory walk sits behind every keystroke otherwise.
     pub(super) at_menu: Option<(String, Vec<pi_core::input::complete::FileEntry>)>,
@@ -80,7 +75,7 @@ pub(super) struct Ui {
     pub(super) at_root: std::path::PathBuf,
     pub(super) spinner: usize,
     // The modal keys, or None while they are off.
-    pub(super) vim: Option<Vim>,
+    pub(super) vim: Option<pi_store::keys::Mode>,
     // The segments the status line shows, in the order the config named them.
     pub(super) status: Vec<Segment>,
     // What the bar says, in ring order. Rebuilt before every draw.
@@ -100,9 +95,27 @@ pub(super) struct Ui {
     // Whether the live block lists every call in flight or just the newest
     // with a count; a click flips it. Outlives the calls themselves.
     pub(super) live_tools_shown: bool,
-    // The conversation alone. The one thing on this surface that hides the
-    // editor rather than sitting over it; `browse.rs` draws it.
-    pub(super) browsing: bool,
+}
+
+/// Who has the keyboard.
+pub(super) enum Focus {
+    // The line, with completions over it while what is typed has some.
+    Editor,
+    // The messages a rewind can go back to, session order, newest last.
+    Rewind(Vec<MenuEntry>),
+    // What a slash command answered, read until closed.
+    Reply(Reply),
+    // The conversation alone, the editor hidden; `browse.rs` draws it.
+    Browse,
+}
+
+/// A press, kept for the one after it.
+#[derive(Clone, Copy)]
+pub(super) struct LastPress {
+    pub(super) press: pi_store::keys::Press,
+    pub(super) at: Instant,
+    // It put a character on the line, which a pair it starts takes back.
+    pub(super) typed: bool,
 }
 
 // What to call a checkout: the root answers to its directory name (as
@@ -148,7 +161,9 @@ impl Ui {
     pub(super) fn leave_lane(&mut self, view: &mut View) {
         view.draft = self.editor.take_composing();
         self.flash = None;
-        self.rewind.clear();
+        if matches!(self.focus, Focus::Rewind(_)) {
+            self.focus = Focus::Editor;
+        }
     }
 
     pub(super) fn new(
@@ -178,16 +193,14 @@ impl Ui {
             band,
             tty_bg: None,
             bang_prompt,
-            last_l: None,
             picked: None,
             dismissed_at: None,
-            last_interrupt: None,
-            last_esc: None,
-            rewind: Vec::new(),
+            focus: Focus::Editor,
+            last_press: None,
+            pair_window: std::time::Duration::ZERO,
             at_menu: None,
             at_root: std::path::PathBuf::new(),
             vim: None,
-            reply: None,
             spinner: 0,
             status: default_parts(),
             tabs: Vec::new(),
@@ -196,7 +209,6 @@ impl Ui {
             hovered_scrollback: None,
             row_targets: Vec::new(),
             live_tools_shown: false,
-            browsing: false,
             regions: Regions::default(),
         }
     }
@@ -236,7 +248,7 @@ impl Ui {
         // above holds it. Collapsed: newest named with a count for the rest.
         let shown = drawn(&view.state.tools, row_holds);
         let mut pending = Vec::new();
-        if !self.browsing {
+        if !self.browsing() {
             if self.live_tools_shown {
                 pending.extend(
                     shown
@@ -265,7 +277,7 @@ impl Ui {
         // count the rows the block takes, not the lines before they did.
         let pending_rows = rows.len();
 
-        rows.extend(if thinking && self.browsing {
+        rows.extend(if thinking && self.browsing() {
             Vec::new()
         } else {
             body(
@@ -278,7 +290,7 @@ impl Ui {
             )
         });
 
-        if lane.is_running() && !self.browsing {
+        if lane.is_running() && !self.browsing() {
             let mut parts = status::parts(&self.status, &snapshot(lane, view));
             // A stopping run says so; an ordinary one needs no word — its
             // ticking clock already says the turn is on.

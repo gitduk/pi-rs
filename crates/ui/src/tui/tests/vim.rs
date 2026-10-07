@@ -109,7 +109,9 @@ fn a_j_left_behind_does_not_arm_a_later_k() {
 
     ui.key(&lane, &mut view, typed('j'), false);
     let stale = std::time::Instant::now() - std::time::Duration::from_secs(1);
-    ui.vim.as_mut().unwrap().last = Some(('j', stale));
+    if let Some(last) = &mut ui.last_press {
+        last.at = stale;
+    }
     ui.key(&lane, &mut view, typed('k'), false);
 
     assert_eq!(ui.editor.text(), "jk");
@@ -142,7 +144,7 @@ fn an_unbound_character_types_nothing_in_normal() {
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
     ui.editor.set_line("hello");
-    ui.vim.as_mut().unwrap().mode = Mode::Normal;
+    ui.vim = Some(Mode::Normal);
 
     ui.key(&lane, &mut view, typed('z'), false);
     assert_eq!(ui.editor.text(), "hello");
@@ -160,7 +162,7 @@ fn i_and_a_return_to_insert_on_either_side_of_the_caret() {
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
     ui.editor.set_line("ab");
-    ui.vim.as_mut().unwrap().mode = Mode::Normal;
+    ui.vim = Some(Mode::Normal);
 
     ui.key(&lane, &mut view, typed('0'), false);
     ui.key(&lane, &mut view, typed('i'), false);
@@ -168,7 +170,7 @@ fn i_and_a_return_to_insert_on_either_side_of_the_caret() {
     ui.key(&lane, &mut view, typed('Z'), false);
     assert_eq!(ui.editor.text(), "Zab", "i types where the caret is");
 
-    ui.vim.as_mut().unwrap().mode = Mode::Normal;
+    ui.vim = Some(Mode::Normal);
     ui.key(&lane, &mut view, typed('0'), false);
     ui.key(&lane, &mut view, typed('a'), false);
     ui.key(&lane, &mut view, typed('Y'), false);
@@ -183,7 +185,7 @@ fn s_and_c_delete_their_range_and_land_in_insert() {
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
     ui.editor.set_line("abcd");
-    ui.vim.as_mut().unwrap().mode = Mode::Normal;
+    ui.vim = Some(Mode::Normal);
 
     ui.key(&lane, &mut view, typed('0'), false);
     ui.key(&lane, &mut view, typed('s'), false);
@@ -192,7 +194,7 @@ fn s_and_c_delete_their_range_and_land_in_insert() {
     ui.key(&lane, &mut view, typed('Z'), false);
     assert_eq!(ui.editor.text(), "Zbcd", "s types where the character was");
 
-    ui.vim.as_mut().unwrap().mode = Mode::Normal;
+    ui.vim = Some(Mode::Normal);
     ui.key(&lane, &mut view, typed('0'), false);
     let right = crate::tui::TermEvent::Key(crossterm::event::KeyEvent::new(
         crossterm::event::KeyCode::Right,
@@ -213,7 +215,7 @@ fn s_and_cc_change_the_line_without_removing_it() {
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
     ui.editor.set_line("ab\ncd\nef");
-    ui.vim.as_mut().unwrap().mode = Mode::Normal;
+    ui.vim = Some(Mode::Normal);
 
     ui.editor.buffer_start();
     ui.editor.down();
@@ -223,7 +225,7 @@ fn s_and_cc_change_the_line_without_removing_it() {
     ui.key(&lane, &mut view, typed('Z'), false);
     assert_eq!(ui.editor.text(), "ab\nZ\nef");
 
-    ui.vim.as_mut().unwrap().mode = Mode::Normal;
+    ui.vim = Some(Mode::Normal);
     ui.editor.down();
     ui.key(&lane, &mut view, typed('c'), false);
     ui.key(&lane, &mut view, typed('c'), false);
@@ -241,7 +243,7 @@ fn o_and_o_open_a_line_and_land_in_insert() {
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
     ui.editor.set_line("ab\ncd");
-    ui.vim.as_mut().unwrap().mode = Mode::Normal;
+    ui.vim = Some(Mode::Normal);
 
     ui.key(&lane, &mut view, typed('O'), false);
     assert_eq!(mode(&ui), Some(Mode::Insert));
@@ -253,7 +255,7 @@ fn o_and_o_open_a_line_and_land_in_insert() {
     );
 
     ui.editor.set_line("ab\ncd");
-    ui.vim.as_mut().unwrap().mode = Mode::Normal;
+    ui.vim = Some(Mode::Normal);
     ui.key(&lane, &mut view, typed('o'), false);
     ui.key(&lane, &mut view, typed('Z'), false);
     assert_eq!(
@@ -270,7 +272,7 @@ fn dd_takes_the_whole_line_and_stays_in_normal() {
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
     ui.editor.set_line("ab\ncd\nef");
-    ui.vim.as_mut().unwrap().mode = Mode::Normal;
+    ui.vim = Some(Mode::Normal);
 
     ui.key(&lane, &mut view, typed('d'), false);
     assert_eq!(ui.editor.text(), "ab\ncd\nef", "the first d waits");
@@ -300,7 +302,7 @@ fn gg_g_and_caret_walk_the_lines() {
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
     ui.editor.set_line("  ab\ncd");
-    ui.vim.as_mut().unwrap().mode = Mode::Normal;
+    ui.vim = Some(Mode::Normal);
 
     ui.key(&lane, &mut view, typed('g'), false);
     ui.key(&lane, &mut view, typed('g'), false);
@@ -322,7 +324,7 @@ fn an_empty_line_sends_gg_and_g_to_the_history_ends() {
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
     view.surface.scrollback = (1..=60).map(|n| Row::notice(format!("row {n}"))).collect();
-    ui.vim.as_mut().unwrap().mode = Mode::Normal;
+    ui.vim = Some(Mode::Normal);
 
     ui.key(&lane, &mut view, typed('g'), false);
     ui.key(&lane, &mut view, typed('g'), false);
@@ -366,8 +368,8 @@ fn ctrl_l_clears_the_line_and_twice_starts_a_session() {
     assert!(matches!(asked, Asked::Own(Deed::Nothing)), "{asked:?}");
     assert!(ui.editor.is_empty(), "the line went on the one press");
 
-    // Pressed again while it is still empty: the clearing press left the
-    // double-tap unarmed, so this one only arms it.
+    // Pressed again while it is still empty: the clearing press is not the
+    // first of a pair, so this one only starts one.
     let asked = ui.key(&lane, &mut view, ctrl('l'), false);
     assert!(
         matches!(asked, Asked::Own(Deed::Nothing)),
@@ -421,7 +423,7 @@ fn v_opens_the_conversation_view_on_an_empty_line() {
     let mut ui = vim_ui();
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
-    ui.vim.as_mut().unwrap().mode = Mode::Normal;
+    ui.vim = Some(Mode::Normal);
     view.surface.scrollback = (1..=40)
         .flat_map(|n| Row::answer(&format!("answer {n}"), &ui.paint))
         .collect();
@@ -429,12 +431,12 @@ fn v_opens_the_conversation_view_on_an_empty_line() {
     // A line with something on it: `v` is Ignore, and nothing opens.
     ui.editor.set_line("half-typed");
     ui.key(&lane, &mut view, typed('v'), false);
-    assert!(!ui.browsing, "a line to command keeps its v");
+    assert!(!ui.browsing(), "a line to command keeps its v");
     assert_eq!(ui.editor.text(), "half-typed");
 
     ui.editor.clear();
     ui.key(&lane, &mut view, typed('v'), false);
-    assert!(ui.browsing);
+    assert!(ui.browsing());
 
     // The keys in here are its own: `x` would delete a character in
     // Normal, and `k` scrolls back rather than reaching for history.
@@ -475,7 +477,7 @@ fn v_opens_the_conversation_view_on_an_empty_line() {
     // of it is not a pair.
     ui.key(&lane, &mut view, typed('g'), false);
     ui.key(&lane, &mut view, esc, false);
-    assert!(!ui.browsing);
+    assert!(!ui.browsing());
     assert_eq!(view.surface.scroll, 0, "and leaves at the newest rows");
     ui.key(&lane, &mut view, typed('g'), false);
     assert_eq!(
@@ -489,7 +491,7 @@ fn v_opens_the_conversation_view_on_an_empty_line() {
 #[test]
 fn turning_the_keys_off_drops_the_mode_rather_than_parking_it() {
     let mut ui = vim_ui();
-    ui.vim.as_mut().unwrap().mode = Mode::Normal;
+    ui.vim = Some(Mode::Normal);
 
     ui.set_vim(&pi_store::config::Vim {
         enabled: false,

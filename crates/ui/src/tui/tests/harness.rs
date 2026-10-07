@@ -146,7 +146,7 @@ pub(super) fn ctrl(c: char) -> crate::tui::TermEvent {
 }
 
 pub(super) fn mode(ui: &crate::tui::Ui) -> Option<Mode> {
-    ui.vim.as_ref().map(|v| v.mode)
+    ui.vim
 }
 
 pub(super) fn test_ui(width: u16, height: u16) -> crate::tui::Ui {

@@ -694,7 +694,7 @@ fn normal_capitals_step_the_checkouts_and_the_window() {
         })
         .collect();
     ui.lists.worktrees.set(trees).ok();
-    ui.vim.as_mut().unwrap().mode = Mode::Normal;
+    ui.vim = Some(Mode::Normal);
     let (_dir, mut lane) = a_running_lane();
     let mut view = View::default();
 

@@ -2,17 +2,18 @@
 //! rewind menu — and the keys that drive them.
 use super::mouse::at_row_name;
 use super::row::Row;
+use super::ui::{Focus, LastPress};
 use super::view::View;
-use super::vim::{Typed, double_tap};
 use super::{Asked, Deed, Ui};
+use super::{DOUBLE_TAP, screen};
 use agent::session::EntryId;
-use crossterm::event::{Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
+use crossterm::event::{Event as TermEvent, KeyEventKind, MouseEventKind};
 use pi_core::core;
 use pi_core::core::lane::Lane;
 use pi_core::input::Builtin;
 use pi_core::input::commands::{Candidate, Choice};
 use pi_core::input::{self, Intent};
-use pi_store::keys::{Action, Layers, Menu, Press};
+use pi_store::keys::{Action, Layers, Mode, Over, Press};
 use pi_store::session::ResumeChoice;
 use pi_store::session::Store;
 use ratatui::text::Line;
@@ -21,20 +22,13 @@ use ratatui::widgets::ListItem;
 use std::time::Instant;
 
 impl Ui {
-    // A reply is up: it owns the menu's space, and the completion list
-    // waits. It has the keyboard while open.
-    pub(super) fn overlay(&self) -> bool {
-        self.reply.is_some()
-    }
-
     // What the line could become: a completion while a command word is
     // typed, or (rewind selector open) a message to rewind to.
     pub(super) fn menu(&mut self) -> Vec<MenuEntry> {
-        if self.overlay() {
-            return Vec::new();
-        }
-        if !self.rewind.is_empty() {
-            return self.rewind.clone();
+        match &self.focus {
+            Focus::Rewind(rows) => return rows.clone(),
+            Focus::Reply(_) | Focus::Browse => return Vec::new(),
+            Focus::Editor => {}
         }
         if self.dismissed_at.as_deref() == Some(self.editor.text()) {
             return Vec::new();
@@ -85,7 +79,7 @@ impl Ui {
     // Open the rewind selector on the given messages, newest selected first.
     pub(super) fn open_rewind(&mut self, rows: Vec<MenuEntry>) {
         self.picked = Some(rows.len().saturating_sub(1));
-        self.rewind = rows;
+        self.focus = Focus::Rewind(rows);
     }
 
     // The highlighted row, clamped: the list shrinks as the word grows.
@@ -159,123 +153,214 @@ impl Ui {
                 return Asked::Own(Deed::Nothing);
             }
             TermEvent::Paste(text) => {
-                self.last_esc = None;
-                if let Some(v) = &mut self.vim {
-                    v.last = None;
-                }
-                // Browse mode and a reply hide the line: text pasted into it
-                // would land where nobody can see it, and be there on the way out.
-                if !self.browsing && !self.overlay() {
+                self.last_press = None;
+                // Only the line takes text, and only while it has the keys:
+                // anywhere else the paste would land where nobody can see it.
+                if matches!(self.focus, Focus::Editor) {
                     self.editor.insert_str(&text.replace('\r', "\n"));
                 }
                 return Asked::Own(Deed::Nothing);
             }
-            TermEvent::Mouse(mouse) => {
-                // A reply is topmost, as for keys: the wheel scrolls it
-                // while up, never the transcript underneath.
-                if self.reply.is_some() {
-                    let room = self.regions.menu.height as usize;
-                    let width = self.screen.usable();
-                    match mouse.kind {
-                        MouseEventKind::ScrollUp => return self.scrolled(-1, room, width),
-                        MouseEventKind::ScrollDown => return self.scrolled(1, room, width),
-                        _ => {}
-                    }
-                }
-                match mouse.kind {
-                    MouseEventKind::ScrollUp => self.scroll_view(view, true, 1),
-                    MouseEventKind::ScrollDown => self.scroll_view(view, false, 1),
-                    MouseEventKind::Moved | MouseEventKind::Drag(_) => {
-                        self.on_mouse_move(view, mouse.column, mouse.row);
-                    }
-                    MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                        self.on_mouse_click(view, mouse.column, mouse.row);
-                    }
-                    _ => {}
-                }
-                return Asked::Own(Deed::Nothing);
-            }
+            TermEvent::Mouse(mouse) => return self.mouse(view, mouse),
             // Windows reports both press and release; acting on both would
-            // double every keystroke. Any non-Esc key breaks the rewind double-tap.
-            TermEvent::Key(k) if k.kind != KeyEventKind::Release => {
-                if k.code != KeyCode::Esc {
-                    self.last_esc = None;
+            // double every keystroke.
+            TermEvent::Key(k) if k.kind != KeyEventKind::Release => k,
+            _ => return Asked::Own(Deed::Nothing),
+        };
+
+        let press = Press::of(key.code, key.modifiers);
+        let now = Instant::now();
+        let last = self.last_press.take();
+        let prev = last
+            .filter(|l| now.duration_since(l.at) < self.pair_window_after(l.press))
+            .map(|l| l.press);
+        let layers = self.layers(running);
+        let hit = self.keys.hit(prev, press, layers);
+        if let Some(h) = hit
+            && h.pair
+        {
+            // The pair's first half typed itself onto the line before anyone
+            // knew it was one; take it back, so the line shows what it means.
+            if last.is_some_and(|l| l.typed) {
+                self.editor.backspace();
+            }
+        } else {
+            // A finished pair starts none: `g g g` is a pair and a `g`.
+            self.last_press = Some(LastPress {
+                press,
+                at: now,
+                typed: false,
+            });
+        }
+        let action = hit.map(|h| h.action);
+
+        match action {
+            Some(Action::AppCancel) => return self.cancel(view, running),
+            Some(Action::AppQuit) => return Asked::Core(Intent::Builtin(Builtin::Quit)),
+            _ => {}
+        }
+        match self.focus {
+            Focus::Reply(_) | Focus::Browse => self.pager_key(view, action),
+            Focus::Rewind(_) => self.rewind_key(action),
+            Focus::Editor => self.editor_key(lane, view, key, action),
+        }
+    }
+
+    // The layers the key table reads, from who has the keyboard.
+    fn layers(&mut self, running: bool) -> Layers {
+        let over = match self.focus {
+            Focus::Reply(_) | Focus::Browse => Over::Pager,
+            Focus::Rewind(_) => Over::Menu,
+            Focus::Editor => {
+                if self.menu().is_empty() {
+                    Over::None
+                } else {
+                    Over::Menu
                 }
-                k
+            }
+        };
+        Layers {
+            over,
+            run: running,
+            mode: self.vim,
+            // Whether the line has anything on it, which the keys bound
+            // to an empty one read. Only Normal asks.
+            line_empty: self.editor.is_empty(),
+        }
+    }
+
+    // How long `press` waits for the second of a pair. A bare character is
+    // also text, so its pairs must come quickly or typing would trip them.
+    fn pair_window_after(&self, press: Press) -> std::time::Duration {
+        if press.is_bare() {
+            self.pair_window
+        } else {
+            DOUBLE_TAP
+        }
+    }
+
+    // The stop: whatever is over the editor closes, and a run stops. With
+    // neither, it says the next one leaves.
+    fn cancel(&mut self, view: &mut View, running: bool) -> Asked {
+        let closed = self.close_overlay(view);
+        if running {
+            return Asked::Own(Deed::Interrupt);
+        }
+        if closed {
+            return Asked::Own(Deed::Nothing);
+        }
+        self.flash("press it again to quit");
+        Asked::Own(Deed::Nothing)
+    }
+
+    // Back to the line, from whatever has the keyboard; false when the line
+    // had it already. The press that closed is not the first of a pair.
+    fn close_overlay(&mut self, view: &mut View) -> bool {
+        match self.focus {
+            Focus::Editor => return false,
+            Focus::Browse => self.leave_browse(view),
+            Focus::Rewind(_) | Focus::Reply(_) => self.focus = Focus::Editor,
+        }
+        self.disarm();
+        true
+    }
+
+    // A press that did its own thing is not the first of a pair: the table
+    // pairs by key alone (dismissing `esc`, clearing `ctrl+l`).
+    fn disarm(&mut self) {
+        self.last_press = None;
+    }
+
+    // A reply or the conversation view: the pager keys move it, and
+    // everything else is swallowed.
+    fn pager_key(&mut self, view: &mut View, action: Option<Action>) -> Asked {
+        let (up, step) = match action {
+            Some(Action::PagerDown) => (false, Stride::Line),
+            Some(Action::PagerUp) => (true, Stride::Line),
+            Some(Action::PagerHalfDown) => (false, Stride::Half),
+            Some(Action::PagerHalfUp) => (true, Stride::Half),
+            Some(Action::PagerPageDown) => (false, Stride::Page),
+            Some(Action::PagerPageUp) => (true, Stride::Page),
+            Some(Action::PagerBottom) => (false, Stride::End),
+            Some(Action::PagerTop) => (true, Stride::End),
+            Some(Action::PagerClose) => {
+                self.close_overlay(view);
+                return Asked::Own(Deed::Nothing);
             }
             _ => return Asked::Own(Deed::Nothing),
         };
-        // A reply, then browse mode, takes the keyboard whole: one place has
-        // the focus, and the editor's table has nothing on screen to aim at.
-        if self.overlay() {
-            // Except the stop: a reply on screen must not stand between the
-            // user and a run they want stopped.
-            let stop = key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL;
-            if !(running && stop) {
-                return self.reply_key(key);
-            }
-            self.reply = None;
+        if matches!(self.focus, Focus::Browse) {
+            let rows = match step {
+                Stride::Line => 1,
+                Stride::Half => self.half_scroll_step(),
+                Stride::Page => self.page_scroll_step(),
+                Stride::End => screen::TOP,
+            };
+            self.scroll_view(view, up, rows);
+            return Asked::Own(Deed::Nothing);
         }
-        if self.browsing {
-            return self.browse_key(view, key);
-        }
-        let press = Press::of(key.code, key.modifiers);
-        // Computed here since `menu()` mutates state.
-        let menu = if self.menu().is_empty() {
-            Menu::Off
-        } else {
-            Menu::On
+        let room = self.regions.menu.height as usize;
+        // Wraps at the drawing's width, not the terminal's: a row that wraps
+        // after this count would end up unreachable to scroll to.
+        let width = self.screen.usable();
+        // The last row of a full window is the count, not the reply.
+        let page = room.saturating_sub(1).max(1) as isize;
+        let rows = match step {
+            Stride::Line => 1,
+            Stride::Half => (page / 2).max(1),
+            Stride::Page => page,
+            Stride::End => isize::MAX,
         };
-        let bound = self.keys.action(
-            press,
-            Layers {
-                menu,
-                run: running,
-                mode: self.vim.as_ref().map(|v| v.mode),
-                // Whether the line has anything on it, which the keys bound
-                // to an empty one read. Only Normal asks.
-                line_empty: self.editor.is_empty(),
-            },
-        );
+        self.scrolled(if up { -rows } else { rows }, room, width)
+    }
 
-        // A key that means something breaks the escape sequence: `j`, a
-        // command, then `k` is two commands and a `j`, not a mode change.
-        if bound.is_some()
-            && let Some(v) = &mut self.vim
-        {
-            v.last = None;
+    // The rewind selector: move, pick, or close; nothing else reaches it.
+    fn rewind_key(&mut self, action: Option<Action>) -> Asked {
+        match action {
+            Some(action @ (Action::MenuNext | Action::MenuPrevious)) => self.step_menu(action),
+            Some(Action::MenuAccept | Action::LineSubmit) => {
+                if let Some(MenuEntry::Message { id, .. }) = self.highlighted() {
+                    self.focus = Focus::Editor;
+                    return Asked::Own(Deed::To(id));
+                }
+            }
+            Some(Action::MenuDismiss) => {
+                self.focus = Focus::Editor;
+                self.disarm();
+            }
+            _ => {}
         }
+        Asked::Own(Deed::Nothing)
+    }
 
-        if !self.rewind.is_empty()
-            && !matches!(
-                bound,
-                Some(
-                    Action::MenuDismiss
-                        | Action::MenuAccept
-                        | Action::MenuNext
-                        | Action::MenuPrevious
-                        | Action::LineSubmit
-                )
-            )
-        {
-            self.rewind.clear();
-        }
+    fn step_menu(&mut self, action: Action) {
+        let n = self.menu().len().saturating_sub(1);
+        let at = self.picked.unwrap_or(n).min(n);
+        self.picked = Some(if action == Action::MenuNext {
+            at.saturating_add(1).min(n)
+        } else {
+            at.saturating_sub(1)
+        });
+    }
 
-        match bound {
-            Some(Action::AppCancel) => return self.interrupt_or_quit(running),
+    // The line has the keys, a completion list perhaps over it.
+    fn editor_key(
+        &mut self,
+        lane: &Lane,
+        view: &mut View,
+        key: crossterm::event::KeyEvent,
+        action: Option<Action>,
+    ) -> Asked {
+        match action {
             Some(Action::LineSubmit) => {
                 // Enter with a menu open runs what's highlighted, the typed
                 // text a mere prefix. Pick before draining the editor.
-                match self.highlighted() {
-                    Some(MenuEntry::Message { id, .. }) => {
-                        self.rewind.clear();
-                        return Asked::Own(Deed::To(id));
-                    }
+                return match self.highlighted() {
                     Some(MenuEntry::Completion(c)) => {
                         // The completion's line runs; the prefix that
                         // produced it goes, so it can't resubmit as a stray prompt.
                         self.editor.take();
-                        return self.run_line(view, c.line);
+                        self.run_line(view, c.line)
                     }
                     Some(MenuEntry::File {
                         start,
@@ -287,13 +372,13 @@ impl Ui {
                         // Enter on a path applies it and stays: the prompt
                         // is not done until the user says so.
                         self.apply_file(start, end, &path, dir);
-                        return Asked::Own(Deed::Nothing);
+                        Asked::Own(Deed::Nothing)
                     }
-                    None => {
+                    Some(MenuEntry::Message { .. }) | None => {
                         let typed = self.editor.take();
-                        return self.run_line(view, typed);
+                        self.run_line(view, typed)
                     }
-                }
+                };
             }
             Some(Action::EditExternally) => return Asked::Own(Deed::External),
             Some(Action::RunInterrupt) => {
@@ -304,18 +389,9 @@ impl Ui {
                 }
                 return Asked::Own(Deed::Interrupt);
             }
-            Some(Action::Rewind) => {
-                // Double Esc on an empty line opens the rewind selector:
-                // first press arms it, second (in window) asks for messages.
-                if !self.editor.is_empty() {
-                    return Asked::Own(Deed::Nothing);
-                }
-                let now = Instant::now();
-                if double_tap(&mut self.last_esc, now) {
-                    self.last_esc = None;
-                    return Asked::Own(Deed::Rewind);
-                }
-                return Asked::Own(Deed::Nothing);
+            // Only from an empty line: with text on it, `esc esc` is nothing.
+            Some(Action::Rewind) if self.editor.is_empty() => {
+                return Asked::Own(Deed::Rewind);
             }
             Some(action @ (Action::LaneNext | Action::LanePrev)) => {
                 let forward = action == Action::LaneNext;
@@ -327,22 +403,10 @@ impl Ui {
                     }
                 };
             }
-            Some(Action::LineClear) => {
-                // A line to lose goes on the one press; with nothing there,
-                // the session is what a press would replace, so it takes two.
-                if self.editor.is_empty() {
-                    let now = Instant::now();
-                    if double_tap(&mut self.last_l, now) {
-                        self.last_l = None;
-                        return Asked::Core(Intent::Builtin(Builtin::New));
-                    }
-                } else {
-                    // The armed half goes with the line: a quick second
-                    // press must not start a session on the line just cleared.
-                    self.last_l = None;
-                    self.editor.clear();
-                }
-                return Asked::Own(Deed::Nothing);
+            // The session is what a press would replace, so it takes two,
+            // and only with nothing on the line.
+            Some(Action::SessionNew) if self.editor.is_empty() => {
+                return Asked::Core(Intent::Builtin(Builtin::New));
             }
             Some(Action::AppExit) => {
                 // No `running` check: leaving is one intent whatever is in
@@ -354,21 +418,25 @@ impl Ui {
                     Asked::Own(Deed::Nothing)
                 };
             }
-            _ => {}
-        }
-
-        match bound {
+            Some(Action::LineClear) => {
+                if !self.editor.is_empty() {
+                    self.editor.clear();
+                    self.disarm();
+                }
+            }
             Some(Action::InsertNewline) => self.editor.insert('\n'),
             Some(Action::DeleteCharBack) => self.editor.backspace(),
             Some(Action::DeleteCharForward) => self.editor.delete(),
             Some(Action::DeleteWordBack) => self.editor.kill_word_back(),
             Some(Action::DeleteToLineEnd) => self.editor.kill_to_end(),
             Some(Action::DeleteToLineStart) => self.editor.kill_to_start(),
+            Some(Action::DeleteLine) => self.editor.delete_line(),
             Some(Action::MoveCharLeft) => self.editor.left(),
             Some(Action::MoveCharRight) => self.editor.right(),
             Some(Action::MoveWordLeft) => self.editor.word_left(),
             Some(Action::MoveWordRight) => self.editor.word_right(),
             Some(Action::MoveWordNext) => self.editor.word_next(),
+            Some(Action::ModeNormal) => self.set_mode(Mode::Normal),
             Some(Action::ModeInsert) => self.leave_normal(),
             Some(Action::ModeInsertAfter) => {
                 self.editor.right();
@@ -402,6 +470,7 @@ impl Ui {
             Some(Action::MoveLineStart) => self.editor.home(),
             Some(Action::MoveLineEnd) => self.editor.end(),
             Some(Action::MoveLineFirstNonBlank) => self.editor.first_non_blank(),
+            Some(Action::MoveBufferStart) => self.buffer_ends(view, true),
             Some(Action::MoveBufferEnd) => self.buffer_ends(view, false),
             Some(Action::HistoryOlder) => self.editor.up(),
             Some(Action::HistoryNewer) => self.editor.down(),
@@ -424,89 +493,72 @@ impl Ui {
                 // A fold-all reflows groups above the view too; re-baseline.
                 view.surface.counted = None;
             }
-
-            Some(Action::MenuAccept) => {
-                match self.highlighted() {
-                    Some(MenuEntry::Message { id, .. }) => {
-                        self.rewind.clear();
-                        return Asked::Own(Deed::To(id));
+            Some(Action::MenuAccept) => match self.highlighted() {
+                Some(MenuEntry::Completion(c)) => {
+                    self.editor.set_line(&c.line);
+                    // Something still expected after it wants a space first.
+                    if c.more {
+                        self.editor.insert(' ');
                     }
-                    Some(MenuEntry::Completion(c)) => {
-                        self.editor.set_line(&c.line);
-                        // Something still expected after it wants a space first.
-                        if c.more {
-                            self.editor.insert(' ');
-                        }
-                        self.picked = None;
-                    }
-                    Some(MenuEntry::File {
-                        start,
-                        end,
-                        path,
-                        dir,
-                        ..
-                    }) => {
-                        self.apply_file(start, end, &path, dir);
-                    }
-                    None => {}
+                    self.picked = None;
                 }
-            }
-            Some(action @ (Action::MenuNext | Action::MenuPrevious)) => {
-                let n = self.menu().len().saturating_sub(1);
-                let at = self.picked.unwrap_or(n).min(n);
-                self.picked = Some(if action == Action::MenuNext {
-                    at.saturating_add(1).min(n)
-                } else {
-                    at.saturating_sub(1)
-                });
-            }
-            // Answered in the first match, which returns; named here because
-            // this one has no catch-all and should not grow one.
-            Some(Action::LaneNext) | Some(Action::LanePrev) | Some(Action::EditExternally) => {}
+                Some(MenuEntry::File {
+                    start,
+                    end,
+                    path,
+                    dir,
+                    ..
+                }) => self.apply_file(start, end, &path, dir),
+                Some(MenuEntry::Message { .. }) | None => {}
+            },
+            Some(action @ (Action::MenuNext | Action::MenuPrevious)) => self.step_menu(action),
             Some(Action::MenuDismiss) => {
-                let was_rewind = !self.rewind.is_empty();
-                self.rewind.clear();
                 // Keyed to the text, so any edit brings the list back —
-                // "not that", not "never again". Rewind doesn't record this.
-                if !was_rewind {
-                    self.dismissed_at = Some(self.editor.text().to_string());
-                }
+                // "not that", not "never again".
+                self.dismissed_at = Some(self.editor.text().to_string());
+                self.disarm();
             }
             // Unbound and printable is the one thing no table has to say —
             // except in Normal, where it is the table saying no.
             None => {
-                if let Some(c) = pi_store::keys::bare_letter(&key) {
-                    match self.vim.as_mut().map(|v| v.typed(c, Instant::now())) {
-                        Some(Typed::Ignore) => {}
-                        // The sequence's first half is on screen already;
-                        // take it back so the line always shows what it means.
-                        Some(Typed::Escape) => {
-                            self.editor.backspace();
-                            self.show_mode();
-                        }
-                        Some(Typed::Command(action)) => match action {
-                            Action::DeleteLine => self.editor.delete_line(),
-                            Action::ChangeLine => self.change_line(),
-                            Action::MoveBufferStart => self.buffer_ends(view, true),
-                            _ => unreachable!("a doubled key names one of the three"),
-                        },
-                        Some(Typed::Insert) | None => self.editor.insert(c),
+                if let Some(c) = pi_store::keys::bare_letter(&key)
+                    && self.vim.is_none_or(|m| m == Mode::Insert)
+                {
+                    self.editor.insert(c);
+                    if let Some(last) = &mut self.last_press {
+                        last.typed = true;
                     }
                 }
             }
-            Some(
-                Action::LineClear
-                | Action::AppCancel
-                | Action::LineSubmit
-                | Action::RunInterrupt
-                | Action::AppExit
-                | Action::Rewind,
-            ) => unreachable!("handled scrollback"),
-            // No binding reaches for these: `dd` and `gg` are doubled keys
-            // the `None` arm answers, so the table never sends them here.
-            Some(Action::DeleteLine | Action::MoveBufferStart) => {
-                unreachable!("doubled keys are answered where they are typed")
+            // Another focus's, or a guard above that did not hold (`esc esc`
+            // with text on the line): nothing here.
+            Some(_) => {}
+        }
+        Asked::Own(Deed::Nothing)
+    }
+
+    // The wheel scrolls what has the keyboard: a reply while one is up,
+    // else the transcript. Moves and clicks are the transcript's.
+    fn mouse(&mut self, view: &mut View, mouse: crossterm::event::MouseEvent) -> Asked {
+        if matches!(self.focus, Focus::Reply(_)) {
+            let room = self.regions.menu.height as usize;
+            let width = self.screen.usable();
+            match mouse.kind {
+                MouseEventKind::ScrollUp => return self.scrolled(-1, room, width),
+                MouseEventKind::ScrollDown => return self.scrolled(1, room, width),
+                _ => {}
             }
+        }
+        match mouse.kind {
+            MouseEventKind::ScrollUp => self.scroll_view(view, true, 1),
+            MouseEventKind::ScrollDown => self.scroll_view(view, false, 1),
+            MouseEventKind::Moved | MouseEventKind::Drag(_) => {
+                self.on_mouse_move(view, mouse.column, mouse.row);
+            }
+            MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                self.on_mouse_click(view, mouse.column, mouse.row);
+            }
+            _ => {}
         }
         Asked::Own(Deed::Nothing)
     }
@@ -527,21 +579,15 @@ impl Ui {
         self.submitted = true;
         Asked::Core(intent)
     }
+}
 
-    // One key, two meanings: stop the run, or — pressed twice inside the
-    // window — leave. The escalation lives with the binding, not Ctrl-C.
-    fn interrupt_or_quit(&mut self, running: bool) -> Asked {
-        if double_tap(&mut self.last_interrupt, Instant::now()) {
-            return Asked::Core(Intent::Builtin(Builtin::Quit));
-        }
-        if running {
-            return Asked::Own(Deed::Interrupt);
-        }
-        // The next press is the one that leaves, and saying so is what keeps
-        // this one from reading as a key that did nothing.
-        self.flash("press it again to quit");
-        Asked::Own(Deed::Nothing)
-    }
+// How far a pager key moves what it reads.
+enum Stride {
+    Line,
+    Half,
+    Page,
+    // As far as there is.
+    End,
 }
 
 // One row either menu can offer: a completion of the line, an @ path, or a
