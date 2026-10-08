@@ -239,8 +239,7 @@ impl Channels {
         }
     }
 
-    /// `name`'s message started, or was steered into, the turn on `lane`:
-    /// that turn's answer is owed to it.
+    /// `name`'s message started the turn on `lane`: its answer is owed to it.
     pub fn ask(&mut self, name: &str, lane: u64) {
         if let Some(relay) = self.relay(name) {
             relay.ask(lane);

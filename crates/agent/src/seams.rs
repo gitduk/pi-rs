@@ -13,7 +13,6 @@ use llm::message::Message;
 use llm::model::ModelSpec;
 use llm::stream::Usage;
 use serde_json::Value;
-use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::UnboundedSender;
 use tool::Tier;
 
@@ -115,39 +114,3 @@ pub struct Untouched;
 
 #[async_trait]
 impl Compactor for Untouched {}
-
-/// Lines said after the run began, waiting for the next point where the
-/// transcript can legally take one.
-///
-/// Shared, not a channel: the surface still needs to see what hasn't been
-/// taken yet (status line, hand-back at run end). Read once a turn, at the
-/// one seam a user message can follow results without stranding a `tool_use`.
-#[derive(Clone, Default)]
-pub struct Steer(Arc<Mutex<Vec<String>>>);
-
-impl Steer {
-    /// Say something to the run in flight; it is heard at the next seam.
-    pub fn say(&self, text: impl Into<String>) {
-        self.lock().push(text.into());
-    }
-
-    /// Everything said since the last look, in the order it was said.
-    pub fn take(&self) -> Vec<String> {
-        std::mem::take(&mut *self.lock())
-    }
-
-    /// How much has been said and not yet heard.
-    pub fn len(&self) -> usize {
-        self.lock().len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.lock().is_empty()
-    }
-
-    // Push and take on a `Vec` can't panic, so this lock can't actually be
-    // poisoned; recovering rather than unwrapping keeps one bad call local.
-    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<String>> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
-    }
-}

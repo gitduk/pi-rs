@@ -410,8 +410,8 @@ impl Tui {
             return Wake::Do(asked);
         }
         let intent = match asked {
-            // A deed is the screen's own move: it is never queued and never
-            // steered, because waiting is one of the four answers about lines.
+            // A deed is the screen's own move: it never waits for the run,
+            // because waiting is one of the answers about lines.
             Asked::Own(deed) => match deed.fate() {
                 // A key, not a command: a deed's refusal is the answer to a
                 // press, and the reply is for what a slash command answered.
@@ -420,9 +420,7 @@ impl Tui {
                     return Wake::Nothing;
                 }
                 Fate::Now => return Wake::Do(Asked::Own(deed)),
-                Fate::Queued | Fate::Steered(_) => {
-                    unreachable!("a deed waits for nothing")
-                }
+                Fate::Queued => unreachable!("a deed waits for nothing"),
             },
             Asked::Core(intent) => intent,
         };
@@ -432,25 +430,6 @@ impl Tui {
                 front_view(&mut self.views, self.core.lane())
                     .queued
                     .push(Queued { intent, origin });
-                Wake::Nothing
-            }
-            Fate::Steered(text) => {
-                // A `!` or a `/compact` holds the lane: nothing is listening,
-                // so the line waits for it the way every line used to.
-                let Some(steer) = self.core.lane().steer().cloned() else {
-                    front_view(&mut self.views, self.core.lane())
-                        .queued
-                        .push(Queued { intent, origin });
-                    return Wake::Nothing;
-                };
-                // Spends the unsend chance, like the model's first word
-                // does: esc now stops, rather than starting an unheard turn.
-                front_view(&mut self.views, self.core.lane())
-                    .state
-                    .committed = true;
-                self.drivers.steered(self.core.lane().token(), origin);
-                let said = clipboard::with_paths(&text, &self.ui.images).map(|(sent, _)| sent);
-                steer.say(said.unwrap_or(text));
                 Wake::Nothing
             }
             // A command refused because a run is in flight. It was typed, so

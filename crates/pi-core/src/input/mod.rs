@@ -73,9 +73,6 @@ pub enum Fate {
     Now,
     // Goes to the model, or needs the surface free, so it waits.
     Queued,
-    // Prose while a run works: read at its next turn boundary rather than
-    // queued; carries the text so a second read of the line can't drift.
-    Steered(String),
     // Would move what the run stands on. Says this rather than doing it.
     Refused(&'static str),
 }
@@ -133,12 +130,9 @@ impl Intent {
             Intent::Builtin(Builtin::Settings(rest)) if !rest.trim().is_empty() => Fate::Now,
             Intent::Builtin(Builtin::Settings(_)) => Fate::Queued,
             Intent::Builtin(Builtin::Channel(..)) => Fate::Now,
-            Intent::Other { .. } => Fate::Queued,
+            Intent::Other { .. } | Intent::Prompt(_) => Fate::Queued,
             // Its first round is due at once, and a round wants the lane free.
             Intent::Builtin(Builtin::Loop(_)) => Fate::Queued,
-            // Prose reaches the run already talking to the model — waiting
-            // would make a correction arrive too late to be one.
-            Intent::Prompt(text) => Fate::Steered(text.clone()),
             // A `!` files its result in the transcript, which the run has.
             Intent::Bash(_) => Fate::Queued,
             // Both reach for the transcript, and the run is holding it.

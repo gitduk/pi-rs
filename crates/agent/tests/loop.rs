@@ -15,7 +15,7 @@ mod common;
 use common::spec;
 
 use agent::session::Session;
-use agent::{Agent, AgentError, Briefing, Ceiling, Event, Retry, Steer};
+use agent::{Agent, AgentError, Briefing, Ceiling, Event, Retry};
 use tool::{Concurrency, Ctx, Registry, Tier, Tool, ToolError, ToolOutput, Workspace};
 
 // Replays one scripted event list per turn, so the loop is exercised without
@@ -23,9 +23,6 @@ use tool::{Concurrency, Ctx, Registry, Tier, Tool, ToolError, ToolOutput, Worksp
 struct Scripted {
     turns: Vec<Vec<StreamEvent>>,
     next: AtomicUsize,
-    // Where a mid-run interjection leaves the line: past this turn's own
-    // mailbox look, so it exercises the seam rather than the start.
-    interject: std::sync::Mutex<Option<(usize, Steer, String)>>,
 }
 
 impl Scripted {
@@ -33,7 +30,6 @@ impl Scripted {
         Arc::new(Self {
             turns,
             next: AtomicUsize::new(0),
-            interject: Default::default(),
         })
     }
 }
@@ -46,11 +42,6 @@ impl Transport for Scripted {
         _req: &Request,
     ) -> llm::Result<BoxStream<'static, llm::Result<StreamEvent>>> {
         let i = self.next.fetch_add(1, Ordering::SeqCst);
-        if let Some((at, steer, text)) = self.interject.lock().unwrap().as_ref()
-            && *at == i
-        {
-            steer.say(text.clone());
-        }
         let events = self.turns.get(i).cloned().unwrap_or_default();
         Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
     }
@@ -141,20 +132,9 @@ async fn drive_retrying(
     prompt: &str,
     retry: &Retry,
 ) -> (Session, Result<llm::stream::Usage, AgentError>, Vec<Event>) {
-    drive_steered(agent, ctx, prompt, &Steer::default(), retry).await
-}
-
-// The same, with a mailbox the test can speak into while the run works.
-async fn drive_steered(
-    agent: &Agent,
-    ctx: &Ctx,
-    prompt: &str,
-    steer: &Steer,
-    retry: &Retry,
-) -> (Session, Result<llm::stream::Usage, AgentError>, Vec<Event>) {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut session = Session::with_prompt(prompt);
-    let out = agent.steered(&mut session, ctx, &tx, steer, retry).await;
+    let out = agent.run(&mut session, ctx, &tx, retry).await;
     drop(tx);
     let mut events = Vec::new();
     while let Some(e) = rx.recv().await {
@@ -1205,72 +1185,4 @@ async fn a_coded_tool_error_reaches_the_model_with_its_code() {
     let body = results[0].flatten_text();
     assert!(body.starts_with("Error: timed out after 42ms"), "{body}");
     assert!(body.ends_with("[code: TOOL_TIMEOUT]"), "{body}");
-}
-
-// A line said while the run worked lands at the next seam, after the results
-// it interrupted — among them it would leave a `tool_use` unanswered.
-#[tokio::test]
-async fn a_line_said_mid_run_lands_after_the_results_it_interrupted() {
-    let (_d, mut a, ctx, wire) =
-        wired(vec![call_turn(&[("t1", "slow", "{}")]), text_turn("noted")]);
-    brief(&mut a).registry = Registry::new().with(Sleeper {
-        name: "slow",
-        delay_ms: 0,
-        exclusive: false,
-    });
-    let steer = Steer::default();
-    *wire.interject.lock().unwrap() = Some((0, steer.clone(), "look at parse.rs".into()));
-
-    let (session, out, _) = drive_steered(&a, &ctx, "go", &steer, &Retry::default()).await;
-    out.unwrap();
-    assert!(steer.is_empty(), "the run took what was said");
-
-    let view = session.context();
-    let said = view
-        .iter()
-        .position(|m| m.text().contains("look at parse.rs"))
-        .expect("the line reached the transcript");
-    let answered = view
-        .iter()
-        .position(|m| match m {
-            Message::User { content } => content
-                .iter()
-                .any(|c| matches!(c, UserContent::ToolResult(_))),
-            _ => false,
-        })
-        .expect("the call was answered");
-    assert!(
-        answered < said,
-        "the line follows the result it interrupted"
-    );
-}
-
-// The model stopped, but the user had already spoken. Posting `Done` here
-// would leave the line to start a second run saying what this one can hear.
-#[tokio::test]
-async fn a_line_said_while_the_model_finished_keeps_the_run_going() {
-    let (_d, a, ctx, wire) = wired(vec![text_turn("all done"), text_turn("noted")]);
-    let steer = Steer::default();
-    *wire.interject.lock().unwrap() = Some((0, steer.clone(), "one more thing".into()));
-
-    let (session, out, events) = drive_steered(&a, &ctx, "go", &steer, &Retry::default()).await;
-    out.unwrap();
-
-    assert!(
-        session
-            .context()
-            .iter()
-            .any(|m| m.text().contains("one more thing")),
-        "the line reached the transcript"
-    );
-    let ends: Vec<&Event> = events
-        .iter()
-        .filter(|e| matches!(e, Event::Done { .. }))
-        .collect();
-    assert_eq!(ends.len(), 1, "one ending, not one per turn");
-    assert!(
-        matches!(ends[0], Event::Done { turns: 2, .. }),
-        "the run went round again rather than ending: {:?}",
-        ends[0]
-    );
 }

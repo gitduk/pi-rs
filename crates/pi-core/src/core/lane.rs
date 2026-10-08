@@ -16,7 +16,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use agent::session::{EntryId, Session};
-use agent::{Agent, Archive, Event, Steer, Totals};
+use agent::{Agent, Archive, Event, Totals};
 use subagent::Subagent;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio_util::sync::CancellationToken;
@@ -43,9 +43,6 @@ pub enum Run {
     Running {
         // What `esc` cancels, and only for the lane in front.
         cancel: CancellationToken,
-        // Where a line typed mid-run goes, taken at the next turn boundary.
-        // `None` for a `!` or `/compact`, which call no model and have none.
-        steer: Option<Steer>,
         // Esc caught the prompt on its way out: stop the run, then unsend it.
         // Set while the run works, acted on when it ends.
         unsend: bool,
@@ -57,20 +54,6 @@ pub enum Run {
         // Esc asked for the prompt back while this was still running.
         unsend: bool,
     },
-}
-
-/// What a job leaves behind when it hands the transcript back.
-///
-/// One value rather than a bool and a leftover list read from two places: a
-/// caller that took the `unsend` and forgot the rest would drop what the user
-/// said into the gap between the run's last look and its return.
-#[derive(Default)]
-pub struct Handback {
-    /// Esc asked for the prompt back.
-    pub unsend: bool,
-    /// Said to the run after its last look at the mailbox, so never heard.
-    /// It goes back to the surface to be run as an ordinary line.
-    pub unheard: Vec<String>,
 }
 
 /// One checkout being worked in, in three parts that change at different
@@ -281,21 +264,11 @@ impl Lane {
 
     /// A job has given this lane's transcript back. The one place `Running`
     /// ends: a lane left in it queues every later prompt and never drains.
-    pub fn finish(&mut self) -> Handback {
+    /// Says whether esc asked for the prompt back.
+    pub fn finish(&mut self) -> bool {
         match std::mem::replace(&mut self.runner.run, Run::Idle) {
-            Run::Running { unsend, steer, .. } => Handback {
-                unsend,
-                unheard: steer.map(|s| s.take()).unwrap_or_default(),
-            },
-            _ => Handback::default(),
-        }
-    }
-
-    /// Where a line typed mid-run goes, while a run is there to hear one.
-    pub fn steer(&self) -> Option<&Steer> {
-        match &self.runner.run {
-            Run::Running { steer, .. } => steer.as_ref(),
-            _ => None,
+            Run::Running { unsend, .. } => unsend,
+            _ => false,
         }
     }
 
@@ -304,12 +277,10 @@ impl Lane {
         matches!(self.runner.run, Run::Running { .. })
     }
 
-    /// A run has taken this lane. `steer` is the mailbox it hears at the next
-    /// turn boundary; a job that calls no model has none to hear from.
-    pub fn begin(&mut self, cancel: CancellationToken, steer: Option<Steer>) {
+    /// A run has taken this lane.
+    pub fn begin(&mut self, cancel: CancellationToken) {
         self.runner.run = Run::Running {
             cancel,
-            steer,
             unsend: false,
         };
     }
@@ -389,14 +360,9 @@ impl Lane {
         started: Option<std::time::Duration>,
         queued: usize,
     ) -> Snapshot {
-        // Queued (surface) and steered (mid-run) lines are both unreached by
-        // the model; which side one waits on is the loop's business.
-        self.talk.tally.snapshot(
-            model,
-            self.checkout.worktree.as_deref(),
-            started,
-            queued + self.steer().map_or(0, agent::Steer::len),
-        )
+        self.talk
+            .tally
+            .snapshot(model, self.checkout.worktree.as_deref(), started, queued)
     }
 
     /// The checkout this lane works in, when it is not the repository's own.

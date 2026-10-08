@@ -10,11 +10,10 @@ use tokio_util::sync::CancellationToken;
 
 use super::row::Row;
 use super::term::{Deafened, EXIT_GRACE, external_editor, scratch_file};
-use super::view::{Queued, front_view, tail_of, view_at};
+use super::view::{front_view, tail_of, view_at};
 use super::{NO_TRANSCRIPT, Tui};
 use pi_core::core;
 use pi_core::driver::Ended;
-use pi_core::input::Intent;
 use pi_store::listing::Listing;
 
 // What kind of job a finished `Done` was, carrying what only that kind
@@ -110,7 +109,6 @@ impl Tui {
             .collect();
         self.ui.adopt(view, &fresh);
         let cancel = CancellationToken::new();
-        let steer = agent::Steer::default();
         let ctx = self.core.lane_mut().ctx_for(cancel.clone());
 
         self.arm_view(false);
@@ -126,17 +124,15 @@ impl Tui {
         // Read where the run starts, not carried on the agent: a reload
         // between two turns reaches the next one this way.
         let retry = self.core.config.retry();
-        // The run's own handle on the mailbox; the lane keeps the other.
-        let heard = steer.clone();
         tokio::spawn(async move {
-            let out = guard(agent.steered(&mut carried, &ctx, &sent, &heard, &retry)).await;
+            let out = guard(agent.run(&mut carried, &ctx, &sent, &retry)).await;
             let _ = done.send(Done {
                 token,
                 kind: Kind::Turn,
                 ran: out.map(|out| (carried, out)),
             });
         });
-        self.core.lane_mut().begin(cancel, Some(steer));
+        self.core.lane_mut().begin(cancel);
     }
 
     // Runs a `!` command off the loop, so the screen stays live. Borrows
@@ -177,7 +173,7 @@ impl Tui {
         });
         // Not a turn: nothing here calls a model, so there is no boundary at
         // which a line could be heard.
-        self.core.lane_mut().begin(cancel, None);
+        self.core.lane_mut().begin(cancel);
     }
 
     // Runs `/compact` off the loop — summarizing what it drops is a model
@@ -219,7 +215,7 @@ impl Tui {
         });
         // Not a turn: nothing here calls a model, so there is no boundary at
         // which a line could be heard.
-        self.core.lane_mut().begin(cancel, None);
+        self.core.lane_mut().begin(cancel);
     }
 
     // Hands the terminal to `$EDITOR` on `path`, on its own thread (a
@@ -359,20 +355,7 @@ impl Tui {
         let Some(lane) = self.core.position_of(done.token) else {
             return;
         };
-        let back = self.core.lanes[lane].finish();
-        let token = self.core.lanes[lane].token();
-        let origins = self.drivers.unheard(token, back.unheard.len());
-        let unheard: Vec<_> = back
-            .unheard
-            .into_iter()
-            .zip(origins)
-            .map(|(said, origin)| Queued {
-                intent: Intent::Prompt(said),
-                origin,
-            })
-            .collect();
-        view_at(&mut self.views, token).queued.extend(unheard);
-        let unsend = back.unsend;
+        let unsend = self.core.lanes[lane].finish();
 
         match done.kind {
             Kind::Turn | Kind::Bash { .. } => self.settle_run(lane, done, unsend).await,

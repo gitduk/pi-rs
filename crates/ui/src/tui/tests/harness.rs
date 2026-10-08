@@ -96,7 +96,7 @@ pub(super) fn running_lane(dir: &std::path::Path) -> Lane {
         )
     });
     // What every `start_*` leaves behind while its job runs.
-    lane.begin(tokio_util::sync::CancellationToken::new(), None);
+    lane.begin(tokio_util::sync::CancellationToken::new());
     lane
 }
 

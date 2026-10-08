@@ -868,7 +868,7 @@ async fn leaving_with_a_run_in_flight_takes_the_transcript_back() {
     let token = tui.core.lane().token();
     tui.core
         .lane_mut()
-        .begin(tokio_util::sync::CancellationToken::new(), None);
+        .begin(tokio_util::sync::CancellationToken::new());
 
     let mut carried = Session::new();
     carried.prompt("go");
@@ -985,60 +985,4 @@ async fn a_queued_line_remembers_the_channel_it_came_from() {
         .map(|q| q.origin)
         .collect();
     assert_eq!(from, [Origin::Channel("wechat"), Origin::Typed]);
-}
-
-// A line the phone steered in that the run never heard comes back bare;
-// it must come back as the phone's, or its answer lands on the terminal instead.
-#[tokio::test]
-async fn a_steered_line_the_run_never_heard_comes_back_as_its_channels() {
-    let dir = tempfile::tempdir().expect("a checkout");
-    let mut tui = surface(dir.path());
-    let token = tui.core.lanes[0].token();
-    let steer = agent::Steer::default();
-    tui.core.lanes[0].begin(
-        tokio_util::sync::CancellationToken::new(),
-        Some(steer.clone()),
-    );
-
-    tui.admit(
-        Asked::Core(Intent::Prompt("heard".into())),
-        Origin::Channel("wechat"),
-    );
-    // The run looked once: that line was heard, the rest were not.
-    steer.take();
-    // The same words from both sides: told apart by order, never by text.
-    tui.admit(Asked::Core(Intent::Prompt("same".into())), Origin::Typed);
-    tui.admit(
-        Asked::Core(Intent::Prompt("same".into())),
-        Origin::Channel("wechat"),
-    );
-    tui.settle(crate::tui::job::Done {
-        token,
-        kind: crate::tui::job::Kind::Turn,
-        ran: Some((
-            agent::session::Session::new(),
-            Err(agent::AgentError::Cancelled),
-        )),
-    })
-    .await;
-
-    let back: Vec<_> = view_at(&mut tui.views, token)
-        .queued
-        .iter()
-        .map(|q| match &q.intent {
-            Intent::Prompt(text) => (text.clone(), q.origin),
-            _ => panic!("only the unheard lines are queued"),
-        })
-        .collect();
-    assert_eq!(
-        back,
-        [
-            ("same".to_string(), Origin::Typed),
-            ("same".to_string(), Origin::Channel("wechat"))
-        ]
-    );
-    assert!(
-        tui.drivers.steered_lines().is_empty(),
-        "the ledger lets go with the run"
-    );
 }

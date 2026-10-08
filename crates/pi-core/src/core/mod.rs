@@ -469,6 +469,7 @@ mod tests {
     #[test]
     fn what_wants_the_model_or_the_surface_waits() {
         for intent in [
+            Intent::Prompt("the bug is in parse.rs".into()),
             Intent::Bash("ls".into()),
             Intent::Builtin(Builtin::Settings(String::new())),
             Intent::Other {
@@ -481,19 +482,6 @@ mod tests {
                 "{intent:?} should wait"
             );
         }
-    }
-
-    #[test]
-    fn prose_reaches_the_run_rather_than_waiting_for_it() {
-        let said = "the bug is in parse.rs";
-        assert!(matches!(Intent::Prompt(said.into()).fate(), Fate::Steered(text) if text == said));
-        // The line the door read says the same thing the word would.
-        assert!(matches!(
-            read(said, BUILTIN).fate(),
-            Fate::Steered(text) if text == said
-        ));
-        // A slash word is not prose and still waits.
-        assert!(matches!(read("/settings", BUILTIN).fate(), Fate::Queued));
     }
 
     #[test]

@@ -889,7 +889,7 @@ mod tests {
         core.enter_worktree("fix-tools").unwrap();
         assert_eq!(core.lanes.len(), 2);
 
-        core.lanes[1].begin(tokio_util::sync::CancellationToken::new(), None);
+        core.lanes[1].begin(tokio_util::sync::CancellationToken::new());
 
         core.current = 0;
         core.in_force();

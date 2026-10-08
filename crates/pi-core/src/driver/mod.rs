@@ -55,9 +55,6 @@ pub struct Drivers {
     channels: Channels,
     loops: Loops,
     later: Arc<later::Table>,
-    // Where each line steered into a running turn came from, by lane token,
-    // in the order said: a run hands back what it never heard bare.
-    steered: Vec<(u64, Origin)>,
 }
 
 impl Drivers {
@@ -66,7 +63,6 @@ impl Drivers {
             channels: Channels::new(channels),
             loops: Loops::default(),
             later: Arc::default(),
-            steered: Vec::new(),
         }
     }
 
@@ -139,33 +135,6 @@ impl Drivers {
         None
     }
 
-    /// A line from `origin` was steered into the turn running on `lane`.
-    pub fn steered(&mut self, lane: u64, origin: Origin) {
-        self.steered.push((lane, origin));
-        if let Origin::Channel(name) = origin {
-            self.channels.ask(name, lane);
-        }
-    }
-
-    /// The run on `lane` is over and `n` steered lines went unheard: who sent
-    /// each, in order. The ledger lets go of the lane either way.
-    pub fn unheard(&mut self, lane: u64, n: usize) -> Vec<Origin> {
-        let said: Vec<Origin> = self
-            .steered
-            .extract_if(.., |s| s.0 == lane)
-            .map(|s| s.1)
-            .collect();
-        // The mailbox is first in, first out: what went unheard is the tail
-        // of what was said, so it lines up with the tail of the ledger.
-        let heard = said.len().saturating_sub(n);
-        said[heard..]
-            .iter()
-            .copied()
-            .chain(std::iter::repeat(Origin::Typed))
-            .take(n)
-            .collect()
-    }
-
     /// One event from any lane's run; each driver keeps its own turns'.
     pub fn observe(&mut self, lane: u64, event: &Event) {
         self.channels.observe(lane, event);
@@ -194,11 +163,6 @@ impl Drivers {
     /// End the loops of lanes that are gone, saying which ended.
     pub fn retain(&mut self, live: impl Fn(u64) -> bool) -> Vec<String> {
         self.loops.retain(live)
-    }
-
-    #[cfg(any(test, feature = "testing"))]
-    pub fn steered_lines(&self) -> &[(u64, Origin)] {
-        &self.steered
     }
 }
 

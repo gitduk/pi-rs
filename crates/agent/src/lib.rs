@@ -30,7 +30,7 @@ use event::say;
 pub use event::{Event, Totals};
 pub use hooks::{Hooks, NoHooks};
 pub use retry::Retry;
-pub use seams::{Approver, Archive, Compactor, Decision, Fitted, Steer, Untouched, Working};
+pub use seams::{Approver, Archive, Compactor, Decision, Fitted, Untouched, Working};
 
 pub const DEFAULT_SYSTEM: &str = include_str!("../prompts/system.md");
 
@@ -139,29 +139,15 @@ impl Agent {
         self.brief = brief;
     }
 
-    /// A run nobody is talking to — what a subagent, a one-shot and a test
-    /// all want, named for what it is rather than an empty mailbox each time.
+    /// Run the session's prompt until the model stops calling tools.
     ///
     /// `retry` is read where the run starts, not kept on the agent, so a
-    /// a reload that changed it reaches the next run without a refresh.
+    /// reload that changed it reaches the next run without a refresh.
     pub async fn run(
         &self,
         session: &mut Session,
         ctx: &Ctx,
         tx: &UnboundedSender<Event>,
-        retry: &Retry,
-    ) -> Result<Usage, AgentError> {
-        self.steered(session, ctx, tx, &Steer::default(), retry)
-            .await
-    }
-
-    /// The same run, with somewhere for the user to speak into while it works.
-    pub async fn steered(
-        &self,
-        session: &mut Session,
-        ctx: &Ctx,
-        tx: &UnboundedSender<Event>,
-        steer: &Steer,
         retry: &Retry,
     ) -> Result<Usage, AgentError> {
         let mut totals = Usage::default();
@@ -176,11 +162,6 @@ impl Agent {
         let mut compactions = 0usize;
 
         for turn in 1.. {
-            // What was said while the run worked. Read here and nowhere else:
-            // a `tool_use` must be answered before anything else may speak.
-            for said in steer.take() {
-                session.prompt(said);
-            }
             say(tx, Event::TurnStart { turn });
             // Entered around each await, not held across it — a guard spanning
             // an await labels whatever else the runtime polls meanwhile.
@@ -332,11 +313,6 @@ impl Agent {
             session.push_assistant(content);
 
             if calls.is_empty() {
-                // The model stopped, but the user spoke while it was speaking:
-                // posting `Done` here would leave that line for a second run.
-                if !steer.is_empty() {
-                    continue;
-                }
                 say(
                     tx,
                     Event::Done {
