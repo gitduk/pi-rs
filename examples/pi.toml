@@ -75,7 +75,7 @@ idle_timeout = 300
 
 # Days a session, and an image pasted with ctrl+v, is kept after it was last
 # worked on; an older one is deleted when pi starts. Unset is 90, 0 keeps
-# everything. Only read from this file: a project's .pi.toml may not set it.
+# everything.
 # keep_days = 90
 
 # Absolute directories the tools above the read tier may reach besides the
@@ -153,7 +153,6 @@ replay_thinking = "tagged"
 # `api_key` when they differ. One that names a `base_url` never inherits the
 # file's `api_key` — the file's key is for the file's host — so without its
 # own it falls back to OPENAI_API_KEY or ANTHROPIC_API_KEY by its format.
-# Only this file may set the three; a project's .pi.toml that does is refused.
 [models."gpt-5"]
 base_url = "https://api.openai.com/v1"
 format   = "openai"
@@ -165,15 +164,13 @@ max_output_tokens = 128_000
 # {"tool", "args", "workspace"} as JSON on stdin ("result" too, after). Before
 # a call, exit 0 lets it run and exit 2 refuses it with what the hook printed;
 # any other exit, or no answer in 30s, refuses it as a broken hook. After one,
-# what it printed is added to the result. `tools` empty is every
-# tool. Only this file may name them, like [mcp].
+# what it printed is added to the result. `tools` empty is every tool.
 # [[hooks]]
 # when    = "before"
 # tools   = ["bash"]
 # command = "~/.pi/hooks/guard.sh"
 
-# MCP servers, each one's tools offered as `<name>__<tool>`. Only this file
-# may name them: a project's .pi.toml that does is refused. A value that is
+# MCP servers, each one's tools offered as `<name>__<tool>`. A value that is
 # `$NAME` reads pi's environment.
 [mcp.github]
 command = "github-mcp-server"

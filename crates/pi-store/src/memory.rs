@@ -1,6 +1,6 @@
 //! What pi has come to know across sessions, as plain markdown under
-//! `~/.pi/memory/`: every `*.md` there is global, `projects/<key>.md` is one
-//! project's. Distillation writes it; anyone may read or edit it by hand.
+//! `~/.pi/memory/`: `<key>.md`, its name the project's path with `-` for
+//! `/`, is one project's; every other `*.md` there is global. Distillation writes it; anyone may read or edit it by hand.
 //! What the prompt makes of it is `pi-core`'s.
 
 use std::collections::BTreeMap;
@@ -60,9 +60,23 @@ impl Memory {
 
     /// The project file for the checkout rooted at `project`.
     pub fn project_path(&self, project: &Path) -> PathBuf {
-        self.dir
-            .join("projects")
-            .join(format!("{}.md", key_of(project)))
+        self.dir.join(format!("{}.md", key_of(project)))
+    }
+
+    /// Move project files up out of `projects/`, where they used to live,
+    /// unless one of the same name is already there.
+    pub fn lift_projects(&self) {
+        let old = self.dir.join("projects");
+        let Ok(entries) = std::fs::read_dir(&old) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let to = self.dir.join(entry.file_name());
+            if !to.exists() {
+                let _ = std::fs::rename(entry.path(), to);
+            }
+        }
+        let _ = std::fs::remove_dir(&old);
     }
 
     /// Where the file `files` calls `name` lives.
@@ -242,7 +256,9 @@ pub fn parse(reply: &str) -> Result<Vec<Edit>, String> {
 // the directory or hide among files that aren't memory.
 fn global_name(name: &str) -> bool {
     name.strip_suffix(".md").is_some_and(|stem| {
+        // A project's file starts with the `-` its path's leading `/` became.
         !stem.is_empty()
+            && !stem.starts_with('-')
             && stem != PROJECT
             && stem
                 .chars()
@@ -371,6 +387,30 @@ mod tests {
         );
         std::fs::write(dir.path().join(MARKS), "{\"s1\": 3").unwrap();
         assert_eq!(memory.marks(), None);
+    }
+
+    // Side by side in one directory, a project's file is never read as
+    // global, and one left in the old `projects/` comes up beside them.
+    #[test]
+    fn project_files_sit_with_the_global_ones_and_never_pass_for_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::new(dir.path());
+        let here = Path::new("/w/here");
+        std::fs::create_dir(dir.path().join("projects")).unwrap();
+        std::fs::write(dir.path().join("projects/-w-here.md"), "- here\n").unwrap();
+        std::fs::write(dir.path().join("-w-there.md"), "- there\n").unwrap();
+        std::fs::write(dir.path().join("user.md"), "- user\n").unwrap();
+
+        memory.lift_projects();
+        assert!(!dir.path().join("projects").exists());
+        let names: Vec<String> = memory.files(here).into_iter().map(|f| f.name).collect();
+        assert_eq!(names, [PROJECT, "user.md"]);
+        assert_eq!(memory.files(here)[0].body, "- here\n");
+
+        let skipped = memory
+            .apply(here, &[edit("-w-there.md", None, Some("x"))])
+            .unwrap();
+        assert_eq!(skipped, 0, "another project's file is not a global name");
     }
 
     #[test]

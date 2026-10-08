@@ -190,6 +190,7 @@ pub fn a_resolved(standing: &str) -> Arc<Resolved> {
         system: None,
         endpoint: None,
         mcp: Vec::new(),
+        project: None,
     })
 }
 

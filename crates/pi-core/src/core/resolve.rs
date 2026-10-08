@@ -58,6 +58,9 @@ pub struct Resolved {
     pub endpoint: Option<String>,
     /// The MCP servers the config names, for the banner.
     pub mcp: Vec<String>,
+    /// The project file and what it sets that reaches past its checkout, as
+    /// key and value, said at startup: nothing refuses it.
+    pub project: Option<(String, Vec<(String, String)>)>,
 }
 
 /// Offer `tool` to the set, saying so when an earlier source holds its name.
@@ -249,7 +252,10 @@ pub fn resolve(
         memory: memory_files,
         system: system_file,
         endpoint: endpoint(pinned, config, settings, root),
-        mcp: config.mcp.keys().cloned().collect(),
+        mcp: mcp_names(config, settings),
+        project: settings
+            .project_reaching()
+            .map(|(file, keys)| (context::short(file, root), keys)),
     })
 }
 
@@ -305,6 +311,20 @@ pub fn watched(pinned: &Pinned, root: &Path) -> Vec<Stamp> {
             let meta = std::fs::metadata(&path).ok()?;
             Some((path, meta.modified().ok(), meta.len()))
         })
+        .collect()
+}
+
+// The servers in force the project file does not name: those it does are
+// said with the rest of what it sets.
+fn mcp_names(config: &config::Config, settings: &Settings) -> Vec<String> {
+    let project = settings
+        .project_tree()
+        .and_then(|(_, tree)| tree.get("mcp")?.as_table());
+    config
+        .mcp
+        .keys()
+        .filter(|name| !project.is_some_and(|names| names.contains_key(*name)))
+        .cloned()
         .collect()
 }
 

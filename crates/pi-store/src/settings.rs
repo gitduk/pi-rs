@@ -71,6 +71,21 @@ impl Settings {
         self.file.get(key).is_some()
     }
 
+    /// The project file and its own tree, if one was found.
+    pub fn project_tree(&self) -> Option<(&Path, &toml::Value)> {
+        self.project
+            .as_ref()
+            .map(|(file, tree)| (file.as_path(), tree))
+    }
+
+    /// The project file and the keys it sets that reach past its checkout,
+    /// when it sets any.
+    pub fn project_reaching(&self) -> Option<(&Path, Vec<(String, String)>)> {
+        let (file, tree) = self.project.as_ref()?;
+        let keys = crate::config::reaching(tree);
+        (!keys.is_empty()).then_some((file.as_path(), keys))
+    }
+
     /// The project file, when it is the one setting the top-level `key`.
     pub fn project_sets(&self, key: &str) -> Option<&Path> {
         let (file, tree) = self.project.as_ref()?;

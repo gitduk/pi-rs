@@ -765,51 +765,63 @@ pub fn project_file(workspace: &Path) -> Option<PathBuf> {
     project_path(workspace, home().as_deref())
 }
 
-/// Keys only your own `settings.toml` may set, and why: entering a checkout
-/// must not start what it names, nor decide what of yours is deleted.
-pub const GLOBAL_ONLY: &[(&str, &str)] = &[
-    (
-        "mcp",
-        "[mcp] belongs in your own settings.toml — a checkout's would start programs",
-    ),
-    (
-        "keep_days",
-        "keep_days belongs in your own settings.toml — a checkout's would delete sessions",
-    ),
-    (
-        "hooks",
-        "[[hooks]] belong in your own settings.toml — a checkout's would run programs",
-    ),
+/// Keys a project file may set that reach past its checkout: they start
+/// programs, delete sessions, widen writes, or choose where a key is sent.
+const REACHING: &[&str] = &[
+    "mcp",
+    "hooks",
+    "keep_days",
+    "write_roots",
+    "base_url",
+    "api_key",
 ];
+
+/// The keys of a project `tree` that reach past its checkout, as spelled
+/// there, each with its value as shown when it loads.
+pub fn reaching(tree: &toml::Value) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = REACHING
+        .iter()
+        .filter_map(|key| Some((key.to_string(), shown(key, tree.get(*key)?))))
+        .collect();
+    let models = tree.get("models").and_then(toml::Value::as_table);
+    for (name, entry) in models.into_iter().flatten() {
+        for field in ["base_url", "api_key"] {
+            if let Some(value) = entry.get(field) {
+                out.push((format!("models.{name}.{field}"), shown(field, value)));
+            }
+        }
+    }
+    out
+}
+
+// One line for a reaching key's value; a literal key never reaches the screen.
+fn shown(key: &str, value: &toml::Value) -> String {
+    use toml::Value as V;
+    match value {
+        V::String(s) if key == "api_key" && !s.starts_with('$') => "(hidden)".into(),
+        V::String(s) => s.clone(),
+        V::Table(t) => t.keys().cloned().collect::<Vec<_>>().join(", "),
+        V::Array(items) => items
+            .iter()
+            .map(|item| match item {
+                V::String(s) => s.clone(),
+                other => other
+                    .get("command")
+                    .and_then(V::as_str)
+                    .map_or_else(|| other.to_string(), str::to_string),
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+        other => other.to_string(),
+    }
+}
 
 /// The nearest `.pi.toml` at or above `workspace`, and its tree.
 pub fn load_project(workspace: &Path) -> Result<Option<(PathBuf, toml::Value)>> {
     let Some(path) = project_file(workspace) else {
         return Ok(None);
     };
-    let Some(tree) = read_tree(&path, true)? else {
-        return Ok(None);
-    };
-    for (key, why) in GLOBAL_ONLY {
-        if tree.get(*key).is_some() {
-            bail!("{}: {why}", path.display());
-        }
-    }
-    // Merged field by field, a checkout's `base_url` would join your model's
-    // own key in one entry and send that key to the checkout's host.
-    let models = tree.get("models").and_then(toml::Value::as_table);
-    for (name, entry) in models.into_iter().flatten() {
-        for field in ["base_url", "api_key", "format"] {
-            if entry.get(field).is_some() {
-                bail!(
-                    "{}: models.{name}.{field} belongs in your own settings.toml — \
-                     a checkout's would send that model's key to its host",
-                    path.display()
-                );
-            }
-        }
-    }
-    Ok(Some((path, tree)))
+    Ok(read_tree(&path, true)?.map(|tree| (path, tree)))
 }
 
 impl Config {
@@ -890,36 +902,26 @@ mod tests {
         }
     }
 
-    // Entering a checkout must not start a program its file names.
+    // A checkout may set what it likes; what reaches past it is said aloud.
     #[test]
-    fn a_project_file_may_not_set_a_global_only_key() {
+    fn a_project_file_may_set_anything_and_what_reaches_past_it_is_named() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join(".git")).unwrap();
-        let file = dir.path().join(".pi.toml");
-        for (body, key) in [
-            ("[mcp.evil]\ncommand = \"x\"\n", "mcp"),
-            ("keep_days = 1\n", "keep_days"),
-            ("[[hooks]]\nwhen = \"before\"\ncommand = \"x\"\n", "hooks"),
-        ] {
-            std::fs::write(&file, body).unwrap();
-            let err = load_project(dir.path()).unwrap_err().to_string();
-            assert!(err.contains(key), "{key}: {err}");
-        }
-        assert_eq!(GLOBAL_ONLY.len(), 3, "a new key gets a case above");
-
-        for field in [
-            "base_url = \"https://evil\"",
-            "api_key = \"$X\"",
-            "format = \"chat\"",
-        ] {
-            std::fs::write(&file, format!("[models.home]\n{field}\n")).unwrap();
-            let err = load_project(dir.path()).unwrap_err().to_string();
-            assert!(err.contains("models.home"), "{field}: {err}");
-        }
-        std::fs::write(&file, "[models.home]\ncontext_window = 1000\n").unwrap();
-        assert!(
-            load_project(dir.path()).is_ok(),
-            "the numbers are a checkout's to say"
+        let body = "keep_days = 1\ntier = \"read\"\napi_key = \"sk-literal\"\n\
+                    [mcp.docs]\ncommand = \"x\"\n\
+                    [models.home]\nbase_url = \"https://elsewhere\"\ncontext_window = 1000\n";
+        std::fs::write(dir.path().join(".pi.toml"), body).unwrap();
+        let (_, tree) = load_project(dir.path()).unwrap().unwrap();
+        let said = |k: &str, v: &str| (k.to_string(), v.to_string());
+        assert_eq!(
+            reaching(&tree),
+            [
+                said("mcp", "docs"),
+                said("keep_days", "1"),
+                said("api_key", "(hidden)"),
+                said("models.home.base_url", "https://elsewhere"),
+            ],
+            "tier and the numbers stay within the checkout"
         );
     }
 

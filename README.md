@@ -52,9 +52,10 @@ api_key  = "$OPENAI_API_KEY"   # never the file's key: that one is for its host
 refused at load.
 
 A `.pi.toml` between the workspace and the repository root overrides the same
-keys, `base_url`, `api_key` and `write_roots` included, but not a model's own
-`base_url`, `api_key` or `format`. Read the one in a checkout you did not write
-before running pi there.
+keys, every one of them. The keys that reach past the checkout — `mcp`,
+`hooks`, `keep_days`, `write_roots`, `base_url`, `api_key`, and a model's own
+`base_url` or `api_key` — are named under the banner when pi starts. Read the
+file in a checkout you did not write before running pi there.
 
 Nothing needs a restart. Within a second of a save to the settings, a system
 prompt file, an `AGENTS.md` or memory, the lane in front is rebuilt from them;
@@ -118,10 +119,9 @@ Esc.
 `read` `write` `edit` `glob` `grep` `bash` `fetch` `skill` `subagent`, plus:
 
 - `judge`, when the config has a `[judge]` section.
-- One tool per tool of each MCP server in `[mcp.<name>]` of
-  `~/.pi/settings.toml`, offered as `<name>__<tool>` once the server has
-  listed them. `command` and `args` run one over stdio, `url` reaches one over
-  Streamable HTTP; a project's `.pi.toml` may not name any. A server that will
+- One tool per tool of each MCP server in `[mcp.<name>]`, offered as
+  `<name>__<tool>` once the server has listed them. `command` and `args` run
+  one over stdio, `url` reaches one over Streamable HTTP. A server that will
   not start is listed as `<name>__unavailable`, with the reason; `/mcp`
   shows each server and its tools, and `/mcp restart` reconnects them.
 - `later`, in the terminal: a prompt the model leaves itself, which comes back
@@ -139,7 +139,7 @@ A server's prompts are commands too: `/<name>:<prompt> [args]` asks the server
 for the prompt's text and sends it, one typed word per argument, the last
 taking the rest.
 
-`[[hooks]]` in `~/.pi/settings.toml` run a command around tool calls, handed
+`[[hooks]]` run a command around tool calls, handed
 the call as JSON on stdin. Before a call, exit 0 lets it run and exit 2 refuses
 it with what the hook printed; a hook that fails or hangs refuses it too. After
 one, what it printed joins the result. `examples/pi.toml` has
@@ -186,7 +186,7 @@ Memory starts with the first session to end and never reads tool output.
 | `~/.pi/SYSTEM.md`                        | replaces the built-in system prompt        |
 | `~/.pi/AGENTS.md`, `AGENTS.md`           | standing instructions: yours, a project's  |
 | `~/.pi/skills/`                          | skills: a directory with a `SKILL.md`      |
-| `~/.pi/memory/*.md`, `projects/*.md`     | memory: global, and one file per project   |
+| `~/.pi/memory/*.md`                      | memory: global, and one file per project   |
 | `~/.pi/tools/`                           | script tools                               |
 | `~/.pi/images/`                          | images pasted with `ctrl+v`                |
 | `~/.pi/bar.rs`                           | a cargo script that lays out the bar       |

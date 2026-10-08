@@ -1022,30 +1022,46 @@ impl Row {
         if let Some(system) = &resolved.system {
             facts.push(("system prompt", tilde(system)));
         }
-        for (label, names) in [
-            ("content", &resolved.context),
-            ("memory", &resolved.memory),
-            ("mcp", &resolved.mcp),
-        ] {
-            if !names.is_empty() {
-                facts.push((label, names.join(", ")));
+        if !resolved.context.is_empty() {
+            facts.push(("content", resolved.context.join(", ")));
+        }
+        // By topic, a handful at most: the paths are in `/status`.
+        const TOPICS: usize = 5;
+        let topics: Vec<&str> = resolved
+            .memory
+            .iter()
+            .filter_map(|p| std::path::Path::new(p).file_stem()?.to_str())
+            .collect();
+        if !topics.is_empty() {
+            let mut shown = topics[..topics.len().min(TOPICS)].join(", ");
+            if topics.len() > TOPICS {
+                shown.push_str(&format!(", +{}", topics.len() - TOPICS));
             }
+            facts.push(("memory", shown));
+        }
+        if !resolved.mcp.is_empty() {
+            facts.push(("mcp", resolved.mcp.join(", ")));
         }
         if resolved.ceiling != tool::Tier::Exec {
             facts.push(("tier", format!("{:?}", resolved.ceiling).to_lowercase()));
         }
+        // What the project file sets goes under its name, apart from yours.
+        let (file, project) = match &resolved.project {
+            Some((file, keys)) => (Some(file), keys.as_slice()),
+            None => (None, &[][..]),
+        };
         let width = facts
             .iter()
             .map(|(label, _)| label.len())
+            .chain(project.iter().map(|(key, _)| key.len()))
             .max()
             .unwrap_or(0);
         let muted = |line: &str| Self::notice(Line::from(paint.span(&paint.theme.muted, line)));
+        let fact = |label: &str, value: &str| muted(&format!("{label:width$}  {value}"));
         std::iter::once(muted(icons::VERSION_BANNER))
-            .chain(
-                facts
-                    .iter()
-                    .map(|(label, value)| muted(&format!("{label:width$}  {value}"))),
-            )
+            .chain(facts.iter().map(|(label, value)| fact(label, value)))
+            .chain(file.into_iter().flat_map(|file| [muted(""), muted(file)]))
+            .chain(project.iter().map(|(key, value)| fact(key, value)))
             .collect()
     }
 }

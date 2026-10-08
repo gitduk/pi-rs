@@ -105,8 +105,8 @@ url     = "https://example.com/mcp"            # or Streamable HTTP
 headers = { Authorization = "$DOCS_AUTHORIZATION" }  # the whole value: "Bearer …"
 ```
 
-- Only your own `settings.toml` may name servers; a project's `.pi.toml` that
-  does is refused.
+- `~/.pi/settings.toml` serves everywhere; a project's `.pi.toml` adds servers
+  for that checkout alone, and pi names them under the banner at startup.
 - A server that will not start shows up as `<server>__unavailable`, its
   description saying why; the user's `/mcp` lists every server and its tools,
   and `/mcp restart` reconnects them.

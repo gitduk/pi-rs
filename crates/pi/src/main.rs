@@ -160,6 +160,7 @@ async fn main() -> Result<ExitCode> {
         (None, true) => Some(store.latest(workspace.root())?),
         _ => None,
     };
+    pi_store::memory::Memory::default().lift_projects();
     // Off the startup path: stats every bucket, almost never has anything to
     // take. A run that exits first loses nothing — the next one sweeps.
     tokio::task::spawn_blocking({
@@ -211,6 +212,13 @@ async fn main() -> Result<ExitCode> {
     // Ahead of the quiet check on purpose: see `Dialled::warning`.
     if let Some(warning) = &dialled.warning {
         eprintln!("\x1b[{}m{warning}\x1b[0m", config.theme.muted.codes());
+    }
+    if let Some((file, keys)) = &resolved.project {
+        let muted = config.theme.muted.codes();
+        eprintln!("\n\x1b[{muted}m{file}\x1b[0m");
+        for (key, value) in keys {
+            eprintln!("\x1b[{muted}m  {key} {value}\x1b[0m");
+        }
     }
     if !args.quiet {
         for note in dialled.assumed.iter().chain(&resolved.notes) {
