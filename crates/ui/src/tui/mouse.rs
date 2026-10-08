@@ -35,14 +35,17 @@ impl Ui {
         let Target::Scrollback(idx, line) = target else {
             return None;
         };
-        // How many screen rows of this same line sit above the pointer: a
-        // drawn block is one line, its label the first of its rows.
+        // How many rows of this same line sit above the pointer, those
+        // scrolled off included: a drawn block is one line, its label the first.
         let at = row.checked_sub(self.regions.history.y)? as usize;
-        let below_top = self.row_targets[..at]
+        let mut below_top = self.row_targets[..at]
             .iter()
             .rev()
             .take_while(|t| matches!(t, Target::Scrollback(i, l) if (*i, *l) == (idx, line)))
             .count();
+        if below_top == at {
+            below_top += self.top_cut;
+        }
         let row = view.surface.scrollback.get(idx)?;
         let width = self.screen.usable();
         let clicked = line;

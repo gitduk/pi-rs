@@ -93,6 +93,8 @@ pub(super) struct Ui {
     // opens or closes something.
     pub(super) hovered_scrollback: Option<(usize, usize)>,
     pub(super) row_targets: Vec<Target>,
+    // Rows of the top drawn line scrolled off above the window.
+    pub(super) top_cut: usize,
     // The transcript rows as last drawn, in plain text: what a selection
     // reads, row for row with `row_targets`.
     pub(super) drawn: Vec<String>,
@@ -223,6 +225,7 @@ impl Ui {
             layout: Default::default(),
             hovered_scrollback: None,
             row_targets: Vec::new(),
+            top_cut: 0,
             drawn: Vec::new(),
             selection: None,
             press: None,

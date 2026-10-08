@@ -417,7 +417,7 @@ impl Ui {
             )
         });
 
-        let (tagged_rows, scroll) = screen::window_tagged(
+        let (tagged_rows, scroll, cut) = screen::window_tagged(
             scrollback.chain(live_stream),
             hist_view,
             view.surface.scroll,
@@ -426,6 +426,7 @@ impl Ui {
         let (rows, row_targets): (Vec<Line<'static>>, Vec<Target>) =
             tagged_rows.into_iter().unzip();
         self.row_targets = row_targets;
+        self.top_cut = cut;
         self.drawn = rows
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())

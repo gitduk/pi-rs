@@ -103,12 +103,13 @@ impl Piece for Ready<'_> {
 pub const TOP: usize = usize::MAX;
 
 /// `room` rows from `lines`, `scroll` back from the bottom — measured in
-/// wrapped rows, not lines, or the newest rows fall off screen.
+/// wrapped rows, not lines, or the newest rows fall off screen. Also the
+/// scroll clamped, and how many rows of the top line fell off above.
 pub fn window_tagged<T: Clone, P: Piece>(
     lines: impl DoubleEndedIterator<Item = (P, T)>,
     room: usize,
     scroll: usize,
-) -> (Vec<(Line<'static>, T)>, usize) {
+) -> (Vec<(Line<'static>, T)>, usize, usize) {
     // A scroll of `TOP` must reach the clamp below, not overflow on the way.
     let want = room.saturating_add(scroll);
     // Backwards on the counts alone: a line the window will not show costs its
@@ -125,6 +126,7 @@ pub fn window_tagged<T: Clone, P: Piece>(
     let scroll = scroll.min(have.saturating_sub(room));
     let mut back: Vec<(Line<'static>, T)> = Vec::new();
     let mut skip = scroll;
+    let mut cut = 0;
     for (line, tag) in pending {
         if back.len() >= room {
             break;
@@ -143,6 +145,7 @@ pub fn window_tagged<T: Clone, P: Piece>(
         let mut rows = line.pieces();
         rows.reverse();
         let left = room - back.len();
+        cut = rows.len().saturating_sub(skip).saturating_sub(left);
         back.extend(
             rows.into_iter()
                 .skip(skip)
@@ -152,7 +155,7 @@ pub fn window_tagged<T: Clone, P: Piece>(
         skip = 0;
     }
     back.reverse();
-    (back, scroll)
+    (back, scroll, cut)
 }
 
 /// A line's spans with the line's own style folded into each, for building
@@ -177,7 +180,7 @@ pub fn window<'a>(
     scroll: usize,
 ) -> (Vec<Line<'static>>, usize) {
     let lines = lines.map(move |line| (Ready { line, width }, ()));
-    let (rows, scroll) = window_tagged(lines, room, scroll);
+    let (rows, scroll, _) = window_tagged(lines, room, scroll);
     (rows.into_iter().map(|(r, ())| r).collect(), scroll)
 }
 
