@@ -55,8 +55,9 @@ impl Ui {
         if (clicked != line || below_top > 0) && row.badged(&self.paint, width) {
             return None;
         }
-        // Excludes the empty rest of the row past the text.
-        let (text, border) = row.line(line, &self.paint, width);
+        // Excludes the empty rest of the row past the text: the row pointed
+        // at, not the line it toggles, which may be narrower.
+        let (text, border) = row.line(clicked, &self.paint, width);
         let start = border.map_or(0, |b| b.width());
         (start..start + text.width())
             .contains(&(col as usize))

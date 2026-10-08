@@ -247,6 +247,7 @@ impl Tui {
         self.ui.editor.set_line(&parked);
         self.ui.lists.at(self.core.lane().root());
         self.ui.at_root = self.core.lane().root().to_path_buf();
+        self.ui.at_menu = None;
         // Recall follows the checkout like the lists do; the line just
         // typed is already filed (`save_history` ran while still in front).
         let lines = history_of(&self.core.store, self.core.lane().root());
