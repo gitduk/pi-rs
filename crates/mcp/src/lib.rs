@@ -529,8 +529,19 @@ impl Tool for Remote {
         if let Value::Object(map) = args {
             params = params.with_arguments(map);
         }
+        // As long as `bash` may run: past that, a server is wedged, not busy.
+        const WAIT: std::time::Duration = std::time::Duration::from_secs(600);
         let result = tokio::select! {
-            r = self.peer.call_tool(params) => r,
+            r = tokio::time::timeout(WAIT, self.peer.call_tool(params)) => match r {
+                Ok(r) => r,
+                Err(_) => {
+                    return Err(ToolError::Invalid(format!(
+                        "{}: no answer in {}s; the call was given up",
+                        self.name,
+                        WAIT.as_secs()
+                    )));
+                }
+            },
             _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
         }
         .map_err(|e| ToolError::Invalid(format!("{}: {e}", self.name)))?;
