@@ -88,6 +88,11 @@ impl Tui {
         let Some(mut carried) = self.take_carried() else {
             return;
         };
+        // The line keeps `[Image #n …]`; the model is told where each one is.
+        let (prompt, typed) = match super::clipboard::with_paths(&prompt, &self.ui.images) {
+            Some(sent) => (sent, typed.or(Some(prompt))),
+            None => (prompt, typed),
+        };
         carried.send_prompt(prompt, typed);
         // The repair results and stop note the send filed are entries now:
         // derive rows like any commit so they show without a rebuild.

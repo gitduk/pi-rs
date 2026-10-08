@@ -27,6 +27,7 @@ ratatui = "0.30.2"
 tui-markdown = "0.3"
 # Pinned: `diagram::squeeze` works around how this version lays wide chars.
 mermaid-text = "=0.57.0"
+imagesize = "0.15.0"
 
 [dev-dependencies]
 pi-core = { workspace = true, features = ["testing"] }

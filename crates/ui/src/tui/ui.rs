@@ -85,6 +85,8 @@ pub(super) struct Ui {
     pub(super) flash: Option<(String, Instant)>,
     // What a click copied, said beside that scrollback row's badge for `FLASH`.
     pub(super) copied: Option<(usize, String, Instant)>,
+    // Each pasted image's file, `[Image #n …]` on the line naming `n - 1`.
+    pub(super) images: Vec<std::path::PathBuf>,
     // What the bar's rows hold: the script's last answer, or the default.
     pub(super) layout: pi_store::bar::Layout,
     // The scrollback row and line under the mouse, when a click there
@@ -209,6 +211,7 @@ impl Ui {
             tabs: Vec::new(),
             flash: None,
             copied: None,
+            images: Vec::new(),
             layout: Default::default(),
             hovered_scrollback: None,
             row_targets: Vec::new(),

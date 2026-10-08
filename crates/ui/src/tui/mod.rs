@@ -448,7 +448,7 @@ impl Tui {
                     .state
                     .committed = true;
                 self.drivers.steered(self.core.lane().token(), origin);
-                steer.say(text);
+                steer.say(clipboard::with_paths(&text, &self.ui.images).unwrap_or(text));
                 Wake::Nothing
             }
             // A command refused because a run is in flight. It was typed, so

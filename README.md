@@ -99,7 +99,7 @@ Esc.
 | `! <command>`                      | run a shell command and record its output     |
 | `@path`                            | complete a workspace file                     |
 | click a code block's label         | copy it; a diagram or table, its source       |
-| `ctrl+v`                           | paste a clipboard image as its file's path    |
+| `ctrl+v`                           | paste a clipboard image as `[Image #n]`       |
 
 ## Tools
 
