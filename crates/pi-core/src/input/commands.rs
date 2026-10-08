@@ -7,6 +7,7 @@ use std::sync::Arc;
 use skills::Skill;
 
 use super::{Builtin, Intent};
+use pi_store::listing::{Listing, Row};
 use pi_store::session::ResumeChoice;
 
 #[derive(Clone)]
@@ -110,6 +111,12 @@ pub(crate) const BUILTIN: &[Command] = &[
         "[text]",
         "repeat a line while it keeps changing the tree; bare, stop one",
         |_, rest| Intent::Builtin(Builtin::Loop(rest)),
+    ),
+    Command::builtin(
+        "/mcp",
+        "[restart [name]]",
+        "the MCP servers and their tools; restart reconnects one, or all",
+        |_, rest| Intent::Builtin(Builtin::Mcp(rest)),
     ),
     Command::builtin(
         "/status",
@@ -217,31 +224,25 @@ pub fn with_channels(table: &Arc<Vec<Command>>, channels: &[Command]) -> Arc<Vec
     Arc::new(out)
 }
 
-pub(crate) fn help(commands: &[Command]) -> Vec<String> {
-    let width = commands
-        .iter()
-        .map(|c| c.word.len() + c.args.len() + 1)
-        .max()
-        .unwrap_or(0);
-    let row = |c: &Command| {
-        let head = format!("{} {}", c.word, c.args);
-        format!("{head:width$}  {}", c.help)
-    };
+pub(crate) fn help(commands: &[Command]) -> Listing {
+    let row = |c: &Command| Row::new([format!("{} {}", c.word, c.args), c.help.to_string()]);
     // Where built-ins end, not where skills begin — a third source would
     // otherwise land in the built-in half. `commands` keeps them contiguous.
     let Some(split) = commands
         .iter()
         .position(|c| !matches!(c.source, Source::Builtin))
     else {
-        return commands.iter().map(row).collect();
+        return Listing::of(commands.iter().map(row));
     };
-    let mut out: Vec<String> = commands[..split].iter().map(row).collect();
+    let mut out: Vec<Row> = commands[..split].iter().map(row).collect();
     // Without a prefix there is nothing in the word itself to say which half it
     // came from, so the list says it once.
-    out.push(String::new());
-    out.push("skills — the instructions load when you run one:".into());
+    out.push(Row::new([""]));
+    out.push(Row::new([
+        "skills — the instructions load when you run one:",
+    ]));
     out.extend(commands[split..].iter().map(row));
-    out
+    Listing::of(out)
 }
 
 /// Something the prompt can complete to — a model, a worktree — and what tells

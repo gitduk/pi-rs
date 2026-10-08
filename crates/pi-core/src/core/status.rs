@@ -84,6 +84,10 @@ impl Core {
                 resolved.context.join(", "),
             ]));
         }
+        let servers = crate::core::mcp::summary();
+        if !servers.is_empty() {
+            rows.push(Row::new(["mcp".into(), servers.join(", ")]));
+        }
         if !resolved.memory.is_empty() {
             rows.push(Row::new(["memory".into(), resolved.memory.join(", ")]));
         }

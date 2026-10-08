@@ -190,11 +190,7 @@ pub fn discover_in(dir: &Path) -> (Vec<Script>, Vec<Skip>) {
 
 // What every provider accepts as a tool name.
 fn usable(name: &str) -> bool {
-    (1..=64).contains(&name.len()) && name.chars().all(name_char)
-}
-
-fn name_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '-' || c == '_'
+    (1..=64).contains(&name.len()) && name.chars().all(tool::name_char)
 }
 
 // The stand-in for a script that does not read: its name as near as a tool
@@ -209,7 +205,7 @@ impl Broken {
         let stem = skip.path.file_stem()?.to_str()?;
         let name: String = stem
             .chars()
-            .map(|c| if name_char(c) { c } else { '_' })
+            .map(|c| if tool::name_char(c) { c } else { '_' })
             .take(64)
             .collect();
         Some(Self {

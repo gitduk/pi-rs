@@ -100,6 +100,7 @@ impl Core {
                 }
             });
         self.in_force();
+        crate::core::mcp::sync(&config, &root);
         self.config = std::sync::Arc::new(config);
         tracing::info!(
             target: "pi::session",

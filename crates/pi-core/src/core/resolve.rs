@@ -150,6 +150,10 @@ pub fn resolve(
     if let Some(scripts) = scripts {
         registry.read(scripts);
     }
+    // Read live like the scripts: a server's tools join once it has listed them.
+    if !config.mcp.is_empty() {
+        registry.read(Arc::new(crate::core::mcp::Live));
+    }
 
     let settled = config.settle(config::Flags {
         effort: pinned.effort,

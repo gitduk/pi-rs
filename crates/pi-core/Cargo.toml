@@ -16,6 +16,7 @@ channel.workspace = true
 pi-store.workspace = true
 tool.workspace = true
 toolbox.workspace = true
+mcp.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 clap.workspace = true

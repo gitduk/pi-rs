@@ -9,6 +9,15 @@ use pi_store::text;
 /// Rows as text, each multi-cell row's first cell padded to the widest such
 /// cell — done here, since only drawing knows the width to fit.
 pub fn lines(listing: &Listing) -> Vec<String> {
+    split(listing)
+        .into_iter()
+        .map(|(head, rest)| head + &rest)
+        .collect()
+}
+
+/// Rows as `lines` lays them, cut after the padded first cell: what wraps is
+/// the rest, under its own column. A prose row's head is empty.
+pub fn split(listing: &Listing) -> Vec<(String, String)> {
     let width = listing
         .rows
         .iter()
@@ -20,23 +29,18 @@ pub fn lines(listing: &Listing) -> Vec<String> {
         .rows
         .iter()
         .map(|row| {
-            let mut out = String::new();
-            let table = row.cells.len() > 1;
-            for (at, cell) in row.cells.iter().enumerate() {
-                if at > 0 {
-                    out.push_str("  ");
+            let (head, cells) = match row.cells.split_first() {
+                Some((first, rest)) if !rest.is_empty() => {
+                    (format!("{}  ", text::pad(first, width)), rest)
                 }
-                if at == 0 && table {
-                    out.push_str(&text::pad(cell, width));
-                } else {
-                    out.push_str(cell);
-                }
-            }
+                _ => (String::new(), &row.cells[..]),
+            };
+            let mut rest = cells.join("  ");
             if let Some(note) = &row.note {
-                out.push_str(icons::KEY_NOTE_SEP);
-                out.push_str(note);
+                rest.push_str(icons::KEY_NOTE_SEP);
+                rest.push_str(note);
             }
-            out
+            (head, rest)
         })
         .collect()
 }

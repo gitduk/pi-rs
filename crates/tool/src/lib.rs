@@ -2,6 +2,11 @@ use async_trait::async_trait;
 use llm::message::ToolResultContent;
 use serde_json::{Deserializer, Value};
 
+/// A character every provider accepts in a tool name: a-z, A-Z, 0-9, `-`, `_`.
+pub fn name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '-' || c == '_'
+}
+
 /// Parse a tool's arguments with a serde path on any error, so a missing or
 /// misspelled field says which one (`items[1].status`) instead of a bare
 /// `missing field 'status'` that could be any of a hundred places.

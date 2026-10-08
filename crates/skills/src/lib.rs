@@ -49,11 +49,7 @@ impl Skill {
 
 // A name that cannot leave the skills directory it was found in.
 fn usable(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 64
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    (1..=64).contains(&name.len()) && name.chars().all(tool::name_char)
 }
 
 #[derive(Deserialize)]

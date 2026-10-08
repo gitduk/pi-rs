@@ -89,6 +89,7 @@ Esc.
 | `/compact [focus]`                 | summarize everything but the working tail     |
 | `/loop <line>`                     | resubmit a line until a round edits no file   |
 | `/later`, `/later rm <id>`         | what the model left for later; cancel one     |
+| `/mcp`, `/mcp restart [name]`      | MCP servers and their tools; reconnect        |
 | `/settings`                        | edit the project's config                     |
 | `/status`, `/keys`, `/help`        | session paths and spend; bindings; commands   |
 | `/content`                         | everything the model is given before you type |
@@ -102,6 +103,12 @@ Esc.
 `read` `write` `edit` `glob` `grep` `bash` `fetch` `skill` `subagent`, plus:
 
 - `judge`, when the config has a `[judge]` section.
+- One tool per tool of each MCP server in `[mcp.<name>]` of
+  `~/.pi/settings.toml`, offered as `<name>__<tool>` once the server has
+  listed them. `command` and `args` run one over stdio, `url` reaches one over
+  Streamable HTTP; a project's `.pi.toml` may not name any. A server that will
+  not start is listed as `<name>__unavailable`, with the reason; `/mcp`
+  shows each server and its tools, and `/mcp restart` reconnects them.
 - `later`, in the terminal: a prompt the model leaves itself, which comes back
   as a turn of its own after a delay, on a period, or when a background
   command exits. It waits until the checkout is in front and idle, and lasts
@@ -164,4 +171,4 @@ release on CI.
 
 ## Not built
 
-MCP, LSP, a sandbox for `bash`, per-call approval, session branching.
+LSP, a sandbox for `bash`, per-call approval, session branching.

@@ -12,6 +12,7 @@ license = "MIT"
 llm = { path = "crates/llm" }
 tool = { path = "crates/tool" }
 toolbox = { path = "crates/toolbox" }
+mcp = { path = "crates/mcp" }
 agent = { path = "crates/agent" }
 subagent = { path = "crates/subagent" }
 skills = { path = "crates/skills" }

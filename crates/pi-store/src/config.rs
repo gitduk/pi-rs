@@ -83,6 +83,10 @@ pub struct Config {
     /// Vim keys: on unless a file turns them off.
     #[serde(default)]
     pub vim: Vim,
+    /// MCP servers by name, each one's tools offered as `<name>__<tool>`.
+    /// Your own file only: a checkout's would start programs on entry.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub mcp: BTreeMap<String, McpServer>,
     /// How many rounds a `/loop` may run before it stops on its own. Defaults
     /// to 10 — the fingerprint and thin-round brakes catch a converging loop,
     /// and this is the floor for the shape they cannot (a round that keeps
@@ -128,6 +132,58 @@ pub struct Vim {
     /// typed as text; the pairs themselves are `[keys]` bindings.
     #[serde(default = "default_pair_ms")]
     pub pair_timeout_ms: u64,
+}
+
+/// One MCP server: a command run over stdio, or a URL spoken to over HTTP.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpServer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// Added to the command's environment; a leading `$` reads pi's own.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Sent with every request; a leading `$` reads the environment.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
+}
+
+impl McpServer {
+    /// The environment as the command gets it, `$NAME` values read; one whose
+    /// variable is unset is left out rather than sent empty.
+    pub fn env(&self) -> Vec<(String, String)> {
+        expanded(&self.env)
+    }
+
+    /// The headers as sent, read the same way.
+    pub fn headers(&self) -> Vec<(String, String)> {
+        expanded(&self.headers)
+    }
+
+    fn check(&self, name: &str) -> Result<()> {
+        if !(1..=32).contains(&name.len()) || !name.chars().all(tool::name_char) {
+            bail!("mcp.{name}: a server name is a-z, A-Z, 0-9, - and _, up to 32");
+        }
+        match (&self.command, &self.url) {
+            (Some(_), None) if self.headers.is_empty() => Ok(()),
+            (None, Some(_)) if self.args.is_empty() && self.env.is_empty() => Ok(()),
+            (Some(_), Some(_)) | (None, None) => {
+                bail!("mcp.{name}: give one of `command` (stdio) or `url` (HTTP)")
+            }
+            (Some(_), None) => bail!("mcp.{name}: `headers` go with `url`, not `command`"),
+            (None, Some(_)) => bail!("mcp.{name}: `args` and `env` go with `command`, not `url`"),
+        }
+    }
+}
+
+fn expanded(map: &BTreeMap<String, String>) -> Vec<(String, String)> {
+    map.iter()
+        .filter_map(|(k, v)| Some((k.clone(), expand_key(v)?)))
+        .collect()
 }
 
 fn default_enabled() -> bool {
@@ -639,7 +695,17 @@ pub fn load_project(workspace: &Path) -> Result<Option<(PathBuf, toml::Value)>> 
     let Some(path) = project_file(workspace) else {
         return Ok(None);
     };
-    Ok(read_tree(&path, true)?.map(|tree| (path, tree)))
+    let Some(tree) = read_tree(&path, true)? else {
+        return Ok(None);
+    };
+    // Entering a checkout must not start whatever program it names.
+    if tree.get("mcp").is_some() {
+        bail!(
+            "{}: [mcp] belongs in your own settings.toml — a checkout's would start programs",
+            path.display()
+        );
+    }
+    Ok(Some((path, tree)))
 }
 
 impl Config {
@@ -649,6 +715,9 @@ impl Config {
         let mut config: Config = serde_path_to_error::deserialize(tree)?;
         config.base_url = config.base_url.map(|url| expand_base_url(url.trim()));
         config.check_key()?;
+        for (name, server) in &config.mcp {
+            server.check(name)?;
+        }
         for (model, entry) in &config.models {
             if config.base_url.is_some() && config.format.is_some() {
                 config.spec(model, entry)?;
@@ -699,6 +768,33 @@ mod tests {
 
     // The example is documentation nothing else reads, so this is what keeps
     // a renamed or removed key from rotting in it.
+    // A server is one of two shapes; anything that mixes them, or names
+    // itself what a tool name cannot carry, is refused at load.
+    #[test]
+    fn an_mcp_server_is_a_command_or_a_url() {
+        assert!(parse("[mcp.a]\ncommand = \"x\"\n").is_ok());
+        assert!(parse("[mcp.a]\nurl = \"http://h/mcp\"\n").is_ok());
+        for bad in [
+            "[mcp.a]\n",
+            "[mcp.a]\ncommand = \"x\"\nurl = \"http://h\"\n",
+            "[mcp.a]\ncommand = \"x\"\nheaders = { A = \"b\" }\n",
+            "[mcp.a]\nurl = \"http://h\"\nargs = [\"y\"]\n",
+            "[mcp.\"a b\"]\ncommand = \"x\"\n",
+        ] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    // Entering a checkout must not start a program its file names.
+    #[test]
+    fn a_project_file_may_not_name_mcp_servers() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join(".pi.toml"), "[mcp.evil]\ncommand = \"x\"\n").unwrap();
+        let err = load_project(dir.path()).unwrap_err().to_string();
+        assert!(err.contains("[mcp]"), "{err}");
+    }
+
     #[test]
     fn the_shipped_example_is_a_valid_config() {
         let example = include_str!("../../../examples/pi.toml");

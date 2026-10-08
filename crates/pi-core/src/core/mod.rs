@@ -9,6 +9,7 @@ pub mod bash;
 pub mod content;
 pub mod dial;
 pub mod lane;
+pub mod mcp;
 pub mod memory;
 pub mod meter;
 pub mod resolve;
@@ -221,9 +222,10 @@ impl Core {
                 )),
             },
             Intent::Builtin(Builtin::Quit) => Step::Quit,
-            Intent::Builtin(Builtin::Help) => Step::Handled(Listing::say(help(&self.commands))),
+            Intent::Builtin(Builtin::Help) => Step::Handled(help(&self.commands)),
             Intent::Builtin(Builtin::Keys) => Step::Handled(self.keys.listing()),
             Intent::Builtin(Builtin::Status) => Step::Handled(self.status()),
+            Intent::Builtin(Builtin::Mcp(arg)) => Step::Handled(crate::core::mcp::command(&arg)),
             Intent::Builtin(Builtin::Content) => Step::Handled(self.content()),
             Intent::Builtin(Builtin::New) => {
                 self.fresh_session();

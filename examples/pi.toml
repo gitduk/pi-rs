@@ -149,6 +149,18 @@ replay_thinking = "tagged"
 # want, or keep two files and pass `--config`.
 # ---------------------------------------------------------------------------
 
+# MCP servers, each one's tools offered as `<name>__<tool>`. Only this file
+# may name them: a project's .pi.toml that does is refused. A value that is
+# `$NAME` reads pi's environment.
+[mcp.github]
+command = "github-mcp-server"
+args    = ["stdio"]
+env     = { GITHUB_TOKEN = "$GITHUB_TOKEN" }
+
+[mcp.docs]
+url     = "https://example.com/mcp"
+headers = { Authorization = "$DOCS_AUTHORIZATION" }
+
 [keys]
 # An entry replaces that action's defaults rather than adding to them.
 # `/keys` lists every id. Two presses apart by a space are a pair.

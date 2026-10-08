@@ -50,6 +50,8 @@ pub enum Builtin {
     Loop(String),
     // Bare, what is left for later here; `rm <id>` cancels one.
     Later(String),
+    // Bare, the MCP servers and their tools; `restart [name]` reconnects.
+    Mcp(String),
     // `/new` and `ctrl+l` twice are one variant: a fresh session, old one
     // kept on disk, screen rebuilt empty — one intent, however expressed.
     New,
@@ -102,6 +104,8 @@ impl Intent {
                 | Builtin::Name(_),
             ) => Fate::Now,
             Intent::Builtin(Builtin::Model(_) | Builtin::Later(_)) => Fate::Now,
+            // A restart drops only the servers' connections, never the run's.
+            Intent::Builtin(Builtin::Mcp(_)) => Fate::Now,
             // Bare, these only list what there is.
             Intent::Builtin(Builtin::Resume(name) | Builtin::Worktree(name))
                 if name.trim().is_empty() =>

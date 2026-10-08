@@ -201,6 +201,7 @@ async fn main() -> Result<ExitCode> {
     let dialled = dial(&pinned, &config, &named, named_by)?;
 
     let resolved = resolve(&pinned, &workspace, &config, &settings)?;
+    pi_core::core::mcp::sync(&config, workspace.root());
     // Ahead of the quiet check on purpose: see `Dialled::warning`.
     if let Some(warning) = &dialled.warning {
         eprintln!("\x1b[{}m{warning}\x1b[0m", config.theme.muted.codes());
@@ -305,6 +306,9 @@ async fn main() -> Result<ExitCode> {
         distill_after(&args, &ended, &model_id);
         return out.map(|()| ExitCode::SUCCESS);
     };
+
+    // One request, so the servers get a moment to list their tools first.
+    pi_core::core::mcp::settled(std::time::Duration::from_secs(10)).await;
 
     // A skill command is a prompt, so it means the same here as at the
     // terminal; built-ins aren't — they operate on a session this run has none of.

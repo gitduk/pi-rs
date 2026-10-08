@@ -1,6 +1,6 @@
 ---
 name: pi-tool
-description: Give pi a capability it lacks by writing it a tool (a Rust cargo script) or a skill in pi's home. Use when the work needs a tool or a skill that does not exist yet, or when asked to add, write or fix one.
+description: Give pi a capability it lacks — write it a tool (a script), connect an MCP server, or write a skill, all in pi's home. Use when the work needs a tool, server or skill that does not exist yet, or when asked to add, write or fix one.
 ---
 
 # Extending pi
@@ -86,6 +86,32 @@ Steps:
    <home>/tools/count.sh` (Rust: `cargo +nightly -Zscript --quiet` instead of
    `bash`).
 4. Call it as a tool on your next turn.
+
+## An MCP server
+
+When the capability already exists as an MCP server, connect it instead of
+writing it: add a section to `settings.toml` in pi's home. pi notices the save
+within a second, starts the server, and its tools join your list as
+`<server>__<tool>` once it has listed them.
+
+```toml
+[mcp.github]                       # a-z, 0-9, - and _
+command = "github-mcp-server"      # stdio: a program and its arguments
+args    = ["stdio"]
+env     = { GITHUB_TOKEN = "$GITHUB_TOKEN" }   # a value that is `$NAME` reads pi's environment
+
+[mcp.docs]
+url     = "https://example.com/mcp"            # or Streamable HTTP
+headers = { Authorization = "$DOCS_AUTHORIZATION" }  # the whole value: "Bearer …"
+```
+
+- Only your own `settings.toml` may name servers; a project's `.pi.toml` that
+  does is refused.
+- A server that will not start shows up as `<server>__unavailable`, its
+  description saying why; the user's `/mcp` lists every server and its tools,
+  and `/mcp restart` reconnects them.
+- Check the server's own documentation for its command and the variables it
+  needs. Never write a secret into the file: name the variable with `$`.
 
 ## A skill
 
