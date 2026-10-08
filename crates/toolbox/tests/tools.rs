@@ -110,6 +110,7 @@ fn registry_tiers_name_what_each_tool_may_reach() {
     assert_eq!(r.get("bash").unwrap().tier(), Tier::Exec);
     assert_eq!(r.get("read").unwrap().tier(), Tier::Read);
     assert_eq!(r.get("fetch").unwrap().tier(), Tier::Net);
+    assert_eq!(r.get("search").unwrap().tier(), Tier::Net);
 }
 
 #[tokio::test]

@@ -183,8 +183,8 @@ impl Tool for Fetch {
          text types come back verbatim. Use it to read documentation, an \
          issue, a changelog or an API's own answer rather than working from \
          memory of it. It reads what is served at that address and follows \
-         redirects; it is not a search engine, so a question needs a page that \
-         answers it. Only public addresses are fetched: loopback, LAN and \
+         redirects; it is not a search engine — `search` finds the page that \
+         answers a question. Only public addresses are fetched: loopback, LAN and \
          link-local targets are refused, redirects included. Binary responses \
          are refused with their type named."
     }

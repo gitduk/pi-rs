@@ -13,6 +13,7 @@ pub mod read;
 mod rows;
 pub mod rtk;
 pub mod scripts;
+pub mod search;
 mod syntax;
 pub mod walk;
 pub mod write;
@@ -28,4 +29,5 @@ pub fn builtin() -> Registry {
         .with(glob::Glob)
         .with(bash::Bash)
         .with(fetch::Fetch::default())
+        .with(search::Search)
 }
