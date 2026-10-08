@@ -383,8 +383,13 @@ impl Ui {
             Some(Action::EditExternally) => return Asked::Own(Deed::External),
             Some(Action::PasteImage) => match super::clipboard::paste_image() {
                 Ok((path, about)) => {
-                    self.images.push(path);
-                    let n = self.images.len();
+                    let n = match self.images.iter().position(|p| *p == path) {
+                        Some(at) => at + 1,
+                        None => {
+                            self.images.push(path);
+                            self.images.len()
+                        }
+                    };
                     self.editor.insert_str(&format!("[Image #{n} {about}] "));
                 }
                 Err(why) => self.flash(why),
@@ -433,8 +438,8 @@ impl Ui {
                 }
             }
             Some(Action::InsertNewline) => self.editor.insert('\n'),
-            Some(Action::DeleteCharBack) => self.editor.backspace(),
-            Some(Action::DeleteCharForward) => self.editor.delete(),
+            Some(Action::DeleteCharBack) => self.editor.backspace_tag(),
+            Some(Action::DeleteCharForward) => self.editor.delete_tag(),
             Some(Action::DeleteWordBack) => self.editor.kill_word_back(),
             Some(Action::DeleteToLineEnd) => self.editor.kill_to_end(),
             Some(Action::DeleteToLineStart) => self.editor.kill_to_start(),

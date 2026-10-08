@@ -5,6 +5,9 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::render::Paint;
 
+/// How a pasted image is named on the line, up to its number.
+pub const IMAGE_TAG: &str = "[Image #";
+
 #[derive(Default)]
 pub struct Editor {
     text: String,
@@ -120,6 +123,35 @@ impl Editor {
         }
     }
 
+    /// `backspace`, but a pasted image's `[Image #n …]` goes whole: half a
+    /// tag names no image.
+    pub fn backspace_tag(&mut self) {
+        match self.tag_ending_at(self.cursor) {
+            Some(at) => self.splice(at, self.cursor, ""),
+            None => self.backspace(),
+        }
+    }
+
+    // Where the image tag whose `]` sits just before `end` begins, if one does.
+    fn tag_ending_at(&self, end: usize) -> Option<usize> {
+        let body = self.text[..end].strip_suffix(']')?;
+        let at = body.rfind(IMAGE_TAG)?;
+        (!body[at..].contains(']')).then_some(at)
+    }
+
+    /// `delete`, the same way forward.
+    pub fn delete_tag(&mut self) {
+        let after = &self.text[self.cursor..];
+        if after.starts_with(IMAGE_TAG)
+            && let Some(close) = after.find(']')
+        {
+            let end = self.cursor + close + 1;
+            self.text.replace_range(self.cursor..end, "");
+        } else {
+            self.delete();
+        }
+    }
+
     pub fn delete(&mut self) {
         if self.cursor < self.text.len() {
             self.text.remove(self.cursor);
@@ -176,8 +208,10 @@ impl Editor {
         self.cursor += word + space;
     }
 
+    /// An image tag counts as one word.
     pub fn kill_word_back(&mut self) {
-        let start = self.word_start();
+        let end = self.text[..self.cursor].trim_end().len();
+        let start = self.tag_ending_at(end).unwrap_or_else(|| self.word_start());
         self.text.replace_range(start..self.cursor, "");
         self.cursor = start;
     }
@@ -463,6 +497,28 @@ mod tests {
         );
         e.insert_str(s);
         e
+    }
+
+    #[test]
+    fn an_image_tag_is_deleted_whole_from_either_side() {
+        let mut e = typed("a [Image #1 8x8 75 B]");
+        e.backspace_tag();
+        assert_eq!(e.text, "a ");
+        e.backspace_tag();
+        assert_eq!(e.text, "a", "past the tag, one char at a time");
+
+        let mut e = typed("[Image #2 x] b");
+        e.home();
+        e.delete_tag();
+        assert_eq!(e.text, " b");
+
+        let mut e = typed("a [Image #3 x] ");
+        e.kill_word_back();
+        assert_eq!(e.text, "a ", "ctrl+w takes the tag and the space after it");
+
+        let mut e = typed("[x] ok]");
+        e.backspace_tag();
+        assert_eq!(e.text, "[x] ok", "a bracket that is no tag is one char");
     }
 
     #[test]

@@ -2,8 +2,9 @@
 //! only, so the image is asked of the system clipboard instead.
 
 use std::path::PathBuf;
+
+use super::editor::IMAGE_TAG;
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const TYPES: [(&str, &str); 4] = [
     ("image/png", "png"),
@@ -59,12 +60,17 @@ pub(super) fn paste_image() -> Result<(PathBuf, String), String> {
         .ok_or("no pi home to save the image in")?
         .join("images");
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let path = dir.join(format!("{stamp}.{ext}"));
-    std::fs::write(&path, &bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    // Named by content, so pasting the same picture again is the same file.
+    let hash = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut h);
+        h.finish()
+    };
+    let path = dir.join(format!("{hash:016x}.{ext}"));
+    if !path.exists() {
+        std::fs::write(&path, &bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    }
     let size = pi_store::text::size(bytes.len() as u64);
     let about = match imagesize::blob_size(&bytes) {
         Ok(d) => format!("{}x{} {size}", d.width, d.height),
@@ -76,18 +82,17 @@ pub(super) fn paste_image() -> Result<(PathBuf, String), String> {
 /// `text` with each `[Image #n …]` naming a pasted file given its path, for
 /// the model; `None` when it names none.
 pub(super) fn with_paths(text: &str, images: &[PathBuf]) -> Option<String> {
-    const OPEN: &str = "[Image #";
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     let mut found = false;
-    while let Some(at) = rest.find(OPEN) {
+    while let Some(at) = rest.find(IMAGE_TAG) {
         let (before, tag) = rest.split_at(at);
         out.push_str(before);
         let Some(close) = tag.find(']') else {
             rest = tag;
             break;
         };
-        let n: Option<usize> = tag[OPEN.len()..close]
+        let n: Option<usize> = tag[IMAGE_TAG.len()..close]
             .split(' ')
             .next()
             .and_then(|n| n.parse().ok());
