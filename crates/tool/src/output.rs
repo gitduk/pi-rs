@@ -183,37 +183,55 @@ impl Default for Budget {
 /// transcript.
 pub fn bound(mut out: ToolOutput, ctx: &Ctx) -> ToolOutput {
     for piece in &mut out.content {
-        let ToolResultContent::Text(t) = piece else {
-            continue;
-        };
-        match spill::write(ctx, &t.text) {
-            Ok(None) => continue,
-            Ok(Some(spilled)) => {
-                let head = head_bytes(&t.text, VIEW);
-                let left = t.text.len() - head.len();
-                t.text = format!("{head}\n… {left} more bytes; {}\n", spilled.note());
+        // Structured blocks are text to the model too; an oversized one is
+        // bounded as the text it would be sent as.
+        if let ToolResultContent::Json { value } = piece {
+            let text = value.to_string();
+            if text.len() <= spill::MAX_OUTPUT {
+                continue;
             }
-            // Spilling failed and the gate still must not flood: say plainly
-            // that the tail is gone instead of a clean-looking prefix.
-            Err(_) => {
-                let head = head_bytes(&t.text, VIEW);
-                t.text = format!(
-                    "{head}\n… {} more bytes truncated — spill failed\n",
-                    t.text.len() - head.len()
-                );
-            }
+            *piece = ToolResultContent::Text(llm::message::Text { text });
+        }
+        if let ToolResultContent::Text(t) = piece {
+            t.text = bound_text(std::mem::take(&mut t.text), ctx);
         }
     }
     out
 }
 
-/// The one way agent code runs a tool: through the gate.
+fn bound_text(text: String, ctx: &Ctx) -> String {
+    match spill::write(ctx, &text) {
+        Ok(None) => text,
+        Ok(Some(spilled)) => {
+            let head = head_bytes(&text, VIEW);
+            let left = text.len() - head.len();
+            format!("{head}\n… {left} more bytes; {}\n", spilled.note())
+        }
+        // Spilling failed and the gate still must not flood: say plainly
+        // that the tail is gone instead of a clean-looking prefix.
+        Err(_) => {
+            let head = head_bytes(&text, VIEW);
+            format!(
+                "{head}\n… {} more bytes truncated — spill failed\n",
+                text.len() - head.len()
+            )
+        }
+    }
+}
+
+/// Run `tool` behind the gate: its output bounded, and so is the prose of a
+/// refusal, which reaches the model just the same.
 pub async fn gated(tool: &dyn Tool, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
-    Ok(bound(tool.execute(args, ctx).await?, ctx))
+    match tool.execute(args, ctx).await {
+        Ok(out) => Ok(bound(out, ctx)),
+        Err(ToolError::Invalid(why)) => Err(ToolError::Invalid(bound_text(why, ctx))),
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::{Ctx, Workspace};
 
     fn ctx(dir: &std::path::Path) -> Ctx {
@@ -263,6 +281,48 @@ mod tests {
 
         let small = super::bound(super::ToolOutput::text("tiny"), &ctx(dir.path()));
         assert_eq!(small.flatten(), "tiny");
+    }
+
+    // A structured block and a refusal reach the model as text, so neither
+    // may slip past the gate at any size.
+    #[tokio::test]
+    async fn the_gate_bounds_json_blocks_and_refusals_too() {
+        struct Refuses;
+        #[async_trait::async_trait]
+        impl crate::Tool for Refuses {
+            fn name(&self) -> &str {
+                "refuses"
+            }
+            fn description(&self) -> &str {
+                ""
+            }
+            fn schema(&self) -> Value {
+                Value::Null
+            }
+            fn tier(&self) -> crate::Tier {
+                crate::Tier::Read
+            }
+            async fn execute(&self, _: Value, _: &Ctx) -> Result<ToolOutput, ToolError> {
+                Err(ToolError::Invalid("x".repeat(spill::MAX_OUTPUT + 1_000)))
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx(dir.path());
+
+        let big = Value::String("y".repeat(spill::MAX_OUTPUT + 1_000));
+        let out = ToolOutput {
+            content: vec![ToolResultContent::Json { value: big }],
+            ..ToolOutput::text("")
+        };
+        let text = bound(out, &ctx).flatten();
+        assert!(text.contains("full output:"), "{text}");
+        assert!(text.len() < 40_000, "{}", text.len());
+
+        let Err(ToolError::Invalid(why)) = gated(&Refuses, Value::Null, &ctx).await else {
+            panic!("a refusal stays a refusal");
+        };
+        assert!(why.contains("full output:"), "{why}");
+        assert!(why.len() < 40_000, "{}", why.len());
     }
 
     #[test]
