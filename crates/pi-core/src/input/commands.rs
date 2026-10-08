@@ -354,7 +354,7 @@ pub fn complete<'a>(
             .map(|s| Candidate {
                 show: s.label(),
                 line: format!("/resume {}", s.id),
-                help: ago(s.created),
+                help: format!("{:>8}  {}", ago(s.created), s.extent()),
                 more: false,
             })
             .collect(),

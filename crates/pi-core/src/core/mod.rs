@@ -350,6 +350,8 @@ mod tests {
             prompt: "fix the flaky test".into(),
             name: None,
             created: 0,
+            rounds: 1,
+            bytes: 0,
         }];
         let offered =
             crate::input::commands::complete("/resume f", &commands, &[], || &one[..], || &[]);

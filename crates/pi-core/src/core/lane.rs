@@ -740,20 +740,23 @@ impl Core {
         }
         // What a session is known by is its own label — the name the user gave
         // it, then its first question — never the id.
-        let shown: Vec<(bool, String, u64)> = list
+        let shown: Vec<(bool, String, String, u64)> = list
             .iter()
-            .map(|s| (s.id == self.lane().talk.id, s.label(), s.created))
+            .map(|s| {
+                let current = s.id == self.lane().talk.id;
+                (current, s.label(), s.extent(), s.created)
+            })
             .collect();
         let width = shown
             .iter()
-            .map(|(_, t, _)| unicode_width::UnicodeWidthStr::width(t.as_str()))
+            .map(|(_, t, _, _)| unicode_width::UnicodeWidthStr::width(t.as_str()))
             .max()
             .unwrap_or(0);
         let mut out: Vec<String> = shown
             .iter()
-            .map(|(mark, text, created)| {
+            .map(|(mark, text, extent, created)| {
                 format!(
-                    "{} {}  {:>10}",
+                    "{} {}  {:>10}  {extent}",
                     if *mark { icons::CURRENT_ITEM } else { " " },
                     pi_store::text::pad(text, width),
                     ago(*created)

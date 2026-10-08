@@ -65,6 +65,9 @@ struct Peek {
     name: Option<String>,
     #[serde(default)]
     entries: Vec<PeekEntry>,
+    // The transcript's size on disk, set once it is read.
+    #[serde(skip)]
+    bytes: u64,
 }
 
 #[derive(Deserialize)]
@@ -92,6 +95,11 @@ impl Peek {
         self.entries.last().map_or(self.created, |e| e.at)
     }
 
+    // How many times the user asked: one round each.
+    fn rounds(&self) -> usize {
+        self.entries.iter().filter(|e| e.ask.is_some()).count()
+    }
+
     // The first thing the user asked, which is what the list shows in place
     // of an id. A `!` command's output is not it.
     fn opening(&self) -> Option<String> {
@@ -112,6 +120,8 @@ pub struct ResumeChoice {
     pub prompt: String,
     pub name: Option<String>,
     pub created: u64,
+    pub rounds: usize,
+    pub bytes: u64,
 }
 
 /// How much of a session's row a list or a completion shows.
@@ -140,6 +150,13 @@ impl ResumeChoice {
             None if prompt.is_empty() => "(no question)".into(),
             None => clip(prompt, RESUME_WIDTH),
         }
+    }
+
+    /// How much there is to it: its rounds and its transcript's size, in
+    /// fixed widths so rows line up wherever they are shown.
+    pub fn extent(&self) -> String {
+        let rounds = format!("{} rounds", self.rounds);
+        format!("{rounds:>10}  {:>8}", crate::text::size(self.bytes))
     }
 }
 
@@ -459,7 +476,10 @@ impl Store {
             .filter_map(|path| {
                 let body = std::fs::read_to_string(&path).ok()?;
                 match serde_json::from_str::<Peek>(&body) {
-                    Ok(peek) => (peek.workspace == want).then_some(peek),
+                    Ok(peek) => (peek.workspace == want).then_some(Peek {
+                        bytes: body.len() as u64,
+                        ..peek
+                    }),
                     Err(e) => {
                         tracing::warn!(
                             target: "pi::session",
@@ -579,6 +599,8 @@ impl Store {
             .into_iter()
             .map(|p| ResumeChoice {
                 prompt: p.opening().unwrap_or_default(),
+                rounds: p.rounds(),
+                bytes: p.bytes,
                 id: p.id,
                 name: p.name,
                 created: p.created,

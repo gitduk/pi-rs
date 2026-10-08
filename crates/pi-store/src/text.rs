@@ -89,6 +89,15 @@ pub fn spent(t: &agent::Totals) -> String {
     parts.join(icons::PART_SEP)
 }
 
+/// A file's size, in the largest unit that keeps it above one.
+pub fn size(bytes: u64) -> String {
+    match bytes {
+        0..1_024 => format!("{bytes} B"),
+        1_024..1_048_576 => format!("{:.1} KB", bytes as f64 / 1_024.0),
+        _ => format!("{:.1} MB", bytes as f64 / 1_048_576.0),
+    }
+}
+
 /// One line, cut to `max` display columns, not characters (see module doc).
 pub fn clip(s: &str, max: usize) -> String {
     let one = s.replace('\n', " ");
