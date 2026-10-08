@@ -26,7 +26,7 @@ use tool::{Ctx, Tool};
 use super::Core;
 use crate::core::meter::{Snapshot, Tally};
 use crate::core::resolve::Resolved;
-use crate::input::commands::ago;
+use crate::input::commands::session_facts;
 use crate::input::{Rewound, refused};
 use pi_store::icons;
 use pi_store::journal;
@@ -740,27 +740,22 @@ impl Core {
         }
         // What a session is known by is its own label — the name the user gave
         // it, then its first question — never the id.
-        let shown: Vec<(bool, String, String, u64)> = list
+        let width = list
             .iter()
-            .map(|s| {
-                let current = s.id == self.lane().talk.id;
-                (current, s.label(), s.extent(), s.created)
-            })
-            .collect();
-        let width = shown
-            .iter()
-            .map(|(_, t, _, _)| unicode_width::UnicodeWidthStr::width(t.as_str()))
+            .map(|s| unicode_width::UnicodeWidthStr::width(s.label().as_str()))
             .max()
             .unwrap_or(0);
-        let mut out: Vec<String> = shown
+        let facts = session_facts(&list.iter().collect::<Vec<_>>());
+        let mut out: Vec<String> = list
             .iter()
-            .map(|(mark, text, extent, created)| {
-                format!(
-                    "{} {}  {:>10}  {extent}",
-                    if *mark { icons::CURRENT_ITEM } else { " " },
-                    pi_store::text::pad(text, width),
-                    ago(*created)
-                )
+            .zip(facts)
+            .map(|(s, facts)| {
+                let mark = if s.id == self.lane().talk.id {
+                    icons::CURRENT_ITEM
+                } else {
+                    " "
+                };
+                format!("{mark} {}  {facts}", pi_store::text::pad(&s.label(), width))
             })
             .collect();
         out.push("resume one by typing /resume and Tab".into());

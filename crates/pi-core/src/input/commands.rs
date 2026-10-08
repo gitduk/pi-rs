@@ -344,22 +344,55 @@ pub fn complete<'a>(
         "/worktree" => worktree_candidates(worktrees(), "/worktree ", typed),
         // A first question is a whole sentence, and a session answers to the
         // name it was given as well, and to its id.
-        "/resume" => sessions()
-            .iter()
-            .filter(|s| {
-                let named = s.name.as_deref().is_some_and(|n| n.starts_with(typed));
-                (s.name.is_some() || !s.prompt.is_empty())
-                    && (named || s.prompt.starts_with(typed) || s.id.starts_with(typed))
-            })
-            .map(|s| Candidate {
-                show: s.label(),
-                line: format!("/resume {}", s.id),
-                help: format!("{:>8}  {}", ago(s.created), s.extent()),
-                more: false,
-            })
-            .collect(),
+        "/resume" => {
+            let offered: Vec<&ResumeChoice> = sessions()
+                .iter()
+                .filter(|s| {
+                    let named = s.name.as_deref().is_some_and(|n| n.starts_with(typed));
+                    (s.name.is_some() || !s.prompt.is_empty())
+                        && (named || s.prompt.starts_with(typed) || s.id.starts_with(typed))
+                })
+                .collect();
+            let facts = session_facts(&offered);
+            offered
+                .into_iter()
+                .zip(facts)
+                .map(|(s, help)| Candidate {
+                    show: s.label(),
+                    line: format!("/resume {}", s.id),
+                    help,
+                    more: false,
+                })
+                .collect()
+        }
         _ => Vec::new(),
     }
+}
+
+/// Each session's age, rounds and size, every column as wide as its widest
+/// among `sessions`, so the rows shown together line up.
+pub(crate) fn session_facts(sessions: &[&ResumeChoice]) -> Vec<String> {
+    let rows: Vec<[String; 3]> = sessions
+        .iter()
+        .map(|s| {
+            [
+                ago(s.created),
+                format!("{} rounds", s.rounds),
+                pi_store::text::size(s.bytes),
+            ]
+        })
+        .collect();
+    let w: [usize; 3] = std::array::from_fn(|i| rows.iter().map(|r| r[i].len()).max().unwrap_or(0));
+    rows.iter()
+        .map(|[age, rounds, size]| {
+            format!(
+                "{age:>a$}  {rounds:>b$}  {size:>c$}",
+                a = w[0],
+                b = w[1],
+                c = w[2]
+            )
+        })
+        .collect()
 }
 
 pub(crate) fn ago(secs: u64) -> String {

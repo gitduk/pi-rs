@@ -151,13 +151,6 @@ impl ResumeChoice {
             None => clip(prompt, RESUME_WIDTH),
         }
     }
-
-    /// How much there is to it: its rounds and its transcript's size, in
-    /// fixed widths so rows line up wherever they are shown.
-    pub fn extent(&self) -> String {
-        let rounds = format!("{} rounds", self.rounds);
-        format!("{rounds:>10}  {:>8}", crate::text::size(self.bytes))
-    }
 }
 
 impl Stored {
