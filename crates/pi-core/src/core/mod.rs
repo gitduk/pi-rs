@@ -8,6 +8,7 @@ pub mod bar;
 pub mod bash;
 pub mod content;
 pub mod dial;
+pub mod hooks;
 pub mod lane;
 pub mod mcp;
 pub mod memory;
@@ -225,6 +226,7 @@ impl Core {
             Intent::Builtin(Builtin::Help) => Step::Handled(help(&self.commands)),
             Intent::Builtin(Builtin::Keys) => Step::Handled(self.keys.listing()),
             Intent::Builtin(Builtin::Status) => Step::Handled(self.status()),
+            Intent::Builtin(Builtin::Effort(arg)) => Step::Handled(Listing::say(self.effort(&arg))),
             Intent::Builtin(Builtin::Mcp(arg)) => Step::Handled(crate::core::mcp::command(&arg)),
             Intent::Builtin(Builtin::Content) => Step::Handled(self.content()),
             Intent::Builtin(Builtin::New) => {
@@ -349,7 +351,7 @@ mod tests {
             id: "s1".into(),
             prompt: "fix the flaky test".into(),
             name: None,
-            created: 0,
+            touched: 0,
             rounds: 1,
             bytes: 0,
         }];

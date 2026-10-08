@@ -12,7 +12,7 @@ use tool::{Ctx, ToolError};
 /// The longest any child may run, whatever its caller asked for.
 pub(crate) const MAX_RUN: Duration = Duration::from_secs(600);
 
-pub(crate) struct Exited {
+pub struct Exited {
     pub status: ExitStatus,
     pub stdout: Captured,
     pub stderr: Captured,
@@ -20,7 +20,7 @@ pub(crate) struct Exited {
 
 /// Run `cmd`, feeding it `stdin` when there is some. Past `timeout` (at most
 /// [`MAX_RUN`]), or on the context's cancellation, the process group is reaped.
-pub(crate) async fn run(
+pub async fn run(
     mut cmd: Command,
     stdin: Option<Vec<u8>>,
     timeout: Duration,

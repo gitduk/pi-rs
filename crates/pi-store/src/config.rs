@@ -87,6 +87,9 @@ pub struct Config {
     /// Your own file only: a checkout's would start programs on entry.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub mcp: BTreeMap<String, McpServer>,
+    /// Commands run around tool calls. Your own file only, like `[mcp]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hooks: Vec<Hook>,
     /// How many rounds a `/loop` may run before it stops on its own. Defaults
     /// to 10 — the fingerprint and thin-round brakes catch a converging loop,
     /// and this is the floor for the shape they cannot (a round that keeps
@@ -115,6 +118,12 @@ pub struct Config {
     /// first token. Clamped up to 1: a zero would call every stream wedged.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idle_timeout: Option<u64>,
+
+    /// Days a session, and a pasted image, is kept after it was last worked
+    /// on. Unset is 90; 0 keeps everything. Your own file only: a checkout's
+    /// would delete the sessions of every other project.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_days: Option<u32>,
 }
 
 /// The modal keys, and the sequence that leaves Insert for Normal.
@@ -132,6 +141,27 @@ pub struct Vim {
     /// typed as text; the pairs themselves are `[keys]` bindings.
     #[serde(default = "default_pair_ms")]
     pub pair_timeout_ms: u64,
+}
+
+/// A command run around tool calls, handed the call as JSON on stdin.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hook {
+    pub when: HookWhen,
+    /// The tools it runs around; empty is every tool.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
+    /// Run by `sh -c` in the workspace.
+    pub command: String,
+}
+
+/// Before a call, where exit 2 refuses it; or after, where what it prints
+/// is added to the result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HookWhen {
+    Before,
+    After,
 }
 
 /// One MCP server: a command run over stdio, or a URL spoken to over HTTP.
@@ -196,6 +226,8 @@ fn default_pair_ms() -> u64 {
 fn default_loop_max_rounds() -> Option<usize> {
     Some(DEFAULT_LOOP_MAX_ROUNDS)
 }
+
+const DEFAULT_KEEP_DAYS: u32 = 90;
 
 // The default `loop_max_rounds` — see the field doc.
 const DEFAULT_LOOP_MAX_ROUNDS: usize = 10;
@@ -264,6 +296,15 @@ impl Config {
     /// silent mean the same thing to callers.
     pub fn loop_cap(&self) -> Option<usize> {
         self.loop_max_rounds.or(Some(DEFAULT_LOOP_MAX_ROUNDS))
+    }
+
+    /// How long an untouched session or pasted image is kept; `None` keeps
+    /// them all.
+    pub fn keep(&self) -> Option<std::time::Duration> {
+        match self.keep_days.unwrap_or(DEFAULT_KEEP_DAYS) {
+            0 => None,
+            days => Some(std::time::Duration::from_secs(u64::from(days) * 86_400)),
+        }
     }
 }
 
@@ -690,6 +731,23 @@ pub fn project_file(workspace: &Path) -> Option<PathBuf> {
     project_path(workspace, home().as_deref())
 }
 
+/// Keys only your own `settings.toml` may set, and why: entering a checkout
+/// must not start what it names, nor decide what of yours is deleted.
+pub const GLOBAL_ONLY: &[(&str, &str)] = &[
+    (
+        "mcp",
+        "[mcp] belongs in your own settings.toml — a checkout's would start programs",
+    ),
+    (
+        "keep_days",
+        "keep_days belongs in your own settings.toml — a checkout's would delete sessions",
+    ),
+    (
+        "hooks",
+        "[[hooks]] belong in your own settings.toml — a checkout's would run programs",
+    ),
+];
+
 /// The nearest `.pi.toml` at or above `workspace`, and its tree.
 pub fn load_project(workspace: &Path) -> Result<Option<(PathBuf, toml::Value)>> {
     let Some(path) = project_file(workspace) else {
@@ -698,12 +756,10 @@ pub fn load_project(workspace: &Path) -> Result<Option<(PathBuf, toml::Value)>> 
     let Some(tree) = read_tree(&path, true)? else {
         return Ok(None);
     };
-    // Entering a checkout must not start whatever program it names.
-    if tree.get("mcp").is_some() {
-        bail!(
-            "{}: [mcp] belongs in your own settings.toml — a checkout's would start programs",
-            path.display()
-        );
+    for (key, why) in GLOBAL_ONLY {
+        if tree.get(*key).is_some() {
+            bail!("{}: {why}", path.display());
+        }
     }
     Ok(Some((path, tree)))
 }
@@ -787,12 +843,20 @@ mod tests {
 
     // Entering a checkout must not start a program its file names.
     #[test]
-    fn a_project_file_may_not_name_mcp_servers() {
+    fn a_project_file_may_not_set_a_global_only_key() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join(".git")).unwrap();
-        std::fs::write(dir.path().join(".pi.toml"), "[mcp.evil]\ncommand = \"x\"\n").unwrap();
-        let err = load_project(dir.path()).unwrap_err().to_string();
-        assert!(err.contains("[mcp]"), "{err}");
+        let file = dir.path().join(".pi.toml");
+        for (body, key) in [
+            ("[mcp.evil]\ncommand = \"x\"\n", "mcp"),
+            ("keep_days = 1\n", "keep_days"),
+            ("[[hooks]]\nwhen = \"before\"\ncommand = \"x\"\n", "hooks"),
+        ] {
+            std::fs::write(&file, body).unwrap();
+            let err = load_project(dir.path()).unwrap_err().to_string();
+            assert!(err.contains(key), "{key}: {err}");
+        }
+        assert_eq!(GLOBAL_ONLY.len(), 3, "a new key gets a case above");
     }
 
     #[test]

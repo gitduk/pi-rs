@@ -39,6 +39,8 @@ pub enum Builtin {
     Compact(String),
     // The name to move to, or empty to list what there is.
     Model(String),
+    // The thinking effort to run at, or empty to say the one in force.
+    Effort(String),
     // The name to work in, or empty to list what there is.
     Worktree(String),
     // Bare `/settings`: the project's `.pi.toml` in `$EDITOR`. An argument
@@ -101,9 +103,11 @@ impl Intent {
                 | Builtin::Keys
                 | Builtin::Status
                 | Builtin::Content
-                | Builtin::Name(_),
+                | Builtin::Name(_)
+                | Builtin::Model(_)
+                | Builtin::Effort(_)
+                | Builtin::Later(_),
             ) => Fate::Now,
-            Intent::Builtin(Builtin::Model(_) | Builtin::Later(_)) => Fate::Now,
             // A restart drops only the servers' connections, never the run's.
             Intent::Builtin(Builtin::Mcp(_)) => Fate::Now,
             // Bare, these only list what there is.
@@ -201,6 +205,15 @@ pub fn recallable(line: &str, commands: &[Command]) -> bool {
 // A word `read` did not know: a skill to run, or a typo to name.
 pub(crate) fn step_for(commands: &[Command], word: &str, args: &str) -> Step {
     let Some(skill) = skill_for(commands, word) else {
+        if let Some(prompt) = crate::core::mcp::prompt(word) {
+            return match crate::core::mcp::fetch(&prompt, args) {
+                Ok(send) => Step::Prompt {
+                    typed: Some(format!("{word} {args}").trim_end().to_string()),
+                    send,
+                },
+                Err(why) => Step::Flash(why),
+            };
+        }
         return Step::Flash(format!("unknown command {word} — /help lists them"));
     };
     match expanded(skill, args) {

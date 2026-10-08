@@ -10,7 +10,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use async_trait::async_trait;
-use rmcp::model::{CallToolRequestParams, ClientConfig, Implementation, ProtocolVersion};
+use rmcp::model::{
+    CallToolRequestParams, ClientConfig, GetPromptRequestParams, Implementation, ProtocolVersion,
+};
 use rmcp::service::{ClientLifecycleMode, ClientServiceExt, NotificationContext, Peer, RoleClient};
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 use serde_json::Value;
@@ -58,8 +60,51 @@ pub struct Shown {
 
 enum State {
     Starting,
-    Up(Vec<Arc<dyn Tool>>),
+    Up(Vec<Arc<dyn Tool>>, Vec<Prompt>),
     Down(String),
+}
+
+/// A prompt a server offers, run as `/<server>:<name>`.
+#[derive(Clone)]
+pub struct Prompt {
+    pub server: String,
+    pub name: String,
+    pub description: String,
+    // Its arguments' names, in the order typed words fill them.
+    args: Vec<String>,
+    peer: Peer<RoleClient>,
+}
+
+impl Prompt {
+    /// The word that runs it.
+    pub fn word(&self) -> String {
+        format!("/{}:{}", self.server, self.name)
+    }
+
+    /// The prompt's text with `typed` as its arguments: one argument takes
+    /// all of it; with more, each takes a word and the last the rest.
+    pub async fn text(&self, typed: &str) -> Result<String, String> {
+        let mut params = GetPromptRequestParams::new(self.name.clone());
+        let typed = typed.trim();
+        if !typed.is_empty() && !self.args.is_empty() {
+            params = params.with_arguments(fill(&self.args, typed));
+        }
+        let got = self
+            .peer
+            .get_prompt(params)
+            .await
+            .map_err(|e| format!("{}: {e}", self.word()))?;
+        let texts: Vec<&str> = got
+            .messages
+            .iter()
+            .filter_map(|m| m.content.as_text())
+            .map(|t| t.text.as_str())
+            .collect();
+        if texts.is_empty() {
+            return Err(format!("{} gave no text", self.word()));
+        }
+        Ok(texts.join("\n\n"))
+    }
 }
 
 impl Servers {
@@ -115,7 +160,7 @@ impl Servers {
             .map(|s| {
                 let (status, tools) = match &*lock(&s.state) {
                     State::Starting => ("starting".to_string(), Vec::new()),
-                    State::Up(tools) => (
+                    State::Up(tools, _) => (
                         format!("{} tools", tools.len()),
                         tools
                             .iter()
@@ -129,6 +174,17 @@ impl Servers {
                     status,
                     tools,
                 }
+            })
+            .collect()
+    }
+
+    /// Every prompt of every server that is up.
+    pub fn prompts(&self) -> Vec<Prompt> {
+        self.servers
+            .iter()
+            .flat_map(|s| match &*lock(&s.state) {
+                State::Up(_, prompts) => prompts.clone(),
+                _ => Vec::new(),
             })
             .collect()
     }
@@ -183,7 +239,7 @@ impl tool::Source for Servers {
         for server in &self.servers {
             match &*lock(&server.state) {
                 State::Starting => {}
-                State::Up(tools) => out.extend(tools.iter().cloned()),
+                State::Up(tools, _) => out.extend(tools.iter().cloned()),
                 State::Down(why) => out.push(Arc::new(Down {
                     name: tool_name(&server.name, "unavailable"),
                     description: format!(
@@ -297,9 +353,38 @@ async fn run(server: Arc<Server>, epoch: u64) {
     down(&server, epoch, ended);
 }
 
-// The server's tools, read again: at start, and whenever it says they changed.
+// The server's tools and prompts, read again: at start, and whenever it says
+// either changed. A server without prompts, or failing to list them, has none.
 async fn list(server: &Arc<Server>, epoch: u64, peer: &Peer<RoleClient>) {
-    match peer.list_all_tools().await {
+    let offers_prompts = peer
+        .peer_info()
+        .is_some_and(|info| info.capabilities.prompts.is_some());
+    let (prompts, tools) = tokio::join!(
+        async {
+            if offers_prompts {
+                peer.list_all_prompts().await.unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        },
+        peer.list_all_tools()
+    );
+    let prompts: Vec<Prompt> = prompts
+        .into_iter()
+        .map(|p| Prompt {
+            server: server.name.clone(),
+            name: p.name,
+            description: p.description.unwrap_or_default(),
+            args: p
+                .arguments
+                .unwrap_or_default()
+                .into_iter()
+                .map(|a| a.name)
+                .collect(),
+            peer: peer.clone(),
+        })
+        .collect();
+    match tools {
         Ok(listed) => {
             let tools = listed
                 .into_iter()
@@ -317,7 +402,7 @@ async fn list(server: &Arc<Server>, epoch: u64, peer: &Peer<RoleClient>) {
                     }) as Arc<dyn Tool>
                 })
                 .collect();
-            set(server, epoch, State::Up(tools));
+            set(server, epoch, State::Up(tools, prompts));
         }
         Err(e) => down(server, epoch, format!("could not list its tools: {e}")),
     }
@@ -382,6 +467,12 @@ impl rmcp::ClientHandler for Handler {
     }
 
     async fn on_tool_list_changed(&self, context: NotificationContext<RoleClient>) {
+        if let Some(server) = self.server.upgrade() {
+            list(&server, self.epoch, &context.peer).await;
+        }
+    }
+
+    async fn on_prompt_list_changed(&self, context: NotificationContext<RoleClient>) {
         if let Some(server) = self.server.upgrade() {
             list(&server, self.epoch, &context.peer).await;
         }
@@ -492,6 +583,25 @@ fn flatten(out: &[llm::message::ToolResultContent]) -> String {
         .join("\n")
 }
 
+// Each argument a typed word in turn, however much space between them; the
+// last takes the rest of the line as typed.
+fn fill(args: &[String], typed: &str) -> serde_json::Map<String, Value> {
+    let mut map = serde_json::Map::new();
+    let mut rest = typed.trim();
+    for (i, arg) in args.iter().enumerate() {
+        if rest.is_empty() {
+            break;
+        }
+        let (word, tail) = match rest.split_once(char::is_whitespace) {
+            Some((word, tail)) if i + 1 < args.len() => (word, tail.trim_start()),
+            _ => (rest, ""),
+        };
+        map.insert(arg.clone(), Value::String(word.to_string()));
+        rest = tail;
+    }
+    map
+}
+
 // What stands for a server that is not running.
 struct Down {
     name: String,
@@ -524,6 +634,16 @@ impl Tool for Down {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_words_fill_a_prompts_arguments_in_turn() {
+        let args = ["a", "b", "c"].map(String::from);
+        let map = fill(&args, " foo  bar   baz qux ");
+        assert_eq!(map["a"], "foo");
+        assert_eq!(map["b"], "bar", "a run of spaces is one boundary");
+        assert_eq!(map["c"], "baz qux", "the last takes the rest");
+        assert_eq!(fill(&args, "only").len(), 1);
+    }
 
     #[test]
     fn a_tool_name_is_one_providers_take() {

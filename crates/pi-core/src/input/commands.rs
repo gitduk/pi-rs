@@ -113,6 +113,12 @@ pub(crate) const BUILTIN: &[Command] = &[
         |_, rest| Intent::Builtin(Builtin::Loop(rest)),
     ),
     Command::builtin(
+        "/effort",
+        "[off|low|medium|high]",
+        "how hard the model thinks, from the next request on",
+        |_, rest| Intent::Builtin(Builtin::Effort(rest)),
+    ),
+    Command::builtin(
         "/mcp",
         "[restart [name]]",
         "the MCP servers and their tools; restart reconnects one, or all",
@@ -305,7 +311,7 @@ pub fn complete<'a>(
     let Some((word, rest)) = line.split_once(char::is_whitespace) else {
         // The exact word stays in the list: dropping it would leave only
         // `/news` when `/new` is typed in full, and Tab would pick wrong.
-        return commands
+        let mut offered: Vec<Candidate> = commands
             .iter()
             .filter(|c| c.word.starts_with(line))
             .map(|c| Candidate {
@@ -315,9 +321,32 @@ pub fn complete<'a>(
                 more: !c.args.is_empty(),
             })
             .collect();
+        // A server's prompts come and go with it, so they are asked for live.
+        offered.extend(
+            crate::core::mcp::prompts()
+                .into_iter()
+                .filter(|p| p.word().starts_with(line))
+                .map(|p| Candidate {
+                    show: format!("{} [args]", p.word()),
+                    line: p.word(),
+                    help: gist(&p.description),
+                    more: true,
+                }),
+        );
+        return offered;
     };
     let typed = rest.trim_start();
     match word {
+        "/effort" => pi_store::args::EffortArg::names()
+            .into_iter()
+            .filter(|e| e.starts_with(typed) && e != typed)
+            .map(|e| Candidate {
+                show: e.to_string(),
+                line: format!("/effort {e}"),
+                help: String::new(),
+                more: false,
+            })
+            .collect(),
         // A second word means the model name is settled and something else is
         // being typed. There is no third thing to offer.
         "/model" if typed.contains(char::is_whitespace) => Vec::new(),
@@ -376,7 +405,7 @@ pub(crate) fn session_facts(sessions: &[&ResumeChoice]) -> Vec<String> {
         .iter()
         .map(|s| {
             [
-                ago(s.created),
+                ago(s.touched),
                 format!("{} rounds", s.rounds),
                 pi_store::text::size(s.bytes),
             ]

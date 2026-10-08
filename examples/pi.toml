@@ -73,6 +73,11 @@ loop_max_rounds = 10
 retries = 4
 idle_timeout = 300
 
+# Days a session, and an image pasted with ctrl+v, is kept after it was last
+# worked on; an older one is deleted when pi starts. Unset is 90, 0 keeps
+# everything. Only read from this file: a project's .pi.toml may not set it.
+# keep_days = 90
+
 # Absolute directories the tools above the read tier may reach besides the
 # workspace root — this widens where `bash` may work as well as what write and
 # edit may touch, so grant it the way you would a shell. Entries must be
@@ -148,6 +153,17 @@ replay_thinking = "tagged"
 # A second endpoint is not a config shape. Point `base_url` at the one you
 # want, or keep two files and pass `--config`.
 # ---------------------------------------------------------------------------
+
+# Commands run around tool calls by `sh -c` in the workspace, each handed
+# {"tool", "args", "workspace"} as JSON on stdin ("result" too, after). Before
+# a call, exit 0 lets it run and exit 2 refuses it with what the hook printed;
+# any other exit, or no answer in 30s, refuses it as a broken hook. After one,
+# what it printed is added to the result. `tools` empty is every
+# tool. Only this file may name them, like [mcp].
+# [[hooks]]
+# when    = "before"
+# tools   = ["bash"]
+# command = "~/.pi/hooks/guard.sh"
 
 # MCP servers, each one's tools offered as `<name>__<tool>`. Only this file
 # may name them: a project's .pi.toml that does is refused. A value that is

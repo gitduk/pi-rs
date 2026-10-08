@@ -232,6 +232,7 @@ pub fn resolve(
             system,
             effort,
             approver: std::sync::Arc::new(agent::Ceiling(tier)),
+            hooks: crate::core::hooks::of(&config.hooks),
             subagent_deadline: config
                 .subagent_deadline
                 .map(|s| std::time::Duration::from_secs(s.max(1))),

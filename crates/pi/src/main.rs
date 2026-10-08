@@ -155,22 +155,28 @@ async fn main() -> Result<ExitCode> {
         .with_context(within)?;
 
     let store = session::Store::default();
-    // Off the startup path: stats every bucket, almost never has anything to
-    // take. A run that exits first loses nothing — the next one sweeps.
-    tokio::task::spawn_blocking({
-        let store = store.clone();
-        move || {
-            // One tree, two prune rules: transcripts by reach, journals by
-            // age — a run worth reading back is a fortnight old at most.
-            journal::prune(store.root());
-            store.prune();
-        }
-    });
     let prior = match (&args.resume, args.continue_last) {
         (Some(id), _) => Some(store.load(id)?),
         (None, true) => Some(store.latest(workspace.root())?),
         _ => None,
     };
+    // Off the startup path: stats every bucket, almost never has anything to
+    // take. A run that exits first loses nothing — the next one sweeps.
+    tokio::task::spawn_blocking({
+        let store = store.clone();
+        let keep = config.keep();
+        let spare = prior.as_ref().map(|p| p.id.clone());
+        move || {
+            // Transcripts by reach and by age, journals by age — a run worth
+            // reading back is a fortnight old at most.
+            journal::prune(store.root());
+            store.prune();
+            if let Some(keep) = keep {
+                store.forget_older_than(keep, spare.as_deref());
+                pi_store::forget_images(keep);
+            }
+        }
+    });
 
     // What this run keeps: an interactive session, or one the user named with
     // `-c`/`--resume`. A one-shot prompt leaves nothing behind, not even a log.

@@ -85,6 +85,7 @@ Esc.
 | ---------------------------------- | --------------------------------------------- |
 | `/new`, `/resume [id]`, `/name`    | start, switch, label a session                |
 | `/model [name]`                    | list the models, or move the session to one   |
+| `/effort [level]`                  | `off` `low` `medium` `high`, from now on      |
 | `/worktree [name]`, `/worktree rm` | work in `<repo>.worktrees/<name>`             |
 | `/compact [focus]`                 | summarize everything but the working tail     |
 | `/loop <line>`                     | resubmit a line until a round edits no file   |
@@ -122,6 +123,16 @@ Esc.
   `[package] description` and `[package.metadata.pi.args]`, which needs
   `cargo +nightly -Zscript`. A script that does not read is listed as not
   usable, with the reason.
+
+A server's prompts are commands too: `/<name>:<prompt> [args]` asks the server
+for the prompt's text and sends it, one typed word per argument, the last
+taking the rest.
+
+`[[hooks]]` in `~/.pi/settings.toml` run a command around tool calls, handed
+the call as JSON on stdin. Before a call, exit 0 lets it run and exit 2 refuses
+it with what the hook printed; a hook that fails or hangs refuses it too. After
+one, what it printed joins the result. `examples/pi.toml` has
+the shape.
 
 Scripts and skills are read live: one written while pi runs is offered to the
 model from its next turn, and a skill's `/name` answers the next time you type.
@@ -168,6 +179,10 @@ Memory starts with the first session to end and never reads tool output.
 | `~/.pi/images/`                          | images pasted with `ctrl+v`                |
 | `~/.pi/bar.rs`                           | a cargo script that lays out the bar       |
 | `~/.pi/sessions/<project>/<session>/`    | the transcript and `journal.jsonl`         |
+
+A session not worked on for 90 days, and a pasted image not pasted again for
+as long, is deleted when pi starts; `keep_days` in `settings.toml` changes the
+days, and `0` keeps everything.
 
 The journal records what the transcript does not: requests, timings, refusals,
 retries. One JSON object per line, `0600`, kept two weeks. `PI_LOG` takes

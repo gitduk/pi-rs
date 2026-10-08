@@ -518,20 +518,13 @@ pub fn prune(sessions: &Path) {
     let Ok(buckets) = std::fs::read_dir(sessions) else {
         return;
     };
-    let now = SystemTime::now();
     for bucket in buckets.flatten() {
         let Ok(entries) = std::fs::read_dir(bucket.path()) else {
             continue;
         };
         for entry in entries.flatten() {
             let path = entry.path().join(JOURNAL_FILE);
-            let old = path
-                .metadata()
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| now.duration_since(t).ok())
-                .is_some_and(|age| age > KEEP);
-            if old {
+            if crate::older_than(&path, KEEP) {
                 let _ = std::fs::remove_file(&path);
                 // And the directory, if the journal was the last thing in it — a run
                 // that never got as far as a transcript, since a bucket needs to be empty.

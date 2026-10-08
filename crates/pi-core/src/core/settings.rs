@@ -7,6 +7,7 @@ use super::meter::summary;
 use super::status::{carries_reasoning, demotion};
 use crate::input::commands::Choice;
 use crate::input::refused;
+use pi_store::args::EffortArg;
 use pi_store::config::{self, Config};
 use pi_store::icons;
 
@@ -235,6 +236,36 @@ impl Core {
             "model switched"
         );
         self.retarget(dialled.transport, dialled.spec);
+        said
+    }
+    /// `/effort`: bare, the effort in force; with a level, that level from
+    /// the next request on, as `--effort` would have set it.
+    pub(super) fn effort(&mut self, arg: &str) -> Vec<String> {
+        use clap::ValueEnum;
+        let now = |core: &Self| core.lane().agent().brief.effort.name();
+        let levels = EffortArg::names().join("|");
+        let arg = arg.trim();
+        if arg.is_empty() {
+            return vec![format!("effort {} — /effort {levels}", now(self))];
+        }
+        let Ok(level) = EffortArg::from_str(arg, true) else {
+            return vec![format!("unknown effort `{arg}` — /effort {levels}")];
+        };
+        let was = self.pinned.effort.replace(level);
+        let mut said = match self.rebuilt() {
+            Ok(said) => said,
+            Err(why) => {
+                self.pinned.effort = was;
+                return vec![why];
+            }
+        };
+        said.push(format!("effort {}", now(self)));
+        if self.lane().agent().spec().thinking.is_none() {
+            let model = &self.lane().agent().spec().model;
+            said.push(format!(
+                "{model} takes no thinking setting, so this changes nothing on it"
+            ));
+        }
         said
     }
     // What `/model` on its own shows.

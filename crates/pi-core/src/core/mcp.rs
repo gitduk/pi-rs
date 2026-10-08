@@ -80,18 +80,23 @@ pub fn command(arg: &str) -> Listing {
     };
     match arg.split_whitespace().collect::<Vec<_>>().as_slice() {
         [] => {
+            let prompts = servers.prompts();
             let mut rows = Vec::new();
             for s in servers.shown() {
                 // The model reads `<server>__` and `[server]` on each tool;
                 // here the server heads its own rows, so neither is repeated.
                 let tag = format!("[{}] ", s.name);
                 let prefix = format!("{}__", s.name);
-                rows.push(Row::new([s.name, s.status]));
+                rows.push(Row::new([s.name.clone(), s.status]));
                 for (name, description) in s.tools {
                     let name = name.strip_prefix(&prefix).unwrap_or(&name);
                     let first = description.lines().next().unwrap_or_default();
                     let first = first.strip_prefix(&tag).unwrap_or(first);
                     rows.push(Row::new([format!("  {name}"), first.to_string()]));
+                }
+                for p in prompts.iter().filter(|p| p.server == s.name) {
+                    let first = p.description.lines().next().unwrap_or_default();
+                    rows.push(Row::new([format!("  {}", p.word()), first.to_string()]));
                 }
             }
             Listing::of(rows)
@@ -103,6 +108,33 @@ pub fn command(arg: &str) -> Listing {
         },
         _ => Listing::say(["/mcp lists the servers; /mcp restart [name] reconnects one, or all"]),
     }
+}
+
+/// Every prompt the running servers offer.
+pub fn prompts() -> Vec<mcp::Prompt> {
+    running().map_or_else(Vec::new, |s| s.prompts())
+}
+
+/// The prompt `word` (`/<server>:<name>`) runs, if a running server has it.
+pub fn prompt(word: &str) -> Option<mcp::Prompt> {
+    prompts().into_iter().find(|p| p.word() == word)
+}
+
+/// A prompt's text, asked of its server while the caller waits: a typed
+/// command has nothing to send until it comes back.
+pub fn fetch(prompt: &mcp::Prompt, args: &str) -> Result<String, String> {
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+    let handle = tokio::runtime::Handle::try_current()
+        .ok()
+        .filter(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+        .ok_or("an MCP prompt needs pi's own runtime")?;
+    tokio::task::block_in_place(|| {
+        handle.block_on(async {
+            tokio::time::timeout(WAIT, prompt.text(args))
+                .await
+                .unwrap_or_else(|_| Err(format!("{} did not answer in 10s", prompt.word())))
+        })
+    })
 }
 
 /// What each running server is doing, for `/status`.

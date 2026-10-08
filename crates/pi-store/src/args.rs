@@ -81,3 +81,13 @@ pub enum EffortArg {
     Medium,
     High,
 }
+
+impl EffortArg {
+    /// Every level as typed, in order: what `/effort` offers and names.
+    pub fn names() -> Vec<String> {
+        Self::value_variants()
+            .iter()
+            .filter_map(|v| Some(v.to_possible_value()?.get_name().to_string()))
+            .collect()
+    }
+}

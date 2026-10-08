@@ -17,6 +17,7 @@ pub mod approval;
 pub mod compaction;
 pub mod context;
 pub mod event;
+pub mod hooks;
 pub mod prompt;
 pub mod retry;
 pub mod seams;
@@ -27,6 +28,7 @@ pub use compaction::Summarizing;
 pub use compaction::ladder::{Policy, Report};
 use event::say;
 pub use event::{Event, Totals};
+pub use hooks::{Hooks, NoHooks};
 pub use retry::Retry;
 pub use seams::{Approver, Archive, Compactor, Decision, Fitted, Steer, Untouched, Working};
 
@@ -78,6 +80,8 @@ pub struct Briefing {
     pub system: String,
     pub effort: Effort,
     pub approver: Arc<dyn Approver>,
+    /// What runs around each call the approver let through.
+    pub hooks: Arc<dyn Hooks>,
     /// How long a subagent may run silent before it is read as wedged.
     /// None defaults to 1800 s.
     pub subagent_deadline: Option<std::time::Duration>,
@@ -109,6 +113,7 @@ impl Agent {
                 system: DEFAULT_SYSTEM.to_string(),
                 effort: Effort::Off,
                 approver: Arc::new(Ceiling(tool::Tier::Exec)),
+                hooks: Arc::new(NoHooks),
                 subagent_deadline: None,
             }),
             compactor: Arc::new(seams::Untouched),
@@ -565,7 +570,7 @@ impl Agent {
         tx: &UnboundedSender<Event>,
         spent: &mut Usage,
     ) -> (Vec<(ToolResult, Option<String>)>, bool) {
-        let actions: Vec<Action> = calls
+        let mut actions: Vec<Action> = calls
             .iter()
             .map(|c| {
                 if let Some(invalid) = bad.get(&c.id) {
@@ -597,6 +602,26 @@ impl Agent {
                 }
             })
             .collect();
+        // Hooks decide beside the approver, so a refusal is a denial like its.
+        let refusals = futures::future::join_all(calls.iter().zip(&actions).map(
+            |(call, action)| async move {
+                match action {
+                    Action::Run(_) => self
+                        .brief
+                        .hooks
+                        .before(&call.name, &call.args, ctx)
+                        .await
+                        .err(),
+                    Action::Reject(_) => None,
+                }
+            },
+        ))
+        .await;
+        for (action, refused) in actions.iter_mut().zip(refusals) {
+            if let Some(why) = refused {
+                *action = Action::Reject(why);
+            }
+        }
 
         for (call, action) in calls.iter().zip(&actions) {
             match action {
@@ -635,8 +660,19 @@ impl Agent {
                             None,
                         ),
                         Action::Run(t) => {
-                            let output =
+                            let mut output =
                                 tool::output::gated(t.as_ref(), call.args.clone(), ctx).await;
+                            if let Ok(out) = &mut output
+                                && let Some(note) = self
+                                    .brief
+                                    .hooks
+                                    .after(&call.name, &call.args, out, ctx)
+                                    .await
+                            {
+                                // Through the same gate as the tool's own output.
+                                let note = tool::output::bound(ToolOutput::text(note), ctx);
+                                out.content.extend(note.content);
+                            }
                             landed(call, output, tx)
                         }
                     }

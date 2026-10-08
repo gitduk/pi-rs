@@ -8,7 +8,7 @@ pub mod glob;
 pub mod grep;
 pub mod judge;
 mod parses;
-mod process;
+pub mod process;
 pub mod read;
 mod rows;
 pub mod rtk;

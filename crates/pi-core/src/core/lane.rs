@@ -191,6 +191,7 @@ pub fn a_resolved(standing: &str) -> Arc<Resolved> {
             system: String::new(),
             effort: llm::request::Effort::Off,
             approver: Arc::new(agent::Ceiling(tool::Tier::Exec)),
+            hooks: Arc::new(agent::NoHooks),
             subagent_deadline: None,
         }),
         standing: standing.into(),

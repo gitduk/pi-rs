@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use serde::Deserialize;
 
@@ -206,12 +206,7 @@ impl Memory {
     pub fn lock(&self) -> Option<Lock> {
         std::fs::create_dir_all(&self.dir).ok()?;
         let path = self.dir.join(LOCK);
-        let stale = std::fs::metadata(&path)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| SystemTime::now().duration_since(t).ok())
-            .is_some_and(|age| age > STALE);
-        if stale {
+        if crate::older_than(&path, STALE) {
             let _ = std::fs::remove_file(&path);
         }
         std::fs::OpenOptions::new()

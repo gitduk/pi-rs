@@ -56,9 +56,7 @@ pub(super) fn paste_image() -> Result<(PathBuf, String), String> {
         return Err("no image on the clipboard".to_string());
     }
 
-    let dir = pi_store::dir()
-        .ok_or("no pi home to save the image in")?
-        .join("images");
+    let dir = pi_store::images_dir().ok_or("no pi home to save the image in")?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     // Named by content, so pasting the same picture again is the same file.
     let hash = {
@@ -68,7 +66,12 @@ pub(super) fn paste_image() -> Result<(PathBuf, String), String> {
         h.finish()
     };
     let path = dir.join(format!("{hash:016x}.{ext}"));
-    if !path.exists() {
+    // Already there, it is touched instead: a fresh paste keeps it from the sweep.
+    let kept = std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .and_then(|f| f.set_modified(std::time::SystemTime::now()));
+    if kept.is_err() {
         std::fs::write(&path, &bytes).map_err(|e| format!("{}: {e}", path.display()))?;
     }
     let size = pi_store::text::size(bytes.len() as u64);

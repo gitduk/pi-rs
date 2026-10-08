@@ -119,7 +119,8 @@ pub struct ResumeChoice {
     pub id: String,
     pub prompt: String,
     pub name: Option<String>,
-    pub created: u64,
+    /// When it was last worked on, which is also what the list sorts by.
+    pub touched: u64,
     pub rounds: usize,
     pub bytes: u64,
 }
@@ -502,10 +503,28 @@ impl Store {
         self.prune_older_than(UNREACHED_KEEP);
     }
 
+    /// Deletes every session not worked on for `keep` but `spare`, the one
+    /// about to be resumed.
+    pub fn forget_older_than(&self, keep: std::time::Duration, spare: Option<&str>) {
+        let spare = spare.map(tool::state::file_stem);
+        for (bucket, transcripts) in self.buckets() {
+            for transcript in &transcripts {
+                let Some(dir) = transcript.parent() else {
+                    continue;
+                };
+                let spared = spare.as_deref().is_some_and(|s| dir.ends_with(s));
+                if !spared && crate::older_than(transcript, keep) {
+                    let _ = std::fs::remove_dir_all(dir);
+                }
+            }
+            // Only an empty one goes; one still holding anything stays.
+            let _ = std::fs::remove_dir(&bucket);
+        }
+    }
+
     // The same, against a stated age rather than the constant — a test that
     // waits a month is not a test.
     fn prune_older_than(&self, keep: std::time::Duration) {
-        let now = std::time::SystemTime::now();
         for (bucket, transcripts) in self.buckets() {
             // No transcripts here means nothing says whether the tree is
             // gone; `remove_dir` only takes a genuinely empty bucket.
@@ -513,13 +532,7 @@ impl Store {
                 let _ = std::fs::remove_dir(&bucket);
                 continue;
             }
-            let recent = transcripts.iter().any(|p| {
-                p.metadata()
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|t| now.duration_since(t).ok())
-                    .is_none_or(|age| age < keep)
-            });
+            let recent = transcripts.iter().any(|p| !crate::older_than(p, keep));
             if recent {
                 continue;
             }
@@ -593,10 +606,10 @@ impl Store {
             .map(|p| ResumeChoice {
                 prompt: p.opening().unwrap_or_default(),
                 rounds: p.rounds(),
+                touched: p.touched(),
                 bytes: p.bytes,
                 id: p.id,
                 name: p.name,
-                created: p.created,
             })
             .collect()
     }
@@ -691,6 +704,28 @@ mod tests {
         assert!(
             store.load("gone").is_err(),
             "nothing can reach a bucket whose tree went"
+        );
+    }
+    #[test]
+    fn an_untouched_session_is_forgotten_but_not_the_one_being_resumed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::new(tmp.path());
+        let log = log_with(vec![Message::user("hi")]);
+        let ws = tempfile::tempdir().unwrap();
+        for id in ["old", "resumed"] {
+            store
+                .save(id, ws.path(), "test-model", None, 7, &log)
+                .unwrap();
+        }
+
+        store.forget_older_than(std::time::Duration::from_secs(3600), None);
+        assert!(store.load("old").is_ok(), "saved just now is not old");
+
+        store.forget_older_than(std::time::Duration::ZERO, Some("resumed"));
+        assert!(store.load("old").is_err());
+        assert!(
+            store.load("resumed").is_ok(),
+            "the session being resumed stays"
         );
     }
     // Two trees that fold to one bucket share it, so pruning must judge
