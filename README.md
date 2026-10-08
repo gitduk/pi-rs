@@ -99,6 +99,7 @@ Esc.
 | `! <command>`                      | run a shell command and record its output     |
 | `@path`                            | complete a workspace file                     |
 | click a code block's label         | copy it; a diagram or table, its source       |
+| `ctrl+v`                           | paste a clipboard image as its file's path    |
 
 ## Tools
 
@@ -130,6 +131,10 @@ an MCP server, so a capability it lacks is one it can add; the built-in `pi-help
 skill is this README, for questions about pi itself. A skill of either name in
 `~/.pi/skills/` replaces it.
 
+`read` also opens PNG, JPEG, GIF and WebP files as images. A model reaches them
+only with `vision = true` in its `[models]` entry; without it, each image is
+sent as a line saying it was left out.
+
 `fetch` speaks http and https and refuses loopback, private and link-local
 addresses. With [rtk](https://github.com/rtk-ai/rtk) on `PATH`, `bash` runs
 each command through `rtk rewrite`; `RTK_DISABLED=1` turns that off.
@@ -160,6 +165,7 @@ Memory starts with the first session to end and never reads tool output.
 | `~/.pi/skills/`                          | skills: a directory with a `SKILL.md`      |
 | `~/.pi/memory/*.md`, `projects/*.md`     | memory: global, and one file per project   |
 | `~/.pi/tools/`                           | script tools                               |
+| `~/.pi/images/`                          | images pasted with `ctrl+v`                |
 | `~/.pi/bar.rs`                           | a cargo script that lays out the bar       |
 | `~/.pi/sessions/<project>/<session>/`    | the transcript and `journal.jsonl`         |
 

@@ -169,6 +169,32 @@ impl Reasoning {
     }
 }
 
+/// Every image swapped for a line saying why, for a model that takes none:
+/// one sent anyway fails the whole request.
+pub fn blind(messages: &mut [Message], model: &str) {
+    let note = || Text {
+        text: format!("[image not shown: {model} does not take images]"),
+    };
+    for message in messages {
+        let Message::User { content } = message else {
+            continue;
+        };
+        for part in content {
+            match part {
+                UserContent::Image(_) => *part = UserContent::Text(note()),
+                UserContent::ToolResult(result) => {
+                    for part in &mut result.content {
+                        if matches!(part, ToolResultContent::Image(_)) {
+                            *part = ToolResultContent::Text(note());
+                        }
+                    }
+                }
+                UserContent::Text(_) => {}
+            }
+        }
+    }
+}
+
 impl Message {
     pub fn user(text: impl Into<String>) -> Self {
         Message::User {

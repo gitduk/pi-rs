@@ -381,6 +381,10 @@ impl Ui {
                 };
             }
             Some(Action::EditExternally) => return Asked::Own(Deed::External),
+            Some(Action::PasteImage) => match super::clipboard::paste_image() {
+                Ok(path) => self.editor.insert_str(&format!("{} ", path.display())),
+                Err(why) => self.flash(why),
+            },
             Some(Action::RunInterrupt) => {
                 // Esc before the model has moved means "I didn't mean to send
                 // that"; an empty editor, or unsending overwrites a line.

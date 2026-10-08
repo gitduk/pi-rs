@@ -4,6 +4,7 @@
 mod bar;
 mod browse;
 mod call;
+mod clipboard;
 mod editor;
 mod job;
 mod menu;

@@ -149,6 +149,8 @@ pub enum Action {
     OpenLineAbove,
     // The line, in `$EDITOR`. The one action that leaves the process.
     EditExternally,
+    // A clipboard image, saved to a file whose path goes on the line.
+    PasteImage,
     PagerDown,
     PagerUp,
     PagerHalfDown,
@@ -584,6 +586,13 @@ const BINDINGS: &[Binding] = &[
         when: W::Mode(Mode::Normal),
         keys: &["O"],
         note: "a new line over it, then Insert",
+    },
+    Binding {
+        id: "edit.paste.image",
+        action: A::PasteImage,
+        when: W::Editor,
+        keys: &["ctrl+v"],
+        note: "the clipboard's image, saved under ~/.pi/images",
     },
     Binding {
         id: "normal.edit.external",

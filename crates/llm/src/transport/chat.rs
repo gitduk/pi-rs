@@ -14,7 +14,9 @@ use serde_json::{Value, json};
 
 use super::{FAILED, Shared, Transport};
 use crate::error::{LlmError, Result};
-use crate::message::{AssistantContent, Image, Message, Replay, ToolResult, UserContent, tagged};
+use crate::message::{
+    AssistantContent, Image, Message, Replay, ToolResult, ToolResultContent, UserContent, tagged,
+};
 use crate::model::{Format, ModelSpec, ThinkingControl};
 use crate::request::{Request, ToolChoice};
 use crate::stream::{BlockKind, StopReason, StreamEvent, Usage};
@@ -114,6 +116,9 @@ fn encode(msgs: &[Message], spec: &ModelSpec) -> Vec<Value> {
             Message::System { .. } => {}
             Message::User { content } => {
                 let mut blocks: Vec<Value> = Vec::new();
+                // A `tool` message holds text only, and a user message between
+                // two of them breaks the run, so their images follow the run.
+                let mut seen: Vec<Value> = Vec::new();
                 for b in content {
                     match b {
                         UserContent::Text(t) => {
@@ -126,9 +131,16 @@ fn encode(msgs: &[Message], spec: &ModelSpec) -> Vec<Value> {
                                 blocks = Vec::new();
                             }
                             out.push(encode_tool_result(r));
+                            for part in &r.content {
+                                if let ToolResultContent::Image(img) = part {
+                                    seen.push(json!({ "type": "text", "text": format!("[image from {}]", r.call) }));
+                                    seen.push(encode_image(img));
+                                }
+                            }
                         }
                     }
                 }
+                blocks.splice(0..0, seen);
                 if !blocks.is_empty() {
                     out.push(json!({ "role": "user", "content": blocks }));
                 }
@@ -413,6 +425,38 @@ impl Transport for ChatCompletions {
 mod tests {
     use super::*;
     use crate::stream::Accumulator;
+
+    #[test]
+    fn a_tool_results_image_follows_the_run_of_tool_messages() {
+        let result = |call: &str, image: bool| {
+            let mut content = vec![ToolResultContent::Text(crate::message::Text {
+                text: "seen".into(),
+            })];
+            if image {
+                content.push(ToolResultContent::Image(Image::Base64 {
+                    media_type: "image/png".into(),
+                    data: "AAAA".into(),
+                }));
+            }
+            UserContent::ToolResult(ToolResult {
+                call: call.into(),
+                name: "read".into(),
+                content,
+                is_error: false,
+            })
+        };
+        let msgs = [Message::User {
+            content: vec![result("a", true), result("b", false)],
+        }];
+        let out = encode(&msgs, &ModelSpec::test());
+        let roles: Vec<_> = out.iter().map(|m| m["role"].as_str().unwrap()).collect();
+        assert_eq!(roles, ["tool", "tool", "user"]);
+        assert_eq!(out[2]["content"][0]["text"], "[image from a]");
+        assert_eq!(
+            out[2]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,AAAA"
+        );
+    }
 
     #[test]
     fn the_deepseek_cache_halves_split_into_usage() {

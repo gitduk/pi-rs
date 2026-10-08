@@ -204,6 +204,9 @@ impl Agent {
                     .await;
                 totals.add(&fitted.spent);
                 sent = fitted.context;
+                if !self.model.spec.vision {
+                    llm::message::blind(&mut sent, &self.model.spec.model);
+                }
                 if fitted.changed {
                     compactions += 1;
                 }

@@ -25,6 +25,49 @@ struct Args {
     outline: Option<bool>,
 }
 
+// Under Anthropic's 5 MB per-image cap even counted as base64.
+const IMAGE_MAX: usize = 3_750_000;
+
+// The formats every vision endpoint takes, named by their magic bytes.
+fn image_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
+fn image(rel: &str, media_type: &str, bytes: &[u8]) -> ToolOutput {
+    use base64::Engine;
+    use llm::message::{Image, Text, ToolResultContent};
+    if bytes.len() > IMAGE_MAX {
+        return ToolOutput::text(format!(
+            "{rel} is a {media_type} of {} bytes, over the {IMAGE_MAX}-byte image limit; \
+             shrink it with bash and read the smaller copy",
+            bytes.len()
+        ));
+    }
+    ToolOutput {
+        content: vec![
+            ToolResultContent::Text(Text {
+                text: format!("[{rel}] {media_type}, {} bytes", bytes.len()),
+            }),
+            ToolResultContent::Image(Image::Base64 {
+                media_type: media_type.to_string(),
+                data: base64::engine::general_purpose::STANDARD.encode(bytes),
+            }),
+        ],
+        preview: None,
+        spent: Default::default(),
+    }
+}
+
 fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_SNIFF).any(|b| *b == 0)
 }
@@ -165,7 +208,8 @@ impl Tool for Read {
     }
 
     fn description(&self) -> &str {
-        "Read a file as numbered lines, or list a directory. Output is headed by \
+        "Read a file as numbered lines, list a directory, or look at an image \
+         (PNG, JPEG, GIF, WebP). Output is headed by \
          [path]; later edits anchor on the content itself, so re-read after the \
          file changes. A long file comes back as a skeleton of its declarations \
          instead — read a range with offset and limit, or hand one whole block \
@@ -264,6 +308,9 @@ impl Tool for Read {
             return Ok(ToolOutput::text(over_limit(&rel, meta.len())));
         }
         let bytes = tokio::fs::read(&path).await?;
+        if let Some(media_type) = image_type(&bytes) {
+            return Ok(image(&rel, media_type, &bytes));
+        }
         if looks_binary(&bytes) {
             return Ok(ToolOutput::text(format!(
                 "{rel} is binary ({} bytes); read is for text",

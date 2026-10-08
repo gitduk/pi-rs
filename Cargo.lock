@@ -3370,6 +3370,7 @@ name = "toolbox"
 version = "1.23.4"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "filetime",
  "globset",
  "grep-regex",
