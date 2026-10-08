@@ -174,6 +174,56 @@ fn append_style_params(out: &mut String, style: ratatui::style::Style) {
     }
 }
 
+// Stands in for a code block's fence lines, so `fenced` can find them after
+// rendering: a private-use char no model writes.
+const FENCE: &str = "\u{E000}";
+
+/// A code block's head: its language on the prompt's band, and `note` muted
+/// after it.
+pub fn badge(lang: &str, note: &str, paint: &Paint) -> Line<'static> {
+    let band =
+        style_to_ratatui(&paint.theme.code).patch(band_to_ratatui(&paint.theme.prompt.panel.said));
+    badge_with(lang, note, band, style_to_ratatui(&paint.theme.muted))
+}
+
+fn badge_with(
+    lang: &str,
+    note: &str,
+    band: ratatui::style::Style,
+    muted: ratatui::style::Style,
+) -> Line<'static> {
+    let lang = if lang.is_empty() { "block" } else { lang };
+    let mut spans = vec![Span::styled(format!(" {lang} "), band)];
+    if !note.is_empty() {
+        spans.push(Span::styled(format!(" {note}"), muted));
+    }
+    Line::from(spans)
+}
+
+// A code block's opening fence becomes its badge, the rest of its info string
+// the note; the closing fence goes.
+fn fenced(
+    lines: Vec<Line<'static>>,
+    badge: ratatui::style::Style,
+    muted: ratatui::style::Style,
+) -> Vec<Line<'static>> {
+    let mut open = false;
+    let mut out = Vec::with_capacity(lines.len());
+    for line in lines {
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let Some(lang) = text.strip_prefix(FENCE) else {
+            out.push(line);
+            continue;
+        };
+        open = !open;
+        if open {
+            let (lang, note) = lang.trim().split_once(' ').unwrap_or((lang.trim(), ""));
+            out.push(badge_with(lang, note.trim(), badge, muted));
+        }
+    }
+    out
+}
+
 fn trim_partial_fences(text: &str) -> &str {
     for suffix in ["\n`", "\n``"] {
         if let Some(rest) = text.strip_suffix(suffix)
@@ -199,6 +249,10 @@ impl tui_markdown::StyleSheet for PiStyleSheet {
 
     fn code(&self) -> ratatui::style::Style {
         self.code
+    }
+
+    fn code_block_fence(&self) -> &str {
+        FENCE
     }
 
     fn link(&self) -> ratatui::style::Style {
@@ -236,16 +290,25 @@ pub fn render_markdown(text: &str, paint: &Paint) -> Vec<ratatui::text::Line<'st
         return text.lines().map(|l| Line::from(l.to_string())).collect();
     }
     let trimmed = trim_partial_fences(text);
+    // Drawn for the terminal as it is now; a narrower one gets the source.
+    let width = crossterm::terminal::size()
+        .ok()
+        .map(|(w, _)| usize::from(w));
+    let drawn = crate::block::drawn(trimmed, width);
     let sheet = PiStyleSheet {
         heading: style_to_ratatui(&paint.theme.heading),
         code: style_to_ratatui(&paint.theme.code),
         muted: style_to_ratatui(&paint.theme.muted),
     };
+    let badge = sheet
+        .code
+        .patch(band_to_ratatui(&paint.theme.prompt.panel.said));
+    let muted = sheet.muted;
     let options = tui_markdown::Options::new(sheet);
-    let parsed = tui_markdown::from_str_with_options(trimmed, &options);
+    let parsed = tui_markdown::from_str_with_options(&drawn, &options);
     // The parsed text borrows the input; flatten text/line styles onto the
     // spans and own the content, so the lines outlive this call.
-    parsed
+    let lines = parsed
         .lines
         .into_iter()
         .map(|line| {
@@ -257,7 +320,8 @@ pub fn render_markdown(text: &str, paint: &Paint) -> Vec<ratatui::text::Line<'st
                 .collect();
             Line::from(spans)
         })
-        .collect()
+        .collect();
+    fenced(lines, badge, muted)
 }
 
 /// The diff rows a sketched (folded) result shows under its head.

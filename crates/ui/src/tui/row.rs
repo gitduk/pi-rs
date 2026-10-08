@@ -8,6 +8,7 @@ use ratatui::style::{Modifier, Style as RStyle};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::block::{self, Form};
 use crate::render::named;
 use crate::render::{self, Paint};
 use pi_core::core::resolve::Resolved;
@@ -286,6 +287,14 @@ enum Kind {
     // What the model answered, one row per markdown line. Its own kind,
     // not a notice — an answer is half the conversation, not screen-only.
     Answer(Line<'static>),
+    // A closed mermaid block or a table, drawn for the width it is shown at:
+    // a resize draws it again, or shows its source when it no longer fits.
+    // One logical line whose `\n`s the wrap breaks.
+    Block {
+        form: Form,
+        source: String,
+        painted: RefCell<Option<(usize, Line<'static>)>>,
+    },
     // A painted line the screen alone knows: banner, command output,
     // warning. `times` collapses an identical repeat into one row+count.
     Notice {
@@ -331,7 +340,10 @@ impl Row {
     /// Whether this row is part of the conversation: what was said and what
     /// was answered, which is what browse mode is for.
     pub fn is_conversation(&self) -> bool {
-        matches!(&self.0, Kind::Said { .. } | Kind::Answer(_))
+        matches!(
+            &self.0,
+            Kind::Said { .. } | Kind::Answer(_) | Kind::Block { .. }
+        )
     }
 
     /// Something only the screen ever knew (a tally line, a lane's
@@ -374,12 +386,39 @@ impl Row {
         Line::from(paint.span(&paint.theme.muted, line))
     }
 
-    /// A whole assistant text block, for a caller that has one.
+    /// A whole assistant text block, for a caller that has one. Its mermaid
+    /// blocks are rows of their own, drawn at whatever width they get.
     pub fn answer(text: &str, paint: &Paint) -> Vec<Self> {
-        render::render_markdown(text, paint)
-            .into_iter()
-            .map(|text| Self::new(Kind::Answer(text)))
-            .collect()
+        let markdown = |text: &str| {
+            render::render_markdown(text, paint)
+                .into_iter()
+                .map(|line| Self::new(Kind::Answer(line)))
+        };
+        if !paint.color {
+            return markdown(text).collect();
+        }
+        let blank = || Self::new(Kind::Answer(Line::default()));
+        let mut rows: Vec<Self> = Vec::new();
+        for piece in block::pieces(text) {
+            match piece {
+                block::Piece::Text(text) => rows.extend(markdown(text)),
+                block::Piece::Block(form, source) => {
+                    if !rows.is_empty() {
+                        rows.push(blank());
+                    }
+                    rows.push(Self::new(Kind::Block {
+                        form,
+                        source: source.trim_end().to_string(),
+                        painted: RefCell::new(None),
+                    }));
+                    rows.push(blank());
+                }
+            }
+        }
+        if matches!(rows.last(), Some(Self(Kind::Answer(l), _)) if l.spans.is_empty()) {
+            rows.pop();
+        }
+        rows
     }
 
     /// A group whose first step is `first`, folded the way it is born.
@@ -679,7 +718,7 @@ impl Row {
     /// Wraps not counted; `height` is the screen-row count.
     pub fn len(&self) -> usize {
         match &self.0 {
-            Kind::Answer(_) | Kind::Notice { .. } | Kind::Said { .. } => 1,
+            Kind::Answer(_) | Kind::Block { .. } | Kind::Notice { .. } | Kind::Said { .. } => 1,
             Kind::Result {
                 preview_lines,
                 expanded,
@@ -746,6 +785,21 @@ impl Row {
         match &self.0 {
             Kind::Said { border, body, .. } => (body.clone(), Some(border.clone())),
             Kind::Answer(text) => (text.clone(), None),
+            Kind::Block {
+                form,
+                source,
+                painted,
+            } => {
+                let mut held = painted.borrow_mut();
+                if let Some((at, line)) = held.as_ref()
+                    && *at == width
+                {
+                    return (line.clone(), None);
+                }
+                let line = block_at(*form, source, paint, width);
+                *held = Some((width, line.clone()));
+                (line, None)
+            }
             Kind::Notice { text, times } if *times == 1 => (text.clone(), None),
             Kind::Notice { text, times } => {
                 // The count wears the muted style whatever the line it trails,
@@ -1534,5 +1588,46 @@ mod height_tests {
         assert_eq!(fresh.line_height(0, &paint, 2), 3, "abcdef wraps to three");
         assert_eq!(fresh.line_height(1, &paint, 2), 1);
         assert_eq!(fresh.height(&paint, 2), 4);
+    }
+}
+
+// A block row at `width`: drawn when it fits, else its source under a badge
+// saying what it would need. A mermaid block wears its badge either way.
+fn block_at(form: Form, source: &str, paint: &Paint, width: usize) -> Line<'static> {
+    use crate::block::{Drawn, draw, note};
+    let joined = |lines: Vec<Line<'static>>| {
+        let mut spans = Vec::new();
+        for (at, line) in lines.into_iter().enumerate() {
+            if at > 0 {
+                spans.push(Span::raw("\n"));
+            }
+            spans.extend(line.spans);
+        }
+        Line::from(spans)
+    };
+    let source_under = |lang: &str, note: &str| {
+        let mut spans = render::badge(lang, note, paint).spans;
+        spans.push(Span::raw(format!("\n{source}")));
+        Line::from(spans)
+    };
+    match form {
+        Form::Mermaid => match draw(source, Some(width)) {
+            Drawn::Fits(diagram) => {
+                let mut spans = render::badge("mermaid", "", paint).spans;
+                spans.push(Span::raw(format!("\n{diagram}")));
+                Line::from(spans)
+            }
+            Drawn::Wide { needs, has } => source_under("mermaid", &note(needs, has)),
+            Drawn::Unread => source_under("mermaid", ""),
+        },
+        Form::Table => {
+            let lines = render::render_markdown(source, paint);
+            let needs = lines.iter().map(Line::width).max().unwrap_or(0);
+            if needs <= width {
+                joined(lines)
+            } else {
+                source_under("table", &note(needs, width))
+            }
+        }
     }
 }

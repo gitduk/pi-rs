@@ -4,6 +4,7 @@
 //! This is the top of the tree: it reads `pi-core` and `pi-store`, and nothing here is
 //! read back.
 
+pub mod block;
 pub mod listing;
 pub mod render;
 pub mod sgr;
