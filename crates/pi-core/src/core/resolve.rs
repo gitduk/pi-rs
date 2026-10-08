@@ -90,10 +90,13 @@ pub fn resolve(
     // on the next turn, and typed once `Core::refresh_skills` has seen it.
     let shelf = pi_store::dir().filter(|_| !pinned.no_skills).map(|pi| {
         let shelf = skills::Shelf::new(pi.join("skills"));
-        Arc::new(match skills::Skill::builtin(toolbox::scripts::SKILL) {
-            Some(pi_tool) => shelf.with_builtin(pi_tool),
-            None => shelf,
-        })
+        let builtins = [toolbox::scripts::SKILL, PI_SKILL];
+        Arc::new(
+            builtins
+                .into_iter()
+                .filter_map(skills::Skill::builtin)
+                .fold(shelf, skills::Shelf::with_builtin),
+        )
     });
     let (found, shelf_seen) = shelf.as_ref().map(|s| s.now()).unwrap_or_default();
     // A skill that silently fails to appear is one the user goes looking
@@ -177,10 +180,10 @@ pub fn resolve(
     // Everything the run needs to know about pi rides here rather than in the
     // system prompt, so that a replaced or empty one loses none of it.
     let stamp = journal::rfc3339(std::time::SystemTime::now());
-    // Said only where `pi-tool` is offered and the home may be written; the
+    // Said only where `pi-extend` is offered and the home may be written; the
     // write tool's own check, so a symlinked home is judged as it is.
     let pi_home = pi_store::dir().filter(|home| {
-        found.skills.iter().any(|s| s.name == "pi-tool")
+        found.skills.iter().any(|s| s.name == "pi-extend")
             && tool::Tier::Write.under(tier)
             && home
                 .to_str()
@@ -251,6 +254,15 @@ fn system_file(pinned: &Pinned) -> Option<PathBuf> {
         .or_else(config::system_file)
 }
 
+// pi as its README tells it, for when the user asks about pi itself: one
+// source, so a feature written up there is known here.
+const PI_SKILL: &str = concat!(
+    "---\nname: pi-help\ndescription: How pi itself works — its commands, keys, config, \
+     tools, sessions and limits (the README). Use when asked how to do something in pi, or \
+     what a pi command, setting or feature does; /help only lists the commands.\n---\n\n",
+    include_str!("../../../../README.md"),
+);
+
 /// A file as last seen: its path, time and size.
 pub type Stamp = (PathBuf, Option<std::time::SystemTime>, u64);
 
@@ -318,11 +330,11 @@ fn endpoint(
 
 #[cfg(test)]
 mod tests {
-    // `pi-tool` is dropped without a word when its header does not parse.
+    // A built-in skill is dropped without a word when its header does not parse.
     #[test]
-    fn pi_tool_is_a_builtin_skill_and_its_skill_example_parses() {
-        let pi_tool = skills::Skill::builtin(toolbox::scripts::SKILL).expect("pi-tool parses");
-        assert_eq!(pi_tool.name, "pi-tool");
+    fn pi_extend_is_a_builtin_skill_and_its_skill_example_parses() {
+        let extend = skills::Skill::builtin(toolbox::scripts::SKILL).expect("pi-extend parses");
+        assert_eq!(extend.name, "pi-extend");
         let example = toolbox::scripts::SKILL
             .split("```markdown\n")
             .nth(1)
@@ -330,5 +342,83 @@ mod tests {
             .expect("a skill example");
         let (_, description) = skills::frontmatter(example).unwrap();
         assert!(description.is_some_and(|d| !d.is_empty()));
+    }
+
+    #[test]
+    fn pi_help_is_a_builtin_skill() {
+        let help = skills::Skill::builtin(super::PI_SKILL).expect("pi-help parses");
+        assert_eq!(help.name, "pi-help");
+    }
+
+    // `pi-help` answers from the README, so what the code has and the README
+    // leaves out is something the model will deny exists.
+    fn missing(
+        names: impl IntoIterator<Item = String>,
+        said: &[&str],
+        forms: &[&str],
+    ) -> Vec<String> {
+        // Aligned columns (`tier   = "exec"`) read as one space.
+        let said: Vec<String> = said
+            .iter()
+            .map(|t| t.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect();
+        names
+            .into_iter()
+            .filter(|name| {
+                !said.iter().any(|text| {
+                    forms
+                        .iter()
+                        .any(|form| text.contains(&form.replace("{}", name)))
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_readme_names_every_command() {
+        let words = crate::input::commands::BUILTIN
+            .iter()
+            .map(|c| c.word.to_string());
+        let gone = missing(words, &[super::PI_SKILL], &["`{}`", "`{} ", "`{}["]);
+        assert!(gone.is_empty(), "README.md lacks {gone:?}");
+    }
+
+    #[test]
+    fn the_readme_names_every_tool() {
+        let mut names = toolbox::builtin().names();
+        names.extend(
+            [
+                skills::Load::NAME,
+                subagent::Subagent::NAME,
+                toolbox::judge::Judge::NAME,
+                crate::driver::later::Later::NAME,
+            ]
+            .map(String::from),
+        );
+        let gone = missing(names, &[super::PI_SKILL], &["`{}`"]);
+        assert!(gone.is_empty(), "README.md lacks {gone:?}");
+    }
+
+    // Every top-level key, read off the refusal of one that is not: serde
+    // lists the fields it expected, so a new one cannot be left off here.
+    #[test]
+    fn the_readme_or_the_example_names_every_setting() {
+        let refused = toml::from_str::<pi_store::config::Config>("not_a_setting = 1")
+            .expect_err("an unknown key is refused")
+            .to_string();
+        let keys: Vec<String> = refused
+            .split_once("expected one of ")
+            .expect("serde names the fields")
+            .1
+            .split(", ")
+            .map(|k| k.trim().trim_matches('`').to_string())
+            .collect();
+        assert!(keys.len() > 10, "{refused}");
+        let example = include_str!("../../../../examples/pi.toml");
+        let gone = missing(keys, &[super::PI_SKILL, example], &["{} =", "[{}", "`{}`"]);
+        assert!(
+            gone.is_empty(),
+            "README.md and examples/pi.toml lack {gone:?}"
+        );
     }
 }

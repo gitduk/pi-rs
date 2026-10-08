@@ -188,7 +188,7 @@ impl tool::Source for Servers {
                     name: tool_name(&server.name, "unavailable"),
                     description: format!(
                         "MCP server `{}` is not running: {why}. Its tools come back once \
-                         [mcp.{}] in ~/.pi/settings.toml starts; calling this only says so.",
+                         [mcp.{}] in pi's settings.toml starts; calling this only says so.",
                         server.name, server.name
                     ),
                 })),

@@ -77,9 +77,9 @@ and edit refuse.",
             return;
         };
         out.push_str(&format!(
-            "\n\n<pi_home path=\"{}\">\npi's own home, read live: a tool or skill written here \
-is offered from your next turn, with no restart. The `pi-tool` skill says how to write \
-one.\n</pi_home>",
+            "\n\n<pi_home path=\"{}\">\npi's own home, read live: what you add here is offered \
+from your next turn, with no restart. The `pi-extend` skill says what can be added and \
+how.\n</pi_home>",
             escaped(home.display())
         ));
     }

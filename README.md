@@ -92,6 +92,7 @@ Esc.
 | `/mcp`, `/mcp restart [name]`      | MCP servers and their tools; reconnect        |
 | `/settings`                        | edit the project's config                     |
 | `/status`, `/keys`, `/help`        | session paths and spend; bindings; commands   |
+| `/exit`                            | leave; `ctrl+d` does the same                 |
 | `/content`                         | everything the model is given before you type |
 | `/wechat on`, `/wechat off`        | bridge the session to a WeChat chat           |
 | `/<skill> [args]`                  | run a skill (also one-shot: `pi "/commit"`)   |
@@ -123,8 +124,10 @@ Esc.
 Scripts and skills are read live: one written while pi runs is offered to the
 model from its next turn, and a skill's `/name` answers the next time you type.
 
-The built-in `pi-tool` skill teaches the model to write both, so a capability
-it lacks is one it can add. A skill of that name in `~/.pi/skills/` replaces it.
+The built-in `pi-extend` skill teaches the model to write both and to connect
+an MCP server, so a capability it lacks is one it can add; the built-in `pi-help`
+skill is this README, for questions about pi itself. A skill of either name in
+`~/.pi/skills/` replaces it.
 
 `fetch` speaks http and https and refuses loopback, private and link-local
 addresses. With [rtk](https://github.com/rtk-ai/rtk) on `PATH`, `bash` runs

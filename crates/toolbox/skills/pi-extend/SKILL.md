@@ -1,5 +1,5 @@
 ---
-name: pi-tool
+name: pi-extend
 description: Give pi a capability it lacks — write it a tool (a script), connect an MCP server, or write a skill, all in pi's home. Use when the work needs a tool, server or skill that does not exist yet, or when asked to add, write or fix one.
 ---
 
