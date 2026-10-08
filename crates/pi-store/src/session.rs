@@ -231,6 +231,36 @@ pub fn key_of(path: &Path) -> String {
 // Named once: four readers look it up, and naming it differently in one
 // would be a session that quietly stops being found.
 const TRANSCRIPT: &str = "session.json";
+const LOCK: &str = ".lock";
+
+/// One session held by this process; the system lets go if pi dies.
+pub struct Claim {
+    _file: std::fs::File,
+    dir: PathBuf,
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        discard_unsaved(&self.dir);
+    }
+}
+
+/// A session directory never saved to leaves nothing behind: its lock goes,
+/// and the directory with it once nothing else is there.
+fn discard_unsaved(dir: &Path) {
+    if !dir.join(TRANSCRIPT).exists() {
+        let _ = std::fs::remove_file(dir.join(LOCK));
+        let _ = std::fs::remove_dir(dir);
+    }
+}
+
+/// The same for a sweep: a lock some pi still holds stays where it is.
+pub(crate) fn discard_abandoned(dir: &Path) {
+    let free = std::fs::File::open(dir.join(LOCK)).map_or(true, |f| f.try_lock().is_ok());
+    if free {
+        discard_unsaved(dir);
+    }
+}
 // Beside a session's transcript: the subagents its turns called, one file each.
 const SUBAGENTS: &str = "subagents";
 
@@ -360,6 +390,32 @@ impl Store {
         self.dir_of(workspace)
             .join(tool::state::file_stem(id))
             .join(TRANSCRIPT)
+    }
+
+    /// Hold the session `id` saved under `workspace` for this process, so no
+    /// other pi saves over it meanwhile; refused while one already holds it.
+    pub fn claim(&self, workspace: &Path, id: &str) -> Result<Claim> {
+        let dir = self.dir_of(workspace).join(tool::state::file_stem(id));
+        std::fs::create_dir_all(&dir)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join(LOCK))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Claim { _file: file, dir }),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                anyhow::bail!("session {id} is open in another pi")
+            }
+            Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
+        }
+    }
+
+    /// Claim `id` under `workspace`, then read it: read after the claim, it is
+    /// the last save, and no other pi makes another while it is held.
+    pub fn take(&self, workspace: &Path, id: &str) -> Result<(Stored, Claim)> {
+        let claim = self.claim(workspace, id)?;
+        Ok((self.load(id)?, claim))
     }
 
     /// `created` is the caller's because it is set once and never changes.
@@ -614,22 +670,46 @@ impl Store {
             .collect()
     }
 
-    /// Most recent session recorded for this workspace, read in full — it is
-    /// about to be resumed, which is the one time the whole transcript is
-    /// wanted.
-    pub fn latest(&self, workspace: &Path) -> Result<Stored> {
+    /// Most recent session recorded for this workspace, taken as `take` does
+    /// and read in full — it is about to be resumed, which is the one time
+    /// the whole transcript is wanted.
+    pub fn take_latest(&self, workspace: &Path) -> Result<(Stored, Claim)> {
         let newest = self
             .peek(workspace)
             .into_iter()
             .next()
             .with_context(|| format!("no session recorded for {}", workspace.display()))?;
-        self.load(&newest.id)
+        self.take(workspace, &newest.id)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::key_of;
+
+    // One session, one holder at a time; one never saved leaves no directory.
+    #[test]
+    fn a_held_session_refuses_a_second_claim_until_let_go() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = super::Store::new(tmp.path().join("s"));
+        let ws = std::path::Path::new("/w");
+        let held = store.claim(ws, "a").unwrap();
+        let err = store.claim(ws, "a").err().unwrap().to_string();
+        assert!(err.contains("another pi"), "{err}");
+        drop(held);
+        let dir = store.path_of(ws, "a").parent().unwrap().to_path_buf();
+        assert!(!dir.exists());
+
+        // A sweep leaves a held lock alone and takes an abandoned one.
+        let held = store.claim(ws, "a").unwrap();
+        super::discard_abandoned(&dir);
+        assert!(dir.join(super::LOCK).exists());
+        drop(held);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(super::LOCK), "").unwrap();
+        super::discard_abandoned(&dir);
+        assert!(!dir.exists());
+    }
 
     #[test]
     fn two_ids_minted_in_one_second_are_still_two_ids() {
@@ -923,12 +1003,15 @@ mod tests {
         touched_at(&store, std::path::Path::new("/a"), "old", 100);
         touched_at(&store, std::path::Path::new("/a"), "new", 200);
 
-        assert_eq!(store.latest(std::path::Path::new("/a")).unwrap().id, "new");
         assert_eq!(
-            store.latest(std::path::Path::new("/b")).unwrap().id,
+            store.take_latest(std::path::Path::new("/a")).unwrap().0.id,
+            "new"
+        );
+        assert_eq!(
+            store.take_latest(std::path::Path::new("/b")).unwrap().0.id,
             "other"
         );
-        assert!(store.latest(std::path::Path::new("/nowhere")).is_err());
+        assert!(store.take_latest(std::path::Path::new("/nowhere")).is_err());
     }
 
     // Deliberately not injective — `/home/u/pi-rs` and `/home/u/pi/rs`
@@ -960,7 +1043,7 @@ mod tests {
         assert!(at.starts_with(store.path_of(w, "p").parent().unwrap()));
         let ids: Vec<String> = store.choices(w).into_iter().map(|c| c.id).collect();
         assert_eq!(ids, ["p"]);
-        assert_eq!(store.latest(w).unwrap().id, "p");
+        assert_eq!(store.take_latest(w).unwrap().0.id, "p");
     }
 
     #[test]

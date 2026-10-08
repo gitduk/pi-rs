@@ -155,11 +155,14 @@ async fn main() -> Result<ExitCode> {
         .with_context(within)?;
 
     let store = session::Store::default();
-    let prior = match (&args.resume, args.continue_last) {
-        (Some(id), _) => Some(store.load(id)?),
-        (None, true) => Some(store.latest(workspace.root())?),
+    // Held for the whole run: two pi saving one session would each erase
+    // what the other said.
+    let (prior, mut claim) = match (&args.resume, args.continue_last) {
+        (Some(id), _) => Some(store.take(workspace.root(), id)?),
+        (None, true) => Some(store.take_latest(workspace.root())?),
         _ => None,
-    };
+    }
+    .unzip();
     pi_store::memory::Memory::default().lift_projects();
     // Off the startup path: stats every bucket, almost never has anything to
     // take. A run that exits first loses nothing — the next one sweeps.
@@ -196,6 +199,9 @@ async fn main() -> Result<ExitCode> {
         .as_ref()
         .map(|p| p.id.clone())
         .unwrap_or_else(session::new_id);
+    if keeps && claim.is_none() {
+        claim = Some(store.claim(workspace.root(), &id)?);
+    }
 
     let Some((named, named_by)) = config.model(
         args.model.as_deref(),
@@ -289,6 +295,7 @@ async fn main() -> Result<ExitCode> {
             created,
             name,
             worktree,
+            claim,
             ..lane::Opening::new(Arc::new(ag), resolved, ctx)
         });
         first.return_session(carried);

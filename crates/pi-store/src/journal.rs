@@ -528,7 +528,7 @@ pub fn prune(sessions: &Path) {
                 let _ = std::fs::remove_file(&path);
                 // And the directory, if the journal was the last thing in it — a run
                 // that never got as far as a transcript, since a bucket needs to be empty.
-                let _ = std::fs::remove_dir(entry.path());
+                crate::session::discard_abandoned(&entry.path());
             }
         }
     }

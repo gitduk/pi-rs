@@ -385,6 +385,37 @@ mod tests {
     }
 
     #[test]
+    fn a_session_open_in_another_pi_is_not_resumed_here() {
+        let dir = tempfile::tempdir().unwrap();
+        let transport = std::sync::Arc::new(Recording::default());
+        let mut core = a_repl(dir.path(), transport, "model-a");
+        let root = dir.path().canonicalize().unwrap();
+        let mut talk = agent::session::Session::default();
+        talk.send_prompt("hi", None);
+        core.store
+            .save("s2", &root, "model-a", None, 0, &talk)
+            .unwrap();
+
+        let elsewhere = core.store.claim(&root, "s2").unwrap();
+        let err = core.resume("s2").unwrap_err();
+        assert!(err.contains("another pi"), "{err}");
+        drop(elsewhere);
+        // A child another test is forking may hold the lock's descriptor a
+        // moment longer: the release is eventual, not instant.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let back = loop {
+            match core.resume("s2") {
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10))
+                }
+                back => break back,
+            }
+        };
+        assert!(back.is_ok(), "{back:?}");
+        assert_eq!(core.lane().id(), "s2");
+    }
+
+    #[test]
     fn a_skill_written_mid_run_is_a_command_without_a_reload() {
         let dir = tempfile::tempdir().unwrap();
         let transport = std::sync::Arc::new(Recording::default());

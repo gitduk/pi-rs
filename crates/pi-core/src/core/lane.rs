@@ -90,6 +90,8 @@ struct Conversation {
     // When this session began. Held rather than read back: going to disk for
     // it made every save parse the whole transcript to recover one integer.
     created: u64,
+    // Keeps another pi from saving over this session while it is open here.
+    _claim: Option<session::Claim>,
     // What the user calls this session, if anything.
     name: Option<String>,
     // What this session's finished runs have cost, in and out and in money.
@@ -103,11 +105,18 @@ struct Conversation {
 }
 
 impl Conversation {
-    fn new(id: String, created: u64, session: Option<Session>, name: Option<String>) -> Self {
+    fn new(
+        id: String,
+        created: u64,
+        session: Option<Session>,
+        name: Option<String>,
+        claim: Option<session::Claim>,
+    ) -> Self {
         Self {
             session,
             id,
             created,
+            _claim: claim,
             name,
             totals: Totals::default(),
             tally: Tally::default(),
@@ -204,6 +213,8 @@ pub struct Opening {
     pub created: u64,
     pub name: Option<String>,
     pub worktree: Option<String>,
+    /// The hold on `id`, when the opener already took it.
+    pub claim: Option<session::Claim>,
 }
 
 impl Opening {
@@ -217,6 +228,7 @@ impl Opening {
             created: 0,
             name: None,
             worktree: None,
+            claim: None,
         }
     }
 }
@@ -233,7 +245,7 @@ impl Lane {
                 ctx: parts.ctx,
                 worktree: parts.worktree,
             },
-            talk: Conversation::new(parts.id, parts.created, None, parts.name),
+            talk: Conversation::new(parts.id, parts.created, None, parts.name, parts.claim),
             runner: Runner {
                 run: Run::Idle,
                 events,
@@ -618,22 +630,26 @@ impl Core {
     // Fresh, unnamed session; the old transcript stays on disk. Says nothing:
     // the rebuilt screen is already empty and the id is the surface's business.
     pub(super) fn fresh_session(&mut self) {
+        let id = session::new_id();
+        let claim = self.store.claim(self.lane().root(), &id).ok();
         self.becomes(Conversation::new(
-            session::new_id(),
+            id,
             session::now(),
             Some(Session::default()),
             None,
+            claim,
         ));
     }
     // Take a stored transcript as the running one — entries, name and id.
     // Parting with what is being left is the caller's; they differ on when.
-    fn adopt_session(&mut self, stored: Stored) -> Vec<String> {
+    fn adopt_session(&mut self, stored: Stored, claim: session::Claim) -> Vec<String> {
         let (id, name, created) = (stored.id.clone(), stored.name.clone(), stored.created);
         self.becomes(Conversation::new(
             id,
             created,
             Some(stored.into_session()),
             name,
+            Some(claim),
         ));
         // The id (timestamp+pid) is nothing to read; only a name — what the
         // user called it — is worth a line.
@@ -682,9 +698,10 @@ impl Core {
 
         // Asked with the root the next save will file under, so a tree is found
         // by the same key it was stored by.
-        let found = self.store.latest(&root);
+        // One open in another pi stays there; this lane starts its own.
+        let found = self.store.take_latest(&root);
         Ok(match found {
-            Ok(stored) => self.adopt_session(stored),
+            Ok((stored, claim)) => self.adopt_session(stored, claim),
             Err(e) => {
                 // Nothing recorded for this tree is the ordinary case; an
                 // archive that will not load is not, and says so only here.
@@ -754,8 +771,11 @@ impl Core {
         {
             tracing::warn!(target: "pi::session", error = %e, "resume could not save the leaving session");
         }
-        let stored = self.store.load(id).map_err(|e| refused("resume", e))?;
-        Ok(self.adopt_session(stored))
+        let (stored, claim) = self
+            .store
+            .take(self.lane().root(), id)
+            .map_err(|e| refused("resume", e))?;
+        Ok(self.adopt_session(stored, claim))
     }
 }
 
