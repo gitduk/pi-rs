@@ -935,18 +935,38 @@ impl Row {
         }
     }
 
-    /// What the screen opens with: version, endpoint, instruction files.
-    /// Built fresh (not stored), so a reload theme change can repaint it.
+    /// What the screen opens with: what the prompt stands on, and departures
+    /// from the defaults. Built fresh, so a reload theme change repaints it.
     pub fn banner(resolved: &Resolved, paint: &Paint) -> Vec<Self> {
-        let muted = |line: &str| Self::notice(Line::from(paint.span(&paint.theme.muted, line)));
-        let mut rows = vec![muted(icons::VERSION_BANNER)];
-        rows.extend(resolved.endpoint.as_deref().map(muted));
-        let context = &resolved.context;
-        if !context.is_empty() {
-            rows.push(muted("context:"));
-            rows.extend(context.iter().map(|f| muted(&format!("- {f}"))));
+        let mut facts = Vec::new();
+        if let Some(system) = &resolved.system {
+            facts.push(("system prompt", tilde(system)));
         }
-        rows
+        for (label, names) in [
+            ("content", &resolved.context),
+            ("memory", &resolved.memory),
+            ("mcp", &resolved.mcp),
+        ] {
+            if !names.is_empty() {
+                facts.push((label, names.join(", ")));
+            }
+        }
+        if resolved.ceiling != tool::Tier::Exec {
+            facts.push(("tier", format!("{:?}", resolved.ceiling).to_lowercase()));
+        }
+        let width = facts
+            .iter()
+            .map(|(label, _)| label.len())
+            .max()
+            .unwrap_or(0);
+        let muted = |line: &str| Self::notice(Line::from(paint.span(&paint.theme.muted, line)));
+        std::iter::once(muted(icons::VERSION_BANNER))
+            .chain(
+                facts
+                    .iter()
+                    .map(|(label, value)| muted(&format!("{label:width$}  {value}"))),
+            )
+            .collect()
     }
 }
 
@@ -969,6 +989,14 @@ fn tool_start_line(name: &str, summary: &str) -> String {
 pub(super) fn count(n: usize, thing: &str) -> String {
     let s = if n == 1 { "" } else { "s" };
     format!("{n} {thing}{s}")
+}
+
+// The home directory as `~`: the banner has no workspace to shorten against.
+fn tilde(path: &std::path::Path) -> String {
+    match agent::context::home().and_then(|h| Some(path.strip_prefix(h).ok()?.to_owned())) {
+        Some(rel) => format!("~/{}", rel.display()),
+        None => path.display().to_string(),
+    }
 }
 
 fn clip_to(s: &str, max_cols: usize) -> &str {

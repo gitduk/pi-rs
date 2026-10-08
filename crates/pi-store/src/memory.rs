@@ -65,6 +65,15 @@ impl Memory {
             .join(format!("{}.md", key_of(project)))
     }
 
+    /// Where the file `files` calls `name` lives.
+    pub fn path_of(&self, name: &str, project: &Path) -> PathBuf {
+        if name == PROJECT {
+            self.project_path(project)
+        } else {
+            self.dir.join(name)
+        }
+    }
+
     /// Every file `files` would read, whether or not it holds anything.
     pub fn paths(&self, project: &Path) -> Vec<PathBuf> {
         let mut out: Vec<PathBuf> = std::fs::read_dir(&self.dir)

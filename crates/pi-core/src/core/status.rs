@@ -79,10 +79,7 @@ impl Core {
             rows.push(Row::new(["system prompt".into(), short(system, root)]));
         }
         if !resolved.context.is_empty() {
-            rows.push(Row::new([
-                "instructions".into(),
-                resolved.context.join(", "),
-            ]));
+            rows.push(Row::new(["content".into(), resolved.context.join(", ")]));
         }
         let servers = crate::core::mcp::summary();
         if !servers.is_empty() {

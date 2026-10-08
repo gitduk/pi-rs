@@ -49,13 +49,15 @@ pub struct Resolved {
     /// would. Shown under the banner rather than said as a note: it is what
     /// this run is standing on, not news.
     pub context: Vec<String>,
-    /// The memory files folded into the prompt, by the name an edit uses.
+    /// The memory files folded into the prompt, by path.
     pub memory: Vec<String>,
     /// The file that replaced the built-in system prompt, if one did.
     pub system: Option<PathBuf>,
-    /// Where requests go and which source said so, for the banner and
-    /// `/status`: two files can each name one now.
+    /// Where requests go and which source said so, for `/status`: two files
+    /// can each name one now.
     pub endpoint: Option<String>,
+    /// The MCP servers the config names, for the banner.
+    pub mcp: Vec<String>,
 }
 
 /// Offer `tool` to the set, saying so when an earlier source holds its name.
@@ -201,7 +203,12 @@ pub fn resolve(
         .iter()
         .map(|(p, _)| context::short(p, root))
         .collect();
-    let memory_names = memory.iter().map(|(name, _)| name.clone()).collect();
+    let memory_dir = pi_store::memory::Memory::default();
+    let main = crate::core::worktree::main_root(root);
+    let memory_files = memory
+        .iter()
+        .map(|(name, _)| context::short(&memory_dir.path_of(name, &main), root))
+        .collect();
     // Appended rather than sent as a message: standing instructions don't
     // change within a run, and the system prompt is what a provider caches.
     let standing = agent::prompt::Standing {
@@ -238,9 +245,10 @@ pub fn resolve(
         shelf_seen,
         notes,
         context,
-        memory: memory_names,
+        memory: memory_files,
         system: system_file,
         endpoint: endpoint(pinned, config, settings, root),
+        mcp: config.mcp.keys().cloned().collect(),
     })
 }
 

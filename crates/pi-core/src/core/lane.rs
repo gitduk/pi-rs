@@ -205,6 +205,7 @@ pub fn a_resolved(standing: &str) -> Arc<Resolved> {
         memory: Vec::new(),
         system: None,
         endpoint: None,
+        mcp: Vec::new(),
     })
 }
 
