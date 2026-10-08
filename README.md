@@ -110,6 +110,7 @@ Esc.
 | `! <command>`                      | run a shell command and record its output     |
 | `@path`                            | complete a workspace file                     |
 | click a code block's label         | copy it; a diagram or table, its source       |
+| drag, double or triple click       | copy the text, a word, or a line              |
 | `ctrl+v`                           | paste a clipboard image as `[Image #n]`       |
 
 ## Tools

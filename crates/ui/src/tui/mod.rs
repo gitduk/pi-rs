@@ -13,6 +13,7 @@ mod reply;
 mod row;
 mod screen;
 mod scrollback;
+mod select;
 mod stream;
 mod term;
 mod ui;

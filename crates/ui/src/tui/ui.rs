@@ -93,6 +93,14 @@ pub(super) struct Ui {
     // opens or closes something.
     pub(super) hovered_scrollback: Option<(usize, usize)>,
     pub(super) row_targets: Vec<Target>,
+    // The transcript rows as last drawn, in plain text: what a selection
+    // reads, row for row with `row_targets`.
+    pub(super) drawn: Vec<String>,
+    // What the mouse has selected, drawn reversed until the next press.
+    pub(super) selection: Option<super::select::Selection>,
+    // The last press: where, when, how many in a row there, and whether the
+    // pointer has moved since — a drag rather than a click.
+    pub(super) press: Option<Press>,
     // Where the frame's regions landed last. The click handler reads them
     // back: a screen row only means something inside a named region.
     pub(super) regions: Regions,
@@ -215,6 +223,9 @@ impl Ui {
             layout: Default::default(),
             hovered_scrollback: None,
             row_targets: Vec::new(),
+            drawn: Vec::new(),
+            selection: None,
+            press: None,
             live_tools_shown: false,
             regions: Regions::default(),
         }
@@ -498,4 +509,13 @@ pub(super) fn following_terminal(theme: &Theme, bg: Option<(u8, u8, u8)>) -> The
         theme.prompt.panel.said = bands.said;
     }
     theme
+}
+
+/// A left press in the transcript, kept to tell a click from a drag and a
+/// double click from two singles.
+pub(super) struct Press {
+    pub(super) at: super::select::Point,
+    pub(super) when: Instant,
+    pub(super) count: u8,
+    pub(super) moved: bool,
 }

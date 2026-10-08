@@ -426,6 +426,25 @@ impl Ui {
         let (rows, row_targets): (Vec<Line<'static>>, Vec<Target>) =
             tagged_rows.into_iter().unzip();
         self.row_targets = row_targets;
+        self.drawn = rows
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        let rows = match &self.selection {
+            Some(sel) => {
+                let lead = |at: usize| match self.row_targets.get(at) {
+                    Some(Target::Scrollback(idx, line)) => view
+                        .surface
+                        .scrollback
+                        .get(*idx)
+                        .and_then(|r| r.line(*line, &self.paint, width).1)
+                        .map_or(0, |b| b.width()),
+                    _ => 0,
+                };
+                super::select::highlight(rows, sel, lead)
+            }
+            None => rows,
+        };
 
         view.surface.scroll = scroll;
         let items = self.menu_items(&menu);

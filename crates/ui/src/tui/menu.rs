@@ -164,7 +164,10 @@ impl Ui {
             TermEvent::Mouse(mouse) => return self.mouse(view, mouse),
             // Windows reports both press and release; acting on both would
             // double every keystroke.
-            TermEvent::Key(k) if k.kind != KeyEventKind::Release => k,
+            TermEvent::Key(k) if k.kind != KeyEventKind::Release => {
+                self.selection = None;
+                k
+            }
             _ => return Asked::Own(Deed::Nothing),
         };
 
@@ -563,13 +566,24 @@ impl Ui {
             }
         }
         match mouse.kind {
-            MouseEventKind::ScrollUp => self.scroll_view(view, true, 1),
-            MouseEventKind::ScrollDown => self.scroll_view(view, false, 1),
-            MouseEventKind::Moved | MouseEventKind::Drag(_) => {
+            MouseEventKind::ScrollUp => {
+                self.selection = None;
+                self.scroll_view(view, true, 1);
+            }
+            MouseEventKind::ScrollDown => {
+                self.selection = None;
+                self.scroll_view(view, false, 1);
+            }
+            MouseEventKind::Moved => self.on_mouse_move(view, mouse.column, mouse.row),
+            MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
                 self.on_mouse_move(view, mouse.column, mouse.row);
+                self.on_drag(mouse.column, mouse.row);
             }
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                self.on_mouse_click(view, mouse.column, mouse.row);
+                self.on_press(view, mouse.column, mouse.row);
+            }
+            MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+                self.on_release(view, mouse.column, mouse.row);
             }
             _ => {}
         }
