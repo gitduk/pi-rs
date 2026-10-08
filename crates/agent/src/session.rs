@@ -89,18 +89,40 @@ pub struct Compaction {
 /// and — when the two differ — what the person saw.
 ///
 /// `text` reaches the wire; `shown` is the screen echo and rewind label;
-/// `image` rides only with an ask. A note carries neither, hence a bare `String`.
+/// `images` ride only with an ask. A note carries neither, hence a bare `String`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Prompt {
     /// What the model reads.
     pub text: String,
-    /// A picture pasted with the ask. An ask is the only carrier.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image: Option<Image>,
+    /// Pictures pasted with the ask. An ask is the only carrier. Read from
+    /// the single `image` older transcripts wrote, too.
+    #[serde(
+        default,
+        alias = "image",
+        deserialize_with = "one_or_many",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub images: Vec<Image>,
     /// What a person reads — the rollback menu, `/resume` naming, the screen.
     /// `None` when it is the same as `text`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shown: Option<String>,
+}
+
+fn one_or_many<'de, D>(de: D) -> Result<Vec<Image>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Either {
+        Many(Vec<Image>),
+        One(Image),
+    }
+    Ok(match Either::deserialize(de)? {
+        Either::Many(images) => images,
+        Either::One(image) => vec![image],
+    })
 }
 
 impl Prompt {
@@ -435,17 +457,17 @@ impl Session {
                                 None => {
                                     pending = Some(Prompt {
                                         text: t.text,
-                                        image: None,
+                                        images: Vec::new(),
                                         shown: None,
                                     });
                                 }
                             },
                             UserContent::Image(i) => match &mut pending {
-                                Some(ask) => ask.image = Some(i),
+                                Some(ask) => ask.images.push(i),
                                 None => {
                                     pending = Some(Prompt {
                                         text: String::new(),
-                                        image: Some(i),
+                                        images: vec![i],
                                         shown: None,
                                     });
                                 }
@@ -477,7 +499,7 @@ impl Session {
     pub fn prompt(&mut self, text: impl Into<String>) -> EntryId {
         self.push_ask(Prompt {
             text: text.into(),
-            image: None,
+            images: Vec::new(),
             shown: None,
         })
     }
@@ -581,6 +603,16 @@ impl Session {
     /// interruption, and an unknown failure adds a note first. `shown` is
     /// what the user typed, when it differs from what the model reads.
     pub fn send_prompt(&mut self, prompt: impl Into<String>, shown: Option<String>) {
+        self.send_prompt_with(prompt, shown, Vec::new());
+    }
+
+    /// [`Session::send_prompt`], with pictures riding the ask.
+    pub fn send_prompt_with(
+        &mut self,
+        prompt: impl Into<String>,
+        shown: Option<String>,
+        images: Vec<Image>,
+    ) {
         let answered: HashSet<&str> = self
             .entries
             .iter()
@@ -611,7 +643,7 @@ impl Session {
         }
         let ask = Prompt {
             text: prompt.into(),
-            image: None,
+            images,
             shown,
         };
         self.push_ask(ask);
@@ -902,14 +934,12 @@ pub fn user_block(entry: &Entry) -> Vec<UserContent> {
             let mut out = Vec::new();
             // An image-only ask sends no text block: providers reject the
             // empty one.
-            if !ask.text.is_empty() || ask.image.is_none() {
+            if !ask.text.is_empty() || ask.images.is_empty() {
                 out.push(UserContent::Text(Text {
                     text: ask.text.clone(),
                 }));
             }
-            if let Some(image) = &ask.image {
-                out.push(UserContent::Image(image.clone()));
-            }
+            out.extend(ask.images.iter().cloned().map(UserContent::Image));
             out
         }
         Entry::Bash { run, .. } => vec![UserContent::Text(Text {
@@ -947,6 +977,22 @@ mod tests {
     // The contract the Anthropic encoder's join is written against: joining
     // per-turn messages into one is the wire's business, not this projection's.
     #[test]
+    fn an_ask_written_with_one_image_reads_back_as_a_list_of_one() {
+        let old = r#"{"text":"look","image":{"source":"url","url":"http://x/i.png"}}"#;
+        let ask: Prompt = serde_json::from_str(old).unwrap();
+        assert_eq!(ask.images.len(), 1);
+        let many =
+            r#"{"text":"look","images":[{"source":"url","url":"a"},{"source":"url","url":"b"}]}"#;
+        assert_eq!(
+            serde_json::from_str::<Prompt>(many).unwrap().images.len(),
+            2
+        );
+        let none: Prompt = serde_json::from_str(r#"{"text":"look"}"#).unwrap();
+        assert!(none.images.is_empty());
+        assert!(!serde_json::to_string(&none).unwrap().contains("image"));
+    }
+
+    #[test]
     fn the_view_hands_over_one_message_per_entry() {
         let mut s = Session::new();
         s.prompt("go");
@@ -959,9 +1005,9 @@ mod tests {
         ]);
         s.push_ask(Prompt {
             text: "and now this".into(),
-            image: Some(Image::Url {
+            images: vec![Image::Url {
                 url: "http://x/i.png".into(),
-            }),
+            }],
             shown: None,
         });
 

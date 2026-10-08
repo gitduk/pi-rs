@@ -448,7 +448,8 @@ impl Tui {
                     .state
                     .committed = true;
                 self.drivers.steered(self.core.lane().token(), origin);
-                steer.say(clipboard::with_paths(&text, &self.ui.images).unwrap_or(text));
+                let said = clipboard::with_paths(&text, &self.ui.images).map(|(sent, _)| sent);
+                steer.say(said.unwrap_or(text));
                 Wake::Nothing
             }
             // A command refused because a run is in flight. It was typed, so
@@ -478,6 +479,10 @@ impl Tui {
         // Every lane's runs report here when they end. One channel rather than a
         // handle per lane: the loop waits on it like any other source.
         let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel::<Done>();
+        // An MCP prompt's text, back from its server: the lane it was asked
+        // on, who asked, the line as typed, and the text or why there is none.
+        let (fetched_tx, mut fetched_rx) =
+            tokio::sync::mpsc::unbounded_channel::<(u64, Origin, String, Result<String, String>)>();
         let mut tick = tokio::time::interval(status::SPIN);
         let mut looked = std::time::Instant::now();
         // Off while nothing runs, so the interval falls behind; one
@@ -504,6 +509,9 @@ impl Tui {
                         self.ui.say_muted(view, line);
                     }
                     self.ui.adopt_config(&self.core, view);
+                }
+                if self.core.refresh_prompts() {
+                    self.ui.commands = self.core.commands.clone();
                 }
                 if let Some(said) = self.core.refresh_skills() {
                     self.ui.commands = self.core.commands.clone();
@@ -554,6 +562,39 @@ impl Tui {
                 // `recv()` and `tick()` are; a blocking read gets its own thread.
                 tokio::select! {
                     Some(done) = done_rx.recv() => Wake::Turn(done),
+                    Some((token, from, typed, text)) = fetched_rx.recv() => {
+                        let front = self.core.lane().token() == token;
+                        let started = match text {
+                            Err(why) => {
+                                self.ui.flash(why);
+                                false
+                            }
+                            Ok(send) if front && !self.core.lane().is_running() => {
+                                self.start_turn(send, Some(typed), &done_tx);
+                                true
+                            }
+                            Ok(_) if !front => {
+                                self.ui.flash(format!(
+                                    "{typed} came back after its lane left the front; run it again"
+                                ));
+                                false
+                            }
+                            Ok(_) => {
+                                self.ui.flash(format!(
+                                    "{typed} came back while another turn ran; run it again"
+                                ));
+                                false
+                            }
+                        };
+                        // A driver hears of the turn only now that it began.
+                        if from != Origin::Typed
+                            && let Some(at) = self.core.position_of(token)
+                            && let Some(said) = self.drivers.dispatched(from, token, started, true)
+                        {
+                            self.say_of(at, said);
+                        }
+                        Wake::Nothing
+                    }
                     // Only while something runs, or a flash is up — an idle
                     // loop waking ten times a second has nothing to spin.
                     _ = tick.tick(), if anywhere || self.ui.flash.is_some() || self.ui.copied.is_some() => {
@@ -647,12 +688,30 @@ impl Tui {
             let step = self.core.dispatch(intent);
             self.reconcile(was);
             let prompt = matches!(step, Step::Prompt { .. });
+            // Its turn starts when the server answers; drivers hear then.
+            let deferred = matches!(step, Step::McpPrompt { .. });
             match step {
                 Step::Quit => break,
                 // A refusal is an answer: it was asked for by a line, so it
                 // goes where every other answer does.
                 Step::Flash(line) => self.ui.open_reply(Listing::say([line])),
                 Step::Bash(command) => self.start_bash(command, &done_tx),
+                Step::McpPrompt {
+                    prompt,
+                    args,
+                    typed,
+                } => {
+                    self.ui.flash(format!("asking {} …", prompt.word()));
+                    let (tx, token) = (fetched_tx.clone(), self.core.lane().token());
+                    let from = origin;
+                    tokio::spawn(async move {
+                        const WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+                        let text = tokio::time::timeout(WAIT, prompt.text(&args))
+                            .await
+                            .unwrap_or_else(|_| Err(format!("{} did not answer", prompt.word())));
+                        let _ = tx.send((token, from, typed, text));
+                    });
+                }
                 Step::Swap(said) => self.land_swap(said),
                 Step::Worktrees(lines) => {
                     self.land_lines(lines);
@@ -679,6 +738,7 @@ impl Tui {
             // The driver that sent this line hears the end of the turn it began.
             // By token: the step may have moved the surface to another lane.
             if origin != Origin::Typed
+                && !deferred
                 && let Some(at) = self.core.position_of(asked_on)
             {
                 let started = self.core.lanes[at].is_running();

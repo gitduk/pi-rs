@@ -152,7 +152,8 @@ an MCP server, so a capability it lacks is one it can add; the built-in `pi-help
 skill is this README, for questions about pi itself. A skill of either name in
 `~/.pi/skills/` replaces it.
 
-`read` also opens PNG, JPEG, GIF and WebP files as images. A model reaches them
+An image pasted with `ctrl+v` goes with the message itself; its path rides
+along in the text. `read` also opens PNG, JPEG, GIF and WebP files as images. A model reaches them
 only with `vision = true` in its `[models]` entry; without it, each image is
 sent as a line saying it was left out.
 

@@ -89,7 +89,7 @@ pub fn record_bash(session: &mut Session, command: &str, text: String) {
     }
     session.push_bash(agent::session::Prompt {
         text,
-        image: None,
+        images: Vec::new(),
         shown: Some(format!("!{command}")),
     });
 }

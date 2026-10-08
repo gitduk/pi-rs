@@ -38,7 +38,11 @@ pub fn render(earlier: &[&str], entries: &[&Entry]) -> String {
         match e {
             Entry::Ask { ask, .. } => lines.push(format!(
                 "[user]{} {}",
-                if ask.image.is_some() { " (image)" } else { "" },
+                match ask.images.len() {
+                    0 => String::new(),
+                    1 => " (image)".to_string(),
+                    n => format!(" ({n} images)"),
+                },
                 clip(&ask.text, BLOCK_BYTES)
             )),
             Entry::Bash { run, .. } => {
@@ -134,7 +138,7 @@ mod tests {
             at: 0,
             ask: Prompt {
                 text: text.into(),
-                image: None,
+                images: Vec::new(),
                 shown: None,
             },
         }

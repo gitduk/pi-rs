@@ -8,6 +8,7 @@ description = "pi's surfaces: the full-screen TUI and the one-shot printer"
 
 [dependencies]
 pi-core.workspace = true
+toolbox.workspace = true
 pi-store.workspace = true
 futures.workspace = true
 agent.workspace = true

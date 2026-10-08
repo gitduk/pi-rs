@@ -16,6 +16,8 @@ pub enum Source {
     Builtin,
     // A `SKILL.md` to read and hand to the model as if the user had typed it.
     Skill(Skill),
+    // An MCP server's prompt, fetched from it when run and sent as typed.
+    Prompt(mcp::Prompt),
 }
 
 /// One command: the word, what it takes, what it does, and what it is.
@@ -195,6 +197,29 @@ pub fn commands(skills: &[Skill], notes: &mut Vec<String>) -> Vec<Command> {
     out
 }
 
+/// `table` with the running servers' prompts after it. A prompt whose word
+/// another command holds gives way, as a skill does to a built-in.
+pub fn with_prompts(table: Arc<Vec<Command>>, prompts: Vec<mcp::Prompt>) -> Arc<Vec<Command>> {
+    if prompts.is_empty() {
+        return table;
+    }
+    let mut out = (*table).clone();
+    for prompt in prompts {
+        let word = prompt.word();
+        if out.iter().any(|c| c.word.as_ref() == word) {
+            continue;
+        }
+        out.push(Command {
+            word: Cow::Owned(word),
+            args: "[args]",
+            help: Cow::Owned(gist(&prompt.description)),
+            intent: hand_on,
+            source: Source::Prompt(prompt),
+        });
+    }
+    Arc::new(out)
+}
+
 /// The command that turns `channel` on and off: `/wechat` for `wechat`.
 pub fn channel_command(channel: &dyn ::channel::Channel) -> Command {
     Command {
@@ -241,13 +266,30 @@ pub(crate) fn help(commands: &[Command]) -> Listing {
         return Listing::of(commands.iter().map(row));
     };
     let mut out: Vec<Row> = commands[..split].iter().map(row).collect();
-    // Without a prefix there is nothing in the word itself to say which half it
-    // came from, so the list says it once.
-    out.push(Row::new([""]));
-    out.push(Row::new([
-        "skills — the instructions load when you run one:",
-    ]));
-    out.extend(commands[split..].iter().map(row));
+    // Without a prefix there is nothing in the word itself to say which group
+    // it came from, so the list says it once per group.
+    let groups = [
+        (
+            "skills — the instructions load when you run one:",
+            (|s: &Source| matches!(s, Source::Skill(_))) as fn(&Source) -> bool,
+        ),
+        (
+            "MCP prompts — asked of their server when you run one:",
+            |s: &Source| matches!(s, Source::Prompt(_)),
+        ),
+    ];
+    for (head, member) in groups {
+        let rows: Vec<Row> = commands[split..]
+            .iter()
+            .filter(|c| member(&c.source))
+            .map(row)
+            .collect();
+        if !rows.is_empty() {
+            out.push(Row::new([""]));
+            out.push(Row::new([head]));
+            out.extend(rows);
+        }
+    }
     Listing::of(out)
 }
 
@@ -311,7 +353,7 @@ pub fn complete<'a>(
     let Some((word, rest)) = line.split_once(char::is_whitespace) else {
         // The exact word stays in the list: dropping it would leave only
         // `/news` when `/new` is typed in full, and Tab would pick wrong.
-        let mut offered: Vec<Candidate> = commands
+        return commands
             .iter()
             .filter(|c| c.word.starts_with(line))
             .map(|c| Candidate {
@@ -321,19 +363,6 @@ pub fn complete<'a>(
                 more: !c.args.is_empty(),
             })
             .collect();
-        // A server's prompts come and go with it, so they are asked for live.
-        offered.extend(
-            crate::core::mcp::prompts()
-                .into_iter()
-                .filter(|p| p.word().starts_with(line))
-                .map(|p| Candidate {
-                    show: format!("{} [args]", p.word()),
-                    line: p.word(),
-                    help: gist(&p.description),
-                    more: true,
-                }),
-        );
-        return offered;
     };
     let typed = rest.trim_start();
     match word {

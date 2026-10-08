@@ -43,25 +43,39 @@ fn image_type(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-fn image(rel: &str, media_type: &str, bytes: &[u8]) -> ToolOutput {
+/// `bytes` as an image a model can be sent, or why not: not a format every
+/// vision endpoint takes, or over the size one will.
+pub fn as_image(bytes: &[u8]) -> Result<llm::message::Image, String> {
     use base64::Engine;
-    use llm::message::{Image, Text, ToolResultContent};
+    let media_type = image_type(bytes).ok_or("not a PNG, JPEG, GIF or WebP image")?;
     if bytes.len() > IMAGE_MAX {
-        return ToolOutput::text(format!(
-            "{rel} is a {media_type} of {} bytes, over the {IMAGE_MAX}-byte image limit; \
-             shrink it with bash and read the smaller copy",
+        return Err(format!(
+            "a {media_type} of {} bytes, over the {IMAGE_MAX}-byte image limit",
             bytes.len()
         ));
     }
+    Ok(llm::message::Image::Base64 {
+        media_type: media_type.to_string(),
+        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+    })
+}
+
+fn image(rel: &str, media_type: &str, bytes: &[u8]) -> ToolOutput {
+    use llm::message::{Text, ToolResultContent};
+    let image = match as_image(bytes) {
+        Ok(image) => image,
+        Err(why) => {
+            return ToolOutput::text(format!(
+                "{rel} is {why}; shrink it with bash and read the smaller copy"
+            ));
+        }
+    };
     ToolOutput {
         content: vec![
             ToolResultContent::Text(Text {
                 text: format!("[{rel}] {media_type}, {} bytes", bytes.len()),
             }),
-            ToolResultContent::Image(Image::Base64 {
-                media_type: media_type.to_string(),
-                data: base64::engine::general_purpose::STANDARD.encode(bytes),
-            }),
+            ToolResultContent::Image(image),
         ],
         preview: None,
         spent: Default::default(),

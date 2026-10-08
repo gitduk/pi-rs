@@ -115,28 +115,6 @@ pub fn prompts() -> Vec<mcp::Prompt> {
     running().map_or_else(Vec::new, |s| s.prompts())
 }
 
-/// The prompt `word` (`/<server>:<name>`) runs, if a running server has it.
-pub fn prompt(word: &str) -> Option<mcp::Prompt> {
-    prompts().into_iter().find(|p| p.word() == word)
-}
-
-/// A prompt's text, asked of its server while the caller waits: a typed
-/// command has nothing to send until it comes back.
-pub fn fetch(prompt: &mcp::Prompt, args: &str) -> Result<String, String> {
-    const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
-    let handle = tokio::runtime::Handle::try_current()
-        .ok()
-        .filter(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
-        .ok_or("an MCP prompt needs pi's own runtime")?;
-    tokio::task::block_in_place(|| {
-        handle.block_on(async {
-            tokio::time::timeout(WAIT, prompt.text(args))
-                .await
-                .unwrap_or_else(|_| Err(format!("{} did not answer in 10s", prompt.word())))
-        })
-    })
-}
-
 /// What each running server is doing, for `/status`.
 pub fn summary() -> Vec<String> {
     RUNNING

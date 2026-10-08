@@ -291,6 +291,7 @@ async fn main() -> Result<ExitCode> {
             pinned: pinned.clone(),
             commands,
             channels: Vec::new(),
+            prompts_seen: 0,
             settings,
             current: 0,
             lanes: vec![first],

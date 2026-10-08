@@ -181,7 +181,7 @@ async fn a_panicked_bang_does_not_lay_its_transcript_down_again() {
     let mut s = Session::new();
     s.push_bash(Prompt {
         text: "Ran `ls`\nfile".into(),
-        image: None,
+        images: Vec::new(),
         shown: Some("!ls".into()),
     });
     tui.core.lane_mut().return_session(s);

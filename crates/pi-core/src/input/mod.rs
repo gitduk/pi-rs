@@ -188,8 +188,16 @@ fn expanded(skill: &Skill, args: &str) -> Result<String, String> {
 pub(crate) fn skill_for<'a>(commands: &'a [Command], word: &str) -> Option<&'a Skill> {
     match &commands.iter().find(|c| c.word.as_ref() == word)?.source {
         Source::Skill(skill) => Some(skill),
-        Source::Builtin => None,
+        Source::Builtin | Source::Prompt(_) => None,
     }
+}
+
+/// Whether `word` names a command that becomes a turn: a skill or a prompt.
+pub(crate) fn starts_turn(commands: &[Command], word: &str) -> bool {
+    commands
+        .iter()
+        .find(|c| c.word.as_ref() == word)
+        .is_some_and(|c| !matches!(c.source, Source::Builtin))
 }
 
 /// Whether `line` comes back with Up: what the user said, and a skill — a
@@ -197,28 +205,32 @@ pub(crate) fn skill_for<'a>(commands: &'a [Command], word: &str) -> Option<&'a S
 /// rather than words to re-say, and a word pi does not know is nothing.
 pub fn recallable(line: &str, commands: &[Command]) -> bool {
     match line.split_whitespace().next() {
-        Some(word) if word.starts_with('/') => skill_for(commands, word).is_some(),
+        Some(word) if word.starts_with('/') => starts_turn(commands, word),
         _ => true,
     }
 }
 
 // A word `read` did not know: a skill to run, or a typo to name.
 pub(crate) fn step_for(commands: &[Command], word: &str, args: &str) -> Step {
-    let Some(skill) = skill_for(commands, word) else {
-        if let Some(prompt) = crate::core::mcp::prompt(word) {
-            return match crate::core::mcp::fetch(&prompt, args) {
-                Ok(send) => Step::Prompt {
-                    typed: Some(format!("{word} {args}").trim_end().to_string()),
-                    send,
-                },
-                Err(why) => Step::Flash(why),
+    let typed = || format!("{word} {args}").trim_end().to_string();
+    let skill = match commands
+        .iter()
+        .find(|c| c.word.as_ref() == word)
+        .map(|c| &c.source)
+    {
+        Some(Source::Skill(skill)) => skill,
+        Some(Source::Prompt(prompt)) => {
+            return Step::McpPrompt {
+                prompt: prompt.clone(),
+                args: args.to_string(),
+                typed: typed(),
             };
         }
-        return Step::Flash(format!("unknown command {word} — /help lists them"));
+        _ => return Step::Flash(format!("unknown command {word} — /help lists them")),
     };
     match expanded(skill, args) {
         Ok(send) => Step::Prompt {
-            typed: Some(format!("/{} {args}", skill.name).trim_end().to_string()),
+            typed: Some(typed()),
             send,
         },
         Err(why) => lines(why),
@@ -300,9 +312,19 @@ pub enum Step {
     Bash(String),
     // What to send, and the typed line when a skill expanded into it —
     // `rewind_nodes()` reads the latter so a menu doesn't offer raw SKILL.md.
-    Prompt { send: String, typed: Option<String> },
+    Prompt {
+        send: String,
+        typed: Option<String>,
+    },
     // Needs the network, so the surface runs it and reports.
     Compact(Option<String>),
+    // An MCP prompt to ask its server for, then send as a turn showing
+    // `typed`. Asked off the loop: a slow server must not hold the screen.
+    McpPrompt {
+        prompt: mcp::Prompt,
+        args: String,
+        typed: String,
+    },
     // A command for what drives a lane from outside. The surface hands it
     // to the drivers and places what they answer.
     Drive(Drive),

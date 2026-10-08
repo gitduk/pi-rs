@@ -20,7 +20,7 @@ pub mod tools;
 pub mod worktree;
 
 use crate::core::lane::Lane;
-use crate::input::commands::{Command, channel_command, help, with_channels};
+use crate::input::commands::{Command, channel_command, help, with_channels, with_prompts};
 use crate::input::{Builtin, ChannelCmd, Drive, Intent, Step, lines, step_for};
 use pi_store::config;
 use pi_store::listing::Listing;
@@ -52,6 +52,8 @@ pub struct Core {
     pub commands: std::sync::Arc<Vec<Command>>,
     /// The commands of the run's channels, in every table put in force.
     pub channels: Vec<Command>,
+    /// The servers' list generation `commands` holds the prompts of.
+    pub prompts_seen: u64,
     /// The config files as last read: what `/settings` writes into and
     /// a reload reads again.
     pub settings: Settings,
@@ -73,7 +75,19 @@ impl Core {
     // and a rebound key belong to one tree, not another.
     fn in_force(&mut self) {
         self.keys = self.lane().resolved().keys.clone();
-        self.commands = with_channels(&self.lane().resolved().commands, &self.channels);
+        let table = with_channels(&self.lane().resolved().commands, &self.channels);
+        self.prompts_seen = ::mcp::generation();
+        self.commands = with_prompts(table, crate::core::mcp::prompts());
+    }
+
+    /// Put the servers' prompts in the table again when their lists moved.
+    /// True when the table changed.
+    pub fn refresh_prompts(&mut self) -> bool {
+        if ::mcp::generation() == self.prompts_seen {
+            return false;
+        }
+        self.in_force();
+        true
     }
 
     /// Resolve the lane in front again when a file it was built from changed
@@ -200,7 +214,7 @@ impl Core {
     fn starts_turn(&self, goal: &str) -> bool {
         match crate::input::read(goal, &self.commands) {
             Intent::Prompt(_) | Intent::Bash(_) => true,
-            Intent::Other { word, .. } => crate::input::skill_for(&self.commands, &word).is_some(),
+            Intent::Other { word, .. } => crate::input::starts_turn(&self.commands, &word),
             Intent::Builtin(_) => false,
         }
     }
@@ -487,7 +501,7 @@ mod tests {
         let mut s = Session::new();
         s.push_bash(Prompt {
             text: "Ran `git status`\nnothing to commit".into(),
-            image: None,
+            images: Vec::new(),
             shown: Some("!git status".into()),
         });
 
@@ -609,6 +623,7 @@ mod tests {
             pinned: crate::args::Pinned::default(),
             commands,
             channels: Vec::new(),
+            prompts_seen: 0,
             settings: pi_store::settings::Settings::new(
                 toml::Value::Table(Default::default()),
                 None,

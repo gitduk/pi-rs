@@ -3638,6 +3638,7 @@ dependencies = [
  "tokio-util",
  "toml",
  "tool",
+ "toolbox",
  "tracing",
  "tui-markdown",
  "unicode-width",

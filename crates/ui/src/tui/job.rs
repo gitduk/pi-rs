@@ -89,11 +89,15 @@ impl Tui {
             return;
         };
         // The line keeps `[Image #n …]`; the model is told where each one is.
-        let (prompt, typed) = match super::clipboard::with_paths(&prompt, &self.ui.images) {
-            Some(sent) => (sent, typed.or(Some(prompt))),
-            None => (prompt, typed),
+        let (prompt, typed, images) = match super::clipboard::with_paths(&prompt, &self.ui.images) {
+            Some((sent, named)) => (
+                sent,
+                typed.or(Some(prompt)),
+                super::clipboard::attached(&named),
+            ),
+            None => (prompt, typed, Vec::new()),
         };
-        carried.send_prompt(prompt, typed);
+        carried.send_prompt_with(prompt, typed, images);
         // The repair results and stop note the send filed are entries now:
         // derive rows like any commit so they show without a rebuild.
         let view = front_view(&mut self.views, self.core.lane());

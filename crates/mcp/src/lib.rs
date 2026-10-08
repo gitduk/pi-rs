@@ -75,6 +75,21 @@ pub struct Prompt {
     peer: Peer<RoleClient>,
 }
 
+impl std::fmt::Debug for Prompt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.word())
+    }
+}
+
+// Moves on whenever any server's state does, so a holder of its prompts
+// knows to ask again.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Which change to the servers' lists this is; equal means nothing moved.
+pub fn generation() -> u64 {
+    GENERATION.load(Ordering::SeqCst)
+}
+
 impl Prompt {
     /// The word that runs it.
     pub fn word(&self) -> String {
@@ -225,6 +240,7 @@ impl Servers {
 impl Drop for Servers {
     // A dropped connection stops its server: a stdio child is killed with it.
     fn drop(&mut self) {
+        GENERATION.fetch_add(1, Ordering::SeqCst);
         for server in &self.servers {
             if let Some(task) = lock(&server.task).take() {
                 task.abort();
@@ -269,6 +285,7 @@ fn set(server: &Server, epoch: u64, state: State) {
     let mut now = lock(&server.state);
     if server.epoch.load(Ordering::SeqCst) == epoch {
         *now = state;
+        GENERATION.fetch_add(1, Ordering::SeqCst);
     }
 }
 

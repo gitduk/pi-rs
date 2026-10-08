@@ -801,7 +801,7 @@ fn a_bang_command_goes_with_the_question_that_refers_to_it() {
     })]);
     let ran = s.push_bash(Prompt {
         text: "Ran `cargo test`\nFAILED at auth.rs:14".into(),
-        image: None,
+        images: Vec::new(),
         shown: Some("!cargo test".into()),
     });
     s.prompt("fix that");
@@ -846,7 +846,7 @@ fn a_bang_command_can_be_shrunk_where_a_question_cannot() {
     s.prompt("the task");
     s.push_bash(Prompt {
         text: big(30_000),
-        image: None,
+        images: Vec::new(),
         shown: Some("!cargo test".into()),
     });
     s.prompt("fix that");

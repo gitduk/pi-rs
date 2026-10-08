@@ -83,11 +83,11 @@ pub(super) fn paste_image() -> Result<(PathBuf, String), String> {
 }
 
 /// `text` with each `[Image #n …]` naming a pasted file given its path, for
-/// the model; `None` when it names none.
-pub(super) fn with_paths(text: &str, images: &[PathBuf]) -> Option<String> {
+/// the model, and those files once each in order; `None` when it names none.
+pub(super) fn with_paths(text: &str, images: &[PathBuf]) -> Option<(String, Vec<PathBuf>)> {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
-    let mut found = false;
+    let mut named: Vec<PathBuf> = Vec::new();
     while let Some(at) = rest.find(IMAGE_TAG) {
         let (before, tag) = rest.split_at(at);
         out.push_str(before);
@@ -102,14 +102,25 @@ pub(super) fn with_paths(text: &str, images: &[PathBuf]) -> Option<String> {
         match n.and_then(|n| images.get(n.checked_sub(1)?)) {
             Some(path) => {
                 out.push_str(&format!("{}: {}]", &tag[..close], path.display()));
-                found = true;
+                if !named.contains(path) {
+                    named.push(path.clone());
+                }
             }
             None => out.push_str(&tag[..=close]),
         }
         rest = &tag[close + 1..];
     }
     out.push_str(rest);
-    found.then_some(out)
+    (!named.is_empty()).then_some((out, named))
+}
+
+/// Each file as an image to send with the ask. One that will not go is left
+/// to its path in the text, where `read` says why.
+pub(super) fn attached(paths: &[PathBuf]) -> Vec<llm::message::Image> {
+    paths
+        .iter()
+        .filter_map(|p| toolbox::read::as_image(&std::fs::read(p).ok()?).ok())
+        .collect()
 }
 
 #[cfg(test)]
@@ -119,14 +130,34 @@ mod tests {
     #[test]
     fn a_pasted_images_tag_gains_its_path_and_nothing_else_moves() {
         let images = [PathBuf::from("/i/1.png")];
-        let sent = with_paths(
-            "see [Image #1 8x8 75 B] and [Image #2 x] [Image #1",
+        let (sent, named) = with_paths(
+            "see [Image #1 8x8 75 B] and [Image #2 x] [Image #1 8x8 75 B] [Image #1",
             &images,
-        );
+        )
+        .unwrap();
         assert_eq!(
-            sent.as_deref(),
-            Some("see [Image #1 8x8 75 B: /i/1.png] and [Image #2 x] [Image #1")
+            sent,
+            "see [Image #1 8x8 75 B: /i/1.png] and [Image #2 x] \
+             [Image #1 8x8 75 B: /i/1.png] [Image #1"
         );
+        assert_eq!(named, images, "named twice, sent once");
         assert_eq!(with_paths("no image here", &images), None);
+    }
+
+    #[test]
+    fn a_named_file_goes_as_an_image_and_one_that_is_not_stays_a_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("a.png");
+        let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+        bytes.extend([0; 16]);
+        std::fs::write(&png, bytes).unwrap();
+        let text = dir.path().join("b.png");
+        std::fs::write(&text, "not an image").unwrap();
+        let gone = dir.path().join("c.png");
+        let sent = attached(&[png, text, gone]);
+        assert_eq!(sent.len(), 1);
+        assert!(
+            matches!(&sent[0], llm::message::Image::Base64 { media_type, .. } if media_type == "image/png")
+        );
     }
 }
