@@ -245,6 +245,23 @@ impl Drop for Claim {
     }
 }
 
+// Hold the session directory `dir`, made if missing, for this process.
+fn claim_dir(dir: PathBuf, id: &str) -> Result<Claim> {
+    std::fs::create_dir_all(&dir)?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(LOCK))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Claim { _file: file, dir }),
+        Err(std::fs::TryLockError::WouldBlock) => {
+            anyhow::bail!("session {id} is open in another pi, or another lane of this one")
+        }
+        Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
+    }
+}
+
 /// A session directory never saved to leaves nothing behind: its lock goes,
 /// and the directory with it once nothing else is there.
 fn discard_unsaved(dir: &Path) {
@@ -261,6 +278,7 @@ pub(crate) fn discard_abandoned(dir: &Path) {
         discard_unsaved(dir);
     }
 }
+
 // Beside a session's transcript: the subagents its turns called, one file each.
 const SUBAGENTS: &str = "subagents";
 
@@ -395,27 +413,46 @@ impl Store {
     /// Hold the session `id` saved under `workspace` for this process, so no
     /// other pi saves over it meanwhile; refused while one already holds it.
     pub fn claim(&self, workspace: &Path, id: &str) -> Result<Claim> {
-        let dir = self.dir_of(workspace).join(tool::state::file_stem(id));
-        std::fs::create_dir_all(&dir)?;
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(dir.join(LOCK))?;
-        match file.try_lock() {
-            Ok(()) => Ok(Claim { _file: file, dir }),
-            Err(std::fs::TryLockError::WouldBlock) => {
-                anyhow::bail!("session {id} is open in another pi")
-            }
-            Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
-        }
+        claim_dir(self.dir_of(workspace).join(tool::state::file_stem(id)), id)
     }
 
     /// Claim `id` under `workspace`, then read it: read after the claim, it is
-    /// the last save, and no other pi makes another while it is held.
+    /// the last save, and no other pi makes another while it is held. One
+    /// saved under another workspace moves here first, so it is kept once.
     pub fn take(&self, workspace: &Path, id: &str) -> Result<(Stored, Claim)> {
-        let claim = self.claim(workspace, id)?;
-        Ok((self.load(id)?, claim))
+        let mut claim = self.claim(workspace, id)?;
+        if !claim.dir.join(TRANSCRIPT).is_file() {
+            claim = self.bring(claim, id)?;
+        }
+        Ok((Self::read(&claim.dir.join(TRANSCRIPT))?, claim))
+    }
+
+    // Move the newest copy of `id` filed elsewhere to where `here` holds,
+    // whole, once nothing else holds it; the claim now covers it there.
+    fn bring(&self, here: Claim, id: &str) -> Result<Claim> {
+        let dir = here.dir.clone();
+        let stem = tool::state::file_stem(id);
+        let modified = |d: &PathBuf| {
+            std::fs::metadata(d.join(TRANSCRIPT))
+                .and_then(|m| m.modified())
+                .ok()
+        };
+        let from = std::fs::read_dir(&self.root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path().join(&stem))
+            .filter(|d| *d != dir && d.join(TRANSCRIPT).is_file())
+            .max_by_key(modified)
+            .with_context(|| format!("no session `{id}` in {}", self.root.display()))?;
+        let mut held = claim_dir(from.clone(), id)?;
+        // Nothing saved there yet, so letting go of it frees the name; one
+        // rename then moves all of it or none.
+        drop(here);
+        std::fs::rename(&from, &dir)
+            .with_context(|| format!("cannot move session `{id}` here from {}", from.display()))?;
+        held.dir = dir;
+        Ok(held)
     }
 
     /// `created` is the caller's because it is set once and never changes.
@@ -492,9 +529,10 @@ impl Store {
         Ok(serde_json::from_str(&body)?)
     }
 
-    /// Load a transcript by id: `id` is unique across workspaces, so this
-    /// searches the store's directories rather than needing to know which one saved it.
-    pub fn load(&self, id: &str) -> Result<Stored> {
+    // A transcript by id, from whichever bucket has it: what a test asks
+    // after moving things around. A run reads its own through `take`.
+    #[cfg(test)]
+    pub(crate) fn load(&self, id: &str) -> Result<Stored> {
         let stem = tool::state::file_stem(id);
         let mut match_: Option<PathBuf> = None;
         if let Ok(entries) = std::fs::read_dir(&self.root) {
@@ -1027,6 +1065,30 @@ mod tests {
             key_of(Path::new("/home/u/pi-rs")),
             key_of(Path::new("/home/u/pi/rs"))
         );
+    }
+
+    // Taken from another workspace, a session moves rather than forks: one
+    // copy, under the workspace now using it — never while another pi has it.
+    #[test]
+    fn a_session_taken_elsewhere_moves_with_everything_beside_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::new(tmp.path());
+        let (a, b) = (Path::new("/a"), Path::new("/b"));
+        let log = log_with(vec![Message::user("x")]);
+        store.save("s", a, "m", None, 1, &log).unwrap();
+        store.save_subagent("s", "s-sub", a, "m", 2, &log).unwrap();
+
+        let held = store.claim(a, "s").unwrap();
+        let err = store.take(b, "s").err().unwrap().to_string();
+        assert!(err.contains("another pi"), "{err}");
+        assert!(store.path_of(a, "s").is_file(), "refused, nothing moved");
+        drop(held);
+
+        let (stored, _claim) = store.take(b, "s").unwrap();
+        assert_eq!(stored.id, "s");
+        assert!(store.path_of(b, "s").is_file());
+        assert!(store.subagent_path(b, "s", "s-sub").is_file());
+        assert!(!store.path_of(a, "s").parent().unwrap().exists());
     }
 
     #[test]

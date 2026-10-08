@@ -529,8 +529,10 @@ impl Tui {
     // Puts back the archive when a job never returned the borrowed
     // transcript, naming it `verb`. Says if it's safe to save over.
     fn recover_session(&mut self, lane: usize, verb: &str) -> bool {
-        let id = self.core.lanes[lane].id().to_string();
-        match self.core.store.load(&id) {
+        let on = &self.core.lanes[lane];
+        // This lane's own copy, the one it saves to.
+        let path = self.core.store.path_of(on.root(), on.id());
+        match pi_store::session::Store::read(&path) {
             Ok(stored) => {
                 self.core.lanes[lane].return_session(stored.into_session());
                 self.say_of(
