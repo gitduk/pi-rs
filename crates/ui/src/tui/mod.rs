@@ -555,7 +555,7 @@ impl Tui {
                     Some(done) = done_rx.recv() => Wake::Turn(done),
                     // Only while something runs, or a flash is up — an idle
                     // loop waking ten times a second has nothing to spin.
-                    _ = tick.tick(), if anywhere || self.ui.flash.is_some() => {
+                    _ = tick.tick(), if anywhere || self.ui.flash.is_some() || self.ui.copied.is_some() => {
                         self.ui.spinner += 1;
                         Wake::Nothing
                     }

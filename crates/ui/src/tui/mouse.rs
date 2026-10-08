@@ -50,7 +50,25 @@ impl Ui {
             Some(Target::PendingTools) => self.live_tools_shown = !self.live_tools_shown,
             _ => {
                 let width = self.screen.usable();
-                if let Some((idx, line)) = self.hovered_row(view, col, row)
+                let hit = self.hovered_row(view, col, row);
+                if let Some((idx, code)) =
+                    hit.and_then(|(idx, _)| Some((idx, view.surface.scrollback.get(idx)?.code()?)))
+                {
+                    let lines = code.lines().count();
+                    let copied = crossterm::execute!(
+                        std::io::stdout(),
+                        crossterm::clipboard::CopyToClipboard::to_clipboard_from(code)
+                    );
+                    let said = match copied {
+                        Ok(()) => format!("copied {}", super::row::count(lines, "line")),
+                        Err(e) => format!("not copied: {e}"),
+                    };
+                    if view.surface.scrollback[idx].badged(&self.paint, width) {
+                        self.copied = Some((idx, said, std::time::Instant::now()));
+                    } else {
+                        self.flash(said);
+                    }
+                } else if let Some((idx, line)) = hit
                     && view
                         .surface
                         .scrollback

@@ -287,13 +287,23 @@ enum Kind {
     // What the model answered, one row per markdown line. Its own kind,
     // not a notice — an answer is half the conversation, not screen-only.
     Answer(Line<'static>),
+    // A code block's badge, holding the block's text for a click to copy.
+    Code {
+        badge: Line<'static>,
+        code: String,
+        hovered: bool,
+        copied: Option<String>,
+    },
     // A closed mermaid block or a table, drawn for the width it is shown at:
     // a resize draws it again, or shows its source when it no longer fits.
-    // One logical line whose `\n`s the wrap breaks.
+    // One logical line whose `\n`s the wrap breaks; a click copies the source.
     Block {
         form: Form,
         source: String,
-        painted: RefCell<Option<(usize, Line<'static>)>>,
+        // At which width, and whether a badge heads it.
+        painted: RefCell<Option<(usize, Line<'static>, bool)>>,
+        hovered: bool,
+        copied: Option<String>,
     },
     // A painted line the screen alone knows: banner, command output,
     // warning. `times` collapses an identical repeat into one row+count.
@@ -342,7 +352,7 @@ impl Row {
     pub fn is_conversation(&self) -> bool {
         matches!(
             &self.0,
-            Kind::Said { .. } | Kind::Answer(_) | Kind::Block { .. }
+            Kind::Said { .. } | Kind::Answer(_) | Kind::Code { .. } | Kind::Block { .. }
         )
     }
 
@@ -390,32 +400,43 @@ impl Row {
     /// blocks are rows of their own, drawn at whatever width they get.
     pub fn answer(text: &str, paint: &Paint) -> Vec<Self> {
         let markdown = |text: &str| {
-            render::render_markdown(text, paint)
+            render::render_coded(text, paint)
                 .into_iter()
-                .map(|line| Self::new(Kind::Answer(line)))
+                .map(|(line, code)| match code {
+                    Some(code) => Self::new(Kind::Code {
+                        badge: line,
+                        code,
+                        hovered: false,
+                        copied: None,
+                    }),
+                    None => Self::new(Kind::Answer(line)),
+                })
         };
         if !paint.color {
             return markdown(text).collect();
         }
         let blank = || Self::new(Kind::Answer(Line::default()));
+        let is_blank = |row: &Self| matches!(row, Self(Kind::Answer(l), _) if l.spans.is_empty());
         let mut rows: Vec<Self> = Vec::new();
         for piece in block::pieces(text) {
             match piece {
                 block::Piece::Text(text) => rows.extend(markdown(text)),
                 block::Piece::Block(form, source) => {
-                    if !rows.is_empty() {
+                    if rows.last().is_some_and(|r| !is_blank(r)) {
                         rows.push(blank());
                     }
                     rows.push(Self::new(Kind::Block {
                         form,
                         source: source.trim_end().to_string(),
                         painted: RefCell::new(None),
+                        hovered: false,
+                        copied: None,
                     }));
                     rows.push(blank());
                 }
             }
         }
-        if matches!(rows.last(), Some(Self(Kind::Answer(l), _)) if l.spans.is_empty()) {
+        if rows.last().is_some_and(is_blank) {
             rows.pop();
         }
         rows
@@ -521,6 +542,7 @@ impl Row {
     pub fn click_line(&self, i: usize, width: usize) -> Option<usize> {
         match &self.0 {
             Kind::Result { .. } => self.is_expandable().then_some(0),
+            Kind::Code { .. } | Kind::Block { .. } => Some(0),
             Kind::Steps {
                 steps,
                 pending,
@@ -600,6 +622,10 @@ impl Row {
                 *h = hovered.is_some();
                 *painted.borrow_mut() = None;
             }
+            // Bold is no wider, so no height moves.
+            Kind::Code { hovered: h, .. } | Kind::Block { hovered: h, .. } => {
+                *h = hovered.is_some();
+            }
             _ => {}
         }
     }
@@ -631,6 +657,41 @@ impl Row {
             }
         });
         Self::result(!r.is_error, r.name.clone(), preview)
+    }
+
+    /// Say `said` beside this row's first line, or stop saying it.
+    pub fn say_copied(&mut self, said: Option<&str>) {
+        if let Kind::Code { copied, .. } | Kind::Block { copied, .. } = &mut self.0
+            && copied.as_deref() != said
+        {
+            *copied = said.map(str::to_string);
+            self.1.clear();
+        }
+    }
+
+    /// Whether a badge heads this row at `width`, for a note to stand beside.
+    pub fn badged(&self, paint: &Paint, width: usize) -> bool {
+        match &self.0 {
+            Kind::Code { .. } => true,
+            Kind::Block { painted, .. } => {
+                self.line(0, paint, width);
+                painted
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|(.., badged)| *badged)
+            }
+            _ => false,
+        }
+    }
+
+    /// What a click on this row copies: a code block's text, or the source
+    /// of a diagram or table.
+    pub fn code(&self) -> Option<&str> {
+        match &self.0 {
+            Kind::Code { code, .. } => Some(code),
+            Kind::Block { source, .. } => Some(source),
+            _ => None,
+        }
     }
 
     /// The tool's name if this row is a tool result.
@@ -718,7 +779,11 @@ impl Row {
     /// Wraps not counted; `height` is the screen-row count.
     pub fn len(&self) -> usize {
         match &self.0 {
-            Kind::Answer(_) | Kind::Block { .. } | Kind::Notice { .. } | Kind::Said { .. } => 1,
+            Kind::Answer(_)
+            | Kind::Code { .. }
+            | Kind::Block { .. }
+            | Kind::Notice { .. }
+            | Kind::Said { .. } => 1,
             Kind::Result {
                 preview_lines,
                 expanded,
@@ -785,20 +850,35 @@ impl Row {
         match &self.0 {
             Kind::Said { border, body, .. } => (body.clone(), Some(border.clone())),
             Kind::Answer(text) => (text.clone(), None),
+            Kind::Code {
+                badge,
+                hovered,
+                copied,
+                ..
+            } => (
+                beside(bolded(badge.clone(), *hovered), copied.as_deref(), paint),
+                None,
+            ),
             Kind::Block {
                 form,
                 source,
                 painted,
+                hovered,
+                copied,
             } => {
                 let mut held = painted.borrow_mut();
-                if let Some((at, line)) = held.as_ref()
-                    && *at == width
-                {
-                    return (line.clone(), None);
-                }
-                let line = block_at(*form, source, paint, width);
-                *held = Some((width, line.clone()));
-                (line, None)
+                let (line, badged) = match held.as_ref() {
+                    Some((at, line, badged)) if *at == width => (line.clone(), *badged),
+                    _ => {
+                        let (line, badged) = block_at(*form, source, paint, width);
+                        *held = Some((width, line.clone(), badged));
+                        (line, badged)
+                    }
+                };
+                let line = bolded(line, *hovered && badged);
+                // Beside a table's border it could wrap and split the table.
+                let copied = copied.as_deref().filter(|_| badged);
+                (beside(line, copied, paint), None)
             }
             Kind::Notice { text, times } if *times == 1 => (text.clone(), None),
             Kind::Notice { text, times } => {
@@ -1621,7 +1701,30 @@ mod height_tests {
 
 // A block row at `width`: drawn when it fits, else its source under a badge
 // saying what it would need. A mermaid block wears its badge either way.
-fn block_at(form: Form, source: &str, paint: &Paint, width: usize) -> Line<'static> {
+// The badge a hovered row leads with, in bold: bold is no wider.
+fn bolded(mut line: Line<'static>, hovered: bool) -> Line<'static> {
+    if hovered && let Some(badge) = line.spans.first_mut() {
+        badge.style = badge.style.add_modifier(Modifier::BOLD);
+    }
+    line
+}
+
+// `said`, muted, closing the first line, as a block's note does.
+fn beside(mut line: Line<'static>, said: Option<&str>, paint: &Paint) -> Line<'static> {
+    if let Some(said) = said {
+        let end = line
+            .spans
+            .iter()
+            .position(|s| s.content.starts_with('\n'))
+            .unwrap_or(line.spans.len());
+        line.spans
+            .insert(end, paint.span(&paint.theme.muted, format!(" {said}")));
+    }
+    line
+}
+
+// The row at `width`, and whether a badge heads it: a table drawn whole has none.
+fn block_at(form: Form, source: &str, paint: &Paint, width: usize) -> (Line<'static>, bool) {
     use crate::block::{Drawn, draw, note};
     let joined = |lines: Vec<Line<'static>>| {
         let mut spans = Vec::new();
@@ -1643,18 +1746,18 @@ fn block_at(form: Form, source: &str, paint: &Paint, width: usize) -> Line<'stat
             Drawn::Fits(diagram) => {
                 let mut spans = render::badge("mermaid", "", paint).spans;
                 spans.push(Span::raw(format!("\n{diagram}")));
-                Line::from(spans)
+                (Line::from(spans), true)
             }
-            Drawn::Wide { needs, has } => source_under("mermaid", &note(needs, has)),
-            Drawn::Unread => source_under("mermaid", ""),
+            Drawn::Wide { needs, has } => (source_under("mermaid", &note(needs, has)), true),
+            Drawn::Unread => (source_under("mermaid", ""), true),
         },
         Form::Table => {
             let lines = render::render_markdown(source, paint);
             let needs = lines.iter().map(Line::width).max().unwrap_or(0);
             if needs <= width {
-                joined(lines)
+                (joined(lines), false)
             } else {
-                source_under("table", &note(needs, width))
+                (source_under("table", &note(needs, width)), true)
             }
         }
     }

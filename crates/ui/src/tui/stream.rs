@@ -355,12 +355,21 @@ impl Ui {
         } else {
             Vec::new()
         };
+        if self
+            .copied
+            .as_ref()
+            .is_some_and(|(.., at)| at.elapsed() >= super::FLASH)
+        {
+            self.copied = None;
+        }
         for (idx, row) in view.surface.scrollback.iter_mut().enumerate() {
             // Only the last row takes them, and only the last row can be the
             // summary they belong to: any other is handed nothing.
             let flight: &[PendingTool] = if Some(idx) == last { &held } else { &[] };
             let hovered = self.hovered_scrollback.filter(|h| h.0 == idx).map(|h| h.1);
             row.update_live(hovered, self.spinner, flight);
+            let copied = self.copied.as_ref().filter(|c| c.0 == idx);
+            row.say_copied(copied.map(|c| c.1.as_str()));
         }
         let (live, pending_rows) = self.live(lane, view, row_holds, now);
 

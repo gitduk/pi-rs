@@ -98,6 +98,7 @@ Esc.
 | `/<skill> [args]`                  | run a skill (also one-shot: `pi "/commit"`)   |
 | `! <command>`                      | run a shell command and record its output     |
 | `@path`                            | complete a workspace file                     |
+| click a code block's label         | copy it; a diagram or table, its source       |
 
 ## Tools
 

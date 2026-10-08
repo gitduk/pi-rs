@@ -200,26 +200,35 @@ fn badge_with(
     Line::from(spans)
 }
 
-// A code block's opening fence becomes its badge, the rest of its info string
-// the note; the closing fence goes.
+// A code block's opening fence becomes its badge, carrying the block's text;
+// the rest of its info string is the note, and the closing fence goes.
 fn fenced(
     lines: Vec<Line<'static>>,
     badge: ratatui::style::Style,
     muted: ratatui::style::Style,
-) -> Vec<Line<'static>> {
-    let mut open = false;
+) -> Vec<(Line<'static>, Option<String>)> {
+    let mut open: Option<(usize, Vec<String>)> = None;
     let mut out = Vec::with_capacity(lines.len());
     for line in lines {
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         let Some(lang) = text.strip_prefix(FENCE) else {
-            out.push(line);
+            if let Some((_, body)) = &mut open {
+                body.push(text);
+            }
+            out.push((line, None));
             continue;
         };
-        open = !open;
-        if open {
-            let (lang, note) = lang.trim().split_once(' ').unwrap_or((lang.trim(), ""));
-            out.push(badge_with(lang, note.trim(), badge, muted));
+        match open.take() {
+            Some((at, body)) => out[at].1 = Some(body.join("\n")),
+            None => {
+                let (lang, note) = lang.trim().split_once(' ').unwrap_or((lang.trim(), ""));
+                open = Some((out.len(), Vec::new()));
+                out.push((badge_with(lang, note.trim(), badge, muted), None));
+            }
         }
+    }
+    if let Some((at, body)) = open {
+        out[at].1 = Some(body.join("\n"));
     }
     out
 }
@@ -283,11 +292,22 @@ impl tui_markdown::StyleSheet for PiStyleSheet {
 /// Parse and render markdown into styled lines using `tui-markdown` and theme.
 /// Styles ride on the spans; nothing here speaks SGR.
 pub fn render_markdown(text: &str, paint: &Paint) -> Vec<ratatui::text::Line<'static>> {
+    render_coded(text, paint)
+        .into_iter()
+        .map(|(line, _)| line)
+        .collect()
+}
+
+/// The same lines, each code block's badge paired with the block's text.
+pub fn render_coded(text: &str, paint: &Paint) -> Vec<(Line<'static>, Option<String>)> {
     if text.is_empty() {
         return Vec::new();
     }
     if !paint.color {
-        return text.lines().map(|l| Line::from(l.to_string())).collect();
+        return text
+            .lines()
+            .map(|l| (Line::from(l.to_string()), None))
+            .collect();
     }
     let trimmed = trim_partial_fences(text);
     // Drawn for the terminal as it is now; a narrower one gets the source.
@@ -767,5 +787,15 @@ mod tests {
         assert!(r.out_dirty);
         r.on(agent::Event::TextDelta("done\n".into()));
         assert!(!r.out_dirty, "a delta ending in a newline closes the line");
+    }
+
+    // A click copies this text, so drift in the parser would land in pastes.
+    #[test]
+    fn a_code_blocks_badge_carries_its_text_verbatim() {
+        let code = "fn main() {\n    let x = 1;\n\n\tx\n}";
+        let text = format!("before\n\n```rust\n{code}\n```\n\nafter");
+        let coded = super::render_coded(&text, &super::Paint::new(true));
+        let carried: Vec<_> = coded.iter().filter_map(|(_, c)| c.as_deref()).collect();
+        assert_eq!(carried, [code]);
     }
 }

@@ -83,6 +83,8 @@ pub(super) struct Ui {
     // A note answering the last keypress, and when it landed. It stands
     // where the layout puts it for `FLASH` and then goes — see `bar_lines`.
     pub(super) flash: Option<(String, Instant)>,
+    // What a click copied, said beside that scrollback row's badge for `FLASH`.
+    pub(super) copied: Option<(usize, String, Instant)>,
     // What the bar's rows hold: the script's last answer, or the default.
     pub(super) layout: pi_store::bar::Layout,
     // The scrollback row and line under the mouse, when a click there
@@ -161,6 +163,7 @@ impl Ui {
     pub(super) fn leave_lane(&mut self, view: &mut View) {
         view.draft = self.editor.take_composing();
         self.flash = None;
+        self.copied = None;
         if matches!(self.focus, Focus::Rewind(_)) {
             self.focus = Focus::Editor;
         }
@@ -205,6 +208,7 @@ impl Ui {
             status: default_parts(),
             tabs: Vec::new(),
             flash: None,
+            copied: None,
             layout: Default::default(),
             hovered_scrollback: None,
             row_targets: Vec::new(),

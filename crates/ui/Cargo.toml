@@ -19,7 +19,7 @@ tokio-util.workspace = true
 libc = "0.2"
 tracing.workspace = true
 unicode-width = "0.2.2"
-crossterm = { version = "0.29", default-features = false, features = ["events", "bracketed-paste", "windows"] }
+crossterm = { version = "0.29", default-features = false, features = ["events", "bracketed-paste", "osc52", "windows"] }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
