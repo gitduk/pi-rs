@@ -77,10 +77,9 @@ pub fn dial(
             spec.context_window, spec.max_output_tokens, spec.model
         )
     });
-    let key = config.key();
+    let key = config.key_for(model);
     let warning = config
-        .api_key
-        .as_deref()
+        .written_key(model)
         .filter(|k| !k.starts_with('$'))
         .and_then(|_| {
             pinned

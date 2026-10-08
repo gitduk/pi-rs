@@ -356,6 +356,16 @@ fn yes() -> bool {
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelEntry {
+    /// This model's own endpoint, over the file's `base_url`. A model that
+    /// names one does not inherit the file's `api_key`: a key is the host's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// This model's wire, over the file's `format`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<FormatArg>,
+    /// This model's credential; a leading `$` reads the environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
     #[serde(default = "default_context")]
     pub context_window: u32,
     #[serde(default = "default_output")]
@@ -382,6 +392,9 @@ pub struct ModelEntry {
 impl Default for ModelEntry {
     fn default() -> Self {
         Self {
+            base_url: None,
+            format: None,
+            api_key: None,
             context_window: default_context(),
             max_output_tokens: default_output(),
             thinking: None,
@@ -397,9 +410,10 @@ impl Default for ModelEntry {
 impl Config {
     // The endpoint's shape, refused rather than guessed: naming the wrong one
     // is a 400 on the first turn, and neither is a safer bet than the other.
-    fn format(&self) -> Result<Format> {
-        let named = self
+    fn format(&self, model: &ModelEntry) -> Result<Format> {
+        let named = model
             .format
+            .or(self.format)
             .context("`format` is required: \"anthropic\", \"openai\" or \"chat\"")?;
         Ok(match named {
             FormatArg::Anthropic => Format::Anthropic {
@@ -411,16 +425,24 @@ impl Config {
     }
 
     fn spec(&self, name: &str, model: &ModelEntry) -> Result<ModelSpec> {
-        let format = self.format()?;
-        if !matches!(format, Format::Anthropic { .. }) && self.cache_control != CacheControl::Off {
+        let format = self.format(model)?;
+        // The file's `cache_control` speaks for the file's own wire; a model
+        // on another wire of its own does not inherit it.
+        let own_wire = model.format.is_some_and(|f| Some(f) != self.format);
+        if !own_wire
+            && !matches!(format, Format::Anthropic { .. })
+            && self.cache_control != CacheControl::Off
+        {
             bail!(
                 "cache_control is an Anthropic field; the openai format caches by \
                  default and naming it here can only turn that off"
             );
         }
-        let base_url = self
+        let base_url = model
             .base_url
-            .clone()
+            .as_deref()
+            .map(|url| expand_base_url(url.trim()))
+            .or_else(|| self.base_url.clone())
             .context("`base_url` is required to reach a model")?;
         Ok(ModelSpec {
             model: name.to_string(),
@@ -440,14 +462,15 @@ impl Config {
     // A `$NAME` that names nothing is a typo now and a missing key much later,
     // pointing at the endpoint rather than at the file.
     fn check_key(&self) -> Result<()> {
-        let Some(name) = self.api_key.as_deref().and_then(|k| k.strip_prefix('$')) else {
-            return Ok(());
-        };
-        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-            bail!(
-                "api_key `${name}` does not name an environment variable. \
-                 A literal key beginning with `$` cannot be written here — put it in a variable."
-            );
+        let keys = std::iter::once(self.api_key.as_deref())
+            .chain(self.models.values().map(|m| m.api_key.as_deref()));
+        for name in keys.flatten().filter_map(|k| k.strip_prefix('$')) {
+            if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                bail!(
+                    "api_key `${name}` does not name an environment variable. \
+                     A literal key beginning with `$` cannot be written here — put it in a variable."
+                );
+            }
         }
         Ok(())
     }
@@ -455,7 +478,7 @@ impl Config {
     // A thinking control the format cannot carry is otherwise accepted, then
     // silently dropped when the request is built.
     fn check_thinking(&self, name: &str, model: &ModelEntry) -> Result<()> {
-        match (self.format, model.thinking) {
+        match (model.format.or(self.format), model.thinking) {
             (Some(FormatArg::Anthropic), Some(ThinkingControl::Effort)) => bail!(
                 "{name}: thinking = \"effort\" is not an Anthropic control; use \
                  \"adaptive\" (Claude 4.6 and later) or \"budget\" (4.5 and earlier)"
@@ -542,10 +565,21 @@ impl Config {
         self.models.keys().cloned().collect()
     }
 
-    /// The credential to send, or None when the endpoint wants none. Read at
-    /// use; the *shape* is still checked at load, since a bad `$NAME` is a typo.
-    pub fn key(&self) -> Option<String> {
-        self.api_key.as_deref().and_then(expand_key)
+    /// The key as written for `model`: its own, or the file's while it is
+    /// on the file's endpoint. A model sent elsewhere never carries the
+    /// file's key there.
+    pub fn written_key(&self, model: &str) -> Option<&str> {
+        match self.models.get(model) {
+            Some(m) if m.api_key.is_some() => m.api_key.as_deref(),
+            Some(m) if m.base_url.is_some() => None,
+            _ => self.api_key.as_deref(),
+        }
+    }
+
+    /// [`Config::written_key`], `$NAME` read: the credential to send, or None
+    /// when the endpoint wants none. The shape is checked at load.
+    pub fn key_for(&self, model: &str) -> Option<String> {
+        self.written_key(model).and_then(expand_key)
     }
 
     fn apply_env(&mut self) {
@@ -761,6 +795,20 @@ pub fn load_project(workspace: &Path) -> Result<Option<(PathBuf, toml::Value)>> 
             bail!("{}: {why}", path.display());
         }
     }
+    // Merged field by field, a checkout's `base_url` would join your model's
+    // own key in one entry and send that key to the checkout's host.
+    let models = tree.get("models").and_then(toml::Value::as_table);
+    for (name, entry) in models.into_iter().flatten() {
+        for field in ["base_url", "api_key", "format"] {
+            if entry.get(field).is_some() {
+                bail!(
+                    "{}: models.{name}.{field} belongs in your own settings.toml — \
+                     a checkout's would send that model's key to its host",
+                    path.display()
+                );
+            }
+        }
+    }
     Ok(Some((path, tree)))
 }
 
@@ -775,7 +823,8 @@ impl Config {
             server.check(name)?;
         }
         for (model, entry) in &config.models {
-            if config.base_url.is_some() && config.format.is_some() {
+            let reachable = config.base_url.is_some() || entry.base_url.is_some();
+            if reachable && (config.format.is_some() || entry.format.is_some()) {
                 config.spec(model, entry)?;
             }
             config.check_thinking(model, entry)?;
@@ -857,6 +906,21 @@ mod tests {
             assert!(err.contains(key), "{key}: {err}");
         }
         assert_eq!(GLOBAL_ONLY.len(), 3, "a new key gets a case above");
+
+        for field in [
+            "base_url = \"https://evil\"",
+            "api_key = \"$X\"",
+            "format = \"chat\"",
+        ] {
+            std::fs::write(&file, format!("[models.home]\n{field}\n")).unwrap();
+            let err = load_project(dir.path()).unwrap_err().to_string();
+            assert!(err.contains("models.home"), "{field}: {err}");
+        }
+        std::fs::write(&file, "[models.home]\ncontext_window = 1000\n").unwrap();
+        assert!(
+            load_project(dir.path()).is_ok(),
+            "the numbers are a checkout's to say"
+        );
     }
 
     #[test]
@@ -897,6 +961,50 @@ output_per_mtok = 0
 
     fn parse(body: &str) -> Result<Config> {
         Config::from_tree(toml::from_str(body)?)
+    }
+
+    // A model on its own host must never carry the file's key there.
+    #[test]
+    fn a_model_on_its_own_endpoint_keeps_its_own_key() {
+        let c = parse(
+            r#"
+base_url = "https://api.anthropic.com"
+format = "anthropic"
+cache_control = "standard"
+api_key = "file-key"
+
+[models.home]
+
+[models.gpt]
+base_url = "https://api.openai.com/v1"
+format = "chat"
+
+[models.local]
+base_url = ":8080/v1"
+format = "chat"
+api_key = "local-key"
+"#,
+        )
+        .unwrap();
+        assert_eq!(c.key_for("home").as_deref(), Some("file-key"));
+        assert_eq!(c.key_for("unlisted").as_deref(), Some("file-key"));
+        assert_eq!(c.key_for("gpt"), None, "the file's key stays with its host");
+        assert_eq!(c.key_for("local").as_deref(), Some("local-key"));
+
+        let gpt = c.find("gpt").unwrap();
+        assert_eq!(gpt.base_url, "https://api.openai.com/v1");
+        assert!(
+            matches!(gpt.format, Format::Chat),
+            "cache_control is not inherited"
+        );
+        assert_eq!(
+            c.find("local").unwrap().base_url,
+            "http://127.0.0.1:8080/v1"
+        );
+        assert_eq!(
+            c.find("home").unwrap().base_url,
+            "https://api.anthropic.com"
+        );
     }
 
     #[test]

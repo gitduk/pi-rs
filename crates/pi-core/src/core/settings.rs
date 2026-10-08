@@ -155,13 +155,19 @@ impl Core {
     }
     /// The models `/model` can reach, with what tells them apart.
     pub fn choices(&self) -> Vec<Choice> {
-        let format = self.config.format.map(|f| f.name()).unwrap_or_default();
         self.config
             .models
             .iter()
-            .map(|(name, entry)| Choice {
-                name: name.clone(),
-                note: summary(format, entry.context_window, &entry.pricing),
+            .map(|(name, entry)| {
+                let format = entry.format.or(self.config.format);
+                Choice {
+                    name: name.clone(),
+                    note: summary(
+                        format.map(|f| f.name()).unwrap_or_default(),
+                        entry.context_window,
+                        &entry.pricing,
+                    ),
+                }
             })
             .collect()
     }

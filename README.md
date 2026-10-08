@@ -39,12 +39,22 @@ max_output_tokens = 64_000
 | `openai`    | Responses        | `/responses`        |
 | `chat`      | Chat Completions | `/chat/completions` |
 
+A model on another endpoint says so in its own entry; the rest keep the file's:
+
+```toml
+[models."gpt-5"]
+base_url = "https://api.openai.com/v1"
+format   = "openai"
+api_key  = "$OPENAI_API_KEY"   # never the file's key: that one is for its host
+```
+
 [`examples/pi.toml`](examples/pi.toml) lists every key. An unknown key is
 refused at load.
 
 A `.pi.toml` between the workspace and the repository root overrides the same
-keys, `base_url`, `api_key` and `write_roots` included. Read the one
-in a checkout you did not write before running pi there.
+keys, `base_url`, `api_key` and `write_roots` included, but not a model's own
+`base_url`, `api_key` or `format`. Read the one in a checkout you did not write
+before running pi there.
 
 Nothing needs a restart. Within a second of a save to the settings, a system
 prompt file, an `AGENTS.md` or memory, the lane in front is rebuilt from them;

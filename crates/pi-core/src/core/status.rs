@@ -24,7 +24,7 @@ impl Core {
         let sep = icons::PART_SEP;
         let mut rows = Vec::new();
 
-        let effort = format!("{:?}", lane.agent().brief.effort).to_lowercase();
+        let effort = lane.agent().brief.effort.name();
         rows.push(Row::new([
             "model".into(),
             format!(
@@ -33,9 +33,22 @@ impl Core {
                 figures::short(spec.context_window.into())
             ),
         ]));
-        if let Some(endpoint) = &resolved.endpoint {
-            let endpoint = endpoint.strip_prefix("endpoint: ").unwrap_or(endpoint);
-            rows.push(Row::new(["endpoint", endpoint]));
+        // The file's endpoint names its source; a model on its own host
+        // names that host instead, since that is where requests go.
+        match &resolved.endpoint {
+            Some(endpoint)
+                if endpoint
+                    .strip_prefix("endpoint: ")
+                    .and_then(|e| e.split_once(" ("))
+                    .is_some_and(|(url, _)| url == spec.base_url) =>
+            {
+                let endpoint = endpoint.strip_prefix("endpoint: ").unwrap_or(endpoint);
+                rows.push(Row::new(["endpoint", endpoint]));
+            }
+            _ => rows.push(Row::new([
+                "endpoint".into(),
+                format!("{} ([models.\"{}\"])", spec.base_url, spec.model),
+            ])),
         }
 
         // The last run's own count when there was one; before any, an estimate.

@@ -149,10 +149,17 @@ pricing = { input_per_mtok = 1.0, output_per_mtok = 5.0 }
 [models."some-open-weights-model"]
 replay_thinking = "tagged"
 
-# ---------------------------------------------------------------------------
-# A second endpoint is not a config shape. Point `base_url` at the one you
-# want, or keep two files and pass `--config`.
-# ---------------------------------------------------------------------------
+# A model on another endpoint names its own `base_url`, and `format` and
+# `api_key` when they differ. One that names a `base_url` never inherits the
+# file's `api_key` — the file's key is for the file's host — so without its
+# own it falls back to OPENAI_API_KEY or ANTHROPIC_API_KEY by its format.
+# Only this file may set the three; a project's .pi.toml that does is refused.
+[models."gpt-5"]
+base_url = "https://api.openai.com/v1"
+format   = "openai"
+api_key  = "$OPENAI_API_KEY"
+context_window    = 400_000
+max_output_tokens = 128_000
 
 # Commands run around tool calls by `sh -c` in the workspace, each handed
 # {"tool", "args", "workspace"} as JSON on stdin ("result" too, after). Before
