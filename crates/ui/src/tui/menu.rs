@@ -107,17 +107,47 @@ impl Ui {
 
     // The menu's rows as ratatui list items. The selected row is styled by
     // the list itself; everything else sits muted.
-    pub(super) fn menu_items(&self, menu: &[MenuEntry]) -> Vec<ListItem<'static>> {
+    // Every row muted but `picked`, which is bright and wears the mark and the
+    // theme's `menu.selected` on its name; its band is the list's to draw.
+    pub(super) fn menu_items(&self, menu: &[MenuEntry], picked: usize) -> Vec<ListItem<'static>> {
         let head = menu
             .iter()
             .map(|c| unicode_width::UnicodeWidthStr::width(c.show()))
             .max()
             .unwrap_or(0);
         let muted = self.rat_style(&self.paint.theme.muted);
+        let mark = self.rat_style(&self.paint.theme.prompt.color);
+        let chosen = self.rat_style(&self.paint.theme.menu.selected);
         menu.iter()
-            .map(|c| {
-                let line = format!("  {}  {}", pi_store::text::pad(c.show(), head), c.help());
-                ListItem::new(Line::from(Span::styled(line, muted)))
+            .enumerate()
+            .map(|(at, c)| {
+                let show = c.show();
+                // Only a command word carries an argument hint to set apart; a
+                // message or a file name is whole, spaces and all.
+                let (name, args) = match c {
+                    MenuEntry::Completion(c) if c.more => {
+                        show.split_once(' ').unwrap_or((show, ""))
+                    }
+                    _ => (show, ""),
+                };
+                let args = if args.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {args}")
+                };
+                let pad = head.saturating_sub(unicode_width::UnicodeWidthStr::width(show));
+                let rest = format!("{args}{}  {}", " ".repeat(pad), c.help());
+                if at != picked {
+                    return ListItem::new(Line::from(Span::styled(
+                        format!("  {name}{rest}"),
+                        muted,
+                    )));
+                }
+                ListItem::new(Line::from(vec![
+                    Span::styled(MENU_MARK, mark),
+                    Span::styled(name.to_string(), chosen),
+                    rest.into(),
+                ]))
             })
             .collect()
     }
@@ -668,6 +698,9 @@ impl MenuEntry {
         }
     }
 }
+
+// What heads the picked row of a menu, in the prompt's colour.
+const MENU_MARK: &str = "› ";
 
 // What workspace-dependent completions answer with, read lazily: opening
 // every archive and forking git upfront was a noticeable startup pause.

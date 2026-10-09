@@ -338,7 +338,7 @@ impl Ui {
         // at a time), history fills the rest — bar always keeps its row.
         let room = (self.screen.height as usize).saturating_sub(editor_h + bar_h + 1);
         let reply = match &self.focus {
-            Focus::Reply(r) => Some(r.view(room, width)),
+            Focus::Reply(r) => Some(r.view(room, width, &self.paint)),
             _ => None,
         };
         let menu_h = if let Some(reply) = &reply {
@@ -456,12 +456,17 @@ impl Ui {
         };
 
         view.surface.scroll = scroll;
-        let items = self.menu_items(&menu);
         let picked = self
             .picked
             .unwrap_or(menu.len().saturating_sub(1))
             .min(menu.len().saturating_sub(1));
-        let highlight = self.rat_style(&self.paint.theme.menu.selected);
+        let items = self.menu_items(&menu, picked);
+        // The picked row on the input's band, the menu's width: a bar the eye
+        // finds at once, where a mark in its text alone was not enough.
+        let cursor = self
+            .paint
+            .band(&self.paint.theme.prompt.panel.input)
+            .unwrap_or_default();
         let _ = self.screen.draw(|frame| {
             // Input last, so the caret sits on the bottom row and the bar
             // reads as history's edge, not something hanging off the typed line.
@@ -475,7 +480,7 @@ impl Ui {
                 let mut state = ListState::default();
                 state.select(Some(picked));
                 frame.render_stateful_widget(
-                    List::new(items).highlight_style(highlight),
+                    List::new(items).highlight_style(cursor),
                     regions.menu,
                     &mut state,
                 );

@@ -450,7 +450,7 @@ fn default_err() -> Style {
     Style::color(RED)
 }
 fn default_selected() -> Style {
-    Style::attrs(&[Attr::Reverse])
+    Style::attrs(&[Attr::Bold])
 }
 fn default_prompt_color() -> Style {
     // opencode's build agent colour, which is what its input line and its

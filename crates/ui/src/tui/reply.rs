@@ -7,6 +7,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use super::ui::Focus;
 use super::{Asked, Deed, Ui};
 use crate::listing;
+use crate::render::Paint;
 use pi_store::icons;
 use pi_store::listing::Listing;
 
@@ -26,8 +27,9 @@ impl Reply {
     }
 
     /// Reply rows, wrapped to `width`; fitted here so the row count used by
-    /// the menu can't miss a wrapped line and draw over the bar.
-    fn rows(&self, width: usize) -> Vec<Line<'static>> {
+    /// the menu can't miss a wrapped line and draw over the bar. Each row as
+    /// its key column, empty for a row with none, and the rest.
+    fn rows(&self, width: usize) -> Vec<(String, String)> {
         listing::split(&self.content)
             .into_iter()
             .flat_map(|(head, rest)| {
@@ -36,7 +38,7 @@ impl Reply {
                 if indent == 0 || indent * 2 > width {
                     return words(&(head + &rest), width)
                         .into_iter()
-                        .map(Line::from)
+                        .map(|row| (String::new(), row))
                         .collect::<Vec<_>>();
                 }
                 let pad = " ".repeat(indent);
@@ -45,7 +47,7 @@ impl Reply {
                     .enumerate()
                     .map(|(at, piece)| {
                         let lead = if at == 0 { head.clone() } else { pad.clone() };
-                        Line::from(lead + &piece)
+                        (lead, piece)
                     })
                     .collect()
             })
@@ -54,19 +56,30 @@ impl Reply {
 
     /// The window's `room` rows to draw; the last one names what's above and
     /// below when the reply doesn't fit whole.
-    pub fn view(&self, room: usize, width: usize) -> Vec<Line<'static>> {
+    pub fn view(&self, room: usize, width: usize, paint: &Paint) -> Vec<Line<'static>> {
+        // The key column muted, so what a row is reads apart from what it says.
+        let line = |(key, text): &(String, String)| {
+            Line::from(vec![
+                paint.span(&paint.theme.muted, key.clone()),
+                text.clone().into(),
+            ])
+        };
         let rows = self.rows(width);
         let Some(shown) = window(rows.len(), room) else {
-            return rows;
+            return rows.iter().map(line).collect();
         };
         let start = self.first.min(rows.len() - shown);
-        let mut out = rows[start..start + shown].to_vec();
-        out.push(Line::from(format!(
-            "  {}-{} of {}{}j/k scroll, q close",
-            start + 1,
-            start + shown,
-            rows.len(),
-            icons::KEY_NOTE_SEP,
+        let mut out: Vec<Line<'static>> = rows[start..start + shown].iter().map(line).collect();
+        // Muted: how to move, not part of the answer.
+        out.push(Line::from(paint.span(
+            &paint.theme.muted,
+            format!(
+                "  {}-{} of {}{}j/k scroll, q close",
+                start + 1,
+                start + shown,
+                rows.len(),
+                icons::KEY_NOTE_SEP,
+            ),
         )));
         out
     }
@@ -149,6 +162,7 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::Reply;
+    use crate::render::Paint;
     use pi_store::listing::Listing;
 
     fn reply(n: usize) -> Reply {
@@ -161,7 +175,7 @@ mod tests {
 
     fn shown(reply: &Reply, room: usize) -> Vec<String> {
         reply
-            .view(room, WIDE)
+            .view(room, WIDE, &Paint::new(false))
             .iter()
             .map(|l| l.to_string())
             .collect()
@@ -191,10 +205,10 @@ mod tests {
         let reply = Reply::new(Listing::say(["x".repeat(30), "last".into()]));
         // Ten columns: the long line is three rows of them, the short one is
         // one, and a menu with four rows shows all four.
-        assert_eq!(reply.view(4, 10).len(), 4);
+        assert_eq!(reply.view(4, 10, &Paint::new(false)).len(), 4);
         // Three rows of menu: the window holds three, and the third is the
         // count of what it could not hold.
-        let tight = reply.view(3, 10);
+        let tight = reply.view(3, 10, &Paint::new(false));
         let rows: Vec<String> = tight.iter().map(|l| l.to_string()).collect();
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[2], "  1-2 of 4  ·  j/k scroll, q close");
