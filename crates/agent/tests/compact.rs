@@ -600,6 +600,38 @@ mod budget {
         assert!(after >= a.kept_tokens() / 2, "took the tail too: {after}");
     }
 
+    // Shrinking only to just under the budget would leave the next request
+    // over it again: every turn after would pay a summary and a cold cache.
+    #[tokio::test]
+    async fn an_automatic_compaction_settles_well_under_the_budget() {
+        use agent::Compactor as _;
+        let s = bulky_session();
+        let before = llm::estimate::tokens(&s.context(), &spec());
+        let budget = before - before / 10;
+        let compactor = agent::Summarizing::new(
+            Some((Arc::new(Empty), spec())),
+            agent::Retry::default().idle,
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut s = s;
+        let run = agent::Working {
+            transport: &Never,
+            spec: &spec(),
+        };
+        let fitted = compactor.compact(&mut s, run, budget, false, &tx).await;
+
+        assert!(fitted.changed);
+        let after = llm::estimate::tokens(&fitted.context, &spec());
+        assert!(after <= budget / 2, "{before} -> {after}, budget {budget}");
+        let Ok(agent::Event::Compacted(report)) = rx.try_recv() else {
+            panic!("a compaction says so");
+        };
+        assert!(
+            !report.still_over,
+            "under the budget is not over it: {report:?}"
+        );
+    }
+
     // A flat 16k tail against a 9k budget protects more than the budget holds,
     // so every tier that reaches only what precedes the tail reaches nothing.
     #[test]

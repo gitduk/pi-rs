@@ -167,7 +167,8 @@ repeating an earlier one byte for byte, like the same diff printed for every
 failing test, becomes one line quoting where the first copy begins.
 
 When the transcript outgrows the window, pi drops repeated and old tool
-results first and summarizes whole rounds last. The saved session keeps
+results first and summarizes whole rounds last, down to half the room it
+has, so the next compaction is many turns away. The saved session keeps
 everything; only the model's view shrinks.
 
 pi remembers without being asked. When pi exits, a process it leaves behind

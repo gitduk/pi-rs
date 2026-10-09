@@ -27,7 +27,7 @@ use ladder::{Policy, Report};
 pub struct Summarizing {
     policy: Policy,
     /// Who writes the summary, when it is not the model doing the work.
-    /// Carries its own transport and spec — pricing must match what ran it.
+    /// Its spec shapes the call only: what it spends is priced at the run's rate.
     writer: Option<(Arc<dyn Transport>, ModelSpec)>,
     /// How long a wedged stream is given before it is read as wedged, for the
     /// summary's own call.
@@ -133,8 +133,11 @@ impl Compactor for Summarizing {
             protect_tail: if urgent { 0 } else { self.tail_within(budget) },
             ..self.policy
         };
-        match self.pass(session, run, budget, &policy, None).await {
-            Some((report, spent)) => {
+        // Settle at half: stopping just under the budget would compact again on
+        // nearly every request after, each a summary call and a cold cache.
+        match self.pass(session, run, budget / 2, &policy, None).await {
+            Some((mut report, spent)) => {
+                report.still_over = report.after > budget;
                 say(tx, Event::Compacted(report));
                 Fitted {
                     context: session.context(),
