@@ -294,19 +294,19 @@ impl tui_markdown::StyleSheet for PiStyleSheet {
     }
 }
 
-/// Parse and render markdown into styled lines using `tui-markdown` and theme.
-/// Styles ride on the spans; nothing here speaks SGR.
 /// What a rendered line is to the code blocks around it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Coded {
     Text,
     /// A block's badge, carrying the block's text for a click to copy.
     Badge(String),
-    /// A line inside a block: drawn on the block's band, so where the band
-    /// stops is where the block ends.
+    /// A line inside a block: set off from the prose around it, so where
+    /// that stops is where the block ends.
     Code,
 }
 
+/// Parse and render markdown into styled lines using `tui-markdown` and theme.
+/// Styles ride on the spans; nothing here speaks SGR.
 pub fn render_markdown(text: &str, paint: &Paint) -> Vec<ratatui::text::Line<'static>> {
     render_coded(text, paint)
         .into_iter()
@@ -820,11 +820,11 @@ mod tests {
             })
             .collect();
         assert_eq!(carried, [code]);
-        // Every line of the block, and nothing past it, is drawn on the band.
-        let banded = coded
+        // Every line of the block, and nothing past it, is set off as code.
+        let set_off = coded
             .iter()
             .filter(|(_, c)| *c == super::Coded::Code)
             .count();
-        assert_eq!(banded, code.lines().count());
+        assert_eq!(set_off, code.lines().count());
     }
 }
