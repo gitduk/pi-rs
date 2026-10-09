@@ -962,23 +962,23 @@ impl Row {
         if resolved.ceiling != tool::Tier::Exec {
             facts.push(("tier", format!("{:?}", resolved.ceiling).to_lowercase()));
         }
-        // What the project file sets goes under its name, apart from yours.
-        let (file, project) = match &resolved.project {
-            Some((file, keys)) => (Some(file), keys.as_slice()),
-            None => (None, &[][..]),
-        };
+        // What the project file sets is a fact like the rest; which file
+        // said it is not worth a line of its own.
+        facts.extend(
+            resolved
+                .project
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.clone())),
+        );
         let width = facts
             .iter()
             .map(|(label, _)| label.len())
-            .chain(project.iter().map(|(key, _)| key.len()))
             .max()
             .unwrap_or(0);
         let muted = |line: &str| Self::notice(Line::from(paint.span(&paint.theme.muted, line)));
         let fact = |label: &str, value: &str| muted(&format!("{label:width$}  {value}"));
         std::iter::once(muted(icons::VERSION_BANNER))
             .chain(facts.iter().map(|(label, value)| fact(label, value)))
-            .chain(file.into_iter().flat_map(|file| [muted(""), muted(file)]))
-            .chain(project.iter().map(|(key, value)| fact(key, value)))
             .chain((!resolved.notes.is_empty()).then(|| muted("")))
             .chain(resolved.notes.iter().map(|note| muted(note)))
             .collect()

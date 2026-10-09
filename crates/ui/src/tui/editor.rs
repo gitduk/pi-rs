@@ -303,6 +303,12 @@ impl Editor {
         self.cursor = start;
     }
 
+    /// Whether `up` would leave the line being typed for history: the caret
+    /// on its first line, history not yet entered.
+    pub fn recalls_next(&self) -> bool {
+        self.at == self.history.len() && self.line_start() == 0
+    }
+
     /// Older, unless the caret has a line of this buffer above it to walk
     /// first.
     pub fn up(&mut self) {

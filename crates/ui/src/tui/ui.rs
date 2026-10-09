@@ -61,6 +61,8 @@ pub(super) struct Ui {
     // A line was submitted. Echo happens here (the view is in hand), but
     // the recall list is the surface's, so it's told once per line.
     pub(super) submitted: bool,
+    // The echoed line submitted mid-run: its echo waits with it in the queue.
+    pub(super) held: Option<String>,
     // What `/model` can complete to. A copy rather than a borrow of the
     // config: the loop holds the session mutably while it draws.
     pub(super) choices: Vec<Choice>,
@@ -87,7 +89,7 @@ pub(super) struct Ui {
     // What the bar says, in ring order. Rebuilt before every draw.
     pub(super) tabs: Vec<Tab>,
     // A note answering the last keypress, and when it landed. It stands
-    // where the layout puts it for `FLASH` and then goes — see `bar_lines`.
+    // where the layout puts it for `flash_for` and then goes — see `bar_lines`.
     pub(super) flash: Option<(String, Instant)>,
     // When a click last copied: the row says so for `FLASH`, and the loop
     // ticks until it is gone.
@@ -210,6 +212,7 @@ impl Ui {
             screen,
             keys,
             submitted: false,
+            held: None,
             choices,
             commands,
             lists,
@@ -340,6 +343,21 @@ impl Ui {
             if !parts.is_empty() {
                 let line = parts.join(icons::PART_SEP);
                 let muted = Line::from(self.paint.span(&self.paint.theme.muted, line));
+                rows.extend(screen::fit(&muted, width));
+            }
+        }
+        // Typed lines waiting their turn, muted under the said rule: off the
+        // transcript until they start, and up takes them back.
+        if !self.browsing() {
+            for line in view.queued.iter().filter_map(|q| q.line.as_deref()) {
+                let first = line.lines().next().unwrap_or_default();
+                let more = if line.contains('\n') {
+                    icons::ELLIPSIS
+                } else {
+                    ""
+                };
+                let text = format!("{} {first}{more}", icons::SAID_RULE);
+                let muted = Line::from(self.paint.span(&self.paint.theme.muted, text));
                 rows.extend(screen::fit(&muted, width));
             }
         }

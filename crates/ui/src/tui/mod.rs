@@ -51,9 +51,17 @@ const THINKING: &str = "thinking…";
 // borrowed from pi. A latching flag would read clear-type-clear as a pair.
 const DOUBLE_TAP: std::time::Duration = std::time::Duration::from_millis(500);
 
-// How long a flash stays on the bar row: long enough to read a short line
-// without looking for it, short enough that a second try lands after it.
+// The shortest a flash or a copy mark stays: long enough to catch a short
+// line, short enough that a second try lands after it.
 const FLASH: std::time::Duration = std::time::Duration::from_secs(1);
+// The longest a flash stays, however much it says: the bar is borrowed.
+const FLASH_MAX: std::time::Duration = std::time::Duration::from_secs(4);
+
+// How long a flash of `line` stays: about 16 characters a second of reading.
+fn flash_for(line: &str) -> std::time::Duration {
+    let reading = std::time::Duration::from_millis(line.chars().count() as u64 * 60);
+    reading.clamp(FLASH, FLASH_MAX)
+}
 
 // Shared text for several call sites, so a reword can't drift between them.
 const NO_TRANSCRIPT: &str = "this checkout has no transcript — /new or /resume first";
@@ -404,7 +412,7 @@ impl Tui {
 
     // The one gate every input passes, so two ways of asking the same
     // thing can't get different answers. `fate` decides only mid-run.
-    fn admit(&mut self, asked: Asked, origin: Origin) -> Wake {
+    fn admit(&mut self, asked: Asked, origin: Origin, line: Option<String>) -> Wake {
         if !self.core.lane().is_running() {
             return Wake::Do(asked);
         }
@@ -428,7 +436,11 @@ impl Tui {
             Fate::Queued => {
                 front_view(&mut self.views, self.core.lane())
                     .queued
-                    .push(Queued { intent, origin });
+                    .push(Queued {
+                        intent,
+                        origin,
+                        line,
+                    });
                 Wake::Nothing
             }
             // A command refused because a run is in flight. It was typed, so
@@ -596,7 +608,8 @@ impl Tui {
                             if self.ui.took_submit() {
                                 self.save_history();
                             }
-                            self.admit(intent, Origin::Typed)
+                            let held = self.ui.held.take();
+                            self.admit(intent, Origin::Typed, held)
                         }
                         None => Wake::Leave,
                     },
@@ -609,10 +622,10 @@ impl Tui {
                             if intent.echoed() {
                                 self.echo_sent(&text);
                             }
-                            self.admit(Asked::Core(intent), origin)
+                            self.admit(Asked::Core(intent), origin, None)
                         }
                         Some((_, channel::Inbound::Stop)) => {
-                            self.admit(Asked::Own(Deed::Interrupt), Origin::Typed)
+                            self.admit(Asked::Own(Deed::Interrupt), Origin::Typed, None)
                         }
                         // The QR, an error, a way out of one: on the lane the
                         // channel follows, where it lasts and can be re-read.
@@ -635,6 +648,11 @@ impl Tui {
                     .queued
                     .remove(0);
                 origin = queued.origin;
+                if let Some(line) = &queued.line {
+                    let view = front_view(&mut self.views, self.core.lane());
+                    self.ui.submit(view, line);
+                    view.surface.scroll = 0;
+                }
                 Wake::Do(Asked::Core(queued.intent))
             };
             // Out here, where all of `self` is free again.

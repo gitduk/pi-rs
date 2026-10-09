@@ -227,13 +227,6 @@ async fn main() -> Result<ExitCode> {
         if let Some(warning) = &dialled.warning {
             eprintln!("\x1b[{}m{warning}\x1b[0m", config.theme.muted.codes());
         }
-        if let Some((file, keys)) = &resolved.project {
-            let muted = config.theme.muted.codes();
-            eprintln!("\n\x1b[{muted}m{file}\x1b[0m");
-            for (key, value) in keys {
-                eprintln!("\x1b[{muted}m  {key} {value}\x1b[0m");
-            }
-        }
         if !args.quiet {
             for note in dialled.assumed.iter().chain(&resolved.notes) {
                 eprintln!("\x1b[{}m{note}\x1b[0m", config.theme.muted.codes());

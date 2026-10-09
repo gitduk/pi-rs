@@ -110,6 +110,9 @@ pub enum StreamKind {
 pub(super) struct Queued {
     pub(super) intent: Intent,
     pub(super) origin: Origin,
+    // A typed line, kept off the transcript while it waits: up hands it back
+    // to the editor, or its turn echoes it when it starts.
+    pub(super) line: Option<String>,
 }
 
 pub(super) type Views = std::collections::BTreeMap<u64, View>;

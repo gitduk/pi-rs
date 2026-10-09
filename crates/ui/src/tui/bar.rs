@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use serde::Serialize;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use super::{FLASH, Mark, Ui, screen};
+use super::{Mark, Ui, flash_for, screen};
 use pi_core::core::lane::Lane;
 use pi_core::core::meter::Snapshot;
 use pi_store::args::TierArg;
@@ -74,7 +74,7 @@ impl Ui {
         if self
             .flash
             .as_ref()
-            .is_some_and(|(_, at)| at.elapsed() >= FLASH)
+            .is_some_and(|(line, at)| at.elapsed() >= flash_for(line))
         {
             self.flash = None;
         }

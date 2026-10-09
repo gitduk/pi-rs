@@ -338,10 +338,11 @@ fn a_flash_is_transient_and_stays_out_of_the_transcript() {
     // Backdated past the window: the next frame is the one that drops it,
     // which is what an idle screen relies on.
     let (text, _) = ui.flash.take().expect("a flash is up");
+    let window = crate::tui::flash_for(&text);
     ui.flash = Some((
         text,
         std::time::Instant::now()
-            .checked_sub(crate::tui::FLASH)
+            .checked_sub(window)
             .expect("a clock"),
     ));
     ui.flush(&lane, &mut view);
@@ -974,10 +975,12 @@ async fn a_queued_line_remembers_the_channel_it_came_from() {
     tui.admit(
         Asked::Core(Intent::Prompt("from the phone".into())),
         Origin::Channel("wechat"),
+        None,
     );
     tui.admit(
         Asked::Core(Intent::Prompt("typed here".into())),
         Origin::Typed,
+        None,
     );
 
     let from: Vec<_> = view_at(&mut tui.views, token)

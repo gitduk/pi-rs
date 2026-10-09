@@ -322,14 +322,25 @@ impl Tui {
                 // The file edited first: what else the reload says follows it.
                 Ok(notes) => {
                     let name = agent::instructions::short(&path, self.core.lane().root());
-                    std::iter::once(format!("{name} — in force from the next turn"))
-                        .chain(notes)
-                        .collect()
+                    let line = format!("{name} — in force from the next turn");
+                    // Nothing else to report: an aside for the bar, not a
+                    // reply that waits on a keypress.
+                    if notes.is_empty() {
+                        self.ui.flash(line);
+                        Vec::new()
+                    } else {
+                        std::iter::once(line).chain(notes).collect()
+                    }
                 }
                 Err(why) => vec![why],
             },
         };
-        self.land_lines(Listing::say(said));
+        if said.is_empty() {
+            self.ui
+                .adopt_config(&self.core, front_view(&mut self.views, self.core.lane()));
+        } else {
+            self.land_lines(Listing::say(said));
+        }
     }
 
     // Hand the terminal to `$EDITOR` on a copy of the line, and take back what

@@ -159,7 +159,6 @@ impl Ui {
     }
 
     // The submitted line onto the screen: the row its answer lands under.
-    // Called only from `Tui::echo_sent`, which alone knows if there's one.
     pub(super) fn submit(&mut self, view: &mut View, line: &str) {
         let rows = Row::prompt(line, &self.paint);
         super::scrollback::open_turn(&mut view.surface.scrollback);
@@ -252,7 +251,7 @@ impl Ui {
         match self.focus {
             Focus::Reply(_) | Focus::Browse => self.pager_key(view, action),
             Focus::Rewind(_) => self.rewind_key(action),
-            Focus::Editor => self.editor_key(lane, view, key, action),
+            Focus::Editor => self.editor_key(lane, view, key, action, running),
         }
     }
 
@@ -400,6 +399,7 @@ impl Ui {
         view: &mut View,
         key: crossterm::event::KeyEvent,
         action: Option<Action>,
+        running: bool,
     ) -> Asked {
         match action {
             Some(Action::LineSubmit) => {
@@ -410,7 +410,7 @@ impl Ui {
                         // The completion's line runs; the prefix that
                         // produced it goes, so it can't resubmit as a stray prompt.
                         self.editor.take();
-                        self.run_line(view, c.line)
+                        self.run_line(view, c.line, running)
                     }
                     Some(MenuEntry::File {
                         start,
@@ -426,7 +426,7 @@ impl Ui {
                     }
                     Some(MenuEntry::Message { .. }) | None => {
                         let typed = self.editor.take();
-                        self.run_line(view, typed)
+                        self.run_line(view, typed, running)
                     }
                 };
             }
@@ -535,7 +535,7 @@ impl Ui {
             Some(Action::MoveLineFirstNonBlank) => self.editor.first_non_blank(),
             Some(Action::MoveBufferStart) => self.buffer_ends(view, true),
             Some(Action::MoveBufferEnd) => self.buffer_ends(view, false),
-            Some(Action::HistoryOlder) => self.editor.up(),
+            Some(Action::HistoryOlder) => self.history_older(view),
             Some(Action::HistoryNewer) => self.editor.down(),
             Some(Action::ScrollPageUp) => self.scroll_view(view, true, self.page_scroll_step()),
             Some(Action::ScrollPageDown) => self.scroll_view(view, false, self.page_scroll_step()),
@@ -636,8 +636,29 @@ impl Ui {
         Asked::Own(Deed::Nothing)
     }
 
+    // Up from the bottom of recall takes back the typed lines still queued,
+    // oldest first and the draft after them, before reaching history.
+    fn history_older(&mut self, view: &mut View) {
+        if self.editor.recalls_next() && view.queued.iter().any(|q| q.line.is_some()) {
+            let mut lines = Vec::new();
+            view.queued.retain_mut(|q| match q.line.take() {
+                Some(line) => {
+                    lines.push(line);
+                    false
+                }
+                None => true,
+            });
+            if !self.editor.is_empty() {
+                lines.push(self.editor.text().to_string());
+            }
+            self.editor.set_line(&lines.join("\n"));
+            return;
+        }
+        self.editor.up();
+    }
+
     // Submit `line` as typed: kept in history if it can be recalled, then read.
-    fn run_line(&mut self, view: &mut View, line: String) -> Asked {
+    fn run_line(&mut self, view: &mut View, line: String, running: bool) -> Asked {
         if input::recallable(&line, &self.commands) {
             self.editor.remember(&line);
         }
@@ -645,7 +666,9 @@ impl Ui {
             return Asked::Own(Deed::Nothing);
         }
         let intent = input::read(&line, &self.commands);
-        if intent.echoed() {
+        if intent.echoed() && running {
+            self.held = Some(line);
+        } else if intent.echoed() {
             self.submit(view, &line);
             view.surface.scroll = 0;
         }

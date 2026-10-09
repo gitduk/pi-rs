@@ -58,9 +58,9 @@ pub struct Resolved {
     pub endpoint: Option<String>,
     /// The MCP servers the config names, for the banner.
     pub mcp: Vec<String>,
-    /// The project file and what it sets that reaches past its checkout, as
-    /// key and value, said at startup: nothing refuses it.
-    pub project: Option<(String, Vec<(String, String)>)>,
+    /// What the project file sets that reaches past its checkout, as key and
+    /// value, said at startup: nothing refuses it.
+    pub project: Vec<(String, String)>,
 }
 
 /// Fails whole or not at all. A half-applied config is worse than a stale one,
@@ -238,7 +238,8 @@ pub fn resolve(
         mcp: mcp_names(config, settings),
         project: settings
             .project_reaching()
-            .map(|(file, keys)| (instructions::short(file, root), keys)),
+            .map(|(_, keys)| keys)
+            .unwrap_or_default(),
     })
 }
 

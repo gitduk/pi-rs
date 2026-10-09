@@ -30,7 +30,7 @@ async fn an_idle_lane_opens_the_rewind_selector() {
     let mut tui = surface(dir.path());
     assert!(
         matches!(
-            tui.admit(Asked::Own(Deed::Rewind), crate::tui::Origin::Typed),
+            tui.admit(Asked::Own(Deed::Rewind), crate::tui::Origin::Typed, None),
             crate::tui::Wake::Nothing
         ),
         "the run in flight refuses it"
@@ -74,7 +74,8 @@ async fn an_idle_lane_opens_the_rewind_selector() {
         "the second opens the selector: {asked:?}"
     );
 
-    let crate::tui::Wake::Do(Asked::Own(deed)) = tui.admit(asked, crate::tui::Origin::Typed) else {
+    let crate::tui::Wake::Do(Asked::Own(deed)) = tui.admit(asked, crate::tui::Origin::Typed, None)
+    else {
         panic!("an idle lane refused the rewind: {:?}", tui.ui.flash);
     };
     tui.carry(deed).await;
@@ -107,7 +108,7 @@ async fn the_rewind_of_a_lane_with_no_transcript_says_so() {
     );
 
     let crate::tui::Wake::Do(Asked::Own(deed)) =
-        tui.admit(Asked::Own(Deed::Rewind), crate::tui::Origin::Typed)
+        tui.admit(Asked::Own(Deed::Rewind), crate::tui::Origin::Typed, None)
     else {
         panic!("an idle lane refused the rewind: {:?}", tui.ui.flash);
     };
