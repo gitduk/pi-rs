@@ -18,8 +18,6 @@ impl Ui {
         } else {
             view.surface.scroll.saturating_sub(step)
         };
-        // Screen positions shifted, so the old hover index is stale.
-        self.hovered_scrollback = None;
     }
 
     fn target_at(&self, row: u16) -> Option<Target> {
@@ -30,7 +28,7 @@ impl Ui {
 
     /// The scrollback row and line under the cursor, if the cursor is over
     /// that line's own text.
-    fn hovered_row(&self, view: &View, col: u16, row: u16) -> Option<(usize, usize)> {
+    pub(super) fn hovered_row(&self, view: &View, col: u16, row: u16) -> Option<(usize, usize)> {
         let target = self.target_at(row)?;
         let Target::Scrollback(idx, line) = target else {
             return None;
@@ -65,6 +63,7 @@ impl Ui {
     }
 
     pub(super) fn on_mouse_move(&mut self, view: &mut View, col: u16, row: u16) {
+        self.pointer = Some((col, row));
         self.hovered_scrollback = self.hovered_row(view, col, row);
     }
 
@@ -87,8 +86,10 @@ impl Ui {
                         Ok(()) => format!("copied {}", super::row::count(lines, "line")),
                         Err(e) => format!("not copied: {e}"),
                     };
-                    if view.surface.scrollback[idx].badged(&self.paint, width) {
-                        self.copied = Some((idx, said, std::time::Instant::now()));
+                    let row = &mut view.surface.scrollback[idx];
+                    if row.badged(&self.paint, width) {
+                        row.say_copied(said);
+                        self.copied = Some(std::time::Instant::now());
                     } else {
                         self.flash(said);
                     }

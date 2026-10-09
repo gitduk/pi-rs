@@ -49,6 +49,12 @@ pub(super) struct Ui {
     // Which row of the list is highlighted; the list itself is derived
     // from what's typed. `None` anchors a fresh list on its bottom row.
     pub(super) picked: Option<usize>,
+    // The list's first shown row, kept across frames: rebuilt from zero, the
+    // window would pin the highlight to its bottom edge.
+    pub(super) menu_top: usize,
+    // The line `picked` and `menu_top` were set against: both are positions
+    // in the list it grew, so another line or the rewind list starts over.
+    pub(super) picked_for: Option<String>,
     // Text the list was dismissed at. Any edit brings the list back —
     // Esc means "not that", not "never again".
     pub(super) dismissed_at: Option<String>,
@@ -83,15 +89,20 @@ pub(super) struct Ui {
     // A note answering the last keypress, and when it landed. It stands
     // where the layout puts it for `FLASH` and then goes — see `bar_lines`.
     pub(super) flash: Option<(String, Instant)>,
-    // What a click copied, said beside that scrollback row's badge for `FLASH`.
-    pub(super) copied: Option<(usize, String, Instant)>,
+    // When a click last copied: the row says so for `FLASH`, and the loop
+    // ticks until it is gone.
+    pub(super) copied: Option<Instant>,
     // Each pasted image's file, `[Image #n …]` on the line naming `n - 1`.
     pub(super) images: Vec<std::path::PathBuf>,
     // What the bar's rows hold: the script's last answer, or the default.
     pub(super) layout: pi_store::bar::Layout,
     // The scrollback row and line under the mouse, when a click there
-    // opens or closes something.
+    // opens or closes something. Read off `pointer` and the last frame.
     pub(super) hovered_scrollback: Option<(usize, usize)>,
+    // Where the mouse last was: rows move under a still one as output lands.
+    pub(super) pointer: Option<(u16, u16)>,
+    // The frame just drawn showed a hover its own layout disagrees with.
+    pub(super) redraw: bool,
     pub(super) row_targets: Vec<Target>,
     // Rows of the top drawn line scrolled off above the window.
     pub(super) top_cut: usize,
@@ -177,7 +188,6 @@ impl Ui {
     pub(super) fn leave_lane(&mut self, view: &mut View) {
         view.draft = self.editor.take_composing();
         self.flash = None;
-        self.copied = None;
         if matches!(self.focus, Focus::Rewind(_)) {
             self.focus = Focus::Editor;
         }
@@ -211,6 +221,8 @@ impl Ui {
             tty_bg: None,
             bang_prompt,
             picked: None,
+            menu_top: 0,
+            picked_for: None,
             dismissed_at: None,
             focus: Focus::Editor,
             last_press: None,
@@ -227,6 +239,8 @@ impl Ui {
             images: Vec::new(),
             layout: Default::default(),
             hovered_scrollback: None,
+            pointer: None,
+            redraw: false,
             row_targets: Vec::new(),
             top_cut: 0,
             drawn: Vec::new(),

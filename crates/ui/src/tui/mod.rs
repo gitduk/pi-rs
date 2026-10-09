@@ -233,11 +233,6 @@ impl Tui {
         let _ = tool::state::write_private(&path, editor::encode(keep).as_bytes());
     }
 
-    // Refreshes the completion menu's session list after it changes.
-    fn refresh_sessions(&mut self) {
-        self.ui.lists.forget();
-    }
-
     // Brings the screen into step after a lane switch: parks the old
     // lane's draft, restores the new one's, follows lists, replays news.
     fn reconcile(&mut self, was: usize) {
@@ -282,8 +277,8 @@ impl Tui {
         // Carries its own transcript: the lane it moves to was opened
         // with one, even if the lane being left has a run writing it.
         self.rebuild_front();
-        // `at` forgets both lists, standing in for `refresh_sessions`: a
-        // swap that didn't move repeats the root, dropping them either way.
+        // `at` forgets the lists: a swap that didn't move repeats the root,
+        // dropping them either way.
         self.ui.lists.at(self.core.lane_mut().root());
         self.ui.open_reply(said);
     }
@@ -510,6 +505,9 @@ impl Tui {
             self.ui.jobs = self.drivers.later().jobs(self.core.lane().root());
             let view = front_view(&mut self.views, self.core.lane());
             self.ui.flush(self.core.lane(), view);
+            if std::mem::take(&mut self.ui.redraw) {
+                continue;
+            }
             // After the frame, not before it: a fork here would hold the
             // screen blank. Read again whenever something dropped the list.
             if self.ui.lists.worktrees_read().is_none() {

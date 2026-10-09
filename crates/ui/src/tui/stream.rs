@@ -367,7 +367,7 @@ impl Ui {
         if self
             .copied
             .as_ref()
-            .is_some_and(|(.., at)| at.elapsed() >= super::FLASH)
+            .is_some_and(|at| at.elapsed() >= super::FLASH)
         {
             self.copied = None;
         }
@@ -377,8 +377,6 @@ impl Ui {
             let flight: &[PendingTool] = if Some(idx) == last { &held } else { &[] };
             let hovered = self.hovered_scrollback.filter(|h| h.0 == idx).map(|h| h.1);
             row.update_live(hovered, self.spinner, flight);
-            let copied = self.copied.as_ref().filter(|c| c.0 == idx);
-            row.say_copied(copied.map(|c| c.1.as_str()));
         }
         let (live, pending_rows) = self.live(lane, view, row_holds, now);
 
@@ -486,13 +484,17 @@ impl Ui {
             if let Some(reply) = &reply {
                 frame.render_widget(Rows(reply), regions.menu);
             } else if !items.is_empty() {
-                let mut state = ListState::default();
-                state.select(Some(picked));
+                // Kept full: ratatui won't pull back an offset that a taller
+                // screen or a changed list left past the end.
+                let mut state = ListState::default()
+                    .with_offset(self.menu_top.min(menu.len() - menu_h))
+                    .with_selected(Some(picked));
                 frame.render_stateful_widget(
                     List::new(items).highlight_style(cursor),
                     regions.menu,
                     &mut state,
                 );
+                self.menu_top = state.offset();
             }
             frame.render_widget(Rows(&bar), regions.bar);
             // Before the rows, so a span over the band keeps it: the columns the
@@ -514,6 +516,14 @@ impl Ui {
                 frame.set_cursor_position((caret.1, caret_row));
             }
         });
+        // Bold doesn't move a row, so a second frame settles it.
+        let over = self
+            .pointer
+            .and_then(|(col, row)| self.hovered_row(view, col, row));
+        if over != self.hovered_scrollback {
+            self.hovered_scrollback = over;
+            self.redraw = true;
+        }
     }
 
     // Rebuilds from the transcript, discarding the old drawing — a rewind

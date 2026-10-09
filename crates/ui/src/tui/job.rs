@@ -462,9 +462,6 @@ impl Tui {
         if recovered && let Err(e) = self.core.save_lane(lane) {
             self.say_of(lane, core::not_saved(&e));
         }
-        // The save put the session on disk, the one `/resume` is likeliest to
-        // want back; make the completion list see it.
-        self.refresh_sessions();
 
         // The run's totals (subagents' included) land on its lane; an
         // interrupted run lands as the spend the view showed.
@@ -550,7 +547,6 @@ impl Tui {
             if back && let Err(e) = self.core.save_lane(lane) {
                 self.say_of(lane, core::not_saved(&e));
             }
-            self.refresh_sessions();
         } else if stopped {
             // Nothing written, nothing to report or save — same word a
             // stopped turn ends on.

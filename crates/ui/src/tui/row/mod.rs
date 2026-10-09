@@ -2,6 +2,7 @@
 //! private, so the two producers (live stream, rebuild) can't disagree.
 
 use std::cell::RefCell;
+use std::time::Instant;
 
 use llm::message::{ToolResult, ToolResultContent};
 use ratatui::style::{Modifier, Style as RStyle};
@@ -104,7 +105,7 @@ enum Kind {
         badge: Line<'static>,
         code: String,
         hovered: bool,
-        copied: Option<String>,
+        copied: Option<(String, Instant)>,
     },
     // A closed mermaid block or a table, drawn for the width it is shown at:
     // a resize draws it again, or shows its source when it no longer fits.
@@ -115,7 +116,7 @@ enum Kind {
         // At which width, and whether a badge heads it.
         painted: RefCell<Option<(usize, Line<'static>, bool)>>,
         hovered: bool,
-        copied: Option<String>,
+        copied: Option<(String, Instant)>,
     },
     // A painted line the screen alone knows: banner, command output,
     // warning. `times` collapses an identical repeat into one row+count.
@@ -482,9 +483,22 @@ impl Row {
                 *painted.borrow_mut() = None;
             }
             // Bold is no wider, so no height moves.
-            Kind::Code { hovered: h, .. }
-            | Kind::Block { hovered: h, .. }
-            | Kind::Relayed { hovered: h, .. } => {
+            Kind::Code {
+                hovered: h, copied, ..
+            }
+            | Kind::Block {
+                hovered: h, copied, ..
+            } => {
+                *h = hovered.is_some();
+                if copied
+                    .as_ref()
+                    .is_some_and(|(_, at)| at.elapsed() >= super::FLASH)
+                {
+                    *copied = None;
+                    self.1.clear();
+                }
+            }
+            Kind::Relayed { hovered: h, .. } => {
                 *h = hovered.is_some();
             }
             _ => {}
@@ -520,12 +534,10 @@ impl Row {
         Self::result(!r.is_error, r.name.clone(), preview)
     }
 
-    /// Say `said` beside this row's first line, or stop saying it.
-    pub fn say_copied(&mut self, said: Option<&str>) {
-        if let Kind::Code { copied, .. } | Kind::Block { copied, .. } = &mut self.0
-            && copied.as_deref() != said
-        {
-            *copied = said.map(str::to_string);
+    /// Say `said` beside this row's first line, until `FLASH` has passed.
+    pub fn say_copied(&mut self, said: String) {
+        if let Kind::Code { copied, .. } | Kind::Block { copied, .. } = &mut self.0 {
+            *copied = Some((said, Instant::now()));
             self.1.clear();
         }
     }
@@ -720,7 +732,11 @@ impl Row {
                 copied,
                 ..
             } => (
-                beside(bolded(badge.clone(), *hovered), copied.as_deref(), paint),
+                beside(
+                    bolded(badge.clone(), *hovered),
+                    copied.as_ref().map(|(said, _)| said.as_str()),
+                    paint,
+                ),
                 None,
             ),
             Kind::Block {
@@ -741,7 +757,10 @@ impl Row {
                 };
                 let line = bolded(line, *hovered && badged);
                 // Beside a table's border it could wrap and split the table.
-                let copied = copied.as_deref().filter(|_| badged);
+                let copied = copied
+                    .as_ref()
+                    .map(|(said, _)| said.as_str())
+                    .filter(|_| badged);
                 (beside(line, copied, paint), None)
             }
             Kind::Notice { text, times } if *times == 1 => (text.clone(), None),

@@ -189,6 +189,9 @@ pub struct Progress {
 #[derive(Debug, Clone)]
 pub struct Store {
     root: PathBuf,
+    // Shared by every clone: the core writes through one, the menu reads
+    // through another.
+    version: std::sync::Arc<AtomicU64>,
 }
 
 impl Default for Store {
@@ -355,7 +358,10 @@ fn workspace_of(transcripts: &[PathBuf]) -> Option<String> {
 
 impl Store {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            version: Default::default(),
+        }
     }
 
     // The directory one workspace's transcripts live in.
@@ -378,6 +384,16 @@ impl Store {
         self.dir_of(workspace)
             .join(tool::state::file_stem(id))
             .join(super::journal::JOURNAL_FILE)
+    }
+
+    /// Moves with every write that can change what [`Store::choices`]
+    /// answers, so a cached list can tell it is behind without being told.
+    pub fn version(&self) -> u64 {
+        self.version.load(Ordering::Relaxed)
+    }
+
+    fn changed(&self) {
+        self.version.fetch_add(1, Ordering::Relaxed);
     }
 
     /// The tree every bucket sits in, for the sweeps that walk all of them.
@@ -452,6 +468,7 @@ impl Store {
         std::fs::rename(&from, &dir)
             .with_context(|| format!("cannot move session `{id}` here from {}", from.display()))?;
         held.dir = dir;
+        self.changed();
         Ok(held)
     }
 
@@ -468,6 +485,7 @@ impl Store {
         session: &Session,
     ) -> Result<PathBuf> {
         let path = self.path_of(workspace, id);
+        self.changed();
         write(&path, id, workspace, model, name, created, session)
     }
 
@@ -594,6 +612,7 @@ impl Store {
     /// Reachability alone isn't safe: an unmounted disk looks gone too. Age
     /// is what tells the two apart.
     pub fn prune(&self) {
+        self.changed();
         self.prune_older_than(UNREACHED_KEEP);
     }
 
@@ -601,6 +620,7 @@ impl Store {
     /// about to be resumed.
     pub fn forget_older_than(&self, keep: std::time::Duration, spare: Option<&str>) {
         let spare = spare.map(tool::state::file_stem);
+        self.changed();
         for (bucket, transcripts) in self.buckets() {
             for transcript in &transcripts {
                 let Some(dir) = transcript.parent() else {
@@ -654,6 +674,7 @@ impl Store {
     /// One session at a time: a bucket goes whole only when every
     /// transcript in it was recorded under `root`.
     pub fn drop_under(&self, root: &Path) -> usize {
+        self.changed();
         let mut dropped = 0;
         for (bucket, transcripts) in self.buckets() {
             // Each transcript names the workspace it was saved under; split
@@ -1089,6 +1110,32 @@ mod tests {
         assert!(store.path_of(b, "s").is_file());
         assert!(store.subagent_path(b, "s", "s-sub").is_file());
         assert!(!store.path_of(a, "s").parent().unwrap().exists());
+    }
+
+    // The menu's cached `/resume` list is dropped by this number alone: a
+    // write that changes `choices` without moving it leaves the list stale.
+    #[test]
+    fn writes_that_change_the_choices_move_the_version_every_clone_sees() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::new(tmp.path());
+        let reader = store.clone();
+        let (a, b) = (Path::new("/a"), Path::new("/b"));
+        let log = log_with(vec![Message::user("x")]);
+
+        let mut seen = reader.version();
+        let mut moved = |what: &str| {
+            assert_ne!(reader.version(), seen, "{what} left the version");
+            seen = reader.version();
+        };
+        store.save("s", a, "m", Some("named"), 1, &log).unwrap();
+        moved("save");
+        let (_, claim) = store.take(b, "s").unwrap();
+        drop(claim);
+        moved("a move from another workspace");
+        store.drop_under(b);
+        moved("drop_under");
+        store.forget_older_than(std::time::Duration::ZERO, None);
+        moved("forget_older_than");
     }
 
     #[test]

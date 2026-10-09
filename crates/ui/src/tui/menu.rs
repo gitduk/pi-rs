@@ -30,6 +30,11 @@ impl Ui {
             Focus::Reply(_) | Focus::Browse => return Vec::new(),
             Focus::Editor => {}
         }
+        if self.picked_for.as_deref() != Some(self.editor.text()) {
+            self.picked_for = Some(self.editor.text().to_string());
+            self.picked = None;
+            self.menu_top = 0;
+        }
         if self.dismissed_at.as_deref() == Some(self.editor.text()) {
             return Vec::new();
         }
@@ -47,7 +52,6 @@ impl Ui {
             {
                 let items = pi_core::input::complete::candidates(query, &self.at_root);
                 self.at_menu = Some((query.to_string(), items));
-                self.picked = None;
             }
             let (_, items) = self.at_menu.as_ref().expect("set above");
             return items
@@ -62,6 +66,7 @@ impl Ui {
                 })
                 .collect();
         }
+        self.lists.catch_up();
         // Bottom-up: the best match belongs on the row right above the input.
         pi_core::input::commands::complete(
             self.editor.text(),
@@ -80,10 +85,12 @@ impl Ui {
     // Open the rewind selector on the given messages, newest selected first.
     pub(super) fn open_rewind(&mut self, rows: Vec<MenuEntry>) {
         self.picked = Some(rows.len().saturating_sub(1));
+        self.picked_for = None;
+        self.menu_top = 0;
         self.focus = Focus::Rewind(rows);
     }
 
-    // The highlighted row, clamped: the list shrinks as the word grows.
+    // The highlighted row, clamped: a list can change under the same line.
     pub(super) fn highlighted(&mut self) -> Option<MenuEntry> {
         let mut menu = self.menu();
         if menu.is_empty() {
@@ -102,7 +109,6 @@ impl Ui {
             format!("@{path} ")
         };
         self.editor.splice(start, end, &token);
-        self.picked = None;
     }
 
     // The menu's rows as ratatui list items. The selected row is styled by
@@ -557,7 +563,6 @@ impl Ui {
                     if c.more {
                         self.editor.insert(' ');
                     }
-                    self.picked = None;
                 }
                 Some(MenuEntry::File {
                     start,
@@ -708,6 +713,8 @@ pub(super) struct Lists {
     pub(super) store: Store,
     pub(super) workspace: std::path::PathBuf,
     pub(super) sessions: std::cell::OnceCell<Vec<ResumeChoice>>,
+    // The store's version `sessions` was read at.
+    pub(super) sessions_at: u64,
     pub(super) worktrees: std::cell::OnceCell<Vec<Choice>>,
     pub(super) editable: std::cell::OnceCell<Vec<Choice>>,
     // The flags `/edit`'s list depends on: `--system`, `--no-context-files`.
@@ -720,6 +727,7 @@ impl Lists {
             store,
             workspace,
             sessions: std::cell::OnceCell::new(),
+            sessions_at: 0,
             worktrees: std::cell::OnceCell::new(),
             editable: std::cell::OnceCell::new(),
             pinned: Default::default(),
@@ -734,6 +742,16 @@ impl Lists {
                 .map(Choice::from)
                 .collect()
         })
+    }
+
+    // Drops the session list once the store has written since it was read:
+    // whatever saved, renamed or moved a session needn't say so.
+    pub(super) fn catch_up(&mut self) {
+        let now = self.store.version();
+        if self.sessions_at != now {
+            self.sessions.take();
+            self.sessions_at = now;
+        }
     }
 
     pub(super) fn sessions(&self) -> &[ResumeChoice] {
@@ -765,8 +783,8 @@ impl Lists {
         self.worktrees.get().map(Vec::as_slice)
     }
 
-    // A turn or switch can change either list. Dropped, not recomputed —
-    // whoever asks next pays, and usually nobody does.
+    // A switch, a checkout gone or a file `/edit` made changes them. Dropped,
+    // not recomputed — whoever asks next pays, and usually nobody does.
     pub(super) fn forget(&mut self) {
         self.sessions.take();
         self.worktrees.take();
