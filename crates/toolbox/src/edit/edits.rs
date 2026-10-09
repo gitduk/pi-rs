@@ -445,8 +445,11 @@ fn block(
     // same block, so multiple matching rows count as one candidate.
     let mut seen: Vec<(usize, usize)> = Vec::new();
     let mut hits: Vec<usize> = Vec::new();
+    // An address names a block, not a row: the outline sets a block's first
+    // row, annotation and all, beside a declaration that may open rows below.
+    let wanted = named.map(|at| opens.get(&at));
     for row in opens.keys().copied() {
-        if named.is_some_and(|at| at != row) {
+        if wanted.is_some_and(|w| w != Some(&opens[&row])) {
             continue;
         }
         if !lines
@@ -468,7 +471,7 @@ fn block(
                 path: path.to_string(),
                 index,
                 text: needle.to_string(),
-                available: openings(lines, opens),
+                available: openings(path, body),
             });
         }
         n => {
@@ -495,28 +498,28 @@ fn block(
     Ok((from..to, body[from..to].to_string()))
 }
 
-// Lists what the file does open, so the fix is copying one back into the
-// anchor. One line per block, keyed by its actual opening row.
-fn openings(lines: &[&str], opens: &BTreeMap<usize, (usize, usize)>) -> String {
-    let mut starts: Vec<usize> = opens.values().map(|(start, _)| *start).collect();
-    starts.sort_unstable();
-    starts.dedup();
-    let mut rows: Vec<&str> = Vec::new();
-    for n in starts {
-        if let Some(text) = lines.get(n - 1).map(|l| l.trim())
-            && !rows.contains(&text)
-        {
-            rows.push(text);
-        }
-    }
+// Lists the declarations the outline does, spelled as it spells them, so the
+// fix is copying one back into the anchor.
+fn openings(path: &str, body: &str) -> String {
+    let Some(lang) = crate::syntax::Lang::of(path) else {
+        return String::new();
+    };
+    let items = crate::syntax::outline(lang, body);
+    let spans = crate::rows::of(&items);
+    let rows: Vec<String> = items
+        .iter()
+        .map(|item| {
+            format!(
+                "{}{}",
+                crate::rows::addr(item.line, &spans),
+                crop(&item.text, 60)
+            )
+        })
+        .collect();
     if rows.is_empty() {
         return String::new();
     }
-    let shown: Vec<String> = rows
-        .iter()
-        .take(5)
-        .map(|r| format!("`{}`", crop(r, 60)))
-        .collect();
+    let shown: Vec<String> = rows.iter().take(5).map(|r| format!("`{r}`")).collect();
     let rest = rows.len().saturating_sub(shown.len());
     if rest > 0 {
         format!(" — the file opens: {}, and {rest} more", shown.join(", "))

@@ -642,6 +642,114 @@ async fn a_whole_block_anchor_matching_two_rows_of_one_annotation_is_not_ambiguo
     );
 }
 
+// An outline row puts a block's first row, annotation included, beside its
+// declaration: copied verbatim, it names that block and no other.
+#[tokio::test]
+async fn a_whole_block_anchor_copied_from_the_outline_resolves() {
+    for (file, body, decl, with, after) in [
+        (
+            "a.rs",
+            "/// one\n#[inline]\npub fn f() {\n    1\n}\n\nfn g() {\n    2\n}\n",
+            "pub fn f() {",
+            "fn z() {}",
+            "fn z() {}\n\nfn g() {\n    2\n}\n",
+        ),
+        (
+            "a.py",
+            "@dec\ndef f():\n    return 1\n\ndef g():\n    return 2\n",
+            "def f():",
+            "z = 1",
+            "z = 1\n\ndef g():\n    return 2\n",
+        ),
+    ] {
+        let (_d, c) = ctx();
+        let path = c.workspace.root().join(file);
+        std::fs::write(&path, body).unwrap();
+        let outline = run(
+            &toolbox::read::Read,
+            json!({ "path": file, "outline": true }),
+            &c,
+        )
+        .await;
+        let anchor = outline
+            .lines()
+            .find(|l| l.ends_with(decl))
+            .unwrap_or_else(|| panic!("{file}: no outline row for {decl}: {outline}"));
+        assert!(
+            anchor.starts_with("1-"),
+            "the row is the annotation's: {anchor}"
+        );
+
+        toolbox::edit::Edit
+            .execute(
+                json!({ "path": file, "edits": [
+                    { "old_string": anchor, "new_string": with, "whole_block": true }
+                ]}),
+                &c,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{file}: {anchor} names its block: {e}"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), after, "{file}");
+    }
+}
+
+// An address picks one block; text from a block nested in it doesn't stand in.
+#[tokio::test]
+async fn a_whole_block_address_does_not_reach_into_a_nested_block() {
+    let (_d, c) = ctx();
+    let path = c.workspace.root().join("a.rs");
+    std::fs::write(&path, "impl X {\n    fn g(&self) {\n        1;\n    }\n}\n").unwrap();
+    view(&c, "a.rs").await;
+
+    let refused = toolbox::edit::Edit
+        .execute(
+            json!({ "path": "a.rs", "edits": [
+                { "old_string": "1:fn g(&self) {", "new_string": "fn z() {}", "whole_block": true }
+            ]}),
+            &c,
+        )
+        .await;
+    assert!(
+        refused.is_err(),
+        "row 1 is the impl's, not g's: {refused:?}"
+    );
+}
+
+// A missed anchor is answered with the declarations, as the outline spells
+// them: a statement row is no block worth naming, and the row copied resolves.
+#[tokio::test]
+async fn a_missed_block_anchor_lists_the_declarations_to_copy() {
+    let (_d, c) = ctx();
+    let path = c.workspace.root().join("a.rs");
+    let body = "/// one\n#[inline]\npub fn f() {\n    1\n}\n\nfn g() {\n    2\n}\n";
+    std::fs::write(&path, body).unwrap();
+    view(&c, "a.rs").await;
+
+    let edit = |anchor: &str| {
+        json!({ "path": "a.rs", "edits": [
+            { "old_string": anchor, "new_string": "fn z() {}", "whole_block": true }
+        ]})
+    };
+    let err = toolbox::edit::Edit
+        .execute(edit("fn h() {"), &c)
+        .await
+        .expect_err("no block opens with it")
+        .to_string();
+    assert!(
+        err.ends_with("the file opens: `1-5:pub fn f() {`, `7-9:fn g() {`"),
+        "{err}"
+    );
+
+    toolbox::edit::Edit
+        .execute(edit("1-5:pub fn f() {"), &c)
+        .await
+        .expect("the row the refusal offered names its block");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "fn z() {}\n\nfn g() {\n    2\n}\n"
+    );
+}
+
 // The mark is stripped from the view so an anchor copied from it matches, and
 // it survives on disk: the edit must not quietly destroy it.
 #[tokio::test]
