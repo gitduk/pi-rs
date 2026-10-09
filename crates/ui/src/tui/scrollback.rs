@@ -506,6 +506,9 @@ pub(super) fn scrollback_from(
                             push_tool_row(&mut out, folds, r, result);
                         }
                     } else {
+                        if matches!(other, LogEntry::Ask { .. } | LogEntry::Bash { .. }) {
+                            open_turn(&mut out);
+                        }
                         out.extend(rows);
                     }
                 }
@@ -513,6 +516,14 @@ pub(super) fn scrollback_from(
         }
     }
     out
+}
+
+/// Space a turn off from the one before it, so turns read apart; the
+/// first has nothing above it to be set off from.
+pub(super) fn open_turn(rows: &mut Vec<Row>) {
+    if rows.iter().rev().any(Row::opens_turn) {
+        rows.push(Row::gap());
+    }
 }
 
 /// One entry's rows, as both the rebuild and a fresh adoption draw them.

@@ -191,6 +191,16 @@ impl Row {
         })
     }
 
+    /// The blank line a turn after the first opens on.
+    pub fn gap() -> Self {
+        Self::new(Kind::Answer(Line::default()))
+    }
+
+    /// Whether this row is where a turn begins: something said, or relayed.
+    pub fn opens_turn(&self) -> bool {
+        matches!(&self.0, Kind::Said { .. } | Kind::Relayed { .. })
+    }
+
     /// A turn pi sent on the model's behalf, folded under `label`.
     pub fn relayed(label: &str, text: &str, paint: &Paint) -> Self {
         // A one-line text the label already says opens onto nothing new.

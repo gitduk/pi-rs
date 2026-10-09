@@ -125,6 +125,7 @@ impl Ui {
     // Called only from `Tui::echo_sent`, which alone knows if there's one.
     pub(super) fn submit(&mut self, view: &mut View, line: &str) {
         let rows = Row::prompt(line, &self.paint);
+        super::scrollback::open_turn(&mut view.surface.scrollback);
         view.surface.scrollback.extend(rows);
         view.surface
             .folds
@@ -133,6 +134,7 @@ impl Ui {
 
     pub(super) fn submit_relayed(&mut self, view: &mut View, label: &str, line: &str) {
         let row = Row::relayed(label, line, &self.paint);
+        super::scrollback::open_turn(&mut view.surface.scrollback);
         view.surface.scrollback.push(row);
         view.surface
             .folds
