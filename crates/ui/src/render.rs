@@ -206,29 +206,34 @@ fn fenced(
     lines: Vec<Line<'static>>,
     badge: ratatui::style::Style,
     muted: ratatui::style::Style,
-) -> Vec<(Line<'static>, Option<String>)> {
+) -> Vec<(Line<'static>, Coded)> {
     let mut open: Option<(usize, Vec<String>)> = None;
     let mut out = Vec::with_capacity(lines.len());
     for line in lines {
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         let Some(lang) = text.strip_prefix(FENCE) else {
-            if let Some((_, body)) = &mut open {
-                body.push(text);
-            }
-            out.push((line, None));
+            let coded = match &mut open {
+                Some((_, body)) => {
+                    body.push(text);
+                    Coded::Code
+                }
+                None => Coded::Text,
+            };
+            out.push((line, coded));
             continue;
         };
         match open.take() {
-            Some((at, body)) => out[at].1 = Some(body.join("\n")),
+            Some((at, body)) => out[at].1 = Coded::Badge(body.join("\n")),
             None => {
                 let (lang, note) = lang.trim().split_once(' ').unwrap_or((lang.trim(), ""));
                 open = Some((out.len(), Vec::new()));
-                out.push((badge_with(lang, note.trim(), badge, muted), None));
+                let badge = badge_with(lang, note.trim(), badge, muted);
+                out.push((badge, Coded::Badge(String::new())));
             }
         }
     }
     if let Some((at, body)) = open {
-        out[at].1 = Some(body.join("\n"));
+        out[at].1 = Coded::Badge(body.join("\n"));
     }
     out
 }
@@ -291,6 +296,17 @@ impl tui_markdown::StyleSheet for PiStyleSheet {
 
 /// Parse and render markdown into styled lines using `tui-markdown` and theme.
 /// Styles ride on the spans; nothing here speaks SGR.
+/// What a rendered line is to the code blocks around it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Coded {
+    Text,
+    /// A block's badge, carrying the block's text for a click to copy.
+    Badge(String),
+    /// A line inside a block: drawn on the block's band, so where the band
+    /// stops is where the block ends.
+    Code,
+}
+
 pub fn render_markdown(text: &str, paint: &Paint) -> Vec<ratatui::text::Line<'static>> {
     render_coded(text, paint)
         .into_iter()
@@ -298,15 +314,16 @@ pub fn render_markdown(text: &str, paint: &Paint) -> Vec<ratatui::text::Line<'st
         .collect()
 }
 
-/// The same lines, each code block's badge paired with the block's text.
-pub fn render_coded(text: &str, paint: &Paint) -> Vec<(Line<'static>, Option<String>)> {
+/// The same lines, each with what it is to a code block.
+pub fn render_coded(text: &str, paint: &Paint) -> Vec<(Line<'static>, Coded)> {
     if text.is_empty() {
         return Vec::new();
     }
+    // The fences stay in the text, so they still mark where a block ends.
     if !paint.color {
         return text
             .lines()
-            .map(|l| (Line::from(l.to_string()), None))
+            .map(|l| (Line::from(l.to_string()), Coded::Text))
             .collect();
     }
     let trimmed = trim_partial_fences(text);
@@ -795,7 +812,19 @@ mod tests {
         let code = "fn main() {\n    let x = 1;\n\n\tx\n}";
         let text = format!("before\n\n```rust\n{code}\n```\n\nafter");
         let coded = super::render_coded(&text, &super::Paint::new(true));
-        let carried: Vec<_> = coded.iter().filter_map(|(_, c)| c.as_deref()).collect();
+        let carried: Vec<_> = coded
+            .iter()
+            .filter_map(|(_, c)| match c {
+                super::Coded::Badge(code) => Some(code.as_str()),
+                _ => None,
+            })
+            .collect();
         assert_eq!(carried, [code]);
+        // Every line of the block, and nothing past it, is drawn on the band.
+        let banded = coded
+            .iter()
+            .filter(|(_, c)| *c == super::Coded::Code)
+            .count();
+        assert_eq!(banded, code.lines().count());
     }
 }

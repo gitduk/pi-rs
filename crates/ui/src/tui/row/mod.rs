@@ -97,6 +97,11 @@ enum Kind {
     // What the model answered, one row per markdown line. Its own kind,
     // not a notice — an answer is half the conversation, not screen-only.
     Answer(Line<'static>),
+    // A line of an answer's code block, on the block's band.
+    CodeLine {
+        line: Line<'static>,
+        band: Option<RStyle>,
+    },
     // A code block's badge, holding the block's text for a click to copy.
     Code {
         badge: Line<'static>,
@@ -140,7 +145,9 @@ enum Kind {
     // answer: one line naming it, its text under the line once opened.
     Relayed {
         label: String,
-        body: Vec<Line<'static>>,
+        // Each line, and whether it sits in a code block, on `band`.
+        body: Vec<(Line<'static>, bool)>,
+        band: Option<RStyle>,
         open: bool,
         hovered: bool,
     },
@@ -172,6 +179,7 @@ impl Row {
             &self.0,
             Kind::Said { .. }
                 | Kind::Answer(_)
+                | Kind::CodeLine { .. }
                 | Kind::Code { .. }
                 | Kind::Block { .. }
                 | Kind::Relayed { .. }
@@ -193,9 +201,10 @@ impl Row {
         let said = !text.trim().contains('\n') && label.contains(text.trim());
         Self::new(Kind::Relayed {
             label: label.to_string(),
+            band: code_band(paint),
             body: render::render_coded(text, paint)
                 .into_iter()
-                .map(|(line, _)| line)
+                .map(|(line, coded)| (line, coded == render::Coded::Code))
                 .filter(|_| !said)
                 .collect(),
             open: false,
@@ -237,17 +246,19 @@ impl Row {
     /// A whole assistant text block, for a caller that has one. Its mermaid
     /// blocks are rows of their own, drawn at whatever width they get.
     pub fn answer(text: &str, paint: &Paint) -> Vec<Self> {
+        let band = code_band(paint);
         let markdown = |text: &str| {
             render::render_coded(text, paint)
                 .into_iter()
-                .map(|(line, code)| match code {
-                    Some(code) => Self::new(Kind::Code {
+                .map(move |(line, coded)| match coded {
+                    render::Coded::Badge(code) => Self::new(Kind::Code {
                         badge: line,
                         code,
                         hovered: false,
                         copied: None,
                     }),
-                    None => Self::new(Kind::Answer(line)),
+                    render::Coded::Code => Self::new(Kind::CodeLine { line, band }),
+                    render::Coded::Text => Self::new(Kind::Answer(line)),
                 })
         };
         if !paint.color {
@@ -626,6 +637,7 @@ impl Row {
     pub fn len(&self) -> usize {
         match &self.0 {
             Kind::Answer(_)
+            | Kind::CodeLine { .. }
             | Kind::Code { .. }
             | Kind::Block { .. }
             | Kind::Notice { .. }
@@ -697,6 +709,7 @@ impl Row {
         match &self.0 {
             Kind::Said { border, body, .. } => (body.clone(), Some(border.clone())),
             Kind::Answer(text) => (text.clone(), None),
+            Kind::CodeLine { line, .. } => (line.clone(), None),
             Kind::Code {
                 badge,
                 hovered,
@@ -780,10 +793,18 @@ impl Row {
                     None,
                 )
             }
-            Kind::Relayed { body, .. } => (
-                body.get(i - 1).cloned().unwrap_or_default(),
-                Some(Line::from(STEP_INDENT)),
-            ),
+            Kind::Relayed { body, band, .. } => {
+                let (line, code) = body.get(i - 1).cloned().unwrap_or_default();
+                // Banded here, short of the indent: the row's own band is whole.
+                let line = match band.filter(|_| code) {
+                    Some(band) => {
+                        let room = width.saturating_sub(UnicodeWidthStr::width(STEP_INDENT));
+                        super::screen::banded(line, band, room)
+                    }
+                    None => line,
+                };
+                (line, Some(Line::from(STEP_INDENT)))
+            }
             Kind::Steps {
                 steps,
                 pending,
@@ -822,7 +843,7 @@ impl Row {
     /// goes behind the row whole, past the text's own end.
     pub fn band(&self) -> Option<RStyle> {
         match &self.0 {
-            Kind::Said { band, .. } => *band,
+            Kind::Said { band, .. } | Kind::CodeLine { band, .. } => *band,
             _ => None,
         }
     }
@@ -942,6 +963,11 @@ impl Row {
 }
 
 /// What a result says in text, its other parts left out.
+// What a code block's lines sit on: the band its badge is drawn on.
+pub(super) fn code_band(paint: &Paint) -> Option<RStyle> {
+    paint.band(&paint.theme.prompt.panel.said)
+}
+
 pub fn result_text(r: &ToolResult) -> String {
     r.content
         .iter()
