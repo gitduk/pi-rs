@@ -86,7 +86,7 @@ idle_timeout = 300
 #   in_out     8.4k in / 390 out, a dash for a half the provider never stated
 #   cache      41.2k cached, left out when nothing was read from cache
 #   cost       $0.0012, left out when the model carries no pricing
-#   ctx        ctx 54/743.4k, the transcript against what it may occupy
+#   ctx        ctx 9.6k/1.0m, the request against the model's window
 #   compacted  compacted 2×, left out when the run never shrank the transcript
 #   queued     2 queued — lines submitted while the run worked
 #   model      deepseek-v4-flash

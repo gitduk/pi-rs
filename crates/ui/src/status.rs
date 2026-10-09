@@ -28,10 +28,10 @@ pub fn render(segment: Segment, s: &Snapshot) -> Option<String> {
         // a million-token window reads as 0% for most of a session.
         Segment::Ctx => match s.ctx? {
             (_, 0) => return None,
-            (used, budget) => format!(
+            (used, window) => format!(
                 "ctx {}/{}",
                 llm::figures::short(used as u64),
-                llm::figures::short(budget as u64)
+                llm::figures::short(window as u64)
             ),
         },
         Segment::Compacted if s.compactions == 0 => return None,

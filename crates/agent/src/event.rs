@@ -33,11 +33,12 @@ pub enum Event {
     },
     // The transcript was shrunk to fit before this turn was sent.
     Compacted(crate::compaction::ladder::Report),
-    // What the transcript occupies against what it may, for the request just
-    // sent. Ours rather than the provider's: this is what compaction acts on.
+    // What the request just sent occupies — system prompt, tools and
+    // transcript — against the model's window. Ours rather than the
+    // provider's; compaction works to a budget inside this window.
     Context {
         used: usize,
-        budget: usize,
+        window: usize,
     },
     // The request failed in a way worth another attempt.
     Retrying {
@@ -57,8 +58,8 @@ pub enum Event {
     Done {
         turns: usize,
         usage: Usage,
-        // What the transcript occupied against what it was allowed to, in
-        // tokens, for the request that ended the run.
+        // What a request occupied against the model's window, in tokens,
+        // as of the run's end; measured as `Context` is.
         ctx: (usize, usize),
         // How many times the transcript was shrunk to fit during this run.
         compactions: usize,

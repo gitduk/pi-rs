@@ -92,7 +92,7 @@ impl Tally {
                 self.settled.add(usage, self.pricing.cost(usage));
                 self.turn = Usage::default();
             }
-            agent::Event::Context { used, budget } => self.ctx = Some((*used, *budget)),
+            agent::Event::Context { used, window } => self.ctx = Some((*used, *window)),
             agent::Event::Compacted(_) => self.compactions += 1,
             // Replaces the running count (not adds): a compaction summary
             // is a paid call with no event of its own, only caught here.

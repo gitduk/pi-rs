@@ -213,7 +213,14 @@ impl Agent {
                     compactions += 1;
                 }
                 used = llm::estimate::tokens(&sent, &self.model.spec);
-                say(tx, Event::Context { used, budget });
+                let (occupied, window) = self.occupancy(used, window);
+                say(
+                    tx,
+                    Event::Context {
+                        used: occupied,
+                        window,
+                    },
+                );
                 tracing::debug!(
                     target: "pi::loop",
                     parent: &span,
@@ -336,9 +343,9 @@ impl Agent {
                         usage: totals,
                         // Re-measured rather than reused: `used` is what went
                         // out, and the reply landed in the session since.
-                        ctx: (
+                        ctx: self.occupancy(
                             llm::estimate::tokens(&session.context(), &self.model.spec),
-                            budget,
+                            named_window.unwrap_or(self.window()),
                         ),
                         compactions,
                     },
@@ -401,6 +408,20 @@ impl Agent {
             transport: &*self.model.transport,
             spec: &self.model.spec,
         }
+    }
+
+    /// What a request carrying `transcript` tokens of it occupies, against
+    /// `window`: the system prompt and tool schemas ride every request, so
+    /// they count with the transcript — the same measure the window is in.
+    pub fn occupancy(&self, transcript: usize, window: usize) -> (usize, usize) {
+        let fixed = llm::estimate::text(&self.brief.system)
+            + llm::estimate::tool_defs(&self.brief.registry.defs());
+        (fixed + transcript, window)
+    }
+
+    /// The window the spec claims, before any provider has named another.
+    pub fn window(&self) -> usize {
+        self.model.spec.context_window as usize
     }
 
     /// What the transcript may occupy. The reply, the system prompt and the

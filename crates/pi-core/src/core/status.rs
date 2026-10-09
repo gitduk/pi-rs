@@ -54,16 +54,17 @@ impl Core {
         // The last run's own count when there was one; before any, an estimate.
         let held = lane.tally().ctx().or_else(|| {
             let used = llm::estimate::tokens(&lane.session()?.context(), spec);
-            Some((used, lane.agent().budget()))
+            let agent = lane.agent();
+            Some(agent.occupancy(used, agent.window()))
         });
-        if let Some((used, budget)) = held.filter(|&(_, b)| b > 0) {
+        if let Some((used, window)) = held.filter(|&(_, w)| w > 0) {
             rows.push(Row::new([
                 "context".into(),
                 format!(
                     "{} / {} ({}%)",
                     figures::short(used as u64),
-                    figures::short(budget as u64),
-                    used * 100 / budget
+                    figures::short(window as u64),
+                    used * 100 / window
                 ),
             ]));
         }
