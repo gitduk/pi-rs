@@ -395,18 +395,13 @@ pub(super) fn body(
         let border = (!indent.is_empty()).then(|| Line::from(indent));
         screen::wrap(border.as_ref(), &muted, width)
     } else {
-        // Code lines on their block's band, as they will land.
-        let band = super::row::code_band(paint);
+        // Code lines indented, as they will land.
+        let indent = Line::from(super::row::CODE_INDENT);
         render::render_coded(partial, paint)
             .into_iter()
             .flat_map(|(line, coded)| {
-                let band = band.filter(|_| coded == render::Coded::Code);
-                screen::fit(&line, width)
-                    .into_iter()
-                    .map(move |piece| match band {
-                        Some(band) => screen::banded(piece, band, width),
-                        None => piece,
-                    })
+                let border = (coded == render::Coded::Code).then_some(&indent);
+                screen::wrap(border, &line, width)
             })
             .collect()
     }
