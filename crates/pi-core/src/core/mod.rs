@@ -28,6 +28,12 @@ use pi_store::listing::Listing;
 use pi_store::session::Store;
 use pi_store::settings::Settings;
 
+/// Ask rtk what it is now, in the background, so `/status` can say before
+/// the first command does.
+pub fn warm_rtk() {
+    tokio::spawn(toolbox::rtk::warm());
+}
+
 /// The retry schedule, with the defaults the file may leave out. Read where
 /// a run starts rather than kept on the agent, so a reload reaches it.
 pub fn retry(config: &config::Config) -> agent::Retry {

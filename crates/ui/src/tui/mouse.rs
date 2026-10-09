@@ -297,10 +297,15 @@ pub(super) fn at_row_name(path: &str, dir: bool) -> String {
     }
 }
 
+/// The blank rows between the transcript and whatever is pinned under it —
+/// a panel or the bar — so its last line never reads as part of them.
+pub(super) const HISTORY_GAP: u16 = 1;
+
 impl Regions {
     pub(super) fn layout(area: Rect, menu_h: u16, bar_h: u16, editor_h: u16) -> Self {
         let chunks = Layout::vertical([
             Constraint::Fill(1),
+            Constraint::Length(HISTORY_GAP),
             Constraint::Length(menu_h),
             Constraint::Length(bar_h),
             Constraint::Length(editor_h),
@@ -308,9 +313,9 @@ impl Regions {
         .split(area);
         Self {
             history: chunks[0],
-            menu: chunks[1],
-            bar: chunks[2],
-            editor: chunks[3],
+            menu: chunks[2],
+            bar: chunks[3],
+            editor: chunks[4],
         }
     }
 }

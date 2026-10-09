@@ -336,7 +336,8 @@ impl Ui {
         let caret_in_view = (caret.0 as usize).saturating_sub(editor_top);
         // Bottom-up: input pinned, menu above it (reply or completions, one
         // at a time), history fills the rest — bar always keeps its row.
-        let room = (self.screen.height as usize).saturating_sub(editor_h + bar_h + 1);
+        let gap = super::mouse::HISTORY_GAP as usize;
+        let room = (self.screen.height as usize).saturating_sub(editor_h + bar_h + 1 + gap);
         let reply = match &self.focus {
             Focus::Reply(r) => Some(r.view(room, width, &self.paint)),
             _ => None,
@@ -351,7 +352,7 @@ impl Ui {
         // Every pinned row, bar included: what `Fill(1)` is left with;
         // `Rows` fills top-down and drops overflow off the bottom (newest).
         let hist_view = (self.screen.height as usize)
-            .saturating_sub(editor_h + menu_h + bar_h)
+            .saturating_sub(editor_h + menu_h + bar_h + gap)
             .max(1);
         // The group live calls fold into, when it's the last scrollback
         // row: theirs to draw, so the live block leaves them alone.
@@ -474,6 +475,14 @@ impl Ui {
                 Regions::layout(frame.area(), menu_h as u16, bar_h as u16, editor_h as u16);
             self.regions = regions;
             frame.render_widget(Rows(&rows), regions.history);
+            // While the keys are a panel's, the transcript under it steps back so
+            // the two do not read as one; a menu that comes with typing does not.
+            if matches!(self.focus, Focus::Reply(_) | Focus::Rewind(_)) {
+                frame.buffer_mut().set_style(
+                    regions.history,
+                    ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::DIM),
+                );
+            }
             if let Some(reply) = &reply {
                 frame.render_widget(Rows(reply), regions.menu);
             } else if !items.is_empty() {

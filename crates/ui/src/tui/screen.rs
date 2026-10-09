@@ -377,6 +377,15 @@ impl Screen {
         }
     }
 
+    /// What the in-memory terminal holds after the last draw.
+    #[cfg(test)]
+    pub fn test_buffer(&self) -> &Buffer {
+        match &self.term {
+            Term::Test(t) => t.backend().buffer(),
+            Term::Live(_) => unreachable!("a test screen is the in-memory one"),
+        }
+    }
+
     pub fn usable(&self) -> usize {
         usable(self.width)
     }

@@ -214,22 +214,30 @@ async fn main() -> Result<ExitCode> {
     let pinned = args.pinned();
     let dialled = dial(&pinned, &config, &named, named_by)?;
 
-    let resolved = resolve(&pinned, &workspace, &config, &settings)?;
+    let mut resolved = resolve(&pinned, &workspace, &config, &settings)?;
     pi_core::core::mcp::sync(&config, workspace.root());
-    // Ahead of the quiet check on purpose: see `Dialled::warning`.
-    if let Some(warning) = &dialled.warning {
-        eprintln!("\x1b[{}m{warning}\x1b[0m", config.theme.muted.codes());
-    }
-    if let Some((file, keys)) = &resolved.project {
-        let muted = config.theme.muted.codes();
-        eprintln!("\n\x1b[{muted}m{file}\x1b[0m");
-        for (key, value) in keys {
-            eprintln!("\x1b[{muted}m  {key} {value}\x1b[0m");
+    pi_core::core::warm_rtk();
+    if prompt.is_none() {
+        // Said under the banner: printed here, they would wait behind the
+        // screen and surface only at exit, after the session they were for.
+        let said = dialled.warning.iter().chain(&dialled.assumed).cloned();
+        resolved.notes.splice(0..0, said);
+    } else {
+        // Ahead of the quiet check on purpose: see `Dialled::warning`.
+        if let Some(warning) = &dialled.warning {
+            eprintln!("\x1b[{}m{warning}\x1b[0m", config.theme.muted.codes());
         }
-    }
-    if !args.quiet {
-        for note in dialled.assumed.iter().chain(&resolved.notes) {
-            eprintln!("\x1b[{}m{note}\x1b[0m", config.theme.muted.codes());
+        if let Some((file, keys)) = &resolved.project {
+            let muted = config.theme.muted.codes();
+            eprintln!("\n\x1b[{muted}m{file}\x1b[0m");
+            for (key, value) in keys {
+                eprintln!("\x1b[{muted}m  {key} {value}\x1b[0m");
+            }
+        }
+        if !args.quiet {
+            for note in dialled.assumed.iter().chain(&resolved.notes) {
+                eprintln!("\x1b[{}m{note}\x1b[0m", config.theme.muted.codes());
+            }
         }
     }
     // Captured before the spec and workspace move into the agent and context.

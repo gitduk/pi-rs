@@ -55,24 +55,59 @@ fn disabled() -> bool {
     std::env::var_os("RTK_DISABLED").is_some_and(|v| v.to_str() == Some("1"))
 }
 
-/// Whether rtk answers at all, asked once and cached — except a timed-out
-/// probe, left uncached so one slow moment isn't a session without rtk.
+// What rtk said its version is, `None` when it is not there: asked once —
+// except a timed-out probe, left unasked so one slow moment isn't a session
+// without rtk.
+static VERSION: OnceCell<Option<String>> = OnceCell::const_new();
+
 async fn installed() -> bool {
-    static INSTALLED: OnceCell<bool> = OnceCell::const_new();
-    INSTALLED
+    VERSION
         .get_or_try_init(|| async { probe().await.ok_or(()) })
         .await
-        .copied()
-        .unwrap_or(false)
+        .is_ok_and(Option::is_some)
 }
 
-/// `Some` when rtk answered at all — an old binary answers here but 1 per
-/// command instead, one extra spawn and no behavior change. `None` is a timeout.
-async fn probe() -> Option<bool> {
+/// Ask rtk ahead of the first command, so what it is can be said before then.
+pub async fn warm() {
+    installed().await;
+}
+
+/// What rewriting commands comes to here, as far as has been asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum State {
+    /// Rewriting, with the version rtk gave.
+    On(String),
+    /// Turned off by `RTK_DISABLED=1`.
+    Off,
+    /// No rtk that answers on `PATH`: commands run as written.
+    Missing,
+    /// Not asked yet, or the last ask timed out.
+    Unknown,
+}
+
+pub fn state() -> State {
+    if disabled() {
+        return State::Off;
+    }
+    match VERSION.get() {
+        Some(Some(version)) => State::On(version.clone()),
+        Some(None) => State::Missing,
+        None => State::Unknown,
+    }
+}
+
+/// `Some` when rtk answered at all, holding its version when it is one —
+/// an old binary answers here but 1 per command instead, one extra spawn and
+/// no behavior change. `None` is a timeout.
+async fn probe() -> Option<Option<String>> {
     match ask(&["--version"], None).await {
-        Ok(Some((code, _))) => Some(code == 0),
+        Ok(Some((0, said))) => {
+            let said = said.trim();
+            Some(Some(said.strip_prefix("rtk ").unwrap_or(said).to_string()))
+        }
+        Ok(Some(_)) => Some(None),
         // It cannot be started at all: asking again would fail the same way.
-        Err(_) => Some(false),
+        Err(_) => Some(None),
         Ok(None) => None,
     }
 }

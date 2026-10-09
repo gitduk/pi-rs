@@ -407,3 +407,27 @@ fn the_key_reads_a_group_with_nothing_to_unfold_as_folded() {
     t.toggle_current(&mut scrollback);
     assert!(!t.birth_fold(), "the next group is born open");
 }
+
+// A panel that holds the keys sets the transcript back, so the two do not
+// read as one; closed, the transcript is itself again.
+#[test]
+fn a_panel_dims_the_transcript_under_it() {
+    use ratatui::style::Modifier;
+    let mut ui = test_ui(30, 12);
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    view.surface.scrollback = vec![Row::notice("in the transcript")];
+    let dimmed = |ui: &crate::tui::Ui| {
+        ui.screen.test_buffer()[(0, 0)]
+            .modifier
+            .contains(Modifier::DIM)
+    };
+    ui.flush(&lane, &mut view);
+    assert!(!dimmed(&ui));
+    ui.open_reply(pi_store::listing::Listing::say(["/status answered"]));
+    ui.flush(&lane, &mut view);
+    assert!(dimmed(&ui), "under the panel");
+    ui.focus = crate::tui::ui::Focus::Editor;
+    ui.flush(&lane, &mut view);
+    assert!(!dimmed(&ui), "the panel closed");
+}

@@ -912,8 +912,9 @@ impl Row {
         }
     }
 
-    /// What the screen opens with: what the prompt stands on, and departures
-    /// from the defaults. Built fresh, so a reload theme change repaints it.
+    /// What the screen opens with: what the prompt stands on, departures
+    /// from the defaults, and what startup had to say. Built fresh, so a
+    /// reload theme change repaints it.
     pub fn banner(resolved: &Resolved, paint: &Paint) -> Vec<Self> {
         let mut facts = Vec::new();
         if let Some(system) = &resolved.system {
@@ -959,6 +960,8 @@ impl Row {
             .chain(facts.iter().map(|(label, value)| fact(label, value)))
             .chain(file.into_iter().flat_map(|file| [muted(""), muted(file)]))
             .chain(project.iter().map(|(key, value)| fact(key, value)))
+            .chain((!resolved.notes.is_empty()).then(|| muted("")))
+            .chain(resolved.notes.iter().map(|note| muted(note)))
             .collect()
     }
 }

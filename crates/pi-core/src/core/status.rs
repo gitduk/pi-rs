@@ -97,6 +97,14 @@ impl Core {
                 resolved.instructions.join(", "),
             ]));
         }
+        rows.push(match toolbox::rtk::state() {
+            toolbox::rtk::State::On(version) => Row::new(["rtk".into(), version]),
+            toolbox::rtk::State::Off => Row::new(["rtk", "off"]).noting("RTK_DISABLED=1"),
+            toolbox::rtk::State::Missing => {
+                Row::new(["rtk", "not found"]).noting("commands run as written")
+            }
+            toolbox::rtk::State::Unknown => Row::new(["rtk", "not asked yet"]),
+        });
         let servers = crate::core::mcp::summary();
         if !servers.is_empty() {
             rows.push(Row::new(["mcp".into(), servers.join(", ")]));
