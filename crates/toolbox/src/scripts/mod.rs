@@ -9,6 +9,7 @@
 //! the exit is non-zero. Output runs through the same bounded capture as
 //! bash's, so a runaway script floods neither memory nor transcript.
 
+pub mod env;
 mod script;
 
 use std::path::{Path, PathBuf};
@@ -479,6 +480,29 @@ mod tests {
         );
         assert_eq!(skipped.len(), 1, "{skipped:?}");
         assert!(skipped[0].why.contains("no `# ---` header"), "{skipped:?}");
+    }
+
+    // A script sees what `.env` sets, and an argument of the same name cannot
+    // replace it: the model picks arguments, never the keys they go out with.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_script_starts_with_the_env_file_and_the_model_cannot_swap_it() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("show.sh"),
+            "#!/bin/sh\n# ---\n# description = \"Show\"\n# [args]\n\
+             # PI_TEST_KEY = \"a name the file sets\"\n# ---\necho \"$PI_TEST_KEY\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join(env::FILE), "PI_TEST_KEY=from-file\n").unwrap();
+        let (found, _) = discover_in(dir.path());
+        let ctx = tool::Ctx::new(tool::Workspace::new(dir.path()).unwrap());
+        let out = found[0]
+            .execute(serde_json::json!({ "PI_TEST_KEY": "from-model" }), &ctx)
+            .await
+            .unwrap()
+            .flatten();
+        assert_eq!(out.trim(), "from-file");
     }
 
     #[test]

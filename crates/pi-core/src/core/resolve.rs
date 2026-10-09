@@ -63,19 +63,6 @@ pub struct Resolved {
     pub project: Option<(String, Vec<(String, String)>)>,
 }
 
-/// Offer `tool` to the set, saying so when an earlier source holds its name.
-fn offer(
-    registry: &mut tool::Registry,
-    notes: &mut Vec<String>,
-    source: &str,
-    tool: Arc<dyn tool::Tool>,
-) {
-    let name = tool.name().to_string();
-    if !registry.offer(tool) {
-        notes.push(format!("tool skipped — {source} {name}: the name is taken"));
-    }
-}
-
 /// Fails whole or not at all. A half-applied config is worse than a stale one,
 /// which is why a reload computes all of this before touching anything.
 pub fn resolve(
@@ -122,17 +109,13 @@ pub fn resolve(
         registry.read(shelf.clone());
     }
 
-    // A judgment endpoint is opt-in by section: no `[judge]` in the file, no
-    // tool in the set.
-    if let Some(judge) = &config.judge {
-        let judge = toolbox::judge::Judge::new(judge.endpoint(), judge.key(), judge.model.clone());
-        offer(&mut registry, &mut notes, "judge", Arc::new(judge));
-    }
-
     // Read live: a script written while pi runs is a tool from the next turn.
     let scripts =
         pi_store::dir().map(|root| Arc::new(toolbox::scripts::Dir::new(root.join("tools"))));
     if let Some(scripts) = &scripts {
+        notes.extend(
+            pi_store::dir().and_then(|root| toolbox::scripts::env::loose(&root.join("tools"))),
+        );
         notes.extend(
             scripts
                 .skipped()
@@ -419,7 +402,6 @@ mod tests {
             [
                 skills::Load::NAME,
                 subagent::Subagent::NAME,
-                toolbox::judge::Judge::NAME,
                 crate::driver::later::Later::NAME,
             ]
             .map(String::from),

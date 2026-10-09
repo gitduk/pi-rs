@@ -6,7 +6,6 @@ pub mod edit;
 pub mod fetch;
 pub mod glob;
 pub mod grep;
-pub mod judge;
 mod parses;
 pub mod process;
 pub mod read;

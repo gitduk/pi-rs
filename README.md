@@ -83,12 +83,13 @@ pi -C ~/repo --tier read  # another directory, read-only
 **`bash` is not sandboxed.** `write` and `edit` are held inside the workspace,
 `write_roots` and pi's home, symlinks resolved. The home is writable so the
 model can make its own tools and skills, which means it can also edit
-`settings.toml`, and an edit there takes effect within a second. `bash` runs `sh -c` with only its working
-directory held there, and pi never asks before a call. Use `--tier` when that
-is too much.
+`settings.toml`, and an edit there takes effect within a second. `bash` runs
+`sh -c` with only its working directory held there, and pi never asks before a
+call. Use `--tier` when that is too much.
 
 A run has no turn cap. It ends when the model stops calling tools or you press
-Esc.
+Esc. A session is open in one pi at a time: resuming one another pi holds is
+refused, and resuming one from another directory moves it here.
 
 ## In a session
 
@@ -118,12 +119,12 @@ Esc.
 
 `read` `write` `edit` `glob` `grep` `bash` `fetch` `skill` `subagent`, plus:
 
-- `judge`, when the config has a `[judge]` section.
 - One tool per tool of each MCP server in `[mcp.<name>]`, offered as
   `<name>__<tool>` once the server has listed them. `command` and `args` run
   one over stdio, `url` reaches one over Streamable HTTP. A server that will
   not start is listed as `<name>__unavailable`, with the reason; `/mcp`
-  shows each server and its tools, and `/mcp restart` reconnects them.
+  shows each server and its tools, and `/mcp restart` reconnects them. A call
+  with no answer in 10 minutes is given up.
 - `later`, in the terminal: a prompt the model leaves itself, which comes back
   as a turn of its own after a delay, on a period, or when a background
   command exits. It waits until the checkout is in front and idle, and lasts
@@ -133,30 +134,30 @@ Esc.
   under that line; or a cargo script `*.rs`, described by its
   `[package] description` and `[package.metadata.pi.args]`, which needs
   `cargo +nightly -Zscript`. A script that does not read is listed as not
-  usable, with the reason.
+  usable, with the reason. `~/.pi/tools/.env` holds `NAME=value` lines every
+  script starts with, such as its service's key; `bash` never sees them.
 
 A server's prompts are commands too: `/<name>:<prompt> [args]` asks the server
 for the prompt's text and sends it, one typed word per argument, the last
 taking the rest.
 
-`[[hooks]]` run a command around tool calls, handed
-the call as JSON on stdin. Before a call, exit 0 lets it run and exit 2 refuses
-it with what the hook printed; a hook that fails or hangs refuses it too. After
-one, what it printed joins the result. `examples/pi.toml` has
-the shape.
+`[[hooks]]` run a command around tool calls, handed the call as JSON on stdin.
+Before a call, exit 0 lets it run and exit 2 refuses it with what the hook
+printed; a hook that fails or hangs refuses it too. After one, what it printed
+joins the result. `examples/pi.toml` has the shape.
 
 Scripts and skills are read live: one written while pi runs is offered to the
 model from its next turn, and a skill's `/name` answers the next time you type.
 
 The built-in `pi-extend` skill teaches the model to write both and to connect
-an MCP server, so a capability it lacks is one it can add; the built-in `pi-help`
-skill is this README, for questions about pi itself. A skill of either name in
-`~/.pi/skills/` replaces it.
+an MCP server, so a capability it lacks is one it can add; the built-in
+`pi-help` skill is this README, for questions about pi itself. A skill of
+either name in `~/.pi/skills/` replaces it.
 
 An image pasted with `ctrl+v` goes with the message itself; its path rides
-along in the text. `read` also opens PNG, JPEG, GIF and WebP files as images. A model reaches them
-only with `vision = true` in its `[models]` entry; without it, each image is
-sent as a line saying it was left out.
+along in the text. `read` also opens PNG, JPEG, GIF and WebP files as images.
+A model reaches them only with `vision = true` in its `[models]` entry; without
+it, each image is sent as a line saying it was left out.
 
 `fetch` speaks http and https and refuses loopback, private and link-local
 addresses. With [rtk](https://github.com/rtk-ai/rtk) on `PATH`, `bash` runs
@@ -189,6 +190,7 @@ Memory starts with the first session to end and never reads tool output.
 | `~/.pi/skills/`                          | skills: a directory with a `SKILL.md`      |
 | `~/.pi/memory/*.md`                      | memory: global, and one file per project   |
 | `~/.pi/tools/`                           | script tools                               |
+| `~/.pi/tools/.env`                       | values every script starts with; `0600`    |
 | `~/.pi/images/`                          | images pasted with `ctrl+v`                |
 | `~/.pi/bar.rs`                           | a cargo script that lays out the bar       |
 | `~/.pi/sessions/<project>/<session>/`    | the transcript and `journal.jsonl`         |

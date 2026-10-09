@@ -11,7 +11,7 @@ const TIMEOUT: Duration = Duration::from_secs(300);
 const MAX_ENV_VALUE: usize = 64 << 10;
 
 /// Whether the name is safe to set as an environment variable.
-fn is_identifier(name: &str) -> bool {
+pub(super) fn is_identifier(name: &str) -> bool {
     let mut chars = name.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -63,12 +63,18 @@ impl Script {
     }
 
     // Declared string args also ride in as environment, under three guards: a
-    // portable name, an inherited value that always wins, and a size cap.
-    fn env<'a>(&'a self, args: &'a Value) -> impl Iterator<Item = (&'a str, &'a str)> {
-        self.args.iter().filter_map(|(name, _)| {
+    // portable name, a value already set (inherited or `.env`) that always
+    // wins, and a size cap.
+    fn env<'a>(
+        &'a self,
+        args: &'a Value,
+        set: &'a [(String, String)],
+    ) -> impl Iterator<Item = (&'a str, &'a str)> {
+        self.args.iter().filter_map(move |(name, _)| {
             let value = args.get(name).and_then(Value::as_str)?;
             (is_identifier(name)
                 && std::env::var_os(name).is_none()
+                && set.iter().all(|(key, _)| key != name)
                 && value.len() <= MAX_ENV_VALUE)
                 .then_some((name.as_str(), value))
         })
@@ -139,12 +145,23 @@ impl Tool for Script {
     }
 
     async fn execute(&self, args: Value, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
+        // Read per call, so an edit to it needs no restart. What the process
+        // inherited wins over it, so one run can override a value.
+        let shared: Vec<_> = self
+            .path
+            .parent()
+            .map(super::env::read)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(key, _)| std::env::var_os(key).is_none())
+            .collect();
         let mut command = self.command();
         command
             // Cargo finds a script's config from the script's directory, not
             // this one, so the workspace cannot configure the build.
             .current_dir(ctx.workspace.root())
-            .envs(self.env(&args));
+            .envs(shared.iter().map(|(k, v)| (k, v)))
+            .envs(self.env(&args, &shared));
         let input = serde_json::to_vec(&args).unwrap_or_default();
         let exited = crate::process::run(command, Some(input), TIMEOUT, ctx).await?;
         let (status, errs) = (exited.status, exited.stderr);
@@ -194,8 +211,11 @@ mod tests {
             "file": "a.txt",
             "bad-name": "x",
         });
-        let env: Vec<_> = script.env(&args).collect();
+        let env: Vec<_> = script.env(&args, &[]).collect();
         assert_eq!(env, vec![("file", "a.txt")]);
+        // Nor is a name the `.env` file sets: the model cannot swap a key.
+        let set = [("file".to_string(), "from .env".to_string())];
+        assert_eq!(script.env(&args, &set).count(), 0);
     }
 
     #[test]

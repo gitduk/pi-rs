@@ -68,8 +68,11 @@ fn main() {
   declares one argument. Every argument is a required string.
 - Input: the call's full JSON on stdin, always. Each argument is also an
   environment variable of the same name, except when the name is not a valid
-  identifier, an inherited variable already has it (`PATH` stays `PATH`), or
-  the value is over 64 KiB. Read stdin when any of those can happen.
+  identifier, an inherited variable or `.env` already has it (`PATH` stays
+  `PATH`), or the value is over 64 KiB. Read stdin when any of those can happen.
+- A key or other value every script shares goes in `.env` beside the scripts,
+  one `NAME=value` a line, and reaches each script as an environment variable;
+  `bash` never sees it. Never write a secret into a script: read it from there.
 - Output: stdout is the answer. Exit non-zero to fail; stderr is then the
   error the caller sees. stderr on success is dropped.
 - It runs in the workspace root, only at the exec tier, one call at a time,
