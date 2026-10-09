@@ -26,9 +26,12 @@ pub struct Snapshot {
     pub cost: f64,
     /// Turns begun. Zero is a run that has not started one.
     pub turns: usize,
-    /// Used against usable, in tokens. The denominator is the budget, not the
-    /// window, so 100% is where compaction fires rather than where it refuses.
+    /// What a request occupies against the model's window, in tokens.
+    /// Compaction fires short of 100%, at the budget inside the window.
     pub ctx: Option<(usize, usize)>,
+    /// Output tokens a second, over the time the model spent streaming them;
+    /// `None` until one turn of the run has streamed anything.
+    pub speed: Option<f64>,
     pub compactions: usize,
     pub queued: usize,
     pub model: String,
@@ -52,6 +55,9 @@ pub struct Tally {
     turns: usize,
     ctx: Option<(usize, usize)>,
     compactions: usize,
+    // Output tokens of the turns that streamed, and the time they streamed
+    // for: the run's speed, not skewed by waits or tool calls between.
+    generated: (u64, Duration),
     // The rate this run is priced at, pinned at seed: costed at its own
     // model's rate regardless of what `/model` does meanwhile.
     pricing: Pricing,
@@ -88,9 +94,13 @@ impl Tally {
             // A retry sends a second one for the same turn: the count it
             // carries replaces the abandoned attempt's rather than joining it.
             agent::Event::Usage(usage) => self.turn = *usage,
-            agent::Event::TurnEnd { usage } => {
+            agent::Event::TurnEnd { usage, generating } => {
                 self.settled.add(usage, self.pricing.cost(usage));
                 self.turn = Usage::default();
+                if let Some(took) = generating {
+                    self.generated.0 += usage.output;
+                    self.generated.1 += *took;
+                }
             }
             agent::Event::Context { used, window } => self.ctx = Some((*used, *window)),
             agent::Event::Compacted(_) => self.compactions += 1,
@@ -134,6 +144,7 @@ impl Tally {
             cost: run.cost,
             turns: self.turns,
             ctx: self.ctx,
+            speed: self.speed(),
             compactions: self.compactions,
             queued,
             model: model.to_string(),
@@ -141,7 +152,13 @@ impl Tally {
         }
     }
 
-    /// The context used against the budget, as the last event said.
+    // Output tokens a second over the time spent streaming them.
+    fn speed(&self) -> Option<f64> {
+        let (tokens, took) = self.generated;
+        (!took.is_zero()).then(|| tokens as f64 / took.as_secs_f64())
+    }
+
+    /// The context used against the window, as the last event said.
     pub fn ctx(&self) -> Option<(usize, usize)> {
         self.ctx
     }
@@ -220,6 +237,7 @@ mod tests {
 
         t.on(&agent::Event::TurnEnd {
             usage: usage(100, 30),
+            generating: Some(Duration::from_secs(2)),
         });
         t.on(&agent::Event::TurnStart { turn: 2 });
         t.on(&agent::Event::Usage(usage(400, 7)));
@@ -228,6 +246,8 @@ mod tests {
         // 100 in at 10/mtok, 30 out at 100/mtok. The turn in flight is not
         // priced until it ends, so it contributes to neither figure.
         assert_eq!(s.cost, 0.004);
+        // Speed is the finished turn's: 30 out over its 2s of streaming.
+        assert_eq!(s.speed, Some(15.0));
     }
 
     // A run's own total replaces the running one (same turns counted once):
@@ -238,6 +258,7 @@ mod tests {
         t.on(&agent::Event::TurnStart { turn: 1 });
         t.on(&agent::Event::TurnEnd {
             usage: usage(8_400, 390),
+            generating: None,
         });
         t.on(&agent::Event::Done {
             turns: 2,
@@ -253,6 +274,8 @@ mod tests {
         assert_eq!(s.cost, 0.123);
         assert_eq!(s.ctx, Some((72_400, 114_000)));
         assert_eq!(s.compactions, 1);
+        // Nothing streamed, so no time to divide by.
+        assert_eq!(s.speed, None);
     }
 
     // Seeded with what the session spent before this run; that stays off

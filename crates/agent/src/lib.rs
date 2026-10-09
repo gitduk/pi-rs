@@ -191,6 +191,8 @@ impl Agent {
             // Kept past the retry loop: the fallback below prices what was
             // actually sent, which a squeeze or a compaction may have changed.
             let mut sent;
+            // The attempt that answered says how long its reply took to stream.
+            let mut generating = None;
             // Kept for the same reason the transcript is: what the status line
             // reports as the window's state has to be the request that ran.
             let mut budget;
@@ -246,7 +248,7 @@ impl Agent {
                 };
 
                 match self
-                    .stream_turn(&req, ctx, tx, retry)
+                    .stream_turn(&req, ctx, tx, retry, &mut generating)
                     .instrument(span.clone())
                     .await
                 {
@@ -301,7 +303,13 @@ impl Agent {
             };
 
             totals.add(&done.usage);
-            say(tx, Event::TurnEnd { usage: done.usage });
+            say(
+                tx,
+                Event::TurnEnd {
+                    usage: done.usage,
+                    generating,
+                },
+            );
 
             // Two providers accept an oversized request instead of refusing:
             // one silently, one by truncating — both look like success.
@@ -460,10 +468,11 @@ impl Agent {
         ctx: &Ctx,
         tx: &UnboundedSender<Event>,
         retry: &Retry,
+        generating: &mut Option<std::time::Duration>,
     ) -> Result<llm::stream::Completion, (AgentError, Option<llm::stream::Completion>)> {
         let mut attempt = 0usize;
         loop {
-            let (err, partial) = match self.attempt(req, ctx, tx, retry).await {
+            let (err, partial) = match self.attempt(req, ctx, tx, retry, generating).await {
                 Ok(done) => return Ok(done),
                 Err(err) => err,
             };
@@ -511,13 +520,18 @@ impl Agent {
         clippy::result_large_err,
         reason = "Ok carries a Completion too; boxing Err would not shrink the Result"
     )]
+    /// `generating` comes back as how long the model took to stream what it
+    /// sent: from the first piece of it to the end, waiting and reading the
+    /// prompt left out, so a long context does not read as a slow model.
     async fn attempt(
         &self,
         req: &Request,
         ctx: &Ctx,
         tx: &UnboundedSender<Event>,
         retry: &Retry,
+        generating: &mut Option<std::time::Duration>,
     ) -> Result<llm::stream::Completion, (AgentError, Option<llm::stream::Completion>)> {
+        let mut started: Option<std::time::Instant> = None;
         // A fresh accumulator per attempt: half a stream must not bleed into
         // the message the retry produces.
         let mut acc = Accumulator::new(self.model.spec.model.clone());
@@ -548,6 +562,9 @@ impl Agent {
                 Ok(ev) => ev,
                 Err(e) => return Err((AgentError::from(e), None)),
             };
+            if started.is_none() && !matches!(ev, StreamEvent::MessageStart { .. }) {
+                started = Some(std::time::Instant::now());
+            }
             match &ev {
                 StreamEvent::TextDelta { delta, .. } => {
                     say(tx, Event::TextDelta(delta.clone()));
@@ -563,6 +580,7 @@ impl Agent {
             }
             acc.push(ev);
         }
+        *generating = started.map(|at| at.elapsed());
 
         // What the host owed and did not send, said once per session by the
         // reporter. Said here too, not just the journal — else it looks ordinary.

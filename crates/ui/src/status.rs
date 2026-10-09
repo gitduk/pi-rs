@@ -19,6 +19,13 @@ pub fn render(segment: Segment, s: &Snapshot) -> Option<String> {
         // part instead when nothing has been spent on yet.
         Segment::InOut if s.turns == 0 && s.input == 0 && s.output == 0 => return None,
         Segment::InOut => llm::figures::in_out(s.input, s.output),
+        // Shown whenever in/out is, a dash until a turn has streamed: a part
+        // that came and went between frames would read as a glitch.
+        Segment::Speed if s.turns == 0 && s.input == 0 && s.output == 0 => return None,
+        Segment::Speed => match s.speed {
+            Some(rate) => format!("{rate:.0} t/s"),
+            None => "- t/s".to_string(),
+        },
         Segment::Cache if s.cache_read == 0 => return None,
         Segment::Cache => format!("{} cached", llm::figures::short(s.cache_read)),
         // An unpriced model reports no cost rather than $0.

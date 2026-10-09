@@ -84,6 +84,7 @@ idle_timeout = 300
 #
 #   elapsed    3s / 2m05s — nothing times a one-shot run, so it drops there
 #   in_out     8.4k in / 390 out, a dash for a half the provider never stated
+#   speed      41 t/s, output over the time the model spent streaming it
 #   cache      41.2k cached, left out when nothing was read from cache
 #   cost       $0.0012, left out when the model carries no pricing
 #   ctx        ctx 9.6k/1.0m, the request against the model's window
@@ -95,7 +96,7 @@ idle_timeout = 300
 # A part with nothing to say is left out rather than shown empty, so one list
 # serves the running line and the finished one: `queued` is gone once the run
 # ends, `cost` until something has been spent.
-status = ["elapsed", "in_out", "cache", "ctx", "compacted", "queued", "cost"]
+status = ["elapsed", "in_out", "speed", "cache", "ctx", "compacted", "queued", "cost"]
 
 # ---------------------------------------------------------------------------
 # Facts about a model the defaults get wrong.

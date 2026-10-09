@@ -54,6 +54,9 @@ pub enum Event {
 
     TurnEnd {
         usage: Usage,
+        // How long the model streamed its reply, first piece to last; `None`
+        // when nothing streamed. What `usage.output` took to write.
+        generating: Option<std::time::Duration>,
     },
     Done {
         turns: usize,

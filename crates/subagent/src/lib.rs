@@ -343,7 +343,7 @@ impl Subagent {
                         continue;
                     }
                     Event::Usage(usage) => heard.turn = usage,
-                    Event::TurnEnd { usage } => {
+                    Event::TurnEnd { usage, .. } => {
                         heard.spent.add(&usage);
                         heard.turn = Default::default();
                     }

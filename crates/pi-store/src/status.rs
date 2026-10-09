@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 pub enum Segment {
     Elapsed,
     InOut,
+    Speed,
     Cache,
     Cost,
     Ctx,
@@ -45,6 +46,7 @@ pub fn default_parts() -> Vec<Segment> {
     vec![
         Segment::Elapsed,
         Segment::InOut,
+        Segment::Speed,
         Segment::Cache,
         Segment::Ctx,
         Segment::Compacted,
