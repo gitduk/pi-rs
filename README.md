@@ -116,7 +116,7 @@ Esc.
 
 ## Tools
 
-`read` `write` `edit` `glob` `grep` `bash` `fetch` `search` `skill` `subagent`, plus:
+`read` `write` `edit` `glob` `grep` `bash` `fetch` `skill` `subagent`, plus:
 
 - `judge`, when the config has a `[judge]` section.
 - One tool per tool of each MCP server in `[mcp.<name>]`, offered as
@@ -159,9 +159,7 @@ only with `vision = true` in its `[models]` entry; without it, each image is
 sent as a line saying it was left out.
 
 `fetch` speaks http and https and refuses loopback, private and link-local
-addresses. `search` needs no key: it reads the results page DuckDuckGo, then
-Bing, serves a browser, fetched with `curl`, and says so when an engine turns
-it away. With [rtk](https://github.com/rtk-ai/rtk) on `PATH`, `bash` runs
+addresses. With [rtk](https://github.com/rtk-ai/rtk) on `PATH`, `bash` runs
 each command through `rtk rewrite`; `RTK_DISABLED=1` turns that off.
 
 What a command prints twice reaches the model once. A run of six or more lines
