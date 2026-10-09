@@ -305,9 +305,9 @@ impl Tui {
         (ran, resumed)
     }
 
-    // The project's config in `$EDITOR`, then the reload that makes it count.
-    // A non-zero exit (`:cq`) is "forget it": nothing is reloaded.
-    pub(super) async fn edit_config(&mut self, path: std::path::PathBuf) {
+    // A config, instructions or memory file in `$EDITOR`, then the reload that makes it
+    // count. A non-zero exit (`:cq`) is "forget it": nothing is reloaded.
+    pub(super) async fn edit_file(&mut self, path: std::path::PathBuf) {
         let (ran, resumed) = self.in_editor(&path).await;
         if let Err(e) = resumed {
             self.say_of(
@@ -318,7 +318,16 @@ impl Tui {
         let said = match ran {
             Err(why) => vec![why],
             Ok(s) if !s.success() => vec![format!("editor exited {s} — nothing reloaded")],
-            Ok(_) => self.core.config_edited(),
+            Ok(_) => match self.core.config_edited() {
+                // The file edited first: what else the reload says follows it.
+                Ok(notes) => {
+                    let name = agent::instructions::short(&path, self.core.lane().root());
+                    std::iter::once(format!("{name} — in force from the next turn"))
+                        .chain(notes)
+                        .collect()
+                }
+                Err(why) => vec![why],
+            },
         };
         self.land_lines(Listing::say(said));
     }

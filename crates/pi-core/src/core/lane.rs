@@ -71,7 +71,7 @@ struct Checkout {
     // Shared so a run can take it along; `rearm` goes through `make_mut`, so
     // a run in flight keeps the agent it started on.
     agent: Arc<Agent>,
-    // The agent's brief, key map, command table and instruction files: one
+    // The agent's brief, key map, command table and instructions files: one
     // value, swapped whole by a reload and by an opened checkout.
     resolved: Arc<Resolved>,
     // Carried across turns: the file locks and edit shifts outlive any one run.
@@ -199,7 +199,7 @@ pub fn a_resolved(standing: &str) -> Arc<Resolved> {
         shelf: None,
         shelf_seen: 0,
         notes: Vec::new(),
-        context: Vec::new(),
+        instructions: Vec::new(),
         memory: Vec::new(),
         system: None,
         endpoint: None,

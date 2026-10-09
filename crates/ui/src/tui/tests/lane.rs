@@ -751,7 +751,7 @@ async fn an_edited_project_file_reaches_the_surface_and_names_what_outranks_it()
         "effort = \"low\"\nstatus = [\"model\"]\n",
     )
     .expect("the project file");
-    let said = tui.core.config_edited();
+    let said = tui.core.config_edited().expect("reloaded");
     assert!(
         said.iter()
             .any(|l| l.starts_with("effort: --effort outranks")),

@@ -108,7 +108,7 @@ impl Subagent {
     /// Build the subagent from the one that will call it: same transport, same
     /// model, its own prompt, and no `subagent` in its registry.
     ///
-    /// `standing` is the checkout's workspace anchor and instruction files.
+    /// `standing` is the checkout's workspace anchor and instructions files.
     /// `brief` is passed in, not read off `parent`, so the caller can arm
     /// both from one value while the parent's own brief is still the old one.
     pub fn new(

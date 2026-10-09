@@ -119,7 +119,7 @@ impl Core {
             .iter()
             .filter(|s| !was.contains(s))
             .chain(was.iter().filter(|s| !now.iter().any(|n| n.0 == s.0)))
-            .map(|(path, ..)| agent::context::short(path, &root))
+            .map(|(path, ..)| agent::instructions::short(path, &root))
             .collect();
         match self.try_reload() {
             Ok(mut said) => {
@@ -327,7 +327,7 @@ impl Core {
             // rather than half-remembered as a verb.
             Intent::Builtin(Builtin::Settings(rest)) if rest.trim().is_empty() => {
                 match pi_store::config::project_target(self.lane().root()) {
-                    Some(file) => Step::EditConfig(file),
+                    Some(file) => Step::Edit(file),
                     None => {
                         Step::Flash("no project here: a .pi.toml in $HOME is never read".into())
                     }
@@ -336,6 +336,7 @@ impl Core {
             Intent::Builtin(Builtin::Settings(_)) => {
                 Step::Flash("bare /settings opens the project's .pi.toml".into())
             }
+            Intent::Builtin(Builtin::Edit(name)) => self.edit(name.trim()),
         }
     }
 }
@@ -359,11 +360,15 @@ mod tests {
             asked.borrow_mut().push("worktrees");
             &[]
         };
+        let editable = || -> &[Choice] {
+            asked.borrow_mut().push("editable");
+            &[]
+        };
         let mut notes = Vec::new();
         let commands = commands(&[], &mut notes);
         let line = |text: &str| {
             asked.borrow_mut().clear();
-            crate::input::commands::complete(text, &commands, &[], sessions, worktrees);
+            crate::input::commands::complete(text, &commands, &[], sessions, worktrees, editable);
             asked.borrow().join(",")
         };
 
@@ -373,6 +378,7 @@ mod tests {
         assert_eq!(line("/resume "), "sessions");
         assert_eq!(line("/worktree "), "worktrees");
         assert_eq!(line("/worktree rm "), "worktrees");
+        assert_eq!(line("/edit "), "editable");
 
         // And what the call asks for is what it completes against.
         let one = [pi_store::session::ResumeChoice {
@@ -383,8 +389,14 @@ mod tests {
             rounds: 1,
             bytes: 0,
         }];
-        let offered =
-            crate::input::commands::complete("/resume f", &commands, &[], || &one[..], || &[]);
+        let offered = crate::input::commands::complete(
+            "/resume f",
+            &commands,
+            &[],
+            || &one[..],
+            || &[],
+            || &[],
+        );
         assert_eq!(offered.len(), 1);
         assert_eq!(offered[0].line, "/resume s1");
     }

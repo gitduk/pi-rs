@@ -46,6 +46,9 @@ pub enum Builtin {
     // Bare `/settings`: the project's `.pi.toml` in `$EDITOR`. An argument
     // after the word is refused.
     Settings(String),
+    // A file the model is given, by the name `/edit` lists it under, or
+    // empty to list them.
+    Edit(String),
     // A channel's command: its name, then "" = status, "on" or "off".
     Channel(String, String),
     // What to run over and over, or empty to stop the loop in force.
@@ -129,6 +132,9 @@ impl Intent {
             // the terminal to an editor and reloads, which waits for the run.
             Intent::Builtin(Builtin::Settings(rest)) if !rest.trim().is_empty() => Fate::Now,
             Intent::Builtin(Builtin::Settings(_)) => Fate::Queued,
+            // Bare it lists; naming a file hands the terminal to an editor.
+            Intent::Builtin(Builtin::Edit(name)) if name.trim().is_empty() => Fate::Now,
+            Intent::Builtin(Builtin::Edit(_)) => Fate::Queued,
             Intent::Builtin(Builtin::Channel(..)) => Fate::Now,
             Intent::Other { .. } | Intent::Prompt(_) => Fate::Queued,
             // Its first round is due at once, and a round wants the lane free.
@@ -322,9 +328,9 @@ pub enum Step {
     // A command for what drives a lane from outside. The surface hands it
     // to the drivers and places what they answer.
     Drive(Drive),
-    // The config file to open in `$EDITOR` and reload after: the editor takes
-    // the terminal, which only the surface can give away.
-    EditConfig(std::path::PathBuf),
+    // A file to open in `$EDITOR`, everything it feeds rebuilt after: the
+    // editor takes the terminal, which only the surface can give away.
+    Edit(std::path::PathBuf),
     // Dealt with here; this is what there is to show for it. Returned rather
     // than laid out: the surface decides how wide the columns are.
     Handled(Listing),

@@ -2,11 +2,11 @@
 //!
 //! The value itself is `pi_store::settings`; this is what the Core does to it.
 
-use super::Core;
 use super::meter::summary;
 use super::status::{carries_reasoning, demotion};
+use super::{Core, resolve};
 use crate::input::commands::Choice;
-use crate::input::refused;
+use crate::input::{Step, refused};
 use pi_store::args::EffortArg;
 use pi_store::config::{self, Config};
 use pi_store::icons;
@@ -123,12 +123,37 @@ impl Core {
             .map_err(|e| format!("nothing reloaded — {}", refused("settings", e)))?;
         self.adopt(config)
     }
-    /// After `/settings` closed the editor: reload, and name what the files
-    /// now say that a flag or the environment still outranks.
-    pub fn config_edited(&mut self) -> Vec<String> {
-        let mut said = self.reload();
+    /// `/edit`: bare, the files it offers; with a name, that file to open.
+    pub(super) fn edit(&self, name: &str) -> Step {
+        let files = resolve::editable(&self.pinned, self.lane().root());
+        if name.is_empty() {
+            let width = files
+                .iter()
+                .map(|f| f.name.chars().count())
+                .max()
+                .unwrap_or(0);
+            let mut lines: Vec<String> = files
+                .iter()
+                .map(|f| format!("{:width$}  {}", f.name, f.note))
+                .collect();
+            lines.push("/edit <file> opens one in $EDITOR".into());
+            return Step::Handled(pi_store::listing::Listing::say(lines));
+        }
+        match files.into_iter().find(|f| f.name == name) {
+            Some(file) => Step::Edit(file.path),
+            None => Step::Flash(format!(
+                "`{name}` is not a file /edit offers — bare /edit lists them"
+            )),
+        }
+    }
+
+    /// After `/settings` or `/edit` closed the editor: reload, and name what
+    /// the files now say that a flag or the environment still outranks.
+    /// `Err` is why nothing was reloaded.
+    pub fn config_edited(&mut self) -> Result<Vec<String>, String> {
+        let mut said = self.try_reload()?;
         said.extend(self.shadowed());
-        said
+        Ok(said)
     }
     // Each key the files set that this run takes from somewhere higher.
     fn shadowed(&self) -> Vec<String> {

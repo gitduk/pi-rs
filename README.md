@@ -104,6 +104,7 @@ refused, and resuming one from another directory moves it here.
 | `/later`, `/later rm <id>`         | what the model left for later; cancel one     |
 | `/mcp`, `/mcp restart [name]`      | MCP servers and their tools; reconnect        |
 | `/settings`                        | edit the project's config                     |
+| `/edit [file]`                     | edit `SYSTEM.md`, an `AGENTS.md`, or memory   |
 | `/status`, `/keys`, `/help`        | session paths and spend; bindings; commands   |
 | `/exit`                            | leave; `ctrl+d` does the same                 |
 | `/content`                         | everything the model is given before you type |
@@ -190,7 +191,7 @@ Memory starts with the first session to end and never reads tool output.
 | ---------------------------------------- | ------------------------------------------ |
 | `~/.pi/settings.toml`                    | endpoint, models, `[keys]`, `[theme]`      |
 | `~/.pi/SYSTEM.md`                        | replaces the built-in system prompt        |
-| `~/.pi/AGENTS.md`, `AGENTS.md`           | standing instructions: yours, a project's  |
+| `~/.pi/AGENTS.md`, `AGENTS.md`           | instructions: yours, a project's           |
 | `~/.pi/skills/`                          | skills: a directory with a `SKILL.md`      |
 | `~/.pi/memory/*.md`                      | memory: global, and one file per project   |
 | `~/.pi/tools/`                           | script tools                               |

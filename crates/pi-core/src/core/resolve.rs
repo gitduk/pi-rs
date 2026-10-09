@@ -10,7 +10,7 @@ use llm::request::Effort;
 
 use crate::args::Pinned;
 use crate::input::commands::{Command, commands};
-use agent::context;
+use agent::instructions;
 use pi_store::args::EffortArg;
 use pi_store::settings::Settings;
 use pi_store::{config, journal};
@@ -23,8 +23,8 @@ pub struct Resolved {
     /// A subagent derives its own from this one.
     pub brief: std::sync::Arc<agent::Briefing>,
     /// The tail of the prompt that belongs to the run rather than to the
-    /// assistant: the workspace anchor, what the run is, and the instruction
-    /// files. Kept apart because the subagent has its own prompt but the same
+    /// assistant: the workspace anchor, what the run is, and the
+    /// instructions files. Kept apart because the subagent has its own prompt but the same
     /// tree, the same machine and the same tier.
     pub standing: std::sync::Arc<str>,
     /// How far this run may reach. The lane needs it to decide whether the
@@ -45,10 +45,10 @@ pub struct Resolved {
     pub shelf_seen: u64,
     /// Worth saying once, at startup and at each reload.
     pub notes: Vec<String>,
-    /// The instruction files folded into the system prompt, named as a person
+    /// The instructions files folded into the system prompt, named as a person
     /// would. Shown under the banner rather than said as a note: it is what
     /// this run is standing on, not news.
-    pub context: Vec<String>,
+    pub instructions: Vec<String>,
     /// The memory files folded into the prompt, by path.
     pub memory: Vec<String>,
     /// The file that replaced the built-in system prompt, if one did.
@@ -181,19 +181,19 @@ pub fn resolve(
         (Vec::new(), Vec::new())
     } else {
         (
-            context::load(root, pi_store::dir().as_deref()).files,
+            instructions::load(root, pi_store::dir().as_deref()).files,
             crate::core::memory::kept(&pi_store::memory::Memory::default(), root),
         )
     };
-    let context = instructions
+    let instruction_names = instructions
         .iter()
-        .map(|(p, _)| context::short(p, root))
+        .map(|(p, _)| instructions::short(p, root))
         .collect();
     let memory_dir = pi_store::memory::Memory::default();
     let main = crate::core::worktree::main_root(root);
     let memory_files = memory
         .iter()
-        .map(|(name, _)| context::short(&memory_dir.path_of(name, &main), root))
+        .map(|(name, _)| instructions::short(&memory_dir.path_of(name, &main), root))
         .collect();
     // Appended rather than sent as a message: standing instructions don't
     // change within a run, and the system prompt is what a provider caches.
@@ -231,14 +231,14 @@ pub fn resolve(
         shelf,
         shelf_seen,
         notes,
-        context,
+        instructions: instruction_names,
         memory: memory_files,
         system: system_file,
         endpoint: endpoint(pinned, config, settings, root),
         mcp: mcp_names(config, settings),
         project: settings
             .project_reaching()
-            .map(|(file, keys)| (context::short(file, root), keys)),
+            .map(|(file, keys)| (instructions::short(file, root), keys)),
     })
 }
 
@@ -280,9 +280,9 @@ pub fn watched(pinned: &Pinned, root: &Path) -> Vec<Stamp> {
     paths.extend(system_file(pinned));
     if !pinned.no_context_files {
         let pi = pi_store::dir();
-        paths.extend(context::paths(
+        paths.extend(instructions::paths(
             root,
-            context::home().as_deref(),
+            instructions::home().as_deref(),
             pi.as_deref(),
         ));
         let memory = pi_store::memory::Memory::default();
@@ -293,6 +293,65 @@ pub fn watched(pinned: &Pinned, root: &Path) -> Vec<Stamp> {
         .filter_map(|path| {
             let meta = std::fs::metadata(&path).ok()?;
             Some((path, meta.modified().ok(), meta.len()))
+        })
+        .collect()
+}
+
+/// A file `/edit` offers: where it is, the name it is offered under, and
+/// what it is to the model.
+pub struct Editable {
+    pub path: PathBuf,
+    pub name: String,
+    pub note: String,
+}
+
+impl From<Editable> for crate::input::commands::Choice {
+    fn from(e: Editable) -> Self {
+        Self {
+            name: e.name,
+            note: e.note,
+        }
+    }
+}
+
+/// What the model is given from files in `root`, to edit: the system prompt
+/// and this checkout's `AGENTS.md` even before they exist, since saving one
+/// is how it starts; every other instructions file and memory as they stand.
+pub fn editable(pinned: &Pinned, root: &Path) -> Vec<Editable> {
+    let mut files: Vec<(PathBuf, &str)> = Vec::new();
+    files.extend(system_file(pinned).map(|p| (p, "replaces the system prompt")));
+    if !pinned.no_context_files {
+        let found = instructions::paths(
+            root,
+            instructions::home().as_deref(),
+            pi_store::dir().as_deref(),
+        );
+        let here = root.join("AGENTS.md");
+        if !found.contains(&here) {
+            files.push((here, "instructions"));
+        }
+        files.extend(found.into_iter().map(|p| (p, "instructions")));
+        let memory = pi_store::memory::Memory::default();
+        files.extend(
+            memory
+                .paths(&crate::core::worktree::main_root(root))
+                .into_iter()
+                .filter(|p| p.is_file())
+                .map(|p| (p, "memory")),
+        );
+    }
+    files
+        .into_iter()
+        .map(|(path, what)| {
+            let note = match std::fs::metadata(&path) {
+                Ok(meta) => format!("{what} · {}", pi_store::text::size(meta.len())),
+                Err(_) => format!("{what} · new, saving creates it"),
+            };
+            Editable {
+                name: instructions::short(&path, root),
+                path,
+                note,
+            }
         })
         .collect()
 }
@@ -326,12 +385,12 @@ fn endpoint(
             let from = if let Some(var) = config::endpoint_env() {
                 format!("${var}")
             } else if let Some(file) = settings.project_sets("base_url") {
-                context::short(file, root)
+                instructions::short(file, root)
             } else {
                 match &pinned.config {
                     Some(file) => file.clone(),
                     None => config::global_path()
-                        .map_or_else(|| "settings.toml".into(), |p| context::short(&p, root)),
+                        .map_or_else(|| "settings.toml".into(), |p| instructions::short(&p, root)),
                 }
             };
             (url, from)

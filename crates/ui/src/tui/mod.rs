@@ -152,6 +152,7 @@ impl Tui {
             Lists::new(core.store.clone(), core.lane_mut().root().to_path_buf()),
             paint,
         );
+        ui.lists.pinned = core.pinned.clone();
         ui.tty_bg = answer.bg;
         // Asking the terminal read it, so it is typed in here: the keyboard
         // reader would never see those bytes again.
@@ -699,7 +700,11 @@ impl Tui {
                     // A checkout went; the cached list would go on offering it.
                     self.ui.lists.forget();
                 }
-                Step::EditConfig(file) => self.edit_config(file).await,
+                Step::Edit(file) => {
+                    self.edit_file(file).await;
+                    // A file saved for the first time is listed as there now.
+                    self.ui.lists.forget();
+                }
                 Step::Handled(lines) => self.land_lines(lines),
                 Step::Compact(focus) => self.start_compact(focus, &done_tx),
                 Step::Drive(drive) => {

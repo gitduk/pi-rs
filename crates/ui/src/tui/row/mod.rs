@@ -919,8 +919,8 @@ impl Row {
         if let Some(system) = &resolved.system {
             facts.push(("system prompt", tilde(system)));
         }
-        if !resolved.context.is_empty() {
-            facts.push(("content", resolved.context.join(", ")));
+        if !resolved.instructions.is_empty() {
+            facts.push(("instructions", resolved.instructions.join(", ")));
         }
         // By topic, a handful at most: the paths are in `/status`.
         const TOPICS: usize = 5;
@@ -990,7 +990,7 @@ pub(super) fn count(n: usize, thing: &str) -> String {
 
 // The home directory as `~`: the banner has no workspace to shorten against.
 fn tilde(path: &std::path::Path) -> String {
-    match agent::context::home().and_then(|h| Some(path.strip_prefix(h).ok()?.to_owned())) {
+    match agent::instructions::home().and_then(|h| Some(path.strip_prefix(h).ok()?.to_owned())) {
         Some(rel) => format!("~/{}", rel.display()),
         None => path.display().to_string(),
     }

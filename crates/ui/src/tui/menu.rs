@@ -69,6 +69,7 @@ impl Ui {
             &self.choices,
             || self.lists.sessions(),
             || self.lists.worktrees(),
+            || self.lists.editable(),
         )
         .into_iter()
         .rev()
@@ -675,6 +676,9 @@ pub(super) struct Lists {
     pub(super) workspace: std::path::PathBuf,
     pub(super) sessions: std::cell::OnceCell<Vec<ResumeChoice>>,
     pub(super) worktrees: std::cell::OnceCell<Vec<Choice>>,
+    pub(super) editable: std::cell::OnceCell<Vec<Choice>>,
+    // The flags `/edit`'s list depends on: `--system`, `--no-context-files`.
+    pub(super) pinned: pi_core::args::Pinned,
 }
 
 impl Lists {
@@ -684,7 +688,19 @@ impl Lists {
             workspace,
             sessions: std::cell::OnceCell::new(),
             worktrees: std::cell::OnceCell::new(),
+            editable: std::cell::OnceCell::new(),
+            pinned: Default::default(),
         }
+    }
+
+    // The files `/edit` offers in this workspace.
+    pub(super) fn editable(&self) -> &[Choice] {
+        self.editable.get_or_init(|| {
+            core::resolve::editable(&self.pinned, &self.workspace)
+                .into_iter()
+                .map(Choice::from)
+                .collect()
+        })
     }
 
     pub(super) fn sessions(&self) -> &[ResumeChoice] {
@@ -721,6 +737,7 @@ impl Lists {
     pub(super) fn forget(&mut self) {
         self.sessions.take();
         self.worktrees.take();
+        self.editable.take();
     }
 
     // Points at a workspace, dropping the last one's answers — both

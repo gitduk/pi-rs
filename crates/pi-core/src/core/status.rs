@@ -5,7 +5,7 @@
 //! is where the values come from.
 
 use agent::Totals;
-use agent::context::short;
+use agent::instructions::short;
 use llm::figures;
 
 use super::Core;
@@ -76,7 +76,7 @@ impl Core {
 
         let tier = format!("{:?}", resolved.ceiling).to_lowercase();
         rows.push(Row::new(["tier", &tier]));
-        let mut workspace = agent::context::home()
+        let mut workspace = agent::instructions::home()
             .and_then(|h| Some(format!("~/{}", root.strip_prefix(h).ok()?.display())))
             .unwrap_or_else(|| root.display().to_string());
         if let Some(tree) = lane.worktree() {
@@ -91,8 +91,11 @@ impl Core {
         if let Some(system) = &resolved.system {
             rows.push(Row::new(["system prompt".into(), short(system, root)]));
         }
-        if !resolved.context.is_empty() {
-            rows.push(Row::new(["content".into(), resolved.context.join(", ")]));
+        if !resolved.instructions.is_empty() {
+            rows.push(Row::new([
+                "instructions".into(),
+                resolved.instructions.join(", "),
+            ]));
         }
         let servers = crate::core::mcp::summary();
         if !servers.is_empty() {

@@ -148,6 +148,12 @@ pub(crate) const BUILTIN: &[Command] = &[
         Intent::Builtin(Builtin::Help)
     }),
     Command::builtin(
+        "/edit",
+        "[file]",
+        "list what the model is given from files — SYSTEM.md, AGENTS.md, memory — or edit one",
+        |_, rest| Intent::Builtin(Builtin::Edit(rest)),
+    ),
+    Command::builtin(
         "/settings",
         "",
         "edit the project's .pi.toml, then reload",
@@ -319,14 +325,16 @@ pub struct Candidate {
 
 // A worktree name completed against `prefix`; the whole line an accept makes
 // is `head` plus the name, which is what tells entering from removing.
-fn worktree_candidates(trees: &[Choice], head: &str, prefix: &str) -> Vec<Candidate> {
-    trees
+// The names among `choices` that `typed` begins and does not already finish,
+// each as the whole line `head` plus the name.
+fn offer(choices: &[Choice], head: &str, typed: &str) -> Vec<Candidate> {
+    choices
         .iter()
-        .filter(|w| w.name.starts_with(prefix) && w.name != prefix)
-        .map(|w| Candidate {
-            show: w.name.clone(),
-            line: format!("{head}{}", w.name),
-            help: w.note.clone(),
+        .filter(|c| c.name.starts_with(typed) && c.name != typed)
+        .map(|c| Candidate {
+            show: c.name.clone(),
+            line: format!("{head}{}", c.name),
+            help: c.note.clone(),
             more: false,
         })
         .collect()
@@ -336,16 +344,18 @@ fn worktree_candidates(trees: &[Choice], head: &str, prefix: &str) -> Vec<Candid
 /// then that command's own argument once the word is settled.
 ///
 /// Only args with a known name set are completed (`/model`, `/resume`,
-/// `/worktree`); a prompt or focus phrase is prose, not guessed.
+/// `/worktree`, `/edit`); a prompt or focus phrase is prose, not guessed.
 ///
-/// Sessions and worktrees are asked for lazily: walking transcripts or
-/// running `git worktree list` is paid only by the line that needs it.
+/// Sessions, worktrees and files are asked for lazily: walking transcripts,
+/// running `git worktree list` or reading directories is paid only by the
+/// line that needs it.
 pub fn complete<'a>(
     line: &str,
     commands: &[Command],
     models: &[Choice],
     sessions: impl Fn() -> &'a [ResumeChoice],
     worktrees: impl Fn() -> &'a [Choice],
+    editable: impl Fn() -> &'a [Choice],
 ) -> Vec<Candidate> {
     if !line.starts_with('/') {
         return Vec::new();
@@ -366,40 +376,32 @@ pub fn complete<'a>(
     };
     let typed = rest.trim_start();
     match word {
-        "/effort" => pi_store::args::EffortArg::names()
-            .into_iter()
-            .filter(|e| e.starts_with(typed) && e != typed)
-            .map(|e| Candidate {
-                show: e.to_string(),
-                line: format!("/effort {e}"),
-                help: String::new(),
-                more: false,
-            })
-            .collect(),
+        "/effort" => {
+            let levels: Vec<Choice> = pi_store::args::EffortArg::names()
+                .into_iter()
+                .map(|e| Choice {
+                    name: e.to_string(),
+                    note: String::new(),
+                })
+                .collect();
+            offer(&levels, "/effort ", typed)
+        }
         // A second word means the model name is settled and something else is
         // being typed. There is no third thing to offer.
         "/model" if typed.contains(char::is_whitespace) => Vec::new(),
-        "/model" => models
-            .iter()
-            .filter(|m| m.name.starts_with(typed) && m.name != typed)
-            .map(|m| Candidate {
-                show: m.name.clone(),
-                line: format!("/model {}", m.name),
-                help: m.note.clone(),
-                more: false,
-            })
-            .collect(),
+        "/model" => offer(models, "/model ", typed),
+        "/edit" => offer(editable(), "/edit ", typed),
         // `rm` marks what follows it for removal; a bare `rm` still means the
         // name of a worktree, so nothing is offered until the space says.
         "/worktree" if typed == "rm" => Vec::new(),
         "/worktree" if typed.starts_with("rm ") => {
             let arg = typed["rm ".len()..].trim_start();
-            worktree_candidates(worktrees(), "/worktree rm ", arg)
+            offer(worktrees(), "/worktree rm ", arg)
         }
         // A name may hold a slash (`feat/one`), so unlike a model it is not
         // settled by the first word — only whitespace after it settles it.
         "/worktree" if typed.contains(char::is_whitespace) => Vec::new(),
-        "/worktree" => worktree_candidates(worktrees(), "/worktree ", typed),
+        "/worktree" => offer(worktrees(), "/worktree ", typed),
         // A first question is a whole sentence, and a session answers to the
         // name it was given as well, and to its id.
         "/resume" => {

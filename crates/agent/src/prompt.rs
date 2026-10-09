@@ -16,7 +16,7 @@ pub struct Standing {
     pub write_paths: Vec<PathBuf>,
     /// pi's home, set only when the run may add tools and skills to it.
     pub pi_home: Option<PathBuf>,
-    /// Instruction files by path, most general first.
+    /// Instructions files by path, most general first.
     pub instructions: Vec<(PathBuf, String)>,
     /// Memory files by name.
     pub memory: Vec<(String, String)>,
