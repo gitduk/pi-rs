@@ -53,6 +53,25 @@ where
     std::panic::AssertUnwindSafe(job).catch_unwind().await.ok()
 }
 
+/// A line pi sends on the model's behalf: what the screen names it by, and
+/// what the model is told of where it came from.
+pub(super) struct Relay {
+    pub(super) label: String,
+    pub(super) note: String,
+}
+
+// What opens a turn: a line the user gave, or one pi relays.
+enum Ask {
+    Typed {
+        prompt: String,
+        typed: Option<String>,
+    },
+    Relayed {
+        prompt: String,
+        relay: Relay,
+    },
+}
+
 impl Tui {
     // The front lane's transcript, for a job about to run on it.
     fn take_carried(&mut self) -> Option<Session> {
@@ -82,23 +101,40 @@ impl Tui {
         typed: Option<String>,
         done: &UnboundedSender<Done>,
     ) {
+        self.begin(Ask::Typed { prompt, typed }, done);
+    }
+
+    // The same, for a line pi relays on the model's behalf.
+    pub(super) fn start_relayed(
+        &mut self,
+        prompt: String,
+        relay: Relay,
+        done: &UnboundedSender<Done>,
+    ) {
+        self.begin(Ask::Relayed { prompt, relay }, done);
+    }
+
+    fn begin(&mut self, ask: Ask, done: &UnboundedSender<Done>) {
         // Lent to the run for the turn's length. Missing only when a panic
         // took the transcript and the archive won't read back.
         let Some(mut carried) = self.take_carried() else {
             return;
         };
-        // The line keeps `[Image #n …]`; the model is told where each one is.
-        let (prompt, typed, images) = match super::clipboard::with_paths(&prompt, &self.ui.images) {
-            Some((sent, named)) => (
-                sent,
-                typed.or(Some(prompt)),
-                super::clipboard::attached(&named),
-            ),
-            None => (prompt, typed, Vec::new()),
-        };
-        match self.ui.relay.take() {
-            Some((label, note)) => carried.send_relayed(prompt, label, note),
-            None => carried.send_prompt_with(prompt, typed, images),
+        match ask {
+            Ask::Typed { prompt, typed } => {
+                // The line keeps `[Image #n …]`; the model is told where each one is.
+                let (prompt, typed, images) =
+                    match super::clipboard::with_paths(&prompt, &self.ui.images) {
+                        Some((sent, named)) => (
+                            sent,
+                            typed.or(Some(prompt)),
+                            super::clipboard::attached(&named),
+                        ),
+                        None => (prompt, typed, Vec::new()),
+                    };
+                carried.send_prompt_with(prompt, typed, images);
+            }
+            Ask::Relayed { prompt, relay } => carried.send_relayed(prompt, relay.label, relay.note),
         }
         // The repair results and stop note the send filed are entries now:
         // derive rows like any commit so they show without a rebuild.

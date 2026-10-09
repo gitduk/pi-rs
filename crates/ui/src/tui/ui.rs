@@ -111,9 +111,6 @@ pub(super) struct Ui {
     pub(super) live_tools_shown: bool,
     // The front checkout's subagents in the background, drawn over the bar.
     pub(super) jobs: Vec<pi_core::driver::later::Job>,
-    // The label and note of the line a driver just relayed for the model,
-    // until the turn it starts takes them.
-    pub(super) relay: Option<(String, String)>,
 }
 
 /// Who has the keyboard.
@@ -227,7 +224,6 @@ impl Ui {
             flash: None,
             copied: None,
             jobs: Vec::new(),
-            relay: None,
             images: Vec::new(),
             layout: Default::default(),
             hovered_scrollback: None,

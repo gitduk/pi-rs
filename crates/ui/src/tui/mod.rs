@@ -111,6 +111,8 @@ enum Asked {
 enum Wake {
     // Something to carry out, once the select's borrows are gone.
     Do(Asked),
+    // A line pi relays for the model: always a turn, never a command.
+    Relay(String, job::Relay),
     // A turn ended and has to be settled, whichever lane it belongs to.
     Turn(Done),
     // Something only the screen cares about.
@@ -521,31 +523,11 @@ impl Tui {
             // A driver's line goes only when the lane is free and nothing typed
             // is waiting: what the user says comes first.
             let free = !running && !waiting;
+            let driven = free.then(|| self.driver_line()).flatten();
             let lane = self.core.lane();
-            let next = free
-                .then(|| self.drivers.next(lane.token(), lane.root()))
-                .flatten();
-            let woke = if let Some(next) = next {
-                origin = next.origin;
-                let intent = input::read(&next.line, &self.core.commands);
-                let view = front_view(&mut self.views, self.core.lane());
-                // Only a prompt starts an ask to carry it; a command that came
-                // due runs as typed.
-                match next.label.filter(|_| matches!(intent, Intent::Prompt(_))) {
-                    Some(label) => {
-                        self.ui.submit_relayed(view, &label, &next.line);
-                        self.ui.relay = Some((label, next.note));
-                    }
-                    None => {
-                        self.ui.submit(view, &next.line);
-                        if !next.note.is_empty() {
-                            self.core.lane_mut().push_note(&next.note);
-                        }
-                    }
-                }
-                view.surface.scroll = 0;
-                self.core.lane_mut().charge(&next.spent);
-                Wake::Do(Asked::Core(intent))
+            let woke = if let Some((from, wake)) = driven {
+                origin = from;
+                wake
             } else if !waiting || running {
                 let bar_due = self.bar.due().map(tokio::time::Instant::from_std);
                 // Only while the lane is free: a prompt due under a run would
@@ -664,6 +646,11 @@ impl Tui {
                 }
                 Wake::Nothing => continue,
                 Wake::Leave => break,
+                // Its driver hears nothing of the turn, so nothing follows.
+                Wake::Relay(line, relay) => {
+                    self.start_relayed(line, relay, &done_tx);
+                    continue;
+                }
                 Wake::Do(asked) => asked,
             };
             // What the surface answers for itself: the screen, the keyboard
@@ -729,8 +716,6 @@ impl Tui {
                 // loop's top; draining here would merge them into one prompt.
                 Step::Prompt { send, typed } => self.start_turn(send, typed, &done_tx),
             }
-            // Spent by the turn it was for, or stale if none started.
-            self.ui.relay = None;
             // The driver that sent this line hears the end of the turn it began.
             // By token: the step may have moved the surface to another lane.
             if origin != Origin::Typed
@@ -746,6 +731,36 @@ impl Tui {
         self.save_history();
         self.settle_all(&mut done_rx).await;
         Ok(())
+    }
+
+    // The line a driver sends the front lane next, drawn and its spend
+    // charged, with who sent it: a relay opens a turn, anything else is read.
+    fn driver_line(&mut self) -> Option<(Origin, Wake)> {
+        let lane = self.core.lane();
+        let next = self.drivers.next(lane.token(), lane.root())?;
+        self.core.lane_mut().charge(&next.spent);
+        let intent = input::read(&next.line, &self.core.commands);
+        let view = front_view(&mut self.views, self.core.lane());
+        view.surface.scroll = 0;
+        // A command that came due runs as typed; only a prompt is relayed.
+        let wake = match next.label.filter(|_| matches!(intent, Intent::Prompt(_))) {
+            Some(label) => {
+                self.ui.submit_relayed(view, &label, &next.line);
+                let relay = job::Relay {
+                    label,
+                    note: next.note,
+                };
+                Wake::Relay(next.line, relay)
+            }
+            None => {
+                self.ui.submit(view, &next.line);
+                if !next.note.is_empty() {
+                    self.core.lane_mut().push_note(&next.note);
+                }
+                Wake::Do(Asked::Core(intent))
+            }
+        };
+        Some((next.origin, wake))
     }
 
     // Cut the transcript at an entry — chosen from the selector, or the

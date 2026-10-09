@@ -987,3 +987,38 @@ async fn a_queued_line_remembers_the_channel_it_came_from() {
         .collect();
     assert_eq!(from, [Origin::Channel("wechat"), Origin::Typed]);
 }
+
+// A line pi relays for the model opens a turn under its label; one that
+// came due as a command is read as typed, never relayed.
+#[tokio::test]
+async fn a_relayed_line_opens_a_turn_and_a_command_does_not() {
+    use tool::Tool as _;
+    let dir = tempfile::tempdir().expect("a checkout");
+    let mut tui = surface(dir.path());
+    let later = pi_core::driver::later::Later::new(tui.drivers.later());
+    let ctx = tui.core.lane().ctx().clone();
+    for prompt in ["check the build", "/later"] {
+        later
+            .execute(serde_json::json!({"prompt": prompt, "after": "0s"}), &ctx)
+            .await
+            .expect("set");
+    }
+
+    let Some((Origin::Later, crate::tui::Wake::Relay(line, relay))) = tui.driver_line() else {
+        panic!("the prompt is relayed");
+    };
+    assert_eq!(line, "check the build");
+    assert_eq!(relay.label, "later #1 · check the build");
+    let token = tui.core.lane().token();
+    assert!(
+        lane_rows(&mut tui, token)
+            .iter()
+            .any(|r| r.contains("◆ later #1"))
+    );
+
+    let got = tui.driver_line();
+    assert!(
+        matches!(got, Some((Origin::Later, crate::tui::Wake::Do(Asked::Core(ref i)))) if !matches!(i, Intent::Prompt(_))),
+        "the command is read as typed"
+    );
+}
