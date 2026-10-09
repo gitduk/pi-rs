@@ -365,7 +365,6 @@ pub struct Session {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum StopCause {
     // The user asked the run to stop: Esc, `/stop`, an interrupt.
-    #[allow(dead_code)]
     User,
     // It died on its own — an error or a crash — and no more is known.
     Other,
@@ -386,12 +385,18 @@ impl StopCause {
 /// What an unanswered call is closed with when stopped by the user.
 pub const STOPPED_CALL: &str = "The user stopped this call before it returned.";
 
+/// What an unanswered call is closed with when the run died under it.
+pub const DIED_CALL: &str =
+    "The run died before this call returned; whether it took effect is unknown.";
+
 /// Whether a tool result was synthesized to close an interrupted call.
 pub fn is_stopped_call(r: &ToolResult) -> bool {
     r.content.iter().any(|c| match c {
         // The bare stem also matches older wording, still recorded in
         // transcripts written before it changed.
-        ToolResultContent::Text(t) => t.text.starts_with("The user stopped this call"),
+        ToolResultContent::Text(t) => {
+            t.text.starts_with("The user stopped this call") || t.text == DIED_CALL
+        }
         _ => false,
     })
 }
@@ -586,6 +591,11 @@ impl Session {
         self.interrupted = Some(StopCause::Error(why));
     }
 
+    /// The run that just ended was stopped by the user before it answered.
+    pub fn note_user_stop(&mut self) {
+        self.interrupted = Some(StopCause::User);
+    }
+
     // Feed a cause straight in, for tests shaping a session by hand.
     #[cfg(test)]
     fn mark_stopped(&mut self, cause: StopCause) {
@@ -627,12 +637,21 @@ impl Session {
             .filter(|c| !answered.contains(c.id.as_str()))
             .cloned()
             .collect();
+        // Calls left open with no cause on record: the process died mid-run.
+        let cause = self
+            .interrupted
+            .take()
+            .or_else(|| (!unanswered.is_empty()).then_some(StopCause::Other));
+        let closing = match cause {
+            Some(StopCause::User) => STOPPED_CALL,
+            _ => DIED_CALL,
+        };
         for c in unanswered {
-            self.push_previewed(vec![(ToolResult::text(c.id, c.name, STOPPED_CALL), None)]);
+            self.push_previewed(vec![(ToolResult::text(c.id, c.name, closing), None)]);
         }
-        // A run that died of an unknown failure tells the model so; a user
-        // stop leaves direction to the next prompt.
-        if let Some(note) = self.interrupted.take().and_then(|c| c.note()) {
+        // A run that died tells the model so; a user stop leaves direction to
+        // the next prompt.
+        if let Some(note) = cause.and_then(|c| c.note()) {
             self.push_note(note);
         }
         let ask = Prompt {
@@ -1249,29 +1268,46 @@ mod tests {
         assert!(matches!(&entries[0], Entry::Ask { .. }));
     }
 
+    // An open call is closed with what is known of why: the user stopped it,
+    // or the run died under it — an error, or a crash that left no cause.
     #[test]
-    fn an_unanswered_tool_call_is_repaired_without_error() {
-        let mut s = Session::new();
-        s.prompt("run something");
-        s.push_assistant(vec![AssistantContent::ToolCall(ToolCall {
-            id: "c1".into(),
-            name: "bash".into(),
-            args: serde_json::json!({ "command": "cargo check" }),
-        })]);
-        s.send_prompt("actually do this", None);
-
-        let entries = s.entries();
-        assert_eq!(
-            entries.len(),
-            4,
-            "prompt, assistant call, repaired tool, new prompt"
-        );
-        let result = match &entries[2] {
-            Entry::Tool { result, .. } => result,
-            other => panic!("expected tool result, got {other:?}"),
+    fn an_unanswered_tool_call_is_closed_with_why_it_never_returned() {
+        let open = |cause: Option<StopCause>| {
+            let mut s = Session::new();
+            s.prompt("run something");
+            s.push_assistant(vec![AssistantContent::ToolCall(ToolCall {
+                id: "c1".into(),
+                name: "bash".into(),
+                args: serde_json::json!({ "command": "cargo check" }),
+            })]);
+            if let Some(cause) = cause {
+                s.mark_stopped(cause);
+            }
+            s.send_prompt("actually do this", None);
+            s
         };
-        assert!(!result.is_error, "a stopped call is not an error");
-        assert!(is_stopped_call(result));
+        for (why, cause, closing, noted) in [
+            ("a user stop", Some(StopCause::User), STOPPED_CALL, false),
+            (
+                "an error",
+                Some(StopCause::Error("died".into())),
+                DIED_CALL,
+                true,
+            ),
+            ("a crash", None, DIED_CALL, true),
+        ] {
+            let s = open(cause);
+            let entries = s.entries();
+            let result = match &entries[2] {
+                Entry::Tool { result, .. } => result,
+                other => panic!("{why}: expected the closing result, got {other:?}"),
+            };
+            assert!(!result.is_error, "{why}: a closed call is not an error");
+            assert!(is_stopped_call(result), "{why}");
+            assert_eq!(result.flatten_text(), closing, "{why}");
+            let note = entries.iter().any(|e| matches!(e, Entry::Note { .. }));
+            assert_eq!(note, noted, "{why}");
+        }
     }
 
     #[test]

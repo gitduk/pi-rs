@@ -65,7 +65,7 @@ pub enum AgentError {
 }
 
 /// Fold how the run that just ended went into the next prompt: a run that did
-/// not answer its prompt records why; one that answered or was cancelled, nothing.
+/// not answer its prompt records why, so its open calls are closed truthfully.
 pub trait NoteOutcome {
     fn note_outcome(&mut self, outcome: &Result<Usage, AgentError>);
 }
@@ -73,7 +73,8 @@ pub trait NoteOutcome {
 impl NoteOutcome for Session {
     fn note_outcome(&mut self, outcome: &Result<Usage, AgentError>) {
         match outcome {
-            Ok(_) | Err(AgentError::Cancelled) => {}
+            Ok(_) => {}
+            Err(AgentError::Cancelled) => self.note_user_stop(),
             Err(e) => self.note_failure(e.to_string()),
         }
     }

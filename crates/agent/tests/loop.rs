@@ -431,6 +431,7 @@ async fn a_call_that_finished_beside_a_cancelled_one_keeps_its_result() {
     let (mut session, out, _) = drive(&a, &ctx, "go").await;
     assert!(matches!(out, Err(AgentError::Cancelled)), "{out:?}");
 
+    agent::NoteOutcome::note_outcome(&mut session, &out);
     session.send_prompt("next", None);
     let view = session.context();
     let results = tool_results(&view);

@@ -44,6 +44,8 @@ pub enum Error {
     Reqwest(#[from] reqwest::Error),
     #[error("wechat: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("wechat: the saved token cannot be sent as a header; log in again")]
+    BadToken,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -216,7 +218,7 @@ impl Client {
         endpoint: &str,
         timeout: Duration,
     ) -> Result<String> {
-        req = req.headers(headers(token)).timeout(timeout);
+        req = req.headers(headers(token)?).timeout(timeout);
         let resp = req.send().await?;
         let status = resp.status().as_u16();
         let raw = resp.text().await.unwrap_or_default();
@@ -276,7 +278,7 @@ fn wechat_uin() -> String {
 
 // The fixed request headers, mirroring the reference client: the two app
 // headers on every request; the auth trio on POSTs once a token exists.
-fn headers(token: Option<&str>) -> HeaderMap {
+fn headers(token: Option<&str>) -> Result<HeaderMap> {
     let mut h = HeaderMap::new();
     h.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     h.insert(
@@ -290,15 +292,15 @@ fn headers(token: Option<&str>) -> HeaderMap {
     h.insert("iLink-App-Id", HeaderValue::from_static(ILINK_APP_ID));
     h.insert(
         "iLink-App-ClientVersion",
-        HeaderValue::from_str(&ILINK_APP_CLIENT_VERSION.to_string()).unwrap(),
+        HeaderValue::from(ILINK_APP_CLIENT_VERSION),
     );
     if let Some(token) = token.filter(|t| !t.trim().is_empty()) {
         h.insert(
             reqwest::header::AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+            HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| Error::BadToken)?,
         );
     }
-    h
+    Ok(h)
 }
 
 // Parse one `get_qrcode_status` body into a `QrStatus`.
@@ -336,4 +338,18 @@ fn client_id() -> String {
         .map(|d| d.as_millis())
         .unwrap_or(0);
     format!("pi-wechat:{now}-{:08x}", rand::random::<u32>())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The token comes from a file anyone can edit: a stray newline in it is
+    // an error to report, not a panic that takes the channel down.
+    #[test]
+    fn a_token_that_cannot_be_a_header_is_an_error() {
+        assert!(matches!(headers(Some("abc\ndef")), Err(Error::BadToken)));
+        assert!(headers(Some("abc")).is_ok());
+        assert!(headers(None).is_ok());
+    }
 }
