@@ -337,7 +337,7 @@ const BINDINGS: &[Binding] = &[
         action: A::Rewind,
         when: W::Editor,
         keys: &["esc esc"],
-        note: "with an empty line, to go back to a message or an answer",
+        note: "with an empty line, to go back to something you said",
     },
     Binding {
         id: "view.scroll-up",

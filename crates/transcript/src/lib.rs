@@ -310,6 +310,12 @@ fn said(blocks: &[AssistantContent]) -> Option<String> {
 // The place this entry offers to go back to, or `None` when it is not one.
 fn node_of(entry: &Entry) -> Option<Node> {
     match entry {
+        // Not the user's to unsend: pi sent it, and the conversation goes on
+        // from it the way it does from an answer.
+        Entry::Ask { id, ask, .. } if ask.relayed.is_some() => Some(Node::Reply {
+            id: *id,
+            show: ask.shown_text().to_string(),
+        }),
         Entry::Ask { id, ask, .. } => Some(Node::Ask {
             id: *id,
             show: ask.shown_text().to_string(),
@@ -719,12 +725,14 @@ impl Session {
     ///
     /// Prompts only: a `!` command's output is not something anyone sent, and
     /// unsending it would put a line back in the editor that was never typed
-    /// as a question.
+    /// as a question. None when the last ask is one pi relayed: taking it back
+    /// would throw away an answer the model is owed, and put a line nobody typed
+    /// in the editor.
     pub fn last_ask(&self) -> Option<EntryId> {
         self.entries.iter().rev().find_map(|e| match e {
-            Entry::Ask { id, .. } => Some(*id),
+            Entry::Ask { id, ask, .. } => Some(ask.relayed.is_none().then_some(*id)),
             _ => None,
-        })
+        })?
     }
 
     /// Rewind to an entry, keeping it: everything after is removed and the
@@ -1417,5 +1425,23 @@ mod tests {
         assert_eq!(ask.shown_text(), "subagent #1 find");
         let typed: Prompt = serde_json::from_str(r#"{"text":"hi"}"#).unwrap();
         assert!(typed.relayed.is_none());
+    }
+
+    #[test]
+    fn a_relayed_ask_is_not_the_users_to_take_back() {
+        let mut s = Session::new();
+        let mine = s.prompt("find the callers");
+        s.send_relayed(
+            "three callers",
+            "subagent #1 find".into(),
+            "Not typed.".into(),
+        );
+        let rewindable: Vec<_> = s.rewind_nodes().iter().map(Node::id).collect();
+        assert_eq!(rewindable, [mine], "only what the user said");
+        assert_eq!(s.last_ask(), None, "Esc keeps the answer it is owed");
+        assert_eq!(
+            s.last_node().map(|n| n.show().to_string()),
+            Some("subagent #1 find".into())
+        );
     }
 }

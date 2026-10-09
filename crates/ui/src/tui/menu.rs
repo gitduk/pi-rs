@@ -642,11 +642,11 @@ pub(super) enum MenuEntry {
         path: String,
         dir: bool,
     },
-    // `help` says what picking the row does: two rows of prose read alike.
+    // Something the user said, to rewind to. Every row does the same, so
+    // none carries a note saying what.
     Message {
         id: EntryId,
         show: String,
-        help: &'static str,
     },
 }
 
@@ -663,7 +663,7 @@ impl MenuEntry {
         match self {
             MenuEntry::Completion(c) => &c.help,
             MenuEntry::File { path, .. } => path,
-            MenuEntry::Message { help, .. } => help,
+            MenuEntry::Message { .. } => "",
         }
     }
 }

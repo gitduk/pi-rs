@@ -369,7 +369,6 @@ async fn the_rewind_selector_has_the_keyboard() {
     tui.ui.open_rewind(vec![MenuEntry::Message {
         id: EntryId(1),
         show: "the first question".into(),
-        help: "",
     }]);
     let token = tui.core.lane().token();
     let press = |code| crate::tui::TermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));

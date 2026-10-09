@@ -824,7 +824,6 @@ impl Tui {
             .map(|node| MenuEntry::Message {
                 id: node.id(),
                 show: pi_store::text::clip(node.show(), 60),
-                help: "you — unsends it",
             })
             .collect();
         if rows.is_empty() {
