@@ -1,0 +1,12 @@
+[package]
+name = "transcript"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "The conversation record: entries, compaction marks, the context they replay as"
+
+[dependencies]
+llm.workspace = true
+serde.workspace = true
+serde_json.workspace = true

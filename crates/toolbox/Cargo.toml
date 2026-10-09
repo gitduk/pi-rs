@@ -21,7 +21,6 @@ grep-regex.workspace = true
 grep-searcher.workspace = true
 reqwest.workspace = true
 toml.workspace = true
-base64 = "0.22"
 
 # Syntax, for the outlines a `whole_block` anchor and a parse check read.
 tree-sitter = "0.25"

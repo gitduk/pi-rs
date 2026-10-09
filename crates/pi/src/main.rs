@@ -6,14 +6,15 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use tokio::sync::mpsc;
 
+use agent::NoteOutcome as _;
 use pi_core::args::Args;
 use pi_core::core::dial::{dial, summary_writer};
 use pi_core::core::resolve::resolve;
-use pi_core::core::{self, Core, lane, worktree};
+use pi_core::core::{self, Core, archive, lane, worktree};
 use pi_core::input::expand;
 use pi_store::icons;
 use pi_store::settings::Settings;
-use pi_store::{archive, journal, session};
+use pi_store::{journal, session};
 use ui::{render, tui};
 
 // The prompt, or None when the run should ask for one.
@@ -104,7 +105,7 @@ async fn distill_alone(args: &Args, store: session::Store, ended: &str) -> Resul
     let writer = summary_writer(&pinned, &config, &dialled.spec.model)?
         .unwrap_or((dialled.transport, dialled.spec));
     let memory = pi_store::memory::Memory::default();
-    core::memory::distill(store, memory, writer, config.retry().idle, ended).await;
+    core::memory::distill(store, memory, writer, core::retry(&config).idle, ended).await;
     Ok(())
 }
 
@@ -258,7 +259,7 @@ async fn main() -> Result<ExitCode> {
             prior.as_ref(),
         );
     }
-    let retry = config.retry();
+    let retry = core::retry(&config);
     // Installed last: the compactor watches its stream by the idle timeout
     // `Config::retry` just settled. Without one the transcript is never shrunk.
     ag.compactor = Arc::new(agent::Summarizing::new(writer, retry.idle));

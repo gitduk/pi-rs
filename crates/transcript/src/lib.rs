@@ -1,10 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::AgentError;
 use llm::message::{
     AssistantContent, Image, Message, Text, ToolCall, ToolResult, ToolResultContent, UserContent,
 };
-use llm::stream::Usage;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -582,14 +580,10 @@ impl Session {
         id
     }
 
-    /// Fold how the run that just ended went into the next prompt: a run that
-    /// did not answer its prompt records why, for [`Session::send_prompt`] to
-    /// name; one that answered records nothing.
-    pub fn note_outcome(&mut self, outcome: &Result<Usage, AgentError>) {
-        match outcome {
-            Ok(_) | Err(AgentError::Cancelled) => {}
-            Err(e) => self.interrupted = Some(StopCause::Error(e.to_string())),
-        }
+    /// The run that just ended died of `why` before answering its prompt,
+    /// recorded for [`Session::send_prompt`] to name.
+    pub fn note_failure(&mut self, why: String) {
+        self.interrupted = Some(StopCause::Error(why));
     }
 
     // Feed a cause straight in, for tests shaping a session by hand.
@@ -1137,7 +1131,6 @@ mod tests {
         answered.push_assistant(vec![AssistantContent::Text(MsgText {
             text: "it says a".into(),
         })]);
-        answered.note_outcome(&Ok(Usage::default()));
 
         let stopped = |cause: StopCause| {
             let mut s = Session::new();
@@ -1145,17 +1138,16 @@ mod tests {
             s.mark_stopped(cause);
             s
         };
-        let failed = |outcome: Result<Usage, AgentError>| {
+        let failed = |why: &str| {
             let mut s = Session::new();
             s.prompt("go");
-            s.note_outcome(&outcome);
+            s.note_failure(why.into());
             s
         };
 
         for (why, mut s, note) in [
             ("an answer", answered, None),
             ("a user stop", stopped(StopCause::User), None),
-            ("a cancelled run", failed(Err(AgentError::Cancelled)), None),
             (
                 "a death of no known cause",
                 stopped(StopCause::Other),
@@ -1163,7 +1155,7 @@ mod tests {
             ),
             (
                 "a death with a cause",
-                failed(Err(AgentError::Llm(llm::LlmError::Stream("died".into())))),
+                failed("stream: died"),
                 Some(stopped_note(Some("stream: died"))),
             ),
         ] {

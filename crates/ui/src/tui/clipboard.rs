@@ -119,7 +119,7 @@ pub(super) fn with_paths(text: &str, images: &[PathBuf]) -> Option<(String, Vec<
 pub(super) fn attached(paths: &[PathBuf]) -> Vec<llm::message::Image> {
     paths
         .iter()
-        .filter_map(|p| toolbox::read::as_image(&std::fs::read(p).ok()?).ok())
+        .filter_map(|p| llm::message::Image::from_bytes(&std::fs::read(p).ok()?).ok())
         .collect()
 }
 

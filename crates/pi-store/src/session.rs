@@ -5,10 +5,10 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use agent::session::Session;
+use transcript::Session;
 /// The clock this crate dates transcripts by — the session's own, so a file
 /// and the entries inside it are never stamped by two.
-pub use agent::session::now;
+pub use transcript::now;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -999,8 +999,8 @@ mod tests {
         let mut log = log_with(vec![Message::user("go"), call("read"), results()]);
         // The result is its own entry now, so the omission names that entry.
         let target = log.view().last().unwrap().id();
-        log.record(agent::session::Compaction {
-            omissions: vec![agent::session::Omission {
+        log.record(transcript::Compaction {
+            omissions: vec![transcript::Omission {
                 block: None,
                 entry: target,
                 notice: "[gone]".into(),

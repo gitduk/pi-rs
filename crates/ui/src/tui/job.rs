@@ -123,7 +123,7 @@ impl Tui {
         let done = done.clone();
         // Read where the run starts, not carried on the agent: a reload
         // between two turns reaches the next one this way.
-        let retry = self.core.config.retry();
+        let retry = pi_core::core::retry(&self.core.config);
         tokio::spawn(async move {
             let out = guard(agent.run(&mut carried, &ctx, &sent, &retry)).await;
             let _ = done.send(Done {

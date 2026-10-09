@@ -16,7 +16,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use agent::session::{EntryId, Session};
-use agent::{Agent, Archive, Event, Totals};
+use agent::{Agent, Archive, Event, NoteOutcome as _, Totals};
 use subagent::Subagent;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio_util::sync::CancellationToken;
@@ -682,7 +682,7 @@ impl Core {
             &mut ag,
             Arc::new(resolved),
             archive,
-            self.config.retry(),
+            crate::core::retry(&self.config),
             self.later.clone(),
         );
 

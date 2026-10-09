@@ -25,44 +25,9 @@ struct Args {
     outline: Option<bool>,
 }
 
-// Under Anthropic's 5 MB per-image cap even counted as base64.
-const IMAGE_MAX: usize = 3_750_000;
-
-// The formats every vision endpoint takes, named by their magic bytes.
-fn image_type(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        Some("image/png")
-    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        Some("image/jpeg")
-    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        Some("image/gif")
-    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        Some("image/webp")
-    } else {
-        None
-    }
-}
-
-/// `bytes` as an image a model can be sent, or why not: not a format every
-/// vision endpoint takes, or over the size one will.
-pub fn as_image(bytes: &[u8]) -> Result<llm::message::Image, String> {
-    use base64::Engine;
-    let media_type = image_type(bytes).ok_or("not a PNG, JPEG, GIF or WebP image")?;
-    if bytes.len() > IMAGE_MAX {
-        return Err(format!(
-            "a {media_type} of {} bytes, over the {IMAGE_MAX}-byte image limit",
-            bytes.len()
-        ));
-    }
-    Ok(llm::message::Image::Base64 {
-        media_type: media_type.to_string(),
-        data: base64::engine::general_purpose::STANDARD.encode(bytes),
-    })
-}
-
 fn image(rel: &str, media_type: &str, bytes: &[u8]) -> ToolOutput {
     use llm::message::{Text, ToolResultContent};
-    let image = match as_image(bytes) {
+    let image = match llm::message::Image::from_bytes(bytes) {
         Ok(image) => image,
         Err(why) => {
             return ToolOutput::text(format!(
@@ -322,7 +287,7 @@ impl Tool for Read {
             return Ok(ToolOutput::text(over_limit(&rel, meta.len())));
         }
         let bytes = tokio::fs::read(&path).await?;
-        if let Some(media_type) = image_type(&bytes) {
+        if let Some(media_type) = llm::message::Image::media_type(&bytes) {
             return Ok(image(&rel, media_type, &bytes));
         }
         if looks_binary(&bytes) {

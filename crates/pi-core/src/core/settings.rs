@@ -83,7 +83,7 @@ impl Core {
             .map_or(running.model, |(_, s)| s.model.clone());
         // The compactor holds the summarizer's connection, so it's rebuilt
         // here or `summarize_model`/`idle_timeout` never follow a reload.
-        let retry = config.retry();
+        let retry = crate::core::retry(&config);
         let writer = crate::core::dial::summary_writer(&self.pinned, &config, &model)
             .map_err(|e| format!("nothing reloaded — {}", refused("summarize_model", e)))?;
 
@@ -180,7 +180,7 @@ impl Core {
     ) {
         let archive = self.archive(self.lane().root().to_path_buf(), spec.model.clone());
         let resolved = self.lane().resolved().clone();
-        let retry = self.config.retry();
+        let retry = crate::core::retry(&self.config);
         // The child is built from this agent, so the tool is hung again for it
         // to run on the model this session just moved to.
         let later = self.later.clone();

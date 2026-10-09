@@ -78,7 +78,7 @@ impl Default for Escape {
 
 /// The shared wording for a spend, used for both a session's totals and a
 /// run's. Cost is omitted (not shown as $0) when the model is unpriced.
-pub fn spent(t: &agent::Totals) -> String {
+pub fn spent(t: &llm::Totals) -> String {
     let mut parts = vec![in_out(t.usage.input, t.usage.output)];
     if t.usage.cache_read > 0 {
         parts.push(format!("{} cached", short(t.usage.cache_read)));

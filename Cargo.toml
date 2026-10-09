@@ -13,6 +13,7 @@ llm = { path = "crates/llm" }
 tool = { path = "crates/tool" }
 toolbox = { path = "crates/toolbox" }
 mcp = { path = "crates/mcp" }
+transcript = { path = "crates/transcript" }
 agent = { path = "crates/agent" }
 subagent = { path = "crates/subagent" }
 skills = { path = "crates/skills" }

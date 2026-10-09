@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 use agent::Archive;
 use agent::session::Session;
 
-use crate::session::{Store, now};
+use pi_store::session::{Store, now};
 
 // Saves handed off to a background thread, still in flight; the exit path
 // drains these so a promised transcript is actually on disk before exit.

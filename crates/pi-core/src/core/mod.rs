@@ -4,6 +4,7 @@
 //! Each verb lives with its state — see `settings.rs`, `lane.rs`,
 //! `status.rs`, `meter.rs`, `bash.rs`, `driver/`.
 
+pub mod archive;
 pub mod bar;
 pub mod bash;
 pub mod content;
@@ -26,6 +27,19 @@ use pi_store::config;
 use pi_store::listing::Listing;
 use pi_store::session::Store;
 use pi_store::settings::Settings;
+
+/// The retry schedule, with the defaults the file may leave out. Read where
+/// a run starts rather than kept on the agent, so a reload reaches it.
+pub fn retry(config: &config::Config) -> agent::Retry {
+    let mut retry = agent::Retry::default();
+    if let Some(n) = config.retries {
+        retry.attempts = n;
+    }
+    if let Some(secs) = config.idle_timeout {
+        retry.idle = std::time::Duration::from_secs(secs.max(1));
+    }
+    retry
+}
 
 /// What every surface says when the transcript did not reach the disk: one
 /// sentence, so a reworded copy cannot make one failure read as two.
@@ -163,7 +177,7 @@ impl Core {
     /// serves: lanes armed before this are armed again.
     pub fn enable_later(&mut self, table: std::sync::Arc<crate::driver::later::Table>) {
         self.later = Some(table);
-        let retry = self.config.retry();
+        let retry = retry(&self.config);
         for at in 0..self.lanes.len() {
             let lane = &self.lanes[at];
             let archive =
@@ -195,7 +209,7 @@ impl Core {
         root: std::path::PathBuf,
         model: String,
     ) -> std::sync::Arc<dyn agent::Archive> {
-        pi_store::archive::Filed::armed(self.store.clone(), root, model)
+        archive::Filed::armed(self.store.clone(), root, model)
     }
 
     pub fn lane_mut(&mut self) -> &mut Lane {
@@ -615,7 +629,7 @@ mod tests {
         let resolved = crate::core::lane::arm(
             &mut agent,
             crate::core::lane::a_resolved("standing"),
-            pi_store::archive::Filed::armed(
+            super::archive::Filed::armed(
                 pi_store::session::Store::new(root.join("state")),
                 root.to_path_buf(),
                 model.into(),

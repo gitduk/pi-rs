@@ -7,7 +7,6 @@
 
 use std::path::PathBuf;
 
-pub mod archive;
 pub mod args;
 pub mod bar;
 pub mod config;

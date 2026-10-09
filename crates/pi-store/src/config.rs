@@ -279,18 +279,6 @@ impl Config {
         crate::keys::Keys::resolve(&overrides)
     }
 
-    /// The retry schedule, with the defaults the file may leave out. Read where
-    /// a run starts rather than kept on the agent, so a reload reaches it.
-    pub fn retry(&self) -> agent::Retry {
-        let mut retry = agent::Retry::default();
-        if let Some(n) = self.retries {
-            retry.attempts = n;
-        }
-        if let Some(secs) = self.idle_timeout {
-            retry.idle = std::time::Duration::from_secs(secs.max(1));
-        }
-        retry
-    }
     /// The ceiling an unset `loop_max_rounds` reads as — see the field. An
     /// `Option` here mirrors the field, so `None` and the config staying
     /// silent mean the same thing to callers.

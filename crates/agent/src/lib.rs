@@ -21,7 +21,7 @@ pub mod hooks;
 pub mod prompt;
 pub mod retry;
 pub mod seams;
-pub mod session;
+pub use transcript as session;
 
 pub use approval::Ceiling;
 pub use compaction::Summarizing;
@@ -62,6 +62,21 @@ pub enum AgentError {
 
     #[error("still running {}s after cancel", STOP_GRACE.as_secs())]
     Unstopped,
+}
+
+/// Fold how the run that just ended went into the next prompt: a run that did
+/// not answer its prompt records why; one that answered or was cancelled, nothing.
+pub trait NoteOutcome {
+    fn note_outcome(&mut self, outcome: &Result<Usage, AgentError>);
+}
+
+impl NoteOutcome for Session {
+    fn note_outcome(&mut self, outcome: &Result<Usage, AgentError>) {
+        match outcome {
+            Ok(_) | Err(AgentError::Cancelled) => {}
+            Err(e) => self.note_failure(e.to_string()),
+        }
+    }
 }
 
 /// The wire a lane talks on, and the model on the other end. Swapped whole by
@@ -796,4 +811,30 @@ async fn leashed<T>(
     tokio::time::timeout(idle, fut)
         .await
         .map_err(|_| wedged(idle))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::Entry;
+
+    #[test]
+    fn only_a_failed_run_leaves_a_note_for_the_next_prompt() {
+        for (why, outcome, noted) in [
+            ("an answer", Ok(Usage::default()), false),
+            ("a cancelled run", Err(AgentError::Cancelled), false),
+            (
+                "a failed run",
+                Err(AgentError::Llm(llm::LlmError::Stream("died".into()))),
+                true,
+            ),
+        ] {
+            let mut s = Session::new();
+            s.prompt("go");
+            s.note_outcome(&outcome);
+            s.send_prompt("and now this", None);
+            let got = s.entries().iter().any(|e| matches!(e, Entry::Note { .. }));
+            assert_eq!(got, noted, "{why}");
+        }
+    }
 }
