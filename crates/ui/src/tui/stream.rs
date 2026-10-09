@@ -184,8 +184,14 @@ impl Ui {
                     name: name.clone(),
                     summary: crate::render::summarize(args),
                     started: std::time::Instant::now(),
+                    progress: None,
                     done: None,
                 });
+            }
+            Event::ToolProgress { id, text } => {
+                if let Some(t) = view.state.tools.iter_mut().find(|t| t.id == *id) {
+                    t.progress = Some(text.clone());
+                }
             }
             Event::ToolEnd {
                 id,
@@ -198,6 +204,7 @@ impl Ui {
                 // what the entry derives to.
                 if let Some(t) = view.state.tools.iter_mut().find(|t| t.id == *id) {
                     t.done = Some(Row::result(!*is_error, name.clone(), preview.clone()));
+                    t.progress = None;
                 }
             }
             // New entries: derive rows via `f_entry`, check them against
@@ -305,7 +312,8 @@ impl Ui {
         // editor); the tally and window share this one predicate.
         let browse = self.browsing();
         let keep = move |row: &Row| !browse || row.is_conversation();
-        let mut bar = self.bar_lines(&Facts::of(lane), &snapshot(lane, view), width);
+        let mut bar = super::call::job_lines(&self.jobs, self.spinner, &self.paint, width);
+        bar.extend(self.bar_lines(&Facts::of(lane), &snapshot(lane, view), width));
         // The bar's rows are not worth a terminal that cannot hold them, a row
         // to type on and a row of history: one that short keeps the other two.
         bar.truncate((self.screen.height as usize).saturating_sub(2));

@@ -183,6 +183,7 @@ async fn a_panicked_bang_does_not_lay_its_transcript_down_again() {
         text: "Ran `ls`\nfile".into(),
         images: Vec::new(),
         shown: Some("!ls".into()),
+        relayed: None,
     });
     tui.core.lane_mut().return_session(s);
     let token = tui.core.lane().token();

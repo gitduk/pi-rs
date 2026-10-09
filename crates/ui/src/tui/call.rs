@@ -10,6 +10,7 @@ use super::row::{self, PendingTool, Row};
 use super::scrollback::Folds;
 use crate::render::{Paint, named};
 use pi_core::core::tools::modifies;
+use pi_core::driver::later::Job;
 use pi_store::icons;
 
 // A tool call still running. Its line is drawn by the group it will fold
@@ -19,6 +20,8 @@ pub(super) struct RunTool {
     pub(super) name: String,
     pub(super) summary: String,
     pub(super) started: Instant,
+    // What the call last said of its progress, if it says any.
+    pub(super) progress: Option<String>,
     // Set when the call ended: the row its entry will adopt, parked until the
     // committed entries arrive — and what decides whether it can still fold.
     pub(super) done: Option<Row>,
@@ -56,7 +59,7 @@ pub(super) fn pending_line(now: Instant, tick: usize, t: &RunTool, paint: &Paint
         None => {
             let mut spans = vec![muted(format!("{} ", row::call_frame(tick)))];
             spans.extend(row::shimmer(&named, tick, paint));
-            spans.push(muted(row::out_for(out_secs(t, now))));
+            spans.push(muted(row::out_for(t.progress.as_deref(), out_secs(t, now))));
             Line::from(spans)
         }
     }
@@ -78,6 +81,7 @@ pub(super) fn held(tools: &[RunTool], now: Instant) -> Vec<PendingTool> {
             name: t.name.clone(),
             preview: t.summary.clone(),
             landed: t.done.is_some(),
+            progress: t.progress.clone(),
             secs: out_secs(t, now),
         })
         .collect()
@@ -110,4 +114,42 @@ pub(super) fn push_tool_row(
         return;
     }
     scrollback.push(row);
+}
+
+// More than this and the list would crowd out the history it sits under.
+const JOBS_SHOWN: usize = 4;
+
+// One row per subagent in the background: still out with its progress and
+// clock, or done and waiting for the lane to be free.
+pub(super) fn job_lines(
+    jobs: &[Job],
+    tick: usize,
+    paint: &Paint,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let room = width.saturating_sub(1);
+    let muted = |s: String| paint.span(&paint.theme.muted, s);
+    let mut lines: Vec<Line<'static>> = jobs
+        .iter()
+        .take(JOBS_SHOWN)
+        .map(|job| {
+            let (mark, state) = if job.ended {
+                (
+                    icons::DONE_MARK,
+                    format!("{}done, back when idle", icons::PART_SEP),
+                )
+            } else {
+                let progress = Some(job.progress.as_str()).filter(|p| !p.is_empty());
+                let secs = Some(job.started.elapsed().as_secs());
+                (row::call_frame(tick), row::out_for(progress, secs))
+            };
+            let text = format!("{mark} #{} {}{state}", job.id, job.description);
+            Line::from(muted(pi_store::text::clip(&text, room)))
+        })
+        .collect();
+    if jobs.len() > JOBS_SHOWN {
+        let more = format!("+{} more · /later", jobs.len() - JOBS_SHOWN);
+        lines.push(Line::from(muted(more)));
+    }
+    lines
 }

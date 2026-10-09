@@ -1,3 +1,6 @@
+use std::future::Future;
+use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -28,6 +31,32 @@ struct Args {
     // child: a check it knows about is a check it can write itself around.
     #[serde(default)]
     verify: Option<String>,
+    #[serde(default)]
+    background: bool,
+}
+
+/// Where a job taken off the caller's turn runs, and how it comes back.
+pub trait Background: Send + Sync {
+    /// Run `job` for the checkout at `root` apart from the caller's turn,
+    /// handing it where to say its progress; returns the id it goes by.
+    fn start(&self, root: PathBuf, description: String, job: Job) -> u64;
+}
+
+/// A subagent run apart from its caller, started with where to say its
+/// progress and the token that asks it to stop.
+pub type Job = Box<
+    dyn FnOnce(
+            tool::Progress,
+            tokio_util::sync::CancellationToken,
+        ) -> Pin<Box<dyn Future<Output = Ran> + Send>>
+        + Send,
+>;
+
+/// What a job sent to the background came to.
+pub struct Ran {
+    /// The answer the caller would have read, its cost line leading.
+    pub answer: String,
+    pub spent: llm::stream::Usage,
 }
 
 // How many written paths the result names before counting the rest — kept
@@ -57,6 +86,7 @@ enum Outcome {
 /// The caller sees a tool that takes prose and answers with prose. What happens
 /// in between is a second agent with a window of its own — which is the point:
 /// a long search costs the caller one paragraph instead of forty turns.
+#[derive(Clone)]
 pub struct Subagent {
     // Cloned for each call and thrown away after. Its registry has no
     // `subagent` of its own, so this does not nest.
@@ -68,6 +98,8 @@ pub struct Subagent {
     // The retry schedule the child runs on, handed in when the tool is hung:
     // a tool has no way to reach the config where it is called.
     retry: Retry,
+    // Where `background` sends a job; without it every call blocks its turn.
+    background: Option<Arc<dyn Background>>,
 }
 
 impl Subagent {
@@ -103,7 +135,14 @@ impl Subagent {
             archive,
             deadline,
             retry,
+            background: None,
         }
+    }
+
+    /// Let a call leave its turn: its answer comes back through `to`.
+    pub fn with_background(mut self, to: Arc<dyn Background>) -> Self {
+        self.background = Some(to);
+        self
     }
 
     pub fn with_deadline(mut self, deadline: Duration) -> Self {
@@ -122,6 +161,26 @@ struct Heard {
     // Accumulated per turn rather than taken from `run`, which hands back
     // nothing when it ends early — and a run cut short has still been paid for.
     spent: llm::stream::Usage,
+    // The turn in flight's own count so far, until its end folds it into `spent`.
+    turn: llm::stream::Usage,
+    // The child's calls still out, oldest first.
+    out: Vec<(String, String)>,
+}
+
+impl Heard {
+    // `turn 3 · 41.2k/3.1k · grep`: where the child is, for the caller's row.
+    fn progress(&self) -> String {
+        let mut spent = self.spent;
+        spent.add(&self.turn);
+        let mut parts = vec![format!("turn {}", self.turns.max(1))];
+        if spent.input + spent.output > 0 {
+            parts.push(llm::figures::slash(spent.input, spent.output));
+        }
+        if let Some((_, name)) = self.out.last() {
+            parts.push(name.clone());
+        }
+        parts.join(" · ")
+    }
 }
 
 #[async_trait]
@@ -162,7 +221,7 @@ impl Tool for Subagent {
     }
 
     fn schema(&self) -> Value {
-        json!({
+        let mut schema = json!({
             "type": "object",
             "properties": {
                 "description": {
@@ -180,7 +239,14 @@ impl Tool for Subagent {
             },
             "required": ["description", "prompt"],
             "additionalProperties": false,
-        })
+        });
+        if self.background.is_some() {
+            schema["properties"]["background"] = json!({
+                "type": "boolean",
+                "description": "Run it apart from this turn: the call returns at once with an id, and the answer comes back later as a turn of its own. For a long job you need not wait on — keep working, or end the turn. It shares this checkout, so give it work that touches no file you are editing.",
+            });
+        }
+        schema
     }
 
     // What the child may do, because that is what the caller is authorising.
@@ -198,7 +264,48 @@ impl Tool for Subagent {
                 "the subagent's `prompt` is empty — say what it should do".into(),
             ));
         }
+        match &self.background {
+            Some(to) if args.background => Ok(self.send_off(to.as_ref(), args, ctx)),
+            _ => self.run(args, ctx).await,
+        }
+    }
+}
 
+impl Subagent {
+    // Started apart from the turn: the table's token, so esc leaves it
+    // running, and its own record of writes, since the caller's run will end.
+    fn send_off(&self, to: &dyn Background, args: Args, ctx: &Ctx) -> ToolOutput {
+        let this = self.clone();
+        let root = ctx.workspace.root().to_path_buf();
+        let description = args.description.clone();
+        let ctx = ctx.clone().with_own_writes();
+        let job: Job = Box::new(move |progress, stop| {
+            Box::pin(async move {
+                let ctx = ctx.with_cancel(stop).with_progress(progress);
+                match this.run(args, &ctx).await {
+                    Ok(out) => Ran {
+                        answer: format!("{}\n\n{}", out.preview(), out.flatten()),
+                        spent: out.spent,
+                    },
+                    Err(why) => Ran {
+                        answer: why.to_string(),
+                        spent: Default::default(),
+                    },
+                }
+            })
+        });
+        let job_name = description.replace('\n', " ");
+        let id = to.start(root, description, job);
+        let preview = format!("{} [background #{id}]", job_name.trim());
+        ToolOutput::text(format!(
+            "started in the background as #{id}; its answer comes back as a turn \
+             of its own, so keep working or end this turn. `later` lists it, and \
+             `later` with `cancel` stops it."
+        ))
+        .with_preview(preview)
+    }
+
+    async fn run(&self, args: Args, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
         let id = format!(
             "{}-subagent-{}",
             ctx.spill_namespace(),
@@ -218,18 +325,38 @@ impl Tool for Subagent {
         // Every event resets the silence clock, whatever kind it is: an
         // event is the child moving, and moving is all the watchdog asks.
         let (ticked, ticking) = watch::channel(Instant::now());
+        let caller = ctx.clone();
         let heard = tokio::spawn(async move {
             let mut heard = Heard::default();
+            let mut said = String::new();
             while let Some(event) = rx.recv().await {
                 let _ = ticked.send(Instant::now());
                 match event {
                     Event::TurnStart { turn } => {
                         heard.turns = turn;
                         heard.text.clear();
+                        heard.turn = Default::default();
                     }
-                    Event::TextDelta(text) => heard.text.push_str(&text),
-                    Event::TurnEnd { usage } => heard.spent.add(&usage),
+                    // The answer grows; where the child is does not.
+                    Event::TextDelta(text) => {
+                        heard.text.push_str(&text);
+                        continue;
+                    }
+                    Event::Usage(usage) => heard.turn = usage,
+                    Event::TurnEnd { usage } => {
+                        heard.spent.add(&usage);
+                        heard.turn = Default::default();
+                    }
+                    Event::ToolStart { id, name, .. } => heard.out.push((id, name)),
+                    Event::ToolEnd { id, .. } | Event::ToolDenied { id, .. } => {
+                        heard.out.retain(|(out, _)| *out != id)
+                    }
                     _ => {}
+                }
+                let now = heard.progress();
+                if now != said {
+                    caller.progress(now.clone());
+                    said = now;
                 }
             }
             heard

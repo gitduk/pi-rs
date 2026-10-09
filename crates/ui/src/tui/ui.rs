@@ -109,6 +109,11 @@ pub(super) struct Ui {
     // Whether the live block lists every call in flight or just the newest
     // with a count; a click flips it. Outlives the calls themselves.
     pub(super) live_tools_shown: bool,
+    // The front checkout's subagents in the background, drawn over the bar.
+    pub(super) jobs: Vec<pi_core::driver::later::Job>,
+    // The label and note of the line a driver just relayed for the model,
+    // until the turn it starts takes them.
+    pub(super) relay: Option<(String, String)>,
 }
 
 /// Who has the keyboard.
@@ -221,6 +226,8 @@ impl Ui {
             tabs: Vec::new(),
             flash: None,
             copied: None,
+            jobs: Vec::new(),
+            relay: None,
             images: Vec::new(),
             layout: Default::default(),
             hovered_scrollback: None,

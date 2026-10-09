@@ -241,7 +241,12 @@ pub struct Ctx {
     session: Option<String>,
     // Where over-long outputs land, `<root>/<session>/<n>.log`.
     spill_root: std::path::PathBuf,
+    // Where a running call says how far it has got; set per call by the loop.
+    progress: Option<Progress>,
 }
+
+/// Takes a running call's latest word on its progress, replacing the last.
+pub type Progress = std::sync::Arc<dyn Fn(String) + Send + Sync>;
 
 pub type FileLocks =
     std::sync::Arc<std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, FileLock>>>;
@@ -268,6 +273,7 @@ impl Ctx {
             writes: Default::default(),
             session: None,
             spill_root: spill::temp(),
+            progress: None,
         }
     }
 }
@@ -366,6 +372,20 @@ impl Ctx {
     pub fn with_own_writes(mut self) -> Self {
         self.writes = Default::default();
         self
+    }
+
+    /// Route this call's progress to `to`.
+    pub fn with_progress(mut self, to: Progress) -> Self {
+        self.progress = Some(to);
+        self
+    }
+
+    /// Say how far the call has got, replacing what it said before. A no-op
+    /// when nothing is listening.
+    pub fn progress(&self, text: impl Into<String>) {
+        if let Some(to) = &self.progress {
+            to(text.into());
+        }
     }
 
     /// Hold this while mutating `path`. Keyed on the resolved path, not the

@@ -36,6 +36,12 @@ pub fn render(earlier: &[&str], entries: &[&Entry]) -> String {
     }
     for e in entries {
         match e {
+            // Back on the model's own say-so, not the user's.
+            Entry::Ask { ask, .. } if ask.relayed.is_some() => lines.push(format!(
+                "[came back: {}] {}",
+                ask.shown_text(),
+                clip(&ask.text, BLOCK_BYTES)
+            )),
             Entry::Ask { ask, .. } => lines.push(format!(
                 "[user]{} {}",
                 match ask.images.len() {
@@ -140,6 +146,7 @@ mod tests {
                 text: text.into(),
                 images: Vec::new(),
                 shown: None,
+                relayed: None,
             },
         }
     }

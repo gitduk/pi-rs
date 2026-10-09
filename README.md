@@ -129,6 +129,8 @@ refused, and resuming one from another directory moves it here.
   as a turn of its own after a delay, on a period, or when a background
   command exits. It waits until the checkout is in front and idle, and lasts
   while pi runs; past that, schedule `pi "..."` with the system's cron.
+  `subagent` with `background` comes back the same way, leaving the turn
+  free; those still out are listed above the bar, and `/later rm` stops one.
 - One tool per script in `~/.pi/tools/`: any file whose first line is a `#!`,
   its `description` and `[args]` written as TOML in a `# ---` comment block
   under that line; or a cargo script `*.rs`, described by its

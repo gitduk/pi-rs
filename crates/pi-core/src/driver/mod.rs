@@ -49,6 +49,11 @@ pub struct Next {
     pub line: String,
     pub note: String,
     pub origin: Origin,
+    /// Spent before the line was sent, by a subagent in the background.
+    pub spent: llm::stream::Usage,
+    /// Set when the line is the model's own come back, not the user's: what
+    /// the screen names it by. The note then rides with the ask.
+    pub label: Option<String>,
 }
 
 pub struct Drivers {
@@ -78,14 +83,25 @@ impl Drivers {
     /// `later` first: it was due at a time, and a loop's next round can wait
     /// one turn where a loop that never settles would hold it off for good.
     pub fn next(&mut self, lane: u64, root: &std::path::Path) -> Option<Next> {
-        let (line, note, origin) = match self.later.take_due(root) {
-            Some(due) => (due.line, due.note, Origin::Later),
+        Some(match self.later.take_due(root) {
+            Some(due) => Next {
+                line: due.line,
+                note: due.note,
+                origin: Origin::Later,
+                spent: due.spent,
+                label: Some(due.label),
+            },
             None => {
                 let due = self.loops.due(lane)?;
-                (due.goal, due.note, Origin::Loop)
+                Next {
+                    line: due.goal,
+                    note: due.note,
+                    origin: Origin::Loop,
+                    spent: Default::default(),
+                    label: None,
+                }
             }
-        };
-        Some(Next { line, note, origin })
+        })
     }
 
     /// What a channel says, stamped with who said it. Cancel-safe, so the

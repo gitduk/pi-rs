@@ -536,6 +536,7 @@ mod tests {
             text: "Ran `git status`\nnothing to commit".into(),
             images: Vec::new(),
             shown: Some("!git status".into()),
+            relayed: None,
         });
 
         let Entry::Bash { run: t, .. } = &s.entries()[0] else {

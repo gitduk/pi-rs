@@ -96,7 +96,10 @@ impl Tui {
             ),
             None => (prompt, typed, Vec::new()),
         };
-        carried.send_prompt_with(prompt, typed, images);
+        match self.ui.relay.take() {
+            Some((label, note)) => carried.send_relayed(prompt, label, note),
+            None => carried.send_prompt_with(prompt, typed, images),
+        }
         // The repair results and stop note the send filed are entries now:
         // derive rows like any commit so they show without a rebuild.
         let view = front_view(&mut self.views, self.core.lane());

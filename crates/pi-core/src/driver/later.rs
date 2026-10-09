@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use pi_store::icons;
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 use tokio::sync::Notify;
@@ -54,12 +55,45 @@ enum When {
         ended: Option<String>,
         task: tokio::task::AbortHandle,
     },
+    // A subagent sent off by its caller; `ended` is its answer once it has one.
+    Agent {
+        progress: String,
+        started: Instant,
+        ended: Option<subagent::Ran>,
+        // Asks it to wind down the way esc does, grace and all.
+        stop: tokio_util::sync::CancellationToken,
+    },
+}
+
+impl When {
+    // End what a cancelled or orphaned item still has running.
+    fn stop(&self) {
+        match self {
+            When::Done { task, .. } => task.abort(),
+            When::Agent { stop, .. } => stop.cancel(),
+            _ => {}
+        }
+    }
+}
+
+/// A subagent in the background, as a surface lists it.
+pub struct Job {
+    pub id: u64,
+    pub description: String,
+    pub progress: String,
+    pub started: Instant,
+    /// Done, its answer waiting for the lane to be free.
+    pub ended: bool,
 }
 
 /// A prompt that has come due: the line to submit and the note before it.
 pub struct Due {
     pub line: String,
     pub note: String,
+    /// What the screen names the turn by, since nobody typed it.
+    pub label: String,
+    /// What a background subagent spent getting here, owed to the session.
+    pub spent: llm::stream::Usage,
 }
 
 impl Table {
@@ -82,8 +116,8 @@ impl Table {
             .filter_map(|i| match &i.when {
                 When::At(at) => Some(*at),
                 When::Every { next, .. } => Some(*next),
-                When::Done { ended: Some(_), .. } => Some(Instant::now()),
-                When::Done { ended: None, .. } => None,
+                When::Done { ended, .. } => ended.is_some().then(Instant::now),
+                When::Agent { ended, .. } => ended.is_some().then(Instant::now),
             })
             .min()
     }
@@ -99,12 +133,21 @@ impl Table {
                     When::At(at) => *at <= now,
                     When::Every { next, .. } => *next <= now,
                     When::Done { ended, .. } => ended.is_some(),
+                    When::Agent { ended, .. } => ended.is_some(),
                 }
         })?;
         let item = &mut inner.items[at];
-        let note = format!(
+        let mut note = format!(
             "This turn is `later` #{}, which you left for yourself; the user did not just type it.",
             item.id
+        );
+        let mut spent = llm::stream::Usage::default();
+        let first = |text: &str| text.lines().next().unwrap_or("").trim().to_string();
+        let mut label = format!(
+            "later #{}{}{}",
+            item.id,
+            icons::PART_SEP,
+            first(&item.prompt)
         );
         let (line, repeats) = match &mut item.when {
             When::Every { period, next } => {
@@ -122,11 +165,36 @@ impl Table {
                 ),
                 false,
             ),
+            When::Agent { ended, .. } => {
+                let ran = ended.take().unwrap_or_else(|| subagent::Ran {
+                    answer: String::new(),
+                    spent: Default::default(),
+                });
+                spent = ran.spent;
+                label = format!("subagent #{} {}", item.id, first(&ran.answer));
+                note = format!(
+                    "This turn is the answer of background subagent #{}, which you started; \
+                     the user did not just type it.",
+                    item.id
+                );
+                (
+                    format!(
+                        "Background subagent #{} ({}) has finished:\n\n{}",
+                        item.id, item.prompt, ran.answer
+                    ),
+                    false,
+                )
+            }
         };
         if !repeats {
             inner.items.remove(at);
         }
-        Some(Due { line, note })
+        Some(Due {
+            line,
+            note,
+            label,
+            spent,
+        })
     }
 
     /// What is pending for `root`, one line each.
@@ -150,6 +218,12 @@ impl Table {
                         ..
                     } => format!("when `{command}` exits"),
                     When::Done { command, .. } => format!("`{command}` has exited"),
+                    When::Agent {
+                        progress,
+                        ended: None,
+                        ..
+                    } => format!("subagent running, {progress}"),
+                    When::Agent { .. } => "subagent finished".to_string(),
                 };
                 format!("#{}  {when}: {}", i.id, i.prompt)
             })
@@ -165,9 +239,7 @@ impl Table {
             .position(|i| i.id == id && i.root == root)
             .ok_or_else(|| format!("no `later` #{id} here"))?;
         let item = inner.items.remove(at);
-        if let When::Done { task, .. } = &item.when {
-            task.abort();
-        }
+        item.when.stop();
         drop(inner);
         self.changed.notify_one();
         Ok(format!("cancelled #{id}: {}", item.prompt))
@@ -179,8 +251,8 @@ impl Table {
         let mut inner = self.lock();
         inner.items.retain(|i| {
             let gone = i.root.starts_with(root);
-            if gone && let When::Done { task, .. } = &i.when {
-                task.abort();
+            if gone {
+                i.when.stop();
             }
             !gone
         });
@@ -204,14 +276,94 @@ impl Table {
         id
     }
 
+    /// The subagents in the background for `root`, oldest first.
+    pub fn jobs(&self, root: &Path) -> Vec<Job> {
+        self.lock()
+            .items
+            .iter()
+            .filter(|i| i.root == root)
+            .filter_map(|i| match &i.when {
+                When::Agent {
+                    progress,
+                    started,
+                    ended,
+                    ..
+                } => Some(Job {
+                    id: i.id,
+                    description: i.prompt.clone(),
+                    progress: progress.clone(),
+                    started: *started,
+                    ended: ended.is_some(),
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whether a subagent is still running for `root`, so a surface keeps
+    /// redrawing its clock.
+    pub fn working(&self, root: &Path) -> bool {
+        self.lock()
+            .items
+            .iter()
+            .any(|i| i.root == root && matches!(i.when, When::Agent { ended: None, .. }))
+    }
+
+    fn progressed(&self, id: u64, said: String) {
+        self.update(id, |when| {
+            if let When::Agent { progress, .. } = when {
+                *progress = said;
+            }
+        });
+    }
+
+    fn answered(&self, id: u64, ran: subagent::Ran) {
+        self.update(id, |when| {
+            if let When::Agent { ended, .. } = when {
+                *ended = Some(ran);
+            }
+        });
+    }
+
     // A background command has exited: its prompt is due.
     fn ended(&self, id: u64, said: String) {
-        if let Some(item) = self.lock().items.iter_mut().find(|i| i.id == id)
-            && let When::Done { ended, .. } = &mut item.when
-        {
-            *ended = Some(said);
+        self.update(id, |when| {
+            if let When::Done { ended, .. } = when {
+                *ended = Some(said);
+            }
+        });
+    }
+
+    // Change item `id`, if it is still here, and wake whoever draws it.
+    fn update(&self, id: u64, change: impl FnOnce(&mut When)) {
+        if let Some(item) = self.lock().items.iter_mut().find(|i| i.id == id) {
+            change(&mut item.when);
         }
         self.changed.notify_one();
+    }
+}
+
+impl subagent::Background for Later {
+    fn start(&self, root: PathBuf, description: String, job: subagent::Job) -> u64 {
+        let table = self.table.clone();
+        self.table.add(root, description, |id| {
+            let progress: tool::Progress = {
+                let table = table.clone();
+                Arc::new(move |said| table.progressed(id, said))
+            };
+            let stop = tokio_util::sync::CancellationToken::new();
+            let run = job(progress, stop.clone());
+            tokio::spawn(async move {
+                let ran = run.await;
+                table.answered(id, ran);
+            });
+            When::Agent {
+                progress: String::new(),
+                started: Instant::now(),
+                ended: None,
+                stop,
+            }
+        })
     }
 }
 
@@ -507,5 +659,75 @@ mod tests {
             due.line
         );
         assert!(due.line.contains("built"), "{}", due.line);
+    }
+
+    #[tokio::test]
+    async fn a_background_subagent_comes_back_once_with_what_it_spent() {
+        use subagent::Background as _;
+        let table = Arc::new(Table::default());
+        let root = PathBuf::from("/checkout");
+        let (go, gate) = tokio::sync::oneshot::channel::<()>();
+        let id = Later::new(table.clone()).start(
+            root.clone(),
+            "find callers".into(),
+            Box::new(|progress, _stop| {
+                Box::pin(async move {
+                    progress("turn 2".into());
+                    let _ = gate.await;
+                    subagent::Ran {
+                        answer: "three callers".into(),
+                        spent: llm::stream::Usage {
+                            input: 100,
+                            output: 20,
+                            ..Default::default()
+                        },
+                    }
+                })
+            }),
+        );
+        tokio::task::yield_now().await;
+        let job = &table.jobs(&root)[0];
+        assert_eq!(
+            (job.id, job.progress.as_str(), job.ended),
+            (id, "turn 2", false)
+        );
+        assert!(table.working(&root));
+        assert!(table.take_due(&root).is_none(), "still running");
+
+        go.send(()).unwrap();
+        while table.working(&root) {
+            tokio::task::yield_now().await;
+        }
+        let due = table.take_due(&root).unwrap();
+        assert!(due.line.contains("three callers"), "{}", due.line);
+        assert_eq!((due.spent.input, due.spent.output), (100, 20));
+        assert!(table.take_due(&root).is_none(), "delivered once");
+        assert!(table.jobs(&root).is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_background_subagent_asks_it_to_stop() {
+        use subagent::Background as _;
+        let table = Arc::new(Table::default());
+        let root = PathBuf::from("/checkout");
+        let (seen, heard) = tokio::sync::oneshot::channel();
+        let id = Later::new(table.clone()).start(
+            root.clone(),
+            "long job".into(),
+            Box::new(|_, stop| {
+                Box::pin(async move {
+                    // Winds down on its own once asked, as a subagent does.
+                    stop.cancelled().await;
+                    let _ = seen.send(());
+                    subagent::Ran {
+                        answer: String::new(),
+                        spent: Default::default(),
+                    }
+                })
+            }),
+        );
+        table.cancel(&root, id).unwrap();
+        heard.await.expect("the job heard the stop");
+        assert!(!table.working(&root));
     }
 }

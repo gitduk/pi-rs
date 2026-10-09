@@ -136,6 +136,14 @@ enum Kind {
         // per row made redraws quadratic in the diff's size.
         painted: RefCell<Option<(usize, Vec<Line<'static>>)>>,
     },
+    // A turn nobody typed — a `later` come due, a background subagent's
+    // answer: one line naming it, its text under the line once opened.
+    Relayed {
+        label: String,
+        body: Vec<Line<'static>>,
+        open: bool,
+        hovered: bool,
+    },
     // The run's working behind one fold: read-only calls that landed
     // well and the reasoning around them, in order.
     Steps {
@@ -162,7 +170,11 @@ impl Row {
     pub fn is_conversation(&self) -> bool {
         matches!(
             &self.0,
-            Kind::Said { .. } | Kind::Answer(_) | Kind::Code { .. } | Kind::Block { .. }
+            Kind::Said { .. }
+                | Kind::Answer(_)
+                | Kind::Code { .. }
+                | Kind::Block { .. }
+                | Kind::Relayed { .. }
         )
     }
 
@@ -172,6 +184,22 @@ impl Row {
         Self::new(Kind::Notice {
             text: line.into(),
             times: 1,
+        })
+    }
+
+    /// A turn pi sent on the model's behalf, folded under `label`.
+    pub fn relayed(label: &str, text: &str, paint: &Paint) -> Self {
+        // A one-line text the label already says opens onto nothing new.
+        let said = !text.trim().contains('\n') && label.contains(text.trim());
+        Self::new(Kind::Relayed {
+            label: label.to_string(),
+            body: render::render_coded(text, paint)
+                .into_iter()
+                .map(|(line, _)| line)
+                .filter(|_| !said)
+                .collect(),
+            open: false,
+            hovered: false,
         })
     }
 
@@ -320,6 +348,7 @@ impl Row {
         match &self.0 {
             Kind::Steps { steps, pending, .. } => expandable(steps, pending),
             Kind::Result { preview_lines, .. } => *preview_lines > render::SKETCHED_ROWS,
+            Kind::Relayed { body, .. } => !body.is_empty(),
             _ => false,
         }
     }
@@ -343,6 +372,11 @@ impl Row {
                 self.1.clear();
                 true
             }
+            Kind::Relayed { open, .. } => {
+                *open = !*open;
+                self.1.clear();
+                true
+            }
             _ => false,
         }
     }
@@ -351,7 +385,7 @@ impl Row {
     /// from anywhere on it, a group from its own line or a step's.
     pub fn click_line(&self, i: usize, width: usize) -> Option<usize> {
         match &self.0 {
-            Kind::Result { .. } => self.is_expandable().then_some(0),
+            Kind::Result { .. } | Kind::Relayed { .. } => self.is_expandable().then_some(0),
             Kind::Code { .. } | Kind::Block { .. } => Some(0),
             Kind::Steps {
                 steps,
@@ -433,7 +467,9 @@ impl Row {
                 *painted.borrow_mut() = None;
             }
             // Bold is no wider, so no height moves.
-            Kind::Code { hovered: h, .. } | Kind::Block { hovered: h, .. } => {
+            Kind::Code { hovered: h, .. }
+            | Kind::Block { hovered: h, .. }
+            | Kind::Relayed { hovered: h, .. } => {
                 *h = hovered.is_some();
             }
             _ => {}
@@ -607,6 +643,7 @@ impl Row {
                     render::SKETCHED_ROWS + 1
                 }
             }
+            Kind::Relayed { body, open, .. } => 1 + if *open { body.len() } else { 0 },
             Kind::Steps {
                 steps,
                 pending,
@@ -719,6 +756,34 @@ impl Row {
                 };
                 (rows.get(i).cloned().unwrap_or_default(), None)
             }
+            Kind::Relayed {
+                label,
+                body,
+                hovered,
+                ..
+            } if i == 0 => {
+                let tail = match body.len() {
+                    0 => String::new(),
+                    n => format!("{}{}", icons::PART_SEP, count(n, "line")),
+                };
+                let room = width.saturating_sub(2 + UnicodeWidthStr::width(tail.as_str()) + 1);
+                let text = pi_store::text::clip(label, room.max(8));
+                (
+                    Line::from(vec![
+                        paint.span_hovered(
+                            *hovered,
+                            &paint.theme.prompt.color,
+                            icons::RELAYED_MARK,
+                        ),
+                        paint.span_hovered(*hovered, &paint.theme.muted, format!(" {text}{tail}")),
+                    ]),
+                    None,
+                )
+            }
+            Kind::Relayed { body, .. } => (
+                body.get(i - 1).cloned().unwrap_or_default(),
+                Some(Line::from(STEP_INDENT)),
+            ),
             Kind::Steps {
                 steps,
                 pending,

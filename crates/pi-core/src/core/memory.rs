@@ -109,7 +109,11 @@ async fn once(
         .filter(|e| from.is_none_or(|f| e.id().0 > f))
         // Only the conversation: tool output is text from anywhere, and one
         // line of it remembered would ride every prompt after.
-        .filter(|e| matches!(e, Entry::Ask { .. } | Entry::Answer { .. }))
+        // Asks pi relayed are not the user's words, and one carries a subagent's.
+        .filter(|e| match e {
+            Entry::Ask { ask, .. } => ask.relayed.is_none(),
+            e => matches!(e, Entry::Answer { .. }),
+        })
         .collect();
     let history = agent::compaction::render(&[], &entries);
     if history.trim().is_empty() {

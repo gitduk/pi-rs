@@ -105,6 +105,11 @@ pub struct Prompt {
     /// `None` when it is the same as `text`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shown: Option<String>,
+    /// Set when pi sent this ask on the model's own behalf — a `later` come
+    /// due, a background subagent's answer: what the model is told of where
+    /// it came from. Nobody typed it, so `shown` names it rather than echoes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relayed: Option<String>,
 }
 
 fn one_or_many<'de, D>(de: D) -> Result<Vec<Image>, D::Error>
@@ -462,6 +467,7 @@ impl Session {
                                         text: t.text,
                                         images: Vec::new(),
                                         shown: None,
+                                        relayed: None,
                                     });
                                 }
                             },
@@ -472,6 +478,7 @@ impl Session {
                                         text: String::new(),
                                         images: vec![i],
                                         shown: None,
+                                        relayed: None,
                                     });
                                 }
                             },
@@ -504,6 +511,7 @@ impl Session {
             text: text.into(),
             images: Vec::new(),
             shown: None,
+            relayed: None,
         })
     }
 
@@ -617,6 +625,26 @@ impl Session {
         shown: Option<String>,
         images: Vec<Image>,
     ) {
+        self.send(Prompt {
+            text: prompt.into(),
+            images,
+            shown,
+            relayed: None,
+        });
+    }
+
+    /// Continue with an ask pi sends on the model's behalf: `label` is what
+    /// the screen names it, `note` what the model is told of where it came from.
+    pub fn send_relayed(&mut self, prompt: impl Into<String>, label: String, note: String) {
+        self.send(Prompt {
+            text: prompt.into(),
+            images: Vec::new(),
+            shown: Some(label),
+            relayed: Some(note),
+        });
+    }
+
+    fn send(&mut self, ask: Prompt) {
         let answered: HashSet<&str> = self
             .entries
             .iter()
@@ -654,11 +682,6 @@ impl Session {
         if let Some(note) = cause.and_then(|c| c.note()) {
             self.push_note(note);
         }
-        let ask = Prompt {
-            text: prompt.into(),
-            images,
-            shown,
-        };
         self.push_ask(ask);
     }
 
@@ -944,7 +967,11 @@ pub fn injected_summary(s: &str) -> String {
 pub fn user_block(entry: &Entry) -> Vec<UserContent> {
     match entry {
         Entry::Ask { ask, .. } => {
-            let mut out = Vec::new();
+            let mut out: Vec<UserContent> = ask
+                .relayed
+                .iter()
+                .map(|note| UserContent::Text(Text { text: note.clone() }))
+                .collect();
             // An image-only ask sends no text block: providers reject the
             // empty one.
             if !ask.text.is_empty() || ask.images.is_empty() {
@@ -1022,6 +1049,7 @@ mod tests {
                 url: "http://x/i.png".into(),
             }],
             shown: None,
+            relayed: None,
         });
 
         let msgs = s.context();
@@ -1360,5 +1388,34 @@ mod tests {
         };
         assert_eq!(content.len(), 2);
         assert!(matches!(&content[1], UserContent::Text(t) if t.text.contains("<earlier-work>")));
+    }
+
+    #[test]
+    fn a_relayed_ask_tells_the_model_where_it_came_from_and_survives_a_save() {
+        let mut s = Session::new();
+        s.send_relayed("the answer", "subagent #1 find".into(), "Not typed.".into());
+        let texts = |s: &Session| -> Vec<String> {
+            s.context()
+                .into_iter()
+                .flat_map(|m| match m {
+                    Message::User { content } => content,
+                    _ => Vec::new(),
+                })
+                .filter_map(|c| match c {
+                    UserContent::Text(t) => Some(t.text),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(texts(&s), ["Not typed.", "the answer"]);
+
+        let back: Session = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(texts(&back), ["Not typed.", "the answer"]);
+        let Some(Entry::Ask { ask, .. }) = back.entries().last() else {
+            panic!("no ask");
+        };
+        assert_eq!(ask.shown_text(), "subagent #1 find");
+        let typed: Prompt = serde_json::from_str(r#"{"text":"hi"}"#).unwrap();
+        assert!(typed.relayed.is_none());
     }
 }

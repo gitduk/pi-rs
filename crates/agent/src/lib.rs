@@ -652,6 +652,7 @@ impl Agent {
                             None,
                         ),
                         Action::Run(t) => {
+                            let ctx = &with_progress(ctx, call, tx);
                             let mut output =
                                 tool::output::gated(t.as_ref(), call.args.clone(), ctx).await;
                             if let Ok(out) = &mut output
@@ -713,6 +714,20 @@ enum Landed {
     Stopped,
     Answered(ToolResult, Option<String>),
     Ran(ToolResult, Option<String>, Usage),
+}
+
+// The call's own context, its progress said as events under its id.
+fn with_progress(ctx: &Ctx, call: &ToolCall, tx: &UnboundedSender<Event>) -> Ctx {
+    let (id, tx) = (call.id.clone(), tx.clone());
+    ctx.clone().with_progress(Arc::new(move |text| {
+        say(
+            &tx,
+            Event::ToolProgress {
+                id: id.clone(),
+                text,
+            },
+        )
+    }))
 }
 
 // A call's output as its result, its end said as it lands.

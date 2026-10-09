@@ -58,6 +58,8 @@ pub struct PendingTool {
     /// Whether the call has landed yet. A call that lands badly is never
     /// the row's — it's on its way to its own line.
     pub landed: bool,
+    /// What the call last said of how far it has got.
+    pub progress: Option<String>,
     /// Whole seconds it has been out, once there are enough to be worth
     /// saying; `None` before that and once it has landed.
     pub secs: Option<u64>,
@@ -110,17 +112,16 @@ pub fn shimmer(text: &str, tick: usize, paint: &Paint) -> Vec<Span<'static>> {
     spans
 }
 
-/// How long a call has been out, as its line says it: nothing for a call
-/// quick enough to be over before the number could be read.
-pub fn out_for(secs: Option<u64>) -> String {
-    secs.map(|s| {
-        format!(
-            "{}{}",
-            icons::PART_SEP,
-            llm::figures::elapsed(std::time::Duration::from_secs(s))
-        )
-    })
-    .unwrap_or_default()
+/// What a call's line says while it is out: its progress, if it reports any,
+/// then how long it has been out — nothing for a call over before that reads.
+pub fn out_for(progress: Option<&str>, secs: Option<u64>) -> String {
+    let secs = secs.map(|s| llm::figures::elapsed(std::time::Duration::from_secs(s)));
+    progress
+        .into_iter()
+        .map(str::to_string)
+        .chain(secs)
+        .map(|part| format!("{}{part}", icons::PART_SEP))
+        .collect()
 }
 
 // Whether the row still has a call out. Any of them, not the newest:
@@ -304,7 +305,7 @@ fn pending_head(p: &PendingTool, tick: usize) -> Head {
             Mark::Out(tick)
         },
         text: p.desc(),
-        tail: out_for(p.secs),
+        tail: out_for(p.progress.as_deref(), p.secs),
         more: false,
     }
 }
@@ -477,7 +478,10 @@ pub(super) fn steps_header(
         };
         return Line::from(muted(text));
     };
-    let mut tail = pending.last().map(|p| out_for(p.secs)).unwrap_or_default();
+    let mut tail = pending
+        .last()
+        .map(|p| out_for(p.progress.as_deref(), p.secs))
+        .unwrap_or_default();
     if calls > 1 {
         tail.push_str(&format!("{}{}", icons::PART_SEP, count(calls, "call")));
     }
@@ -559,6 +563,7 @@ mod tests {
             name: name.to_string(),
             preview: preview.to_string(),
             landed,
+            progress: None,
             secs: None,
         }
     }

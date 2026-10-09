@@ -15,6 +15,11 @@ pub enum Event {
         name: String,
         args: serde_json::Value,
     },
+    // A running call's latest word on how far it has got.
+    ToolProgress {
+        id: String,
+        text: String,
+    },
     ToolEnd {
         id: String,
         name: String,
@@ -82,6 +87,8 @@ fn note(event: &Event) {
         | Event::Committed { .. } => {}
         // The loop's own "sending" record carries these two already.
         Event::Context { .. } => {}
+        // What it sums up is journaled where it happened.
+        Event::ToolProgress { .. } => {}
         Event::TurnStart { turn } => tracing::info!(target: "pi::loop", turn, "turn start"),
         Event::ToolStart { id, name, args } => {
             tracing::info!(target: "pi::tool", call = %id, tool = %name, "call");

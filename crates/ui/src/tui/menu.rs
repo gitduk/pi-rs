@@ -131,6 +131,14 @@ impl Ui {
             .fold_previous(&mut view.surface.scrollback);
     }
 
+    pub(super) fn submit_relayed(&mut self, view: &mut View, label: &str, line: &str) {
+        let row = Row::relayed(label, line, &self.paint);
+        view.surface.scrollback.push(row);
+        view.surface
+            .folds
+            .fold_previous(&mut view.surface.scrollback);
+    }
+
     // Whether a line has been submitted since this was last asked: the surface
     // catches the recall list up when it has.
     pub(super) fn took_submit(&mut self) -> bool {

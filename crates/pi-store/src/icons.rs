@@ -24,6 +24,7 @@ pub const STOPPED_MARK: &str = "✖"; // a call made and never answered: stopped
 // `✳`, which some fonts draw as an emoji.
 pub const CALL_FRAMES: [&str; 12] = ["·", "✢", "*", "✶", "✻", "✽", "✽", "✻", "✶", "*", "✢", "·"];
 pub const DONE_MARK: &str = "✔"; // a tool row that finished well
+pub const RELAYED_MARK: &str = "◆"; // a turn pi sent for the model: a `later`, a subagent's answer
 pub const FAIL_MARK: &str = "✖"; // a failure, a denial, a refused edit
 pub const WARN_MARK: &str = "!";
 pub const UNOPENED_MARK: &str = "○"; // a checkout on the bar that no lane has open

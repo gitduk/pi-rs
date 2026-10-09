@@ -504,6 +504,7 @@ impl Tui {
             }
             self.refresh_tabs();
             self.bar.poke(self.core.lane());
+            self.ui.jobs = self.drivers.later().jobs(self.core.lane().root());
             let view = front_view(&mut self.views, self.core.lane());
             self.ui.flush(self.core.lane(), view);
             // After the frame, not before it: a fork here would hold the
@@ -526,13 +527,25 @@ impl Tui {
                 .flatten();
             let woke = if let Some(next) = next {
                 origin = next.origin;
+                let intent = input::read(&next.line, &self.core.commands);
                 let view = front_view(&mut self.views, self.core.lane());
-                self.ui.submit(view, &next.line);
-                view.surface.scroll = 0;
-                if !next.note.is_empty() {
-                    self.core.lane_mut().push_note(&next.note);
+                // Only a prompt starts an ask to carry it; a command that came
+                // due runs as typed.
+                match next.label.filter(|_| matches!(intent, Intent::Prompt(_))) {
+                    Some(label) => {
+                        self.ui.submit_relayed(view, &label, &next.line);
+                        self.ui.relay = Some((label, next.note));
+                    }
+                    None => {
+                        self.ui.submit(view, &next.line);
+                        if !next.note.is_empty() {
+                            self.core.lane_mut().push_note(&next.note);
+                        }
+                    }
                 }
-                Wake::Do(Asked::Core(input::read(&next.line, &self.core.commands)))
+                view.surface.scroll = 0;
+                self.core.lane_mut().charge(&next.spent);
+                Wake::Do(Asked::Core(intent))
             } else if !waiting || running {
                 let bar_due = self.bar.due().map(tokio::time::Instant::from_std);
                 // Only while the lane is free: a prompt due under a run would
@@ -578,7 +591,7 @@ impl Tui {
                     }
                     // Only while something runs, or a flash is up — an idle
                     // loop waking ten times a second has nothing to spin.
-                    _ = tick.tick(), if anywhere || self.ui.flash.is_some() || self.ui.copied.is_some() => {
+                    _ = tick.tick(), if anywhere || later.working(lane.root()) || self.ui.flash.is_some() || self.ui.copied.is_some() => {
                         self.ui.spinner += 1;
                         Wake::Nothing
                     }
@@ -716,6 +729,8 @@ impl Tui {
                 // loop's top; draining here would merge them into one prompt.
                 Step::Prompt { send, typed } => self.start_turn(send, typed, &done_tx),
             }
+            // Spent by the turn it was for, or stale if none started.
+            self.ui.relay = None;
             // The driver that sent this line hears the end of the turn it began.
             // By token: the step may have moved the surface to another lane.
             if origin != Origin::Typed

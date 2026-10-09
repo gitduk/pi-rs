@@ -148,13 +148,18 @@ pub fn arm(
     retry: agent::Retry,
     later: Option<Arc<crate::driver::later::Table>>,
 ) -> Arc<Resolved> {
-    let subagent = Subagent::new(
+    let mut subagent = Subagent::new(
         agent,
         resolved.brief.clone(),
         archive,
         &resolved.standing,
         retry,
     );
+    // Its answer comes back the way a `later` prompt does, so only with one.
+    if let Some(table) = &later {
+        subagent =
+            subagent.with_background(Arc::new(crate::driver::later::Later::new(table.clone())));
+    }
     // A fresh `Arc`, since the child holds the old one: it runs on the
     // registry it came from, and only the lane's copy carries the tool.
     let mut brief = resolved.brief.clone();
