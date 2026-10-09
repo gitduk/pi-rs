@@ -19,7 +19,7 @@ pub fn read(dir: &Path) -> Vec<(String, String)> {
 
 // Literal values: no expansion, no escapes, nothing run. A line that is not
 // `NAME=value` is passed over rather than guessed at.
-fn parse(text: &str) -> Vec<(String, String)> {
+pub(super) fn parse(text: &str) -> Vec<(String, String)> {
     text.lines()
         .filter_map(|line| {
             let line = line.trim();

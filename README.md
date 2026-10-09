@@ -136,6 +136,8 @@ refused, and resuming one from another directory moves it here.
   `cargo +nightly -Zscript`. A script that does not read is listed as not
   usable, with the reason. `~/.pi/tools/.env` holds `NAME=value` lines every
   script starts with, such as its service's key; `bash` never sees them.
+  [`examples/tools/`](examples/tools/) has two to copy: `search`, and `judge`,
+  which reads its key from there.
 
 A server's prompts are commands too: `/<name>:<prompt> [args]` asks the server
 for the prompt's text and sends it, one typed word per argument, the last

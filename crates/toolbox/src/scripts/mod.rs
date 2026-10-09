@@ -482,6 +482,20 @@ mod tests {
         assert!(skipped[0].why.contains("no `# ---` header"), "{skipped:?}");
     }
 
+    // The shipped examples are what people copy; one that stopped parsing
+    // would teach a script pi skips.
+    #[test]
+    fn the_shipped_example_tools_are_scripts_pi_accepts() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/tools");
+        let (found, skipped) = discover_in(&dir);
+        assert!(skipped.is_empty(), "{skipped:?}");
+        let names: Vec<_> = found.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["judge", "search"]);
+        let example = std::fs::read_to_string(dir.join(".env.example")).unwrap();
+        let named: Vec<_> = env::parse(&example).into_iter().map(|(k, _)| k).collect();
+        assert_eq!(named, ["TYPESAFE_API_KEY"], "what judge reads");
+    }
+
     // A script sees what `.env` sets, and an argument of the same name cannot
     // replace it: the model picks arguments, never the keys they go out with.
     #[cfg(unix)]
