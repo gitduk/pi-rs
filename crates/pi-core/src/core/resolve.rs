@@ -462,7 +462,6 @@ mod tests {
             [
                 skills::Load::NAME,
                 subagent::Subagent::NAME,
-                crate::driver::later::Later::NAME,
                 crate::driver::jobs::Jobs::NAME,
             ]
             .map(String::from),

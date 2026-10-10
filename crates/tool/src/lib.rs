@@ -263,11 +263,12 @@ pub trait JobSink: Send + Sync {
 }
 
 /// A running job's way to report. Each `result` comes back to its checkout
-/// as a turn of its own; `end` says it will report no more.
+/// as a turn of its own, with what it `spent` getting there; `end` says it
+/// will report no more.
 pub trait JobHandle: Send + Sync {
     fn id(&self) -> u64;
     fn status(&self, text: String);
-    fn result(&self, text: String);
+    fn result(&self, text: String, spent: llm::stream::Usage);
     fn end(&self);
 }
 

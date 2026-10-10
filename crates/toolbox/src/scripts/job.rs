@@ -117,7 +117,14 @@ pub async fn run(
                             stop.clone(),
                         );
                         let id = job.id();
-                        tokio::spawn(go_on(name.to_string(), child, fd3, stdout, stderr, job, stop));
+                        // Owned before the task is first polled: a shutdown that
+                    // drops it unrun still takes what the script started.
+                    let group = child.id().map(Group);
+                    let name = name.to_string();
+                    tokio::spawn(async move {
+                        let _group = group;
+                        go_on(name, child, fd3, stdout, stderr, job, stop).await;
+                    });
                         return Ok(Ran::Detached { said: text, id });
                     }
                 Said::Result(_) => tracing::warn!(
@@ -153,13 +160,12 @@ async fn go_on(
     job: std::sync::Arc<dyn JobHandle>,
     stop: CancellationToken,
 ) {
-    let _group = child.id().map(Group);
     let status: std::io::Result<ExitStatus> = loop {
         tokio::select! {
             biased;
             said = fd3.next() => match said {
                 Said::Status(text) => job.status(text),
-                Said::Result(text) => job.result(text),
+                Said::Result(text) => job.result(text, Default::default()),
                 Said::Detach(_) => {}
             },
             status = child.wait() => break status,
@@ -175,13 +181,19 @@ async fn go_on(
         () = stop.cancelled() => return,
     };
     if !out.text.trim().is_empty() {
-        job.result(out.noted());
+        job.result(out.noted(), Default::default());
     }
     match status {
         Ok(status) if !status.success() => {
-            job.result(format!("{name} exited {status}; {}", err.noted().trim()));
+            job.result(
+                format!("{name} exited {status}; {}", err.noted().trim()),
+                Default::default(),
+            );
         }
-        Err(e) => job.result(format!("{name} could not be waited on: {e}")),
+        Err(e) => job.result(
+            format!("{name} could not be waited on: {e}"),
+            Default::default(),
+        ),
         Ok(_) => {}
     }
     job.end();
@@ -314,7 +326,7 @@ mod tests {
         fn status(&self, text: String) {
             self.said.lock().unwrap().push(format!("status {text}"));
         }
-        fn result(&self, text: String) {
+        fn result(&self, text: String, _spent: llm::stream::Usage) {
             self.said
                 .lock()
                 .unwrap()
@@ -486,6 +498,51 @@ echo 'all done'"#,
         );
         run("big", cmd, Vec::new(), 5 * SECOND, &ctx).await.unwrap();
         assert_eq!(*progress.lock().unwrap(), ["after"]);
+    }
+
+    // The shipped `later` is the protocol's worked example: it has to keep
+    // detaching and reporting the way this side reads it.
+    #[tokio::test]
+    async fn the_shipped_later_detaches_then_brings_its_prompt_back() {
+        let Ok(python) = which("python3") else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let later =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/tools/later");
+        let mut cmd = Command::new(python);
+        cmd.arg(later).current_dir(dir.path());
+        let sink = Arc::new(Sink::default());
+        let ctx = ctx(dir.path()).with_jobs(sink.clone());
+        let ended = sink.ended.notified();
+        let input = br#"{"prompt": "check the build", "when_done": "echo built"}"#.to_vec();
+        let Ran::Detached { said, .. } = run("later", cmd, input, 5 * SECOND, &ctx).await.unwrap()
+        else {
+            panic!("it detached")
+        };
+        assert!(said.contains("echo built"), "{said}");
+        tokio::time::timeout(5 * SECOND, ended)
+            .await
+            .expect("it ended");
+        let said = sink.said.lock().unwrap();
+        let result = said
+            .iter()
+            .find(|s| s.starts_with("result "))
+            .expect("a result");
+        assert!(
+            result.contains("check the build") && result.contains("built"),
+            "{said:?}"
+        );
+    }
+
+    fn which(program: &str) -> Result<std::path::PathBuf, ()> {
+        std::env::var_os("PATH")
+            .and_then(|paths| {
+                std::env::split_paths(&paths)
+                    .map(|dir| dir.join(program))
+                    .find(|path| path.is_file())
+            })
+            .ok_or(())
     }
 
     async fn assert_gone(pid_file: &std::path::Path) {

@@ -53,8 +53,6 @@ pub enum Builtin {
     Channel(String, String),
     // What to run over and over, or empty to stop the loop in force.
     Loop(String),
-    // Bare, what is left for later here; `rm <id>` cancels one.
-    Later(String),
     // Bare, what runs in the background here; `stop <id>` ends one.
     Jobs(String),
     // Bare, the MCP servers and their tools; `restart [name]` reconnects.
@@ -108,7 +106,6 @@ impl Intent {
                 | Builtin::Name(_)
                 | Builtin::Model(_)
                 | Builtin::Effort(_)
-                | Builtin::Later(_)
                 | Builtin::Jobs(_),
             ) => Fate::Now,
             // A restart drops only the servers' connections, never the run's.
@@ -353,8 +350,6 @@ pub enum Drive {
     Channel(String, ChannelCmd),
     /// `/loop` over a goal already known to start a turn; `None` stops it.
     Loop(Option<String>),
-    /// `/later`, with what followed the word.
-    Later(String),
     /// `/jobs`, with what followed the word.
     Jobs(String),
 }

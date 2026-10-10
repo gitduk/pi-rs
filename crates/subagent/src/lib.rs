@@ -1,6 +1,3 @@
-use std::future::Future;
-use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -33,30 +30,6 @@ struct Args {
     verify: Option<String>,
     #[serde(default)]
     background: bool,
-}
-
-/// Where a job taken off the caller's turn runs, and how it comes back.
-pub trait Background: Send + Sync {
-    /// Run `job` for the checkout at `root` apart from the caller's turn,
-    /// handing it where to say its progress; returns the id it goes by.
-    fn start(&self, root: PathBuf, description: String, job: Job) -> u64;
-}
-
-/// A subagent run apart from its caller, started with where to say its
-/// progress and the token that asks it to stop.
-pub type Job = Box<
-    dyn FnOnce(
-            tool::Progress,
-            tokio_util::sync::CancellationToken,
-        ) -> Pin<Box<dyn Future<Output = Ran> + Send>>
-        + Send,
->;
-
-/// What a job sent to the background came to.
-pub struct Ran {
-    /// The answer the caller would have read, its cost line leading.
-    pub answer: String,
-    pub spent: llm::stream::Usage,
 }
 
 // How many written paths the result names before counting the rest — kept
@@ -98,8 +71,8 @@ pub struct Subagent {
     // The retry schedule the child runs on, handed in when the tool is hung:
     // a tool has no way to reach the config where it is called.
     retry: Retry,
-    // Where `background` sends a job; without it every call blocks its turn.
-    background: Option<Arc<dyn Background>>,
+    // Whether `background` is offered; without it every call blocks its turn.
+    background: bool,
 }
 
 impl Subagent {
@@ -135,13 +108,14 @@ impl Subagent {
             archive,
             deadline,
             retry,
-            background: None,
+            background: false,
         }
     }
 
-    /// Let a call leave its turn: its answer comes back through `to`.
-    pub fn with_background(mut self, to: Arc<dyn Background>) -> Self {
-        self.background = Some(to);
+    /// Offer `background`: a call may leave its turn as a job of the
+    /// context it runs under, its answer coming back as a turn of its own.
+    pub fn with_background(mut self) -> Self {
+        self.background = true;
         self
     }
 
@@ -240,7 +214,7 @@ impl Tool for Subagent {
             "required": ["description", "prompt"],
             "additionalProperties": false,
         });
-        if self.background.is_some() {
+        if self.background {
             schema["properties"]["background"] = json!({
                 "type": "boolean",
                 "description": "Run it apart from this turn: the call returns at once with an id, and the answer comes back later as a turn of its own. For a long job you need not wait on — keep working, or end the turn. It shares this checkout, so give it work that touches no file you are editing.",
@@ -264,9 +238,10 @@ impl Tool for Subagent {
                 "the subagent's `prompt` is empty — say what it should do".into(),
             ));
         }
-        match &self.background {
-            Some(to) if args.background => Ok(self.send_off(to.as_ref(), args, ctx)),
-            _ => self.run(args, ctx).await,
+        if self.background && args.background {
+            self.send_off(args, ctx)
+        } else {
+            self.run(args, ctx).await
         }
     }
 }
@@ -274,35 +249,47 @@ impl Tool for Subagent {
 impl Subagent {
     // Started apart from the turn: the table's token, so esc leaves it
     // running, and its own record of writes, since the caller's run will end.
-    fn send_off(&self, to: &dyn Background, args: Args, ctx: &Ctx) -> ToolOutput {
+    fn send_off(&self, args: Args, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
+        let Some(sink) = ctx.jobs() else {
+            return Err(ToolError::Invalid(
+                "this run cannot keep a subagent in the background; call it without \
+                 `background`"
+                    .into(),
+            ));
+        };
+        let description = args.description.replace('\n', " ");
+        let stop = tokio_util::sync::CancellationToken::new();
+        let job = sink.start(
+            ctx.workspace.root().to_path_buf(),
+            description.clone(),
+            stop.clone(),
+        );
+        let id = job.id();
         let this = self.clone();
-        let root = ctx.workspace.root().to_path_buf();
-        let description = args.description.clone();
-        let ctx = ctx.clone().with_own_writes();
-        let job: Job = Box::new(move |progress, stop| {
-            Box::pin(async move {
-                let ctx = ctx.with_cancel(stop).with_progress(progress);
-                match this.run(args, &ctx).await {
-                    Ok(out) => Ran {
-                        answer: format!("{}\n\n{}", out.preview(), out.flatten()),
-                        spent: out.spent,
-                    },
-                    Err(why) => Ran {
-                        answer: why.to_string(),
-                        spent: Default::default(),
-                    },
-                }
-            })
+        let progress: tool::Progress = {
+            let job = job.clone();
+            Arc::new(move |said| job.status(said))
+        };
+        let ctx = ctx
+            .clone()
+            .with_own_writes()
+            .with_cancel(stop)
+            .with_progress(progress);
+        tokio::spawn(async move {
+            let (answer, spent) = match this.run(args, &ctx).await {
+                Ok(out) => (format!("{}\n\n{}", out.preview(), out.flatten()), out.spent),
+                Err(why) => (why.to_string(), Default::default()),
+            };
+            job.result(answer, spent);
+            job.end();
         });
-        let job_name = description.replace('\n', " ");
-        let id = to.start(root, description, job);
-        let preview = format!("{} [background #{id}]", job_name.trim());
-        ToolOutput::text(format!(
+        let preview = format!("{} [background #{id}]", description.trim());
+        Ok(ToolOutput::text(format!(
             "started in the background as #{id}; its answer comes back as a turn \
              of its own, so keep working or end this turn. `jobs` lists it, and \
              `jobs` with `stop` stops it."
         ))
-        .with_preview(preview)
+        .with_preview(preview))
     }
 
     async fn run(&self, args: Args, ctx: &Ctx) -> Result<ToolOutput, ToolError> {

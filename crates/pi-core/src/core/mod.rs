@@ -85,9 +85,9 @@ pub struct Core {
     /// By lane token, the files as they stood when a reload last refused
     /// them, so a broken file is said once rather than once a second.
     pub refused: std::collections::HashMap<u64, Vec<resolve::Stamp>>,
-    /// Where `later` and `jobs` keep what comes back, when a surface serves
-    /// them; a run with nothing to come back to offers neither tool.
-    pub tables: Option<crate::driver::Tables>,
+    /// Where calls that outlive their turn are kept, when a surface serves
+    /// them; a run with nothing to come back to keeps no jobs.
+    pub jobs: Option<std::sync::Arc<crate::driver::jobs::Table>>,
 }
 
 impl Core {
@@ -183,25 +183,25 @@ impl Core {
     /// where a call that outlives the turn goes on, when jobs are served.
     pub fn turn_ctx(&self, cancel: tokio_util::sync::CancellationToken) -> tool::Ctx {
         let ctx = self.lane().ctx_for(cancel);
-        match &self.tables {
-            Some(tables) => ctx.with_jobs(std::sync::Arc::new(crate::driver::jobs::Jobs::new(
-                tables.jobs.clone(),
+        match &self.jobs {
+            Some(jobs) => ctx.with_jobs(std::sync::Arc::new(crate::driver::jobs::Jobs::new(
+                jobs.clone(),
             ))),
             None => ctx,
         }
     }
 
-    /// Offer `later` and `jobs` on every lane, writing into `tables`, which
-    /// the surface serves: lanes armed before this are armed again.
-    pub fn enable_tables(&mut self, tables: crate::driver::Tables) {
-        self.tables = Some(tables);
+    /// Offer `jobs` on every lane, writing into `table`, which the surface
+    /// serves: lanes armed before this are armed again.
+    pub fn enable_jobs(&mut self, table: std::sync::Arc<crate::driver::jobs::Table>) {
+        self.jobs = Some(table);
         let retry = retry(&self.config);
         for at in 0..self.lanes.len() {
             let lane = &self.lanes[at];
             let archive =
                 self.archive(lane.root().to_path_buf(), lane.agent().spec().model.clone());
             let resolved = lane.resolved().clone();
-            self.lanes[at].rearm(resolved, archive, retry, self.tables.clone(), |_| {});
+            self.lanes[at].rearm(resolved, archive, retry, self.jobs.clone(), |_| {});
         }
     }
 
@@ -260,7 +260,6 @@ impl Core {
         match intent {
             Intent::Bash(command) => Step::Bash(command),
             Intent::Prompt(send) => Step::Prompt { send, typed: None },
-            Intent::Builtin(Builtin::Later(arg)) => Step::Drive(Drive::Later(arg)),
             Intent::Builtin(Builtin::Jobs(arg)) => Step::Drive(Drive::Jobs(arg)),
             Intent::Builtin(Builtin::Loop(goal)) => match goal.trim() {
                 "" => Step::Drive(Drive::Loop(None)),
@@ -695,7 +694,7 @@ mod tests {
             ),
             lanes: vec![lane],
             refused: Default::default(),
-            tables: None,
+            jobs: None,
             current: 0,
         }
     }

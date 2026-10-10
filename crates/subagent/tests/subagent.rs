@@ -663,3 +663,107 @@ async fn two_calls_in_one_turn_both_reach_the_child() {
     let sessions = kept.sessions.lock().unwrap();
     assert_eq!(sessions.len(), 2, "both calls ran a child");
 }
+
+// A job host that records what its one job said and wakes the test at the end.
+#[derive(Default)]
+struct Host {
+    said: Arc<std::sync::Mutex<Vec<String>>>,
+    spent: Arc<std::sync::Mutex<llm::stream::Usage>>,
+    ended: Arc<tokio::sync::Notify>,
+}
+
+impl tool::JobSink for Host {
+    fn start(
+        &self,
+        _root: std::path::PathBuf,
+        description: String,
+        _stop: tokio_util::sync::CancellationToken,
+    ) -> Arc<dyn tool::JobHandle> {
+        self.said
+            .lock()
+            .unwrap()
+            .push(format!("start {description}"));
+        Arc::new(Host {
+            said: self.said.clone(),
+            spent: self.spent.clone(),
+            ended: self.ended.clone(),
+        })
+    }
+}
+
+impl tool::JobHandle for Host {
+    fn id(&self) -> u64 {
+        4
+    }
+    fn status(&self, _text: String) {}
+    fn result(&self, text: String, spent: llm::stream::Usage) {
+        self.said.lock().unwrap().push(text);
+        *self.spent.lock().unwrap() = spent;
+    }
+    fn end(&self) {
+        self.said.lock().unwrap().push("end".into());
+        self.ended.notify_one();
+    }
+}
+
+fn offered(turns: Vec<Vec<StreamEvent>>) -> Subagent {
+    let parent = Agent::new(
+        Arc::new(Scripted {
+            turns,
+            next: AtomicUsize::new(0),
+            saw: Arc::default(),
+        }),
+        spec(),
+    );
+    Subagent::new(
+        &parent,
+        parent.brief.clone(),
+        Arc::new(Kept::default()),
+        STANDING,
+        Retry::default(),
+    )
+    .with_background()
+}
+
+// Sent off, the child answers into the run's job host, spend and all, and
+// the call returns at once with the job's id.
+#[tokio::test]
+async fn a_background_child_reports_through_the_runs_jobs() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Arc::new(Host::default());
+    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap()).with_jobs(host.clone());
+    let ended = host.ended.notified();
+    let out = offered(vec![text_turn("there are four files")])
+        .execute(
+            serde_json::json!({"description": "count", "prompt": "count the files", "background": true}),
+            &ctx,
+        )
+        .await
+        .expect("sent off");
+    assert!(out.flatten().contains("#4"), "{}", out.flatten());
+    tokio::time::timeout(std::time::Duration::from_secs(5), ended)
+        .await
+        .expect("the child finished");
+    let said = host.said.lock().unwrap();
+    assert_eq!(said[0], "start count");
+    assert!(said[1].contains("there are four files"), "{said:?}");
+    assert_eq!(said[2], "end");
+    assert!(
+        host.spent.lock().unwrap().input > 0,
+        "its spend comes along"
+    );
+}
+
+#[tokio::test]
+async fn background_is_refused_where_the_run_keeps_no_jobs() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(Workspace::new(dir.path()).unwrap());
+    let err = offered(vec![])
+        .execute(
+            serde_json::json!({"description": "count", "prompt": "count", "background": true}),
+            &ctx,
+        )
+        .await
+        .expect_err("refused");
+    assert!(err.to_string().contains("cannot keep"), "{err}");
+}

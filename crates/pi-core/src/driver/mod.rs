@@ -5,7 +5,6 @@
 
 mod channel;
 pub mod jobs;
-pub mod later;
 pub mod looping;
 
 use std::sync::Arc;
@@ -23,7 +22,6 @@ pub enum Origin {
     Typed,
     Channel(&'static str),
     Loop,
-    Later,
     Job,
 }
 
@@ -61,23 +59,7 @@ pub struct Next {
 pub struct Drivers {
     channels: Channels,
     loops: Loops,
-    tables: Tables,
-}
-
-/// What the lanes' tools write into and the drivers serve: what was left for
-/// later, and what runs in the background.
-#[derive(Clone, Default)]
-pub struct Tables {
-    pub later: Arc<later::Table>,
-    pub jobs: Arc<jobs::Table>,
-}
-
-impl Tables {
-    /// Forget what was left or runs for checkouts at or under `root`.
-    pub fn drop_under(&self, root: &std::path::Path) {
-        self.later.drop_under(root);
-        self.jobs.drop_under(root);
-    }
+    jobs: Arc<jobs::Table>,
 }
 
 impl Drivers {
@@ -85,31 +67,28 @@ impl Drivers {
         Self {
             channels: Channels::new(channels),
             loops: Loops::default(),
-            tables: Tables::default(),
+            jobs: Arc::default(),
         }
     }
 
-    /// What `later` and `jobs` write into: the lanes' tools and this driver
-    /// share them.
-    pub fn tables(&self) -> Tables {
-        self.tables.clone()
+    /// What `jobs` and every call that outlives its turn write into: the
+    /// lanes' tools and this driver share it.
+    pub fn jobs(&self) -> Arc<jobs::Table> {
+        self.jobs.clone()
     }
 
     /// The line a driver sends `lane`, the checkout at `root`, next. Asked
     /// only when the lane is free and nothing typed is waiting: what the user
     /// says comes first.
     ///
-    /// `later` and finished jobs first: they were due already, and a loop's
-    /// next round can wait one turn where a loop that never settles would
-    /// hold them off for good.
+    /// A job's result first: it was due already, and a loop's next round can
+    /// wait one turn where a loop that never settles would hold it off for good.
     pub fn next(&mut self, lane: u64, root: &std::path::Path) -> Option<Next> {
-        let due = (self.tables.later.take_due(root).map(|d| (d, Origin::Later)))
-            .or_else(|| self.tables.jobs.take_due(root).map(|d| (d, Origin::Job)));
-        Some(match due {
-            Some((due, origin)) => Next {
+        Some(match self.jobs.take_due(root) {
+            Some(due) => Next {
                 line: due.line,
                 note: due.note,
-                origin,
+                origin: Origin::Job,
                 spent: due.spent,
                 label: Some(due.label),
             },
@@ -141,7 +120,6 @@ impl Drivers {
                 Ok(()) => Said::Nothing,
                 Err(why) => Said::Reply(vec![why]),
             },
-            Drive::Later(arg) => Said::Reply(self.later_command(&arg, ctx)),
             Drive::Jobs(arg) => Said::Reply(self.jobs_command(&arg, ctx)),
             Drive::Loop(None) => match self.loops.stop(lane) {
                 // A loop really ended: that belongs in the transcript.
@@ -169,7 +147,7 @@ impl Drivers {
             Origin::Channel(name) if prompt && started => self.channels.ask(name, lane),
             Origin::Loop if started => self.loops.ask(lane),
             Origin::Loop => return self.loops.unstarted(lane),
-            Origin::Channel(_) | Origin::Typed | Origin::Later | Origin::Job => {}
+            Origin::Channel(_) | Origin::Typed | Origin::Job => {}
         }
         None
     }
@@ -206,32 +184,12 @@ impl Drivers {
 }
 
 impl Drivers {
-    // `/later`: what is pending here, or `rm <id>` to cancel one.
-    fn later_command(&self, arg: &str, ctx: &Ctx) -> Vec<String> {
-        let root = ctx.workspace.root();
-        match arg.split_whitespace().collect::<Vec<_>>().as_slice() {
-            [] => {
-                let pending = self.tables.later.listing(root);
-                if pending.is_empty() {
-                    vec!["nothing left for later here".into()]
-                } else {
-                    pending
-                }
-            }
-            ["rm", id] => match id.trim_start_matches('#').parse() {
-                Ok(id) => vec![self.tables.later.cancel(root, id).unwrap_or_else(|e| e)],
-                Err(_) => vec![format!("`{id}` is not an id; /later lists them")],
-            },
-            _ => vec!["/later lists what is pending; /later rm <id> cancels one".into()],
-        }
-    }
-
     // `/jobs`: what runs in the background here, or `stop <id>` to end one.
     fn jobs_command(&self, arg: &str, ctx: &Ctx) -> Vec<String> {
         let root = ctx.workspace.root();
         match arg.split_whitespace().collect::<Vec<_>>().as_slice() {
             [] => {
-                let jobs = self.tables.jobs.listing(root);
+                let jobs = self.jobs.listing(root);
                 if jobs.is_empty() {
                     vec!["nothing in the background here".into()]
                 } else {
@@ -239,7 +197,7 @@ impl Drivers {
                 }
             }
             ["stop", id] => match id.trim_start_matches('#').parse() {
-                Ok(id) => vec![self.tables.jobs.stop(root, id).unwrap_or_else(|e| e)],
+                Ok(id) => vec![self.jobs.stop(root, id).unwrap_or_else(|e| e)],
                 Err(_) => vec![format!("`{id}` is not an id; /jobs lists them")],
             },
             _ => vec!["/jobs lists what runs in the background; /jobs stop <id> ends one".into()],

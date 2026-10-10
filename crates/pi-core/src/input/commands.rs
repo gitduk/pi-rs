@@ -103,12 +103,6 @@ pub(crate) const BUILTIN: &[Command] = &[
         |_, rest| Intent::Builtin(Builtin::Compact(rest)),
     ),
     Command::builtin(
-        "/later",
-        "[rm id]",
-        "what the model left to come back here later; rm cancels one",
-        |_, rest| Intent::Builtin(Builtin::Later(rest)),
-    ),
-    Command::builtin(
         "/jobs",
         "[stop id]",
         "what runs in the background here; stop ends one",

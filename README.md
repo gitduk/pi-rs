@@ -101,7 +101,6 @@ refused, and resuming one from another directory moves it here.
 | `/worktree [name]`, `/worktree rm` | work in `<repo>.worktrees/<name>`             |
 | `/compact [focus]`                 | summarize everything but the working tail     |
 | `/loop <line>`                     | resubmit a line until a round edits no file   |
-| `/later`, `/later rm <id>`         | what the model left for later; cancel one     |
 | `/jobs`, `/jobs stop <id>`         | what runs in the background; stop one         |
 | `/mcp`, `/mcp restart [name]`      | MCP servers and their tools; reconnect        |
 | `/settings`                        | edit the project's config                     |
@@ -127,14 +126,11 @@ refused, and resuming one from another directory moves it here.
   not start is listed as `<name>__unavailable`, with the reason; `/mcp`
   shows each server and its tools, and `/mcp restart` reconnects them. A call
   with no answer in 10 minutes is given up.
-- `later`, in the terminal: a prompt the model leaves itself, which comes back
-  as a turn of its own after a delay, on a period, or when a background
-  command exits. It waits until the checkout is in front and idle, and lasts
-  while pi runs; past that, schedule `pi "..."` with the system's cron.
-- `jobs`, in the terminal: what runs in the background, or `stop` one.
-  `subagent` with `background` leaves the turn free and its answer comes back
-  as `later` does; those still out are listed above the bar, and `/jobs stop`
-  stops one.
+- `jobs`, in the terminal: what runs in the background, or `stop` one. A
+  `subagent` with `background`, or a script that detaches, leaves the turn
+  free; each result comes back as a turn of its own once the checkout is in
+  front and idle. Those still out are listed above the bar, and `/jobs stop`
+  stops one. Jobs last while pi runs; past that, use the system's cron.
 - One tool per script in `~/.pi/tools/`: any file whose first line is a `#!`,
   its `description` and `[args]` written as TOML in a `# ---` comment block
   under that line; or a cargo script `*.rs`, described by its
@@ -142,8 +138,12 @@ refused, and resuming one from another directory moves it here.
   `cargo +nightly -Zscript`. A script that does not read is listed as not
   usable, with the reason. `~/.pi/tools/.env` holds `NAME=value` lines every
   script starts with, such as its service's key; `bash` never sees them.
-  [`examples/tools/`](examples/tools/) has two to copy: `search`, and `judge`,
-  which reads its key from there.
+  A script may also write JSON lines to fd 3 (`PI_EVENTS_FD`): `status` for
+  its progress, `detach` to end the call and run on as a job, then `result`
+  for each turn it sends back; its stdout at exit is the last.
+  [`examples/tools/`](examples/tools/) has three to copy: `search`; `judge`,
+  which reads its key from there; and `later`, a prompt the model leaves
+  itself for after a delay, on a period, or when a command exits.
 
 A server's prompts are commands too: `/<name>:<prompt> [args]` asks the server
 for the prompt's text and sends it, one typed word per argument, the last

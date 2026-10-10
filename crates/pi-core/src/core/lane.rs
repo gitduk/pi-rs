@@ -146,7 +146,7 @@ pub fn arm(
     resolved: Arc<Resolved>,
     archive: Arc<dyn Archive>,
     retry: agent::Retry,
-    tables: Option<crate::driver::Tables>,
+    jobs: Option<Arc<crate::driver::jobs::Table>>,
 ) -> Arc<Resolved> {
     let mut subagent = Subagent::new(
         agent,
@@ -156,9 +156,8 @@ pub fn arm(
         retry,
     );
     // Its answer comes back as a job's does, so only with somewhere to keep it.
-    if let Some(tables) = &tables {
-        let jobs = crate::driver::jobs::Jobs::new(tables.jobs.clone());
-        subagent = subagent.with_background(Arc::new(jobs));
+    if jobs.is_some() {
+        subagent = subagent.with_background();
     }
     // A fresh `Arc`, since the child holds the old one: it runs on the
     // registry it came from, and only the lane's copy carries the tool.
@@ -168,12 +167,11 @@ pub fn arm(
     }
     // The lane's copy only, as with the subagent: a child cannot reach the
     // lane its prompt would come back to.
-    if let Some(tables) = tables
+    if let Some(jobs) = jobs
         && tool::Tier::Exec.under(resolved.ceiling)
     {
-        let registry = &mut Arc::make_mut(&mut brief).registry;
-        registry.offer(Arc::new(crate::driver::later::Later::new(tables.later)));
-        registry.offer(Arc::new(crate::driver::jobs::Jobs::new(tables.jobs)));
+        let jobs = crate::driver::jobs::Jobs::new(jobs);
+        Arc::make_mut(&mut brief).registry.offer(Arc::new(jobs));
     }
     agent.apply(brief);
     resolved
@@ -347,12 +345,12 @@ impl Lane {
         resolved: Arc<Resolved>,
         archive: Arc<dyn Archive>,
         retry: agent::Retry,
-        tables: Option<crate::driver::Tables>,
+        jobs: Option<Arc<crate::driver::jobs::Table>>,
         change: impl FnOnce(&mut Agent),
     ) {
         let agent = Arc::make_mut(&mut self.checkout.agent);
         change(agent);
-        self.checkout.resolved = arm(agent, resolved, archive, retry, tables);
+        self.checkout.resolved = arm(agent, resolved, archive, retry, jobs);
     }
 
     /// Replace what was decided where the agent holds none of it — the
@@ -689,7 +687,7 @@ impl Core {
             Arc::new(resolved),
             archive,
             crate::core::retry(&self.config),
-            self.tables.clone(),
+            self.jobs.clone(),
         );
 
         // Built, not cloned from the lane being left: a `Ctx`'s tables key on
