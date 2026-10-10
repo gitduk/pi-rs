@@ -998,7 +998,7 @@ async fn a_relayed_line_opens_a_turn_and_a_command_does_not() {
     use tool::Tool as _;
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
-    let later = pi_core::driver::later::Later::new(tui.drivers.later());
+    let later = pi_core::driver::later::Later::new(tui.drivers.tables().later);
     let ctx = tui.core.lane().ctx().clone();
     for prompt in ["check the build", "/later"] {
         later

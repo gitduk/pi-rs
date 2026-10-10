@@ -146,7 +146,7 @@ pub fn arm(
     resolved: Arc<Resolved>,
     archive: Arc<dyn Archive>,
     retry: agent::Retry,
-    later: Option<Arc<crate::driver::later::Table>>,
+    tables: Option<crate::driver::Tables>,
 ) -> Arc<Resolved> {
     let mut subagent = Subagent::new(
         agent,
@@ -155,10 +155,10 @@ pub fn arm(
         &resolved.standing,
         retry,
     );
-    // Its answer comes back the way a `later` prompt does, so only with one.
-    if let Some(table) = &later {
-        subagent =
-            subagent.with_background(Arc::new(crate::driver::later::Later::new(table.clone())));
+    // Its answer comes back as a job's does, so only with somewhere to keep it.
+    if let Some(tables) = &tables {
+        let jobs = crate::driver::jobs::Jobs::new(tables.jobs.clone());
+        subagent = subagent.with_background(Arc::new(jobs));
     }
     // A fresh `Arc`, since the child holds the old one: it runs on the
     // registry it came from, and only the lane's copy carries the tool.
@@ -168,11 +168,12 @@ pub fn arm(
     }
     // The lane's copy only, as with the subagent: a child cannot reach the
     // lane its prompt would come back to.
-    if let Some(table) = later
+    if let Some(tables) = tables
         && tool::Tier::Exec.under(resolved.ceiling)
     {
-        let later = crate::driver::later::Later::new(table);
-        Arc::make_mut(&mut brief).registry.offer(Arc::new(later));
+        let registry = &mut Arc::make_mut(&mut brief).registry;
+        registry.offer(Arc::new(crate::driver::later::Later::new(tables.later)));
+        registry.offer(Arc::new(crate::driver::jobs::Jobs::new(tables.jobs)));
     }
     agent.apply(brief);
     resolved
@@ -346,12 +347,12 @@ impl Lane {
         resolved: Arc<Resolved>,
         archive: Arc<dyn Archive>,
         retry: agent::Retry,
-        later: Option<Arc<crate::driver::later::Table>>,
+        tables: Option<crate::driver::Tables>,
         change: impl FnOnce(&mut Agent),
     ) {
         let agent = Arc::make_mut(&mut self.checkout.agent);
         change(agent);
-        self.checkout.resolved = arm(agent, resolved, archive, retry, later);
+        self.checkout.resolved = arm(agent, resolved, archive, retry, tables);
     }
 
     /// Replace what was decided where the agent holds none of it — the
@@ -688,7 +689,7 @@ impl Core {
             Arc::new(resolved),
             archive,
             crate::core::retry(&self.config),
-            self.later.clone(),
+            self.tables.clone(),
         );
 
         // Built, not cloned from the lane being left: a `Ctx`'s tables key on

@@ -123,7 +123,7 @@ pub(super) struct Ui {
     // with a count; a click flips it. Outlives the calls themselves.
     pub(super) live_tools_shown: bool,
     // The front checkout's subagents in the background, drawn over the bar.
-    pub(super) jobs: Vec<pi_core::driver::later::Job>,
+    pub(super) jobs: Vec<pi_core::driver::jobs::Job>,
 }
 
 /// Who has the keyboard.

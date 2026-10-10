@@ -109,6 +109,12 @@ pub(crate) const BUILTIN: &[Command] = &[
         |_, rest| Intent::Builtin(Builtin::Later(rest)),
     ),
     Command::builtin(
+        "/jobs",
+        "[stop id]",
+        "what runs in the background here; stop ends one",
+        |_, rest| Intent::Builtin(Builtin::Jobs(rest)),
+    ),
+    Command::builtin(
         "/loop",
         "[text]",
         "repeat a line while it keeps changing the tree; bare, stop one",

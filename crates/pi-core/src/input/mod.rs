@@ -55,6 +55,8 @@ pub enum Builtin {
     Loop(String),
     // Bare, what is left for later here; `rm <id>` cancels one.
     Later(String),
+    // Bare, what runs in the background here; `stop <id>` ends one.
+    Jobs(String),
     // Bare, the MCP servers and their tools; `restart [name]` reconnects.
     Mcp(String),
     // `/new` and `ctrl+l` twice are one variant: a fresh session, old one
@@ -106,7 +108,8 @@ impl Intent {
                 | Builtin::Name(_)
                 | Builtin::Model(_)
                 | Builtin::Effort(_)
-                | Builtin::Later(_),
+                | Builtin::Later(_)
+                | Builtin::Jobs(_),
             ) => Fate::Now,
             // A restart drops only the servers' connections, never the run's.
             Intent::Builtin(Builtin::Mcp(_)) => Fate::Now,
@@ -352,6 +355,8 @@ pub enum Drive {
     Loop(Option<String>),
     /// `/later`, with what followed the word.
     Later(String),
+    /// `/jobs`, with what followed the word.
+    Jobs(String),
 }
 
 /// What `/<channel>` asks: bare for status, `on` or `off`.

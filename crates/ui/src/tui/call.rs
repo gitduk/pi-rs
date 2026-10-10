@@ -10,7 +10,7 @@ use super::row::{self, PendingTool, Row};
 use super::scrollback::Folds;
 use crate::render::{Paint, named};
 use pi_core::core::tools::modifies;
-use pi_core::driver::later::Job;
+use pi_core::driver::jobs::Job;
 use pi_store::icons;
 
 // A tool call still running. Its line is drawn by the group it will fold
@@ -119,36 +119,27 @@ pub(super) fn push_tool_row(
 // More than this and the list would crowd out the history it sits under.
 const JOBS_SHOWN: usize = 4;
 
-// One row per subagent in the background: still out with its progress and
-// clock, or done and waiting for the lane to be free.
-pub(super) fn job_lines(
-    jobs: &[Job],
-    tick: usize,
-    paint: &Paint,
-    width: usize,
-) -> Vec<Line<'static>> {
+// One row per job: still out with its progress and clock, or done and
+// waiting for the lane to be free. The ticking clock is what says it lives.
+pub(super) fn job_lines(jobs: &[Job], paint: &Paint, width: usize) -> Vec<Line<'static>> {
     let room = width.saturating_sub(1);
     let muted = |s: String| paint.span(&paint.theme.muted, s);
     let mut lines: Vec<Line<'static>> = jobs
         .iter()
         .take(JOBS_SHOWN)
         .map(|job| {
-            let (mark, state) = if job.ended {
-                (
-                    icons::DONE_MARK,
-                    format!("{}done, back when idle", icons::PART_SEP),
-                )
+            let state = if job.ended {
+                format!("{}done, back when idle", icons::PART_SEP)
             } else {
                 let progress = Some(job.progress.as_str()).filter(|p| !p.is_empty());
-                let secs = Some(job.started.elapsed().as_secs());
-                (row::call_frame(tick), row::out_for(progress, secs))
+                row::out_for(progress, Some(job.started.elapsed().as_secs()))
             };
-            let text = format!("{mark} #{} {}{state}", job.id, job.description);
+            let text = format!("#{} {}{state}", job.id, job.description);
             Line::from(muted(pi_store::text::clip(&text, room)))
         })
         .collect();
     if jobs.len() > JOBS_SHOWN {
-        let more = format!("+{} more · /later", jobs.len() - JOBS_SHOWN);
+        let more = format!("+{} more · /jobs", jobs.len() - JOBS_SHOWN);
         lines.push(Line::from(muted(more)));
     }
     lines

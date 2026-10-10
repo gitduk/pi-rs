@@ -312,7 +312,7 @@ impl Ui {
         // editor); the tally and window share this one predicate.
         let browse = self.browsing();
         let keep = move |row: &Row| !browse || row.is_conversation();
-        let mut bar = super::call::job_lines(&self.jobs, self.spinner, &self.paint, width);
+        let mut bar = super::call::job_lines(&self.jobs, &self.paint, width);
         bar.extend(self.bar_lines(&Facts::of(lane), &snapshot(lane, view), width));
         // The bar's rows are not worth a terminal that cannot hold them, a row
         // to type on and a row of history: one that short keeps the other two.

@@ -514,7 +514,7 @@ impl Tui {
             }
             self.refresh_tabs();
             self.bar.poke(self.core.lane());
-            self.ui.jobs = self.drivers.later().jobs(self.core.lane().root());
+            self.ui.jobs = self.drivers.tables().jobs.jobs(self.core.lane().root());
             let view = front_view(&mut self.views, self.core.lane());
             self.ui.flush(self.core.lane(), view);
             if std::mem::take(&mut self.ui.redraw) {
@@ -543,8 +543,16 @@ impl Tui {
                 let bar_due = self.bar.due().map(tokio::time::Instant::from_std);
                 // Only while the lane is free: a prompt due under a run would
                 // wake this loop again and again with nothing it may do.
-                let later = self.drivers.later();
-                let later_due = free.then(|| later.next_due(lane.root())).flatten();
+                let tables = self.drivers.tables();
+                let due_back = free
+                    .then(|| {
+                        let later = tables.later.next_due(lane.root());
+                        later
+                            .into_iter()
+                            .chain(tables.jobs.next_due(lane.root()))
+                            .min()
+                    })
+                    .flatten();
                 // Every branch must be cancel-safe: a loser is dropped mid-poll.
                 // `recv()` and `tick()` are; a blocking read gets its own thread.
                 tokio::select! {
@@ -584,7 +592,7 @@ impl Tui {
                     }
                     // Only while something runs, or a flash is up — an idle
                     // loop waking ten times a second has nothing to spin.
-                    _ = tick.tick(), if anywhere || later.working(lane.root()) || self.ui.flash.is_some() || self.ui.copied.is_some() => {
+                    _ = tick.tick(), if anywhere || tables.jobs.working(lane.root()) || self.ui.flash.is_some() || self.ui.copied.is_some() => {
                         self.ui.spinner += 1;
                         Wake::Nothing
                     }
@@ -597,9 +605,10 @@ impl Tui {
                     _ = tokio::time::sleep_until(bar_due.unwrap_or_else(tokio::time::Instant::now)),
                         if bar_due.is_some() => Wake::Nothing,
                     // Something was left, cancelled or finished: look again.
-                    _ = later.changed().notified() => Wake::Nothing,
-                    _ = tokio::time::sleep_until(later_due.unwrap_or_else(tokio::time::Instant::now)),
-                        if later_due.is_some() => Wake::Nothing,
+                    _ = tables.later.changed().notified() => Wake::Nothing,
+                    _ = tables.jobs.changed().notified() => Wake::Nothing,
+                    _ = tokio::time::sleep_until(due_back.unwrap_or_else(tokio::time::Instant::now)),
+                        if due_back.is_some() => Wake::Nothing,
                     key = self.events.recv() => match key {
                         Some(key) => {
                             let lane = self.core.lane();

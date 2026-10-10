@@ -102,6 +102,7 @@ refused, and resuming one from another directory moves it here.
 | `/compact [focus]`                 | summarize everything but the working tail     |
 | `/loop <line>`                     | resubmit a line until a round edits no file   |
 | `/later`, `/later rm <id>`         | what the model left for later; cancel one     |
+| `/jobs`, `/jobs stop <id>`         | what runs in the background; stop one         |
 | `/mcp`, `/mcp restart [name]`      | MCP servers and their tools; reconnect        |
 | `/settings`                        | edit the project's config                     |
 | `/edit [file]`                     | edit `SYSTEM.md`, an `AGENTS.md`, or memory   |
@@ -130,8 +131,10 @@ refused, and resuming one from another directory moves it here.
   as a turn of its own after a delay, on a period, or when a background
   command exits. It waits until the checkout is in front and idle, and lasts
   while pi runs; past that, schedule `pi "..."` with the system's cron.
-  `subagent` with `background` comes back the same way, leaving the turn
-  free; those still out are listed above the bar, and `/later rm` stops one.
+- `jobs`, in the terminal: what runs in the background, or `stop` one.
+  `subagent` with `background` leaves the turn free and its answer comes back
+  as `later` does; those still out are listed above the bar, and `/jobs stop`
+  stops one.
 - One tool per script in `~/.pi/tools/`: any file whose first line is a `#!`,
   its `description` and `[args]` written as TOML in a `# ---` comment block
   under that line; or a cargo script `*.rs`, described by its
