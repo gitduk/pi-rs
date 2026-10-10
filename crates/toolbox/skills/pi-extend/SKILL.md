@@ -76,7 +76,8 @@ fn main() {
 - Output: stdout is the answer. Exit non-zero to fail; stderr is then the
   error the caller sees. stderr on success is dropped.
 - It runs in the workspace root, only at the exec tier, one call at a time,
-  with a 300 s limit. Large output is cut and spilled to a file like bash's.
+  with a 300 s limit until it detaches (next section). Large output is cut
+  and spilled to a file like bash's.
 - The `#!` line is read by pi, not the kernel: no execute bit is needed.
 - Rust crates go under `[dependencies]` in the frontmatter.
 
@@ -89,6 +90,71 @@ Steps:
    <home>/tools/count.sh` (Rust: `cargo +nightly -Zscript --quiet` instead of
    `bash`).
 4. Call it as a tool on your next turn.
+
+## A tool that outlives its call
+
+A long command needs no tool: `bash` with `background` runs it apart from
+the turn and brings its exit and output back. Write a tool that detaches when
+the work keeps reporting — a watcher, a crawler that hands back batches, a
+bridge to a chat where a person talks to this session.
+
+Such a script talks to pi over fd 3, one JSON object a line; `PI_EVENTS_FD`
+is `3` when pi is listening. A script that never writes fd 3 is a plain tool.
+
+| It writes | Meaning |
+|---|---|
+| `{"status": "..."}` | how far it has got: the call's progress, then its row above the bar |
+| `{"detach": "..."}` | the call returns now with this text; the script runs on as a job |
+| `{"result": "..."}` | after detaching: one result, a turn of its own on its checkout |
+| `{"notice": "..."}` | a line on the screen only, which the model never reads: a QR to scan |
+| `{"input": "..."}` | a person's words, sent to the model as written, never run as a command |
+| `{"interrupt": true}` | stop the turn running on its checkout, as esc does |
+
+For each turn an `input` opened, pi writes back on the same fd
+`{"started": true}`, then `{"reply": "..."}`: the whole answer, ended with
+`(stopped)` or `(failed: …)` when it did not finish. Every input gets one.
+
+```python
+#!/usr/bin/env python3
+# ---
+# description = "Watch a URL and report each time its content changes. Runs in the background until `jobs` stops it."
+# [args]
+# url = "the page to watch"
+# ---
+import hashlib, json, os, sys, time, urllib.request
+
+if os.environ.get("PI_EVENTS_FD") != "3":
+    sys.exit("needs pi to keep it running")
+url = json.load(sys.stdin)["url"]
+fd3 = os.fdopen(3, "w")
+def say(**m):
+    fd3.write(json.dumps(m) + "\n"); fd3.flush()
+
+say(detach=f"watching {url}; each change comes back as a turn")
+seen = None
+while True:
+    digest = hashlib.sha256(urllib.request.urlopen(url).read()).hexdigest()
+    if seen and digest != seen:
+        say(result=f"{url} changed")
+    seen = digest
+    say(status=f"checked {time.strftime('%H:%M')}")
+    time.sleep(300)
+```
+
+- Detach first, before anything slow: until then the call holds the turn and
+  the 300 s limit applies. After it, no limit: the job runs until it exits, a
+  `jobs` stop (SIGTERM, then SIGKILL), or pi exits, and takes its process
+  group along each time.
+- `result`, `input` and `interrupt` count only after `detach`.
+- Its stdout at exit is its last result; a non-zero exit adds stderr.
+- What it saves between runs, it keeps itself, under `$PI_HOME`. A login
+  token is written readable by its owner alone.
+- `input` is a person's voice: use it only for words a person typed to this
+  session. Data the work found goes back as `result`.
+- Only a run that can keep jobs offers detaching; elsewhere — a one-shot
+  `pi "..."`, a subagent — a detach is refused and the script ended.
+- Try it by hand with fd 3 sent to the terminal:
+  `echo '{"url":"https://example.com"}' | PI_EVENTS_FD=3 python3 <home>/tools/watch 3>&1`.
 
 ## An MCP server
 
