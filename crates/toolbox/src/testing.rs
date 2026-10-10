@@ -57,6 +57,9 @@ impl JobHandle for Handle {
     fn input(&self, text: String) {
         self.said.lock().unwrap().push(format!("input {text}"));
     }
+    fn notice(&self, text: String) {
+        self.said.lock().unwrap().push(format!("notice {text}"));
+    }
     fn interrupt(&self) {
         self.said.lock().unwrap().push("interrupt".into());
     }

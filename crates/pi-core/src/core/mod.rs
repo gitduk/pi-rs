@@ -21,8 +21,8 @@ pub mod tools;
 pub mod worktree;
 
 use crate::core::lane::Lane;
-use crate::input::commands::{Command, channel_command, help, with_channels, with_prompts};
-use crate::input::{Builtin, ChannelCmd, Drive, Intent, Step, lines, step_for};
+use crate::input::commands::{Command, help, with_prompts};
+use crate::input::{Builtin, Drive, Intent, Step, lines, step_for};
 use pi_store::config;
 use pi_store::listing::Listing;
 use pi_store::session::Store;
@@ -64,14 +64,12 @@ pub struct Core {
     pub config: std::sync::Arc<config::Config>,
     /// The command line's say over the config, re-applied over every reload.
     pub pinned: crate::args::Pinned,
-    /// What a slash answers to: built-ins, channels and skills. Rebuilt by
+    /// What a slash answers to: built-ins and skills. Rebuilt by
     /// a reload, since a skill can appear between one turn and the next.
     ///
     /// Shared rather than copied: the terminal holds the same table and
     /// re-reads it whenever this is replaced.
     pub commands: std::sync::Arc<Vec<Command>>,
-    /// The commands of the run's channels, in every table put in force.
-    pub channels: Vec<Command>,
     /// The servers' list generation `commands` holds the prompts of.
     pub prompts_seen: u64,
     /// The config files as last read: what `/settings` writes into and
@@ -95,7 +93,7 @@ impl Core {
     // and a rebound key belong to one tree, not another.
     fn in_force(&mut self) {
         self.keys = self.lane().resolved().keys.clone();
-        let table = with_channels(&self.lane().resolved().commands, &self.channels);
+        let table = self.lane().resolved().commands.clone();
         self.prompts_seen = ::mcp::generation();
         self.commands = with_prompts(table, crate::core::mcp::prompts());
     }
@@ -208,15 +206,6 @@ impl Core {
             let resolved = lane.resolved().clone();
             self.lanes[at].rearm(resolved, archive, retry, self.jobs.clone(), |_| {});
         }
-    }
-
-    /// Give each of `channels` its `/<name>` command.
-    pub fn add_channels(&mut self, channels: &[std::sync::Arc<dyn ::channel::Channel>]) {
-        self.channels = channels
-            .iter()
-            .map(|c| channel_command(c.as_ref()))
-            .collect();
-        self.in_force();
     }
 
     /// The checkout in front. Indexing is safe by construction: `lanes` is
@@ -340,12 +329,6 @@ impl Core {
                 }
             }
             Intent::Other { word, args } => step_for(&self.commands, &word, &args),
-            Intent::Builtin(Builtin::Channel(name, rest)) => match rest.trim() {
-                "" => Step::Drive(Drive::Channel(name, ChannelCmd::Status)),
-                "on" => Step::Drive(Drive::Channel(name, ChannelCmd::On)),
-                "off" => Step::Drive(Drive::Channel(name, ChannelCmd::Off)),
-                other => Step::Flash(format!("unknown /{name} verb `{other}` — bare, on or off")),
-            },
             // Only the bare word opens the file; an argument is refused
             // rather than half-remembered as a verb.
             Intent::Builtin(Builtin::Settings(rest)) if rest.trim().is_empty() => {
@@ -537,7 +520,6 @@ mod tests {
             Intent::Builtin(Builtin::Keys),
             Intent::Builtin(Builtin::Model(String::new())),
             Intent::Builtin(Builtin::Worktree("tree".into())),
-            Intent::Builtin(Builtin::Channel("wechat".into(), "on".into())),
         ] {
             assert!(
                 matches!(intent.fate(), Fate::Now),
@@ -691,7 +673,6 @@ mod tests {
             config: std::sync::Arc::new(pi_store::config::Config::default()),
             pinned: crate::args::Pinned::default(),
             commands,
-            channels: Vec::new(),
             prompts_seen: 0,
             settings: pi_store::settings::Settings::new(
                 toml::Value::Table(Default::default()),

@@ -1,8 +1,8 @@
 //! The QR login state machine, mirroring the reference's `waitForWeixinLogin`.
 //!
-//! Interaction goes through two callbacks so the same flow serves a plain
-//! terminal and pi's TUI; without a verify-code reader, that prompt ends
-//! the login honestly instead of hanging.
+//! Interaction goes through two callbacks, where the QR and progress show.
+//! Nothing here can type a verification code, so the phone asking for one
+//! ends the login honestly instead of hanging.
 
 use std::time::{Duration, Instant};
 
@@ -13,7 +13,7 @@ use crate::types::{Credentials, QrStatus};
 pub enum LoginError {
     #[error("wechat login: {0}")]
     Failed(String),
-    #[error("wechat login timed out after {0:?} — try /wechat on again")]
+    #[error("wechat login timed out after {0:?} — call wechat again")]
     Timeout(Duration),
     #[error(
         "wechat login: the phone asked for a verification code, which this build cannot enter \
@@ -28,12 +28,10 @@ pub type Result<T> = std::result::Result<T, LoginError>;
 
 /// How a person sees the login. `show_qr` receives the rendered QR (text);
 /// `notice` receives one-line progress messages including the fallback URL.
-/// `read_verify_code` returns the code typed by the user, or `None` to abort.
 /// Owned boxes so the flow can run inside a spawned task.
 pub struct LoginView {
     pub show_qr: Box<dyn FnMut(&str) + Send>,
     pub notice: Box<dyn FnMut(&str) + Send>,
-    pub read_verify_code: Option<Box<dyn FnMut() -> Option<String> + Send>>,
 }
 
 /// How long the whole login may take before `Timeout`.
@@ -49,7 +47,6 @@ pub const POLL_PAUSE: Duration = Duration::from_secs(1);
 pub async fn login(client: &mut Client, view: &mut LoginView) -> Result<Credentials> {
     let mut qrcode = fetch_qrcode(client, view).await?;
     let mut refresh = 0u32;
-    let mut verify_code: Option<String> = None;
     let deadline = Instant::now() + LOGIN_TIMEOUT;
     let mut said_scanned = false;
 
@@ -58,7 +55,7 @@ pub async fn login(client: &mut Client, view: &mut LoginView) -> Result<Credenti
             return Err(LoginError::Timeout(LOGIN_TIMEOUT));
         }
         let status = client
-            .poll_qrcode(&qrcode.qrcode, verify_code.as_deref())
+            .poll_qrcode(&qrcode.qrcode, None)
             .await
             .map_err(|e| LoginError::Failed(e.to_string()))?;
         match status {
@@ -69,29 +66,16 @@ pub async fn login(client: &mut Client, view: &mut LoginView) -> Result<Credenti
                     said_scanned = true;
                 }
             }
-            QrStatus::NeedVerifyCode => {
-                let Some(read) = view.read_verify_code.as_mut() else {
-                    return Err(LoginError::VerifyCodeUnsupported);
-                };
-                (view.notice)("the phone shows a verification code — type it here");
-                let Some(code) = read() else {
-                    return Err(LoginError::Failed("verification code not given".into()));
-                };
-                verify_code = Some(code);
-                said_scanned = false;
-                continue;
-            }
+            QrStatus::NeedVerifyCode => return Err(LoginError::VerifyCodeUnsupported),
             QrStatus::VerifyCodeBlocked => {
                 (view.notice)("the verification code was refused; refreshing the QR");
                 qrcode = refresh_qrcode(client, view, &mut refresh).await?;
-                verify_code = None;
                 said_scanned = false;
                 continue;
             }
             QrStatus::Expired => {
                 (view.notice)("the QR expired; refreshing");
                 qrcode = refresh_qrcode(client, view, &mut refresh).await?;
-                verify_code = None;
                 said_scanned = false;
                 continue;
             }
@@ -153,7 +137,7 @@ async fn refresh_qrcode(
 ) -> Result<crate::types::QrCode> {
     if *refresh >= MAX_QR_REFRESH {
         return Err(LoginError::Failed(format!(
-            "the QR expired {MAX_QR_REFRESH} times — give up and try /wechat on again"
+            "the QR expired {MAX_QR_REFRESH} times — give up and call wechat again"
         )));
     }
     *refresh += 1;

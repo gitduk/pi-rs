@@ -4,13 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "WeChat as a pi channel: the bot client, its login flow, and the adapter"
+description = "WeChat for pi: the bot client, its login flow, and pi-wechat, the tool that bridges a session"
+
+[[bin]]
+name = "pi-wechat"
+path = "src/main.rs"
 
 [dependencies]
-anyhow.workspace = true
-async-trait.workspace = true
-channel.workspace = true
-tokio-util.workspace = true
 pulldown-cmark = { version = "0.13", default-features = false }
 base64 = "0.22"
 rand = "0.8"
@@ -18,7 +18,11 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["net", "io-util", "io-std", "rt"] }
 tracing.workspace = true
 qrcode = { version = "0.14", default-features = false }
 
+[dev-dependencies]
+tempfile = "3"
+libc = "0.2"
+tokio = { workspace = true, features = ["process"] }

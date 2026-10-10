@@ -1,7 +1,7 @@
 //! `/loop`: the same line, submitted round after round until the tree stops
 //! changing — judged by the tree, never by the model.
 //!
-//! A loop drives a lane from outside, as a channel does; the lane itself
+//! A loop drives a lane from outside, as a job does; the lane itself
 //! knows nothing of loops.
 
 use std::collections::BTreeMap;

@@ -17,8 +17,6 @@ transcript = { path = "crates/transcript" }
 agent = { path = "crates/agent" }
 subagent = { path = "crates/subagent" }
 skills = { path = "crates/skills" }
-channel = { path = "crates/channel" }
-wechat = { path = "crates/wechat" }
 pi-store = { path = "crates/pi-store" }
 pi-core = { path = "crates/pi-core" }
 ui = { path = "crates/ui" }

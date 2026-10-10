@@ -108,7 +108,6 @@ pub(super) fn surface(dir: &std::path::Path) -> crate::tui::Tui {
         config: std::sync::Arc::new(pi_store::config::Config::default()),
         pinned: pi_core::args::Pinned::default(),
         commands: std::sync::Arc::new(Vec::new()),
-        channels: Vec::new(),
         prompts_seen: 0,
         settings: pi_store::settings::Settings::new(toml::Value::Table(Default::default()), None),
         lanes: vec![running_lane(dir)],

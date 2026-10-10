@@ -964,17 +964,17 @@ fn a_now_intent_runs_with_the_transcript_a_run_has() {
     drop(lane_dir);
 }
 
-// A line from the phone that has to wait keeps where it came from, or the
-// turn it finally starts answers the terminal and the phone hears nothing.
+// A line from a job that has to wait keeps where it came from, or the turn
+// it finally starts answers the terminal and the job hears nothing.
 #[tokio::test]
-async fn a_queued_line_remembers_the_channel_it_came_from() {
+async fn a_queued_line_remembers_the_job_it_came_from() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
     let token = tui.core.lane().token();
 
     tui.admit(
         Asked::Core(Intent::Prompt("from the phone".into())),
-        Origin::Channel("wechat"),
+        Origin::Input(1),
         None,
     );
     tui.admit(
@@ -988,7 +988,7 @@ async fn a_queued_line_remembers_the_channel_it_came_from() {
         .iter()
         .map(|q| q.origin)
         .collect();
-    assert_eq!(from, [Origin::Channel("wechat"), Origin::Typed]);
+    assert_eq!(from, [Origin::Input(1), Origin::Typed]);
 }
 
 // A job's result opens a turn under its label, even one that reads like a

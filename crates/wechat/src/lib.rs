@@ -1,19 +1,17 @@
 //! WeChat for pi: a protocol client for the Weixin iLink bot API (HTTP/JSON
-//! long-poll), and `WeChat`, the `channel::Channel` built on it.
+//! long-poll), and `pi-wechat`, the tool that bridges a session to it.
 //!
-//! `client`, `login` and `types` know only the wire; `adapter` owns the saved
+//! `client`, `login` and `types` know only the wire; `bridge` owns the saved
 //! state and what a message means. Verified against
 //! `@tencent-weixin/openclaw-weixin` 2.4.8.
 
-mod adapter;
-pub mod client;
-pub mod login;
+pub mod bridge;
+mod client;
+mod login;
 mod markdown;
-pub mod types;
+mod split;
+mod types;
 
-pub use adapter::{Keep, WeChat};
-pub use client::{Client, Error as ClientError};
-pub use login::{LoginError, LoginView, login as login_flow, render_qr};
-pub use types::{
-    CHANNEL_VERSION, Credentials, DEFAULT_BASE_URL, QrCode, QrStatus, Update, WireMessage, text_of,
-};
+use client::Client;
+use login::{LoginView, login as login_flow};
+use types::{DEFAULT_BASE_URL, Update, text_of};

@@ -302,16 +302,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "channel"
-version = "2.0.2"
-dependencies = [
- "anyhow",
- "async-trait",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
 name = "chrono"
 version = "0.4.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1898,7 +1888,6 @@ version = "2.0.2"
 dependencies = [
  "agent",
  "anyhow",
- "channel",
  "clap",
  "llm",
  "pi-core",
@@ -1908,7 +1897,6 @@ dependencies = [
  "tool",
  "tracing",
  "ui",
- "wechat",
 ]
 
 [[package]]
@@ -1918,7 +1906,6 @@ dependencies = [
  "agent",
  "anyhow",
  "async-trait",
- "channel",
  "clap",
  "futures",
  "ignore",
@@ -3631,7 +3618,6 @@ dependencies = [
  "agent",
  "anyhow",
  "async-trait",
- "channel",
  "crossterm",
  "futures",
  "imagesize",
@@ -3908,19 +3894,17 @@ dependencies = [
 name = "wechat"
 version = "2.0.2"
 dependencies = [
- "anyhow",
- "async-trait",
  "base64 0.22.1",
- "channel",
+ "libc",
  "pulldown-cmark",
  "qrcode",
  "rand 0.8.8",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
- "tokio-util",
  "tracing",
 ]
 

@@ -1,6 +1,6 @@
 //! Markdown as the phone reads it: WeChat renders none of it, so every
 //! construct the model emits gets reduced to the plainest text that still
-//! says what it said. Nothing here touches the channel or the socket.
+//! says what it said. Nothing here touches the bridge or the socket.
 
 use pulldown_cmark::{CodeBlockKind, Event as MdEvent, Options, Parser, Tag, TagEnd};
 

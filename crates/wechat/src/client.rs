@@ -66,10 +66,6 @@ impl Client {
         }
     }
 
-    pub fn base_url(&self) -> &str {
-        &self.base_url
-    }
-
     /// Ask for a login QR. `local_tokens` are previously-known bot tokens:
     /// the server uses them to say "already bound" instead of issuing a login.
     pub async fn fetch_qrcode(&self, local_tokens: &[String]) -> Result<QrCode> {

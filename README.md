@@ -108,7 +108,6 @@ refused, and resuming one from another directory moves it here.
 | `/status`, `/keys`, `/help`        | session paths and spend; bindings; commands   |
 | `/exit`                            | leave; `ctrl+d` does the same                 |
 | `/content`                         | everything the model is given before you type |
-| `/wechat on`, `/wechat off`        | bridge the session to a WeChat chat           |
 | `/<skill> [args]`                  | run a skill (also one-shot: `pi "/commit"`)   |
 | `! <command>`                      | run a shell command and record its output     |
 | `@path`                            | complete a workspace file                     |
@@ -141,12 +140,16 @@ refused, and resuming one from another directory moves it here.
   A script may also write JSON lines to fd 3 (`PI_EVENTS_FD`): `status` for
   its progress, `detach` to end the call and run on as a job, then `result`
   for each turn it sends back (its stdout at exit is the last), `input` for a
-  person's line, read as if typed, and `interrupt` to stop the checkout's
-  turn. A turn an input opened is told back on fd 3: `started`, then its
+  person's line, sent to the model as written, never run as a command,
+  `notice` for a line on the screen the model never reads, and `interrupt`
+  to stop the checkout's turn. A turn an input opened is told back on fd 3: `started`, then its
   whole `reply`.
-  [`examples/tools/`](examples/tools/) has three to copy: `search`; `judge`,
-  which reads its key from there; and `later`, a prompt the model leaves
-  itself for after a delay or on a period.
+  [`examples/tools/`](examples/tools/) has four to copy: `search`; `judge`,
+  which reads its key from there; `later`, a prompt the model leaves itself
+  for after a delay or on a period; and `wechat`, which bridges the session
+  to a WeChat chat — ask for it, scan the QR the first time, and what you
+  send from the phone arrives as turns, `/stop` included. It runs
+  `pi-wechat`, from `cargo install --path crates/wechat`.
 
 A server's prompts are commands too: `/<name>:<prompt> [args]` asks the server
 for the prompt's text and sends it, one typed word per argument, the last

@@ -307,7 +307,6 @@ async fn main() -> Result<ExitCode> {
             config: config.clone(),
             pinned: pinned.clone(),
             commands,
-            channels: Vec::new(),
             prompts_seen: 0,
             settings,
             current: 0,
@@ -315,13 +314,7 @@ async fn main() -> Result<ExitCode> {
             refused: Default::default(),
             jobs: None,
         };
-        let (saved, keep) = pi_store::private_file("wechat.json");
-        let channels: Vec<Arc<dyn channel::Channel>> = vec![Arc::new(wechat::WeChat::new(
-            saved.as_deref(),
-            Arc::new(keep),
-        ))];
-        core.add_channels(&channels);
-        let drivers = pi_core::driver::Drivers::new(channels);
+        let drivers = pi_core::driver::Drivers::default();
         core.enable_jobs(drivers.jobs());
         let out = tui::Tui::new(core, key_map, drivers)?.run().await;
         // Subagents handed their transcripts to a background save; wait

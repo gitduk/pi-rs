@@ -273,6 +273,8 @@ pub trait JobHandle: Send + Sync {
     fn status(&self, text: String);
     fn result(&self, text: String, spent: llm::stream::Usage);
     fn input(&self, text: String);
+    /// A line for the person at the screen, never the model: a QR to scan.
+    fn notice(&self, text: String);
     /// Stop the turn running in the job's checkout, as esc would.
     fn interrupt(&self);
     fn end(&self);

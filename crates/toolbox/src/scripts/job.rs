@@ -1,7 +1,8 @@
 //! A script call that may outlive its turn. Fd 3 is a socket of JSON lines:
 //! `status` says how far it has got; `detach` ends the call and runs on as a
 //! job; after it, each `result` comes back as a turn, as does stdout at exit,
-//! `input` is a person's line, and `interrupt` stops the checkout's turn.
+//! `input` is a person's line, `interrupt` stops the checkout's turn, and
+//! `notice` is a line for the screen only.
 //! A turn an input opened is told back: `started`, then its whole `reply`.
 
 use std::os::fd::AsRawFd;
@@ -38,6 +39,7 @@ enum Said {
     Detach(String),
     Result(String),
     Input(String),
+    Notice(String),
     Interrupt,
 }
 
@@ -134,7 +136,7 @@ pub async fn run(
                     });
                         return Ok(Ran::Detached { said: text, id });
                     }
-                Said::Result(_) | Said::Input(_) | Said::Interrupt => tracing::warn!(
+                Said::Result(_) | Said::Input(_) | Said::Notice(_) | Said::Interrupt => tracing::warn!(
                     target: "pi::scripts", script = name, "said before detach, dropped"
                 ),
             },
@@ -175,6 +177,7 @@ async fn go_on(
                 Said::Status(text) => job.status(text),
                 Said::Result(text) => job.result(text, Default::default()),
                 Said::Input(text) => job.input(text),
+                Said::Notice(text) => job.notice(text),
                 Said::Interrupt => job.interrupt(),
                 Said::Detach(_) => {}
             },
@@ -276,6 +279,7 @@ fn parse(line: &str) -> Option<Said> {
         .map(Said::Detach)
         .or_else(|| text("result").map(Said::Result))
         .or_else(|| text("input").map(Said::Input))
+        .or_else(|| text("notice").map(Said::Notice))
         .or_else(|| text("status").map(Said::Status))
 }
 

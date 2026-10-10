@@ -1,9 +1,8 @@
-//! What drives a lane from outside the keyboard: a chat channel, a `/loop`.
+//! What drives a lane from outside the keyboard: a job, a `/loop`.
 //!
 //! A driver hears only the end of turns its own lines began; `Drivers`
 //! keeps that ledger so the surface need not know which driver cares.
 
-mod channel;
 pub mod jobs;
 pub mod looping;
 
@@ -13,14 +12,12 @@ use agent::Event;
 use tool::Ctx;
 
 use crate::input::Drive;
-use channel::Channels;
 use looping::Loops;
 
 /// Who sent a line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
     Typed,
-    Channel(&'static str),
     Loop,
     Job,
     /// A person speaking through job `0`: the turn's answer goes back to it.
@@ -58,8 +55,8 @@ pub struct Next {
     pub label: Option<String>,
 }
 
+#[derive(Default)]
 pub struct Drivers {
-    channels: Channels,
     loops: Loops,
     jobs: Arc<jobs::Table>,
     // Turns a job's input opened, each with its answer so far.
@@ -73,15 +70,6 @@ struct Owed {
 }
 
 impl Drivers {
-    pub fn new(channels: Vec<Arc<dyn ::channel::Channel>>) -> Self {
-        Self {
-            channels: Channels::new(channels),
-            loops: Loops::default(),
-            jobs: Arc::default(),
-            owed: Vec::new(),
-        }
-    }
-
     /// What `jobs` and every call that outlives its turn write into: the
     /// lanes' tools and this driver share it.
     pub fn jobs(&self) -> Arc<jobs::Table> {
@@ -123,17 +111,9 @@ impl Drivers {
         })
     }
 
-    /// What a channel says, stamped with who said it. Cancel-safe, so the
-    /// surface may drop it mid-wait in a `select!`.
-    pub async fn inbound(&mut self) -> Option<(Origin, ::channel::Inbound)> {
-        let (name, msg) = self.channels.rx.recv().await?;
-        Some((Origin::Channel(name), msg))
-    }
-
     /// Carry out a driver's command, given on `lane`.
     pub fn command(&mut self, drive: Drive, lane: u64, ctx: &Ctx) -> Said {
         match drive {
-            Drive::Channel(name, cmd) => Said::Reply(self.channels.command(&name, cmd)),
             Drive::Loop(Some(goal)) => match self.loops.start(lane, goal, ctx) {
                 Ok(()) => Said::Nothing,
                 Err(why) => Said::Reply(vec![why]),
@@ -160,10 +140,8 @@ impl Drivers {
         prompt: bool,
     ) -> Option<String> {
         match origin {
-            // A channel relays model turns only: a `!` never reaches `Done`,
-            // so its answer would be owed forever.
-            Origin::Channel(name) if prompt && started => self.channels.ask(name, lane),
-            // Only a model turn ends with an answer to send back, as above.
+            // Only a model turn ends with an answer to send back: a `!` never
+            // reaches `Done`, so its answer would be owed forever.
             Origin::Input(job) if prompt && started => {
                 self.owed.push(Owed {
                     job,
@@ -174,14 +152,13 @@ impl Drivers {
             }
             Origin::Loop if started => self.loops.ask(lane),
             Origin::Loop => return self.loops.unstarted(lane),
-            Origin::Channel(_) | Origin::Typed | Origin::Job | Origin::Input(_) => {}
+            Origin::Typed | Origin::Job | Origin::Input(_) => {}
         }
         None
     }
 
     /// One event from any lane's run; each driver keeps its own turns'.
     pub fn observe(&mut self, lane: u64, event: &Event) {
-        self.channels.observe(lane, event);
         if let Event::TextDelta(text) = event {
             for owed in self.owed.iter_mut().filter(|o| o.lane == lane) {
                 owed.said.push_str(text);
@@ -198,7 +175,6 @@ impl Drivers {
         ctx: &Ctx,
         cap: Option<usize>,
     ) -> Option<String> {
-        self.channels.finish_turn(lane, ended);
         for owed in self.owed.extract_if(.., |o| o.lane == lane) {
             self.jobs
                 .tell(owed.job, tool::Told::Reply(reply(owed.said, ended)));
@@ -275,7 +251,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         let ctx = Ctx::new(tool::Workspace::new(&root).unwrap());
-        let mut drivers = Drivers::new(Vec::new());
+        let mut drivers = Drivers::default();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let job = jobs::Jobs::new(drivers.jobs()).start(
             root.clone(),

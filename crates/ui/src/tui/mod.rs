@@ -216,18 +216,9 @@ impl Tui {
             ui,
             events: rx,
             hold: Hold::default(),
-            drivers: Drivers::new(Vec::new()),
+            drivers: Drivers::default(),
             bar: bar::BarScript::at(None),
         }
-    }
-
-    // Lands a line (screen + history) from any door, once per line —
-    // history is written now, not on exit, which two Ctrl-Cs can skip.
-    fn echo_sent(&mut self, line: &str) {
-        let view = front_view(&mut self.views, self.core.lane());
-        self.ui.submit(view, line);
-        view.surface.scroll = 0;
-        self.save_history();
     }
 
     // Best effort: losing a recall list is not worth a message on the way out.
@@ -296,8 +287,8 @@ impl Tui {
     async fn serve_lanes(&mut self) {
         for at in 0..self.core.lanes.len() {
             while let Ok(event) = self.core.lanes[at].inbox().try_recv() {
-                // Every lane, not just the one in front: a turn a channel
-                // asked for is still owed its answer after a switch.
+                // Every lane, not just the one in front: a turn a job's input
+                // opened is still owed its answer after a switch.
                 self.drivers.observe(self.core.lanes[at].token(), &event);
                 // Opened first: a banner drawn later would replace the rows.
                 let view = view::opened(&mut self.views, &self.core.lanes[at], &self.ui.paint);
@@ -534,6 +525,13 @@ impl Tui {
             for root in jobs.take_interrupts() {
                 self.interrupt_at(&root);
             }
+            // Where it lasts and can be re-read, as a QR has to.
+            for text in jobs.take_notices(self.core.lane().root()) {
+                let view = front_view(&mut self.views, self.core.lane());
+                for line in text.lines() {
+                    self.ui.say(view, line.to_string());
+                }
+            }
             self.ui.jobs = jobs.jobs(self.core.lane().root());
             let view = front_view(&mut self.views, self.core.lane());
             self.ui.flush(self.core.lane(), view);
@@ -632,33 +630,6 @@ impl Tui {
                             self.admit(intent, Origin::Typed, held)
                         }
                         None => Wake::Leave,
-                    },
-                    msg = self.drivers.inbound() => match msg {
-                        // The phone types at the lane in front, like a
-                        // hand; its `/stop` is esc — same gate, same intents.
-                        Some((from, channel::Inbound::Text { text })) => {
-                            origin = from;
-                            let intent = input::read(&text, &self.core.commands);
-                            if intent.echoed() {
-                                self.echo_sent(&text);
-                            }
-                            self.admit(Asked::Core(intent), origin, None)
-                        }
-                        Some((_, channel::Inbound::Stop)) => {
-                            self.admit(Asked::Own(Deed::Interrupt), Origin::Typed, None)
-                        }
-                        // The QR, an error, a way out of one: on the lane the
-                        // channel follows, where it lasts and can be re-read.
-                        Some((_, channel::Inbound::Notice(text))) => {
-                            self.ui.say(front_view(&mut self.views, self.core.lane()), text);
-                            Wake::Nothing
-                        }
-                        // A channel saying it is up: one row for a moment.
-                        Some((_, channel::Inbound::Flash(text))) => {
-                            self.ui.flash(text);
-                            Wake::Nothing
-                        }
-                        None => Wake::Nothing,
                     },
                 }
             } else {

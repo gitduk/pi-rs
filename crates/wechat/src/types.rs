@@ -86,13 +86,9 @@ pub enum QrStatus {
 pub struct WireMessage {
     #[serde(default)]
     pub from_user_id: String,
-    #[serde(default)]
-    pub to_user_id: String,
     /// 1 = user sent it, 2 = bot sent it. The loop handles only 1.
     #[serde(default)]
     pub message_type: i64,
-    #[serde(default)]
-    pub message_state: i64,
     /// Required verbatim on any reply, or the reply misses the conversation.
     #[serde(default)]
     pub context_token: Option<String>,
@@ -189,8 +185,6 @@ impl Update {
 /// What `getconfig` returns that pi uses.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Config {
-    #[serde(default)]
-    pub ret: i64,
     #[serde(default)]
     pub typing_ticket: Option<String>,
 }

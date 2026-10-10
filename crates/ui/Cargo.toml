@@ -12,7 +12,6 @@ pi-store.workspace = true
 futures.workspace = true
 agent.workspace = true
 llm.workspace = true
-channel.workspace = true
 tool.workspace = true
 anyhow.workspace = true
 tokio-util.workspace = true

@@ -702,6 +702,7 @@ impl tool::JobHandle for Host {
         *self.spent.lock().unwrap() = spent;
     }
     fn input(&self, _text: String) {}
+    fn notice(&self, _text: String) {}
     fn interrupt(&self) {}
     fn end(&self) {
         self.said.lock().unwrap().push("end".into());

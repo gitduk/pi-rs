@@ -49,8 +49,6 @@ pub enum Builtin {
     // A file the model is given, by the name `/edit` lists it under, or
     // empty to list them.
     Edit(String),
-    // A channel's command: its name, then "" = status, "on" or "off".
-    Channel(String, String),
     // What to run over and over, or empty to stop the loop in force.
     Loop(String),
     // Bare, what runs in the background here; `stop <id>` ends one.
@@ -135,7 +133,6 @@ impl Intent {
             // Bare it lists; naming a file hands the terminal to an editor.
             Intent::Builtin(Builtin::Edit(name)) if name.trim().is_empty() => Fate::Now,
             Intent::Builtin(Builtin::Edit(_)) => Fate::Queued,
-            Intent::Builtin(Builtin::Channel(..)) => Fate::Now,
             Intent::Other { .. } | Intent::Prompt(_) => Fate::Queued,
             // Its first round is due at once, and a round wants the lane free.
             Intent::Builtin(Builtin::Loop(_)) => Fate::Queued,
@@ -346,20 +343,10 @@ pub enum Step {
 /// A command for a driver.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Drive {
-    /// `/<channel>`, which starts, stops or reports the named channel.
-    Channel(String, ChannelCmd),
     /// `/loop` over a goal already known to start a turn; `None` stops it.
     Loop(Option<String>),
     /// `/jobs`, with what followed the word.
     Jobs(String),
-}
-
-/// What `/<channel>` asks: bare for status, `on` or `off`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChannelCmd {
-    Status,
-    On,
-    Off,
 }
 
 pub(crate) fn lines(text: impl Into<String>) -> Step {

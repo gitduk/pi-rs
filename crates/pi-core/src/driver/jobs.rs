@@ -18,6 +18,8 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tool::{Ctx, Tier, Told, Tool, ToolError, ToolOutput};
 
+// Screen lines a job may have waiting before the oldest give way.
+const MAX_NOTICES: usize = 200;
 // What a job may have waiting at once; past it they are counted, not kept,
 // so a job that outruns its lane cannot grow without bound.
 const MAX_WAITING: usize = 100;
@@ -52,6 +54,8 @@ struct Item {
     told: Option<UnboundedSender<Told>>,
     // It asked to stop its checkout's running turn, not yet acted on.
     interrupt: bool,
+    // Lines for the screen, not yet shown.
+    notices: VecDeque<String>,
     // Asks it to wind down: a subagent the way esc does, a process by signal.
     stop: CancellationToken,
 }
@@ -170,6 +174,16 @@ impl Table {
             .collect()
     }
 
+    /// The screen lines `root`'s jobs left since last asked, oldest first.
+    pub fn take_notices(&self, root: &Path) -> Vec<String> {
+        self.lock()
+            .items
+            .iter_mut()
+            .filter(|i| i.root == root)
+            .flat_map(|i| std::mem::take(&mut i.notices))
+            .collect()
+    }
+
     /// Tell job `id` about a turn its input opened, if it is still here.
     pub fn tell(&self, id: u64, told: Told) {
         if let Some(to) = self
@@ -276,6 +290,7 @@ impl Table {
             dropped: 0,
             told,
             interrupt: false,
+            notices: VecDeque::new(),
             stop,
         });
         drop(inner);
@@ -330,6 +345,14 @@ struct Handle {
     table: Arc<Table>,
 }
 
+// The last holder gone ends the job, so one whose task died before saying
+// `end` — a panic — does not stay listed as running for good.
+impl Drop for Handle {
+    fn drop(&mut self) {
+        self.table.update(self.id, |i| i.running = false);
+    }
+}
+
 impl tool::JobHandle for Handle {
     fn id(&self) -> u64 {
         self.id
@@ -352,6 +375,15 @@ impl tool::JobHandle for Handle {
                 text,
                 note: String::new(),
             })
+        });
+    }
+
+    fn notice(&self, text: String) {
+        self.table.update(self.id, |i| {
+            if i.notices.len() >= MAX_NOTICES {
+                i.notices.pop_front();
+            }
+            i.notices.push_back(text);
         });
     }
 
@@ -479,6 +511,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_notice_is_shown_once_on_its_own_checkout() {
+        let table = Arc::new(Table::default());
+        let job = start(&table, Path::new("/checkout"), "wechat");
+        job.notice("scan this".into());
+        assert!(table.take_notices(Path::new("/elsewhere")).is_empty());
+        assert_eq!(table.take_notices(Path::new("/checkout")), ["scan this"]);
+        assert!(table.take_notices(Path::new("/checkout")).is_empty());
+    }
+
+    #[tokio::test]
     async fn an_interrupt_names_the_jobs_checkout_once() {
         let table = Arc::new(Table::default());
         let job = start(&table, Path::new("/checkout"), "wechat");
@@ -582,6 +624,19 @@ mod tests {
         let last = last.unwrap();
         assert!(last.contains(&format!("{}", MAX_WAITING - 1)), "{last}");
         assert!(last.contains("3 later lines were dropped"), "{last}");
+    }
+
+    #[tokio::test]
+    async fn a_job_whose_task_died_without_ending_leaves() {
+        let table = Arc::new(Table::default());
+        let root = PathBuf::from("/checkout");
+        let job = start(&table, &root, "crashy");
+        let _ = tokio::spawn(async move {
+            let _job = job;
+            panic!("died before end");
+        })
+        .await;
+        assert!(table.jobs(&root).is_empty());
     }
 
     #[tokio::test]
