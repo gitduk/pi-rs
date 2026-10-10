@@ -163,14 +163,21 @@ impl Tool for Script {
             .envs(shared.iter().map(|(k, v)| (k, v)))
             .envs(self.env(&args, &shared));
         let input = serde_json::to_vec(&args).unwrap_or_default();
-        let exited = crate::process::run(command, Some(input), TIMEOUT, ctx).await?;
+        let exited = match super::job::run(&self.name, command, input, TIMEOUT, ctx).await? {
+            super::job::Ran::Exited(exited) => exited,
+            super::job::Ran::Detached { said, id } => {
+                return Ok(ToolOutput::text(format!(
+                    "{said}\n\nRunning in the background as job #{id}; its results come \
+                     back as turns of their own, so keep working or end this turn. `jobs` \
+                     lists it, and `jobs` with `stop` stops it."
+                ))
+                .with_preview(format!("{} [background #{id}]", self.name)));
+            }
+        };
         let (status, errs) = (exited.status, exited.stderr);
 
         if !status.success() {
-            let mut message = format!("{}: exited {status}; {}", self.name, errs.text.trim());
-            if let Some(spilled) = &errs.spill {
-                message.push_str(&format!("{}\n", spilled.note()));
-            }
+            let message = format!("{}: exited {status}; {}", self.name, errs.noted().trim());
             return Err(ToolError::Invalid(message));
         }
 
@@ -178,11 +185,7 @@ impl Tool for Script {
         if captured.text.trim().is_empty() {
             return Ok(ToolOutput::text(format!("{}: no output", self.name)));
         }
-        let mut body = captured.text;
-        if let Some(spilled) = &captured.spill {
-            body.push_str(&format!("{}\n", spilled.note()));
-        }
-        Ok(ToolOutput::text(body).with_preview(self.name.clone()))
+        Ok(ToolOutput::text(captured.noted()).with_preview(self.name.clone()))
     }
 }
 

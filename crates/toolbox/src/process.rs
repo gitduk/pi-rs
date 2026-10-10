@@ -41,17 +41,7 @@ pub async fn run(
     #[cfg(unix)]
     cmd.process_group(0);
 
-    // A vanished working directory fails as a bare ENOENT, which reads like a
-    // missing command; say the ground went, or the model just retries.
-    let cwd = cmd.as_std().get_current_dir().map(|d| d.to_path_buf());
-    let mut child = cmd.spawn().map_err(|e| match &cwd {
-        Some(cwd) if !cwd.is_dir() => ToolError::Invalid(format!(
-            "the working directory is gone: {}. Nothing will run here \
-             until it is back or the run moves elsewhere.",
-            cwd.display()
-        )),
-        _ => ToolError::from(e),
-    })?;
+    let mut child = spawn(&mut cmd)?;
     let group = child.id();
 
     if let Some(input) = stdin {
@@ -95,10 +85,24 @@ pub async fn run(
     })
 }
 
+/// Start `cmd`. A vanished working directory fails as a bare ENOENT, which
+/// reads like a missing command; say the ground went, or the model retries.
+pub(crate) fn spawn(cmd: &mut Command) -> Result<tokio::process::Child, ToolError> {
+    let cwd = cmd.as_std().get_current_dir().map(|d| d.to_path_buf());
+    cmd.spawn().map_err(|e| match &cwd {
+        Some(cwd) if !cwd.is_dir() => ToolError::Invalid(format!(
+            "the working directory is gone: {}. Nothing will run here \
+             until it is back or the run moves elsewhere.",
+            cwd.display()
+        )),
+        _ => ToolError::from(e),
+    })
+}
+
 // SIGTERM the group, then SIGKILL whatever ignored it. A build killed outright
 // can leave a corrupt output tree, so the polite signal goes first.
 #[cfg(unix)]
-async fn reap(group: Option<u32>) {
+pub(crate) async fn reap(group: Option<u32>) {
     // A freshly spawned pid can never equal our own group's id, and the filter
     // rejects 0 — `killpg(0, …)` would signal the agent itself.
     let Some(pid) = group.filter(|p| *p > 1) else {
@@ -113,4 +117,4 @@ async fn reap(group: Option<u32>) {
 // Windows has no process group to signal: the direct child still dies with
 // `kill_on_drop`, but its descendants outlive a timeout.
 #[cfg(not(unix))]
-async fn reap(_group: Option<u32>) {}
+pub(crate) async fn reap(_group: Option<u32>) {}

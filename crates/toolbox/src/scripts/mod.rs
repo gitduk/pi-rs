@@ -10,6 +10,31 @@
 //! bash's, so a runaway script floods neither memory nor transcript.
 
 pub mod env;
+#[cfg(unix)]
+mod job;
+// Elsewhere a script runs to its end within its turn; it has no fd 3.
+#[cfg(not(unix))]
+mod job {
+    use std::time::Duration;
+    use tool::{Ctx, ToolError};
+
+    pub enum Ran {
+        Exited(crate::process::Exited),
+        Detached { said: String, id: u64 },
+    }
+
+    pub async fn run(
+        _name: &str,
+        cmd: tokio::process::Command,
+        input: Vec<u8>,
+        timeout: Duration,
+        ctx: &Ctx,
+    ) -> Result<Ran, ToolError> {
+        crate::process::run(cmd, Some(input), timeout, ctx)
+            .await
+            .map(Ran::Exited)
+    }
+}
 mod script;
 
 use std::path::{Path, PathBuf};

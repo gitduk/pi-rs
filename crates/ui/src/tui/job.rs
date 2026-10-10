@@ -148,7 +148,7 @@ impl Tui {
             .collect();
         self.ui.adopt(view, &fresh);
         let cancel = CancellationToken::new();
-        let ctx = self.core.lane_mut().ctx_for(cancel.clone());
+        let ctx = self.core.turn_ctx(cancel.clone());
 
         self.arm_view(false);
         // Read while the agent is still reachable: `/model` may replace it

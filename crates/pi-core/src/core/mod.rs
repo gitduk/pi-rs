@@ -179,6 +179,18 @@ impl Core {
         Some(said)
     }
 
+    /// The context a turn on the lane in front runs with: the lane's, and
+    /// where a call that outlives the turn goes on, when jobs are served.
+    pub fn turn_ctx(&self, cancel: tokio_util::sync::CancellationToken) -> tool::Ctx {
+        let ctx = self.lane().ctx_for(cancel);
+        match &self.tables {
+            Some(tables) => ctx.with_jobs(std::sync::Arc::new(crate::driver::jobs::Jobs::new(
+                tables.jobs.clone(),
+            ))),
+            None => ctx,
+        }
+    }
+
     /// Offer `later` and `jobs` on every lane, writing into `tables`, which
     /// the surface serves: lanes armed before this are armed again.
     pub fn enable_tables(&mut self, tables: crate::driver::Tables) {

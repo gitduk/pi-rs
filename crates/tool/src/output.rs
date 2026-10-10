@@ -33,6 +33,17 @@ pub struct Captured {
     pub spill: Option<SpillRef>,
 }
 
+impl Captured {
+    /// The view, followed when the stream spilled by where the whole of it is.
+    pub fn noted(self) -> String {
+        let mut text = self.text;
+        if let Some(spilled) = &self.spill {
+            text.push_str(&format!("{}\n", spilled.note()));
+        }
+        text
+    }
+}
+
 /// A sink that absorbs a stream without ever holding more than the window's
 /// worth of it. Feed it with [`Capture::drain`], read it back with
 /// [`Capture::finish`].

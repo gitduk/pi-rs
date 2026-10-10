@@ -243,10 +243,33 @@ pub struct Ctx {
     spill_root: std::path::PathBuf,
     // Where a running call says how far it has got; set per call by the loop.
     progress: Option<Progress>,
+    // Where a call that outlives its turn goes on; None where nothing could
+    // bring its results back, such as a one-shot run or a subagent.
+    jobs: Option<std::sync::Arc<dyn JobSink>>,
 }
 
 /// Takes a running call's latest word on its progress, replacing the last.
 pub type Progress = std::sync::Arc<dyn Fn(String) + Send + Sync>;
+
+/// Where a call that will outlive its turn is kept: a job of the checkout at
+/// `root`, which the host lists, stops through `stop`, and delivers from.
+pub trait JobSink: Send + Sync {
+    fn start(
+        &self,
+        root: std::path::PathBuf,
+        description: String,
+        stop: tokio_util::sync::CancellationToken,
+    ) -> std::sync::Arc<dyn JobHandle>;
+}
+
+/// A running job's way to report. Each `result` comes back to its checkout
+/// as a turn of its own; `end` says it will report no more.
+pub trait JobHandle: Send + Sync {
+    fn id(&self) -> u64;
+    fn status(&self, text: String);
+    fn result(&self, text: String);
+    fn end(&self);
+}
 
 pub type FileLocks =
     std::sync::Arc<std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, FileLock>>>;
@@ -274,6 +297,7 @@ impl Ctx {
             session: None,
             spill_root: spill::temp(),
             progress: None,
+            jobs: None,
         }
     }
 }
@@ -372,6 +396,23 @@ impl Ctx {
     pub fn with_own_writes(mut self) -> Self {
         self.writes = Default::default();
         self
+    }
+
+    /// Let calls under this context outlive their turn as jobs kept by `to`.
+    pub fn with_jobs(mut self, to: std::sync::Arc<dyn JobSink>) -> Self {
+        self.jobs = Some(to);
+        self
+    }
+
+    /// Calls under this context end with their turn.
+    pub fn without_jobs(mut self) -> Self {
+        self.jobs = None;
+        self
+    }
+
+    /// Where a call may go on after its turn, if anywhere.
+    pub fn jobs(&self) -> Option<&std::sync::Arc<dyn JobSink>> {
+        self.jobs.as_ref()
     }
 
     /// Route this call's progress to `to`.

@@ -15,6 +15,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "net", "process", "io-util"] }
 tracing.workspace = true
+tokio-util.workspace = true
 ignore.workspace = true
 globset.workspace = true
 grep-regex.workspace = true

@@ -299,8 +299,8 @@ impl Subagent {
         let preview = format!("{} [background #{id}]", job_name.trim());
         ToolOutput::text(format!(
             "started in the background as #{id}; its answer comes back as a turn \
-             of its own, so keep working or end this turn. `later` lists it, and \
-             `later` with `cancel` stops it."
+             of its own, so keep working or end this turn. `jobs` lists it, and \
+             `jobs` with `stop` stops it."
         ))
         .with_preview(preview)
     }
@@ -312,14 +312,16 @@ impl Subagent {
             NEXT.fetch_add(1, Ordering::Relaxed)
         );
         // Tree, locks and renumbering are shared with the parent (same files);
-        // transcript, spill name and token are the child's own.
+        // transcript, spill name and token are the child's own. It keeps no
+        // jobs: nothing would bring their results back to the child.
         let stop = ctx.cancel.child_token();
         let root = ctx.spill_root().to_path_buf();
         let child = ctx
             .clone()
             .with_cancel(stop.clone())
             .with_session(&id, root)
-            .with_own_writes();
+            .with_own_writes()
+            .without_jobs();
 
         let (tx, mut rx) = unbounded_channel();
         // Every event resets the silence clock, whatever kind it is: an
