@@ -84,6 +84,8 @@ impl Relay {
     }
 
     fn off(&mut self) -> Vec<String> {
+        // While still alive, or the phone shows "typing" until the server gives up.
+        self.typing(false);
         if let Some(abort) = self.abort.take() {
             abort.cancel();
         }

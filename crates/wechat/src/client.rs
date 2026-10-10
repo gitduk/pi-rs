@@ -138,13 +138,13 @@ impl Client {
             },
             "base_info": base_info(),
         });
-        self.post_no_body("ilink/bot/sendmessage", Some(token), body, API_TIMEOUT)
+        self.post("ilink/bot/sendmessage", Some(token), body, API_TIMEOUT)
             .await
             .map(|_| ())
     }
 
-    /// The per-user config, currently just the typing ticket. The bridge caches
-    /// it per user and refreshes periodically, as the reference does.
+    /// The per-user config, currently just the typing ticket. The adapter
+    /// caches it per peer and fetches a new one after a failed typing send.
     pub async fn get_config(&self, token: &str, user: &str, context_token: &str) -> Result<Config> {
         let body = json!({
             "ilink_user_id": user,
@@ -171,7 +171,7 @@ impl Client {
             "status": status,
             "base_info": base_info(),
         });
-        self.post_no_body("ilink/bot/sendtyping", Some(token), body, CONFIG_TIMEOUT)
+        self.post("ilink/bot/sendtyping", Some(token), body, CONFIG_TIMEOUT)
             .await
             .map(|_| ())
     }
@@ -182,16 +182,6 @@ impl Client {
     }
 
     async fn post(
-        &self,
-        endpoint: &str,
-        token: Option<&str>,
-        body: Value,
-        timeout: Duration,
-    ) -> Result<Value> {
-        self.post_no_body(endpoint, token, body, timeout).await
-    }
-
-    async fn post_no_body(
         &self,
         endpoint: &str,
         token: Option<&str>,

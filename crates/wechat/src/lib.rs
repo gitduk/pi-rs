@@ -3,7 +3,7 @@
 //!
 //! `client`, `login` and `types` know only the wire; `adapter` owns the saved
 //! state and what a message means. Verified against
-//! `@tencent-weixin/openclaw-weixin` 2.4.8 — see `WECHAT.md` §3.
+//! `@tencent-weixin/openclaw-weixin` 2.4.8.
 
 mod adapter;
 pub mod client;

@@ -1,6 +1,7 @@
 //! WeChat as a channel: the login, the long-poll, and the state the host
 //! keeps for it, over the protocol client beside it.
 
+use std::ops::ControlFlow;
 use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 
@@ -134,12 +135,24 @@ impl Channel for WeChat {
         let (Some(token), Some(peer)) = (token, peer) else {
             return Ok(());
         };
-        let context_token = context_token.unwrap_or_default();
-        self.client()
+        let sent = self
+            .client()
             .await
-            .send_text(&token, &peer, &context_token, text)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e:#} — try sending a message from the phone first"))
+            .send_text(
+                &token,
+                &peer,
+                context_token.as_deref().unwrap_or_default(),
+                text,
+            )
+            .await;
+        // Only a reply with no conversation window to ride is fixed by the phone.
+        match (sent, context_token) {
+            (Ok(()), _) => Ok(()),
+            (Err(e), Some(_)) => Err(e.into()),
+            (Err(e), None) => Err(anyhow::anyhow!(
+                "{e:#} — try sending a message from the phone first"
+            )),
+        }
     }
 
     // No ticket, no effect; a failed send is logged and otherwise ignored.
@@ -162,6 +175,7 @@ impl Channel for WeChat {
         let status = if on { 1 } else { 2 };
         if let Err(e) = client.send_typing(&token, &peer, &ticket, status).await {
             tracing::warn!(target: "pi::wechat", error = %e, "sendtyping");
+            t.ticket = None;
         }
     }
 }
@@ -250,7 +264,12 @@ async fn poll(client: crate::Client, state: Arc<Kept>, tx: Inbox, abort: Cancell
             _ = abort.cancelled() => return,
         };
         match update {
-            Ok(update) => handle_update(&state, &tx, update, &mut failures, &mut timeout).await,
+            Ok(update) => {
+                let flow = handle_update(&state, &tx, update, &mut failures, &mut timeout).await;
+                if flow.is_break() {
+                    return;
+                }
+            }
             Err(e) => {
                 failures += 1;
                 if failures == 3 {
@@ -280,10 +299,8 @@ async fn typing_ticket(
     }
     match client.get_config(token, peer, context_token).await {
         Ok(cfg) => {
-            let ticket = cfg.typing_ticket.unwrap_or_default();
-            if !ticket.is_empty() {
-                t.ticket = Some((peer.to_string(), ticket.clone()));
-            }
+            let ticket = cfg.typing_ticket.filter(|t| !t.is_empty())?;
+            t.ticket = Some((peer.to_string(), ticket.clone()));
             Some(ticket)
         }
         Err(e) => {
@@ -299,7 +316,7 @@ async fn handle_update(
     update: Update,
     failures: &mut u32,
     timeout: &mut Duration,
-) {
+) -> ControlFlow<()> {
     if update.is_error() {
         if update.is_stale_token() {
             let mut s = state.lock().await;
@@ -308,7 +325,7 @@ async fn handle_update(
             let _ = tx.send(Inbound::Notice(
                 "wechat token expired — /wechat off, then /wechat on to rescan".into(),
             ));
-            return;
+            return ControlFlow::Break(());
         }
         *failures += 1;
         if *failures == 3 {
@@ -318,7 +335,7 @@ async fn handle_update(
             )));
         }
         tokio::time::sleep(backoff(failures)).await;
-        return;
+        return ControlFlow::Continue(());
     }
     *failures = 0;
     if let Some(t) = update.longpolling_timeout_ms
@@ -356,6 +373,7 @@ async fn handle_update(
     if dirty {
         state.save(&s);
     }
+    ControlFlow::Continue(())
 }
 
 // 2s between ordinary retries, 30s once three have failed in a row (the

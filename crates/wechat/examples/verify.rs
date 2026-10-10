@@ -1,4 +1,4 @@
-//! Standalone verification binary (WECHAT.md §5.1): login with a QR, long-poll
+//! Standalone verification binary: login with a QR, long-poll
 //! for messages, and echo them back verbatim — the protocol layer's own
 //! end-to-end check, independent of the agent.
 //!
