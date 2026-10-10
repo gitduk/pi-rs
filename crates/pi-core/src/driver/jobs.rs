@@ -1,9 +1,10 @@
 //! `jobs`: what runs apart from the turn that started it — a subagent sent
-//! to the background, a script tool that detached — and what it reports back
-//! to its checkout, each result a turn of its own.
+//! to the background, a script tool that detached — and what comes back from
+//! it to its checkout: each result a turn of its own, each input a line read
+//! as if typed, whose turn's answer goes back to the job.
 //!
-//! A result goes only when the lane is free and nothing typed is waiting.
-//! Nothing here outlives this process; past it, use the system's scheduler.
+//! What comes back goes only when the lane is free and nothing typed is
+//! waiting. Nothing here outlives this process; past it, use cron.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -12,11 +13,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::sync::Notify;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};
+use tool::{Ctx, Tier, Told, Tool, ToolError, ToolOutput};
 
-// Results a job may have waiting at once; past it they are counted, not kept,
+// What a job may have waiting at once; past it they are counted, not kept,
 // so a job that outruns its lane cannot grow without bound.
 const MAX_WAITING: usize = 100;
 
@@ -41,11 +43,15 @@ struct Item {
     progress: String,
     started: Instant,
     running: bool,
-    // Results not yet delivered, oldest first. A job leaves the table once
-    // it has stopped running and these are gone.
-    waiting: VecDeque<Due>,
-    // Results that arrived while `waiting` was full.
+    // What it said that is not yet delivered, oldest first. A job leaves the
+    // table once it has stopped running and these are gone.
+    waiting: VecDeque<Back>,
+    // What arrived while `waiting` was full.
     dropped: usize,
+    // Where the turns its inputs opened are told of; None if it never listens.
+    told: Option<UnboundedSender<Told>>,
+    // It asked to stop its checkout's running turn, not yet acted on.
+    interrupt: bool,
     // Asks it to wind down: a subagent the way esc does, a process by signal.
     stop: CancellationToken,
 }
@@ -66,6 +72,16 @@ impl Item {
     }
 }
 
+impl Item {
+    fn wait(&mut self, back: Back) {
+        if self.waiting.len() >= MAX_WAITING {
+            self.dropped += 1;
+        } else {
+            self.waiting.push_back(back);
+        }
+    }
+}
+
 // A job that has stopped with nothing left to say leaves.
 fn settle(items: &mut Vec<Item>, at: usize) {
     if !items[at].running && items[at].waiting.is_empty() {
@@ -81,6 +97,13 @@ pub struct Job {
     pub started: Instant,
     /// Done, its results waiting for the lane to be free.
     pub ended: bool,
+}
+
+/// What comes back from a job: a result, or a person speaking through it,
+/// their words untouched; `note` says only what the cap dropped, if anything.
+pub enum Back {
+    Result(Due),
+    Input { text: String, note: String },
 }
 
 /// What a lane is sent when something it left comes back: the line to
@@ -105,7 +128,7 @@ impl Table {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Now, if a job for `root` has a result waiting.
+    /// Now, if a job for `root` has something waiting.
     pub fn next_due(&self, root: &Path) -> Option<Instant> {
         self.lock()
             .items
@@ -114,26 +137,50 @@ impl Table {
             .then(Instant::now)
     }
 
-    /// The oldest waiting result for `root`, taken.
-    pub fn take_due(&self, root: &Path) -> Option<Due> {
+    /// The oldest thing waiting for `root`, taken, with the job it came from.
+    pub fn take_back(&self, root: &Path) -> Option<(u64, Back)> {
         let mut inner = self.lock();
         let at = inner
             .items
             .iter()
             .position(|i| i.root == root && !i.waiting.is_empty())?;
         let item = &mut inner.items[at];
-        let mut due = item.waiting.pop_front();
-        if item.waiting.is_empty()
-            && let Some(due) = &mut due
-            && item.dropped > 0
-        {
-            due.line.push_str(&format!(
-                "\n\n({} later results were dropped: more than {MAX_WAITING} waited at once.)",
+        let id = item.id;
+        let mut back = item.waiting.pop_front()?;
+        if item.waiting.is_empty() && item.dropped > 0 {
+            let dropped = format!(
+                "({} later lines were dropped: more than {MAX_WAITING} waited at once.)",
                 std::mem::take(&mut item.dropped)
-            ));
+            );
+            match &mut back {
+                Back::Result(due) => due.line.push_str(&format!("\n\n{dropped}")),
+                Back::Input { note, .. } => *note = dropped,
+            }
         }
         settle(&mut inner.items, at);
-        due
+        Some((id, back))
+    }
+
+    /// Checkouts whose running turn a job asked to stop since last asked.
+    pub fn take_interrupts(&self) -> Vec<PathBuf> {
+        self.lock()
+            .items
+            .iter_mut()
+            .filter_map(|i| std::mem::take(&mut i.interrupt).then(|| i.root.clone()))
+            .collect()
+    }
+
+    /// Tell job `id` about a turn its input opened, if it is still here.
+    pub fn tell(&self, id: u64, told: Told) {
+        if let Some(to) = self
+            .lock()
+            .items
+            .iter()
+            .find(|i| i.id == id)
+            .and_then(|i| i.told.as_ref())
+        {
+            let _ = to.send(told);
+        }
     }
 
     /// The jobs for `root`, oldest first.
@@ -208,7 +255,13 @@ impl Table {
         self.changed.notify_one();
     }
 
-    fn add(&self, root: PathBuf, description: String, stop: CancellationToken) -> u64 {
+    fn add(
+        &self,
+        root: PathBuf,
+        description: String,
+        stop: CancellationToken,
+        told: Option<UnboundedSender<Told>>,
+    ) -> u64 {
         let mut inner = self.lock();
         inner.next_id += 1;
         let id = inner.next_id;
@@ -221,6 +274,8 @@ impl Table {
             running: true,
             waiting: VecDeque::new(),
             dropped: 0,
+            told,
+            interrupt: false,
             stop,
         });
         drop(inner);
@@ -259,8 +314,9 @@ impl tool::JobSink for Jobs {
         root: PathBuf,
         description: String,
         stop: CancellationToken,
+        told: Option<UnboundedSender<Told>>,
     ) -> Arc<dyn tool::JobHandle> {
-        let id = self.table.add(root, description, stop);
+        let id = self.table.add(root, description, stop, told);
         Arc::new(Handle {
             id,
             table: self.table.clone(),
@@ -285,13 +341,22 @@ impl tool::JobHandle for Handle {
 
     fn result(&self, text: String, spent: llm::stream::Usage) {
         self.table.update(self.id, |i| {
-            if i.waiting.len() >= MAX_WAITING {
-                i.dropped += 1;
-            } else {
-                let due = i.due(&text, spent);
-                i.waiting.push_back(due);
-            }
+            let due = i.due(&text, spent);
+            i.wait(Back::Result(due));
         });
+    }
+
+    fn input(&self, text: String) {
+        self.table.update(self.id, |i| {
+            i.wait(Back::Input {
+                text,
+                note: String::new(),
+            })
+        });
+    }
+
+    fn interrupt(&self) {
+        self.table.update(self.id, |i| i.interrupt = true);
     }
 
     fn end(&self) {
@@ -352,7 +417,75 @@ mod tests {
             root.to_path_buf(),
             name.into(),
             CancellationToken::new(),
+            None,
         )
+    }
+
+    fn result_of(table: &Table, root: &Path) -> Option<Due> {
+        match table.take_back(root)?.1 {
+            Back::Result(due) => Some(due),
+            Back::Input { .. } => panic!("an input, not a result"),
+        }
+    }
+
+    // A person's line and a result keep the order they were said in, and the
+    // turn the line opens is told of through the job's own channel.
+    #[tokio::test]
+    async fn an_input_waits_in_line_and_its_job_hears_of_its_turn() {
+        let table = Arc::new(Table::default());
+        let root = PathBuf::from("/checkout");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let job = tool::JobSink::start(
+            &Jobs::new(table.clone()),
+            root.clone(),
+            "wechat".into(),
+            CancellationToken::new(),
+            Some(tx),
+        );
+        job.result("connected".into(), Default::default());
+        job.input("why did the tests fail".into());
+        assert!(matches!(table.take_back(&root), Some((_, Back::Result(_)))));
+        let Some((id, Back::Input { text, note })) = table.take_back(&root) else {
+            panic!("the input comes next")
+        };
+        assert_eq!((id, text.as_str()), (job.id(), "why did the tests fail"));
+        assert!(note.is_empty(), "a person's line is read as typed: {note}");
+        table.tell(id, Told::Started);
+        table.tell(id, Told::Reply("parse.rs:40".into()));
+        assert_eq!(rx.try_recv(), Ok(Told::Started));
+        assert_eq!(rx.try_recv(), Ok(Told::Reply("parse.rs:40".into())));
+    }
+
+    // What was lost to the cap is said in the note: a person's words are
+    // never added to.
+    #[tokio::test]
+    async fn the_cap_is_noted_beside_a_persons_line_not_in_it() {
+        let table = Arc::new(Table::default());
+        let root = PathBuf::from("/checkout");
+        let job = start(&table, &root, "wechat");
+        for n in 0..MAX_WAITING + 2 {
+            job.input(format!("line {n}"));
+        }
+        let mut last = None;
+        while let Some((_, back)) = table.take_back(&root) {
+            last = Some(back);
+        }
+        let Some(Back::Input { text, note }) = last else {
+            panic!("an input")
+        };
+        assert_eq!(text, format!("line {}", MAX_WAITING - 1));
+        assert!(note.contains("2 later lines were dropped"), "{note}");
+        assert!(!text.contains("dropped"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn an_interrupt_names_the_jobs_checkout_once() {
+        let table = Arc::new(Table::default());
+        let job = start(&table, Path::new("/checkout"), "wechat");
+        job.interrupt();
+        job.interrupt();
+        assert_eq!(table.take_interrupts(), [PathBuf::from("/checkout")]);
+        assert!(table.take_interrupts().is_empty());
     }
 
     // What a background subagent spent rides with its answer, owed to the session.
@@ -369,11 +502,11 @@ mod tests {
         };
         job.result("three callers".into(), spent);
         job.end();
-        let due = table.take_due(&root).unwrap();
+        let due = result_of(&table, &root).unwrap();
         assert!(due.line.contains("three callers"), "{}", due.line);
         assert_eq!(due.label, "find callers #1 three callers");
         assert_eq!((due.spent.input, due.spent.output), (100, 20));
-        assert!(table.take_due(&root).is_none(), "delivered once");
+        assert!(result_of(&table, &root).is_none(), "delivered once");
         assert!(table.jobs(&root).is_empty());
     }
 
@@ -387,6 +520,7 @@ mod tests {
             root.clone(),
             "long job".into(),
             stop.clone(),
+            None,
         );
         assert!(table.stop(Path::new("/elsewhere"), job.id()).is_err());
         table.stop(&root, job.id()).unwrap();
@@ -394,7 +528,7 @@ mod tests {
         job.result("too late".into(), Default::default());
         job.end();
         assert!(
-            table.take_due(&root).is_none(),
+            result_of(&table, &root).is_none(),
             "a stopped job says nothing more"
         );
         assert!(table.jobs(&root).is_empty());
@@ -411,6 +545,7 @@ mod tests {
             root.clone(),
             "crawl".into(),
             CancellationToken::new(),
+            None,
         );
         job.status("1/2 pages".into());
         job.result("page one".into(), Default::default());
@@ -418,10 +553,10 @@ mod tests {
         job.end();
         assert_eq!(table.jobs(&root)[0].progress, "1/2 pages");
         assert!(table.jobs(&root)[0].ended);
-        let first = table.take_due(&root).unwrap();
+        let first = result_of(&table, &root).unwrap();
         assert!(first.line.ends_with("page one"), "{}", first.line);
         assert_eq!(table.jobs(&root).len(), 1, "one result still waits");
-        assert!(table.take_due(&root).unwrap().line.ends_with("page two"));
+        assert!(result_of(&table, &root).unwrap().line.ends_with("page two"));
         assert!(table.jobs(&root).is_empty());
     }
 
@@ -435,17 +570,18 @@ mod tests {
             root.clone(),
             "flood".into(),
             CancellationToken::new(),
+            None,
         );
         for n in 0..MAX_WAITING + 3 {
             job.result(n.to_string(), Default::default());
         }
         let mut last = None;
-        while let Some(due) = table.take_due(&root) {
+        while let Some(due) = result_of(&table, &root) {
             last = Some(due.line);
         }
         let last = last.unwrap();
         assert!(last.contains(&format!("{}", MAX_WAITING - 1)), "{last}");
-        assert!(last.contains("3 later results were dropped"), "{last}");
+        assert!(last.contains("3 later lines were dropped"), "{last}");
     }
 
     #[tokio::test]
@@ -457,17 +593,23 @@ mod tests {
             root.clone(),
             "quiet".into(),
             Default::default(),
+            None,
         );
         job.end();
         assert!(table.jobs(&root).is_empty());
-        assert!(table.take_due(&root).is_none());
+        assert!(result_of(&table, &root).is_none());
     }
 
     #[tokio::test]
     async fn a_removed_checkout_stops_its_jobs() {
         let table = Arc::new(Table::default());
-        let a = table.add("/repo.worktrees/a".into(), "a".into(), Default::default());
-        table.add("/repo".into(), "main".into(), Default::default());
+        let a = table.add(
+            "/repo.worktrees/a".into(),
+            "a".into(),
+            Default::default(),
+            None,
+        );
+        table.add("/repo".into(), "main".into(), Default::default(), None);
         let stop = table.lock().items[0].stop.clone();
         table.drop_under(Path::new("/repo.worktrees/a"));
         assert!(stop.is_cancelled(), "#{a} was asked to stop");

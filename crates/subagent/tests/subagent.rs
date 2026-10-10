@@ -678,6 +678,7 @@ impl tool::JobSink for Host {
         _root: std::path::PathBuf,
         description: String,
         _stop: tokio_util::sync::CancellationToken,
+        _told: Option<tokio::sync::mpsc::UnboundedSender<tool::Told>>,
     ) -> Arc<dyn tool::JobHandle> {
         self.said
             .lock()
@@ -700,6 +701,8 @@ impl tool::JobHandle for Host {
         self.said.lock().unwrap().push(text);
         *self.spent.lock().unwrap() = spent;
     }
+    fn input(&self, _text: String) {}
+    fn interrupt(&self) {}
     fn end(&self) {
         self.said.lock().unwrap().push("end".into());
         self.ended.notify_one();

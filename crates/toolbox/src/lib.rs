@@ -13,6 +13,8 @@ mod rows;
 pub mod rtk;
 pub mod scripts;
 mod syntax;
+#[cfg(test)]
+mod testing;
 pub mod walk;
 pub mod write;
 

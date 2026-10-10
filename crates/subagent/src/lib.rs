@@ -263,6 +263,7 @@ impl Subagent {
             ctx.workspace.root().to_path_buf(),
             description.clone(),
             stop.clone(),
+            None,
         );
         let id = job.id();
         let this = self.clone();

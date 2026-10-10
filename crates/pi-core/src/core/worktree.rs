@@ -370,7 +370,7 @@ impl Core {
         }
         // Already open: the lane that holds it comes back whole. Nothing is
         // said — the screen changing, bar included, says where you are.
-        if let Some(i) = self.lanes.iter().position(|lane| lane.root() == ws.root()) {
+        if let Some(i) = self.lane_at(ws.root()) {
             self.current = i;
             self.in_force();
             return Ok(Step::Handled(Listing::default()));

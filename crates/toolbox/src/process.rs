@@ -118,3 +118,57 @@ pub(crate) async fn reap(group: Option<u32>) {
 // `kill_on_drop`, but its descendants outlive a timeout.
 #[cfg(not(unix))]
 pub(crate) async fn reap(_group: Option<u32>) {}
+
+// How long a job's pipes may stay open after its process exits: past it,
+// what the process left running is taken down so the job can end.
+const LINGER: Duration = Duration::from_secs(2);
+
+/// A job's process group, killed when the job goes: stopped, removed with
+/// its checkout, or pi gone.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) struct Group(pub(crate) u32);
+
+impl Drop for Group {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if self.0 > 1 {
+            // SAFETY: a signal to a group this job made; a gone one is ESRCH.
+            unsafe { libc::killpg(self.0 as libc::pid_t, libc::SIGKILL) };
+        }
+    }
+}
+
+/// Pull `pipe` into a bounded capture on a task of its own.
+pub(crate) fn drain<R>(mut pipe: R, ctx: &Ctx) -> tokio::task::JoinHandle<Captured>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    let ctx = ctx.clone();
+    tokio::spawn(async move {
+        let mut capture = Capture::new();
+        let _ = capture.drain(&mut pipe, &ctx).await;
+        capture.finish()
+    })
+}
+
+pub(crate) async fn captured(task: &mut tokio::task::JoinHandle<Captured>) -> Captured {
+    task.await.unwrap_or_else(|_| Capture::new().finish())
+}
+
+/// A job's output once its process has exited, taking down what it left
+/// holding the pipes after a moment; `None` when the job was stopped.
+pub(crate) async fn drained(
+    stdout: &mut tokio::task::JoinHandle<Captured>,
+    stderr: &mut tokio::task::JoinHandle<Captured>,
+    group: Option<u32>,
+    stop: &tokio_util::sync::CancellationToken,
+) -> Option<(Captured, Captured)> {
+    tokio::select! {
+        both = async { (captured(stdout).await, captured(stderr).await) } => Some(both),
+        () = tokio::time::sleep(LINGER) => {
+            reap(group).await;
+            Some((captured(stdout).await, captured(stderr).await))
+        }
+        () = stop.cancelled() => None,
+    }
+}

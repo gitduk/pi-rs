@@ -452,6 +452,22 @@ impl Tui {
         }
     }
 
+    // A job asked to stop the turn running in its checkout, as esc would;
+    // with none running there is nothing to say.
+    fn interrupt_at(&mut self, root: &std::path::Path) {
+        let Some(at) = self.core.lane_at(root) else {
+            return;
+        };
+        if !self.core.lanes[at].is_running() {
+            return;
+        }
+        if at == self.core.current {
+            self.stop_current(false);
+        } else {
+            self.core.lanes[at].stop(false);
+        }
+    }
+
     // Stop the run in front, if there is one. `unsend` also takes the prompt
     // back once it has stopped.
     fn stop_current(&mut self, unsend: bool) {
@@ -514,7 +530,11 @@ impl Tui {
             }
             self.refresh_tabs();
             self.bar.poke(self.core.lane());
-            self.ui.jobs = self.drivers.jobs().jobs(self.core.lane().root());
+            let jobs = self.drivers.jobs();
+            for root in jobs.take_interrupts() {
+                self.interrupt_at(&root);
+            }
+            self.ui.jobs = jobs.jobs(self.core.lane().root());
             let view = front_view(&mut self.views, self.core.lane());
             self.ui.flush(self.core.lane(), view);
             if std::mem::take(&mut self.ui.redraw) {
@@ -762,7 +782,9 @@ impl Tui {
         self.core.lane_mut().charge(&next.spent);
         let view = front_view(&mut self.views, self.core.lane());
         view.surface.scroll = 0;
-        // A job's result is relayed under its label; a loop's line is read as typed.
+        // A job's result is relayed under its label; a loop's line is read as
+        // typed. A person's line through a job is always a prompt: what they
+        // send never runs here as a command, and every one is answered.
         let wake = match next.label {
             Some(label) => {
                 self.ui.submit_relayed(view, &label, &next.line);
@@ -773,7 +795,10 @@ impl Tui {
                 Wake::Relay(next.line, relay)
             }
             None => {
-                let intent = input::read(&next.line, &self.core.commands);
+                let intent = match next.origin {
+                    Origin::Input(_) => Intent::Prompt(next.line.clone()),
+                    _ => input::read(&next.line, &self.core.commands),
+                };
                 self.ui.submit(view, &next.line);
                 if !next.note.is_empty() {
                     self.core.lane_mut().push_note(&next.note);

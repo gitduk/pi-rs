@@ -1002,6 +1002,7 @@ async fn a_jobs_result_opens_a_turn_under_its_label() {
         dir.path().to_path_buf(),
         "later".into(),
         Default::default(),
+        None,
     );
     job.result("check the build".into(), Default::default());
     job.result("/compact".into(), Default::default());
@@ -1020,4 +1021,27 @@ async fn a_jobs_result_opens_a_turn_under_its_label() {
             .iter()
             .any(|r| r.contains("◆ later #1 check the build"))
     );
+}
+
+// A person's line through a job is a prompt even when it looks like a
+// command: nothing they send runs here, and every line gets its answer.
+#[tokio::test]
+async fn a_persons_line_through_a_job_is_always_a_prompt() {
+    let dir = tempfile::tempdir().expect("a checkout");
+    let mut tui = surface(dir.path());
+    let job = tool::JobSink::start(
+        &pi_core::driver::jobs::Jobs::new(tui.drivers.jobs()),
+        dir.path().to_path_buf(),
+        "wechat".into(),
+        Default::default(),
+        None,
+    );
+    for line in ["/compact", "!rm -rf build"] {
+        job.input(line.into());
+        let got = tui.driver_line();
+        assert!(
+            matches!(&got, Some((Origin::Input(_), crate::tui::Wake::Do(Asked::Core(Intent::Prompt(p))))) if p == line),
+            "{line} is a prompt"
+        );
+    }
 }

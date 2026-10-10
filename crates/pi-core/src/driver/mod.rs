@@ -23,6 +23,8 @@ pub enum Origin {
     Channel(&'static str),
     Loop,
     Job,
+    /// A person speaking through job `0`: the turn's answer goes back to it.
+    Input(u64),
 }
 
 /// How a turn ended, as every driver that began it is told.
@@ -60,6 +62,14 @@ pub struct Drivers {
     channels: Channels,
     loops: Loops,
     jobs: Arc<jobs::Table>,
+    // Turns a job's input opened, each with its answer so far.
+    owed: Vec<Owed>,
+}
+
+struct Owed {
+    job: u64,
+    lane: u64,
+    said: String,
 }
 
 impl Drivers {
@@ -68,6 +78,7 @@ impl Drivers {
             channels: Channels::new(channels),
             loops: Loops::default(),
             jobs: Arc::default(),
+            owed: Vec::new(),
         }
     }
 
@@ -84,13 +95,20 @@ impl Drivers {
     /// A job's result first: it was due already, and a loop's next round can
     /// wait one turn where a loop that never settles would hold it off for good.
     pub fn next(&mut self, lane: u64, root: &std::path::Path) -> Option<Next> {
-        Some(match self.jobs.take_due(root) {
-            Some(due) => Next {
+        Some(match self.jobs.take_back(root) {
+            Some((_, jobs::Back::Result(due))) => Next {
                 line: due.line,
                 note: due.note,
                 origin: Origin::Job,
                 spent: due.spent,
                 label: Some(due.label),
+            },
+            Some((job, jobs::Back::Input { text, note })) => Next {
+                line: text,
+                note,
+                origin: Origin::Input(job),
+                spent: Default::default(),
+                label: None,
             },
             None => {
                 let due = self.loops.due(lane)?;
@@ -145,9 +163,18 @@ impl Drivers {
             // A channel relays model turns only: a `!` never reaches `Done`,
             // so its answer would be owed forever.
             Origin::Channel(name) if prompt && started => self.channels.ask(name, lane),
+            // Only a model turn ends with an answer to send back, as above.
+            Origin::Input(job) if prompt && started => {
+                self.owed.push(Owed {
+                    job,
+                    lane,
+                    said: String::new(),
+                });
+                self.jobs.tell(job, tool::Told::Started);
+            }
             Origin::Loop if started => self.loops.ask(lane),
             Origin::Loop => return self.loops.unstarted(lane),
-            Origin::Channel(_) | Origin::Typed | Origin::Job => {}
+            Origin::Channel(_) | Origin::Typed | Origin::Job | Origin::Input(_) => {}
         }
         None
     }
@@ -155,6 +182,11 @@ impl Drivers {
     /// One event from any lane's run; each driver keeps its own turns'.
     pub fn observe(&mut self, lane: u64, event: &Event) {
         self.channels.observe(lane, event);
+        if let Event::TextDelta(text) = event {
+            for owed in self.owed.iter_mut().filter(|o| o.lane == lane) {
+                owed.said.push_str(text);
+            }
+        }
     }
 
     /// A run on `lane` ended. What comes back says why a loop ended, if one
@@ -167,6 +199,10 @@ impl Drivers {
         cap: Option<usize>,
     ) -> Option<String> {
         self.channels.finish_turn(lane, ended);
+        for owed in self.owed.extract_if(.., |o| o.lane == lane) {
+            self.jobs
+                .tell(owed.job, tool::Told::Reply(reply(owed.said, ended)));
+        }
         self.loops
             .turn_ended(lane, ended, ctx, cap)
             .and_then(|round| round.ending())
@@ -179,8 +215,30 @@ impl Drivers {
 
     /// End the loops of lanes that are gone, saying which ended.
     pub fn retain(&mut self, live: impl Fn(u64) -> bool) -> Vec<String> {
+        // A job left waiting on a reply would wait for good.
+        for owed in self.owed.extract_if(.., |o| !live(o.lane)) {
+            self.jobs.tell(
+                owed.job,
+                tool::Told::Reply(reply(owed.said, &Ended::Stopped)),
+            );
+        }
         self.loops.retain(live)
     }
+}
+
+// A turn's answer as its job is told it: what it said, then how it ended
+// when that was not cleanly, so a stop never reads as silence.
+fn reply(mut said: String, ended: &Ended) -> String {
+    let how = match ended {
+        Ended::Done => return said,
+        Ended::Stopped | Ended::Unsent => "(stopped)".to_string(),
+        Ended::Failed(why) => format!("(failed: {why})"),
+    };
+    if !said.trim().is_empty() {
+        said.push_str("\n\n");
+    }
+    said.push_str(&how);
+    said
 }
 
 impl Drivers {
@@ -202,5 +260,46 @@ impl Drivers {
             },
             _ => vec!["/jobs lists what runs in the background; /jobs stop <id> ends one".into()],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tool::{JobSink as _, Told};
+
+    // The line a person sent through a job opens a turn as if typed; the
+    // job hears it begin, then gets the whole answer, cut short or not.
+    #[tokio::test]
+    async fn a_turn_an_input_opened_is_told_back_to_its_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let ctx = Ctx::new(tool::Workspace::new(&root).unwrap());
+        let mut drivers = Drivers::new(Vec::new());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let job = jobs::Jobs::new(drivers.jobs()).start(
+            root.clone(),
+            "wechat".into(),
+            Default::default(),
+            Some(tx),
+        );
+        job.input("why did it fail".into());
+
+        let next = drivers.next(1, &root).expect("the input is due");
+        assert_eq!(next.line, "why did it fail");
+        assert_eq!(next.origin, Origin::Input(job.id()));
+        assert!(next.label.is_none(), "read as typed, not relayed");
+
+        drivers.dispatched(next.origin, 1, true, true);
+        assert_eq!(rx.try_recv(), Ok(Told::Started));
+        drivers.observe(1, &Event::TextDelta("parse.rs".into()));
+        drivers.observe(2, &Event::TextDelta("another lane".into()));
+        drivers.turn_ended(1, &Ended::Stopped, &ctx, None);
+        assert_eq!(
+            rx.try_recv(),
+            Ok(Told::Reply("parse.rs\n\n(stopped)".into()))
+        );
+        drivers.turn_ended(1, &Ended::Done, &ctx, None);
+        assert!(rx.try_recv().is_err(), "told once");
     }
 }

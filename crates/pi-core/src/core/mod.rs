@@ -179,6 +179,11 @@ impl Core {
         Some(said)
     }
 
+    /// The lane that holds the checkout at `root`, if one is open.
+    pub fn lane_at(&self, root: &std::path::Path) -> Option<usize> {
+        self.lanes.iter().position(|lane| lane.root() == root)
+    }
+
     /// The context a turn on the lane in front runs with: the lane's, and
     /// where a call that outlives the turn goes on, when jobs are served.
     pub fn turn_ctx(&self, cancel: tokio_util::sync::CancellationToken) -> tool::Ctx {

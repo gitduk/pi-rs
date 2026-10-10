@@ -253,23 +253,39 @@ pub type Progress = std::sync::Arc<dyn Fn(String) + Send + Sync>;
 
 /// Where a call that will outlive its turn is kept: a job of the checkout at
 /// `root`, which the host lists, stops through `stop`, and delivers from.
+/// What the host has to tell the job goes to `told`, when it listens.
 pub trait JobSink: Send + Sync {
     fn start(
         &self,
         root: std::path::PathBuf,
         description: String,
         stop: tokio_util::sync::CancellationToken,
+        told: Option<tokio::sync::mpsc::UnboundedSender<Told>>,
     ) -> std::sync::Arc<dyn JobHandle>;
 }
 
 /// A running job's way to report. Each `result` comes back to its checkout
-/// as a turn of its own, with what it `spent` getting there; `end` says it
-/// will report no more.
+/// as a turn of its own, with what it `spent` getting there; an `input` is a
+/// person speaking through the job, read as if typed; `end` says it will
+/// report no more.
 pub trait JobHandle: Send + Sync {
     fn id(&self) -> u64;
     fn status(&self, text: String);
     fn result(&self, text: String, spent: llm::stream::Usage);
+    fn input(&self, text: String);
+    /// Stop the turn running in the job's checkout, as esc would.
+    fn interrupt(&self);
     fn end(&self);
+}
+
+/// What the host tells a job about the turns its `input` opened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Told {
+    /// A turn one of its inputs opened has begun.
+    Started,
+    /// That turn has ended: its whole answer, how it ended if not cleanly,
+    /// and empty when it said nothing.
+    Reply(String),
 }
 
 pub type FileLocks =

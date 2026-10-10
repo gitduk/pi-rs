@@ -127,10 +127,10 @@ refused, and resuming one from another directory moves it here.
   shows each server and its tools, and `/mcp restart` reconnects them. A call
   with no answer in 10 minutes is given up.
 - `jobs`, in the terminal: what runs in the background, or `stop` one. A
-  `subagent` with `background`, or a script that detaches, leaves the turn
-  free; each result comes back as a turn of its own once the checkout is in
-  front and idle. Those still out are listed above the bar, and `/jobs stop`
-  stops one. Jobs last while pi runs; past that, use the system's cron.
+  `bash` or `subagent` call with `background`, or a script that detaches,
+  leaves the turn free; each result comes back as a turn of its own once the
+  checkout is in front and idle. Those still out are listed above the bar,
+  and `/jobs stop` stops one. Jobs last while pi runs; past that, use cron.
 - One tool per script in `~/.pi/tools/`: any file whose first line is a `#!`,
   its `description` and `[args]` written as TOML in a `# ---` comment block
   under that line; or a cargo script `*.rs`, described by its
@@ -140,10 +140,13 @@ refused, and resuming one from another directory moves it here.
   script starts with, such as its service's key; `bash` never sees them.
   A script may also write JSON lines to fd 3 (`PI_EVENTS_FD`): `status` for
   its progress, `detach` to end the call and run on as a job, then `result`
-  for each turn it sends back; its stdout at exit is the last.
+  for each turn it sends back (its stdout at exit is the last), `input` for a
+  person's line, read as if typed, and `interrupt` to stop the checkout's
+  turn. A turn an input opened is told back on fd 3: `started`, then its
+  whole `reply`.
   [`examples/tools/`](examples/tools/) has three to copy: `search`; `judge`,
   which reads its key from there; and `later`, a prompt the model leaves
-  itself for after a delay, on a period, or when a command exits.
+  itself for after a delay or on a period.
 
 A server's prompts are commands too: `/<name>:<prompt> [args]` asks the server
 for the prompt's text and sends it, one typed word per argument, the last

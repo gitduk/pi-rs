@@ -1,8 +1,8 @@
-//! A script call that may outlive its turn. Fd 3 is a socket the script
-//! writes JSON lines to: `{"status": ...}` says how far it has got;
-//! `{"detach": ...}` ends the call with that text and runs on as a job;
-//! after it, each `{"result": ...}` comes back as a turn of its own, and
-//! so does stdout at exit. A script that never writes fd 3 runs as before.
+//! A script call that may outlive its turn. Fd 3 is a socket of JSON lines:
+//! `status` says how far it has got; `detach` ends the call and runs on as a
+//! job; after it, each `result` comes back as a turn, as does stdout at exit,
+//! `input` is a person's line, and `interrupt` stops the checkout's turn.
+//! A turn an input opened is told back: `started`, then its whole `reply`.
 
 use std::os::fd::AsRawFd;
 use std::process::{ExitStatus, Stdio};
@@ -11,13 +11,15 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::OwnedReadHalf;
+use tokio::net::unix::OwnedWriteHalf;
 use tokio::process::{Child, Command};
+use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tool::output::{Capture, Captured};
-use tool::{Ctx, JobHandle, ToolError};
+use tool::output::Captured;
+use tool::{Ctx, JobHandle, Told, ToolError};
 
-use crate::process::{Exited, MAX_RUN, reap, spawn};
+use crate::process::{Exited, Group, MAX_RUN, captured, drain, drained, reap, spawn};
 
 /// The variable naming the descriptor, so a script can tell pi is listening.
 pub const FD_VAR: &str = "PI_EVENTS_FD";
@@ -35,6 +37,8 @@ enum Said {
     Status(String),
     Detach(String),
     Result(String),
+    Input(String),
+    Interrupt,
 }
 
 /// Run `cmd` with `input` on stdin and fd 3 open for what it says. Until it
@@ -85,7 +89,7 @@ pub async fn run(
     let mut stderr = drain(child.stderr.take().expect("stderr is piped"), ctx);
 
     ours.set_nonblocking(true)?;
-    let (read, _write) = tokio::net::UnixStream::from_std(ours)?.into_split();
+    let (read, write) = tokio::net::UnixStream::from_std(ours)?.into_split();
     let mut fd3 = Fd3 {
         reader: BufReader::new(read),
         line: Vec::new(),
@@ -111,11 +115,14 @@ pub async fn run(
                             )));
                         };
                         let stop = CancellationToken::new();
+                        let (told, hear) = unbounded_channel();
                         let job = sink.start(
                             ctx.workspace.root().to_path_buf(),
                             name.to_string(),
                             stop.clone(),
+                            Some(told),
                         );
+                        tokio::spawn(tell(write, hear));
                         let id = job.id();
                         // Owned before the task is first polled: a shutdown that
                     // drops it unrun still takes what the script started.
@@ -127,8 +134,8 @@ pub async fn run(
                     });
                         return Ok(Ran::Detached { said: text, id });
                     }
-                Said::Result(_) => tracing::warn!(
-                    target: "pi::scripts", script = name, "result before detach, dropped"
+                Said::Result(_) | Said::Input(_) | Said::Interrupt => tracing::warn!(
+                    target: "pi::scripts", script = name, "said before detach, dropped"
                 ),
             },
             // The pipes too: what the script left running may hold them, and
@@ -160,59 +167,59 @@ async fn go_on(
     job: std::sync::Arc<dyn JobHandle>,
     stop: CancellationToken,
 ) {
+    let group = child.id();
     let status: std::io::Result<ExitStatus> = loop {
         tokio::select! {
             biased;
             said = fd3.next() => match said {
                 Said::Status(text) => job.status(text),
                 Said::Result(text) => job.result(text, Default::default()),
+                Said::Input(text) => job.input(text),
+                Said::Interrupt => job.interrupt(),
                 Said::Detach(_) => {}
             },
             status = child.wait() => break status,
             // Stopped: the table already forgot it, so nothing more is said.
             () = stop.cancelled() => {
-                reap(child.id()).await;
+                reap(group).await;
                 return;
             }
         }
     };
-    let (out, err) = tokio::select! {
-        both = async { (captured(&mut stdout).await, captured(&mut stderr).await) } => both,
-        () = stop.cancelled() => return,
+    let Some((out, err)) = drained(&mut stdout, &mut stderr, group, &stop).await else {
+        return;
     };
-    if !out.text.trim().is_empty() {
-        job.result(out.noted(), Default::default());
-    }
-    match status {
+    // One turn for one ending: what it printed, then how it failed, if it did.
+    let failed = match status {
         Ok(status) if !status.success() => {
-            job.result(
-                format!("{name} exited {status}; {}", err.noted().trim()),
-                Default::default(),
-            );
+            Some(format!("{name} exited {status}; {}", err.noted().trim()))
         }
-        Err(e) => job.result(
-            format!("{name} could not be waited on: {e}"),
-            Default::default(),
-        ),
-        Ok(_) => {}
+        Ok(_) => None,
+        Err(e) => Some(format!("{name} could not be waited on: {e}")),
+    };
+    let said: Vec<String> = [Some(out.noted()), failed]
+        .into_iter()
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+        .collect();
+    if !said.is_empty() {
+        job.result(said.join("\n\n"), Default::default());
     }
     job.end();
 }
 
-fn drain<R>(mut pipe: R, ctx: &Ctx) -> JoinHandle<Captured>
-where
-    R: tokio::io::AsyncRead + Unpin + Send + 'static,
-{
-    let ctx = ctx.clone();
-    tokio::spawn(async move {
-        let mut capture = Capture::new();
-        let _ = capture.drain(&mut pipe, &ctx).await;
-        capture.finish()
-    })
-}
-
-async fn captured(task: &mut JoinHandle<Captured>) -> Captured {
-    task.await.unwrap_or_else(|_| Capture::new().finish())
+// What the host tells a detached script, in order, on its own task: a script
+// that never reads fd 3 fills the socket and stalls only this.
+async fn tell(mut to: OwnedWriteHalf, mut hear: UnboundedReceiver<Told>) {
+    while let Some(told) = hear.recv().await {
+        let line = match told {
+            Told::Started => serde_json::json!({ "started": true }),
+            Told::Reply(text) => serde_json::json!({ "reply": text }),
+        };
+        if to.write_all(format!("{line}\n").as_bytes()).await.is_err() {
+            return;
+        }
+    }
 }
 
 // What the script says on fd 3, a line at a time. Once it is closed it says
@@ -262,81 +269,21 @@ impl Fd3 {
 fn parse(line: &str) -> Option<Said> {
     let v: Value = serde_json::from_str(line).ok()?;
     let text = |key| v.get(key).and_then(Value::as_str).map(str::to_string);
+    if v.get("interrupt").and_then(Value::as_bool) == Some(true) {
+        return Some(Said::Interrupt);
+    }
     text("detach")
         .map(Said::Detach)
         .or_else(|| text("result").map(Said::Result))
+        .or_else(|| text("input").map(Said::Input))
         .or_else(|| text("status").map(Said::Status))
-}
-
-// A detached script's process group, killed when its job goes: stopped,
-// removed with its checkout, or pi gone.
-struct Group(u32);
-
-impl Drop for Group {
-    fn drop(&mut self) {
-        if self.0 > 1 {
-            // SAFETY: a signal to a group this job made; a gone one is ESRCH.
-            unsafe { libc::killpg(self.0 as libc::pid_t, libc::SIGKILL) };
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{Sink, ctx};
     use std::sync::{Arc, Mutex};
-    use tokio::sync::Notify;
-
-    // A host that records what its one job said, and wakes a test at the end.
-    #[derive(Default)]
-    struct Sink {
-        said: Arc<Mutex<Vec<String>>>,
-        ended: Arc<Notify>,
-        stop: Mutex<Option<CancellationToken>>,
-    }
-
-    struct Handle {
-        said: Arc<Mutex<Vec<String>>>,
-        ended: Arc<Notify>,
-    }
-
-    impl tool::JobSink for Sink {
-        fn start(
-            &self,
-            _root: std::path::PathBuf,
-            description: String,
-            stop: CancellationToken,
-        ) -> Arc<dyn JobHandle> {
-            self.said
-                .lock()
-                .unwrap()
-                .push(format!("start {description}"));
-            *self.stop.lock().unwrap() = Some(stop);
-            Arc::new(Handle {
-                said: self.said.clone(),
-                ended: self.ended.clone(),
-            })
-        }
-    }
-
-    impl JobHandle for Handle {
-        fn id(&self) -> u64 {
-            7
-        }
-        fn status(&self, text: String) {
-            self.said.lock().unwrap().push(format!("status {text}"));
-        }
-        fn result(&self, text: String, _spent: llm::stream::Usage) {
-            self.said
-                .lock()
-                .unwrap()
-                .push(format!("result {}", text.trim()));
-        }
-        fn end(&self) {
-            self.said.lock().unwrap().push("end".into());
-            self.ended.notify_one();
-        }
-    }
 
     fn script(dir: &std::path::Path, body: &str) -> Command {
         let path = dir.join("script");
@@ -344,10 +291,6 @@ mod tests {
         let mut cmd = Command::new("sh");
         cmd.arg(path).current_dir(dir);
         cmd
-    }
-
-    fn ctx(dir: &std::path::Path) -> Ctx {
-        Ctx::new(tool::Workspace::new(dir).unwrap())
     }
 
     const SECOND: Duration = Duration::from_secs(1);
@@ -482,6 +425,33 @@ echo 'all done'"#,
         assert_gone(&dir.path().join("pid")).await;
     }
 
+    // What a detached script left running cannot hold its job open past its
+    // own exit: the pipes get a moment, then the group goes.
+    #[tokio::test]
+    async fn a_detached_scripts_leftover_child_does_not_keep_its_job_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Arc::new(Sink::default());
+        let ctx = ctx(dir.path()).with_jobs(sink.clone());
+        let cmd = script(
+            dir.path(),
+            "echo '{\"detach\":\"x\"}' >&3; sleep 30 &\necho $! > pid; echo done",
+        );
+        let ended = sink.ended.notified();
+        run("leaky", cmd, Vec::new(), 5 * SECOND, &ctx)
+            .await
+            .unwrap();
+        tokio::time::timeout(5 * SECOND, ended)
+            .await
+            .expect("the job ended");
+        assert_gone(&dir.path().join("pid")).await;
+        assert!(
+            sink.said
+                .lock()
+                .unwrap()
+                .contains(&"result done".to_string())
+        );
+    }
+
     // A line past the cap is dropped whole; what follows it is still read.
     #[tokio::test]
     async fn an_overlong_line_on_fd_3_is_dropped_not_held() {
@@ -515,12 +485,12 @@ echo 'all done'"#,
         let sink = Arc::new(Sink::default());
         let ctx = ctx(dir.path()).with_jobs(sink.clone());
         let ended = sink.ended.notified();
-        let input = br#"{"prompt": "check the build", "when_done": "echo built"}"#.to_vec();
+        let input = br#"{"prompt": "check the build", "after": "0s"}"#.to_vec();
         let Ran::Detached { said, .. } = run("later", cmd, input, 5 * SECOND, &ctx).await.unwrap()
         else {
             panic!("it detached")
         };
-        assert!(said.contains("echo built"), "{said}");
+        assert!(said.contains("back in 0s"), "{said}");
         tokio::time::timeout(5 * SECOND, ended)
             .await
             .expect("it ended");
@@ -529,10 +499,7 @@ echo 'all done'"#,
             .iter()
             .find(|s| s.starts_with("result "))
             .expect("a result");
-        assert!(
-            result.contains("check the build") && result.contains("built"),
-            "{said:?}"
-        );
+        assert!(result.contains("check the build"), "{said:?}");
     }
 
     fn which(program: &str) -> Result<std::path::PathBuf, ()> {
@@ -543,6 +510,39 @@ echo 'all done'"#,
                     .find(|path| path.is_file())
             })
             .ok_or(())
+    }
+
+    // A person's line and a stop go up; what the host tells of the turn
+    // comes down on the same fd, in order, for the script to read.
+    #[tokio::test]
+    async fn a_detached_script_speaks_for_a_person_and_hears_the_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Arc::new(Sink::default());
+        let ctx = ctx(dir.path()).with_jobs(sink.clone());
+        let cmd = script(
+            dir.path(),
+            r#"echo '{"detach":"connected"}' >&3
+echo '{"input":"why did it fail"}' >&3
+echo '{"interrupt":true}' >&3
+read -r a <&3; read -r b <&3
+printf '%s\n%s\n' "$a" "$b" > heard"#,
+        );
+        let ended = sink.ended.notified();
+        run("bridge", cmd, Vec::new(), 5 * SECOND, &ctx)
+            .await
+            .unwrap();
+        let told = sink.told.lock().unwrap().clone().expect("it listens");
+        told.send(Told::Started).unwrap();
+        told.send(Told::Reply("parse.rs:40".into())).unwrap();
+        tokio::time::timeout(5 * SECOND, ended)
+            .await
+            .expect("it ended");
+        assert_eq!(
+            sink.said.lock().unwrap()[1..3],
+            ["input why did it fail", "interrupt"]
+        );
+        let heard = std::fs::read_to_string(dir.path().join("heard")).unwrap();
+        assert_eq!(heard, "{\"started\":true}\n{\"reply\":\"parse.rs:40\"}\n");
     }
 
     async fn assert_gone(pid_file: &std::path::Path) {
