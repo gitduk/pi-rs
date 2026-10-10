@@ -367,6 +367,8 @@ impl Ui {
     fn rewind_key(&mut self, action: Option<Action>) -> Asked {
         match action {
             Some(action @ (Action::MenuNext | Action::MenuPrevious)) => self.step_menu(action),
+            Some(Action::MenuFirst) => self.picked = Some(0),
+            Some(Action::MenuLast) => self.picked = Some(self.menu().len().saturating_sub(1)),
             Some(Action::MenuAccept) => {
                 if let Some(MenuEntry::Message { id, .. }) = self.highlighted() {
                     self.focus = Focus::Editor;
