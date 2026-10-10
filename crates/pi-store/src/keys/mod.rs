@@ -34,8 +34,12 @@ pub enum When {
     // A view read, not typed into — a reply, the conversation alone. It has
     // the keyboard: the editor's layers are not consulted under it.
     Pager,
-    // While a list is up over the editor — see `Over::Menu`.
+    // A list's movement and dismissal keys: over the line while completing,
+    // and under the picker's own letters.
     Menu,
+    // A list that has the keyboard — the rewind selector. Nothing types
+    // under it, so bare letters are free to move it.
+    Picker,
     // A turn is in flight.
     Run,
     // Only in that mode, and only while vim keys are on at all.
@@ -50,16 +54,18 @@ pub enum When {
     App,
 }
 
-/// What is up over the editor, which decides the layers consulted first.
+/// Who has the keyboard, which picks the set of keys read. Only the line's
+/// two stack the editor's layers; the others shut them out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Over {
+pub enum Surface {
     #[default]
-    None,
-    // A completion list or the rewind selector: the list's movement and
-    // dismissal keys, over the editor's.
-    Menu,
-    // A command's reply or the conversation view: its own keys, and the
-    // editor's not at all.
+    Editor,
+    // The line, a completion list over it: the list's keys first, and
+    // letters still type, to narrow it.
+    Completion,
+    // The rewind selector.
+    Picker,
+    // A command's reply or the conversation view.
     Pager,
 }
 
@@ -67,7 +73,7 @@ pub enum Over {
 /// bare fields — they are usually live at once, and a swapped pair compiles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Layers {
-    pub over: Over,
+    pub surface: Surface,
     pub run: bool,
     /// The mode, or `None` when vim keys are off. Three legal states in three
     /// representations: a separate `vim: bool` beside a `Mode` would make
@@ -324,6 +330,34 @@ const BINDINGS: &[Binding] = &[
         when: W::Menu,
         keys: &["esc"],
         note: "until the next keystroke",
+    },
+    Binding {
+        id: "picker.next",
+        action: A::MenuNext,
+        when: W::Picker,
+        keys: &["j"],
+        note: "",
+    },
+    Binding {
+        id: "picker.previous",
+        action: A::MenuPrevious,
+        when: W::Picker,
+        keys: &["k"],
+        note: "",
+    },
+    Binding {
+        id: "picker.accept",
+        action: A::MenuAccept,
+        when: W::Picker,
+        keys: &["enter"],
+        note: "",
+    },
+    Binding {
+        id: "picker.close",
+        action: A::MenuDismiss,
+        when: W::Picker,
+        keys: &["q"],
+        note: "the rewind selector",
     },
     Binding {
         id: "run.interrupt",
@@ -871,16 +905,14 @@ impl Keys {
 
 // The layers consulted for `layers`, innermost first.
 fn live(layers: Layers) -> Vec<When> {
-    // A pager has the keyboard: nothing of the editor's reaches past it.
-    if layers.over == Over::Pager {
-        return vec![When::Pager, When::App];
-    }
-    let mut live = Vec::with_capacity(6);
-    // `menu.dismiss` and `run.interrupt` both claim `esc`; dismissing clears
-    // the menu so the next press reaches the run.
-    if layers.over == Over::Menu {
-        live.push(When::Menu);
-    }
+    let mut live = match layers.surface {
+        Surface::Pager => return vec![When::Pager, When::App],
+        Surface::Picker => return vec![When::Picker, When::Menu, When::App],
+        // `menu.dismiss` and `run.interrupt` both claim `esc`; dismissing
+        // clears the menu so the next press reaches the run.
+        Surface::Completion => vec![When::Menu],
+        Surface::Editor => Vec::with_capacity(6),
+    };
     if layers.run {
         live.push(When::Run);
     }
@@ -905,18 +937,22 @@ mod tests {
         // Only worth having while reasoning arrives; a binding that resolved
         // between turns, not during them, would be useless in the one context.
         let keys = Keys::resolve(&BTreeMap::new()).unwrap();
-        for (over, running) in [(Over::None, false), (Over::None, true), (Over::Menu, true)] {
+        for (surface, running) in [
+            (Surface::Editor, false),
+            (Surface::Editor, true),
+            (Surface::Completion, true),
+        ] {
             assert_eq!(
                 keys.action(
                     press("ctrl+t"),
                     Layers {
-                        over,
+                        surface,
                         run: running,
                         ..Layers::default()
                     }
                 ),
                 Some(Action::ThinkFold),
-                "over={over:?} running={running}"
+                "surface={surface:?} running={running}"
             );
         }
     }
@@ -932,7 +968,7 @@ mod tests {
     fn a_pager_has_the_keyboard() {
         let k = Keys::default();
         let pager = Layers {
-            over: Over::Pager,
+            surface: Surface::Pager,
             run: true,
             mode: Some(Mode::Normal),
             line_empty: true,
@@ -1005,7 +1041,7 @@ mod tests {
             k.action(
                 press("up"),
                 Layers {
-                    over: Over::Menu,
+                    surface: Surface::Completion,
                     ..Layers::default()
                 }
             ),
@@ -1019,7 +1055,7 @@ mod tests {
             k.action(
                 press("esc"),
                 Layers {
-                    over: Over::Menu,
+                    surface: Surface::Completion,
                     run: true,
                     mode: None,
                     line_empty: false,
@@ -1052,7 +1088,7 @@ mod tests {
                     k.action(
                         key,
                         Layers {
-                            over: Over::None,
+                            surface: Surface::Editor,
                             run: true,
                             mode,
                             line_empty: false,
@@ -1088,7 +1124,7 @@ mod tests {
     fn the_menu_leaves_the_letters_to_the_list() {
         let k = Keys::default();
         let listing = Layers {
-            over: Over::Menu,
+            surface: Surface::Completion,
             ..Layers::default()
         };
         for letter in ["x", "e", "j", "k"] {
@@ -1108,7 +1144,7 @@ mod tests {
         for b in BINDINGS {
             // Both halves of Normal: about what it does to pre-vim bindings,
             // not the modal keys themselves.
-            if matches!(b.when, W::Mode(_) | W::NormalEmpty | W::Pager) {
+            if matches!(b.when, W::Mode(_) | W::NormalEmpty | W::Pager | W::Picker) {
                 continue;
             }
             for spec in b.keys {
@@ -1117,10 +1153,10 @@ mod tests {
                     Chord::Two(a, p) => (Some(a), p),
                 };
                 let insert = Layers {
-                    over: if b.when == W::Menu {
-                        Over::Menu
+                    surface: if b.when == W::Menu {
+                        Surface::Completion
                     } else {
-                        Over::None
+                        Surface::Editor
                     },
                     run: b.when == W::Run,
                     mode: None,

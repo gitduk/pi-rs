@@ -13,7 +13,7 @@ use pi_core::core::lane::Lane;
 use pi_core::input::Builtin;
 use pi_core::input::commands::{Candidate, Choice};
 use pi_core::input::{self, Intent};
-use pi_store::keys::{Action, Layers, Mode, Over, Press};
+use pi_store::keys::{Action, Layers, Mode, Press, Surface};
 use pi_store::session::ResumeChoice;
 use pi_store::session::Store;
 use ratatui::text::Line;
@@ -257,19 +257,19 @@ impl Ui {
 
     // The layers the key table reads, from who has the keyboard.
     fn layers(&mut self, running: bool) -> Layers {
-        let over = match self.focus {
-            Focus::Reply(_) | Focus::Browse => Over::Pager,
-            Focus::Rewind(_) => Over::Menu,
+        let surface = match self.focus {
+            Focus::Reply(_) | Focus::Browse => Surface::Pager,
+            Focus::Rewind(_) => Surface::Picker,
             Focus::Editor => {
                 if self.menu().is_empty() {
-                    Over::None
+                    Surface::Editor
                 } else {
-                    Over::Menu
+                    Surface::Completion
                 }
             }
         };
         Layers {
-            over,
+            surface,
             run: running,
             mode: self.vim,
             // Whether the line has anything on it, which the keys bound
@@ -367,7 +367,7 @@ impl Ui {
     fn rewind_key(&mut self, action: Option<Action>) -> Asked {
         match action {
             Some(action @ (Action::MenuNext | Action::MenuPrevious)) => self.step_menu(action),
-            Some(Action::MenuAccept | Action::LineSubmit) => {
+            Some(Action::MenuAccept) => {
                 if let Some(MenuEntry::Message { id, .. }) = self.highlighted() {
                     self.focus = Focus::Editor;
                     return Asked::Own(Deed::To(id));
