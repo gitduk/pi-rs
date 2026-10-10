@@ -124,12 +124,13 @@ pub(super) fn view_at(views: &mut Views, token: u64) -> &mut View {
 }
 
 // What a lane's status line is drawn from: what events can't say —
-// when the turn started, what's queued behind it.
+// when the turn started, what's queued behind it. Typed lines are drawn
+// under the status line already, so only the unseen rest is counted.
 pub(super) fn snapshot(lane: &Lane, view: &View) -> Snapshot {
     lane.snapshot(
         &view.model,
         view.state.started.map(|s| s.elapsed()),
-        view.queued.len(),
+        view.queued.iter().filter(|q| q.line.is_none()).count(),
     )
 }
 
