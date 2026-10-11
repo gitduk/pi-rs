@@ -1,7 +1,6 @@
 //! A row of folded steps: the read-only calls and reasoning of a run,
 //! one line closed, a list open, each step opening on its own.
 
-use ratatui::style::{Modifier, Style as RStyle};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
@@ -75,41 +74,6 @@ impl PendingTool {
 pub fn call_frame(tick: usize) -> &'static str {
     const TICKS_PER_FRAME: usize = 2;
     icons::CALL_FRAMES[tick / TICKS_PER_FRAME % icons::CALL_FRAMES.len()]
-}
-
-/// A call's text while it is out: muted, with a brighter band sweeping
-/// across it one character a tick.
-pub fn shimmer(text: &str, tick: usize, paint: &Paint) -> Vec<Span<'static>> {
-    // How far past each end the band travels, so a sweep leaves the text at
-    // rest for a moment before the next.
-    const EDGE: usize = 4;
-    if !paint.color {
-        return vec![paint.span(&paint.theme.muted, text.to_string())];
-    }
-    let span = |lit: u8, run: String| match lit {
-        2 => Span::styled(run, RStyle::default().add_modifier(Modifier::BOLD)),
-        1 => Span::raw(run),
-        _ => paint.span(&paint.theme.muted, run),
-    };
-    let at = (tick % (text.chars().count() + 2 * EDGE)) as isize - EDGE as isize;
-    let mut spans = Vec::new();
-    let (mut run, mut level) = (String::new(), 0);
-    for (i, c) in text.chars().enumerate() {
-        let lit = match (i as isize - at).unsigned_abs() {
-            0 => 2,
-            1 => 1,
-            _ => 0,
-        };
-        if lit != level && !run.is_empty() {
-            spans.push(span(level, std::mem::take(&mut run)));
-        }
-        level = lit;
-        run.push(c);
-    }
-    if !run.is_empty() {
-        spans.push(span(level, run));
-    }
-    spans
 }
 
 /// What a call's line says while it is out: its progress, if it reports any,
@@ -212,7 +176,7 @@ pub enum Step {
 #[derive(Clone, Copy)]
 enum Mark {
     Done,
-    // Out, turning and its text shimmering at this spinner tick.
+    // Out, turning at this spinner tick.
     Out(usize),
     // Reasoning wears none: a call is the thing that gets a mark.
     Thought,
@@ -265,16 +229,6 @@ impl Head {
 
     // Opened, the text is whole and wraps, and what the tail said is below it.
     fn line(&self, open: bool, hovered: bool, paint: &Paint, width: usize) -> Line<'static> {
-        if let Mark::Out(tick) = self.mark
-            && !open
-            && !hovered
-        {
-            let text = clipped(&self.text, self.room(width), self.more);
-            let mut spans = self.mark.spans(false, paint);
-            spans.extend(shimmer(&text, tick, paint));
-            spans.push(paint.span(&paint.theme.muted, self.tail.clone()));
-            return Line::from(spans);
-        }
         let text = if open {
             self.text.clone()
         } else {

@@ -36,7 +36,7 @@ fn out_secs(t: &RunTool, now: Instant) -> Option<u64> {
 // only to vanish reads as a flicker.
 const SHOWN_AFTER: u64 = 2;
 
-// The call's line in the live block: mark, shimmering text, elapsed time.
+// The call's line in the live block: mark, text, elapsed time.
 // A modifying call never folds, so it stays drawn here after it ends.
 pub(super) fn pending_line(now: Instant, tick: usize, t: &RunTool, paint: &Paint) -> Line<'static> {
     let ended = if modifies(&t.name) {
@@ -57,10 +57,8 @@ pub(super) fn pending_line(now: Instant, tick: usize, t: &RunTool, paint: &Paint
             Line::from(muted(format!("{mark} {named}")))
         }
         None => {
-            let mut spans = vec![muted(format!("{} ", row::call_frame(tick)))];
-            spans.extend(row::shimmer(&named, tick, paint));
-            spans.push(muted(row::out_for(t.progress.as_deref(), out_secs(t, now))));
-            Line::from(spans)
+            let out = row::out_for(t.progress.as_deref(), out_secs(t, now));
+            Line::from(muted(format!("{} {named}{out}", row::call_frame(tick))))
         }
     }
 }

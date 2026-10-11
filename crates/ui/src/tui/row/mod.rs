@@ -17,7 +17,7 @@ use pi_store::icons;
 
 mod steps;
 
-pub use steps::{FoldedTool, PendingTool, Step, call_frame, out_for, shimmer};
+pub use steps::{FoldedTool, PendingTool, Step, call_frame, out_for};
 use steps::{
     STEP_INDENT, Unit, body_line, expandable, lone, step_index, step_line, steps_header, unit_at,
 };
@@ -158,7 +158,7 @@ enum Kind {
         folded: bool,
         // The line under the mouse, when it is one a click opens or closes.
         hovered: Option<usize>,
-        // The tick the calls still out shimmer at.
+        // The tick the marks of calls still out turn at.
         spinner: usize,
     },
 }
