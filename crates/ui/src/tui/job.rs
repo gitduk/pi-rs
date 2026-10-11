@@ -510,6 +510,14 @@ impl Tui {
             }
         };
         let token = self.core.lanes[lane].token();
+        match &how {
+            Ended::Done => tracing::info!(target: "pi::loop", lane = token, "run ended"),
+            Ended::Stopped => tracing::info!(target: "pi::loop", lane = token, "run stopped"),
+            Ended::Unsent => tracing::info!(target: "pi::loop", lane = token, "run unsent"),
+            Ended::Failed(why) => {
+                tracing::warn!(target: "pi::loop", lane = token, error = %why, "run failed")
+            }
+        }
         let cap = self.core.config.loop_cap();
         let ended = self
             .drivers

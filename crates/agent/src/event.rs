@@ -98,9 +98,8 @@ fn note(event: &Event) {
         Event::ToolProgress { .. } => {}
         Event::TurnStart { turn } => tracing::info!(target: "pi::loop", turn, "turn start"),
         Event::ToolStart { id, name, args } => {
-            tracing::info!(target: "pi::tool", call = %id, tool = %name, "call");
-            // Logged separately at debug: args can be a whole file's worth, and
-            // the info-level record above would serialize it all just to truncate it.
+            tracing::info!(target: "pi::tool", call = %id, tool = %name, args = %clipped(args), "call");
+            // Whole at debug: args can be a file's worth, which `call` clips.
             tracing::debug!(target: "pi::tool", call = %id, args = %args, "arguments");
         }
         Event::ToolEnd {
@@ -142,5 +141,23 @@ fn note(event: &Event) {
             "counted"
         ),
         Event::Done { turns, .. } => tracing::info!(target: "pi::loop", turns, "done"),
+    }
+}
+
+// Every key a call passed, each long string cut to its head: which file and
+// which command survive, a written file's body does not.
+fn clipped(args: &serde_json::Value) -> serde_json::Value {
+    const HEAD: usize = 160;
+    use serde_json::Value;
+    match args {
+        Value::String(s) if s.chars().count() > HEAD => {
+            let head: String = s.chars().take(HEAD).collect();
+            Value::String(format!("{head}… ({} chars)", s.chars().count()))
+        }
+        Value::Array(items) => Value::Array(items.iter().map(clipped).collect()),
+        Value::Object(map) => {
+            Value::Object(map.iter().map(|(k, v)| (k.clone(), clipped(v))).collect())
+        }
+        other => other.clone(),
     }
 }

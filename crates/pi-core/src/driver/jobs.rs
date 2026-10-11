@@ -79,6 +79,7 @@ impl Item {
 impl Item {
     fn wait(&mut self, back: Back) {
         if self.waiting.len() >= MAX_WAITING {
+            tracing::warn!(target: "pi::job", job = self.id, "over the waiting cap, dropped");
             self.dropped += 1;
         } else {
             self.waiting.push_back(back);
@@ -162,6 +163,11 @@ impl Table {
             }
         }
         settle(&mut inner.items, at);
+        let kind = match back {
+            Back::Result(_) => "result",
+            Back::Input { .. } => "input",
+        };
+        tracing::info!(target: "pi::job", job = id, kind, "delivered");
         Some((id, back))
     }
 
@@ -186,6 +192,12 @@ impl Table {
 
     /// Tell job `id` about a turn its input opened, if it is still here.
     pub fn tell(&self, id: u64, told: Told) {
+        match &told {
+            Told::Started => tracing::info!(target: "pi::job", job = id, "told started"),
+            Told::Reply(text) => tracing::info!(
+                target: "pi::job", job = id, chars = text.chars().count(), reply = %text, "told reply"
+            ),
+        }
         if let Some(to) = self
             .lock()
             .items
@@ -250,6 +262,7 @@ impl Table {
         let item = inner.items.remove(at);
         item.stop.cancel();
         drop(inner);
+        tracing::info!(target: "pi::job", job = id, "stopped");
         self.changed.notify_one();
         Ok(format!("stopped #{id}: {}", item.description))
     }
@@ -261,6 +274,7 @@ impl Table {
         inner.items.retain(|i| {
             let gone = i.root.starts_with(root);
             if gone {
+                tracing::info!(target: "pi::job", job = i.id, "stopped with its checkout");
                 i.stop.cancel();
             }
             !gone
@@ -279,6 +293,9 @@ impl Table {
         let mut inner = self.lock();
         inner.next_id += 1;
         let id = inner.next_id;
+        tracing::info!(
+            target: "pi::job", job = id, name = %description, root = %root.display(), "started"
+        );
         inner.items.push(Item {
             id,
             root,
@@ -349,7 +366,12 @@ struct Handle {
 // `end` — a panic — does not stay listed as running for good.
 impl Drop for Handle {
     fn drop(&mut self) {
-        self.table.update(self.id, |i| i.running = false);
+        self.table.update(self.id, |i| {
+            if i.running {
+                tracing::warn!(target: "pi::job", job = i.id, "its task went without ending");
+            }
+            i.running = false
+        });
     }
 }
 
@@ -359,10 +381,12 @@ impl tool::JobHandle for Handle {
     }
 
     fn status(&self, text: String) {
+        tracing::debug!(target: "pi::job", job = self.id, status = %text, "status");
         self.table.update(self.id, |i| i.progress = text);
     }
 
     fn result(&self, text: String, spent: llm::stream::Usage) {
+        tracing::info!(target: "pi::job", job = self.id, text = %text, "result");
         self.table.update(self.id, |i| {
             let due = i.due(&text, spent);
             i.wait(Back::Result(due));
@@ -370,6 +394,7 @@ impl tool::JobHandle for Handle {
     }
 
     fn input(&self, text: String) {
+        tracing::info!(target: "pi::job", job = self.id, text = %text, "input");
         self.table.update(self.id, |i| {
             i.wait(Back::Input {
                 text,
@@ -379,6 +404,7 @@ impl tool::JobHandle for Handle {
     }
 
     fn notice(&self, text: String) {
+        tracing::info!(target: "pi::job", job = self.id, text = %text, "notice");
         self.table.update(self.id, |i| {
             if i.notices.len() >= MAX_NOTICES {
                 i.notices.pop_front();
@@ -388,10 +414,12 @@ impl tool::JobHandle for Handle {
     }
 
     fn interrupt(&self) {
+        tracing::info!(target: "pi::job", job = self.id, "interrupt");
         self.table.update(self.id, |i| i.interrupt = true);
     }
 
     fn end(&self) {
+        tracing::info!(target: "pi::job", job = self.id, "ended");
         self.table.update(self.id, |i| i.running = false);
     }
 }

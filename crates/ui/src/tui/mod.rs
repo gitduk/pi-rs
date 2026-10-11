@@ -393,6 +393,9 @@ impl Tui {
     // Deeds the screen keeps for itself: only the surface can move the
     // screen, keyboard, and process, and knows which lane is in front.
     async fn carry(&mut self, deed: Deed) {
+        if deed != Deed::Nothing {
+            tracing::info!(target: "pi::session", deed = ?deed, "deed");
+        }
         match deed {
             Deed::Nothing => {}
             Deed::Interrupt => self.stop_current(false),
@@ -676,6 +679,9 @@ impl Tui {
             };
             let was = self.core.current;
             let asked_on = self.core.lane().token();
+            tracing::info!(
+                target: "pi::session", origin = ?origin, lane = asked_on, intent = ?intent, "dispatch"
+            );
             let step = self.core.dispatch(intent);
             self.reconcile(was);
             let prompt = matches!(step, Step::Prompt { .. });
@@ -760,6 +766,9 @@ impl Tui {
         // send never runs here as a command, and every one is answered.
         let wake = match next.label {
             Some(label) => {
+                tracing::info!(
+                    target: "pi::session", origin = ?next.origin, lane = self.core.lane().token(), label = %label, "relay"
+                );
                 self.ui.submit_relayed(view, &label, &next.line);
                 let relay = job::Relay {
                     label,

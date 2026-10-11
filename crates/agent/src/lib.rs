@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use llm::message::{Message, ToolCall};
+use llm::message::{AssistantContent, Message, ToolCall};
 use llm::model::ModelSpec;
 use llm::request::{Effort, Request};
 use llm::stream::Usage;
@@ -319,10 +319,24 @@ impl Agent {
                 );
             }
 
-            tracing::debug!(
+            // Sizes beside the stop: a reply that ends after two words reads
+            // like any other turn unless the record says how much it said.
+            let (mut text, mut reasoning) = (0usize, 0usize);
+            if let Message::Assistant { content, .. } = &done.message {
+                for c in content {
+                    match c {
+                        AssistantContent::Text(t) => text += t.text.chars().count(),
+                        AssistantContent::Reasoning(r) => reasoning += r.text().chars().count(),
+                        AssistantContent::ToolCall(_) => {}
+                    }
+                }
+            }
+            tracing::info!(
                 target: "pi::loop",
                 parent: &span,
                 stop = ?done.stop,
+                text,
+                reasoning,
                 calls = done.message.tool_calls().count(),
                 invalid = done.invalid.len(),
                 "replied"

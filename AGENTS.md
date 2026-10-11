@@ -1,1 +1,2 @@
 - commit 之前使用 cargo fmt 格式化代码
+- journal 日志记在必经的入口上，不散落在各个功能里：工具走 `agent/src/event.rs` 的 `note()`，后台 job 走 `pi-core/src/driver/jobs.rs` 的 `Table`，用户输入走 TUI 的 `dispatch`/`carry()`。新功能必须经过这些入口；确实要新开入口时，日志加在新入口上。`note()` 等处的 match 不加 `_ =>`，让编译器提醒新变体要不要记日志
