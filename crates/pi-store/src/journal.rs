@@ -522,6 +522,15 @@ pub fn failure() -> Option<String> {
     JOURNAL.get()?.sink.lock().ok()?.why.clone()
 }
 
+/// Whether the journal has stopped recording: `failure` without the text,
+/// for what asks every frame.
+pub fn failed() -> bool {
+    JOURNAL
+        .get()
+        .and_then(|j| j.sink.lock().ok().map(|s| s.why.is_some()))
+        .unwrap_or(false)
+}
+
 /// Drops journals nothing will be read back from, kept a fortnight — shorter
 /// than the transcript beside it. Failures just mean logging less, never stopping.
 pub fn prune(sessions: &Path) {

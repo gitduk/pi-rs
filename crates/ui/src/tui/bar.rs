@@ -56,7 +56,7 @@ impl Facts {
             spent: lane.tally().session().cost,
             alerts: [
                 lane.unsaved().map(|_| "unsaved"),
-                pi_store::journal::failure().map(|_| "journal off"),
+                pi_store::journal::failed().then_some("journal off"),
             ]
             .into_iter()
             .flatten()
