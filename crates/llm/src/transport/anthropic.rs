@@ -406,7 +406,7 @@ impl Transport for Anthropic {
                     Err(_) => None,
                     Ok(data) if data["type"] == "error" => {
                         tracing::warn!(
-                            target: "pi::wire", wire = "anthropic",
+                            target: "pi::wire", format = "anthropic",
                             detail = %data["error"], "error frame"
                         );
                         Some(Err(LlmError::Stream(data["error"].to_string())))
