@@ -1908,7 +1908,6 @@ dependencies = [
  "async-trait",
  "clap",
  "futures",
- "ignore",
  "libc",
  "llm",
  "mcp",

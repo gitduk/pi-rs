@@ -4,8 +4,6 @@
 
 use std::path::Path;
 
-use ignore::WalkBuilder;
-
 // Where a token ends and a new one may start. The newline keeps the scan
 // inside the line the caret is on, as the per-line parse upstream does.
 const DELIMS: [char; 6] = [' ', '\t', '"', '\'', '=', '\n'];
@@ -63,18 +61,13 @@ pub fn candidates(query: &str, root: &Path) -> Vec<FileEntry> {
         None => (root.to_path_buf(), String::new(), query),
     };
 
-    // The tools walk's rules: dotted entries kept, `.git` skipped, gitignore
-    // applied without a repo, links not followed — one could leave the root.
-    let mut builder = WalkBuilder::new(&scope);
-    builder.hidden(false);
-    builder.follow_links(false);
-    builder.git_ignore(true);
-    builder.require_git(false);
-    builder.filter_entry(|e| e.file_name() != ".git");
-    builder.max_depth(Some(1));
-
+    // The tools' walk, so `@` offers what grep and glob would find. The scope
+    // never leaves the root, so the global gitignore applies.
     let mut raw: Vec<(String, bool)> = Vec::new();
-    for entry in builder.build().flatten() {
+    let walk = toolbox::walk::walker_at(&scope, true, None)
+        .max_depth(Some(1))
+        .build();
+    for entry in walk.flatten() {
         let Ok(rel) = entry.path().strip_prefix(&scope) else {
             continue;
         };
