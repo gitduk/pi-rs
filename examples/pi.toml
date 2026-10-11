@@ -39,6 +39,7 @@ model = "claude-sonnet-5"
 # `model`.
 summarize_model = "claude-haiku-4-5"
 
+# How hard the model thinks, on every wire alike; unset is `high`.
 effort = "medium"                # off | low | medium | high
 tier   = "exec"                  # read | write | exec | net
 
@@ -104,8 +105,8 @@ status = ["elapsed", "in_out", "speed", "cache", "ctx", "compacted", "queued", "
 #
 # Every field below has a default, so a model needs an entry only where it
 # differs — and needs none at all to be usable. An unlisted name is passed
-# through to the endpoint with the defaults: a 128k window, 8k of output, no
-# pricing and no thinking.
+# through to the endpoint with the defaults: a 128k window, 8k of output and no
+# pricing.
 # ---------------------------------------------------------------------------
 
 # Measured 2026-08-14.
@@ -113,10 +114,6 @@ status = ["elapsed", "in_out", "speed", "cache", "ctx", "compacted", "queued", "
 context_window    = 200_000
 max_output_tokens = 64_000
 vision            = true
-# How the model takes a thinking instruction, absent if it takes none.
-# `adaptive` is Claude 4.6+, `budget` 4.5 and earlier, `effort` the OpenAI
-# Responses control. Naming one the format cannot carry is refused at load.
-thinking          = "adaptive"
 # Claude 4.6+ and the OpenAI reasoning models reject every temperature but the
 # default, so the only request they accept is one that omits it.
 accepts_temperature = false
@@ -126,16 +123,12 @@ pricing = { input_per_mtok = 3.0, output_per_mtok = 15.0, cache_read_per_mtok = 
 [models."claude-haiku-4-5"]
 context_window    = 200_000
 max_output_tokens = 32_000
-thinking          = "budget"
 pricing = { input_per_mtok = 1.0, output_per_mtok = 5.0 }
 
-# What becomes of reasoning another model produced, when the transcript moves
-# here by `/model`. `off` leaves it out — what the docs say to do, and the
-# cheapest. `tagged` wraps it in `<think>`, for models trained to read that.
-# Reasoning this model itself signed always replays as itself and is not
-# governed by this.
-[models."some-open-weights-model"]
-replay_thinking = "tagged"
+# A model that cannot think is told nothing of thinking, `off` included: on
+# some endpoints the field alone is a 400.
+[models."gpt-4.1"]
+effort = "unsupported"
 
 # A model on another endpoint names its own `base_url`, and `format` and
 # `api_key` when they differ. One that names a `base_url` never inherits the

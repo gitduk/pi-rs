@@ -298,4 +298,69 @@ mod tests {
         gaps.ignored("frame", "response.queued");
         assert_eq!(gaps.reported(), 3);
     }
+
+    // A wire told nothing lets the model think by its own default, which ate
+    // a whole reply budget on DeepSeek once; off has to be said everywhere.
+    #[test]
+    fn every_wire_says_off_out_loud() {
+        use crate::model::Format;
+        use crate::request::Effort;
+        let req = |effort| Request {
+            messages: vec![crate::message::Message::user("go")],
+            effort,
+            ..Default::default()
+        };
+        let on = |format| ModelSpec {
+            format,
+            ..ModelSpec::test()
+        };
+        let anthropic = ModelSpec::test();
+        let chat = on(Format::Chat);
+        let openai = on(Format::OpenAi);
+
+        let off = req(Effort::Off);
+        assert_eq!(
+            anthropic::build_body(&anthropic, &off)["thinking"],
+            json!({ "type": "disabled" })
+        );
+        assert_eq!(
+            chat::build_body(&chat, &off)["thinking"],
+            json!({ "type": "disabled" })
+        );
+        assert_eq!(
+            openai::build_body(&openai, &off)["reasoning"],
+            json!({ "effort": "none" })
+        );
+
+        let high = req(Effort::High);
+        let body = anthropic::build_body(&anthropic, &high);
+        assert_eq!(body["thinking"], json!({ "type": "adaptive" }));
+        assert_eq!(body["output_config"], json!({ "effort": "high" }));
+        assert_eq!(
+            chat::build_body(&chat, &high)["thinking"],
+            json!({ "type": "enabled", "reasoning_effort": "high" })
+        );
+        assert_eq!(
+            openai::build_body(&openai, &high)["reasoning"],
+            json!({ "effort": "high" })
+        );
+
+        // A model that cannot think is told nothing, off included.
+        let mute = |spec: ModelSpec| ModelSpec {
+            accepts_effort: false,
+            ..spec
+        };
+        let body = anthropic::build_body(&mute(anthropic), &high);
+        assert!(body.get("thinking").is_none() && body.get("output_config").is_none());
+        assert!(
+            chat::build_body(&mute(chat), &off)
+                .get("thinking")
+                .is_none()
+        );
+        assert!(
+            openai::build_body(&mute(openai), &high)
+                .get("reasoning")
+                .is_none()
+        );
+    }
 }

@@ -3,7 +3,7 @@
 //! The value itself is `pi_store::settings`; this is what the Core does to it.
 
 use super::meter::summary;
-use super::status::{carries_reasoning, demotion};
+use super::status::carries_reasoning;
 use super::{Core, resolve};
 use crate::input::commands::Choice;
 use crate::input::{Step, refused};
@@ -255,7 +255,7 @@ impl Core {
         // An absent transcript is one a run has, and it is writing this
         // model's reasoning into it as we speak — so say it either way.
         if self.lane().session().is_none_or(carries_reasoning) {
-            said.push(demotion(spec.replay_thinking).into());
+            said.push("reasoning from the earlier turns is dropped rather than replayed".into());
         }
         tracing::info!(
             target: "pi::session",
@@ -290,10 +290,11 @@ impl Core {
             }
         };
         said.push(format!("effort {}", now(self)));
-        if self.lane().agent().spec().thinking.is_none() {
-            let model = &self.lane().agent().spec().model;
+        let spec = self.lane().agent().spec();
+        if !spec.accepts_effort {
             said.push(format!(
-                "{model} takes no thinking setting, so this changes nothing on it"
+                "{} is marked effort = \"unsupported\", so this changes nothing on it",
+                spec.model
             ));
         }
         said

@@ -81,10 +81,9 @@ pub(super) fn running_lane(dir: &std::path::Path) -> Lane {
         context_window: 200_000,
         max_output_tokens: 8_000,
         vision: false,
-        thinking: None,
+        accepts_effort: true,
         accepts_temperature: true,
         can_force_tool: true,
-        replay_thinking: llm::model::ReplayThinking::Tagged,
         pricing: llm::model::Pricing::default(),
     };
     let mut lane = Lane::opened(pi_core::core::lane::Opening {

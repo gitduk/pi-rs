@@ -71,9 +71,8 @@ pub fn dial(
     // correct the one that matters instead of debugging a 400 later.
     let assumed = (!config.is_written(model)).then(|| {
         format!(
-            "assuming a {}-token window, {} max output, no pricing, and no \
-             thinking for `{}`. Set --context if the server's window differs; \
-             --effort needs a config entry naming the model's thinking shape.",
+            "assuming a {}-token window, {} max output and no pricing for `{}`. \
+             Set --context if the server's window differs.",
             spec.context_window, spec.max_output_tokens, spec.model
         )
     });

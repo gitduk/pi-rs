@@ -14,9 +14,9 @@ use serde_json::{Value, json};
 use super::{FAILED, Shared, Transport};
 use crate::error::{LlmError, Result};
 use crate::message::{
-    AssistantContent, Image, Message, Replay, ToolResult, ToolResultContent, UserContent, tagged,
+    AssistantContent, Image, Message, ToolResult, ToolResultContent, UserContent,
 };
-use crate::model::{Format, ModelSpec, ThinkingControl};
+use crate::model::{Format, ModelSpec};
 use crate::request::{Request, ToolChoice};
 use crate::stream::{BlockKind, StopReason, StreamEvent, Usage};
 
@@ -71,19 +71,14 @@ fn encode_tool_result(r: &ToolResult) -> Value {
 
 // One stored assistant turn as the chat wire wants it: content and tool
 // calls on the same message, merged losslessly up to their relative order.
-fn encode_assistant(content: &[AssistantContent], spec: &ModelSpec, out: &mut Vec<Value>) {
+fn encode_assistant(content: &[AssistantContent], out: &mut Vec<Value>) {
     let mut text = String::new();
     let mut calls: Vec<Value> = Vec::new();
     for b in content {
         match b {
             AssistantContent::Text(t) => text.push_str(&t.text),
-            AssistantContent::Reasoning(r) => {
-                // Demoted reasoning ships as `<think>`-wrapped prose, like
-                // the other wires; signed/encrypted are unreachable here.
-                if let Replay::Demoted = r.replay_for(spec) {
-                    text.push_str(&tagged(&r.text()));
-                }
-            }
+            // Chat has no signed or encrypted shape, so none ever replays.
+            AssistantContent::Reasoning(_) => {}
             AssistantContent::ToolCall(call) => calls.push(json!({
                 "id": call.id,
                 "type": "function",
@@ -108,7 +103,7 @@ fn encode_assistant(content: &[AssistantContent], spec: &ModelSpec, out: &mut Ve
 
 // The `messages` array. System rides the top-level field; a user turn with a
 // tool result splits into a user message and a `tool` message, in order.
-fn encode(msgs: &[Message], spec: &ModelSpec) -> Vec<Value> {
+fn encode(msgs: &[Message]) -> Vec<Value> {
     let mut out = Vec::new();
     for m in msgs {
         match m {
@@ -144,7 +139,7 @@ fn encode(msgs: &[Message], spec: &ModelSpec) -> Vec<Value> {
                     out.push(json!({ "role": "user", "content": blocks }));
                 }
             }
-            Message::Assistant { content } => encode_assistant(content, spec, &mut out),
+            Message::Assistant { content } => encode_assistant(content, &mut out),
         }
     }
     out
@@ -159,7 +154,7 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
     let mut body = json!({
         "model": spec.model,
         "stream": true,
-        "messages": encode(&req.messages, spec),
+        "messages": encode(&req.messages),
         "max_tokens": max_output_tokens,
     });
 
@@ -170,14 +165,13 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
             .unwrap()
             .insert(0, json!({ "role": "system", "content": system }));
     }
-    // DeepSeek's chat wire takes `thinking: {type}` with `reasoning_effort`;
-    // a model with no thinking instruction gets no such field.
-    if let Some(ThinkingControl::Effort) = spec.thinking {
-        if let Some(effort) = req.effort.as_openai() {
-            body["thinking"] = json!({ "type": "enabled", "reasoning_effort": effort });
-        } else {
-            body["thinking"] = json!({ "type": "disabled" });
-        }
+    // DeepSeek's chat wire takes `thinking: {type}` with `reasoning_effort`.
+    // Off is said out loud: a model told nothing thinks by its own default.
+    if spec.accepts_effort {
+        body["thinking"] = match req.effort.as_openai() {
+            Some(effort) => json!({ "type": "enabled", "reasoning_effort": effort }),
+            None => json!({ "type": "disabled" }),
+        };
     }
 
     if !req.tools.is_empty() {
@@ -423,7 +417,7 @@ mod tests {
         let msgs = [Message::User {
             content: vec![result("a", true), result("b", false)],
         }];
-        let out = encode(&msgs, &ModelSpec::test());
+        let out = encode(&msgs);
         let roles: Vec<_> = out.iter().map(|m| m["role"].as_str().unwrap()).collect();
         assert_eq!(roles, ["tool", "tool", "user"]);
         assert_eq!(out[2]["content"][0]["text"], "[image from a]");

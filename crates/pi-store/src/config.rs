@@ -1,7 +1,7 @@
 //! Startup defaults and locally-defined models.
 //!
 //! TOML rather than JSON: most of what a model entry holds is a measurement,
-//! and a measurement without its provenance rots. `thinking = "budget"` needs
+//! and a measurement without its provenance rots. `max_output_tokens` needs
 //! the comment saying which endpoint that was tried against, and JSON has
 //! nowhere to put it.
 //!
@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use llm::model::{CacheControl, Format, ModelSpec, Pricing, ReplayThinking, ThinkingControl};
+use llm::model::{CacheControl, Format, ModelSpec, Pricing};
 use serde::{Deserialize, Serialize};
 
 use crate::args::{EffortArg, FormatArg, TierArg};
@@ -319,13 +319,17 @@ pub struct ModelEntry {
     pub context_window: u32,
     #[serde(default = "default_output")]
     pub max_output_tokens: u32,
-    /// How the model takes a thinking instruction, absent if it takes none.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<ThinkingControl>,
-    #[serde(default)]
-    pub replay_thinking: ReplayThinking,
+    // Read and dropped: `effort` now says thinking on every wire, and a file
+    // written before that must still load.
+    #[serde(default, skip_serializing)]
+    thinking: Option<toml::Value>,
+    #[serde(default, skip_serializing)]
+    replay_thinking: Option<toml::Value>,
     #[serde(default)]
     pub vision: bool,
+    /// `unsupported` for a model that cannot think; no level belongs here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<EffortArg>,
     /// Anthropic 4.6+ and the OpenAI reasoning models reject every value.
     #[serde(default = "yes")]
     pub accepts_temperature: bool,
@@ -347,8 +351,9 @@ impl Default for ModelEntry {
             context_window: default_context(),
             max_output_tokens: default_output(),
             thinking: None,
-            replay_thinking: ReplayThinking::default(),
+            replay_thinking: None,
             vision: false,
+            effort: None,
             accepts_temperature: true,
             can_force_tool: true,
             pricing: Pricing::default(),
@@ -400,8 +405,7 @@ impl Config {
             context_window: model.context_window,
             max_output_tokens: model.max_output_tokens,
             vision: model.vision,
-            thinking: model.thinking,
-            replay_thinking: model.replay_thinking,
+            accepts_effort: model.effort != Some(EffortArg::Unsupported),
             accepts_temperature: model.accepts_temperature,
             can_force_tool: model.can_force_tool,
             pricing: model.pricing,
@@ -422,31 +426,6 @@ impl Config {
             }
         }
         Ok(())
-    }
-
-    // A thinking control the format cannot carry is otherwise accepted, then
-    // silently dropped when the request is built.
-    fn check_thinking(&self, name: &str, model: &ModelEntry) -> Result<()> {
-        match (model.format.or(self.format), model.thinking) {
-            (Some(FormatArg::Anthropic), Some(ThinkingControl::Effort)) => bail!(
-                "{name}: thinking = \"effort\" is not an Anthropic control; use \
-                 \"adaptive\" (Claude 4.6 and later) or \"budget\" (4.5 and earlier)"
-            ),
-            (
-                Some(FormatArg::Openai | FormatArg::Chat),
-                Some(t @ (ThinkingControl::Adaptive | ThinkingControl::Budget)),
-            ) => {
-                let named = match t {
-                    ThinkingControl::Adaptive => "adaptive",
-                    _ => "budget",
-                };
-                bail!(
-                    "{name}: thinking = \"{named}\" is Anthropic-only; \
-                     this format takes \"effort\""
-                )
-            }
-            _ => Ok(()),
-        }
     }
 }
 
@@ -557,7 +536,9 @@ impl Config {
     /// Flag > the files > the built-in default.
     pub fn settle(&self, flags: Flags) -> Settled {
         Settled {
-            effort: flags.effort.or(self.effort).unwrap_or(EffortArg::Off),
+            // What a model told nothing does anyway, so leaving it unset
+            // changes nothing; `off` is the choice to stop it.
+            effort: flags.effort.or(self.effort).unwrap_or(EffortArg::High),
             tier: flags.tier.or(self.tier).unwrap_or(TierArg::Exec),
         }
     }
@@ -783,12 +764,20 @@ impl Config {
         for (name, server) in &config.mcp {
             server.check(name)?;
         }
+        if config.effort == Some(EffortArg::Unsupported) {
+            bail!("effort = \"unsupported\" describes one model; put it in that model's entry");
+        }
         for (model, entry) in &config.models {
+            if entry.effort.is_some_and(|e| e != EffortArg::Unsupported) {
+                bail!(
+                    "models.{model}.effort: only \"unsupported\" belongs here; \
+                     a level is set by the top-level `effort` or `/effort`"
+                );
+            }
             let reachable = config.base_url.is_some() || entry.base_url.is_some();
             if reachable && (config.format.is_some() || entry.format.is_some()) {
                 config.spec(model, entry)?;
             }
-            config.check_thinking(model, entry)?;
         }
         config.key_map()?;
         Ok(config)
@@ -891,7 +880,6 @@ effort = "medium"
 [models.flash]
 context_window = 1_000_000
 max_output_tokens = 384_000
-thinking = "effort"
 
 [models.flash.pricing]
 input_per_mtok = 0.14

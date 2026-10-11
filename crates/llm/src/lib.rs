@@ -13,7 +13,7 @@ pub mod transport;
 pub use error::{LlmError, Result};
 pub use fault::{Fault, classify};
 pub use message::{AssistantContent, Message, ToolCall, ToolResult, UserContent};
-pub use model::{Format, ModelSpec, ReplayThinking};
+pub use model::{Format, ModelSpec};
 pub use request::{Effort, Request, ToolChoice, ToolDef};
 pub use stream::{Accumulator, Completion, StopReason, StreamEvent, Usage};
 pub use totals::Totals;

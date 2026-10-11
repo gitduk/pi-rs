@@ -68,9 +68,6 @@ fn quoted(s: &str) -> usize {
 
 use text as of;
 
-// `<think>` and its closing tag, the wrapper a demoted block ships inside.
-const TAG_OVERHEAD: usize = 6;
-
 /// A bound on what a transcript costs to send to `spec`, not a token count:
 /// no tokenizer is embedded, so this only decides *when* to compact.
 ///
@@ -165,7 +162,6 @@ fn replayed_reasoning(r: &Reasoning, spec: &ModelSpec) -> usize {
     match r.replay_for(spec) {
         Replay::Signed { signature } => text() + of(signature),
         Replay::Encrypted { id, encrypted } => of(id) + of(encrypted),
-        Replay::Demoted => text() + TAG_OVERHEAD,
         Replay::Dropped => 0,
     }
 }

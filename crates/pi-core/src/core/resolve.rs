@@ -152,7 +152,8 @@ pub fn resolve(
     });
     let tier = tool::Tier::from(settled.tier);
     let effort = match settled.effort {
-        EffortArg::Off => Effort::Off,
+        // `unsupported` is refused anywhere but a model's entry.
+        EffortArg::Unsupported | EffortArg::Off => Effort::Off,
         EffortArg::Low => Effort::Low,
         EffortArg::Medium => Effort::Medium,
         EffortArg::High => Effort::High,

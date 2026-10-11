@@ -623,10 +623,9 @@ mod tests {
             context_window: 200_000,
             max_output_tokens: 8_000,
             vision: true,
-            thinking: Some(llm::model::ThinkingControl::Budget),
+            accepts_effort: true,
             accepts_temperature: true,
             can_force_tool: true,
-            replay_thinking: llm::model::ReplayThinking::Tagged,
             pricing: llm::model::Pricing {
                 input_per_mtok: 1.0,
                 output_per_mtok: 2.0,

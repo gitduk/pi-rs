@@ -76,6 +76,10 @@ impl From<tool::Tier> for TierArg {
 #[derive(Debug, Clone, Copy, PartialEq, ValueEnum, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EffortArg {
+    // A model's own entry only: what it can do, not how hard to try, so no
+    // flag or command offers it.
+    #[value(skip)]
+    Unsupported,
     Off,
     Low,
     Medium,

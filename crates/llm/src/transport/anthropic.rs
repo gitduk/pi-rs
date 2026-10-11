@@ -7,15 +7,13 @@ use super::Transport;
 use super::{Gaps, Shared};
 use crate::error::{LlmError, Result};
 use crate::message::{
-    AssistantContent, Image, Message, Reasoning, Replay, ToolResult, ToolResultContent,
-    UserContent, tagged,
+    AssistantContent, Image, Message, Reasoning, Replay, ToolResult, ToolResultContent, UserContent,
 };
-use crate::model::{CacheControl, Format, ModelSpec, ThinkingControl};
+use crate::model::{CacheControl, Format, ModelSpec};
 use crate::request::{Request, ToolChoice};
 use crate::stream::{BlockKind, StopReason, StreamEvent, Usage};
 
 const API_VERSION: &str = "2023-06-01";
-const MIN_THINKING_BUDGET: u32 = 1024;
 
 pub struct Anthropic {
     http: reqwest::Client,
@@ -98,9 +96,6 @@ fn encode_reasoning(r: &Reasoning, spec: &ModelSpec) -> Option<Value> {
             "thinking": r.text(),
             "signature": signature,
         })),
-        // Tag-wrapped prior reasoning trips Anthropic's reasoning_extraction
-        // classifier, so a demoted block ships as bare prose.
-        Replay::Demoted => Some(json!({ "type": "text", "text": tagged(&r.text()) })),
         // No Anthropic spec ever encrypts one: the transport is chosen by the
         // same format `replay_for` reads.
         Replay::Encrypted { .. } | Replay::Dropped => None,
@@ -221,28 +216,19 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
         }
     }
 
-    let thinking_on = match (spec.thinking, req.effort.as_anthropic()) {
-        (Some(ThinkingControl::Adaptive), Some(effort)) => {
+    // Off is said out loud: a model told nothing thinks whenever it judges
+    // the input hard.
+    let thinking_on = match req.effort.as_anthropic() {
+        _ if !spec.accepts_effort => false,
+        Some(effort) => {
             body["thinking"] = json!({ "type": "adaptive" });
             body["output_config"] = json!({ "effort": effort });
             true
         }
-        // Asking for no thinking has to be said out loud here: an adaptive
-        // model left to itself thinks whenever it judges the input hard.
-        (Some(ThinkingControl::Adaptive), None) => {
+        None => {
             body["thinking"] = json!({ "type": "disabled" });
             false
         }
-        // Anthropic requires budget < max_tokens, and rejects any budget under
-        // the floor: below that the request cannot carry thinking at all.
-        (Some(ThinkingControl::Budget), Some(_)) if max_tokens > MIN_THINKING_BUDGET => {
-            let ratio = req.effort.budget_ratio().unwrap_or(0.5);
-            let budget =
-                ((max_tokens as f64 * ratio) as u32).clamp(MIN_THINKING_BUDGET, max_tokens - 1);
-            body["thinking"] = json!({ "type": "enabled", "budget_tokens": budget });
-            true
-        }
-        _ => false,
     };
 
     // Thinking pins temperature to 1; any other value is rejected.
@@ -427,7 +413,6 @@ impl Transport for Anthropic {
 mod tests {
     use super::*;
     use crate::message::ReasoningContent;
-    use crate::model::ReplayThinking;
 
     fn spec() -> ModelSpec {
         ModelSpec {
@@ -435,7 +420,6 @@ mod tests {
             format: Format::Anthropic {
                 cache_control: CacheControl::LongTtl,
             },
-            thinking: Some(ThinkingControl::Budget),
             ..ModelSpec::test()
         }
     }
@@ -500,42 +484,36 @@ mod tests {
     #[test]
     fn the_estimate_counts_what_the_wire_carries() {
         let thinking = "z".repeat(20_000);
-        let with = |replay| {
-            let mut s = spec();
-            s.replay_thinking = replay;
-            s
-        };
-        let req = |_: &ModelSpec| Request {
+        let spec = spec();
+        // Signed by the target itself it replays; from any other model it
+        // is left out.
+        let req = |by: &str| Request {
             messages: vec![
                 Message::user("go"),
                 Message::Assistant {
                     content: vec![AssistantContent::Reasoning(Reasoning {
                         id: None,
-                        // No signature, and a foreign author: exactly the block
-                        // a demotion decides about.
                         content: vec![ReasoningContent::Text {
                             text: thinking.clone(),
-                            signature: None,
+                            signature: Some("sig".into()),
                         }],
-                        by: None,
+                        by: Some(by.into()),
                     })],
                 },
             ],
             ..Default::default()
         };
+        let (kept, dropped) = (req(&spec.model), req("another-model"));
 
-        let dropped = with(ReplayThinking::Off);
-        let kept = with(ReplayThinking::Tagged);
-
-        let sent = |s: &ModelSpec| build_body(s, &req(s)).to_string();
+        let sent = |r: &Request| build_body(&spec, r).to_string();
         assert!(
             !sent(&dropped).contains(&thinking),
             "it was dropped from the body"
         );
         assert!(sent(&kept).contains(&thinking), "it rode the body");
 
-        let counted = |s: &ModelSpec| crate::estimate::tokens(&req(s).messages, s);
-        let bare = crate::estimate::tokens(&[Message::user("go")], &dropped);
+        let counted = |r: &Request| crate::estimate::tokens(&r.messages, &spec);
+        let bare = crate::estimate::tokens(&[Message::user("go")], &spec);
         assert!(
             counted(&dropped) < bare + 100,
             "a block that never leaves must cost nothing: {} vs {bare}",

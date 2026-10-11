@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::model::{Format, ModelSpec, ReplayThinking};
+use crate::model::{Format, ModelSpec};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "lowercase")]
@@ -138,20 +138,12 @@ pub enum Replay<'a> {
     Signed { signature: &'a str },
     // The target's own, encrypted: the ciphertext is the whole of what goes.
     Encrypted { id: &'a str, encrypted: &'a str },
-    // Foreign or unsigned, and the target reads `<think>`: demoted to prose.
-    Demoted,
     // Nothing leaves.
     Dropped,
 }
 
-/// The wrapper a demoted block ships inside. Written once so the two
-/// transports and the estimate's `TAG_OVERHEAD` describe the same bytes.
-pub fn tagged(text: &str) -> String {
-    format!("<think>\n{text}\n</think>")
-}
-
 impl Reasoning {
-    /// The prose halves, joined — all a demoted block ever shows the target.
+    /// The prose halves, joined.
     pub fn text(&self) -> String {
         self.content
             .iter()
@@ -195,14 +187,9 @@ impl Reasoning {
             }
         }
 
-        let has_text = self
-            .content
-            .iter()
-            .any(|c| matches!(c, ReasoningContent::Text { text, .. } if !text.is_empty()));
-        match spec.replay_thinking {
-            ReplayThinking::Tagged if has_text => Replay::Demoted,
-            _ => Replay::Dropped,
-        }
+        // Foreign or unsigned: left out, as the providers' docs say to do on
+        // a model change, and a target that ignores it still bills for it.
+        Replay::Dropped
     }
 }
 

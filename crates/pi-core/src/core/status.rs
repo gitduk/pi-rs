@@ -161,16 +161,6 @@ impl Core {
     }
 }
 
-// What becomes of prior-turn reasoning once another model reads it — the
-// signed path is out, so it's one of these three.
-pub(super) fn demotion(replay: llm::model::ReplayThinking) -> &'static str {
-    use llm::model::ReplayThinking as R;
-    match replay {
-        R::Tagged => "reasoning from the earlier turns replays wrapped in <think> tags",
-        R::Off => "reasoning from the earlier turns is dropped rather than replayed",
-    }
-}
-
 // Whether the transcript holds prior-turn reasoning — worth saying at a
 // switch, since it's the one part of history that doesn't survive intact.
 pub(super) fn carries_reasoning(session: &agent::session::Session) -> bool {

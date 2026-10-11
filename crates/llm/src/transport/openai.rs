@@ -8,9 +8,9 @@ use super::{FAILED, Gaps, Shared};
 use crate::error::{LlmError, Result};
 use crate::message::{
     AssistantContent, Image, Message, Reasoning, ReasoningContent, Replay, Text, ToolCall,
-    ToolResult, ToolResultContent, UserContent, tagged,
+    ToolResult, ToolResultContent, UserContent,
 };
-use crate::model::{Format, ModelSpec, ThinkingControl};
+use crate::model::{Format, ModelSpec};
 use crate::request::{Request, ToolChoice};
 use crate::stream::{BlockKind, InvalidToolArgs, StopReason, StreamEvent, Usage};
 
@@ -93,7 +93,6 @@ fn encode_reasoning(r: &Reasoning, spec: &ModelSpec) -> Option<Value> {
             "summary": [],
             "encrypted_content": encrypted,
         })),
-        Replay::Demoted => Some(assistant_text(&tagged(&r.text()))),
         // No OpenAI spec ever signs one: the transport is chosen by the same
         // format `replay_for` reads.
         Replay::Signed { .. } | Replay::Dropped => None,
@@ -235,10 +234,9 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
         };
     }
 
-    if spec.thinking == Some(ThinkingControl::Effort)
-        && let Some(effort) = req.effort.as_openai()
-    {
-        body["reasoning"] = json!({ "effort": effort });
+    // Off is said out loud: a reasoning model told nothing reasons anyway.
+    if spec.accepts_effort {
+        body["reasoning"] = json!({ "effort": req.effort.as_openai().unwrap_or("none") });
     }
 
     body
@@ -529,7 +527,6 @@ mod tests {
             base_url: "https://api.openai.com/v1".into(),
             format: Format::OpenAi,
             context_window: 400_000,
-            thinking: Some(ThinkingControl::Effort),
             ..ModelSpec::test()
         }
     }

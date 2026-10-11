@@ -10,8 +10,8 @@ pub struct ToolDef {
     pub input_schema: Value,
 }
 
-/// Abstract reasoning intensity. Transports translate: Anthropic gets a token
-/// budget, OpenAI-family an effort string. Never store a wire value here.
+/// Whether to think, and how hard. Every transport says each level, `Off`
+/// included, in its own words. Never store a wire value here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Effort {
@@ -63,17 +63,6 @@ impl Request {
     }
 }
 impl Effort {
-    /// Fraction of the output budget handed to thinking. Anthropic requires the
-    /// budget to stay below max_tokens, so this is a ratio, not a constant.
-    pub fn budget_ratio(self) -> Option<f64> {
-        match self {
-            Effort::Off => None,
-            Effort::Low => Some(0.25),
-            Effort::Medium => Some(0.5),
-            Effort::High => Some(0.8),
-        }
-    }
-
     /// The name a person reads and a config writes.
     pub fn name(self) -> &'static str {
         match self {
