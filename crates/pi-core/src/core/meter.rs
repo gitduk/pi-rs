@@ -33,6 +33,8 @@ pub struct Snapshot {
     /// `None` until one turn of the run has streamed anything.
     pub speed: Option<f64>,
     pub compactions: usize,
+    /// The run had to resend smaller than its estimate allowed.
+    pub refit: bool,
     pub queued: usize,
     pub model: String,
     /// The worktree the session is working in, or None in the repository's own
@@ -55,6 +57,10 @@ pub struct Tally {
     turns: usize,
     ctx: Option<(usize, usize)>,
     compactions: usize,
+    // The run's warnings, kept whole for `/status`.
+    compacted: Option<agent::Report>,
+    refits: Vec<String>,
+    gaps: Vec<String>,
     // Output tokens of the turns that streamed, and the time they streamed
     // for: the run's speed, not skewed by waits or tool calls between.
     generated: (u64, Duration),
@@ -103,7 +109,12 @@ impl Tally {
                 }
             }
             agent::Event::Context { used, window } => self.ctx = Some((*used, *window)),
-            agent::Event::Compacted(_) => self.compactions += 1,
+            agent::Event::Compacted(report) => {
+                self.compactions += 1;
+                self.compacted = Some(*report);
+            }
+            agent::Event::Refit(why) => self.refits.push(why.clone()),
+            agent::Event::Warning(gap) => self.gaps.push(gap.clone()),
             // Replaces the running count (not adds): a compaction summary
             // is a paid call with no event of its own, only caught here.
             agent::Event::Done {
@@ -146,6 +157,7 @@ impl Tally {
             ctx: self.ctx,
             speed: self.speed(),
             compactions: self.compactions,
+            refit: !self.refits.is_empty(),
             queued,
             model: model.to_string(),
             worktree: worktree.map(str::to_string),
@@ -156,6 +168,21 @@ impl Tally {
     fn speed(&self) -> Option<f64> {
         let (tokens, took) = self.generated;
         (!took.is_zero()).then(|| tokens as f64 / took.as_secs_f64())
+    }
+
+    /// The last compaction of this run, or of a `/compact` since.
+    pub fn compacted(&self) -> Option<&agent::Report> {
+        self.compacted.as_ref()
+    }
+
+    /// Why this run resent smaller, in the order it happened.
+    pub fn refits(&self) -> &[String] {
+        &self.refits
+    }
+
+    /// What the endpoint left out of this run's replies.
+    pub fn gaps(&self) -> &[String] {
+        &self.gaps
     }
 
     /// The context used against the window, as the last event said.
@@ -180,6 +207,44 @@ impl Tally {
         t.merge(&self.run_spend());
         t
     }
+}
+
+/// A compaction's report in one line, for `/status` and the surfaces that
+/// print it as it happens.
+pub fn compaction_line(r: &agent::Report) -> String {
+    let mut parts = Vec::new();
+    if r.superseded > 0 {
+        parts.push(format!("{} superseded", r.superseded));
+    }
+    if r.aged_out > 0 {
+        parts.push(format!("{} aged out", r.aged_out));
+    }
+    if r.args_taken > 0 {
+        parts.push(format!("{} arguments taken", r.args_taken));
+    }
+
+    if r.notices_pruned > 0 {
+        parts.push(format!("{} notices pruned", r.notices_pruned));
+    }
+    if r.dropped > 0 {
+        let how = if r.summarized {
+            "summarized"
+        } else {
+            "dropped"
+        };
+        parts.push(format!("{} messages {how}", r.dropped));
+    }
+    let detail = if parts.is_empty() {
+        String::new()
+    } else {
+        format!("{}{}", icons::PART_SEP, parts.join(", "))
+    };
+    let warn = if r.still_over {
+        format!("{}still over budget", icons::PART_SEP)
+    } else {
+        String::new()
+    };
+    format!("compacted {} → {} tokens{detail}{warn}", r.before, r.after)
 }
 
 // Takes the three pieces rather than a config entry: the running model may

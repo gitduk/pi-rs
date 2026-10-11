@@ -152,9 +152,9 @@ struct Sink {
     // A failed flush means the file can no longer be trusted to hold what we
     // send it; the sink stops writing for good.
     failed: bool,
-    // Why, until whoever holds the terminal takes it: a raw-mode screen
+    // Why it failed, for whoever shows the run's state: a raw-mode screen
     // cannot take a stray stderr line.
-    unsaid: Option<String>,
+    why: Option<String>,
     // Which file `out` writes to now; `retarget` moves it. Kept under the
     // sink's lock so [`path`] reads it back rather than a copy that could drift.
     path: PathBuf,
@@ -177,7 +177,7 @@ fn sink_for(file: File, path: &Path) -> Sink {
         written,
         capped: false,
         failed: false,
-        unsaid: None,
+        why: None,
         path: path.to_path_buf(),
     }
 }
@@ -217,10 +217,7 @@ impl Journal {
             // A poisoned lock is a run to be rescued, not one to kill.
             return Ok(());
         };
-        // A failure not yet shown is still news after the move.
-        let unsaid = sink.unsaid.take();
         *sink = sink_for(file, path);
-        sink.unsaid = unsaid;
         Ok(())
     }
 
@@ -247,12 +244,10 @@ impl Journal {
             );
         }
         // Flushed per record: the records worth having are the ones written just
-        // before whatever killed the process. A failed flush is told once.
+        // before whatever killed the process. A failed flush stops it for good.
         if let Err(e) = sink.out.flush() {
             sink.failed = true;
-            sink.unsaid = Some(format!(
-                "journal write failed ({e}); recording stops and stays stopped"
-            ));
+            sink.why = Some(e.to_string());
         }
     }
 }
@@ -521,10 +516,10 @@ pub fn path() -> Option<PathBuf> {
     JOURNAL.get()?.sink.lock().ok().map(|s| s.path.clone())
 }
 
-/// Why the journal stopped recording, handed out once, to be shown by
-/// whoever owns the terminal.
-pub fn take_failure() -> Option<String> {
-    JOURNAL.get()?.sink.lock().ok()?.unsaid.take()
+/// Why the journal stopped recording, while it is stopped. A file it moves
+/// to is tried afresh.
+pub fn failure() -> Option<String> {
+    JOURNAL.get()?.sink.lock().ok()?.why.clone()
 }
 
 /// Drops journals nothing will be read back from, kept a fortnight — shorter

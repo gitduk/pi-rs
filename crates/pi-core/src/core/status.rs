@@ -50,6 +50,14 @@ impl Core {
                 format!("{} ([models.\"{}\"])", spec.base_url, spec.model),
             ])),
         }
+        // Filed under the reply it cut; gathered here for the whole run.
+        let tally = lane.tally();
+        if !tally.gaps().is_empty() {
+            rows.push(Row::new([
+                "incomplete reply".into(),
+                tally.gaps().join("; "),
+            ]));
+        }
 
         // The last run's own count when there was one; before any, an estimate.
         let held = lane.tally().ctx().or_else(|| {
@@ -67,6 +75,15 @@ impl Core {
                     used * 100 / window
                 ),
             ]));
+        }
+        // Behind the usage line's `compacted N×` and `↓`.
+        if let Some(report) = tally.compacted() {
+            let line = super::meter::compaction_line(report);
+            let line = line.strip_prefix("compacted ").unwrap_or(&line);
+            rows.push(Row::new(["compaction", line]));
+        }
+        if !tally.refits().is_empty() {
+            rows.push(Row::new(["refit".into(), tally.refits().join("; ")]));
         }
         // Left out until something has been spent: a session nothing has been
         // asked of yet has no figure, and a row of dashes is not one.
@@ -114,13 +131,20 @@ impl Core {
             rows.push(Row::new(["memory".into(), resolved.memory.join(", ")]));
         }
 
-        rows.push(Row::new([
+        let session = Row::new([
             "session".into(),
             short(&self.store.path_of(root, lane.id()), root),
-        ]));
-        rows.push(match journal::path() {
-            Some(p) => Row::new(["journal".into(), short(&p, root)]),
-            None => Row::new(["journal", "off"]).noting("PI_LOG is off, or it would not open"),
+        ]);
+        rows.push(match lane.unsaved() {
+            Some(why) => session.noting(format!("not saved: {why}")),
+            None => session,
+        });
+        rows.push(match (journal::path(), journal::failure()) {
+            (Some(p), Some(why)) => {
+                Row::new(["journal".into(), short(&p, root)]).noting(format!("stopped: {why}"))
+            }
+            (Some(p), None) => Row::new(["journal".into(), short(&p, root)]),
+            (None, _) => Row::new(["journal", "off"]).noting("PI_LOG is off, or it would not open"),
         });
         Listing::of(rows)
     }

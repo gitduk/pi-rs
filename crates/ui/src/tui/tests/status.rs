@@ -13,6 +13,7 @@ fn facts(model: &str) -> crate::tui::bar::Facts {
         worktree: None,
         ctx: None,
         spent: 0.0,
+        alerts: Vec::new(),
     }
 }
 

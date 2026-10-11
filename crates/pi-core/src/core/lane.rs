@@ -102,6 +102,8 @@ struct Conversation {
     // Rows filed for the screen while a run had the transcript out. They land
     // when it comes home, after everything the run committed.
     held_screens: Vec<String>,
+    // Why the last save failed; cleared by the next one that lands.
+    unsaved: Option<String>,
 }
 
 impl Conversation {
@@ -121,6 +123,7 @@ impl Conversation {
             totals: Totals::default(),
             tally: Tally::default(),
             held_screens: Vec::new(),
+            unsaved: None,
         }
     }
 }
@@ -464,6 +467,11 @@ impl Lane {
         self.talk.name = name;
     }
 
+    /// Why the transcript on disk is behind this one, while it is.
+    pub fn unsaved(&self) -> Option<&str> {
+        self.talk.unsaved.as_deref()
+    }
+
     /// What the run in flight has cost, over the session's settled totals.
     pub fn tally(&self) -> &Tally {
         &self.talk.tally
@@ -579,27 +587,29 @@ impl Core {
     }
     /// Save the transcript. Called after every turn: an interrupted one is
     /// exactly the one worth keeping.
-    pub fn save(&self) -> anyhow::Result<()> {
+    pub fn save(&mut self) -> anyhow::Result<()> {
         self.save_lane(self.current)
     }
     /// The same for a lane that is not in front: a run that ended out of sight
     /// still has to reach disk, and it is not the screen's turn that decides.
-    pub fn save_lane(&self, at: usize) -> anyhow::Result<()> {
+    pub fn save_lane(&mut self, at: usize) -> anyhow::Result<()> {
         // Away with a run, which saves it itself on the way back.
-        let Some(lane) = self.lanes.get(at) else {
+        let Some(lane) = self.lanes.get_mut(at) else {
             return Ok(());
         };
         let Some(session) = &lane.talk.session else {
             return Ok(());
         };
-        self.store.save(
+        let saved = self.store.save(
             &lane.talk.id,
             lane.checkout.ctx.workspace.root(),
             &lane.checkout.agent.spec().model,
             lane.talk.name.as_deref(),
             lane.talk.created,
             session,
-        )?;
+        );
+        lane.talk.unsaved = saved.as_ref().err().map(|e| format!("{e:#}"));
+        saved?;
         Ok(())
     }
     /// Rewind the conversation to an entry and write the shorter transcript

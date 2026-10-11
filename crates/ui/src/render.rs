@@ -547,7 +547,9 @@ pub fn describe(
             Span::raw(format!(" {name} ")),
             p.span(&p.theme.muted, clip(reason, room)),
         ]),
-        Event::Compacted(r) => Line::from(p.span(&p.theme.muted, compaction_line(r))),
+        Event::Compacted(r) => {
+            Line::from(p.span(&p.theme.muted, pi_core::core::meter::compaction_line(r)))
+        }
         // Clipped whole, prefix and reason: a reason cut to the width alone
         // lands in a bar that cuts it again, in silence and without the ellipsis.
         Event::Retrying {
@@ -700,44 +702,6 @@ impl Renderer {
         self.end_thinking();
         self.settle();
     }
-}
-
-// Public because the scrollback draws it too: a rebuild must read the same
-// line the live event did, and one function is the only way to promise that.
-pub fn compaction_line(r: &agent::Report) -> String {
-    let mut parts = Vec::new();
-    if r.superseded > 0 {
-        parts.push(format!("{} superseded", r.superseded));
-    }
-    if r.aged_out > 0 {
-        parts.push(format!("{} aged out", r.aged_out));
-    }
-    if r.args_taken > 0 {
-        parts.push(format!("{} arguments taken", r.args_taken));
-    }
-
-    if r.notices_pruned > 0 {
-        parts.push(format!("{} notices pruned", r.notices_pruned));
-    }
-    if r.dropped > 0 {
-        let how = if r.summarized {
-            "summarized"
-        } else {
-            "dropped"
-        };
-        parts.push(format!("{} messages {how}", r.dropped));
-    }
-    let detail = if parts.is_empty() {
-        String::new()
-    } else {
-        format!("{}{}", icons::PART_SEP, parts.join(", "))
-    };
-    let warn = if r.still_over {
-        format!("{}still over budget", icons::PART_SEP)
-    } else {
-        String::new()
-    };
-    format!("compacted {} → {} tokens{detail}{warn}", r.before, r.after)
 }
 
 /// A tool name plus the one argument its summary picked out; the caller

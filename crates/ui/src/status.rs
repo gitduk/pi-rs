@@ -35,10 +35,12 @@ pub fn render(segment: Segment, s: &Snapshot) -> Option<String> {
         // a million-token window reads as 0% for most of a session.
         Segment::Ctx => match s.ctx? {
             (_, 0) => return None,
+            // `↓`: the run resent smaller than estimated; `/status` says why.
             (used, window) => format!(
-                "ctx {}/{}",
+                "ctx {}/{}{}",
                 llm::figures::short(used as u64),
-                llm::figures::short(window as u64)
+                llm::figures::short(window as u64),
+                if s.refit { "↓" } else { "" }
             ),
         },
         Segment::Compacted if s.compactions == 0 => return None,

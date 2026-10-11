@@ -470,8 +470,9 @@ impl Tui {
 
         // Saved either way — an interrupted turn is worth keeping — unless
         // the transcript never came back, which would overwrite the disk copy.
-        if recovered && let Err(e) = self.core.save_lane(lane) {
-            self.say_of(lane, core::not_saved(&e));
+        // A failure shows on the bar until a save lands; the error is in `/status`.
+        if recovered {
+            let _ = self.core.save_lane(lane);
         }
 
         // The run's totals (subagents' included) land on its lane; an
@@ -555,8 +556,8 @@ impl Tui {
             let _ = self.core.lanes[lane]
                 .sender()
                 .send(Event::Compacted(report));
-            if back && let Err(e) = self.core.save_lane(lane) {
-                self.say_of(lane, core::not_saved(&e));
+            if back {
+                let _ = self.core.save_lane(lane);
             }
         } else if stopped {
             // Nothing written, nothing to report or save — same word a
@@ -616,8 +617,6 @@ impl Tui {
         // A cancelled run's calls got no `ToolEnd`; their animated rows
         // need to reach scrollback before the next flush freezes them.
         self.ui.abandon_tools(view);
-        // A run that ended without `Done` still owes its compaction lines.
-        self.ui.file_compacted(&mut self.core.lanes[lane], view);
         view.state.started = None;
         view.state.retry = None;
         match out {

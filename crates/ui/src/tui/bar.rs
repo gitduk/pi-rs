@@ -38,6 +38,9 @@ pub(super) struct Facts {
     /// What the session has spent, in dollars: completed turns only, so it
     /// moves a few times a run rather than every frame.
     pub spent: f64,
+    /// What is wrong and stays so until it is fixed, drawn where a flash
+    /// goes whenever none is up; `/status` says why.
+    pub alerts: Vec<String>,
 }
 
 impl Facts {
@@ -51,6 +54,14 @@ impl Facts {
             worktree: lane.worktree().map(str::to_string),
             ctx: lane.tally().ctx(),
             spent: lane.tally().session().cost,
+            alerts: [
+                lane.unsaved().map(|_| "unsaved"),
+                pi_store::journal::failure().map(|_| "journal off"),
+            ]
+            .into_iter()
+            .flatten()
+            .map(str::to_string)
+            .collect(),
         }
     }
 }
@@ -144,6 +155,15 @@ impl Ui {
     // One item other than the checkouts or a group, None when it has nothing
     // to say.
     fn spans(&self, item: &Item, facts: &Facts, snap: &Snapshot) -> Option<Vec<Span<'static>>> {
+        let flash_slot = match item {
+            Item::Part(part) => *part == Part::Flash,
+            Item::Styled(s) => s.part == Part::Flash,
+            _ => false,
+        };
+        if flash_slot && self.flash.is_none() && !facts.alerts.is_empty() {
+            let alerts = facts.alerts.join(icons::PART_SEP);
+            return Some(vec![self.paint.span(&self.paint.theme.status.err, alerts)]);
+        }
         let (text, look) = match item {
             Item::Part(part) => (self.part(*part, facts, snap)?, &MUTED),
             Item::Styled(s) => (self.part(s.part, facts, snap)?, &s.style),

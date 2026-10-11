@@ -82,9 +82,6 @@ pub struct State {
     // The retry the run is waiting out, worded for the status line; any
     // other event means the wait is over.
     pub(super) retry: Option<String>,
-    // Compaction and refit lines from this run, filed under its usage row:
-    // they say what the context looks like from here on, not what it did.
-    pub(super) compacted: Vec<String>,
 }
 
 // The stream still writing into the screen, tagged with which kind of
