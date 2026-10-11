@@ -9,7 +9,7 @@ use ignore::WalkBuilder;
 // Where a token ends and a new one may start. The newline keeps the scan
 // inside the line the caret is on, as the per-line parse upstream does.
 const DELIMS: [char; 6] = [' ', '\t', '"', '\'', '=', '\n'];
-// A walk stops here: ranking below would only be sorting noise past it.
+// A listing stops here: a folder this full is no menu anyway.
 const WALK_CAP: usize = 2000;
 // What the menu shows at most.
 const TOP: usize = 20;
@@ -42,8 +42,8 @@ pub fn at_prefix(line: &str, cursor: usize) -> Option<(usize, usize, &str)> {
 
 /// Ranked candidates for the text after the `@`, best first, at most `TOP`.
 ///
-/// A directory query (`src/`, `src/fo`) scopes the walk there; absolute,
-/// `~` and `..` scopes are refused — workspace-relative paths only.
+/// Only one level is listed, the folder the query names (`src/`, `src/fo`)
+/// or the root; absolute, `~` and `..` scopes are refused.
 pub fn candidates(query: &str, root: &Path) -> Vec<FileEntry> {
     if root.as_os_str().is_empty() {
         return Vec::new();
@@ -71,7 +71,7 @@ pub fn candidates(query: &str, root: &Path) -> Vec<FileEntry> {
     builder.git_ignore(true);
     builder.require_git(false);
     builder.filter_entry(|e| e.file_name() != ".git");
-    builder.max_depth(if name.is_empty() { Some(1) } else { None });
+    builder.max_depth(Some(1));
 
     let mut raw: Vec<(String, bool)> = Vec::new();
     for entry in builder.build().flatten() {
@@ -100,16 +100,13 @@ pub fn candidates(query: &str, root: &Path) -> Vec<FileEntry> {
                 // Nothing to match: children of the scope, folders first.
                 if dir { 110 } else { 100 }
             } else {
-                let file = rel.rsplit('/').next().unwrap_or(&rel);
-                let lower_file = file.to_lowercase();
-                let mut s = if lower_file == query_lower {
+                let lower = rel.to_lowercase();
+                let mut s = if lower == query_lower {
                     100
-                } else if lower_file.starts_with(&query_lower) {
+                } else if lower.starts_with(&query_lower) {
                     80
-                } else if lower_file.contains(&query_lower) {
+                } else if lower.contains(&query_lower) {
                     50
-                } else if path.to_lowercase().contains(&query_lower) {
-                    30
                 } else {
                     0
                 };
@@ -123,16 +120,11 @@ pub fn candidates(query: &str, root: &Path) -> Vec<FileEntry> {
         .collect();
     scored.sort_by(|a, b| {
         b.0.cmp(&a.0)
-            .then_with(|| depth(&a.1.path).cmp(&depth(&b.1.path)))
             .then_with(|| a.1.path.len().cmp(&b.1.path.len()))
             .then_with(|| a.1.path.cmp(&b.1.path))
     });
     scored.truncate(TOP);
     scored.into_iter().map(|(_, e)| e).collect()
-}
-
-fn depth(path: &str) -> usize {
-    path.split('/').filter(|s| !s.is_empty()).count()
 }
 
 #[cfg(test)]
@@ -182,12 +174,11 @@ mod tests {
     }
 
     #[test]
-    fn a_query_ranks_the_name_match_ahead_of_the_path_hit() {
+    fn a_query_matches_one_level_only() {
         let (_dir, root) = tree();
-        // "lib" the folder's own name (prefix, dir bonus) against
-        // "lib/mod.rs", which only matches in the whole path.
-        let got = candidates("li", &root);
-        assert_eq!(names(&got), vec!["src/lib", "src/lib/mod.rs"]);
+        // src/main.rs is a level down: reached through `src/`, not by name.
+        assert!(candidates("main", &root).is_empty());
+        assert_eq!(names(&candidates("src/li", &root)), vec!["src/lib"]);
     }
 
     #[test]
@@ -203,8 +194,8 @@ mod tests {
     #[test]
     fn ignored_and_git_entries_stay_out() {
         let (_dir, root) = tree();
-        assert!(candidates("miss", &root).is_empty());
-        assert!(candidates("config", &root).is_empty());
+        assert!(candidates("ta", &root).is_empty());
+        assert_eq!(names(&candidates(".gi", &root)), vec![".gitignore"]);
     }
 
     #[test]
