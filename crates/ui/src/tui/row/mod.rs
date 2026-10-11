@@ -2,25 +2,29 @@
 //! private, so the two producers (live stream, rebuild) can't disagree.
 
 use std::cell::RefCell;
-use std::time::Instant;
 
 use llm::message::{ToolResult, ToolResultContent};
-use ratatui::style::{Modifier, Style as RStyle};
+use ratatui::style::Style as RStyle;
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::block::{self, Form};
+use crate::block;
 use crate::render::named;
 use crate::render::{self, Paint};
+use crate::tui::browse::PageLine;
 use pi_core::core::resolve::Resolved;
 use pi_store::icons;
 
+mod code;
+mod relayed;
+mod result;
 mod steps;
 
+use code::{Block, Code};
+use relayed::Relayed;
+use result::ToolOut;
+use steps::Group;
 pub use steps::{FoldedTool, PendingTool, Step, call_frame, out_for};
-use steps::{
-    STEP_INDENT, Unit, body_line, expandable, lone, step_index, step_line, steps_header, unit_at,
-};
 
 pub struct Row(Kind, Height);
 
@@ -100,73 +104,69 @@ enum Kind {
     Answer(Line<'static>),
     // A line of an answer's code block, indented by `CODE_INDENT`.
     CodeLine(Line<'static>),
-    // A code block's badge, holding the block's text for a click to copy.
-    Code {
-        badge: Line<'static>,
-        code: String,
-        hovered: bool,
-        copied: Option<(String, Instant)>,
-    },
-    // A closed mermaid block or a table, drawn for the width it is shown at:
-    // a resize draws it again, or shows its source when it no longer fits.
-    // One logical line whose `\n`s the wrap breaks; a click copies the source.
-    Block {
-        form: Form,
-        source: String,
-        // At which width, and whether a badge heads it.
-        painted: RefCell<Option<(usize, Line<'static>, bool)>>,
-        hovered: bool,
-        copied: Option<(String, Instant)>,
-    },
+    Code(Code),
+    Block(Block),
     // A painted line the screen alone knows: banner, command output,
     // warning. `times` collapses an identical repeat into one row+count.
     Notice {
         text: Line<'static>,
         times: usize,
     },
-    // A tool's result, kept as its parts; clipped only when a frame needs
-    // it, since a row clipped to its landing width could never regrow.
-    Result {
-        ok: bool,
-        name: String,
-        preview: String,
-        // The row count, so expandability and toggle don't re-walk the
-        // preview string on every mouse move.
-        preview_lines: usize,
-        expanded: bool,
-        hovered: bool,
-        // Caches the last clip, keyed by width: painting the whole result
-        // per row made redraws quadratic in the diff's size.
-        painted: RefCell<Option<(usize, Vec<Line<'static>>)>>,
-    },
-    // A turn nobody typed — a `later` come due, a background subagent's
-    // answer: one line naming it, its text under the line once opened.
-    Relayed {
-        label: String,
-        // Each line, and whether it sits in a code block.
-        body: Vec<(Line<'static>, bool)>,
-        open: bool,
-        hovered: bool,
-    },
-    // The run's working behind one fold: read-only calls that landed
-    // well and the reasoning around them, in order.
-    Steps {
-        steps: Vec<Step>,
-        // Calls in flight this row draws: not in the scrollback yet, left
-        // to the row by the live block, since this is where they'll land.
-        pending: Vec<PendingTool>,
-        folded: bool,
-        // The line under the mouse, when it is one a click opens or closes.
-        hovered: Option<usize>,
-        // The tick the marks of calls still out turn at.
-        spinner: usize,
-    },
+    Result(ToolOut),
+    Relayed(Relayed),
+    Steps(Group),
+}
+
+/// What opening a closed line shows on the reading page: the line as it
+/// reads unlit, then what it opens onto.
+pub type Opening = (Line<'static>, Vec<PageLine>);
+
+// A row that opens and closes. A new kind that folds implements this and
+// joins `Row::fold`; nothing else about folding names the kinds.
+trait Fold {
+    // Whether opening would show more than the row's own line.
+    fn expandable(&self) -> bool;
+    // Open if closed, close if open; the caller checked `expandable`.
+    fn flip(&mut self);
+    // The line a click on line `i` opens or closes: by default the row's
+    // own, from anywhere on it.
+    fn click_line(&self, _i: usize, _width: usize) -> Option<usize> {
+        self.expandable().then_some(0)
+    }
+    // Open or close what line `i` heads; whether anything moved.
+    fn toggle_at(&mut self, _i: usize, _width: usize) -> bool {
+        self.expandable() && {
+            self.flip();
+            true
+        }
+    }
+    // What opening line `i` would show, while it is closed.
+    fn opening(&self, i: usize, paint: &Paint, width: usize) -> Option<Opening>;
 }
 
 impl Row {
     // A row whose height is not measured yet; every constructor starts here.
     fn new(kind: Kind) -> Self {
         Self(kind, Height::default())
+    }
+
+    // The row as something that opens and closes, if it is one.
+    fn fold(&self) -> Option<&dyn Fold> {
+        match &self.0 {
+            Kind::Steps(g) => Some(g),
+            Kind::Result(r) => Some(r),
+            Kind::Relayed(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    fn fold_mut(&mut self) -> Option<&mut dyn Fold> {
+        match &mut self.0 {
+            Kind::Steps(g) => Some(g),
+            Kind::Result(r) => Some(r),
+            Kind::Relayed(r) => Some(r),
+            _ => None,
+        }
     }
 
     /// Whether this row is part of the conversation: what was said and what
@@ -177,9 +177,9 @@ impl Row {
             Kind::Said { .. }
                 | Kind::Answer(_)
                 | Kind::CodeLine(_)
-                | Kind::Code { .. }
-                | Kind::Block { .. }
-                | Kind::Relayed { .. }
+                | Kind::Code(_)
+                | Kind::Block(_)
+                | Kind::Relayed(_)
         )
     }
 
@@ -199,23 +199,12 @@ impl Row {
 
     /// Whether this row is where a turn begins: something said, or relayed.
     pub fn opens_turn(&self) -> bool {
-        matches!(&self.0, Kind::Said { .. } | Kind::Relayed { .. })
+        matches!(&self.0, Kind::Said { .. } | Kind::Relayed(_))
     }
 
     /// A turn pi sent on the model's behalf, folded under `label`.
     pub fn relayed(label: &str, text: &str, paint: &Paint) -> Self {
-        // A one-line text the label already says opens onto nothing new.
-        let said = !text.trim().contains('\n') && label.contains(text.trim());
-        Self::new(Kind::Relayed {
-            label: label.to_string(),
-            body: render::render_coded(text, paint)
-                .into_iter()
-                .map(|(line, coded)| (line, coded == render::Coded::Code))
-                .filter(|_| !said)
-                .collect(),
-            open: false,
-            hovered: false,
-        })
+        Self::new(Kind::Relayed(Relayed::new(label, text, paint)))
     }
 
     /// Plain text as notice rows, one per line — shared by the live
@@ -256,12 +245,11 @@ impl Row {
             render::render_coded(text, paint)
                 .into_iter()
                 .map(|(line, coded)| match coded {
-                    render::Coded::Badge(code) => Self::new(Kind::Code {
+                    render::Coded::Badge(code) => Self::new(Kind::Code(Code {
                         badge: line,
                         code,
-                        hovered: false,
-                        copied: None,
-                    }),
+                        note: Default::default(),
+                    })),
                     render::Coded::Code => Self::new(Kind::CodeLine(line)),
                     render::Coded::Text => Self::new(Kind::Answer(line)),
                 })
@@ -279,13 +267,8 @@ impl Row {
                     if rows.last().is_some_and(|r| !is_blank(r)) {
                         rows.push(blank());
                     }
-                    rows.push(Self::new(Kind::Block {
-                        form,
-                        source: source.trim_end().to_string(),
-                        painted: RefCell::new(None),
-                        hovered: false,
-                        copied: None,
-                    }));
+                    let source = source.trim_end().to_string();
+                    rows.push(Self::new(Kind::Block(Block::new(form, source))));
                     rows.push(blank());
                 }
             }
@@ -298,13 +281,7 @@ impl Row {
 
     /// A group whose first step is `first`, folded the way it is born.
     pub fn steps(first: Step, folded: bool) -> Self {
-        Self::new(Kind::Steps {
-            steps: vec![first],
-            pending: Vec::new(),
-            folded,
-            hovered: None,
-            spinner: 0,
-        })
+        Self::new(Kind::Steps(Group::new(first, folded)))
     }
 
     /// A lone block of reasoning, as a group of one.
@@ -323,282 +300,94 @@ impl Row {
 
     /// Add a step to this row if it is a group; the step comes back if not.
     pub fn join(&mut self, step: Step) -> Result<(), Step> {
-        if let Kind::Steps { steps, .. } = &mut self.0 {
-            steps.push(step);
-            self.1.clear();
-            Ok(())
-        } else {
-            Err(step)
-        }
+        let Kind::Steps(g) = &mut self.0 else {
+            return Err(step);
+        };
+        g.join(step);
+        self.1.clear();
+        Ok(())
     }
 
     /// Whether this row is a group.
     pub fn is_steps(&self) -> bool {
-        matches!(&self.0, Kind::Steps { .. })
+        matches!(&self.0, Kind::Steps(_))
     }
 
     /// The indent reasoning block `id` shows its lines under, if this group
     /// shows them; the block's unfinished line follows them there.
     pub fn shows_block(&self, id: u64) -> Option<&'static str> {
-        let Kind::Steps {
-            steps,
-            pending,
-            folded: false,
-            ..
-        } = &self.0
-        else {
-            return None;
-        };
-        let held = |s: &Step| matches!(s, Step::Thinking { block, .. } if *block == id);
-        match lone(steps, pending) {
-            Some(s) => held(s).then_some(""),
-            None => steps
-                .iter()
-                .any(|s| held(s) && s.is_open())
-                .then_some(STEP_INDENT),
+        match &self.0 {
+            Kind::Steps(g) => g.shows_block(id),
+            _ => None,
         }
     }
 
     /// Whether this row is an expandable row.
     pub fn is_expandable(&self) -> bool {
-        match &self.0 {
-            Kind::Steps { steps, pending, .. } => expandable(steps, pending),
-            Kind::Result { preview_lines, .. } => *preview_lines > render::SKETCHED_ROWS,
-            Kind::Relayed { body, .. } => !body.is_empty(),
-            _ => false,
-        }
+        self.fold().is_some_and(|f| f.expandable())
     }
 
-    /// Toggle expand state, returning true if toggled.
+    /// Toggle the row's own line, returning true if toggled.
+    #[cfg(test)]
     pub fn toggle_expand(&mut self) -> bool {
-        if !self.is_expandable() {
-            return false;
-        }
-        match &mut self.0 {
-            Kind::Steps { folded, .. } => {
-                *folded = !*folded;
-                self.1.clear();
-                true
-            }
-            Kind::Result {
-                expanded, painted, ..
-            } => {
-                *expanded = !*expanded;
-                *painted.borrow_mut() = None;
-                self.1.clear();
-                true
-            }
-            Kind::Relayed { open, .. } => {
-                *open = !*open;
-                self.1.clear();
-                true
-            }
-            _ => false,
-        }
+        self.toggle_at(0, 0)
     }
 
     /// The line a click on line `i` opens or closes, if any: a result opens
     /// from anywhere on it, a group from its own line or a step's.
     pub fn click_line(&self, i: usize, width: usize) -> Option<usize> {
         match &self.0 {
-            Kind::Result { .. } | Kind::Relayed { .. } => self.is_expandable().then_some(0),
-            Kind::Code { .. } | Kind::Block { .. } => Some(0),
-            Kind::Steps {
-                steps,
-                pending,
-                folded,
-                ..
-            } => {
-                let listed = !*folded && lone(steps, pending).is_none();
-                let step = || match unit_at(steps, pending, i - 1)? {
-                    (Unit::Step(s), 0) => Some(s),
-                    _ => None,
-                };
-                if i == 0 {
-                    expandable(steps, pending).then_some(0)
-                } else if listed && step().is_some_and(|s| s.opens(width)) {
-                    Some(i)
-                } else {
-                    None
-                }
-            }
-            _ => None,
+            Kind::Code(_) | Kind::Block(_) => Some(0),
+            _ => self.fold()?.click_line(i, width),
         }
     }
 
     /// Open or close what line `i` heads — see `click_line` — and say
     /// whether anything moved.
     pub fn toggle_at(&mut self, i: usize, width: usize) -> bool {
-        if i == 0 || !self.is_steps() {
-            return self.toggle_expand();
+        let moved = self.fold_mut().is_some_and(|f| f.toggle_at(i, width));
+        if moved {
+            self.1.clear();
         }
-        if self.click_line(i, width) != Some(i) {
-            return false;
-        }
-        let Kind::Steps { steps, .. } = &mut self.0 else {
-            return false;
-        };
-        let Some(k) = step_index(steps, i - 1) else {
-            return false;
-        };
-        steps[k].flip();
-        self.1.clear();
-        true
+        moved
     }
 
     /// What opening line `i` would show, while it is closed: the line as
     /// it reads with nothing under the pointer, then what it opens onto — a
     /// step's reasoning or call, a result whole, a relayed turn's text.
-    pub fn opening(
-        &self,
-        i: usize,
-        paint: &Paint,
-        width: usize,
-    ) -> Option<(Line<'static>, Vec<crate::tui::browse::PageLine>)> {
-        let (head, step) = match &self.0 {
-            Kind::Steps {
-                steps,
-                pending,
-                folded,
-                spinner,
-                ..
-            } => match lone(steps, pending) {
-                // The group is the step: opening the group opens it.
-                Some(step) if i == 0 && *folded => (
-                    steps_header(steps, pending, false, false, *spinner, paint, width),
-                    step,
-                ),
-                None if i > 0 && !*folded => {
-                    let step = steps
-                        .get(step_index(steps, i - 1)?)
-                        .filter(|s| !s.is_open())?;
-                    let head = step_line(steps, pending, i - 1, false, *spinner, paint, width).0;
-                    (head, step)
-                }
-                _ => return None,
-            },
-            Kind::Result {
-                ok,
-                name,
-                preview,
-                preview_lines,
-                expanded: false,
-                ..
-            } if *preview_lines > render::SKETCHED_ROWS => {
-                let mut rows =
-                    render::result_rows(!*ok, name, preview, true, false, paint, width).into_iter();
-                return Some((rows.next()?, rows.map(|line| (line, None)).collect()));
-            }
-            Kind::Relayed {
-                label,
-                body,
-                open: false,
-                ..
-            } if !body.is_empty() => {
-                return Some((
-                    relayed_head(label, body.len(), false, paint, width),
-                    body.iter()
-                        .map(|(line, code)| (set_off(line.clone(), *code), None))
-                        .collect(),
-                ));
-            }
-            _ => return None,
-        };
-        let body = match step {
-            // Read as an answer is, markdown and all: muted is for the
-            // transcript, where it steps back from what was said.
-            Step::Thinking { lines, .. } => {
-                let text: Vec<String> = lines.iter().map(super::screen::plain).collect();
-                render::render_coded(&text.join("\n"), paint)
-                    .into_iter()
-                    .map(|(line, coded)| match coded {
-                        // The badge copies its block, as an answer's does.
-                        render::Coded::Badge(code) => (line, Some(code)),
-                        render::Coded::Code => (set_off(line, true), None),
-                        render::Coded::Text => (line, None),
-                    })
-                    .collect()
-            }
-            Step::Tool(t) => (0..t.body.len())
-                .map(|j| (body_line(t, j, paint), None))
-                .collect(),
-        };
-        Some((head, body))
+    pub fn opening(&self, i: usize, paint: &Paint, width: usize) -> Option<Opening> {
+        self.fold()?.opening(i, paint, width)
     }
 
     /// Brings a row up to date before the frame draws: hover line, spinner
     /// tick, and the calls in flight this row draws.
     pub fn update_live(&mut self, hovered: Option<usize>, spin: usize, held: &[PendingTool]) {
-        match &mut self.0 {
-            Kind::Steps {
-                pending,
-                hovered: h,
-                spinner,
-                ..
-            } => {
-                // A call starting, ending or landing can change the row's
-                // count; a tick alone can't — lines are clipped to width.
-                if pending.as_slice() != held {
-                    let reshaped = pending.len() != held.len()
-                        || pending.iter().zip(held).any(|(a, b)| {
-                            (&a.name, &a.preview, a.landed) != (&b.name, &b.preview, b.landed)
-                        });
-                    *pending = held.to_vec();
-                    if reshaped {
-                        self.1.clear();
-                    }
-                }
-                // Neither moves a height: hover bolds, and bold is no wider;
-                // a frame is one column like the next.
-                *h = hovered;
-                *spinner = spin;
+        // Hover bolds, and bold is no wider: only what else changed moves
+        // a height.
+        let reshaped = match &mut self.0 {
+            Kind::Steps(g) => g.update(hovered, spin, held),
+            Kind::Result(r) => {
+                r.hover(hovered.is_some());
+                false
             }
-            Kind::Result {
-                hovered: h,
-                preview_lines,
-                painted,
-                ..
-            } if *preview_lines > render::SKETCHED_ROWS && *h != hovered.is_some() => {
-                *h = hovered.is_some();
-                *painted.borrow_mut() = None;
+            Kind::Code(Code { note, .. }) | Kind::Block(Block { note, .. }) => {
+                note.update(hovered.is_some())
             }
-            // Bold is no wider, so no height moves.
-            Kind::Code {
-                hovered: h, copied, ..
+            Kind::Relayed(r) => {
+                r.hover(hovered.is_some());
+                false
             }
-            | Kind::Block {
-                hovered: h, copied, ..
-            } => {
-                *h = hovered.is_some();
-                if copied
-                    .as_ref()
-                    .is_some_and(|(_, at)| at.elapsed() >= super::FLASH)
-                {
-                    *copied = None;
-                    self.1.clear();
-                }
-            }
-            Kind::Relayed { hovered: h, .. } => {
-                *h = hovered.is_some();
-            }
-            _ => {}
+            _ => false,
+        };
+        if reshaped {
+            self.1.clear();
         }
     }
 
     /// A tool result the screen already has in parts — the live path, which
     /// never holds a `ToolResult`.
     pub fn result(ok: bool, name: impl Into<String>, preview: impl Into<String>) -> Self {
-        let preview = preview.into();
-        let preview_lines = preview.lines().count();
-        Self::new(Kind::Result {
-            ok,
-            name: name.into(),
-            preview,
-            preview_lines,
-            expanded: false,
-            hovered: false,
-            painted: RefCell::new(None),
-        })
+        Self::new(Kind::Result(ToolOut::new(ok, name.into(), preview.into())))
     }
 
     /// The row for a stored result: the tool's own sketch if it made one
@@ -616,8 +405,8 @@ impl Row {
 
     /// Say `said` beside this row's first line, until `FLASH` has passed.
     pub fn say_copied(&mut self, said: String) {
-        if let Kind::Code { copied, .. } | Kind::Block { copied, .. } = &mut self.0 {
-            *copied = Some((said, Instant::now()));
+        if let Kind::Code(Code { note, .. }) | Kind::Block(Block { note, .. }) = &mut self.0 {
+            note.copied(said);
             self.1.clear();
         }
     }
@@ -625,14 +414,8 @@ impl Row {
     /// Whether a badge heads this row at `width`, for a note to stand beside.
     pub fn badged(&self, paint: &Paint, width: usize) -> bool {
         match &self.0 {
-            Kind::Code { .. } => true,
-            Kind::Block { painted, .. } => {
-                self.line(0, paint, width);
-                painted
-                    .borrow()
-                    .as_ref()
-                    .is_some_and(|(.., badged)| *badged)
-            }
+            Kind::Code(_) => true,
+            Kind::Block(b) => b.badged(paint, width),
             _ => false,
         }
     }
@@ -641,8 +424,8 @@ impl Row {
     /// of a diagram or table.
     pub fn code(&self) -> Option<&str> {
         match &self.0 {
-            Kind::Code { code, .. } => Some(code),
-            Kind::Block { source, .. } => Some(source),
+            Kind::Code(c) => Some(&c.code),
+            Kind::Block(b) => Some(&b.source),
             _ => None,
         }
     }
@@ -650,7 +433,7 @@ impl Row {
     /// The tool's name if this row is a tool result.
     pub fn tool_name(&self) -> Option<&str> {
         match &self.0 {
-            Kind::Result { name, .. } => Some(name),
+            Kind::Result(r) => Some(&r.name),
             _ => None,
         }
     }
@@ -658,7 +441,7 @@ impl Row {
     /// The tool's preview if this row is a tool result.
     pub fn tool_preview(&self) -> Option<&str> {
         match &self.0 {
-            Kind::Result { preview, .. } => Some(preview),
+            Kind::Result(r) => Some(&r.preview),
             _ => None,
         }
     }
@@ -666,7 +449,7 @@ impl Row {
     /// Whether this tool result succeeded.
     pub fn ok(&self) -> Option<bool> {
         match &self.0 {
-            Kind::Result { ok, .. } => Some(*ok),
+            Kind::Result(r) => Some(r.ok),
             _ => None,
         }
     }
@@ -734,40 +517,13 @@ impl Row {
         match &self.0 {
             Kind::Answer(_)
             | Kind::CodeLine(_)
-            | Kind::Code { .. }
-            | Kind::Block { .. }
+            | Kind::Code(_)
+            | Kind::Block(_)
             | Kind::Notice { .. }
             | Kind::Said { .. } => 1,
-            Kind::Result {
-                preview_lines,
-                expanded,
-                ..
-            } => {
-                if *preview_lines <= render::SKETCHED_ROWS {
-                    (*preview_lines).max(1)
-                } else if *expanded {
-                    *preview_lines + 1
-                } else {
-                    render::SKETCHED_ROWS + 1
-                }
-            }
-            Kind::Relayed { body, open, .. } => 1 + if *open { body.len() } else { 0 },
-            Kind::Steps {
-                steps,
-                pending,
-                folded,
-                ..
-            } => {
-                if *folded || !expandable(steps, pending) {
-                    return 1;
-                }
-                match lone(steps, pending) {
-                    // The block is the group: its lines, with no line above.
-                    Some(Step::Thinking { lines, .. }) => lines.len(),
-                    Some(Step::Tool(t)) => 1 + t.body.len(),
-                    None => 1 + steps.iter().map(Step::len).sum::<usize>() + pending.len(),
-                }
-            }
+            Kind::Result(r) => r.len(),
+            Kind::Relayed(r) => r.len(),
+            Kind::Steps(g) => g.len(),
         }
     }
 
@@ -806,43 +562,8 @@ impl Row {
             Kind::Said { border, body, .. } => (body.clone(), Some(border.clone())),
             Kind::Answer(text) => (text.clone(), None),
             Kind::CodeLine(line) => (line.clone(), Some(Line::from(CODE_INDENT))),
-            Kind::Code {
-                badge,
-                hovered,
-                copied,
-                ..
-            } => (
-                beside(
-                    bolded(badge.clone(), *hovered),
-                    copied.as_ref().map(|(said, _)| said.as_str()),
-                    paint,
-                ),
-                None,
-            ),
-            Kind::Block {
-                form,
-                source,
-                painted,
-                hovered,
-                copied,
-            } => {
-                let mut held = painted.borrow_mut();
-                let (line, badged) = match held.as_ref() {
-                    Some((at, line, badged)) if *at == width => (line.clone(), *badged),
-                    _ => {
-                        let (line, badged) = block_at(*form, source, paint, width);
-                        *held = Some((width, line.clone(), badged));
-                        (line, badged)
-                    }
-                };
-                let line = bolded(line, *hovered && badged);
-                // Beside a table's border it could wrap and split the table.
-                let copied = copied
-                    .as_ref()
-                    .map(|(said, _)| said.as_str())
-                    .filter(|_| badged);
-                (beside(line, copied, paint), None)
-            }
+            Kind::Code(c) => (c.line(paint), None),
+            Kind::Block(b) => (b.line(paint, width), None),
             Kind::Notice { text, times } if *times == 1 => (text.clone(), None),
             Kind::Notice { text, times } => {
                 // The count wears the muted style whatever the line it trails,
@@ -851,76 +572,9 @@ impl Row {
                 spans.push(paint.span(&paint.theme.muted, format!(" ×{times}")));
                 (Line::from(spans), None)
             }
-            Kind::Result {
-                ok,
-                name,
-                preview,
-                expanded,
-                hovered,
-                painted,
-                ..
-            } => {
-                let mut painted = painted.borrow_mut();
-                let rows = match &mut *painted {
-                    Some((w, rows)) if *w == width => rows,
-                    slot => {
-                        let rows = render::result_rows(
-                            !*ok, name, preview, *expanded, *hovered, paint, width,
-                        );
-                        &mut slot.insert((width, rows)).1
-                    }
-                };
-                (rows.get(i).cloned().unwrap_or_default(), None)
-            }
-            Kind::Relayed {
-                label,
-                body,
-                hovered,
-                ..
-            } if i == 0 => (
-                relayed_head(label, body.len(), *hovered, paint, width),
-                None,
-            ),
-            Kind::Relayed { body, .. } => {
-                let (line, code) = body.get(i - 1).cloned().unwrap_or_default();
-                let indent = if code {
-                    format!("{STEP_INDENT}{CODE_INDENT}")
-                } else {
-                    STEP_INDENT.to_string()
-                };
-                (line, Some(Line::from(indent)))
-            }
-            Kind::Steps {
-                steps,
-                pending,
-                folded,
-                hovered,
-                spinner,
-            } => {
-                let open = !*folded && expandable(steps, pending);
-                let hover = |at: usize| *hovered == Some(at);
-                let under = |indent: &'static str| Some(Line::from(indent));
-                match lone(steps, pending) {
-                    Some(Step::Thinking { lines, .. }) if open => {
-                        let mut line = lines[i].clone();
-                        // Bold as `span_hovered` bolds: only where there is colour.
-                        if hover(i) && paint.color {
-                            for span in &mut line.spans {
-                                span.style = Paint::lit(span.style);
-                            }
-                        }
-                        (line, None)
-                    }
-                    Some(Step::Tool(t)) if open && i > 0 => {
-                        (body_line(t, i - 1, paint), under(STEP_INDENT))
-                    }
-                    _ if !open || i == 0 => (
-                        steps_header(steps, pending, open, hover(0), *spinner, paint, width),
-                        None,
-                    ),
-                    _ => step_line(steps, pending, i - 1, hover(i), *spinner, paint, width),
-                }
-            }
+            Kind::Result(r) => (r.line(i, paint, width), None),
+            Kind::Relayed(r) => r.line(i, paint, width),
+            Kind::Steps(g) => g.line(i, paint, width),
         }
     }
 
@@ -935,25 +589,20 @@ impl Row {
 
     /// Whether this row is the group holding reasoning block `id`.
     pub fn holds_block(&self, id: u64) -> bool {
-        match &self.0 {
-            Kind::Steps { steps, .. } => steps
-                .iter()
-                .any(|s| matches!(s, Step::Thinking { block, .. } if *block == id)),
-            _ => false,
-        }
+        matches!(&self.0, Kind::Steps(g) if g.holds_block(id))
     }
 
     /// Whether this row is folded, and the handle to change it.
     pub fn folded(&self) -> Option<bool> {
         match &self.0 {
-            Kind::Steps { folded, .. } => Some(*folded),
+            Kind::Steps(g) => Some(g.folded),
             _ => None,
         }
     }
 
     pub fn set_folded(&mut self, to: bool) {
-        if let Kind::Steps { folded, .. } = &mut self.0 {
-            *folded = to;
+        if let Kind::Steps(g) = &mut self.0 {
+            g.folded = to;
             self.1.clear();
         }
     }
@@ -961,37 +610,19 @@ impl Row {
     /// Block `id` ended: folds to its first line if the group is folded,
     /// stays open if not; goes if it never had a line.
     pub fn end_block(&mut self, id: u64) -> bool {
-        let Kind::Steps { steps, folded, .. } = &mut self.0 else {
+        let Kind::Steps(g) = &mut self.0 else {
             return false;
         };
-        let hidden = *folded;
-        steps.retain_mut(|s| match s {
-            Step::Thinking {
-                block,
-                lines,
-                open,
-                live,
-            } if *block == id => {
-                *open = !hidden && *open;
-                *live = false;
-                !lines.is_empty()
-            }
-            _ => true,
-        });
+        let emptied = g.end_block(id);
         self.1.clear();
-        steps.is_empty()
+        emptied
     }
 
     /// Append a finished line to reasoning block `id`. A no-op anywhere else,
     /// which no caller can reach: the row is found by `holds_block`.
     pub fn push_line(&mut self, id: u64, line: Line<'static>) {
-        if let Kind::Steps { steps, .. } = &mut self.0
-            && let Some(Step::Thinking { lines, .. }) = steps
-                .iter_mut()
-                .rev()
-                .find(|s| matches!(s, Step::Thinking { block, .. } if *block == id))
-        {
-            lines.push(line);
+        if let Kind::Steps(g) = &mut self.0 {
+            g.push_line(id, line);
             self.1.clear();
         }
     }
@@ -1160,26 +791,6 @@ mod height_tests {
     }
 }
 
-// A relayed turn's own line: its label, and how much opening it shows.
-fn relayed_head(
-    label: &str,
-    lines: usize,
-    hovered: bool,
-    paint: &Paint,
-    width: usize,
-) -> Line<'static> {
-    let tail = match lines {
-        0 => String::new(),
-        n => format!("{}{}", icons::PART_SEP, count(n, "line")),
-    };
-    let room = width.saturating_sub(2 + UnicodeWidthStr::width(tail.as_str()) + 1);
-    let text = pi_store::text::clip(label, room.max(8));
-    Line::from(vec![
-        paint.span_hovered(hovered, &paint.theme.prompt.color, icons::RELAYED_MARK),
-        paint.span_hovered(hovered, &paint.theme.muted, format!(" {text}{tail}")),
-    ])
-}
-
 // A code block's line indented as an answer's is, standing on its own.
 fn set_off(line: Line<'static>, code: bool) -> Line<'static> {
     if !code {
@@ -1188,67 +799,4 @@ fn set_off(line: Line<'static>, code: bool) -> Line<'static> {
     let mut spans = vec![Span::raw(CODE_INDENT)];
     spans.extend(line.spans);
     Line::from(spans)
-}
-
-// The badge a hovered row leads with, in bold: bold is no wider.
-fn bolded(mut line: Line<'static>, hovered: bool) -> Line<'static> {
-    if hovered && let Some(badge) = line.spans.first_mut() {
-        badge.style = badge.style.add_modifier(Modifier::BOLD);
-    }
-    line
-}
-
-// `said`, muted, closing the first line, as a block's note does.
-fn beside(mut line: Line<'static>, said: Option<&str>, paint: &Paint) -> Line<'static> {
-    if let Some(said) = said {
-        let end = line
-            .spans
-            .iter()
-            .position(|s| s.content.starts_with('\n'))
-            .unwrap_or(line.spans.len());
-        line.spans
-            .insert(end, paint.span(&paint.theme.muted, format!(" {said}")));
-    }
-    line
-}
-
-// A block row at `width`: drawn when it fits, else its source under a badge
-// saying what it would need. Whether a badge heads it: a drawn table has none.
-fn block_at(form: Form, source: &str, paint: &Paint, width: usize) -> (Line<'static>, bool) {
-    use crate::block::{Drawn, draw, note};
-    let joined = |lines: Vec<Line<'static>>| {
-        let mut spans = Vec::new();
-        for (at, line) in lines.into_iter().enumerate() {
-            if at > 0 {
-                spans.push(Span::raw("\n"));
-            }
-            spans.extend(line.spans);
-        }
-        Line::from(spans)
-    };
-    let source_under = |lang: &str, note: &str| {
-        let mut spans = render::badge(lang, note, paint).spans;
-        spans.push(Span::raw(format!("\n{source}")));
-        Line::from(spans)
-    };
-    match form {
-        Form::Mermaid => match draw(source, Some(width)) {
-            Drawn::Fits(diagram) => {
-                let mut spans = render::badge("mermaid", "", paint).spans;
-                spans.push(Span::raw(format!("\n{diagram}")));
-                (Line::from(spans), true)
-            }
-            Drawn::Wide { needs, has } => (source_under("mermaid", &note(needs, has)), true),
-            Drawn::Unread => (source_under("mermaid", ""), true),
-        },
-        Form::Table => {
-            let lines = render::render_markdown(source, paint);
-            let needs = lines.iter().map(Line::width).max().unwrap_or(0);
-            if needs <= width {
-                (joined(lines), false)
-            } else {
-                (source_under("table", &note(needs, width)), true)
-            }
-        }
-    }
 }

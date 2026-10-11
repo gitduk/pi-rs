@@ -4,8 +4,8 @@
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use super::{clipped, count};
-use crate::render::Paint;
+use super::{Fold, Opening, clipped, count, set_off};
+use crate::render::{self, Paint};
 use crate::tui::{THINKING, screen};
 use pi_store::icons;
 
@@ -15,7 +15,7 @@ pub struct FoldedTool {
     pub preview: String,
     // What the step shows opened, under its line: the lines of the argument
     // past the first the line names (`asked` of them), then what came back.
-    pub(super) body: Vec<String>,
+    body: Vec<String>,
     asked: usize,
     open: bool,
 }
@@ -123,7 +123,7 @@ fn thought(steps: &[Step]) -> Option<usize> {
 
 // The one step of a group that holds nothing else. Such a group has no list
 // to open: opening it opens the step.
-pub(super) fn lone<'a>(steps: &'a [Step], pending: &[PendingTool]) -> Option<&'a Step> {
+fn lone<'a>(steps: &'a [Step], pending: &[PendingTool]) -> Option<&'a Step> {
     match (steps, pending) {
         ([step], []) => Some(step),
         _ => None,
@@ -131,7 +131,7 @@ pub(super) fn lone<'a>(steps: &'a [Step], pending: &[PendingTool]) -> Option<&'a
 }
 
 // Whether unfolding would show more than the row's own line.
-pub(super) fn expandable(steps: &[Step], pending: &[PendingTool]) -> bool {
+fn expandable(steps: &[Step], pending: &[PendingTool]) -> bool {
     match lone(steps, pending) {
         Some(Step::Tool(t)) => !t.body.is_empty(),
         Some(Step::Thinking { lines, .. }) => !lines.is_empty(),
@@ -265,14 +265,14 @@ fn pending_head(p: &PendingTool, tick: usize) -> Head {
 }
 
 impl Step {
-    pub(super) fn is_open(&self) -> bool {
+    fn is_open(&self) -> bool {
         match self {
             Step::Tool(t) => t.open,
             Step::Thinking { open, .. } => *open,
         }
     }
 
-    pub(super) fn flip(&mut self) {
+    fn flip(&mut self) {
         match self {
             Step::Tool(t) => t.open = !t.open,
             Step::Thinking { open, .. } => *open = !*open,
@@ -288,7 +288,7 @@ impl Step {
     }
 
     // The lines it takes in an unfolded group.
-    pub(super) fn len(&self) -> usize {
+    fn len(&self) -> usize {
         1 + if self.is_open() { self.body_len() } else { 0 }
     }
 
@@ -317,7 +317,7 @@ impl Step {
 
     // Whether its line opens: there is more under it, or more of it than
     // the width shows.
-    pub(super) fn opens(&self, width: usize) -> bool {
+    fn opens(&self, width: usize) -> bool {
         self.is_open()
             || self.body_len() > 0
             || self.head().cut(width.saturating_sub(STEP_INDENT.len()))
@@ -325,12 +325,12 @@ impl Step {
 }
 
 // What line `i` of an unfolded group's list sits in, and how far into it.
-pub(super) enum Unit<'a> {
+enum Unit<'a> {
     Step(&'a Step),
     Pending(&'a PendingTool),
 }
 
-pub(super) fn unit_at<'a>(
+fn unit_at<'a>(
     steps: &'a [Step],
     pending: &'a [PendingTool],
     i: usize,
@@ -354,7 +354,7 @@ fn walk(steps: &[Step], mut i: usize) -> Result<(usize, usize), usize> {
 }
 
 // The step whose own line is line `i` of the list.
-pub(super) fn step_index(steps: &[Step], i: usize) -> Option<usize> {
+fn step_index(steps: &[Step], i: usize) -> Option<usize> {
     match walk(steps, i) {
         Ok((k, 0)) => Some(k),
         _ => None,
@@ -363,7 +363,7 @@ pub(super) fn step_index(steps: &[Step], i: usize) -> Option<usize> {
 
 // A group's own line: lists its steps, or (folded) names its newest
 // call so the line holds still when the result lands.
-pub(super) fn steps_header(
+fn steps_header(
     steps: &[Step],
     pending: &[PendingTool],
     open: bool,
@@ -452,7 +452,7 @@ pub(super) fn steps_header(
 
 // A line of what an opened call shows: the argument's own lines in the
 // group's voice, then what came back in the plain one.
-pub(super) fn body_line(t: &FoldedTool, j: usize, paint: &Paint) -> Line<'static> {
+fn body_line(t: &FoldedTool, j: usize, paint: &Paint) -> Line<'static> {
     let text = t.body.get(j).cloned().unwrap_or_default();
     if j < t.asked {
         Line::from(paint.span(&paint.theme.muted, text))
@@ -463,7 +463,7 @@ pub(super) fn body_line(t: &FoldedTool, j: usize, paint: &Paint) -> Line<'static
 
 // Line `i` of an unfolded group's list, the calls in flight last, with the
 // indent it sits under as the border a wrap repeats.
-pub(super) fn step_line(
+fn step_line(
     steps: &[Step],
     pending: &[PendingTool],
     i: usize,
@@ -488,6 +488,264 @@ pub(super) fn step_line(
         None => (Line::default(), STEP_INDENT),
     };
     (line, Some(Line::from(indent)))
+}
+
+/// The run's working behind one fold: read-only calls that landed well and
+/// the reasoning around them, in order.
+pub(super) struct Group {
+    steps: Vec<Step>,
+    // Calls in flight this row draws: not in the scrollback yet, left
+    // to the row by the live block, since this is where they'll land.
+    pending: Vec<PendingTool>,
+    pub(super) folded: bool,
+    // The line under the mouse, when it is one a click opens or closes.
+    hovered: Option<usize>,
+    // The tick the marks of calls still out turn at.
+    spinner: usize,
+}
+
+impl Group {
+    pub(super) fn new(first: Step, folded: bool) -> Self {
+        Self {
+            steps: vec![first],
+            pending: Vec::new(),
+            folded,
+            hovered: None,
+            spinner: 0,
+        }
+    }
+
+    pub(super) fn join(&mut self, step: Step) {
+        self.steps.push(step);
+    }
+
+    fn lone(&self) -> Option<&Step> {
+        lone(&self.steps, &self.pending)
+    }
+
+    // Unfolded, and with more to show than its own line.
+    fn open(&self) -> bool {
+        !self.folded && self.expandable()
+    }
+
+    pub(super) fn len(&self) -> usize {
+        if !self.open() {
+            return 1;
+        }
+        match self.lone() {
+            // The block is the group: its lines, with no line above.
+            Some(Step::Thinking { lines, .. }) => lines.len(),
+            Some(Step::Tool(t)) => 1 + t.body.len(),
+            None => 1 + self.steps.iter().map(Step::len).sum::<usize>() + self.pending.len(),
+        }
+    }
+
+    pub(super) fn line(
+        &self,
+        i: usize,
+        paint: &Paint,
+        width: usize,
+    ) -> (Line<'static>, Option<Line<'static>>) {
+        let open = self.open();
+        let hover = |at: usize| self.hovered == Some(at);
+        let (steps, pending, tick) = (&self.steps, &self.pending, self.spinner);
+        match self.lone() {
+            Some(Step::Thinking { lines, .. }) if open => {
+                let mut line = lines[i].clone();
+                // Bold as `span_hovered` bolds: only where there is colour.
+                if hover(i) && paint.color {
+                    for span in &mut line.spans {
+                        span.style = Paint::lit(span.style);
+                    }
+                }
+                (line, None)
+            }
+            Some(Step::Tool(t)) if open && i > 0 => {
+                (body_line(t, i - 1, paint), Some(Line::from(STEP_INDENT)))
+            }
+            _ if !open || i == 0 => (
+                steps_header(steps, pending, open, hover(0), tick, paint, width),
+                None,
+            ),
+            _ => step_line(steps, pending, i - 1, hover(i), tick, paint, width),
+        }
+    }
+
+    // Hover line, spinner tick and the calls in flight it draws; whether
+    // its count may have moved — a tick alone can't, lines are clipped.
+    pub(super) fn update(
+        &mut self,
+        hovered: Option<usize>,
+        spin: usize,
+        held: &[PendingTool],
+    ) -> bool {
+        self.hovered = hovered;
+        self.spinner = spin;
+        if self.pending.as_slice() == held {
+            return false;
+        }
+        let reshaped =
+            self.pending.len() != held.len()
+                || self.pending.iter().zip(held).any(|(a, b)| {
+                    (&a.name, &a.preview, a.landed) != (&b.name, &b.preview, b.landed)
+                });
+        self.pending = held.to_vec();
+        reshaped
+    }
+
+    pub(super) fn holds_block(&self, id: u64) -> bool {
+        self.steps
+            .iter()
+            .any(|s| matches!(s, Step::Thinking { block, .. } if *block == id))
+    }
+
+    pub(super) fn shows_block(&self, id: u64) -> Option<&'static str> {
+        if self.folded {
+            return None;
+        }
+        let held = |s: &Step| matches!(s, Step::Thinking { block, .. } if *block == id);
+        match self.lone() {
+            Some(s) => held(s).then_some(""),
+            None => self
+                .steps
+                .iter()
+                .any(|s| held(s) && s.is_open())
+                .then_some(STEP_INDENT),
+        }
+    }
+
+    pub(super) fn push_line(&mut self, id: u64, line: Line<'static>) {
+        if let Some(Step::Thinking { lines, .. }) = self
+            .steps
+            .iter_mut()
+            .rev()
+            .find(|s| matches!(s, Step::Thinking { block, .. } if *block == id))
+        {
+            lines.push(line);
+        }
+    }
+
+    // Block `id` ended: whether the group is left with no step.
+    pub(super) fn end_block(&mut self, id: u64) -> bool {
+        let hidden = self.folded;
+        self.steps.retain_mut(|s| match s {
+            Step::Thinking {
+                block,
+                lines,
+                open,
+                live,
+            } if *block == id => {
+                *open = !hidden && *open;
+                *live = false;
+                !lines.is_empty()
+            }
+            _ => true,
+        });
+        self.steps.is_empty()
+    }
+
+    // The step whose own line is line `i` of the group, while it lists them.
+    fn listed_step(&self, i: usize) -> Option<usize> {
+        if self.folded || self.lone().is_some() {
+            return None;
+        }
+        step_index(&self.steps, i.checked_sub(1)?)
+    }
+}
+
+impl Fold for Group {
+    fn expandable(&self) -> bool {
+        expandable(&self.steps, &self.pending)
+    }
+
+    fn flip(&mut self) {
+        self.folded = !self.folded;
+    }
+
+    // The group from its own line, a listed step from its.
+    fn click_line(&self, i: usize, width: usize) -> Option<usize> {
+        if i == 0 {
+            return self.expandable().then_some(0);
+        }
+        self.listed_step(i)
+            .filter(|&k| self.steps[k].opens(width))
+            .map(|_| i)
+    }
+
+    fn toggle_at(&mut self, i: usize, width: usize) -> bool {
+        if i == 0 {
+            return self.expandable() && {
+                self.flip();
+                true
+            };
+        }
+        if self.click_line(i, width) != Some(i) {
+            return false;
+        }
+        let Some(k) = self.listed_step(i) else {
+            return false;
+        };
+        self.steps[k].flip();
+        true
+    }
+
+    // A step closed on line `i`: a lone one from the folded line, a
+    // listed one from its own.
+    fn opening(&self, i: usize, paint: &Paint, width: usize) -> Option<Opening> {
+        let (head, step) = match self.lone() {
+            // The group is the step: opening the group opens it.
+            Some(step) if i == 0 && self.folded => {
+                let head = steps_header(
+                    &self.steps,
+                    &self.pending,
+                    false,
+                    false,
+                    self.spinner,
+                    paint,
+                    width,
+                );
+                (head, step)
+            }
+            None if i > 0 => {
+                let step = &self.steps[self.listed_step(i)?];
+                if step.is_open() {
+                    return None;
+                }
+                let head = step_line(
+                    &self.steps,
+                    &self.pending,
+                    i - 1,
+                    false,
+                    self.spinner,
+                    paint,
+                    width,
+                )
+                .0;
+                (head, step)
+            }
+            _ => return None,
+        };
+        let body = match step {
+            // Read as an answer is, markdown and all: muted is for the
+            // transcript, where it steps back from what was said.
+            Step::Thinking { lines, .. } => {
+                let text: Vec<String> = lines.iter().map(screen::plain).collect();
+                render::render_coded(&text.join("\n"), paint)
+                    .into_iter()
+                    .map(|(line, coded)| match coded {
+                        // The badge copies its block, as an answer's does.
+                        render::Coded::Badge(code) => (line, Some(code)),
+                        render::Coded::Code => (set_off(line, true), None),
+                        render::Coded::Text => (line, None),
+                    })
+                    .collect()
+            }
+            Step::Tool(t) => (0..t.body.len())
+                .map(|j| (body_line(t, j, paint), None))
+                .collect(),
+        };
+        Some((head, body))
+    }
 }
 
 #[cfg(test)]
