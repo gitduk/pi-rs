@@ -33,9 +33,9 @@ pub async fn ask(
     };
 
     let mut acc = Accumulator::new(spec.model.clone());
-    let mut stream = crate::leashed(idle, transport.stream(spec, &req)).await??;
+    let mut stream = crate::turn::leashed(idle, transport.stream(spec, &req)).await??;
     loop {
-        let Some(ev) = crate::leashed(idle, stream.next()).await? else {
+        let Some(ev) = crate::turn::leashed(idle, stream.next()).await? else {
             break;
         };
         acc.push(ev?);

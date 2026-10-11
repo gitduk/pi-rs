@@ -1,19 +1,19 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use futures::StreamExt;
-use llm::message::{Message, ToolCall, ToolResult};
+use llm::message::{Message, ToolCall};
 use llm::model::ModelSpec;
 use llm::request::{Effort, Request};
-use llm::stream::{Accumulator, InvalidToolArgs, StreamEvent, Usage};
+use llm::stream::Usage;
 use llm::transport::Transport;
 use tokio::sync::mpsc::UnboundedSender;
-use tool::{Concurrency, Ctx, Registry, ToolError, ToolOutput};
+use tool::{Ctx, Registry};
 use tracing::Instrument as _;
 
 use crate::session::Session;
 
 pub mod approval;
+mod calls;
 pub mod compaction;
 pub mod event;
 pub mod hooks;
@@ -21,6 +21,7 @@ pub mod instructions;
 pub mod prompt;
 pub mod retry;
 pub mod seams;
+mod turn;
 pub use transcript as session;
 
 pub use approval::Ceiling;
@@ -43,10 +44,6 @@ const SQUEEZE: f64 = 0.6;
 
 // Attempts to shrink one turn before giving up on it.
 const MAX_SQUEEZE: usize = 3;
-
-// How much of a failed argument blob rides back to the model and log; past
-// it, show a window around serde's column rather than the head.
-const MAX_INVALID_ARGS_SHOWN: usize = 400;
 
 /// How long a run has to wind down after its stop token is tripped before it
 /// is dropped where it stands.
@@ -112,12 +109,6 @@ pub struct Agent {
     pub compactor: Arc<dyn Compactor>,
 }
 
-// What a streamed call resolves to before anything runs. Deciding first keeps
-// the result list aligned with the call list even when nothing executes.
-enum Action {
-    Reject(String),
-    Run(Arc<dyn tool::Tool>),
-}
 impl Agent {
     /// An agent with no tools: whoever assembles it installs a registry on
     /// the brief, as the identity compactor waits for a real one.
@@ -456,416 +447,6 @@ impl Agent {
     fn reply_within(&self, window: usize) -> usize {
         (self.model.spec.max_output_tokens as usize).min(window / 4)
     }
-
-    // Run one request, retrying while the provider says it is a passing problem.
-    #[allow(
-        clippy::result_large_err,
-        reason = "Ok carries a Completion too; boxing Err would not shrink the Result"
-    )]
-    async fn stream_turn(
-        &self,
-        req: &Request,
-        ctx: &Ctx,
-        tx: &UnboundedSender<Event>,
-        retry: &Retry,
-        generating: &mut Option<std::time::Duration>,
-    ) -> Result<llm::stream::Completion, (AgentError, Option<llm::stream::Completion>)> {
-        let mut attempt = 0usize;
-        loop {
-            let (err, partial) = match self.attempt(req, ctx, tx, retry, generating).await {
-                Ok(done) => return Ok(done),
-                Err(err) => err,
-            };
-            if matches!(err, AgentError::Cancelled) {
-                return Err((err, partial));
-            }
-            let e = match err {
-                AgentError::Llm(e) => e,
-                other => return Err((other, partial)),
-            };
-
-            if attempt >= retry.attempts || llm::classify(&e) != llm::Fault::Transient {
-                // The classification, not just the error: "why was this not
-                // retried" is answerable from the fault and from nothing else.
-                tracing::error!(
-                    target: "pi::wire",
-                    attempts = attempt,
-                    fault = ?llm::classify(&e),
-                    error = %e,
-                    "giving up"
-                );
-                return Err((AgentError::Llm(e), partial));
-            }
-
-            attempt += 1;
-            let delay = retry.delay(attempt);
-            say(
-                tx,
-                Event::Retrying {
-                    attempt,
-                    delay_ms: delay.as_millis() as u64,
-                    reason: e.to_string(),
-                },
-            );
-            tokio::select! {
-                _ = tokio::time::sleep(delay) => {}
-                _ = ctx.cancel.cancelled() => return Err((AgentError::Cancelled, None)),
-            }
-        }
-    }
-
-    // One attempt. Deltas reach the renderer as they arrive, so a retry shows
-    // as a false start — which the Retrying event is there to explain.
-    #[allow(
-        clippy::result_large_err,
-        reason = "Ok carries a Completion too; boxing Err would not shrink the Result"
-    )]
-    /// `generating` comes back as how long the model took to stream what it
-    /// sent: from the first piece of it to the end, waiting and reading the
-    /// prompt left out, so a long context does not read as a slow model.
-    async fn attempt(
-        &self,
-        req: &Request,
-        ctx: &Ctx,
-        tx: &UnboundedSender<Event>,
-        retry: &Retry,
-        generating: &mut Option<std::time::Duration>,
-    ) -> Result<llm::stream::Completion, (AgentError, Option<llm::stream::Completion>)> {
-        let mut started: Option<std::time::Instant> = None;
-        // A fresh accumulator per attempt: half a stream must not bleed into
-        // the message the retry produces.
-        let mut acc = Accumulator::new(self.model.spec.model.clone());
-        let idle = retry.idle;
-
-        let mut stream = tokio::select! {
-            r = leashed(idle, self.model.transport.stream(&self.model.spec, req)) => match r {
-                Ok(r) => r.map_err(|e| (AgentError::from(e), None))?,
-                Err(e) => return Err((AgentError::Llm(e), None)),
-            },
-            _ = ctx.cancel.cancelled() => return Err((AgentError::Cancelled, None)),
-        };
-
-        loop {
-            let next = tokio::select! {
-                n = leashed(idle, stream.next()) => match n {
-                    Ok(n) => n,
-                    // A provider that stops sending mid-stream would otherwise
-                    // hold the turn open until the user gives up.
-                    Err(e) => return Err((AgentError::Llm(e), None)),
-                },
-                _ = ctx.cancel.cancelled() => {
-                    return Err((AgentError::Cancelled, Some(acc.finish())));
-                }
-            };
-            let Some(ev) = next else { break };
-            let ev = match ev {
-                Ok(ev) => ev,
-                Err(e) => return Err((AgentError::from(e), None)),
-            };
-            if started.is_none() && !matches!(ev, StreamEvent::MessageStart { .. }) {
-                started = Some(std::time::Instant::now());
-            }
-            match &ev {
-                StreamEvent::TextDelta { delta, .. } => {
-                    say(tx, Event::TextDelta(delta.clone()));
-                }
-                StreamEvent::ReasoningDelta { delta, .. } => {
-                    say(tx, Event::ReasoningDelta(delta.clone()));
-                }
-                // The one measured number that arrives before the answer does.
-                StreamEvent::MessageStart { usage, .. } => {
-                    say(tx, Event::Usage(*usage));
-                }
-                _ => {}
-            }
-            acc.push(ev);
-        }
-        *generating = started.map(|at| at.elapsed());
-
-        // What the host owed and did not send, said once per session by the
-        // reporter. Said here too, not just the journal — else it looks ordinary.
-        for gap in self.model.transport.gaps() {
-            say(tx, Event::Warning(gap));
-        }
-
-        Ok(acc.finish())
-    }
-
-    // One result per call, in call order, except a cancelled one, left
-    // unanswered for `send_prompt` to close; `spent` carries nested costs up.
-    async fn run_calls(
-        &self,
-        calls: &[ToolCall],
-        bad: &HashMap<String, InvalidToolArgs>,
-        ctx: &Ctx,
-        tx: &UnboundedSender<Event>,
-        spent: &mut Usage,
-    ) -> (Vec<(ToolResult, Option<String>)>, bool) {
-        let mut actions: Vec<Action> = calls
-            .iter()
-            .map(|c| {
-                if let Some(invalid) = bad.get(&c.id) {
-                    let snippet = invalid_args_snippet(&invalid.raw, &invalid.error);
-                    tracing::warn!(
-                        target: "pi::wire",
-                        call = %c.id,
-                        name = %c.name,
-                        error = %invalid.error,
-                        raw = %snippet,
-                        "tool arguments were not valid JSON"
-                    );
-                    return Action::Reject(format!(
-                        "arguments were not valid JSON ({}); you sent: {snippet}; \
-                         send the whole object again",
-                        invalid.error,
-                    ));
-                }
-                let Some(tool) = self.brief.registry.get(&c.name) else {
-                    return Action::Reject(format!(
-                        "no tool named `{}`; available: {}",
-                        c.name,
-                        self.brief.registry.names().join(", ")
-                    ));
-                };
-                match self.brief.approver.approve(&c.name, tool.tier(), &c.args) {
-                    Decision::Allow => Action::Run(tool),
-                    Decision::Deny(why) => Action::Reject(why),
-                }
-            })
-            .collect();
-        // Hooks decide beside the approver, so a refusal is a denial like its.
-        let refusals = futures::future::join_all(calls.iter().zip(&actions).map(
-            |(call, action)| async move {
-                match action {
-                    Action::Run(_) => self
-                        .brief
-                        .hooks
-                        .before(&call.name, &call.args, ctx)
-                        .await
-                        .err(),
-                    Action::Reject(_) => None,
-                }
-            },
-        ))
-        .await;
-        for (action, refused) in actions.iter_mut().zip(refusals) {
-            if let Some(why) = refused {
-                *action = Action::Reject(why);
-            }
-        }
-
-        for (call, action) in calls.iter().zip(&actions) {
-            match action {
-                Action::Reject(why) => {
-                    say(
-                        tx,
-                        Event::ToolDenied {
-                            id: call.id.clone(),
-                            name: call.name.clone(),
-                            reason: why.clone(),
-                        },
-                    );
-                }
-                Action::Run(_) => {
-                    say(
-                        tx,
-                        Event::ToolStart {
-                            id: call.id.clone(),
-                            name: call.name.clone(),
-                            args: call.args.clone(),
-                        },
-                    );
-                }
-            }
-        }
-
-        // Awaited positionally, so results stay aligned with the calls.
-        let futures: Vec<_> = calls
-            .iter()
-            .zip(&actions)
-            .map(|(call, action)| {
-                async move {
-                    match action {
-                        Action::Reject(why) => Landed::Answered(
-                            ToolResult::error(call.id.clone(), &call.name, why.clone()),
-                            None,
-                        ),
-                        Action::Run(t) => {
-                            let ctx = &with_progress(ctx, call, tx);
-                            let mut output =
-                                tool::output::gated(t.as_ref(), call.args.clone(), ctx).await;
-                            if let Ok(out) = &mut output
-                                && let Some(note) = self
-                                    .brief
-                                    .hooks
-                                    .after(&call.name, &call.args, out, ctx)
-                                    .await
-                            {
-                                // Through the same gate as the tool's own output.
-                                let note = tool::output::bound(ToolOutput::text(note), ctx);
-                                out.content.extend(note.content);
-                            }
-                            landed(call, output, tx)
-                        }
-                    }
-                }
-                .instrument(ran(call))
-            })
-            .collect();
-        // Neighbouring Shared calls join; an Exclusive one waits for those
-        // ahead of it and holds back those behind.
-        let mut outcomes: Vec<Landed> = Vec::with_capacity(calls.len());
-        let mut shared = Vec::new();
-        for (f, action) in futures.into_iter().zip(&actions) {
-            if matches!(action, Action::Run(t) if t.concurrency() == Concurrency::Exclusive) {
-                outcomes.extend(futures::future::join_all(std::mem::take(&mut shared)).await);
-                outcomes.push(f.await);
-            } else {
-                shared.push(f);
-            }
-        }
-        outcomes.extend(futures::future::join_all(shared).await);
-
-        let mut results = Vec::with_capacity(calls.len());
-        let mut stopped = false;
-        for outcome in outcomes {
-            match outcome {
-                // Left unanswered: its siblings may have acted, so theirs are
-                // kept, and the next prompt closes this one as stopped.
-                Landed::Stopped => stopped = true,
-                Landed::Answered(result, preview) => results.push((result, preview)),
-                Landed::Ran(result, preview, used) => {
-                    // A nested run's spend belongs to the run that called it:
-                    // folded in here, it reaches `Event::Done` and the return.
-                    spent.add(&used);
-                    results.push((result, preview));
-                }
-            }
-        }
-
-        (results, stopped)
-    }
-}
-
-// What one call came to. The preview is what the screen drew for it, sent
-// along so a rebuild redraws those bytes instead of re-reading the content.
-enum Landed {
-    Stopped,
-    Answered(ToolResult, Option<String>),
-    Ran(ToolResult, Option<String>, Usage),
-}
-
-// The call's own context, its progress said as events under its id.
-fn with_progress(ctx: &Ctx, call: &ToolCall, tx: &UnboundedSender<Event>) -> Ctx {
-    let (id, tx) = (call.id.clone(), tx.clone());
-    ctx.clone().with_progress(Arc::new(move |text| {
-        say(
-            &tx,
-            Event::ToolProgress {
-                id: id.clone(),
-                text,
-            },
-        )
-    }))
-}
-
-// A call's output as its result, its end said as it lands.
-fn landed(
-    call: &ToolCall,
-    output: Result<ToolOutput, ToolError>,
-    tx: &UnboundedSender<Event>,
-) -> Landed {
-    match output {
-        Err(ToolError::Cancelled) => Landed::Stopped,
-        Err(e) => {
-            let mut body = e.to_string();
-            if let Some(code) = e.code() {
-                // A stable code lets the model branch on what happened
-                // instead of parsing the prose; the prose still leads.
-                body = format!("Error: {body} [code: {code}]");
-            }
-            // The pending live line draws from this same text, so a rebuild's
-            // equality check sees one source, not a live/rebuilt mismatch.
-            say(
-                tx,
-                Event::ToolEnd {
-                    id: call.id.clone(),
-                    name: call.name.clone(),
-                    is_error: true,
-                    preview: body.clone(),
-                },
-            );
-            Landed::Answered(
-                ToolResult::error(call.id.clone(), &call.name, body.clone()),
-                Some(body),
-            )
-        }
-        Ok(out) => {
-            say(
-                tx,
-                Event::ToolEnd {
-                    id: call.id.clone(),
-                    name: call.name.clone(),
-                    is_error: false,
-                    preview: out.preview(),
-                },
-            );
-            let result = ToolResult {
-                call: call.id.clone(),
-                name: call.name.clone(),
-                content: out.content,
-                is_error: false,
-            };
-            Landed::Ran(result, out.preview, out.spent)
-        }
-    }
-}
-
-fn ran(call: &ToolCall) -> tracing::Span {
-    tracing::info_span!(target: "pi::tool", "tool", name = %call.name, call = %call.id)
-}
-
-// Shown whole when it fits, else windowed around serde's 1-indexed column
-// (chars, not bytes — close enough); no column falls back to the tail.
-fn invalid_args_snippet(raw: &str, err: &str) -> String {
-    let chars: Vec<char> = raw.chars().collect();
-    if chars.len() <= MAX_INVALID_ARGS_SHOWN {
-        return raw.to_string();
-    }
-    let column = err
-        .rsplit_once("column ")
-        .and_then(|(_, n)| n.trim().parse::<usize>().ok())
-        .unwrap_or(chars.len())
-        .saturating_sub(1)
-        .min(chars.len());
-    let half = MAX_INVALID_ARGS_SHOWN / 2;
-    let to = (column.saturating_sub(half) + MAX_INVALID_ARGS_SHOWN).min(chars.len());
-    let from = to - MAX_INVALID_ARGS_SHOWN;
-
-    let mut out = String::new();
-    if from > 0 {
-        out.push('…');
-    }
-    out.extend(chars[from..to].iter());
-    if to < chars.len() {
-        out.push('…');
-    }
-    out
-}
-
-fn wedged(idle: std::time::Duration) -> llm::LlmError {
-    llm::LlmError::Stream(format!("the stream sent nothing for {}s", idle.as_secs()))
-}
-
-// The leash every provider call here keeps: silence past `idle` reads as a
-// wedged stream, whether the call drives a turn or a compaction.
-async fn leashed<T>(
-    idle: std::time::Duration,
-    fut: impl std::future::Future<Output = T>,
-) -> llm::Result<T> {
-    tokio::time::timeout(idle, fut)
-        .await
-        .map_err(|_| wedged(idle))
 }
 
 #[cfg(test)]
