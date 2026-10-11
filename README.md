@@ -148,8 +148,8 @@ refused, and resuming one from another directory moves it here.
   which reads its key from there; `later`, a prompt the model leaves itself
   for after a delay or on a period; and `wechat`, which bridges the session
   to a WeChat chat — ask for it, scan the QR the first time, and what you
-  send from the phone arrives as turns, `/stop` included. It runs
-  `pi-wechat`, from `cargo install --path crates/wechat`.
+  send from the phone arrives as turns, `/stop` included. It is a cargo
+  script, `wechat.rs`, so it needs nightly cargo and builds on first use.
 
 A server's prompts are commands too: `/<name>:<prompt> [args]` asks the server
 for the prompt's text and sends it, one typed word per argument, the last

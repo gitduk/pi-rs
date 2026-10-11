@@ -527,6 +527,7 @@ echo 'all done'"#,
             dir.path(),
             r#"echo '{"detach":"connected"}' >&3
 echo '{"input":"why did it fail"}' >&3
+echo '{"notice":"scan the QR"}' >&3
 echo '{"interrupt":true}' >&3
 read -r a <&3; read -r b <&3
 printf '%s\n%s\n' "$a" "$b" > heard"#,
@@ -542,8 +543,8 @@ printf '%s\n%s\n' "$a" "$b" > heard"#,
             .await
             .expect("it ended");
         assert_eq!(
-            sink.said.lock().unwrap()[1..3],
-            ["input why did it fail", "interrupt"]
+            sink.said.lock().unwrap()[1..4],
+            ["input why did it fail", "notice scan the QR", "interrupt"]
         );
         let heard = std::fs::read_to_string(dir.path().join("heard")).unwrap();
         assert_eq!(heard, "{\"started\":true}\n{\"reply\":\"parse.rs:40\"}\n");
