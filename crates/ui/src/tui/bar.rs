@@ -74,6 +74,90 @@ enum Piece {
 }
 
 impl Ui {
+    // The checkouts, one entry each in `refresh_tabs` order. Too narrow, the
+    // front one stays and each dropped end keeps its `…`.
+    pub(super) fn tabs_strip(&self, strip: usize) -> Vec<Span<'static>> {
+        let theme = &self.paint.theme;
+        let sep = self.tab_sep.width();
+        let Some(front) = self.tabs.iter().position(|t| t.mark == Mark::Front) else {
+            return Vec::new();
+        };
+        let items: Vec<Span<'static>> = self
+            .tabs
+            .iter()
+            .map(|tab| {
+                let (sign, style) = match tab.mark {
+                    Mark::Front => ("", &theme.input),
+                    // Settled lanes are their colour alone: a glyph would repeat
+                    // what `Done`/`Failed` already say.
+                    Mark::Done => ("", &theme.status.ok),
+                    Mark::Failed => ("", &theme.status.err),
+                    Mark::Plain => ("", &theme.muted),
+                    Mark::Unopened => (icons::UNOPENED_MARK, &theme.muted),
+                };
+                let label = if sign.is_empty() {
+                    tab.name.clone()
+                } else {
+                    format!("{sign} {}", tab.name)
+                };
+                self.paint.span(style, label)
+            })
+            .collect();
+        let dots = self.paint.span(&theme.muted, icons::ELLIPSIS);
+        let ell = dots.width();
+        let n = items.len();
+        let widths: Vec<usize> = items.iter().map(Span::width).collect();
+        // What the window would take on the row, the `…` a dropped end leaves
+        // behind included.
+        let fits = |lo: usize, hi: usize| {
+            widths[lo..=hi].iter().sum::<usize>()
+                + (hi - lo) * sep
+                + if lo > 0 { ell + sep } else { 0 }
+                + if hi + 1 < n { sep + ell } else { 0 }
+                <= strip
+        };
+        let (mut lo, mut hi) = (0, n - 1);
+        while !fits(lo, hi) && (lo < front || hi > front) {
+            let quiet = |at: usize| self.tabs[at].mark.quiet();
+            let (left, right) = (
+                (lo < front).then(|| quiet(lo)),
+                (hi > front).then(|| quiet(hi)),
+            );
+            // A quiet end drops before a marked one; of two alike, the one
+            // farther from the front. A tie goes right (older checkouts stay).
+            let drop_right = match (left, right) {
+                (Some(true), Some(false)) => false,
+                (Some(false), Some(true)) => true,
+                (None, _) => true,
+                (_, None) => false,
+                _ => hi - front >= front - lo,
+            };
+            if drop_right {
+                hi -= 1;
+            } else {
+                lo += 1;
+            }
+        }
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        if lo > 0 {
+            spans.push(dots.clone());
+            spans.push(self.tab_sep.clone());
+        }
+        for (i, item) in items.into_iter().enumerate().take(hi + 1).skip(lo) {
+            if i > lo {
+                spans.push(self.tab_sep.clone());
+            }
+            spans.push(item);
+        }
+        if hi + 1 < n {
+            spans.push(self.tab_sep.clone());
+            spans.push(dots);
+        }
+        // A front checkout too long for its share folds itself here rather
+        // than eating the parts beside it.
+        screen::fit(&Line::from(spans), strip).remove(0).spans
+    }
+
     /// The bar's rows, one per layout line. The only place an expired flash
     /// is dropped: every frame passes through here.
     pub(super) fn bar_lines(

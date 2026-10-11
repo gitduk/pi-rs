@@ -5,19 +5,16 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use ratatui::style::Style as RStyle;
-use ratatui::text::{Line, Span};
+use ratatui::text::Span;
 
 use super::browse::Read;
-use super::call::{drawn, pending_line};
 use super::editor::Editor;
 use super::menu::{Lists, MenuEntry};
 use super::mouse::{Regions, Target};
-use super::row::{Row, count};
-use super::screen::{self, Screen};
-use super::scrollback::body;
-use super::view::{StreamKind, View, snapshot};
+use super::row::Row;
+use super::screen::Screen;
+use super::view::View;
 use crate::render::Paint;
-use crate::status;
 use pi_core::core::Core;
 use pi_core::core::lane::Lane;
 use pi_core::core::resolve::Resolved;
@@ -266,185 +263,6 @@ impl Ui {
     // A theme style, as ratatui sees it.
     pub(super) fn rat_style(&self, s: &ThemeStyle) -> RStyle {
         crate::sgr::style_to_ratatui(s)
-    }
-
-    // Rows above the input: calls in flight the group isn't drawing, the
-    // open stream, the status line. Includes the count leading pending calls.
-    pub(super) fn live(
-        &self,
-        lane: &Lane,
-        view: &View,
-        row_holds: bool,
-        now: std::time::Instant,
-    ) -> (Vec<Line<'static>>, usize) {
-        let width = self.screen.usable();
-        let mut rows: Vec<Line<'static>> = Vec::new();
-        // Browse mode shows the conversation and nothing that happened on the
-        // way to it: the calls in flight, the thinking and the spinner all go.
-        let thinking = view.surface.stream.kind == StreamKind::Reasoning;
-
-        // Calls kept here: a foldable one doesn't show while the group
-        // above holds it. Collapsed: newest named with a count for the rest.
-        let shown = drawn(&view.state.tools, row_holds);
-        let mut pending = Vec::new();
-        if !self.browsing() {
-            if self.live_tools_shown {
-                pending.extend(
-                    shown
-                        .iter()
-                        .copied()
-                        .map(|t| pending_line(now, self.spinner, t, &self.paint)),
-                );
-            } else if let Some(t) = shown.last() {
-                let extra = if shown.len() > 1 {
-                    format!("{}{}", icons::PART_SEP, count(shown.len(), "call"))
-                } else {
-                    String::new()
-                };
-                let mut line = pending_line(now, self.spinner, t, &self.paint);
-                line.spans
-                    .push(self.paint.span(&self.paint.theme.muted, extra));
-                pending.push(line);
-            }
-        }
-        rows.extend(
-            pending
-                .into_iter()
-                .flat_map(|line| screen::fit(&line, width)),
-        );
-        // The draw tags screen rows by index, and a long summary wraps:
-        // count the rows the block takes, not the lines before they did.
-        let pending_rows = rows.len();
-
-        rows.extend(if thinking && self.browsing() {
-            Vec::new()
-        } else {
-            body(
-                &view.surface.folds,
-                &view.surface.scrollback,
-                thinking,
-                &view.surface.stream.text,
-                width,
-                &self.paint,
-            )
-        });
-
-        if lane.is_running() && !self.browsing() {
-            let mut parts = status::parts(&self.status, &snapshot(lane, view));
-            // A stopping run says so; an ordinary one needs no word — its
-            // ticking clock already says the turn is on.
-            parts.extend(view.state.retry.clone());
-            if view.state.stopping {
-                parts.push(format!("stopping{}", icons::ELLIPSIS));
-            }
-            // `status = []` asks for no line, and a blank row is not none.
-            if !parts.is_empty() {
-                let line = parts.join(icons::PART_SEP);
-                let muted = Line::from(self.paint.span(&self.paint.theme.muted, line));
-                rows.extend(screen::fit(&muted, width));
-            }
-        }
-        // Typed lines waiting their turn, muted under the said rule: off the
-        // transcript until they start, and up takes them back.
-        if !self.browsing() {
-            for line in view.queued.iter().filter_map(|q| q.line.as_deref()) {
-                let first = line.lines().next().unwrap_or_default();
-                let more = if line.contains('\n') {
-                    icons::ELLIPSIS
-                } else {
-                    ""
-                };
-                let text = format!("{} {first}{more}", icons::SAID_RULE);
-                let muted = Line::from(self.paint.span(&self.paint.theme.muted, text));
-                rows.extend(screen::fit(&muted, width));
-            }
-        }
-
-        (rows, pending_rows)
-    }
-
-    // The checkouts, one entry each in `refresh_tabs` order. Too narrow, the
-    // front one stays and each dropped end keeps its `…`.
-    pub(super) fn tabs_strip(&self, strip: usize) -> Vec<Span<'static>> {
-        let theme = &self.paint.theme;
-        let sep = self.tab_sep.width();
-        let Some(front) = self.tabs.iter().position(|t| t.mark == Mark::Front) else {
-            return Vec::new();
-        };
-        let items: Vec<Span<'static>> = self
-            .tabs
-            .iter()
-            .map(|tab| {
-                let (sign, style) = match tab.mark {
-                    Mark::Front => ("", &theme.input),
-                    // Settled lanes are their colour alone: a glyph would repeat
-                    // what `Done`/`Failed` already say.
-                    Mark::Done => ("", &theme.status.ok),
-                    Mark::Failed => ("", &theme.status.err),
-                    Mark::Plain => ("", &theme.muted),
-                    Mark::Unopened => (icons::UNOPENED_MARK, &theme.muted),
-                };
-                let label = if sign.is_empty() {
-                    tab.name.clone()
-                } else {
-                    format!("{sign} {}", tab.name)
-                };
-                self.paint.span(style, label)
-            })
-            .collect();
-        let dots = self.paint.span(&theme.muted, icons::ELLIPSIS);
-        let ell = dots.width();
-        let n = items.len();
-        let widths: Vec<usize> = items.iter().map(Span::width).collect();
-        // What the window would take on the row, the `…` a dropped end leaves
-        // behind included.
-        let fits = |lo: usize, hi: usize| {
-            widths[lo..=hi].iter().sum::<usize>()
-                + (hi - lo) * sep
-                + if lo > 0 { ell + sep } else { 0 }
-                + if hi + 1 < n { sep + ell } else { 0 }
-                <= strip
-        };
-        let (mut lo, mut hi) = (0, n - 1);
-        while !fits(lo, hi) && (lo < front || hi > front) {
-            let quiet = |at: usize| self.tabs[at].mark.quiet();
-            let (left, right) = (
-                (lo < front).then(|| quiet(lo)),
-                (hi > front).then(|| quiet(hi)),
-            );
-            // A quiet end drops before a marked one; of two alike, the one
-            // farther from the front. A tie goes right (older checkouts stay).
-            let drop_right = match (left, right) {
-                (Some(true), Some(false)) => false,
-                (Some(false), Some(true)) => true,
-                (None, _) => true,
-                (_, None) => false,
-                _ => hi - front >= front - lo,
-            };
-            if drop_right {
-                hi -= 1;
-            } else {
-                lo += 1;
-            }
-        }
-        let mut spans: Vec<Span<'static>> = Vec::new();
-        if lo > 0 {
-            spans.push(dots.clone());
-            spans.push(self.tab_sep.clone());
-        }
-        for (i, item) in items.into_iter().enumerate().take(hi + 1).skip(lo) {
-            if i > lo {
-                spans.push(self.tab_sep.clone());
-            }
-            spans.push(item);
-        }
-        if hi + 1 < n {
-            spans.push(self.tab_sep.clone());
-            spans.push(dots);
-        }
-        // A front checkout too long for its share folds itself here rather
-        // than eating the parts beside it.
-        screen::fit(&Line::from(spans), strip).remove(0).spans
     }
 
     // The checkout a step from this one (Normal `L`/`H`), wrapping at

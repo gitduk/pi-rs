@@ -9,14 +9,16 @@ use ratatui::widgets::{List, ListState};
 use super::Ui;
 use super::bar::Facts;
 use super::browse::{Page, Read};
-use super::call;
+use super::call::{self, drawn, pending_line};
 use super::mouse::{Regions, Target};
-use super::row::{PendingTool, Row};
+use super::row::{PendingTool, Row, count};
 use super::screen::{self, Rows};
-use super::scrollback::{Piece, ScrollbackRows, absorb_growth};
+use super::scrollback::{Piece, ScrollbackRows, absorb_growth, body};
 use super::ui::Focus;
-use super::view::{View, snapshot};
+use super::view::{StreamKind, View, snapshot};
 use crate::render;
+use crate::status;
+use pi_store::icons;
 
 impl Ui {
     pub(super) fn flush(&mut self, lane: &Lane, view: &mut View) {
@@ -321,5 +323,100 @@ impl Ui {
             Focus::Read(read) => read.scroll,
             _ => view.surface.scroll,
         }
+    }
+
+    // Rows above the input: calls in flight the group isn't drawing, the
+    // open stream, the status line. Includes the count leading pending calls.
+    pub(super) fn live(
+        &self,
+        lane: &Lane,
+        view: &View,
+        row_holds: bool,
+        now: std::time::Instant,
+    ) -> (Vec<Line<'static>>, usize) {
+        let width = self.screen.usable();
+        let mut rows: Vec<Line<'static>> = Vec::new();
+        // Browse mode shows the conversation and nothing that happened on the
+        // way to it: the calls in flight, the thinking and the spinner all go.
+        let thinking = view.surface.stream.kind == StreamKind::Reasoning;
+
+        // Calls kept here: a foldable one doesn't show while the group
+        // above holds it. Collapsed: newest named with a count for the rest.
+        let shown = drawn(&view.state.tools, row_holds);
+        let mut pending = Vec::new();
+        if !self.browsing() {
+            if self.live_tools_shown {
+                pending.extend(
+                    shown
+                        .iter()
+                        .copied()
+                        .map(|t| pending_line(now, self.spinner, t, &self.paint)),
+                );
+            } else if let Some(t) = shown.last() {
+                let extra = if shown.len() > 1 {
+                    format!("{}{}", icons::PART_SEP, count(shown.len(), "call"))
+                } else {
+                    String::new()
+                };
+                let mut line = pending_line(now, self.spinner, t, &self.paint);
+                line.spans
+                    .push(self.paint.span(&self.paint.theme.muted, extra));
+                pending.push(line);
+            }
+        }
+        rows.extend(
+            pending
+                .into_iter()
+                .flat_map(|line| screen::fit(&line, width)),
+        );
+        // The draw tags screen rows by index, and a long summary wraps:
+        // count the rows the block takes, not the lines before they did.
+        let pending_rows = rows.len();
+
+        rows.extend(if thinking && self.browsing() {
+            Vec::new()
+        } else {
+            body(
+                &view.surface.folds,
+                &view.surface.scrollback,
+                thinking,
+                &view.surface.stream.text,
+                width,
+                &self.paint,
+            )
+        });
+
+        if lane.is_running() && !self.browsing() {
+            let mut parts = status::parts(&self.status, &snapshot(lane, view));
+            // A stopping run says so; an ordinary one needs no word — its
+            // ticking clock already says the turn is on.
+            parts.extend(view.state.retry.clone());
+            if view.state.stopping {
+                parts.push(format!("stopping{}", icons::ELLIPSIS));
+            }
+            // `status = []` asks for no line, and a blank row is not none.
+            if !parts.is_empty() {
+                let line = parts.join(icons::PART_SEP);
+                let muted = Line::from(self.paint.span(&self.paint.theme.muted, line));
+                rows.extend(screen::fit(&muted, width));
+            }
+        }
+        // Typed lines waiting their turn, muted under the said rule: off the
+        // transcript until they start, and up takes them back.
+        if !self.browsing() {
+            for line in view.queued.iter().filter_map(|q| q.line.as_deref()) {
+                let first = line.lines().next().unwrap_or_default();
+                let more = if line.contains('\n') {
+                    icons::ELLIPSIS
+                } else {
+                    ""
+                };
+                let text = format!("{} {first}{more}", icons::SAID_RULE);
+                let muted = Line::from(self.paint.span(&self.paint.theme.muted, text));
+                rows.extend(screen::fit(&muted, width));
+            }
+        }
+
+        (rows, pending_rows)
     }
 }
