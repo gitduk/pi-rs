@@ -150,8 +150,11 @@ struct Sink {
     written: u64,
     capped: bool,
     // A failed flush means the file can no longer be trusted to hold what we
-    // send it; the sink stops writing and says so once on stderr.
+    // send it; the sink stops writing for good.
     failed: bool,
+    // Why, until whoever holds the terminal takes it: a raw-mode screen
+    // cannot take a stray stderr line.
+    unsaid: Option<String>,
     // Which file `out` writes to now; `retarget` moves it. Kept under the
     // sink's lock so [`path`] reads it back rather than a copy that could drift.
     path: PathBuf,
@@ -174,6 +177,7 @@ fn sink_for(file: File, path: &Path) -> Sink {
         written,
         capped: false,
         failed: false,
+        unsaid: None,
         path: path.to_path_buf(),
     }
 }
@@ -213,7 +217,10 @@ impl Journal {
             // A poisoned lock is a run to be rescued, not one to kill.
             return Ok(());
         };
+        // A failure not yet shown is still news after the move.
+        let unsaid = sink.unsaid.take();
         *sink = sink_for(file, path);
+        sink.unsaid = unsaid;
         Ok(())
     }
 
@@ -240,10 +247,12 @@ impl Journal {
             );
         }
         // Flushed per record: the records worth having are the ones written just
-        // before whatever killed the process. A failed flush warns on stderr.
+        // before whatever killed the process. A failed flush is told once.
         if let Err(e) = sink.out.flush() {
             sink.failed = true;
-            eprintln!("warning: journal write failed ({e}); recording stops and stays stopped");
+            sink.unsaid = Some(format!(
+                "journal write failed ({e}); recording stops and stays stopped"
+            ));
         }
     }
 }
@@ -510,6 +519,12 @@ static JOURNAL: std::sync::OnceLock<std::sync::Arc<Journal>> = std::sync::OnceLo
 /// is no second copy to keep in step.
 pub fn path() -> Option<PathBuf> {
     JOURNAL.get()?.sink.lock().ok().map(|s| s.path.clone())
+}
+
+/// Why the journal stopped recording, handed out once, to be shown by
+/// whoever owns the terminal.
+pub fn take_failure() -> Option<String> {
+    JOURNAL.get()?.sink.lock().ok()?.unsaid.take()
 }
 
 /// Drops journals nothing will be read back from, kept a fortnight — shorter

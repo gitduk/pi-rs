@@ -320,6 +320,9 @@ async fn main() -> Result<ExitCode> {
         // Subagents handed their transcripts to a background save; wait
         // for those to land before the runtime goes with them.
         archive::flush().await;
+        if let Some(why) = journal::take_failure() {
+            eprintln!("warning: {why}");
+        }
         distill_after(&args, &ended, &model_id);
         return out.map(|()| ExitCode::SUCCESS);
     };
@@ -388,6 +391,9 @@ async fn main() -> Result<ExitCode> {
     // A stopped run is the one whose subagents were cut short with a save
     // in flight.
     archive::flush().await;
+    if let Some(why) = journal::take_failure() {
+        eprintln!("warning: {why}");
+    }
     if keeps {
         distill_after(&args, &id, &model_id);
     }
