@@ -33,13 +33,11 @@ pub(super) struct Read {
 pub(super) enum Page {
     // The conversation alone: no thinking, calls or notices.
     Conversation,
-    // Lines read on their own, copied out when the page opened.
-    Text {
-        lines: Vec<PageLine>,
-        // A command's answer sits under the transcript it was asked over;
-        // what a step opens stands alone, its first line the one clicked.
-        under: bool,
-    },
+    // A command's answer, under the transcript it was asked over.
+    Reply(Vec<Line<'static>>),
+    // What a closed line opens onto, standing alone: its first line is the
+    // one clicked, copied out when the page opened.
+    Preview(Vec<PageLine>),
 }
 
 impl Ui {
@@ -48,22 +46,12 @@ impl Ui {
     }
 
     pub(super) fn browsing(&self) -> bool {
-        matches!(
-            &self.focus,
-            Focus::Read(Read {
-                page: Page::Conversation,
-                ..
-            })
-        )
+        matches!(self.page(), Some(Page::Conversation))
     }
 
-    // The lines a text page reads, and whether they sit under the transcript.
-    pub(super) fn page_text(&self) -> Option<(&[PageLine], bool)> {
+    pub(super) fn page(&self) -> Option<&Page> {
         match &self.focus {
-            Focus::Read(Read {
-                page: Page::Text { lines, under },
-                ..
-            }) => Some((lines, *under)),
+            Focus::Read(read) => Some(&read.page),
             _ => None,
         }
     }
@@ -73,38 +61,31 @@ impl Ui {
         self.open_page(Page::Conversation, 0);
     }
 
-    // What a click on line `n` of the text page does: copy the block it is
-    // the badge of, or, the head of text standing alone, close the page.
+    // What a click on line `n` of a preview does: copy the block it is the
+    // badge of, or, on the line clicked to open it, close the page.
     pub(super) fn text_click(&self, n: usize) -> Option<TextClick> {
-        let (lines, under) = self.page_text()?;
+        let Some(Page::Preview(lines)) = self.page() else {
+            return None;
+        };
         match &lines.get(n)?.1 {
             Some(code) => Some(TextClick::Copy(code.clone())),
-            None => (n == 0 && !under).then_some(TextClick::Close),
+            None => (n == 0).then_some(TextClick::Close),
         }
     }
 
-    // Read `lines` on their own, from the first.
-    pub(super) fn read_text(&mut self, lines: Vec<PageLine>) {
-        self.open_page(
-            Page::Text {
-                lines,
-                under: false,
-            },
-            super::screen::TOP,
-        );
+    // Read what a closed line opens onto, from its head.
+    pub(super) fn preview(&mut self, lines: Vec<PageLine>) {
+        self.open_page(Page::Preview(lines), super::screen::TOP);
     }
 
     /// Shows a command's reply, replacing any prior one. Empty output opens
     /// nothing, since dismissing an empty overlay is worse than silence.
     pub(super) fn open_reply(&mut self, content: Listing) {
         if !content.is_empty() {
-            let lines = super::reply::lines(&content, self.screen.usable(), &self.paint)
-                .into_iter()
-                .map(|line| (line, None))
-                .collect();
+            let lines = super::reply::lines(&content, self.screen.usable(), &self.paint);
             // From its first line: the draw stops `TOP` at the reply's head.
-            self.open_page(Page::Text { lines, under: true }, super::screen::TOP);
-        } else if self.page_text().is_some_and(|(_, under)| under) {
+            self.open_page(Page::Reply(lines), super::screen::TOP);
+        } else if matches!(self.page(), Some(Page::Reply(_))) {
             self.focus = Focus::Editor;
         }
     }

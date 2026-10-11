@@ -104,7 +104,7 @@ impl Ui {
                         && let Some((head, body)) = row.opening(line, &self.paint, width)
                         && body.len() > self.regions.history.height as usize / 2
                     {
-                        self.read_text(std::iter::once((head, None)).chain(body).collect());
+                        self.preview(std::iter::once((head, None)).chain(body).collect());
                         return;
                     }
                     let before = row.height(&self.paint, width);

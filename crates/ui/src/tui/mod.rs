@@ -6,6 +6,7 @@ mod browse;
 mod call;
 mod clipboard;
 mod editor;
+mod frame;
 mod job;
 mod menu;
 mod mouse;
