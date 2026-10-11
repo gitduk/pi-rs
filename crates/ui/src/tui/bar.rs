@@ -47,7 +47,11 @@ impl Facts {
     pub(super) fn of(lane: &Lane) -> Self {
         Self {
             model: lane.model().to_string(),
-            effort: lane.agent().brief.effort,
+            // A model that takes no effort thinks at no level the run sets.
+            effort: match lane.agent().spec().accepts_effort {
+                true => lane.agent().brief.effort,
+                false => Effort::Off,
+            },
             tier: lane.resolved().ceiling.into(),
             running: lane.is_running(),
             root: lane.root().to_path_buf(),

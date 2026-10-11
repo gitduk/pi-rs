@@ -24,7 +24,10 @@ impl Core {
         let sep = icons::PART_SEP;
         let mut rows = Vec::new();
 
-        let effort = lane.agent().brief.effort.name();
+        let effort = match spec.accepts_effort {
+            true => lane.agent().brief.effort.name(),
+            false => "unsupported",
+        };
         rows.push(Row::new([
             "model".into(),
             format!(
