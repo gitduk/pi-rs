@@ -63,6 +63,10 @@ pub async fn run(
         r = async {
             let drained =
                 tokio::try_join!(out.drain(&mut out_pipe, ctx), err.drain(&mut err_pipe, ctx));
+            // A pipe nobody reads any more would hold the child, and this wait, forever.
+            if drained.is_err() {
+                reap(group).await;
+            }
             let status = child.wait().await?;
             drained.map(|_| status)
         } => Some(r?),

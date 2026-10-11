@@ -56,6 +56,10 @@ pub struct Capture {
     tail: Vec<u8>,
     /// The spill handle and the locator it answers to, set together or not.
     file: Option<(std::fs::File, String)>,
+    /// Why the spill was given up, answered once the stream is dry: it still
+    /// drains, keeping only its two ends, or the child blocks on a full pipe.
+    failure: Option<ToolError>,
+    lost: bool,
     total: usize,
 }
 
@@ -75,33 +79,50 @@ impl Capture {
         loop {
             let n = reader.read(&mut buf).await?;
             if n == 0 {
-                return Ok(());
+                return self.failure.take().map_or(Ok(()), Err);
             }
-            self.absorb(&buf[..n], ctx)?;
+            self.absorb(&buf[..n], ctx);
         }
     }
 
-    fn absorb(&mut self, chunk: &[u8], ctx: &Ctx) -> Result<(), ToolError> {
+    fn absorb(&mut self, chunk: &[u8], ctx: &Ctx) {
         self.total += chunk.len();
-        if let Some((file, _)) = self.file.as_mut() {
-            file.write_all(chunk)?;
+        if self.file.is_some() || self.lost {
+            if let Some((file, _)) = self.file.as_mut()
+                && let Err(e) = file.write_all(chunk)
+            {
+                self.give_up(e.into());
+            }
             self.keep_tail(chunk);
-            return Ok(());
+            return;
         }
         if self.front.len() + chunk.len() <= spill::MAX_OUTPUT {
             self.front.extend_from_slice(chunk);
-            return Ok(());
+            return;
         }
         let room = spill::MAX_OUTPUT - self.front.len();
         self.front.extend_from_slice(&chunk[..room]);
         let rest = &chunk[room..];
+        match self.open_with(rest, ctx) {
+            Ok(opened) => self.file = Some(opened),
+            Err(why) => self.give_up(why),
+        }
+        self.keep_tail(rest);
+    }
+
+    fn open_with(&self, rest: &[u8], ctx: &Ctx) -> Result<(std::fs::File, String), ToolError> {
         let (path, locator) = spill::allocate(ctx)?;
         let mut file = open_spill(&path)?;
         file.write_all(&self.front)?;
         file.write_all(rest)?;
-        self.file = Some((file, locator));
-        self.keep_tail(rest);
-        Ok(())
+        Ok((file, locator))
+    }
+
+    // A half-written spill is not offered back: its locator would read as whole.
+    fn give_up(&mut self, why: ToolError) {
+        self.file = None;
+        self.lost = true;
+        self.failure = Some(why);
     }
 
     fn keep_tail(&mut self, chunk: &[u8]) {
@@ -118,23 +139,29 @@ impl Capture {
             front,
             tail,
             file,
+            lost,
             total,
+            ..
         } = self;
-        let Some((_, locator)) = file else {
+        if file.is_none() && !lost {
             return Captured {
                 total,
                 text: fold_repeats(&String::from_utf8_lossy(&front)),
                 spill: None,
             };
-        };
+        }
         let front = String::from_utf8_lossy(&front);
         let tail = String::from_utf8_lossy(&tail);
         let head = head_bytes(&front, VIEW);
         let tail = tail_bytes(&tail, VIEW);
+        let mut text = fold_repeats(&spill::elided(head, total, tail));
+        if lost {
+            text.push_str("\n… the omitted bytes are gone — spill failed\n");
+        }
         Captured {
             total,
-            text: fold_repeats(&spill::elided(head, total, tail)),
-            spill: Some(SpillRef {
+            text,
+            spill: file.map(|(_, locator)| SpillRef {
                 bytes: total,
                 locator,
             }),

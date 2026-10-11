@@ -469,6 +469,19 @@ async fn a_spill_that_cannot_be_written_fails_loudly() {
     assert_eq!(err.code(), Some("SPILL_FAILED"));
 }
 
+// More than a pipe holds: a capture that stopped reading at the failed spill
+// left the child blocked on its write until the timeout took it.
+#[tokio::test]
+async fn a_failed_spill_still_drains_the_child() {
+    let (dir, c) = common::spilling();
+    std::fs::write(dir.path().join("spill"), "in the way").unwrap();
+    let err = toolbox::bash::Bash
+        .execute(json!({ "command": "seq 1 200000", "timeout_ms": 5000 }), &c)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Some("SPILL_FAILED"));
+}
+
 // No NUL byte, so a NUL sniff calls it text, and a lossy decode would turn
 // every accent into U+FFFD: non-UTF-8 prose is refused rather than mangled.
 #[tokio::test]
