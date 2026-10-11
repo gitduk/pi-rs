@@ -232,6 +232,25 @@ impl Ui {
         }
     }
 
+    // The submitted line onto the screen: the row its answer lands under.
+    pub(super) fn submit(&mut self, view: &mut View, line: &str) {
+        let rows = Row::prompt(line, &self.paint);
+        super::scrollback::open_turn(&mut view.surface.scrollback);
+        view.surface.scrollback.extend(rows);
+        view.surface
+            .folds
+            .fold_previous(&mut view.surface.scrollback);
+    }
+
+    pub(super) fn submit_relayed(&mut self, view: &mut View, label: &str, line: &str) {
+        let row = Row::relayed(label, line, &self.paint);
+        super::scrollback::open_turn(&mut view.surface.scrollback);
+        view.surface.scrollback.push(row);
+        view.surface
+            .folds
+            .fold_previous(&mut view.surface.scrollback);
+    }
+
     // Files this lane's row and draws it now, so a rebuild draws the same
     // thing; moves the tail cursor here so a later adopt won't redraw it.
     pub(super) fn file_screen(&self, lane: &mut Lane, view: &mut View, line: &str) {

@@ -8,6 +8,7 @@ mod clipboard;
 mod editor;
 mod frame;
 mod job;
+mod keys;
 mod menu;
 mod mouse;
 mod reply;
