@@ -268,8 +268,8 @@ impl<'a> DoubleEndedIterator for IndexedScrollbackRows<'a> {
 }
 
 impl<'a> ScrollbackRows<'a> {
-    /// The window's rows; `keep` filters for browse mode (conversation
-    /// only). A dropped row counts as zero lines for the window.
+    /// The window's rows; `keep` filters for the conversation page
+    /// (conversation only). A dropped row counts as zero lines for the window.
     pub(super) fn new(
         rows: &'a [Row],
         paint: &'a Paint,

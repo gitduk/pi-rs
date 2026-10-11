@@ -446,6 +446,86 @@ impl Row {
         true
     }
 
+    /// What opening line `i` would show, while it is closed: the line as
+    /// it reads with nothing under the pointer, then what it opens onto — a
+    /// step's reasoning or call, a result whole, a relayed turn's text.
+    pub fn opening(
+        &self,
+        i: usize,
+        paint: &Paint,
+        width: usize,
+    ) -> Option<(Line<'static>, Vec<crate::tui::browse::PageLine>)> {
+        let (head, step) = match &self.0 {
+            Kind::Steps {
+                steps,
+                pending,
+                folded,
+                spinner,
+                ..
+            } => match lone(steps, pending) {
+                // The group is the step: opening the group opens it.
+                Some(step) if i == 0 && *folded => (
+                    steps_header(steps, pending, false, false, *spinner, paint, width),
+                    step,
+                ),
+                None if i > 0 && !*folded => {
+                    let step = steps
+                        .get(step_index(steps, i - 1)?)
+                        .filter(|s| !s.is_open())?;
+                    let head = step_line(steps, pending, i - 1, false, *spinner, paint, width).0;
+                    (head, step)
+                }
+                _ => return None,
+            },
+            Kind::Result {
+                ok,
+                name,
+                preview,
+                preview_lines,
+                expanded: false,
+                ..
+            } if *preview_lines > render::SKETCHED_ROWS => {
+                let mut rows =
+                    render::result_rows(!*ok, name, preview, true, false, paint, width).into_iter();
+                return Some((rows.next()?, rows.map(|line| (line, None)).collect()));
+            }
+            Kind::Relayed {
+                label,
+                body,
+                open: false,
+                ..
+            } if !body.is_empty() => {
+                return Some((
+                    relayed_head(label, body.len(), false, paint, width),
+                    body.iter()
+                        .map(|(line, code)| (set_off(line.clone(), *code), None))
+                        .collect(),
+                ));
+            }
+            _ => return None,
+        };
+        let body = match step {
+            // Read as an answer is, markdown and all: muted is for the
+            // transcript, where it steps back from what was said.
+            Step::Thinking { lines, .. } => {
+                let text: Vec<String> = lines.iter().map(super::screen::plain).collect();
+                render::render_coded(&text.join("\n"), paint)
+                    .into_iter()
+                    .map(|(line, coded)| match coded {
+                        // The badge copies its block, as an answer's does.
+                        render::Coded::Badge(code) => (line, Some(code)),
+                        render::Coded::Code => (set_off(line, true), None),
+                        render::Coded::Text => (line, None),
+                    })
+                    .collect()
+            }
+            Step::Tool(t) => (0..t.body.len())
+                .map(|j| (body_line(t, j, paint), None))
+                .collect(),
+        };
+        Some((head, body))
+    }
+
     /// Brings a row up to date before the frame draws: hover line, spinner
     /// tick, and the calls in flight this row draws.
     pub fn update_live(&mut self, hovered: Option<usize>, spin: usize, held: &[PendingTool]) {
@@ -797,25 +877,10 @@ impl Row {
                 body,
                 hovered,
                 ..
-            } if i == 0 => {
-                let tail = match body.len() {
-                    0 => String::new(),
-                    n => format!("{}{}", icons::PART_SEP, count(n, "line")),
-                };
-                let room = width.saturating_sub(2 + UnicodeWidthStr::width(tail.as_str()) + 1);
-                let text = pi_store::text::clip(label, room.max(8));
-                (
-                    Line::from(vec![
-                        paint.span_hovered(
-                            *hovered,
-                            &paint.theme.prompt.color,
-                            icons::RELAYED_MARK,
-                        ),
-                        paint.span_hovered(*hovered, &paint.theme.muted, format!(" {text}{tail}")),
-                    ]),
-                    None,
-                )
-            }
+            } if i == 0 => (
+                relayed_head(label, body.len(), *hovered, paint, width),
+                None,
+            ),
             Kind::Relayed { body, .. } => {
                 let (line, code) = body.get(i - 1).cloned().unwrap_or_default();
                 let indent = if code {
@@ -841,7 +906,7 @@ impl Row {
                         // Bold as `span_hovered` bolds: only where there is colour.
                         if hover(i) && paint.color {
                             for span in &mut line.spans {
-                                span.style = span.style.add_modifier(Modifier::BOLD);
+                                span.style = Paint::lit(span.style);
                             }
                         }
                         (line, None)
@@ -1093,6 +1158,36 @@ mod height_tests {
         assert_eq!(fresh.line_height(1, &paint, 2), 1);
         assert_eq!(fresh.height(&paint, 2), 4);
     }
+}
+
+// A relayed turn's own line: its label, and how much opening it shows.
+fn relayed_head(
+    label: &str,
+    lines: usize,
+    hovered: bool,
+    paint: &Paint,
+    width: usize,
+) -> Line<'static> {
+    let tail = match lines {
+        0 => String::new(),
+        n => format!("{}{}", icons::PART_SEP, count(n, "line")),
+    };
+    let room = width.saturating_sub(2 + UnicodeWidthStr::width(tail.as_str()) + 1);
+    let text = pi_store::text::clip(label, room.max(8));
+    Line::from(vec![
+        paint.span_hovered(hovered, &paint.theme.prompt.color, icons::RELAYED_MARK),
+        paint.span_hovered(hovered, &paint.theme.muted, format!(" {text}{tail}")),
+    ])
+}
+
+// A code block's line indented as an answer's is, standing on its own.
+fn set_off(line: Line<'static>, code: bool) -> Line<'static> {
+    if !code {
+        return line;
+    }
+    let mut spans = vec![Span::raw(CODE_INDENT)];
+    spans.extend(line.spans);
+    Line::from(spans)
 }
 
 // The badge a hovered row leads with, in bold: bold is no wider.

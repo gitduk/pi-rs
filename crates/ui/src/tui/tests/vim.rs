@@ -423,6 +423,11 @@ fn v_opens_the_conversation_view_on_an_empty_line() {
     let mut ui = vim_ui();
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
+    // The page's own scroll; the transcript's stays where it was.
+    let page = |ui: &crate::tui::Ui| match &ui.focus {
+        crate::tui::ui::Focus::Read(read) => read.scroll,
+        _ => usize::MAX,
+    };
     ui.vim = Some(Mode::Normal);
     view.surface.scrollback = (1..=40)
         .flat_map(|n| Row::answer(&format!("answer {n}"), &ui.paint))
@@ -443,42 +448,41 @@ fn v_opens_the_conversation_view_on_an_empty_line() {
     ui.key(&lane, &mut view, typed('x'), false);
     assert_eq!(ui.editor.text(), "", "nothing types into a hidden line");
     ui.key(&lane, &mut view, typed('k'), false);
-    assert!(view.surface.scroll > 0, "k walked the conversation back");
+    assert!(page(&ui) > 0, "k walked the conversation back");
 
     // The window keys are the empty line's own: `K`/`J` half a screen,
     // `G` and `gg` the conversation's two ends.
-    let (walked, half) = (view.surface.scroll, ui.half_scroll_step());
+    let (walked, half) = (page(&ui), ui.half_scroll_step());
     ui.key(&lane, &mut view, typed('K'), false);
-    assert_eq!(
-        view.surface.scroll,
-        walked + half,
-        "K is half a window back"
-    );
+    assert_eq!(page(&ui), walked + half, "K is half a window back");
     ui.key(&lane, &mut view, typed('J'), false);
-    assert_eq!(view.surface.scroll, walked, "and J undoes it");
+    assert_eq!(page(&ui), walked, "and J undoes it");
 
     // A lone `g` is half a pair: it moves nothing until the other half
     // arrives.
     ui.key(&lane, &mut view, typed('g'), false);
-    assert_eq!(view.surface.scroll, walked, "one g moves nothing");
+    assert_eq!(page(&ui), walked, "one g moves nothing");
     ui.key(&lane, &mut view, typed('g'), false);
-    assert_eq!(view.surface.scroll, screen::TOP, "gg is the top");
+    assert_eq!(page(&ui), screen::TOP, "gg is the top");
     ui.key(&lane, &mut view, typed('G'), false);
-    assert_eq!(view.surface.scroll, 0, "G is the newest rows");
+    assert_eq!(page(&ui), 0, "G is the newest rows");
 
     // A key that is not the second `g` ends the pair: the `k` here scrolls
     // its own row and leaves the `g` before it a first half, no pair.
     ui.key(&lane, &mut view, typed('g'), false);
     ui.key(&lane, &mut view, typed('k'), false);
     ui.key(&lane, &mut view, typed('g'), false);
-    assert_eq!(view.surface.scroll, 1, "a k between them is not a gg");
+    assert_eq!(page(&ui), 1, "a k between them is not a gg");
 
     // The half left armed in here goes with the mode: a `g` on each side
     // of it is not a pair.
     ui.key(&lane, &mut view, typed('g'), false);
     ui.key(&lane, &mut view, esc, false);
     assert!(!ui.browsing());
-    assert_eq!(view.surface.scroll, 0, "and leaves at the newest rows");
+    assert_eq!(
+        view.surface.scroll, 0,
+        "and leaves the transcript where it was"
+    );
     ui.key(&lane, &mut view, typed('g'), false);
     assert_eq!(
         view.surface.scroll, 0,

@@ -1,26 +1,137 @@
-//! Conversation-only view: user and model turns, without thinking, calls,
-//! or the editor.
+//! The reading page: the transcript region alone, the editor hidden, read
+//! with the pager keys. It reads the conversation, or lines of their own —
+//! what a command answered, or what a step opens.
 //!
-//! Shares the scrollback with other views, so nothing rebuilds on enter/exit.
+//! The page keeps its own scroll, so the transcript's is where it was when
+//! the page closes.
+
+use ratatui::text::Line;
 
 use super::Ui;
 use super::ui::Focus;
 use super::view::View;
+use pi_store::listing::Listing;
+
+// A line of a text page, with the code block a click on it copies when it
+// is that block's badge.
+pub(super) type PageLine = (Line<'static>, Option<String>);
+
+// What a click on a line of a text page does.
+pub(super) enum TextClick {
+    Copy(String),
+    Close,
+}
+
+pub(super) struct Read {
+    pub(super) page: Page,
+    // Rows the page is scrolled up by, as the transcript's `scroll`.
+    pub(super) scroll: usize,
+    // The rows the page measured last, as the transcript's `counted`.
+    pub(super) counted: Option<usize>,
+}
+
+pub(super) enum Page {
+    // The conversation alone: no thinking, calls or notices.
+    Conversation,
+    // Lines read on their own, copied out when the page opened.
+    Text {
+        lines: Vec<PageLine>,
+        // A command's answer sits under the transcript it was asked over;
+        // what a step opens stands alone, its first line the one clicked.
+        under: bool,
+    },
+}
 
 impl Ui {
+    pub(super) fn reading(&self) -> bool {
+        matches!(self.focus, Focus::Read(_))
+    }
+
     pub(super) fn browsing(&self) -> bool {
-        matches!(self.focus, Focus::Browse)
+        matches!(
+            &self.focus,
+            Focus::Read(Read {
+                page: Page::Conversation,
+                ..
+            })
+        )
+    }
+
+    // The lines a text page reads, and whether they sit under the transcript.
+    pub(super) fn page_text(&self) -> Option<(&[PageLine], bool)> {
+        match &self.focus {
+            Focus::Read(Read {
+                page: Page::Text { lines, under },
+                ..
+            }) => Some((lines, *under)),
+            _ => None,
+        }
     }
 
     /// Take the conversation view up, on the newest rows.
-    pub(super) fn browse(&mut self, view: &mut View) {
-        self.focus = Focus::Browse;
-        view.surface.scroll = 0;
+    pub(super) fn browse(&mut self) {
+        self.open_page(Page::Conversation, 0);
     }
 
-    // Scroll resets to 0; the prompt line itself is untouched here.
-    pub(super) fn leave_browse(&mut self, view: &mut View) {
-        self.focus = Focus::Editor;
-        view.surface.scroll = 0;
+    // What a click on line `n` of the text page does: copy the block it is
+    // the badge of, or, the head of text standing alone, close the page.
+    pub(super) fn text_click(&self, n: usize) -> Option<TextClick> {
+        let (lines, under) = self.page_text()?;
+        match &lines.get(n)?.1 {
+            Some(code) => Some(TextClick::Copy(code.clone())),
+            None => (n == 0 && !under).then_some(TextClick::Close),
+        }
+    }
+
+    // Read `lines` on their own, from the first.
+    pub(super) fn read_text(&mut self, lines: Vec<PageLine>) {
+        self.open_page(
+            Page::Text {
+                lines,
+                under: false,
+            },
+            super::screen::TOP,
+        );
+    }
+
+    /// Shows a command's reply, replacing any prior one. Empty output opens
+    /// nothing, since dismissing an empty overlay is worse than silence.
+    pub(super) fn open_reply(&mut self, content: Listing) {
+        if !content.is_empty() {
+            let lines = super::reply::lines(&content, self.screen.usable(), &self.paint)
+                .into_iter()
+                .map(|line| (line, None))
+                .collect();
+            // From its first line: the draw stops `TOP` at the reply's head.
+            self.open_page(Page::Text { lines, under: true }, super::screen::TOP);
+        } else if self.page_text().is_some_and(|(_, under)| under) {
+            self.focus = Focus::Editor;
+        }
+    }
+
+    fn open_page(&mut self, page: Page, scroll: usize) {
+        self.focus = Focus::Read(Read {
+            page,
+            scroll,
+            counted: None,
+        });
+    }
+
+    // The scroll the wheel and the pager keys move: the page's while one
+    // is up, else the transcript's.
+    pub(super) fn scroll_mut<'a>(&'a mut self, view: &'a mut View) -> &'a mut usize {
+        match &mut self.focus {
+            Focus::Read(read) => &mut read.scroll,
+            _ => &mut view.surface.scroll,
+        }
+    }
+
+    // A change the scroll was already moved for: the next frame measures
+    // from it rather than taking it for growth.
+    pub(super) fn rebase(&mut self, view: &mut View) {
+        view.surface.counted = None;
+        if let Focus::Read(read) = &mut self.focus {
+            read.counted = None;
+        }
     }
 }

@@ -27,7 +27,7 @@ impl Ui {
     pub(super) fn menu(&mut self) -> Vec<MenuEntry> {
         match &self.focus {
             Focus::Rewind(rows) => return rows.clone(),
-            Focus::Reply(_) | Focus::Browse => return Vec::new(),
+            Focus::Read(_) => return Vec::new(),
             Focus::Editor => {}
         }
         if self.picked_for.as_deref() != Some(self.editor.text()) {
@@ -244,12 +244,12 @@ impl Ui {
         let action = hit.map(|h| h.action);
 
         match action {
-            Some(Action::AppCancel) => return self.cancel(view, running),
+            Some(Action::AppCancel) => return self.cancel(running),
             Some(Action::AppQuit) => return Asked::Core(Intent::Builtin(Builtin::Quit)),
             _ => {}
         }
         match self.focus {
-            Focus::Reply(_) | Focus::Browse => self.pager_key(view, action),
+            Focus::Read(_) => self.pager_key(view, action),
             Focus::Rewind(_) => self.rewind_key(action),
             Focus::Editor => self.editor_key(lane, view, key, action, running),
         }
@@ -258,7 +258,7 @@ impl Ui {
     // The layers the key table reads, from who has the keyboard.
     fn layers(&mut self, running: bool) -> Layers {
         let surface = match self.focus {
-            Focus::Reply(_) | Focus::Browse => Surface::Pager,
+            Focus::Read(_) => Surface::Pager,
             Focus::Rewind(_) => Surface::Picker,
             Focus::Editor => {
                 if self.menu().is_empty() {
@@ -290,8 +290,8 @@ impl Ui {
 
     // The stop: whatever is over the editor closes, and a run stops. With
     // neither, it says the next one leaves.
-    fn cancel(&mut self, view: &mut View, running: bool) -> Asked {
-        let closed = self.close_overlay(view);
+    fn cancel(&mut self, running: bool) -> Asked {
+        let closed = self.close_overlay();
         if running {
             return Asked::Own(Deed::Interrupt);
         }
@@ -304,11 +304,10 @@ impl Ui {
 
     // Back to the line, from whatever has the keyboard; false when the line
     // had it already. The press that closed is not the first of a pair.
-    fn close_overlay(&mut self, view: &mut View) -> bool {
+    fn close_overlay(&mut self) -> bool {
         match self.focus {
             Focus::Editor => return false,
-            Focus::Browse => self.leave_browse(view),
-            Focus::Rewind(_) | Focus::Reply(_) => self.focus = Focus::Editor,
+            Focus::Read(_) | Focus::Rewind(_) => self.focus = Focus::Editor,
         }
         self.disarm();
         true
@@ -320,8 +319,8 @@ impl Ui {
         self.last_press = None;
     }
 
-    // A reply or the conversation view: the pager keys move it, and
-    // everything else is swallowed.
+    // The reading page: the pager keys move it, and everything else is
+    // swallowed.
     fn pager_key(&mut self, view: &mut View, action: Option<Action>) -> Asked {
         let (up, step) = match action {
             Some(Action::PagerDown) => (false, Stride::Line),
@@ -333,34 +332,19 @@ impl Ui {
             Some(Action::PagerBottom) => (false, Stride::End),
             Some(Action::PagerTop) => (true, Stride::End),
             Some(Action::PagerClose) => {
-                self.close_overlay(view);
+                self.close_overlay();
                 return Asked::Own(Deed::Nothing);
             }
             _ => return Asked::Own(Deed::Nothing),
         };
-        if matches!(self.focus, Focus::Browse) {
-            let rows = match step {
-                Stride::Line => 1,
-                Stride::Half => self.half_scroll_step(),
-                Stride::Page => self.page_scroll_step(),
-                Stride::End => screen::TOP,
-            };
-            self.scroll_view(view, up, rows);
-            return Asked::Own(Deed::Nothing);
-        }
-        let room = self.regions.menu.height as usize;
-        // Wraps at the drawing's width, not the terminal's: a row that wraps
-        // after this count would end up unreachable to scroll to.
-        let width = self.screen.usable();
-        // The last row of a full window is the count, not the reply.
-        let page = room.saturating_sub(1).max(1) as isize;
         let rows = match step {
             Stride::Line => 1,
-            Stride::Half => (page / 2).max(1),
-            Stride::Page => page,
-            Stride::End => isize::MAX,
+            Stride::Half => self.half_scroll_step(),
+            Stride::Page => self.page_scroll_step(),
+            Stride::End => screen::TOP,
         };
-        self.scrolled(if up { -rows } else { rows }, room, width)
+        self.scroll_view(view, up, rows);
+        Asked::Own(Deed::Nothing)
     }
 
     // The rewind selector: move, pick, or close; nothing else reaches it.
@@ -543,7 +527,7 @@ impl Ui {
             Some(Action::ScrollPageDown) => self.scroll_view(view, false, self.page_scroll_step()),
             Some(Action::ScrollHalfUp) => self.scroll_view(view, true, self.half_scroll_step()),
             Some(Action::ScrollHalfDown) => self.scroll_view(view, false, self.half_scroll_step()),
-            Some(Action::Browse) => self.browse(view),
+            Some(Action::Browse) => self.browse(),
             Some(Action::ThinkFold) => {
                 // The last group only. The switch is left alone, so the
                 // groups no one is touching keep what they had.
@@ -601,18 +585,9 @@ impl Ui {
         Asked::Own(Deed::Nothing)
     }
 
-    // The wheel scrolls what has the keyboard: a reply while one is up,
-    // else the transcript. Moves and clicks are the transcript's.
+    // The wheel scrolls what has the keyboard: the reading page while one
+    // is up, else the transcript.
     fn mouse(&mut self, view: &mut View, mouse: crossterm::event::MouseEvent) -> Asked {
-        if matches!(self.focus, Focus::Reply(_)) {
-            let room = self.regions.menu.height as usize;
-            let width = self.screen.usable();
-            match mouse.kind {
-                MouseEventKind::ScrollUp => return self.scrolled(-1, room, width),
-                MouseEventKind::ScrollDown => return self.scrolled(1, room, width),
-                _ => {}
-            }
-        }
         match mouse.kind {
             MouseEventKind::ScrollUp => {
                 self.selection = None;

@@ -74,7 +74,14 @@ impl Paint {
         if !hovered || !self.color {
             return self.span(style, body);
         }
-        self.span(&style.adding(Attr::Bold), body)
+        self.span(&style.lit(), body)
+    }
+
+    /// A drawn span's style under the pointer, as `Style::lit` has it.
+    pub fn lit(style: ratatui::style::Style) -> ratatui::style::Style {
+        style
+            .add_modifier(ratatui::style::Modifier::BOLD)
+            .remove_modifier(ratatui::style::Modifier::DIM)
     }
 
     /// The band `color` paints on this surface, or `None` on a surface that

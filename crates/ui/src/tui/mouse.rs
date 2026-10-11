@@ -4,6 +4,7 @@
 use ratatui::layout::{Constraint, Layout, Rect};
 
 use super::Ui;
+use super::browse::TextClick;
 use super::select::{self, Drawn, Point, Selection};
 use super::ui::Press;
 use super::view::View;
@@ -13,14 +14,15 @@ const MULTI_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
 
 impl Ui {
     pub(super) fn scroll_view(&mut self, view: &mut View, up: bool, step: usize) {
-        view.surface.scroll = if up {
-            view.surface.scroll.saturating_add(step)
+        let scroll = self.scroll_mut(view);
+        *scroll = if up {
+            scroll.saturating_add(step)
         } else {
-            view.surface.scroll.saturating_sub(step)
+            scroll.saturating_sub(step)
         };
     }
 
-    fn target_at(&self, row: u16) -> Option<Target> {
+    pub(super) fn target_at(&self, row: u16) -> Option<Target> {
         self.row_targets
             .get(row.checked_sub(self.regions.history.y)? as usize)
             .copied()
@@ -71,21 +73,21 @@ impl Ui {
         match self.target_at(row) {
             // Live rows rebuild every frame, so a flag flip is enough.
             Some(Target::PendingTools) => self.live_tools_shown = !self.live_tools_shown,
+            Some(Target::Text(n)) => match self.text_click(n) {
+                Some(TextClick::Copy(code)) => {
+                    let said = copy_out(&code);
+                    self.flash(said);
+                }
+                Some(TextClick::Close) => self.focus = super::ui::Focus::Editor,
+                None => {}
+            },
             _ => {
                 let width = self.screen.usable();
                 let hit = self.hovered_row(view, col, row);
                 if let Some((idx, code)) =
                     hit.and_then(|(idx, _)| Some((idx, view.surface.scrollback.get(idx)?.code()?)))
                 {
-                    let lines = code.lines().count();
-                    let copied = crossterm::execute!(
-                        std::io::stdout(),
-                        crossterm::clipboard::CopyToClipboard::to_clipboard_from(code)
-                    );
-                    let said = match copied {
-                        Ok(()) => format!("copied {}", super::row::count(lines, "line")),
-                        Err(e) => format!("not copied: {e}"),
-                    };
+                    let said = copy_out(code);
                     let row = &mut view.surface.scrollback[idx];
                     if row.badged(&self.paint, width) {
                         row.say_copied(said);
@@ -94,13 +96,27 @@ impl Ui {
                         self.flash(said);
                     }
                 } else if let Some((idx, line)) = hit
-                    && view
-                        .surface
-                        .scrollback
-                        .get_mut(idx)
-                        .is_some_and(|r| r.toggle_at(line, width))
+                    && let Some(row) = view.surface.scrollback.get_mut(idx)
                 {
-                    view.surface.counted = None;
+                    // Too long to read in place: read on a page of its own,
+                    // the line clicked heading it, and left folded here.
+                    if matches!(self.focus, super::ui::Focus::Editor)
+                        && let Some((head, body)) = row.opening(line, &self.paint, width)
+                        && body.len() > self.regions.history.height as usize / 2
+                    {
+                        self.read_text(std::iter::once((head, None)).chain(body).collect());
+                        return;
+                    }
+                    let before = row.height(&self.paint, width);
+                    if !row.toggle_at(line, width) {
+                        return;
+                    }
+                    let after = row.height(&self.paint, width);
+                    // What changed is under the line clicked: the bottom moves
+                    // by as much, so that line stays where it was.
+                    let scroll = self.scroll_mut(view);
+                    *scroll = scroll.saturating_add_signed(after as isize - before as isize);
+                    self.rebase(view);
                 }
             }
         }
@@ -120,9 +136,12 @@ impl Ui {
         self.selection = None;
         // Only transcript rows hold text to select; the pending-calls toggle
         // and the like answer the press itself, as they always did.
-        let at = self
-            .point(col, row)
-            .filter(|_| matches!(self.target_at(row), Some(Target::Scrollback(..))));
+        let at = self.point(col, row).filter(|_| {
+            matches!(
+                self.target_at(row),
+                Some(Target::Scrollback(..) | Target::Text(_))
+            )
+        });
         let Some(at) = at else {
             self.press = None;
             self.on_mouse_click(view, col, row);
@@ -273,6 +292,8 @@ pub(super) enum Target {
     None,
     Scrollback(usize, usize),
     PendingTools,
+    // Line `n` of the text the reading page shows.
+    Text(usize),
 }
 
 // The frame's four regions, laid out once and drawn by name. The only place
@@ -281,12 +302,24 @@ pub(super) enum Target {
 pub(super) struct Regions {
     // The scrolled transcript, the live region's rows included.
     pub(super) history: Rect,
-    // The completion list, the rewind selector, or the open reply over it.
+    // The completion list or the rewind selector.
     pub(super) menu: Rect,
     // The bar: the checkouts, or the flash that took its row.
     pub(super) bar: Rect,
     // The input line, pinned to the bottom.
     pub(super) editor: Rect,
+}
+
+// `code` to the clipboard, and what the screen says of it.
+fn copy_out(code: &str) -> String {
+    let copied = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::clipboard::CopyToClipboard::to_clipboard_from(code)
+    );
+    match copied {
+        Ok(()) => format!("copied {}", super::row::count(code.lines().count(), "line")),
+        Err(e) => format!("not copied: {e}"),
+    }
 }
 
 pub(super) fn at_row_name(path: &str, dir: bool) -> String {

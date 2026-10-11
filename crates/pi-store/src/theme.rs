@@ -204,6 +204,22 @@ impl Style {
         }
     }
 
+    /// This style under the pointer: bold, and dim no longer — bold on dim
+    /// text barely shows in most terminals.
+    pub fn lit(&self) -> Self {
+        Self {
+            color: self.color.clone(),
+            sgr: self
+                .sgr
+                .iter()
+                .filter(|a| **a != Attr::Dim)
+                .cloned()
+                .chain([Attr::Bold])
+                .collect(),
+            rendered: OnceLock::new(),
+        }
+    }
+
     /// The SGR parameter list this style amounts to, as written between `\x1b[`
     /// and `m` — `"1;3;38;2;88;166;255"`. Empty when the style is bare.
     pub fn codes(&self) -> &str {

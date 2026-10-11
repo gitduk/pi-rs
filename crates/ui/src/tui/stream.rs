@@ -309,10 +309,18 @@ impl Ui {
     pub(super) fn flush(&mut self, lane: &Lane, view: &mut View) {
         let menu = self.menu();
         let width = self.screen.usable();
-        // Browse mode is the conversation alone (no thinking, calls, notices,
-        // editor); the tally and window share this one predicate.
+        // The reading page has no editor. Browsing it reads the conversation
+        // alone (no thinking, calls, notices); a text page standing alone
+        // reads none of the transcript. The tally and window share this one
+        // predicate.
+        let reading = self.reading();
         let browse = self.browsing();
-        let keep = move |row: &Row| !browse || row.is_conversation();
+        let (text, under) = match self.page_text() {
+            Some((lines, under)) => (lines.to_vec(), under),
+            None => (Vec::new(), false),
+        };
+        let alone = !text.is_empty() && !under;
+        let keep = move |row: &Row| !alone && (!browse || row.is_conversation());
         let mut bar = super::call::job_lines(&self.jobs, &self.paint, width);
         bar.extend(self.bar_lines(&Facts::of(lane), &snapshot(lane, view), width));
         // The bar's rows are not worth a terminal that cannot hold them, a row
@@ -321,7 +329,7 @@ impl Ui {
         let bar_h = bar.len();
         // Nothing to type on, so nothing to pin to the bottom: the rows the
         // editor would have taken go to the history.
-        let (input, caret) = if browse {
+        let (input, caret) = if reading {
             (Vec::new(), (0, 0))
         } else {
             self.editor.view(&self.paint, width)
@@ -335,17 +343,11 @@ impl Ui {
         let input_view: Vec<Line<'static>> =
             input.into_iter().skip(editor_top).take(editor_h).collect();
         let caret_in_view = (caret.0 as usize).saturating_sub(editor_top);
-        // Bottom-up: input pinned, menu above it (reply or completions, one
-        // at a time), history fills the rest — bar always keeps its row.
+        // Bottom-up: input pinned, the menu above it, history fills the
+        // rest — bar always keeps its row.
         let gap = super::mouse::HISTORY_GAP as usize;
         let room = (self.screen.height as usize).saturating_sub(editor_h + bar_h + 1 + gap);
-        let reply = match &self.focus {
-            Focus::Reply(r) => Some(r.view(room, width, &self.paint)),
-            _ => None,
-        };
-        let menu_h = if let Some(reply) = &reply {
-            reply.len()
-        } else if menu.is_empty() {
+        let menu_h = if menu.is_empty() {
             0
         } else {
             menu.len().min(room)
@@ -379,17 +381,24 @@ impl Ui {
             let hovered = self.hovered_scrollback.filter(|h| h.0 == idx).map(|h| h.1);
             row.update_live(hovered, self.spinner, flight);
         }
-        let (live, pending_rows) = self.live(lane, view, row_holds, now);
+        let (live, pending_rows) = if alone {
+            (Vec::new(), 0)
+        } else {
+            self.live(lane, view, row_holds, now)
+        };
 
         // While scrolled up, bottom growth folds into `scroll` via cached row
         // heights — counting lines instead would misfill the visible area.
-        if view.surface.scroll > 0 {
+        // Left alone under a page: the first frame after it counts what grew
+        // meanwhile, as one frame's growth.
+        let height = |r: &&Row| r.height(&self.paint, width);
+        if reading {
+        } else if view.surface.scroll > 0 {
             let total = view
                 .surface
                 .scrollback
                 .iter()
-                .filter(|r| keep(r))
-                .map(|r| r.height(&self.paint, width))
+                .map(|r| height(&r))
                 .sum::<usize>()
                 + live.len();
             view.surface.scroll = absorb_growth(view.surface.scroll, view.surface.counted, total);
@@ -397,6 +406,48 @@ impl Ui {
         } else {
             view.surface.counted = None;
         }
+        // The conversation page, likewise, on its own count; text does not grow.
+        if browse && let Focus::Read(read) = &mut self.focus {
+            if read.scroll > 0 {
+                let rows: usize = view
+                    .surface
+                    .scrollback
+                    .iter()
+                    .filter(|r| keep(r))
+                    .map(|r| height(&r))
+                    .sum();
+                let total = rows + live.len();
+                read.scroll = absorb_growth(read.scroll, read.counted, total);
+                read.counted = Some(total);
+            } else {
+                read.counted = None;
+            }
+        }
+        let scroll = match &self.focus {
+            // No further up than the text's head: the transcript above it is
+            // only what it was asked over.
+            Focus::Read(read) if under => {
+                let rows: usize = text.iter().map(|(l, _)| screen::fit(l, width).len()).sum();
+                read.scroll.min(rows.saturating_sub(hist_view))
+            }
+            Focus::Read(read) => read.scroll,
+            _ => view.surface.scroll,
+        };
+        // A line a click answers on is lit under the pointer, as a fold's
+        // own line is.
+        let lit = self.lit_text();
+        let bold = lit.filter(|_| self.paint.color);
+        let text_stream = text
+            .into_iter()
+            .enumerate()
+            .map(move |(at, (mut line, _))| {
+                if bold == Some(at) {
+                    for span in &mut line.spans {
+                        span.style = render::Paint::lit(span.style);
+                    }
+                }
+                (Piece::Live(screen::Ready { line, width }), Target::Text(at))
+            });
         let scrollback = ScrollbackRows::new(&view.surface.scrollback, &self.paint, width, keep)
             .indexed()
             .map(|(item, idx)| {
@@ -426,9 +477,9 @@ impl Ui {
         });
 
         let (tagged_rows, scroll, cut) = screen::window_tagged(
-            scrollback.chain(live_stream),
+            scrollback.chain(live_stream).chain(text_stream),
             hist_view,
-            view.surface.scroll,
+            scroll,
         );
 
         let (rows, row_targets): (Vec<Line<'static>>, Vec<Target>) =
@@ -455,7 +506,10 @@ impl Ui {
             None => rows,
         };
 
-        view.surface.scroll = scroll;
+        match &mut self.focus {
+            Focus::Read(read) => read.scroll = scroll,
+            _ => view.surface.scroll = scroll,
+        }
         let picked = self
             .picked
             .unwrap_or(menu.len().saturating_sub(1))
@@ -476,15 +530,23 @@ impl Ui {
             frame.render_widget(Rows(&rows), regions.history);
             // While the keys are a panel's, the transcript under it steps back so
             // the two do not read as one; a menu that comes with typing does not.
-            if matches!(self.focus, Focus::Reply(_) | Focus::Rewind(_)) {
-                frame.buffer_mut().set_style(
-                    regions.history,
-                    ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::DIM),
-                );
+            let dim = ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::DIM);
+            if matches!(self.focus, Focus::Rewind(_)) {
+                frame.buffer_mut().set_style(regions.history, dim);
+            } else if under {
+                // The text comes last, under the transcript.
+                let above = self
+                    .row_targets
+                    .iter()
+                    .position(|t| matches!(t, Target::Text(_)))
+                    .unwrap_or(self.row_targets.len());
+                let transcript = Rect {
+                    height: above as u16,
+                    ..regions.history
+                };
+                frame.buffer_mut().set_style(transcript, dim);
             }
-            if let Some(reply) = &reply {
-                frame.render_widget(Rows(reply), regions.menu);
-            } else if !items.is_empty() {
+            if !items.is_empty() {
                 // Kept full: ratatui won't pull back an offset that a taller
                 // screen or a changed list left past the end.
                 let mut state = ListState::default()
@@ -521,10 +583,20 @@ impl Ui {
         let over = self
             .pointer
             .and_then(|(col, row)| self.hovered_row(view, col, row));
-        if over != self.hovered_scrollback {
+        if over != self.hovered_scrollback || self.lit_text() != lit {
             self.hovered_scrollback = over;
             self.redraw = true;
         }
+    }
+
+    // The line of the page's text under the pointer, by the targets the
+    // last frame drew, when a click there does something.
+    fn lit_text(&self) -> Option<usize> {
+        let (_, row) = self.pointer?;
+        let Some(Target::Text(n)) = self.target_at(row) else {
+            return None;
+        };
+        self.text_click(n).map(|_| n)
     }
 
     // Rebuilds from the transcript, discarding the old drawing — a rewind

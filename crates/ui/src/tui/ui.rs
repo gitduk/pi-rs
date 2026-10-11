@@ -1,5 +1,5 @@
 //! What the surface keeps for itself across lanes: the editor and the rows
-//! around it, the bar, the open reply, the theme it paints in.
+//! around it, the bar, the reading page, the theme it paints in.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -7,11 +7,11 @@ use std::time::Instant;
 use ratatui::style::Style as RStyle;
 use ratatui::text::{Line, Span};
 
+use super::browse::Read;
 use super::call::{drawn, pending_line};
 use super::editor::Editor;
 use super::menu::{Lists, MenuEntry};
 use super::mouse::{Regions, Target};
-use super::reply::Reply;
 use super::row::{Row, count};
 use super::screen::{self, Screen};
 use super::scrollback::body;
@@ -132,10 +132,8 @@ pub(super) enum Focus {
     Editor,
     // The messages a rewind can go back to, session order, newest last.
     Rewind(Vec<MenuEntry>),
-    // What a slash command answered, read until closed.
-    Reply(Reply),
-    // The conversation alone, the editor hidden; `browse.rs` draws it.
-    Browse,
+    // The reading page, the editor hidden; `browse.rs` keeps it.
+    Read(Read),
 }
 
 /// A press, kept for the one after it.

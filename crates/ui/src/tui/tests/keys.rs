@@ -127,7 +127,7 @@ async fn an_empty_reply_is_not_opened() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
     tui.ui.open_reply(Listing::default());
-    assert!(!matches!(tui.ui.focus, Focus::Reply(_)));
+    assert!(!matches!(tui.ui.focus, Focus::Read(_)));
 }
 
 // Esc goes to the reply, not past it: reaching the run would stop a turn
@@ -145,10 +145,7 @@ async fn esc_closes_the_reply_rather_than_reaching_the_run() {
         .ui
         .key(tui.core.lane(), view_at(&mut tui.views, token), esc, false);
     assert!(matches!(asked, Asked::Own(Deed::Nothing)), "{asked:?}");
-    assert!(
-        !matches!(tui.ui.focus, Focus::Reply(_)),
-        "the esc closed it"
-    );
+    assert!(!matches!(tui.ui.focus, Focus::Read(_)), "the esc closed it");
 }
 
 // A command's answer is a dismissed reply, so echoing it strands the line
@@ -203,7 +200,7 @@ async fn a_reply_has_the_keyboard_until_closed() {
             .ui
             .key(lane, view_at(&mut tui.views, token), press(code), false);
         assert!(
-            matches!(tui.ui.focus, Focus::Reply(_)),
+            matches!(tui.ui.focus, Focus::Read(_)),
             "{code:?} is the reply's"
         );
         assert!(matches!(asked, Asked::Own(Deed::Nothing)), "{asked:?}");
@@ -217,7 +214,7 @@ async fn a_reply_has_the_keyboard_until_closed() {
         press(KeyCode::Char('q')),
         false,
     );
-    assert!(!matches!(tui.ui.focus, Focus::Reply(_)), "`q` closes it");
+    assert!(!matches!(tui.ui.focus, Focus::Read(_)), "`q` closes it");
 }
 
 // Enter closes a reply without sending the line behind it; `ctrl+c` closes
@@ -235,7 +232,7 @@ async fn enter_and_the_stop_close_a_reply() {
     let lane = tui.core.lane_mut();
     tui.ui
         .key(lane, view_at(&mut tui.views, token), enter, false);
-    assert!(!matches!(tui.ui.focus, Focus::Reply(_)), "Enter closed it");
+    assert!(!matches!(tui.ui.focus, Focus::Read(_)), "Enter closed it");
     assert!(!tui.ui.took_submit(), "and sent nothing");
     assert_eq!(tui.ui.editor.text(), "/help", "the line waits");
 
@@ -247,7 +244,7 @@ async fn enter_and_the_stop_close_a_reply() {
         .ui
         .key(lane, view_at(&mut tui.views, token), ctrl_c, true);
     assert!(
-        !matches!(tui.ui.focus, Focus::Reply(_)),
+        !matches!(tui.ui.focus, Focus::Read(_)),
         "`ctrl+c` took it down too"
     );
     assert!(!matches!(asked, Asked::Own(Deed::Nothing)), "{asked:?}");
