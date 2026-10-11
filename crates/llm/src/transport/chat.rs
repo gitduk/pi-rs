@@ -8,8 +8,7 @@
 //! own decoder rather than a mode on the Responses one.
 
 use async_trait::async_trait;
-use eventsource_stream::Eventsource;
-use futures::stream::{BoxStream, StreamExt};
+use futures::stream::BoxStream;
 use serde_json::{Value, json};
 
 use super::{FAILED, Shared, Transport};
@@ -392,33 +391,9 @@ impl Transport for ChatCompletions {
         let resp = super::exchange("chat", url, spec, req, &body, call).await?;
 
         let mut dec = Decoder::new(self.gaps.clone());
-
-        let stream = resp
-            .bytes_stream()
-            .eventsource()
-            .flat_map(move |item| {
-                let events: Vec<Result<StreamEvent>> = match item {
-                    Err(e) => vec![Err(LlmError::Stream(e.to_string()))],
-                    // `[DONE]` is data-only and carries no JSON; the chunks
-                    // before it already delivered the turn.
-                    Ok(f) if f.data == "[DONE]" => Vec::new(),
-                    Ok(f) => match serde_json::from_str::<Value>(&f.data) {
-                        Err(e) => vec![Err(LlmError::Stream(e.to_string()))],
-                        Ok(data) if data.get("error").is_some_and(|e| !e.is_null()) => {
-                            tracing::warn!(
-                                target: "pi::wire", format = "chat",
-                                detail = %data["error"], "error frame"
-                            );
-                            vec![Err(LlmError::Stream(data["error"].to_string()))]
-                        }
-                        Ok(data) => dec.frame(&data).into_iter().map(Ok).collect(),
-                    },
-                };
-                futures::stream::iter(events)
-            })
-            .boxed();
-
-        Ok(stream)
+        Ok(super::sse(resp, "chat", move |data| {
+            dec.frame(&data).into_iter().map(Ok).collect()
+        }))
     }
 }
 #[cfg(test)]

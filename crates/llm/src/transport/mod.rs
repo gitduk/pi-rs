@@ -2,10 +2,11 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use futures::stream::BoxStream;
+use eventsource_stream::Eventsource;
+use futures::stream::{BoxStream, StreamExt};
 use serde_json::Value;
 
-use crate::error::Result;
+use crate::error::{LlmError, Result};
 use crate::model::ModelSpec;
 use crate::request::Request;
 use crate::stream::StreamEvent;
@@ -92,6 +93,38 @@ pub(crate) async fn exchange(
         status,
         body,
     })
+}
+
+/// The OpenAI-shaped wires' SSE frames as events: each frame's JSON goes to
+/// `decode`; an unreadable frame or one carrying `error` ends the turn.
+pub(crate) fn sse(
+    resp: reqwest::Response,
+    format: &'static str,
+    mut decode: impl FnMut(Value) -> Vec<Result<StreamEvent>> + Send + 'static,
+) -> BoxStream<'static, Result<StreamEvent>> {
+    resp.bytes_stream()
+        .eventsource()
+        .flat_map(move |frame| {
+            let events: Vec<Result<StreamEvent>> = match frame {
+                Err(e) => vec![Err(LlmError::Stream(e.to_string()))],
+                // Chat Completions closes on a data-only `[DONE]`, no JSON in it;
+                // the chunks before it already delivered the turn.
+                Ok(f) if f.data == "[DONE]" => Vec::new(),
+                Ok(f) => match serde_json::from_str::<Value>(&f.data) {
+                    Err(e) => vec![Err(LlmError::Stream(e.to_string()))],
+                    Ok(data) if data.get("error").is_some_and(|e| !e.is_null()) => {
+                        tracing::warn!(
+                            target: "pi::wire", format,
+                            detail = %data["error"], "error frame"
+                        );
+                        vec![Err(LlmError::Stream(data["error"].to_string()))]
+                    }
+                    Ok(data) => decode(data),
+                },
+            };
+            futures::stream::iter(events)
+        })
+        .boxed()
 }
 
 /// One wire protocol. Implementations branch on `spec.format` and never on the

@@ -1,6 +1,5 @@
 use async_trait::async_trait;
-use eventsource_stream::Eventsource;
-use futures::stream::{BoxStream, StreamExt};
+use futures::stream::BoxStream;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -505,40 +504,19 @@ impl Transport for OpenAi {
         let resp = super::exchange("openai", url, spec, req, &body, call).await?;
 
         let mut dec = Decoder::new(spec.model.clone(), self.gaps.clone());
-
-        let stream = resp
-            .bytes_stream()
-            .eventsource()
-            .flat_map(move |frame| {
-                let events: Vec<Result<StreamEvent>> = match frame {
-                    Err(e) => vec![Err(LlmError::Stream(e.to_string()))],
-                    Ok(f) => match serde_json::from_str::<Value>(&f.data) {
-                        Err(e) => vec![Err(LlmError::Stream(e.to_string()))],
-                        Ok(data) if data.get("error").is_some_and(|e| !e.is_null()) => {
-                            tracing::warn!(
-                                target: "pi::wire", format = "openai",
-                                detail = %data["error"], "error frame"
-                            );
-                            vec![Err(LlmError::Stream(data["error"].to_string()))]
-                        }
-                        // A run that failed server-side reports it here, not as
-                        // a status — without this the turn ends looking empty.
-                        Ok(data) if data["type"] == "response.failed" => {
-                            let detail = &data["response"]["error"];
-                            tracing::warn!(
-                                target: "pi::wire", format = "openai",
-                                detail = %detail, "failed response"
-                            );
-                            vec![Err(LlmError::Stream(detail.to_string()))]
-                        }
-                        Ok(data) => dec.frame(&data).into_iter().map(Ok).collect(),
-                    },
-                };
-                futures::stream::iter(events)
-            })
-            .boxed();
-
-        Ok(stream)
+        Ok(super::sse(resp, "openai", move |data| {
+            // A run that failed server-side reports it here, not as a
+            // status — without this the turn ends looking empty.
+            if data["type"] == "response.failed" {
+                let detail = &data["response"]["error"];
+                tracing::warn!(
+                    target: "pi::wire", format = "openai",
+                    detail = %detail, "failed response"
+                );
+                return vec![Err(LlmError::Stream(detail.to_string()))];
+            }
+            dec.frame(&data).into_iter().map(Ok).collect()
+        }))
     }
 }
 
