@@ -146,11 +146,16 @@ async fn once(
             return false;
         }
     };
+    // An empty reply was cut short, not unreadable: the next run asks again.
+    if text.trim().is_empty() {
+        tracing::warn!(target: "pi::memory", session = %stored.id, output = usage.output, "empty reply");
+        return false;
+    }
     // A reply that cannot be read would be one forever; it is passed over.
     let edits = match memory::parse(&text) {
         Ok(edits) => edits,
         Err(why) => {
-            tracing::warn!(target: "pi::memory", session = %stored.id, %why, "unreadable reply");
+            tracing::warn!(target: "pi::memory", session = %stored.id, output = usage.output, %why, "unreadable reply");
             return true;
         }
     };
