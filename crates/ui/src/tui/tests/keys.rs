@@ -123,21 +123,21 @@ async fn the_rewind_of_a_lane_with_no_transcript_says_so() {
 // `/new`, `/worktree` to an open checkout, and `/loop` (which only arms a
 // lane) all answer empty; a dismiss-for-nothing overlay is worse than silence.
 #[tokio::test]
-async fn an_empty_reply_is_not_opened() {
+async fn an_empty_command_page_is_not_opened() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
-    tui.ui.open_reply(Listing::default());
+    tui.ui.open_command(Listing::default());
     assert!(!matches!(tui.ui.focus, Focus::Read(_)));
 }
 
-// Esc goes to the reply, not past it: reaching the run would stop a turn
+// Esc goes to the command page, not past it: reaching the run would stop a turn
 // the user meant to leave alone.
 #[tokio::test]
-async fn esc_closes_the_reply_rather_than_reaching_the_run() {
+async fn esc_closes_the_command_page_rather_than_reaching_the_run() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
-    tui.ui.open_reply(Listing::say(["/help answered this"]));
+    tui.ui.open_command(Listing::say(["/help answered this"]));
 
     let token = tui.core.lane().token();
     let esc = crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -148,7 +148,7 @@ async fn esc_closes_the_reply_rather_than_reaching_the_run() {
     assert!(!matches!(tui.ui.focus, Focus::Read(_)), "the esc closed it");
 }
 
-// A command's answer is a dismissed reply, so echoing it strands the line
+// A command's output is a dismissed page, so echoing it strands the line
 // above nothing; a prompt is echoed since the turn streams under it.
 #[tokio::test]
 async fn a_command_is_not_echoed_and_a_prompt_is() {
@@ -183,14 +183,14 @@ async fn a_command_is_not_echoed_and_a_prompt_is() {
     );
 }
 
-// A reply has the keyboard: one place takes keys at a time, so a stray
-// letter neither types into the hidden line nor takes the reply down.
+// A command page has the keyboard: one place takes keys at a time, so a
+// stray letter neither types into the hidden line nor takes the page down.
 #[tokio::test]
-async fn a_reply_has_the_keyboard_until_closed() {
+async fn a_command_page_has_the_keyboard_until_closed() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
-    tui.ui.open_reply(Listing::say(["/status answered this"]));
+    tui.ui.open_command(Listing::say(["/status answered this"]));
     let token = tui.core.lane().token();
     let press = |code| crate::tui::TermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
 
@@ -201,7 +201,7 @@ async fn a_reply_has_the_keyboard_until_closed() {
             .key(lane, view_at(&mut tui.views, token), press(code), false);
         assert!(
             matches!(tui.ui.focus, Focus::Read(_)),
-            "{code:?} is the reply's"
+            "{code:?} is the page's"
         );
         assert!(matches!(asked, Asked::Own(Deed::Nothing)), "{asked:?}");
     }
@@ -217,15 +217,15 @@ async fn a_reply_has_the_keyboard_until_closed() {
     assert!(!matches!(tui.ui.focus, Focus::Read(_)), "`q` closes it");
 }
 
-// Enter closes a reply without sending the line behind it; `ctrl+c` closes
+// Enter closes a command page without sending the line behind it; `ctrl+c` closes
 // it and, with a run in flight, still stops the run.
 #[tokio::test]
-async fn enter_and_the_stop_close_a_reply() {
+async fn enter_and_the_stop_close_a_command_page() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
     tui.ui.editor.set_line("/help");
-    tui.ui.open_reply(Listing::say(["/status answered this"]));
+    tui.ui.open_command(Listing::say(["/status answered this"]));
 
     let token = tui.core.lane().token();
     let enter = crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -236,7 +236,7 @@ async fn enter_and_the_stop_close_a_reply() {
     assert!(!tui.ui.took_submit(), "and sent nothing");
     assert_eq!(tui.ui.editor.text(), "/help", "the line waits");
 
-    tui.ui.open_reply(Listing::say(["/status answered this"]));
+    tui.ui.open_command(Listing::say(["/status answered this"]));
     let ctrl_c =
         crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
     let lane = tui.core.lane_mut();
@@ -332,13 +332,13 @@ fn esc_takes_the_list_first_and_the_run_next() {
 }
 
 // A `ctrl+c` that closed something is not the first of a quit: two quick
-// presses to put a reply away must not leave the app.
+// presses to put a command page away must not leave the app.
 #[tokio::test]
-async fn the_stop_that_closed_a_reply_is_not_half_a_quit() {
+async fn the_stop_that_closed_a_command_page_is_not_half_a_quit() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
-    tui.ui.open_reply(Listing::say(["/status answered this"]));
+    tui.ui.open_command(Listing::say(["/status answered this"]));
     let token = tui.core.lane().token();
     let ctrl_c =
         || crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
@@ -400,14 +400,14 @@ async fn the_rewind_selector_has_the_keyboard() {
     }
 }
 
-// The `esc` that closed a reply is not the first of `esc esc`: a quick
+// The `esc` that closed a command page is not the first of `esc esc`: a quick
 // second press on the empty line must not open the rewind selector.
 #[tokio::test]
-async fn the_esc_that_closed_a_reply_is_not_half_a_rewind() {
+async fn the_esc_that_closed_a_command_page_is_not_half_a_rewind() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
-    tui.ui.open_reply(Listing::say(["/status answered this"]));
+    tui.ui.open_command(Listing::say(["/status answered this"]));
     let token = tui.core.lane().token();
     let esc = || crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 

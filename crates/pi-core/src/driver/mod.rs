@@ -37,8 +37,8 @@ pub enum Ended {
 /// What a driver's command answers, and where it goes.
 pub enum Said {
     Nothing,
-    // The answer to the command, over the editor.
-    Reply(Vec<String>),
+    // The command's output, on the command page.
+    Command(Vec<String>),
     // Something that happened to the lane, filed with its transcript.
     Transcript(String),
 }
@@ -118,13 +118,13 @@ impl Drivers {
         match drive {
             Drive::Loop(Some(goal)) => match self.loops.start(lane, goal, ctx) {
                 Ok(()) => Said::Nothing,
-                Err(why) => Said::Reply(vec![why]),
+                Err(why) => Said::Command(vec![why]),
             },
-            Drive::Jobs(arg) => Said::Reply(self.jobs_command(&arg, ctx)),
+            Drive::Jobs(arg) => Said::Command(self.jobs_command(&arg, ctx)),
             Drive::Loop(None) => match self.loops.stop(lane) {
                 // A loop really ended: that belongs in the transcript.
                 Some(said) => Said::Transcript(said),
-                None => Said::Reply(vec![
+                None => Said::Command(vec![
                     "no loop here — /loop <line> runs one again while it keeps changing files"
                         .into(),
                 ]),

@@ -1,4 +1,4 @@
-//! What a slash command answered, read on the reading page under the
+//! What a slash command output, read on the reading page under the
 //! transcript — not a transcript notice or a flash, but unread output the
 //! user asked for.
 
@@ -91,8 +91,8 @@ mod tests {
     // A line wider than the page wraps at its width, under its key column.
     #[test]
     fn a_long_row_wraps_under_its_key() {
-        let reply = Listing::say(["x".repeat(30), "last".into()]);
-        let lines: Vec<String> = super::lines(&reply, 10, &Paint::new(false))
+        let output = Listing::say(["x".repeat(30), "last".into()]);
+        let lines: Vec<String> = super::lines(&output, 10, &Paint::new(false))
             .iter()
             .map(|l| l.to_string())
             .collect();

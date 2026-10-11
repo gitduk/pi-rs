@@ -324,7 +324,7 @@ impl Tui {
                     let name = agent::instructions::short(&path, self.core.lane().root());
                     let line = format!("{name} — in force from the next turn");
                     // Nothing else to report: an aside for the bar, not a
-                    // reply that waits on a keypress.
+                    // command page that waits on a keypress.
                     if notes.is_empty() {
                         self.ui.flash(line);
                         Vec::new()
@@ -579,7 +579,7 @@ impl Tui {
             let now = self.core.tokens_now_at(lane);
             // `/compact` answered, and there was nothing to do: the answer to
             // a command, not news about the lane.
-            self.ui.open_reply(Listing::say([format!(
+            self.ui.open_command(Listing::say([format!(
                 "nothing to compact — {now} tokens, all inside the {held} kept as working context"
             )]));
         }

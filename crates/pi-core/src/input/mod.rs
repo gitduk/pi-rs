@@ -82,7 +82,7 @@ impl Intent {
     /// Whether the surface shows the line this was read from, above the answer.
     ///
     /// Shown when the answer lands under it (a turn, a `!`'s output); not for
-    /// a command's reply, which is dismissed rather than kept.
+    /// a command's output, which is dismissed rather than kept.
     pub fn echoed(&self) -> bool {
         !matches!(self, Intent::Builtin(_))
     }

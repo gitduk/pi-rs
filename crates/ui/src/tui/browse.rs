@@ -33,8 +33,8 @@ pub(super) struct Read {
 pub(super) enum Page {
     // The conversation alone: no thinking, calls or notices.
     Conversation,
-    // A command's answer, under the transcript it was asked over.
-    Reply(Vec<Line<'static>>),
+    // A command's output, under the transcript it was typed over.
+    Command(Vec<Line<'static>>),
     // What a closed line opens onto, standing alone: its first line is the
     // one clicked, copied out when the page opened.
     Preview(Vec<PageLine>),
@@ -78,14 +78,14 @@ impl Ui {
         self.open_page(Page::Preview(lines), super::screen::TOP);
     }
 
-    /// Shows a command's reply, replacing any prior one. Empty output opens
+    /// Shows a command's output, replacing any prior one. Empty output opens
     /// nothing, since dismissing an empty overlay is worse than silence.
-    pub(super) fn open_reply(&mut self, content: Listing) {
+    pub(super) fn open_command(&mut self, content: Listing) {
         if !content.is_empty() {
-            let lines = super::reply::lines(&content, self.screen.usable(), &self.paint);
-            // From its first line: the draw stops `TOP` at the reply's head.
-            self.open_page(Page::Reply(lines), super::screen::TOP);
-        } else if matches!(self.page(), Some(Page::Reply(_))) {
+            let lines = super::command::lines(&content, self.screen.usable(), &self.paint);
+            // From its first line: the draw stops `TOP` at the output's head.
+            self.open_page(Page::Command(lines), super::screen::TOP);
+        } else if matches!(self.page(), Some(Page::Command(_))) {
             self.focus = Focus::Editor;
         }
     }

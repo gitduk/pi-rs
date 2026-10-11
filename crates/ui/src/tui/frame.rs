@@ -30,7 +30,7 @@ impl Ui {
         let reading = self.reading();
         let browse = self.browsing();
         let alone = matches!(self.page(), Some(Page::Preview(_)));
-        let reply = matches!(self.page(), Some(Page::Reply(_)));
+        let command = matches!(self.page(), Some(Page::Command(_)));
         let keep = move |row: &Row| !alone && (!browse || row.is_conversation());
         let text = self.page_lines();
         let mut bar = call::job_lines(&self.jobs, &self.paint, width);
@@ -198,8 +198,8 @@ impl Ui {
             let dim = ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::DIM);
             if matches!(self.focus, Focus::Rewind(_)) {
                 frame.buffer_mut().set_style(regions.history, dim);
-            } else if reply {
-                // The reply comes last, under the transcript.
+            } else if command {
+                // The command's output comes last, under the transcript.
                 let above = self
                     .row_targets
                     .iter()
@@ -264,11 +264,13 @@ impl Ui {
         self.text_click(n).map(|_| n)
     }
 
-    // The page's own lines: a reply's, or a preview's without what a click
-    // on one copies.
+    // The page's own lines: a command's, set off from the transcript above it
+    // by a blank row, or a preview's without what a click on one copies.
     fn page_lines(&self) -> Vec<Line<'static>> {
         match self.page() {
-            Some(Page::Reply(lines)) => lines.clone(),
+            Some(Page::Command(lines)) => std::iter::once(Line::default())
+                .chain(lines.iter().cloned())
+                .collect(),
             Some(Page::Preview(lines)) => lines.iter().map(|(line, _)| line.clone()).collect(),
             _ => Vec::new(),
         }
@@ -308,12 +310,12 @@ impl Ui {
         *counted = total;
     }
 
-    // The scroll the window reads at. A reply's stops at its head: the
+    // The scroll the window reads at. A command page's stops at its head: the
     // transcript above it is only what it was asked over.
     fn window_scroll(&self, view: &View, text: &[Line], hist_view: usize, width: usize) -> usize {
         match &self.focus {
             Focus::Read(Read {
-                page: Page::Reply(_),
+                page: Page::Command(_),
                 scroll,
                 ..
             }) => {

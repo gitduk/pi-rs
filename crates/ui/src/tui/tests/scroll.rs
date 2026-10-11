@@ -424,7 +424,7 @@ fn a_panel_dims_the_transcript_under_it() {
     };
     ui.flush(&lane, &mut view);
     assert!(!dimmed(&ui));
-    ui.open_reply(pi_store::listing::Listing::say(["/status answered"]));
+    ui.open_command(pi_store::listing::Listing::say(["/status answered"]));
     ui.flush(&lane, &mut view);
     assert!(dimmed(&ui), "under the panel");
     ui.focus = crate::tui::ui::Focus::Editor;
