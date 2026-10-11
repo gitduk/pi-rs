@@ -79,9 +79,7 @@ impl Paint {
 
     /// A drawn span's style under the pointer, as `Style::lit` has it.
     pub fn lit(style: ratatui::style::Style) -> ratatui::style::Style {
-        style
-            .add_modifier(ratatui::style::Modifier::BOLD)
-            .remove_modifier(ratatui::style::Modifier::DIM)
+        style.add_modifier(ratatui::style::Modifier::BOLD)
     }
 
     /// The band `color` paints on this surface, or `None` on a surface that

@@ -204,20 +204,10 @@ impl Style {
         }
     }
 
-    /// This style under the pointer: bold, and dim no longer — bold on dim
-    /// text barely shows in most terminals.
+    /// This style under the pointer: bold added, nothing else — dim stays,
+    /// so hover never brightens the row.
     pub fn lit(&self) -> Self {
-        Self {
-            color: self.color.clone(),
-            sgr: self
-                .sgr
-                .iter()
-                .filter(|a| **a != Attr::Dim)
-                .cloned()
-                .chain([Attr::Bold])
-                .collect(),
-            rendered: OnceLock::new(),
-        }
+        self.adding(Attr::Bold)
     }
 
     /// The SGR parameter list this style amounts to, as written between `\x1b[`
