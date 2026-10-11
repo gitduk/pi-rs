@@ -502,7 +502,7 @@ impl Transport for OpenAi {
         let resp = super::exchange("openai", url, spec, req, &body, call).await?;
 
         let mut dec = Decoder::new(spec.model.clone(), self.gaps.clone());
-        Ok(super::sse(resp, "openai", move |data| {
+        let events = super::sse(resp, "openai", move |data| {
             // A run that failed server-side reports it here, not as a
             // status — without this the turn ends looking empty.
             if data["type"] == "response.failed" {
@@ -514,7 +514,8 @@ impl Transport for OpenAi {
                 return vec![Err(LlmError::Stream(detail.to_string()))];
             }
             dec.frame(&data).into_iter().map(Ok).collect()
-        }))
+        });
+        Ok(super::terminated("openai", events))
     }
 }
 

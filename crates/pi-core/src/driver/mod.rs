@@ -67,6 +67,8 @@ struct Owed {
     job: u64,
     lane: u64,
     said: String,
+    // Where the current turn's text began: a retried request starts over.
+    turn_from: usize,
 }
 
 impl Drivers {
@@ -147,6 +149,7 @@ impl Drivers {
                     job,
                     lane,
                     said: String::new(),
+                    turn_from: 0,
                 });
                 self.jobs.tell(job, tool::Told::Started);
             }
@@ -159,9 +162,12 @@ impl Drivers {
 
     /// One event from any lane's run; each driver keeps its own turns'.
     pub fn observe(&mut self, lane: u64, event: &Event) {
-        if let Event::TextDelta(text) = event {
-            for owed in self.owed.iter_mut().filter(|o| o.lane == lane) {
-                owed.said.push_str(text);
+        for owed in self.owed.iter_mut().filter(|o| o.lane == lane) {
+            match event {
+                Event::TextDelta(text) => owed.said.push_str(text),
+                Event::TurnStart { .. } => owed.turn_from = owed.said.len(),
+                Event::Retrying { .. } => owed.said.truncate(owed.turn_from),
+                _ => {}
             }
         }
     }
@@ -277,5 +283,44 @@ mod tests {
         );
         drivers.turn_ended(1, &Ended::Done, &ctx, None);
         assert!(rx.try_recv().is_err(), "told once");
+    }
+
+    // A retried request streams its turn again: the job hears the retry's
+    // text once, and what earlier turns of the run said stays.
+    #[tokio::test]
+    async fn a_retried_turn_is_told_back_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let ctx = Ctx::new(tool::Workspace::new(&root).unwrap());
+        let mut drivers = Drivers::default();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let job = jobs::Jobs::new(drivers.jobs()).start(
+            root.clone(),
+            "wechat".into(),
+            Default::default(),
+            Some(tx),
+        );
+        job.input("btc".into());
+        let next = drivers.next(1, &root).expect("the input is due");
+        drivers.dispatched(next.origin, 1, true, true);
+        assert_eq!(rx.try_recv(), Ok(Told::Started));
+
+        let retrying = Event::Retrying {
+            attempt: 1,
+            delay_ms: 0,
+            reason: "cut".into(),
+        };
+        for ev in [
+            Event::TurnStart { turn: 1 },
+            Event::TextDelta("checking. ".into()),
+            Event::TurnStart { turn: 2 },
+            Event::TextDelta("拿到".into()),
+            retrying,
+            Event::TextDelta("83057.6".into()),
+        ] {
+            drivers.observe(1, &ev);
+        }
+        drivers.turn_ended(1, &Ended::Done, &ctx, None);
+        assert_eq!(rx.try_recv(), Ok(Told::Reply("checking. 83057.6".into())));
     }
 }

@@ -405,7 +405,7 @@ impl Transport for Anthropic {
             futures::future::ready(out)
         });
 
-        Ok(stream.boxed())
+        Ok(super::terminated("anthropic", stream.boxed()))
     }
 }
 

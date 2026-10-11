@@ -127,6 +127,39 @@ pub(crate) fn sse(
         .boxed()
 }
 
+/// For a wire whose terminal frame is guaranteed: a stream that closes before
+/// it was cut short, and a cut must not pass for a finished turn.
+pub(crate) fn terminated(
+    format: &'static str,
+    events: BoxStream<'static, Result<StreamEvent>>,
+) -> BoxStream<'static, Result<StreamEvent>> {
+    events
+        .map(Some)
+        .chain(futures::stream::once(async { None }))
+        .scan(false, move |done, item| {
+            let out = match item {
+                Some(Ok(ev)) => {
+                    *done |= matches!(ev, StreamEvent::Done { .. });
+                    Some(Ok(ev))
+                }
+                // The error is the ending: no cut is reported after it.
+                Some(Err(e)) => {
+                    *done = true;
+                    Some(Err(e))
+                }
+                None if *done => None,
+                None => {
+                    tracing::warn!(target: "pi::wire", format, "stream closed before its terminal frame");
+                    Some(Err(LlmError::Stream(
+                        "the stream closed before its terminal frame".into(),
+                    )))
+                }
+            };
+            futures::future::ready(out)
+        })
+        .boxed()
+}
+
 /// One wire protocol. Implementations branch on `spec.format` and never on the
 /// model id: identity is resolved once, into the spec.
 #[async_trait]
@@ -267,6 +300,32 @@ impl Gaps {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_stream_cut_before_its_terminal_frame_is_an_error_not_a_turn() {
+        let run = |events: Vec<StreamEvent>| {
+            let events = futures::stream::iter(events.into_iter().map(Ok)).boxed();
+            futures::executor::block_on(terminated("anthropic", events).collect::<Vec<_>>())
+        };
+        let text = || StreamEvent::TextDelta {
+            index: 0,
+            delta: "拿到".into(),
+        };
+
+        let cut = run(vec![text()]);
+        assert_eq!(cut.len(), 2);
+        assert!(matches!(cut.last(), Some(Err(LlmError::Stream(_)))));
+
+        let whole = run(vec![
+            text(),
+            StreamEvent::Done {
+                stop: Default::default(),
+                usage: Default::default(),
+            },
+        ]);
+        assert_eq!(whole.len(), 2);
+        assert!(whole.iter().all(Result::is_ok));
+    }
 
     #[test]
     fn a_field_the_host_left_out_is_reported_rather_than_blanked() {
