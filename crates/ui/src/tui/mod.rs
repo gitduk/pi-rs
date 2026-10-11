@@ -15,6 +15,7 @@ mod mouse;
 mod row;
 mod screen;
 mod scrollback;
+mod search;
 mod select;
 mod stream;
 mod term;

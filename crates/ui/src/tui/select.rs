@@ -87,7 +87,7 @@ pub(super) fn text(sel: &Selection, rows: &[Drawn], width: usize) -> String {
     out
 }
 
-fn cell(c: char) -> usize {
+pub(super) fn cell(c: char) -> usize {
     c.width().unwrap_or(0)
 }
 
@@ -135,12 +135,22 @@ pub(super) fn word_at(s: &str, col: usize) -> (usize, usize) {
 
 /// `line` with the cells `from..to` drawn reversed.
 pub(super) fn reversed(line: Line<'static>, from: usize, to: usize) -> Line<'static> {
+    modified(line, from, to, Modifier::REVERSED)
+}
+
+/// `line` with `mark` added to the cells `from..to`.
+pub(super) fn modified(
+    line: Line<'static>,
+    from: usize,
+    to: usize,
+    mark: Modifier,
+) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut at = 0;
     for span in line.spans {
         for c in span.content.chars() {
             let style = if at >= from && at < to {
-                span.style.add_modifier(Modifier::REVERSED)
+                span.style.add_modifier(mark)
             } else {
                 span.style
             };

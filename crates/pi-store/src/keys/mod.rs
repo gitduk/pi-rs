@@ -31,8 +31,8 @@ pub enum Mode {
 /// the menu claims never reaches the editor underneath it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum When {
-    // A view read, not typed into — a reply, the conversation alone. It has
-    // the keyboard: the editor's layers are not consulted under it.
+    // A page read, not typed into. It has the keyboard: the editor's
+    // layers are not consulted under it.
     Pager,
     // A list's movement and dismissal keys: over the line while completing,
     // and under the picker's own letters.
@@ -65,7 +65,7 @@ pub enum Surface {
     Completion,
     // The rewind selector.
     Picker,
-    // A command's reply or the conversation view.
+    // A command's output, a preview or the conversation view.
     Pager,
 }
 
@@ -125,6 +125,8 @@ pub enum Action {
     // The conversation alone: the thinking, the calls and the editor itself
     // out of the way. `v` with nothing on the line.
     Browse,
+    // The same, searched: the query typed at once.
+    BrowseSearch,
     ScrollPageUp,
     ScrollPageDown,
     ScrollHalfUp,
@@ -168,6 +170,10 @@ pub enum Action {
     PagerTop,
     PagerBottom,
     PagerClose,
+    // A string to find on a page: typed on the bottom row, then stepped.
+    PagerSearch,
+    PagerSearchNext,
+    PagerSearchPrev,
 }
 
 struct Binding {
@@ -491,6 +497,13 @@ const BINDINGS: &[Binding] = &[
         note: "the conversation alone, with nothing on the line",
     },
     Binding {
+        id: "normal.search",
+        action: A::BrowseSearch,
+        when: W::Mode(Mode::Normal),
+        keys: &["/"],
+        note: "the conversation alone, searched",
+    },
+    Binding {
         id: "normal.move.char.left",
         action: A::MoveCharLeft,
         when: W::Mode(Mode::Normal),
@@ -747,7 +760,28 @@ const BINDINGS: &[Binding] = &[
         action: A::PagerClose,
         when: W::Pager,
         keys: &["q", "esc", "enter", "v"],
-        note: "a command's reply, or the conversation view",
+        note: "a command's output, a preview, or the conversation view",
+    },
+    Binding {
+        id: "pager.search",
+        action: A::PagerSearch,
+        when: W::Pager,
+        keys: &["/"],
+        note: "",
+    },
+    Binding {
+        id: "pager.search-next",
+        action: A::PagerSearchNext,
+        when: W::Pager,
+        keys: &["n"],
+        note: "",
+    },
+    Binding {
+        id: "pager.search-prev",
+        action: A::PagerSearchPrev,
+        when: W::Pager,
+        keys: &["N"],
+        note: "",
     },
 ];
 
@@ -792,8 +826,8 @@ impl Press {
 
 /// The character a press types, when it types one on its own: a letter with
 /// `ctrl` or `alt` on it is the menu's key rather than the surface's own, which
-/// is the same rule every screen with a letter vocabulary reads — browse and a
-/// reply — so it is written down once, here.
+/// is the same rule every screen with a letter vocabulary reads — browse, a
+/// command's output, a preview's search — so it is written down once, here.
 pub fn bare_letter(key: &crossterm::event::KeyEvent) -> Option<char> {
     match key.code {
         KeyCode::Char(c) if Press::of(key.code, key.modifiers).is_bare() => Some(c),
@@ -978,7 +1012,7 @@ mod tests {
         parse(s).unwrap()
     }
 
-    // A reply or the conversation view reads its own keys and the app's,
+    // A page reads its own keys and the app's,
     // never the editor's: one place has the keyboard.
     #[test]
     fn a_pager_has_the_keyboard() {

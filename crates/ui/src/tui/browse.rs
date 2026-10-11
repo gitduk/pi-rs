@@ -28,6 +28,11 @@ pub(super) struct Read {
     pub(super) scroll: usize,
     // The rows the page measured last, as the transcript's `counted`.
     pub(super) counted: Option<usize>,
+    // What the page is searched for, `/` on.
+    pub(super) search: Option<Box<super::search::Search>>,
+    // The line the next frame brings to the top, the rows it takes unknown
+    // until then.
+    pub(super) seek: Option<super::search::Place>,
 }
 
 pub(super) enum Page {
@@ -95,6 +100,8 @@ impl Ui {
             page,
             scroll,
             counted: None,
+            search: None,
+            seek: None,
         });
     }
 

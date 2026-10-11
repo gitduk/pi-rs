@@ -509,3 +509,40 @@ fn turning_the_keys_off_drops_the_mode_rather_than_parking_it() {
     });
     assert_eq!(mode(&ui), Some(Mode::Insert));
 }
+
+// `/` in Normal searches the conversation: the page opens with the query
+// being typed, a hit comes up top, and letting the search go closes it.
+#[test]
+fn slash_in_normal_searches_the_conversation() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let esc = crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    let mut ui = vim_ui();
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    ui.vim = Some(Mode::Normal);
+    view.surface.scrollback = (1..=40)
+        .flat_map(|n| Row::answer(&format!("answer {n}"), &ui.paint))
+        .collect();
+    ui.flush(&lane, &mut view);
+    let press = |ui: &mut crate::tui::Ui, view: &mut View, event| {
+        ui.key(&lane, view, event, false);
+        ui.flush(&lane, view);
+        ui.drawn[0].trim().to_string()
+    };
+    press(&mut ui, &mut view, typed('/'));
+    assert!(ui.browsing());
+    for c in "answer 1".chars() {
+        press(&mut ui, &mut view, typed(c));
+    }
+    // None below the top line: round to the first.
+    assert_eq!(ui.drawn[0].trim(), "answer 1");
+    // The page came with the search, and goes with it.
+    press(&mut ui, &mut view, esc);
+    assert!(!ui.reading(), "esc is back on the line");
+    // So does backing out of an empty `/`.
+    let backspace =
+        crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+    press(&mut ui, &mut view, typed('/'));
+    press(&mut ui, &mut view, backspace);
+    assert!(!ui.reading(), "backspace is back on the line");
+}

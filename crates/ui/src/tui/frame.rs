@@ -14,6 +14,7 @@ use super::mouse::{Regions, Target};
 use super::row::{PendingTool, Row, count};
 use super::screen::{self, Rows};
 use super::scrollback::{Piece, ScrollbackRows, absorb_growth, body};
+use super::search::{self, Laid, Spot};
 use super::ui::Focus;
 use super::view::{StreamKind, View, snapshot};
 use crate::render;
@@ -39,10 +40,14 @@ impl Ui {
         // to type on and a row of history: one that short keeps the other two.
         bar.truncate((self.screen.height as usize).saturating_sub(2));
         let bar_h = bar.len();
-        // Nothing to type on, so nothing to pin to the bottom: the rows the
-        // editor would have taken go to the history.
+        // Nothing to type on but a search, so nothing else pinned to the
+        // bottom: the rows the editor would have taken go to the history.
+        let caret_shown = matches!(self.focus, Focus::Editor) || self.search_typing();
         let (input, caret) = if reading {
-            (Vec::new(), (0, 0))
+            match self.search_line() {
+                Some((line, col)) => (vec![line], (0, col)),
+                None => (Vec::new(), (0, 0)),
+            }
         } else {
             self.editor.view(&self.paint, width)
         };
@@ -52,7 +57,7 @@ impl Ui {
             .len()
             .min((self.screen.height as usize).saturating_sub(1 + bar_h));
         let editor_top = (caret.0 as usize + 1).saturating_sub(editor_h);
-        let input_view: Vec<Line<'static>> =
+        let mut input_view: Vec<Line<'static>> =
             input.into_iter().skip(editor_top).take(editor_h).collect();
         let caret_in_view = (caret.0 as usize).saturating_sub(editor_top);
         // Bottom-up: input pinned, the menu above it, history fills the
@@ -100,6 +105,37 @@ impl Ui {
         };
 
         self.absorb(view, &keep, live.len(), width);
+        if self.search_due() {
+            let laid: Vec<Laid> =
+                ScrollbackRows::new(&view.surface.scrollback, &self.paint, width, keep)
+                    .indexed()
+                    .map(|(piece, idx)| {
+                        let line = match &piece {
+                            Piece::Row { line, .. } => *line,
+                            Piece::Live(_) => 0,
+                        };
+                        Laid::of(Spot::Row(idx, line), screen::Piece::pieces(piece))
+                    })
+                    .chain(
+                        live.iter()
+                            .enumerate()
+                            .map(|(i, l)| Laid::of(Spot::Live(i), screen::fit(l, width))),
+                    )
+                    .chain(
+                        text.iter()
+                            .enumerate()
+                            .map(|(n, l)| Laid::of(Spot::Text(n), screen::fit(l, width))),
+                    )
+                    .collect();
+            self.search_answer(&laid, hist_view);
+            // The count the answer moved, on the row laid out before it: one
+            // row either way, so only what it says changes.
+            if let Some((line, _)) = self.search_line()
+                && input_view.len() == 1
+            {
+                input_view = vec![line];
+            }
+        }
         let scroll = self.window_scroll(view, &text, hist_view, width);
         // A line a click answers on is lit under the pointer, as a fold's
         // own line is.
@@ -151,6 +187,35 @@ impl Ui {
             tagged_rows.into_iter().unzip();
         self.row_targets = row_targets;
         self.top_cut = cut;
+        self.search_settle();
+        // The query marked on the rows a search reads, a command page's own;
+        // a row counts within its line, the top one past what fell off above.
+        let rows = match self.search_query() {
+            Some((query, at)) => {
+                let mut place: Option<(Spot, usize)> = None;
+                rows.into_iter()
+                    .zip(&self.row_targets)
+                    .enumerate()
+                    .map(|(n, (row, target))| {
+                        let spot = Spot::of(*target);
+                        place = match (spot, place) {
+                            (Some(s), Some((was, r))) if s == was => Some((s, r + 1)),
+                            (Some(s), _) if n == 0 => Some((s, self.top_cut)),
+                            (Some(s), _) => Some((s, 0)),
+                            (None, _) => None,
+                        };
+                        if command && !matches!(target, Target::Text(_)) {
+                            return row;
+                        }
+                        let current = at
+                            .filter(|h| place == Some((h.at.spot, h.at.row)))
+                            .map(|h| h.k);
+                        search::marked(row, query, current)
+                    })
+                    .collect()
+            }
+            None => rows,
+        };
         self.drawn = rows
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
@@ -239,7 +304,7 @@ impl Ui {
             frame.render_widget(Rows(&input_view), regions.editor);
             // The caret marks where keys land: nowhere in the line while
             // something else has them.
-            if matches!(self.focus, Focus::Editor) {
+            if caret_shown {
                 let caret_row = regions.editor.y + caret_in_view as u16;
                 frame.set_cursor_position((caret.1, caret_row));
             }
@@ -252,6 +317,17 @@ impl Ui {
             self.hovered_scrollback = over;
             self.redraw = true;
         }
+    }
+
+    // The search's row, and the column the caret stands at after the query.
+    fn search_line(&self) -> Option<(Line<'static>, u16)> {
+        let (query, count) = self.search_prompt()?;
+        let col = unicode_width::UnicodeWidthStr::width(query.as_str()) as u16;
+        let line = Line::from(vec![
+            query.into(),
+            self.paint.span(&self.paint.theme.muted, count),
+        ]);
+        Some((line, col))
     }
 
     // The line of the page's text under the pointer, by the targets the
@@ -267,11 +343,17 @@ impl Ui {
     // The page's own lines: a command's, set off from the transcript above it
     // by a blank row, or a preview's without what a click on one copies.
     fn page_lines(&self) -> Vec<Line<'static>> {
-        match self.page() {
-            Some(Page::Command(lines)) => std::iter::once(Line::default())
+        match &self.focus {
+            Focus::Read(Read {
+                page: Page::Command(lines),
+                ..
+            }) => std::iter::once(Line::default())
                 .chain(lines.iter().cloned())
                 .collect(),
-            Some(Page::Preview(lines)) => lines.iter().map(|(line, _)| line.clone()).collect(),
+            Focus::Read(Read {
+                page: Page::Preview(lines),
+                ..
+            }) => lines.iter().map(|(line, _)| line.clone()).collect(),
             _ => Vec::new(),
         }
     }

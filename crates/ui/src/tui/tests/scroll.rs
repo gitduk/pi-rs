@@ -431,3 +431,218 @@ fn a_panel_dims_the_transcript_under_it() {
     ui.flush(&lane, &mut view);
     assert!(!dimmed(&ui), "the panel closed");
 }
+
+// A found line comes up to the top of the preview, `n` / `N` step round
+// the lines holding it, and esc puts the view back where `/` found it.
+#[test]
+fn a_search_brings_each_line_holding_it_to_the_top() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut ui = test_ui(30, 12);
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    ui.preview(
+        (0..100)
+            .map(|i| (Line::from(format!("line {i}")), None))
+            .collect(),
+    );
+    let press = |ui: &mut crate::tui::Ui, view: &mut View, event| {
+        ui.key(&lane, view, event, false);
+        ui.flush(&lane, view);
+        ui.drawn[0].trim_end().to_string()
+    };
+    let key = |code| crate::tui::TermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
+    ui.flush(&lane, &mut view);
+    assert_eq!(press(&mut ui, &mut view, typed('/')), "line 0");
+    assert_eq!(press(&mut ui, &mut view, typed('4')), "line 4");
+    let reversed = |ui: &crate::tui::Ui, col| {
+        ui.screen.test_buffer()[(col, 0)]
+            .modifier
+            .contains(ratatui::style::Modifier::REVERSED)
+    };
+    assert!(reversed(&ui, 5) && !reversed(&ui, 4), "the 4 alone");
+    assert_eq!(press(&mut ui, &mut view, typed('2')), "line 42");
+    assert_eq!(press(&mut ui, &mut view, key(KeyCode::Backspace)), "line 4");
+    // Which hit of how many: twenty 4s, line 44 holding two.
+    let count = |ui: &crate::tui::Ui| ui.search_prompt().map(|(_, c)| c.trim().to_string());
+    assert_eq!(press(&mut ui, &mut view, key(KeyCode::Enter)), "line 4");
+    assert_eq!(count(&ui).as_deref(), Some("1/20"));
+    assert_eq!(press(&mut ui, &mut view, typed('n')), "line 14");
+    assert_eq!(count(&ui).as_deref(), Some("2/20"));
+    assert_eq!(press(&mut ui, &mut view, typed('N')), "line 4");
+    // Past the first, round to the last, which the bottom of the page holds.
+    let bottom = press(&mut ui, &mut view, typed('N'));
+    assert!(ui.drawn.iter().any(|r| r.starts_with("line 94")));
+    assert_eq!(count(&ui).as_deref(), Some("20/20"));
+    assert_eq!(press(&mut ui, &mut view, typed('/')), bottom);
+    press(&mut ui, &mut view, typed('x'));
+    // The row the search took comes back, and the page is still at its end.
+    press(&mut ui, &mut view, key(KeyCode::Esc));
+    assert!(ui.drawn.iter().any(|r| r.starts_with("line 99")));
+    assert!(ui.reading(), "esc leaves the query, not the page");
+}
+
+// A command page searches its own lines, not the transcript it was typed
+// over, though both hold the query.
+#[test]
+fn a_command_page_searches_only_its_own_lines() {
+    use ratatui::style::Modifier;
+    let mut ui = test_ui(30, 12);
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    view.surface.scrollback = vec![Row::notice("beta in the transcript")];
+    ui.open_command(pi_store::listing::Listing::say(["alpha", "beta"]));
+    ui.flush(&lane, &mut view);
+    for c in "/beta".chars() {
+        ui.key(&lane, &mut view, typed(c), false);
+    }
+    ui.flush(&lane, &mut view);
+    // The cell `beta` starts on, on the row whose text is `line`.
+    let marked = |line: &str| {
+        let row = ui.drawn.iter().position(|r| r.trim() == line).unwrap();
+        let col = ui.drawn[row].find("beta").unwrap();
+        ui.screen.test_buffer()[(col as u16, row as u16)]
+            .modifier
+            .contains(Modifier::REVERSED)
+    };
+    assert!(marked("beta"), "the page's own");
+    assert!(!marked("beta in the transcript"), "the transcript over it");
+}
+
+// The query is edited with the line's own keys: `ctrl+w` takes a word.
+#[test]
+fn a_search_query_takes_the_line_editing_keys() {
+    let mut ui = test_ui(30, 12);
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    ui.preview(vec![(Line::from("head"), None)]);
+    ui.flush(&lane, &mut view);
+    for c in "/one two".chars() {
+        ui.key(&lane, &mut view, typed(c), false);
+    }
+    ui.key(&lane, &mut view, ctrl('w'), false);
+    let query = |ui: &crate::tui::Ui| ui.search_prompt().map(|(q, _)| q);
+    assert_eq!(query(&ui).as_deref(), Some("/one "));
+    ui.key(&lane, &mut view, ctrl('u'), false);
+    assert_eq!(query(&ui).as_deref(), Some("/"));
+    assert!(ui.reading());
+}
+
+// What is counted is what is drawn: an escape the frame drops holds no
+// match, and a line wrapping past the window is stepped row by row.
+#[test]
+fn a_search_counts_what_is_drawn_and_reaches_rows_below_the_window() {
+    let mut ui = test_ui(30, 12);
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    let long = (0..200)
+        .map(|i| format!("w{i:03}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    ui.preview(vec![
+        (Line::from("head"), None),
+        (Line::from("\x1b[31mred\x1b[0m"), None),
+        (Line::from(long), None),
+    ]);
+    ui.flush(&lane, &mut view);
+    let count = |ui: &crate::tui::Ui| ui.search_prompt().map(|(_, c)| c.trim().to_string());
+    for c in "/31m".chars() {
+        ui.key(&lane, &mut view, typed(c), false);
+    }
+    ui.flush(&lane, &mut view);
+    assert_eq!(
+        count(&ui).as_deref(),
+        Some("0/0"),
+        "the escape is not drawn"
+    );
+    ui.key(&lane, &mut view, ctrl('u'), false);
+    for c in "w199".chars() {
+        ui.key(&lane, &mut view, typed(c), false);
+    }
+    ui.flush(&lane, &mut view);
+    assert_eq!(count(&ui).as_deref(), Some("1/1"));
+    assert!(
+        ui.drawn.iter().any(|r| r.contains("w199")),
+        "the row holding it is on screen, though its line starts above"
+    );
+}
+
+// A paste while the query is typed goes on the query.
+#[test]
+fn a_paste_goes_on_the_query() {
+    let mut ui = test_ui(30, 12);
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    ui.preview(vec![(Line::from("head"), None)]);
+    ui.flush(&lane, &mut view);
+    ui.key(&lane, &mut view, typed('/'), false);
+    ui.key(
+        &lane,
+        &mut view,
+        crate::tui::TermEvent::Paste("one\ntwo".into()),
+        false,
+    );
+    assert_eq!(ui.search_prompt().map(|(q, _)| q).as_deref(), Some("/one"));
+}
+
+// A view moved off the hit steps from where it is: `gg n` is the first
+// hit, `G N` the last, not the ones beside the hit left behind.
+#[test]
+fn a_step_after_moving_the_view_goes_from_the_view() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    // `gg` is a pair, which only vim keys give the time to type.
+    let mut ui = vim_ui();
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    ui.preview(
+        (0..100)
+            .map(|i| (Line::from(format!("line {i}")), None))
+            .collect(),
+    );
+    // The count as the one frame after the key drew it, not as kept.
+    let press = |ui: &mut crate::tui::Ui, view: &mut View, event| {
+        ui.key(&lane, view, event, false);
+        ui.flush(&lane, view);
+        let buf = ui.screen.test_buffer();
+        let bottom = buf.area.height - 1;
+        let row: String = (0..buf.area.width)
+            .map(|x| buf[(x, bottom)].symbol())
+            .collect();
+        row.split_whitespace().nth(1).map(str::to_string)
+    };
+    ui.flush(&lane, &mut view);
+    press(&mut ui, &mut view, typed('/'));
+    press(&mut ui, &mut view, typed('4'));
+    let enter = crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    press(&mut ui, &mut view, enter);
+    // From the first hit itself: `gg n` is that hit again, not the one after.
+    press(&mut ui, &mut view, typed('G'));
+    press(&mut ui, &mut view, typed('g'));
+    press(&mut ui, &mut view, typed('g'));
+    assert_eq!(
+        press(&mut ui, &mut view, typed('n')).as_deref(),
+        Some("1/20")
+    );
+    for _ in 0..6 {
+        press(&mut ui, &mut view, typed('n'));
+    }
+    assert_eq!(
+        press(&mut ui, &mut view, typed('n')).as_deref(),
+        Some("8/20")
+    );
+    press(&mut ui, &mut view, typed('g'));
+    press(&mut ui, &mut view, typed('g'));
+    assert_eq!(
+        press(&mut ui, &mut view, typed('n')).as_deref(),
+        Some("1/20")
+    );
+    // Unmoved since, `n` goes on from the hit as before.
+    assert_eq!(
+        press(&mut ui, &mut view, typed('n')).as_deref(),
+        Some("2/20")
+    );
+    press(&mut ui, &mut view, typed('G'));
+    assert_eq!(
+        press(&mut ui, &mut view, typed('N')).as_deref(),
+        Some("20/20")
+    );
+}

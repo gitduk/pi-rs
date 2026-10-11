@@ -36,10 +36,12 @@ impl Ui {
             }
             TermEvent::Paste(text) => {
                 self.last_press = None;
-                // Only the line takes text, and only while it has the keys:
-                // anywhere else the paste would land where nobody can see it.
+                // Only the line or a query being typed takes text: anywhere
+                // else the paste would land where nobody can see it.
                 if matches!(self.focus, Focus::Editor) {
                     self.editor.insert_str(&text.replace('\r', "\n"));
+                } else {
+                    self.search_paste(&text);
                 }
                 return Asked::Own(Deed::Nothing);
             }
@@ -52,6 +54,9 @@ impl Ui {
             }
             _ => return Asked::Own(Deed::Nothing),
         };
+        if self.search_key(&key) {
+            return Asked::Own(Deed::Nothing);
+        }
 
         let press = Press::of(key.code, key.modifiers);
         let now = Instant::now();
@@ -169,6 +174,14 @@ impl Ui {
             Some(Action::PagerTop) => (true, Stride::End),
             Some(Action::PagerClose) => {
                 self.close_overlay();
+                return Asked::Own(Deed::Nothing);
+            }
+            Some(Action::PagerSearch) => {
+                self.search_open();
+                return Asked::Own(Deed::Nothing);
+            }
+            Some(action @ (Action::PagerSearchNext | Action::PagerSearchPrev)) => {
+                self.search_step(action == Action::PagerSearchNext);
                 return Asked::Own(Deed::Nothing);
             }
             _ => return Asked::Own(Deed::Nothing),
@@ -354,6 +367,7 @@ impl Ui {
             Some(Action::ScrollHalfUp) => self.scroll_view(view, true, self.half_scroll_step()),
             Some(Action::ScrollHalfDown) => self.scroll_view(view, false, self.half_scroll_step()),
             Some(Action::Browse) => self.browse(),
+            Some(Action::BrowseSearch) => self.search_conversation(),
             Some(Action::ThinkFold) => {
                 // The last group only. The switch is left alone, so the
                 // groups no one is touching keep what they had.
