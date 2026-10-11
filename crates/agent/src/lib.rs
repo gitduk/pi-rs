@@ -269,7 +269,7 @@ impl Agent {
                                 named_window = Some(limit);
                                 say(
                                     tx,
-                                    Event::Warning(format!(
+                                    Event::Refit(format!(
                                         "the provider reports a {limit}-token window; refitting to it"
                                     )),
                                 );
@@ -280,7 +280,7 @@ impl Agent {
                                 scale *= SQUEEZE;
                                 say(
                                     tx,
-                                    Event::Warning(format!(
+                                    Event::Refit(format!(
                                         "the request did not fit and named no limit below the \
                                      budget; retrying at {}% of the estimated budget",
                                         (scale * 100.0).round()
@@ -320,7 +320,7 @@ impl Agent {
                 scale *= SQUEEZE;
                 say(
                     tx,
-                    Event::Warning(format!(
+                    Event::Refit(format!(
                         "the provider took {} input tokens against a {window}-token window and \
                      answered from a truncated prompt; tightening the budget",
                         done.usage.input

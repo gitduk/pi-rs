@@ -565,11 +565,7 @@ pub fn describe(
                 room,
             ),
         )),
-        Event::Warning(w) => Line::from(vec![
-            p.span(&p.theme.status.err, icons::WARN_MARK),
-            Span::raw(" "),
-            p.span(&p.theme.muted, w),
-        ]),
+        Event::Warning(w) | Event::Refit(w) => Line::from(p.span(&p.theme.muted, w)),
         // Done is a status line rather than an event's wording, and each
         // renderer composes it from its own configured segments.
         _ => return None,

@@ -50,7 +50,7 @@ pub fn retry(config: &config::Config) -> agent::Retry {
 /// What every surface says when the transcript did not reach the disk: one
 /// sentence, so a reworded copy cannot make one failure read as two.
 pub fn not_saved(e: &impl std::fmt::Display) -> String {
-    format!("warning: the transcript was not saved: {e}")
+    format!("the transcript was not saved: {e}")
 }
 
 /// Everything a run holds that outlives any one turn of it, and the one place

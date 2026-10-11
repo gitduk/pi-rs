@@ -159,20 +159,33 @@ impl Ui {
                     let line = parts.join(icons::PART_SEP);
                     self.file_screen(lane, view, &line);
                 }
+                self.file_compacted(lane, view);
             }
             // A warning about the turn — reshaped prompt, short reply, dropped
             // field. Filed and drawn muted, since a rebuild can't recolor it.
             Event::Warning(w) => {
                 self.close(view);
-                let line = format!("{} {w}", icons::WARN_MARK);
-                self.file_screen(lane, view, &line);
+                self.file_screen(lane, view, w);
+            }
+            // Goes with the compaction it leads to, under the usage row.
+            Event::Refit(w) => {
+                if view.state.started.is_some() {
+                    view.state.compacted.push(w.clone());
+                } else {
+                    self.close(view);
+                    self.file_screen(lane, view, w);
+                }
             }
             // What compaction gave up; the numbers live only in the pass's
             // own report, so they're filed as worded here.
             Event::Compacted(r) => {
-                self.close(view);
                 let line = render::compaction_line(r);
-                self.file_screen(lane, view, &line);
+                if view.state.started.is_some() {
+                    view.state.compacted.push(line);
+                } else {
+                    self.close(view);
+                    self.file_screen(lane, view, &line);
+                }
             }
             // A call's two events are one line here: start takes a place in
             // the group or live region; end settles it, matched back by id.
@@ -247,6 +260,12 @@ impl Ui {
             .extend(Row::notice_lines(line, &self.paint));
         if let Some(id) = filed {
             view.surface.tail = Some(id);
+        }
+    }
+
+    pub(super) fn file_compacted(&self, lane: &mut Lane, view: &mut View) {
+        for line in std::mem::take(&mut view.state.compacted) {
+            self.file_screen(lane, view, &line);
         }
     }
 

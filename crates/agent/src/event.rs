@@ -48,6 +48,9 @@ pub enum Event {
     },
     // Something the run recovered from but the user should know about.
     Warning(String),
+    // The request did not fit and is being resent smaller: a warning, but one
+    // about the context from here on, like `Compacted`, not about the reply.
+    Refit(String),
     // Cumulative for the turn, not a delta. Not every wire sends one (Anthropic
     // reports early, OpenAI only at stream end); absence means unknown, not zero.
     Usage(Usage),
@@ -127,7 +130,7 @@ fn note(event: &Event) {
             delay_ms,
             reason,
         } => tracing::warn!(target: "pi::wire", attempt, delay_ms, reason = %reason, "retrying"),
-        Event::Warning(w) => tracing::warn!(target: "pi::loop", "{w}"),
+        Event::Warning(w) | Event::Refit(w) => tracing::warn!(target: "pi::loop", "{w}"),
         // Named for what it carries: the loop sends this before the turn's
         // tool calls run, so "end" would put the record in the wrong place.
         Event::TurnEnd { usage, .. } => tracing::info!(

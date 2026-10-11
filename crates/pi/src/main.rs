@@ -321,7 +321,7 @@ async fn main() -> Result<ExitCode> {
         // for those to land before the runtime goes with them.
         archive::flush().await;
         if let Some(why) = journal::take_failure() {
-            eprintln!("warning: {why}");
+            eprintln!("{why}");
         }
         distill_after(&args, &ended, &model_id);
         return out.map(|()| ExitCode::SUCCESS);
@@ -392,7 +392,7 @@ async fn main() -> Result<ExitCode> {
     // in flight.
     archive::flush().await;
     if let Some(why) = journal::take_failure() {
-        eprintln!("warning: {why}");
+        eprintln!("{why}");
     }
     if keeps {
         distill_after(&args, &id, &model_id);

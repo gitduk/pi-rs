@@ -497,10 +497,8 @@ impl Tui {
                     .say(front_view(&mut self.views, self.core.lane()), said);
             }
             if let Some(why) = pi_store::journal::take_failure() {
-                self.ui.say(
-                    front_view(&mut self.views, self.core.lane()),
-                    format!("warning: {why}"),
-                );
+                self.ui
+                    .say(front_view(&mut self.views, self.core.lane()), why);
             }
             // What changed on disk is taken up within a second: settings,
             // instructions and memory resolve the lane again, a skill's word

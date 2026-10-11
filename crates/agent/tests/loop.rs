@@ -998,7 +998,7 @@ async fn an_overflow_refusal_shrinks_the_transcript_and_retries() {
                 assert!(
                     events
                         .iter()
-                        .any(|e| matches!(e, Event::Warning(w) if w.contains("2000-token window"))),
+                        .any(|e| matches!(e, Event::Refit(w) if w.contains("2000-token window"))),
                     "{events:?}"
                 );
                 assert!(
@@ -1011,7 +1011,7 @@ async fn an_overflow_refusal_shrinks_the_transcript_and_retries() {
             _ => assert!(
                 events
                     .iter()
-                    .any(|e| matches!(e, Event::Warning(w) if w.contains("named no limit"))),
+                    .any(|e| matches!(e, Event::Refit(w) if w.contains("named no limit"))),
                 "{events:?}"
             ),
         }
@@ -1133,7 +1133,7 @@ async fn a_named_window_supersedes_the_guesswork_that_preceded_it() {
     let blind: Vec<&String> = events
         .iter()
         .filter_map(|e| match e {
-            Event::Warning(w) if w.contains("named no limit") => Some(w),
+            Event::Refit(w) if w.contains("named no limit") => Some(w),
             _ => None,
         })
         .collect();

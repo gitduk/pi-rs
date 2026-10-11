@@ -571,7 +571,7 @@ pub fn install(path: &Path, level: LogLevel) {
     let journal = match Journal::open(path, level.field_cap()) {
         Ok(j) => std::sync::Arc::new(j),
         Err(e) => {
-            eprintln!("warning: no journal ({e}); PI_LOG=off silences this");
+            eprintln!("no journal ({e}); PI_LOG=off silences this");
             return;
         }
     };
