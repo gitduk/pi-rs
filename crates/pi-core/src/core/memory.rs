@@ -3,7 +3,7 @@
 //! carries what is remembered in its prompt.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,10 +27,12 @@ const PER_RUN: usize = 10;
 const BUDGET: usize = 16 * 1024;
 
 /// The memory files a run in `dir` carries, by name, within the budget.
+/// A line naming a path that is gone is marked, never dropped.
 pub fn kept(memory: &Memory, dir: &Path) -> Vec<(String, String)> {
+    let root = main_root(dir);
     let mut used = 0;
     let mut kept = Vec::new();
-    for file in memory.files(&main_root(dir)) {
+    for file in memory.files(&root) {
         if used + file.body.len() > BUDGET {
             tracing::warn!(target: "pi::memory", file = %file.name, "over the memory budget, left out");
             continue;
@@ -38,7 +40,67 @@ pub fn kept(memory: &Memory, dir: &Path) -> Vec<(String, String)> {
         used += file.body.len();
         kept.push(file);
     }
-    kept.into_iter().map(|f| (f.name, f.body)).collect()
+    kept.into_iter()
+        .map(|f| (f.name, marked(&f.body, &root)))
+        .collect()
+}
+
+// Each line with the backticked paths it names that no longer exist noted
+// after it: the fact may still hold, but it is no longer to be taken on trust.
+fn marked(body: &str, root: &Path) -> String {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut out = String::with_capacity(body.len());
+    for line in body.lines() {
+        out.push_str(line);
+        let gone: Vec<&str> = line
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|span| gone(span, root, home.as_deref()))
+            .collect();
+        if !gone.is_empty() {
+            out.push_str(&format!(
+                " [possibly stale: `{}` no longer exists]",
+                gone.join("`, `")
+            ));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+// Whether `span` reads as a path whose first part is here but which is not.
+// Its first part has to exist so that a route like `/v1/messages` or a
+// package name is never taken for a file that went missing.
+fn gone(span: &str, root: &Path, home: Option<&Path>) -> bool {
+    let looks_like_path = span.contains('/')
+        && !span.starts_with('@')
+        && !span.contains("://")
+        && !span
+            .chars()
+            .any(|c| c.is_whitespace() || "<>*{}$".contains(c));
+    if !looks_like_path {
+        return false;
+    }
+    let path = span.split("::").next().unwrap_or(span);
+    let path = match path.rsplit_once(':') {
+        Some((file, line)) if !line.is_empty() && line.bytes().all(|b| b.is_ascii_digit()) => file,
+        _ => path,
+    };
+    let (base, rest) = match path.strip_prefix("~/") {
+        Some(rest) => match home {
+            Some(home) => (home, rest),
+            None => return false,
+        },
+        None => match path.strip_prefix('/') {
+            Some(rest) => (Path::new("/"), rest),
+            None => (root, path),
+        },
+    };
+    let Some(first) = rest.split('/').find(|part| !part.is_empty()) else {
+        return false;
+    };
+    base.join(first).exists() && !base.join(rest).exists()
 }
 
 /// Read what changed in the sessions since the last distillation and fold it
@@ -269,5 +331,42 @@ mod tests {
         distill(store, fresh, writer, idle, "s1").await;
         let asked = wire.asked.lock().unwrap().clone();
         assert!(asked[1].contains("from before memory"), "{}", asked[1]);
+    }
+
+    // Only the model reads the mark, so a wrong one goes unseen either way:
+    // a live path called stale, or a dead one passed as fact.
+    #[test]
+    fn only_paths_that_were_here_and_went_are_marked() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src/tools")).unwrap();
+        std::fs::write(root.join("src/tools/registry.py"), "").unwrap();
+        let home = root.join("home");
+        std::fs::create_dir_all(home.join(".pi/tools")).unwrap();
+        let gone = |span| gone(span, root, Some(&home));
+
+        assert!(gone("src/retrieval/laws.py"));
+        assert!(gone("~/.pi/tools/image-to-text"));
+        assert!(gone("src/tools/gone.py::Provider"));
+        assert!(gone("src/tools/gone.py:42"));
+
+        assert!(!gone("src/tools/registry.py"));
+        assert!(!gone("src/tools/registry.py:42"));
+        assert!(!gone("src/tools/registry.py::RequestToolProvider"));
+        // Their first part was never here: not paths of this tree.
+        assert!(!gone("/v1/messages"));
+        assert!(!gone("scripts/load_law_index.py"));
+        assert!(!gone("@upstash/context7-mcp"));
+        assert!(!gone("law-{id}/x"));
+        assert!(!gone("npx -y a/b"));
+        assert!(!gone("https://example.com/a"));
+        assert!(!gone("blocks.rs::extents"));
+
+        let body = "- uses `src/tools/registry.py` and `src/old.py`\n- plain\n";
+        assert_eq!(
+            marked(body, root),
+            "- uses `src/tools/registry.py` and `src/old.py` \
+             [possibly stale: `src/old.py` no longer exists]\n- plain\n"
+        );
     }
 }
