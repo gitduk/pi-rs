@@ -663,7 +663,7 @@ impl Tui {
                 if let Some(line) = &queued.line {
                     let view = front_view(&mut self.views, self.core.lane());
                     self.ui.submit(view, line);
-                    view.surface.scroll = 0;
+                    view.surface.follow();
                 }
                 Wake::Do(Asked::Core(queued.intent))
             };
@@ -780,7 +780,7 @@ impl Tui {
         let next = self.drivers.next(lane.token(), lane.root())?;
         self.core.lane_mut().charge(&next.spent);
         let view = front_view(&mut self.views, self.core.lane());
-        view.surface.scroll = 0;
+        view.surface.follow();
         // A job's result is relayed under its label; a loop's line is read as
         // typed. A person's line through a job is always a prompt: what they
         // send never runs here as a command, and every one is answered.

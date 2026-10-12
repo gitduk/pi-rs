@@ -13,8 +13,8 @@ use super::call::{self, drawn, pending_line};
 use super::mouse::{Regions, Target};
 use super::row::{PendingTool, Row, count};
 use super::screen::{self, Rows};
-use super::scrollback::{Piece, ScrollbackRows, absorb_growth, body};
-use super::search::{self, Laid, Spot};
+use super::scrollback::{Piece, ScrollbackRows, body};
+use super::search::{self, Anchor, Laid, Spot};
 use super::ui::Focus;
 use super::view::{StreamKind, View, snapshot};
 use crate::render;
@@ -25,13 +25,10 @@ impl Ui {
     pub(super) fn flush(&mut self, lane: &Lane, view: &mut View) {
         let menu = self.menu();
         let width = self.screen.usable();
-        // Browsing reads the conversation alone (no thinking, calls, notices);
-        // a preview reads none of the transcript. Tally and window share this.
         let reading = self.reading();
-        let browse = self.browsing();
         let alone = matches!(self.page(), Some(Page::Preview(_)));
         let command = matches!(self.page(), Some(Page::Command(_)));
-        let keep = move |row: &Row| !alone && (!browse || row.is_conversation());
+        let keep = self.keeps();
         let text = self.page_lines();
         let mut bar = call::job_lines(&self.jobs, &self.paint, width);
         bar.extend(self.bar_lines(&Facts::of(lane), &snapshot(lane, view), width));
@@ -84,7 +81,6 @@ impl Ui {
             self.live(lane, view, row_holds, now)
         };
 
-        self.absorb(view, &keep, live.len(), width);
         if self.search_due() {
             let laid: Vec<Laid> =
                 ScrollbackRows::new(&view.surface.scrollback, &self.paint, width, keep)
@@ -107,7 +103,7 @@ impl Ui {
                             .map(|(n, l)| Laid::of(Spot::Text(n), screen::fit(l, width))),
                     )
                     .collect();
-            self.search_answer(&laid, hist_view);
+            self.search_answer(&laid);
             // The count the answer moved, on the row laid out before it: one
             // row either way, so only what it says changes.
             if let Some((line, _)) = self.search_line()
@@ -116,7 +112,11 @@ impl Ui {
                 input_view = vec![line];
             }
         }
-        let scroll = self.window_scroll(view, &text, hist_view, width);
+        let most = self.most(&text, hist_view, width);
+        let (scroll, top) = {
+            let (scroll, top) = self.window_mut(view);
+            (*scroll, *top)
+        };
         // A line a click answers on is lit under the pointer, as a fold's
         // own line is.
         let lit = self.lit_text();
@@ -143,9 +143,9 @@ impl Ui {
         // closes the batch.
         let live_stream = live.iter().enumerate().map(move |(i, s)| {
             let target = if i < pending_rows {
-                Target::PendingTools
+                Target::PendingTools(i)
             } else {
-                Target::None
+                Target::Live(i)
             };
             // In hand already, and the window takes it as it is.
             (
@@ -157,10 +157,13 @@ impl Ui {
             )
         });
 
+        let at = top.map(|a| (move |t: &Target| Spot::of(*t).cmp(&a.spot), a.rows));
         let (tagged_rows, scroll) = screen::window_tagged(
             scrollback.chain(live_stream).chain(text_stream),
             hist_view,
             scroll,
+            at,
+            most,
         );
 
         let mut rows = Vec::with_capacity(tagged_rows.len());
@@ -183,7 +186,7 @@ impl Ui {
                             return row;
                         }
                         let current = at
-                            .filter(|h| Spot::of(*target) == Some(h.at.spot) && r == h.at.row)
+                            .filter(|h| Spot::of(*target) == h.at.spot && r == h.at.row)
                             .map(|h| h.k);
                         search::marked(row, query, current)
                     })
@@ -200,10 +203,10 @@ impl Ui {
             None => rows,
         };
 
-        match &mut self.focus {
-            Focus::Read(read) => read.scroll = scroll,
-            _ => view.surface.scroll = scroll,
-        }
+        // Scrolled up, the next frame opens on this one's top row.
+        let top = (scroll > 0).then(|| self.anchor_here(view)).flatten();
+        let (was, top_was) = self.window_mut(view);
+        (*was, *top_was) = (scroll, top);
         let picked = self
             .picked
             .unwrap_or(menu.len().saturating_sub(1))
@@ -330,55 +333,43 @@ impl Ui {
         }
     }
 
-    // While scrolled up, bottom growth folds into the scroll via cached row
-    // heights — counting lines instead would misfill the visible area.
-    fn absorb(&mut self, view: &mut View, keep: &dyn Fn(&Row) -> bool, live: usize, width: usize) {
-        // Text does not grow. The transcript is left alone under a page: the
-        // first frame after it counts what grew meanwhile, as one frame's.
-        let scroll = match &self.focus {
-            Focus::Read(Read {
-                page: Page::Conversation,
-                scroll,
-                ..
-            }) => *scroll,
-            Focus::Read(_) => return,
-            _ => view.surface.scroll,
-        };
-        let total = (scroll > 0).then(|| {
-            let rows: usize = view
-                .surface
-                .scrollback
-                .iter()
-                .filter(|r| keep(r))
-                .map(|r| r.height(&self.paint, width))
-                .sum();
-            rows + live
-        });
-        let (scroll, counted) = match &mut self.focus {
-            Focus::Read(read) => (&mut read.scroll, &mut read.counted),
-            _ => (&mut view.surface.scroll, &mut view.surface.counted),
-        };
-        if let Some(total) = total {
-            *scroll = absorb_growth(*scroll, *counted, total);
+    // How far back the window may go. A command page's stops at its head:
+    // the transcript above it is only what it was asked over.
+    fn most(&self, text: &[Line], hist_view: usize, width: usize) -> usize {
+        match self.page() {
+            Some(Page::Command(_)) => {
+                let rows: usize = text.iter().map(|l| screen::fit(l, width).len()).sum();
+                rows.saturating_sub(hist_view)
+            }
+            _ => usize::MAX,
         }
-        *counted = total;
     }
 
-    // The scroll the window reads at. A command page's stops at its head: the
-    // transcript above it is only what it was asked over.
-    fn window_scroll(&self, view: &View, text: &[Line], hist_view: usize, width: usize) -> usize {
-        match &self.focus {
-            Focus::Read(Read {
-                page: Page::Command(_),
-                scroll,
-                ..
-            }) => {
-                let rows: usize = text.iter().map(|l| screen::fit(l, width).len()).sum();
-                (*scroll).min(rows.saturating_sub(hist_view))
-            }
-            Focus::Read(read) => read.scroll,
-            _ => view.surface.scroll,
-        }
+    // The scrollback rows the window reads: browsing, the conversation alone
+    // (no thinking, calls, notices); a preview, none of the transcript.
+    pub(super) fn keeps(&self) -> impl Fn(&Row) -> bool + Copy + use<> {
+        let browse = self.browsing();
+        let alone = matches!(self.page(), Some(Page::Preview(_)));
+        move |row: &Row| !alone && (!browse || row.is_conversation())
+    }
+
+    // Where the top row last drawn opens the next window. A live row is drawn
+    // anew and lands as another, so the last settled line holds it instead.
+    pub(super) fn anchor_here(&self, view: &View) -> Option<Anchor> {
+        let place = self.top_place()?;
+        let Spot::Live(i) = place.spot else {
+            return Some(place.into());
+        };
+        let keep = self.keeps();
+        let (idx, row) = (view.surface.scrollback.iter().enumerate())
+            .rev()
+            .find(|(_, r)| keep(r) && r.len() > 0)?;
+        let line = row.len() - 1;
+        let height = row.line_height(line, &self.paint, self.screen.usable());
+        Some(Anchor {
+            spot: Spot::Row(idx, line),
+            rows: (height + i) as isize,
+        })
     }
 
     // Rows above the input: calls in flight the group isn't drawing, the

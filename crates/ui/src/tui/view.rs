@@ -8,7 +8,7 @@ use agent::session::EntryId;
 
 use super::call::RunTool;
 use super::row::Row;
-use super::scrollback::{Folds, scrollback_from};
+use super::scrollback::{Folds, Scrollback, scrollback_from};
 use crate::render::Paint;
 use pi_core::core::Core;
 use pi_core::core::lane::Lane;
@@ -46,19 +46,19 @@ pub struct View {
 pub struct Surface {
     // Finished rows, oldest first, above the editor. Not a pure session
     // projection — also carries banners and notices only the screen knows.
-    pub(super) scrollback: Vec<Row>,
+    pub(super) scrollback: Scrollback,
     // The stream still writing the next row, and which kind it is.
     pub(super) stream: Stream,
     // How the groups of calls and reasoning are folded.
     pub(super) folds: Folds,
-    // How many rows the opening block occupies. A theme change replaces
-    // exactly those and leaves the conversation under them alone.
-    pub(super) opened: usize,
+    // Whether the first row is the opening banner, which a theme change
+    // repaints in its place.
+    pub(super) opened: bool,
     // Rows the view is scrolled up by. Zero shows the newest rows.
     pub(super) scroll: usize,
-    // The rows the scrolled-up view measured last: growth folds into
-    // `scroll`. `None` re-bases — a reflow must not move the view.
-    pub(super) counted: Option<usize>,
+    // The row a scrolled-up view opens on, so what lands or folds under it
+    // leaves it put. `None` goes by `scroll`.
+    pub(super) top: Option<super::search::Anchor>,
     // Id of the last entry adopted into scrollback. Entries beyond it fold
     // in as they commit, so live doesn't wait on a rebuild.
     pub(super) tail: Option<EntryId>,
@@ -147,6 +147,12 @@ pub(super) fn prune_views(core: &Core, views: &mut Views) {
 }
 
 impl Surface {
+    // Back on the newest rows, following them as they land.
+    pub(super) fn follow(&mut self) {
+        self.scroll = 0;
+        self.top = None;
+    }
+
     // The screen a session rebuilds to: the transcript as rows, the fold
     // switch where the user left it, and nothing streaming yet.
     pub(super) fn from(session: &agent::session::Session, paint: &Paint, folded: bool) -> Self {
@@ -184,13 +190,11 @@ impl View {
     /// A lane nobody has said anything in yet: the banner naming what it
     /// stands on, and everything else empty.
     pub fn opening(resolved: &Resolved, paint: &Paint) -> Self {
-        let scrollback = Row::banner(resolved, paint);
-        let opened = scrollback.len();
         Self {
             drawn: true,
             surface: Surface {
-                opened,
-                scrollback,
+                opened: true,
+                scrollback: vec![Row::banner(resolved, paint)].into(),
                 ..Default::default()
             },
             ..Self::default()

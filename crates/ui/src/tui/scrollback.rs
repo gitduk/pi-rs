@@ -14,6 +14,49 @@ use crate::render::{self, Paint};
 use pi_core::core;
 use pi_store::icons;
 
+/// The settled rows, oldest first. Rows only go on the end and change in
+/// place, so an index names the same row for good.
+#[derive(Default)]
+pub(super) struct Scrollback(Vec<Row>);
+
+impl Scrollback {
+    pub(super) fn push(&mut self, row: Row) {
+        self.0.push(row);
+    }
+}
+
+impl std::ops::Deref for Scrollback {
+    type Target = [Row];
+
+    fn deref(&self) -> &[Row] {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Scrollback {
+    fn deref_mut(&mut self) -> &mut [Row] {
+        &mut self.0
+    }
+}
+
+impl Extend<Row> for Scrollback {
+    fn extend<I: IntoIterator<Item = Row>>(&mut self, rows: I) {
+        self.0.extend(rows);
+    }
+}
+
+impl FromIterator<Row> for Scrollback {
+    fn from_iter<I: IntoIterator<Item = Row>>(rows: I) -> Self {
+        Scrollback(rows.into_iter().collect())
+    }
+}
+
+impl From<Vec<Row>> for Scrollback {
+    fn from(rows: Vec<Row>) -> Self {
+        Scrollback(rows)
+    }
+}
+
 // Whether groups are folded, and which reasoning block streams now. A
 // group's fold state resets to `folded` once it stops being last.
 pub(super) struct Folds {
@@ -93,7 +136,7 @@ impl Folds {
 
     // A step joins the last row's group, or opens a new one that retires the
     // old last group and is born the way `ctrl+t` left it.
-    pub(super) fn join(&mut self, scrollback: &mut Vec<Row>, step: Step) {
+    pub(super) fn join(&mut self, scrollback: &mut Scrollback, step: Step) {
         let step = match scrollback.last_mut() {
             Some(last) => match last.join(step) {
                 Ok(()) => return,
@@ -107,7 +150,7 @@ impl Folds {
 
     // A new block of reasoning starts, in a group from its first delta: the
     // group's line is what shows it until a line lands.
-    pub(super) fn start(&mut self, scrollback: &mut Vec<Row>) {
+    pub(super) fn start(&mut self, scrollback: &mut Scrollback) {
         let block = self.take_id();
         self.streaming = Some(block);
         self.join(
@@ -136,15 +179,16 @@ impl Folds {
     }
 
     // The streaming block is over, folded if its group is. One that never
-    // had a line leaves nothing, and neither does a group it was alone in.
-    pub(super) fn close_block(&mut self, scrollback: &mut Vec<Row>) {
+    // had a line leaves nothing, and neither does a group it was alone in:
+    // the group's place stays, holding no line.
+    pub(super) fn close_block(&mut self, scrollback: &mut Scrollback) {
         let Some(id) = self.streaming.take() else {
             return;
         };
         if let Some(at) = scrollback.iter().rposition(|r| r.holds_block(id))
             && scrollback[at].end_block(id)
         {
-            scrollback.remove(at);
+            scrollback[at] = Row::lines(Vec::new());
         }
     }
 
@@ -197,7 +241,7 @@ pub(super) struct ScrollbackRows<'a> {
     // Next entry to read from the back, and the row offset inside it.
     back: (usize, usize),
     // Each row's logical line count, the steps the two walks take. Wrapped
-    // heights are the rows' own caches, summed per frame in `flush`.
+    // heights are the rows' own caches.
     lens: Vec<usize>,
 }
 
@@ -412,7 +456,7 @@ pub(super) fn scrollback_from(
     session: &agent::session::Session,
     paint: &Paint,
     folds: &mut Folds,
-) -> Vec<Row> {
+) -> Scrollback {
     // A call with a session result shows only its result row; an
     // interrupted one shows the start line, as `abandon_tools` leaves it.
     let answered: HashSet<String> = session
@@ -425,7 +469,7 @@ pub(super) fn scrollback_from(
         })
         .collect();
 
-    let mut out = Vec::new();
+    let mut out = Scrollback::default();
     // History, not the view: compaction is the model losing sight of the
     // conversation, not the user. What it dropped is marked and kept.
     let mut hidden = false;
@@ -520,7 +564,7 @@ pub(super) fn scrollback_from(
 
 /// Space a turn off from the one before it, so turns read apart; the
 /// first has nothing above it to be set off from.
-pub(super) fn open_turn(rows: &mut Vec<Row>) {
+pub(super) fn open_turn(rows: &mut Scrollback) {
     if rows.iter().rev().any(Row::opens_turn) {
         rows.push(Row::gap());
     }
@@ -554,14 +598,5 @@ pub(super) fn f_entry(entry: &LogEntry, paint: &Paint) -> Option<Vec<Row>> {
         } => (!agent::session::is_stopped_call(r))
             .then(|| vec![Row::stored_result(r, preview.as_deref())]),
         _ => None,
-    }
-}
-
-// Scroll for the same window one frame later: growth since `last` folds
-// back into the offset so the window keeps its place; `None` re-bases.
-pub(super) fn absorb_growth(scroll: usize, last: Option<usize>, total: usize) -> usize {
-    match last {
-        Some(last) => scroll.saturating_add_signed(total as isize - last as isize),
-        None => scroll,
     }
 }

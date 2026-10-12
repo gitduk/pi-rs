@@ -377,7 +377,7 @@ fn the_live_region_ends_with_the_turn_and_not_with_the_clock() {
 fn live_pending_rows(ui: &crate::tui::Ui) -> usize {
     ui.row_targets
         .iter()
-        .filter(|t| matches!(t, Target::PendingTools))
+        .filter(|t| matches!(t, Target::PendingTools(_)))
         .count()
 }
 

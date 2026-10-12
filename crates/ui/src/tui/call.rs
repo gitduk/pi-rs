@@ -7,7 +7,7 @@ use llm::message::ToolResult;
 use ratatui::text::Line;
 
 use super::row::{self, PendingTool, Row};
-use super::scrollback::Folds;
+use super::scrollback::{Folds, Scrollback};
 use crate::render::{Paint, named};
 use pi_core::core::tools::modifies;
 use pi_core::driver::jobs::Job;
@@ -93,7 +93,7 @@ pub(super) fn drawn(tools: &[RunTool], row_holds: bool) -> Vec<&RunTool> {
 // Where a tool's row goes: a call that landed well and is not a write is a
 // step of the group; anything else is a line of its own that ends it.
 pub(super) fn push_tool_row(
-    scrollback: &mut Vec<Row>,
+    scrollback: &mut Scrollback,
     folds: &mut Folds,
     row: Row,
     result: &ToolResult,

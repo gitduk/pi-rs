@@ -69,17 +69,6 @@ impl Height {
             .and_then(|m| m.lines.get(i).copied().flatten())
     }
 
-    // The row's count, once every line has been measured; a caller that
-    // asks mid-measure fills the rest first (see `height`).
-    fn total(&self, width: usize) -> Option<usize> {
-        let held = self.0.borrow();
-        let m = held.as_ref().filter(|m| m.width == width)?;
-        m.lines
-            .iter()
-            .all(Option::is_some)
-            .then(|| m.lines.iter().flatten().sum())
-    }
-
     fn set(&self, width: usize, i: usize, height: usize) {
         self.at(width, i + 1).lines[i] = Some(height);
     }
@@ -112,6 +101,9 @@ enum Kind {
         text: Line<'static>,
         times: usize,
     },
+    // Painted lines that come and go together: the banner, or none at all
+    // where a row was that is gone.
+    Lines(Vec<Line<'static>>),
     Result(ToolOut),
     Relayed(Relayed),
     Steps(Group),
@@ -190,6 +182,12 @@ impl Row {
             text: line.into(),
             times: 1,
         })
+    }
+
+    /// Painted lines kept as one row: replaced whole, they leave the rows
+    /// under them where they were.
+    pub fn lines(lines: Vec<Line<'static>>) -> Self {
+        Self::new(Kind::Lines(lines))
     }
 
     /// The blank line a turn after the first opens on.
@@ -512,7 +510,7 @@ impl Row {
     }
 
     /// How many logical lines the row is made of — the `i`s `line` answers.
-    /// Wraps not counted; `height` is the screen-row count.
+    /// Wraps not counted; `line_height` gives a line's screen rows.
     pub fn len(&self) -> usize {
         match &self.0 {
             Kind::Answer(_)
@@ -521,25 +519,15 @@ impl Row {
             | Kind::Block(_)
             | Kind::Notice { .. }
             | Kind::Said { .. } => 1,
+            Kind::Lines(lines) => lines.len(),
             Kind::Result(r) => r.len(),
             Kind::Relayed(r) => r.len(),
             Kind::Steps(g) => g.len(),
         }
     }
 
-    /// Screen rows this row takes at `width`, wraps included, cached by
-    /// width. The scrolled-up view's accounting reads these.
-    pub fn height(&self, paint: &Paint, width: usize) -> usize {
-        if let Some(total) = self.1.total(width) {
-            return total;
-        }
-        (0..self.len())
-            .map(|i| self.line_height(i, paint, width))
-            .sum()
-    }
-
-    /// Screen rows logical line `i` takes, from the same cache `height`
-    /// keeps — a line never shown is counted without being wrapped.
+    /// Screen rows logical line `i` takes at `width`, cached by width — a
+    /// line never shown is counted without being wrapped.
     pub fn line_height(&self, i: usize, paint: &Paint, width: usize) -> usize {
         if let Some(h) = self.1.line(width, i) {
             return h;
@@ -561,6 +549,7 @@ impl Row {
         match &self.0 {
             Kind::Said { border, body, .. } => (body.clone(), Some(border.clone())),
             Kind::Answer(text) => (text.clone(), None),
+            Kind::Lines(lines) => (lines[i].clone(), None),
             Kind::CodeLine(line) => (line.clone(), Some(Line::from(CODE_INDENT))),
             Kind::Code(c) => (c.line(paint), None),
             Kind::Block(b) => (b.line(paint, width), None),
@@ -630,7 +619,7 @@ impl Row {
     /// What the screen opens with: what the prompt stands on, departures
     /// from the defaults, and what startup had to say. Built fresh, so a
     /// reload theme change repaints it.
-    pub fn banner(resolved: &Resolved, paint: &Paint) -> Vec<Self> {
+    pub fn banner(resolved: &Resolved, paint: &Paint) -> Self {
         let mut facts = Vec::new();
         if let Some(system) = &resolved.system {
             facts.push(("system prompt", tilde(system)));
@@ -671,13 +660,15 @@ impl Row {
             .map(|(label, _)| label.len())
             .max()
             .unwrap_or(0);
-        let muted = |line: &str| Self::notice(Line::from(paint.span(&paint.theme.muted, line)));
+        let muted = |line: &str| Line::from(paint.span(&paint.theme.muted, line));
         let fact = |label: &str, value: &str| muted(&format!("{label:width$}  {value}"));
-        std::iter::once(muted(icons::VERSION_BANNER))
-            .chain(facts.iter().map(|(label, value)| fact(label, value)))
-            .chain((!resolved.notes.is_empty()).then(|| muted("")))
-            .chain(resolved.notes.iter().map(|note| muted(note)))
-            .collect()
+        Self::lines(
+            std::iter::once(muted(icons::VERSION_BANNER))
+                .chain(facts.iter().map(|(label, value)| fact(label, value)))
+                .chain((!resolved.notes.is_empty()).then(|| muted("")))
+                .chain(resolved.notes.iter().map(|note| muted(note)))
+                .collect(),
+        )
     }
 }
 
@@ -770,24 +761,15 @@ mod conversation_tests {
 mod height_tests {
     use super::*;
 
-    // The window reads one line's height at a time (skipping rows a
-    // scrolled view hides); both paths must agree on where a row ends.
+    // The window counts a line by its height, wraps included, without
+    // building the rows it skips.
     #[test]
-    fn a_rows_height_is_the_sum_of_its_lines() {
+    fn a_lines_height_counts_its_wraps() {
         let paint = Paint::new(false);
         let row = Row::thinking(1, vec![Line::from("abcdef"), Line::from("gh")], false);
-        for width in [2usize, 4, 80] {
-            let sum: usize = (0..row.len())
-                .map(|i| row.line_height(i, &paint, width))
-                .sum();
-            assert_eq!(sum, row.height(&paint, width), "at width {width}");
-        }
-        // Asked a whole row at a time, then one line at a time: same answer.
-        let fresh = Row::thinking(1, vec![Line::from("abcdef"), Line::from("gh")], false);
-        assert_eq!(fresh.height(&paint, 2), 4, "three rows and one");
-        assert_eq!(fresh.line_height(0, &paint, 2), 3, "abcdef wraps to three");
-        assert_eq!(fresh.line_height(1, &paint, 2), 1);
-        assert_eq!(fresh.height(&paint, 2), 4);
+        assert_eq!(row.line_height(0, &paint, 2), 3, "abcdef wraps to three");
+        assert_eq!(row.line_height(1, &paint, 2), 1);
+        assert_eq!(row.line_height(0, &paint, 80), 1);
     }
 }
 

@@ -13,13 +13,24 @@ use super::view::View;
 const MULTI_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
 
 impl Ui {
+    // By rows from the top row the last frame drew, so what lands before the
+    // next one moves nothing; before any frame, by rows from the bottom.
     pub(super) fn scroll_view(&mut self, view: &mut View, up: bool, step: usize) {
-        let scroll = self.scroll_mut(view);
-        *scroll = if up {
-            scroll.saturating_add(step)
-        } else {
-            scroll.saturating_sub(step)
-        };
+        let here = self.anchor_here(view);
+        let (scroll, top) = self.window_mut(view);
+        match top.or(here) {
+            Some(mut anchor) => {
+                let step = step.min(isize::MAX as usize) as isize;
+                anchor.rows = if up {
+                    anchor.rows.saturating_sub(step)
+                } else {
+                    anchor.rows.saturating_add(step)
+                };
+                *top = Some(anchor);
+            }
+            None if up => *scroll = scroll.saturating_add(step),
+            None => *scroll = scroll.saturating_sub(step),
+        }
     }
 
     // The columns a drawn row's border takes before its text.
@@ -78,7 +89,7 @@ impl Ui {
     pub(super) fn on_mouse_click(&mut self, view: &mut View, col: u16, row: u16) {
         match self.target_at(row) {
             // Live rows rebuild every frame, so a flag flip is enough.
-            Some(Target::PendingTools) => self.live_tools_shown = !self.live_tools_shown,
+            Some(Target::PendingTools(_)) => self.live_tools_shown = !self.live_tools_shown,
             Some(Target::Text(n)) => match self.text_click(n) {
                 Some(TextClick::Copy(code)) => {
                     let said = copy_out(&code);
@@ -113,16 +124,12 @@ impl Ui {
                         self.preview(std::iter::once((head, None)).chain(body).collect());
                         return;
                     }
-                    let before = row.height(&self.paint, width);
                     if !row.toggle_at(line, width) {
                         return;
                     }
-                    let after = row.height(&self.paint, width);
-                    // What changed is under the line clicked: the bottom moves
-                    // by as much, so that line stays where it was.
-                    let scroll = self.scroll_mut(view);
-                    *scroll = scroll.saturating_add_signed(after as isize - before as isize);
-                    self.rebase(view);
+                    // What changed is under the line clicked, so that line
+                    // stays where it was.
+                    self.pin(view);
                 }
             }
         }
@@ -291,9 +298,11 @@ impl Ui {
 // What block a rendered history row belongs to, for click handling.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Target {
-    None,
     Scrollback(usize, usize),
-    PendingTools,
+    // Row `i` of the live block: a pending call, a click on it opening or
+    // closing the batch, or the rest.
+    PendingTools(usize),
+    Live(usize),
     // Line `n` of the text the reading page shows.
     Text(usize),
 }

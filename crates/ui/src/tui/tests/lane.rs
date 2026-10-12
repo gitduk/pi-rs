@@ -64,8 +64,8 @@ async fn switching_back_to_a_rebuilt_lane_keeps_its_transcript() {
     let lane = running_lane(dir.path());
     let mut view = crate::tui::View::opening(&pi_core::core::lane::a_resolved(""), &tui.ui.paint);
     // As `rebuild` leaves it: the conversation, and no banner.
-    view.surface.scrollback = vec![Row::notice("what was said before")];
-    view.surface.opened = 0;
+    view.surface.scrollback = vec![Row::notice("what was said before")].into();
+    view.surface.opened = false;
     // The screen the lane comes back with, keyed by the lane it was built
     // for: a lane no longer carries its own.
     tui.views.insert(lane.token(), view);

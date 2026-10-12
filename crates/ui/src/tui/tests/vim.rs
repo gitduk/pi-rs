@@ -344,7 +344,7 @@ fn an_empty_line_sends_gg_and_g_to_the_history_ends() {
     // the user scrolled it to.
     ui.key(&lane, &mut view, typed('K'), false);
     ui.flush(&lane, &mut view);
-    let up = view.surface.scroll;
+    let up = ui.drawn[0].clone();
     ui.editor.set_line("ab\ncd");
     ui.key(&lane, &mut view, typed('G'), false);
     assert_eq!(ui.editor.cursor(), 5, "G runs to the text's end");
@@ -352,7 +352,7 @@ fn an_empty_line_sends_gg_and_g_to_the_history_ends() {
     ui.key(&lane, &mut view, typed('g'), false);
     ui.flush(&lane, &mut view);
     assert_eq!(ui.editor.cursor(), 0, "and gg to its start");
-    assert_eq!(view.surface.scroll, up, "the history stayed where it was");
+    assert_eq!(ui.drawn[0], up, "the history stayed where it was");
 }
 
 // `ctrl+l` weighs the line: text costs one press to clear, an empty line

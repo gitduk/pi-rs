@@ -1,6 +1,7 @@
 //! The whole terminal, via ratatui's diffed cell buffer. History rebuilds
 //! from the transcript, not terminal scrollback, so a rewind can forget it.
 
+use std::cmp::Ordering;
 use std::io::Stdout;
 use std::io::Write;
 
@@ -8,6 +9,7 @@ use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
 };
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
+
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
@@ -103,25 +105,57 @@ impl Piece for Ready<'_> {
 pub const TOP: usize = usize::MAX;
 
 /// `room` rows from `lines`, `scroll` back from the bottom — measured in
-/// wrapped rows, not lines, or the newest rows fall off screen. Each row
-/// comes with its tag and which row of its line it is; also the scroll clamped.
-pub fn window_tagged<T: Clone, P: Piece>(
+/// wrapped rows, not lines, or the newest rows fall off screen. With `top`,
+/// the window opens that many rows down from the line the test says is it
+/// instead (or on the next line, if it is gone), however much changed
+/// below; never more than `most` back. Each row comes with its tag and
+/// which row of its line it is; also the scroll that drew them.
+pub fn window_tagged<T: Clone, P: Piece, F: Fn(&T) -> Ordering>(
     lines: impl DoubleEndedIterator<Item = (P, T)>,
     room: usize,
-    scroll: usize,
+    mut scroll: usize,
+    mut top: Option<(F, isize)>,
+    most: usize,
 ) -> (Vec<(Line<'static>, T, usize)>, usize) {
+    scroll = scroll.min(most);
     // A scroll of `TOP` must reach the clamp below, not overflow on the way.
-    let want = room.saturating_add(scroll);
+    let mut want = room.saturating_add(scroll);
     // Backwards on the counts alone: a line the window will not show costs its
     // height here, not the text it would take to build.
     let mut pending: Vec<(P, T)> = Vec::new();
     let mut have = 0usize;
+    // Rows from the bottom up to the top of the last line passed after `top`.
+    let mut after = None;
+    // The scroll that puts the row `below` rows up from the bottom on top.
+    let settle = |below: Option<usize>, scroll: usize| {
+        below.map_or(scroll, |b| b.saturating_sub(room).min(most))
+    };
     for item in lines.rev() {
-        if have >= want {
+        if top.is_none() && have >= want {
             break;
         }
-        have += item.0.height();
+        let height = item.0.height();
+        let found = top.as_ref().and_then(|(at, rows)| match at(&item.1) {
+            Ordering::Equal => Some(Some(
+                ((have + height) as isize).saturating_sub(*rows).max(0) as usize,
+            )),
+            Ordering::Less => Some(after),
+            Ordering::Greater => {
+                after = Some(have + height);
+                None
+            }
+        });
+        if let Some(below) = found {
+            scroll = settle(below, scroll);
+            want = room.saturating_add(scroll);
+            top = None;
+        }
+        have += height;
         pending.push(item);
+    }
+    // Every line comes after `top`: it was the first, and is gone.
+    if top.is_some() {
+        scroll = settle(after, scroll);
     }
     let scroll = scroll.min(have.saturating_sub(room));
     let mut back: Vec<(Line<'static>, T, usize)> = Vec::new();
@@ -179,7 +213,8 @@ pub fn window<'a>(
     scroll: usize,
 ) -> (Vec<Line<'static>>, usize) {
     let lines = lines.map(move |line| (Ready { line, width }, ()));
-    let (rows, scroll) = window_tagged(lines, room, scroll);
+    let none = None::<(fn(&()) -> Ordering, isize)>;
+    let (rows, scroll) = window_tagged(lines, room, scroll, none, usize::MAX);
     (rows.into_iter().map(|(r, (), _)| r).collect(), scroll)
 }
 

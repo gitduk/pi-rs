@@ -1,6 +1,6 @@
 use crate::render::Paint;
 use crate::tui::row::{FoldedTool, Row, Step};
-use crate::tui::scrollback::{Folds, ScrollbackRows};
+use crate::tui::scrollback::{Folds, Scrollback, ScrollbackRows};
 use crate::tui::{View, following_terminal};
 use pi_store::theme::{Color, Theme};
 use ratatui::text::Line;
@@ -134,7 +134,7 @@ fn scrollback_rows_walk_from_both_ends() {
 }
 
 // A block streamed in: started, and one line landed in its group.
-fn streamed(t: &mut Folds, scrollback: &mut Vec<Row>) {
+fn streamed(t: &mut Folds, scrollback: &mut Scrollback) {
     t.start(scrollback);
     let id = t.streaming.expect("started");
     t.streaming_row(scrollback)
@@ -150,7 +150,8 @@ fn toggling_moves_the_last_group_and_nothing_else() {
     let mut scrollback = vec![
         Row::thinking(9, vec![Line::from("old")], false),
         Row::notice("an answer"),
-    ];
+    ]
+    .into();
     t.start(&mut scrollback);
     t.toggle_current(&mut scrollback);
     assert!(t.folded);
@@ -163,7 +164,7 @@ fn a_finished_group_keeps_its_fold_until_the_next_question() {
     // An unfold survives the answer — a finished group is still last —
     // and folds back to the switch the moment a new input is submitted.
     let mut t = Folds::default();
-    let mut scrollback = Vec::new();
+    let mut scrollback = Scrollback::default();
     streamed(&mut t, &mut scrollback);
     t.toggle_current(&mut scrollback);
     assert_eq!(scrollback[0].folded(), Some(false));
@@ -184,7 +185,7 @@ fn a_finished_group_follows_a_global_unfold() {
         folded: false,
         ..Default::default()
     };
-    let mut scrollback = Vec::new();
+    let mut scrollback = Scrollback::default();
     streamed(&mut t, &mut scrollback);
     t.close_block(&mut scrollback);
     t.fold_previous(&mut scrollback);
@@ -196,7 +197,7 @@ fn a_block_after_a_call_joins_its_group() {
     // The run's working between two answers is one group: a call and the
     // blocks on either side of it fold behind one line.
     let mut t = Folds::default();
-    let mut scrollback = Vec::new();
+    let mut scrollback = Scrollback::default();
     streamed(&mut t, &mut scrollback);
     t.close_block(&mut scrollback);
     t.join(
@@ -214,7 +215,7 @@ fn a_block_after_an_answer_starts_a_group_and_inherits_the_flip() {
     // Past an answer the next block is a new group and new last: the one
     // before folds back, and the new one is born the way `ctrl+t` left it.
     let mut t = Folds::default();
-    let mut scrollback = Vec::new();
+    let mut scrollback = Scrollback::default();
     streamed(&mut t, &mut scrollback);
     t.toggle_current(&mut scrollback);
     t.close_block(&mut scrollback);
@@ -229,13 +230,15 @@ fn a_block_that_ends_without_a_line_leaves_nothing() {
     // `ctrl+t` before the first line flips the group `start` made, and the
     // flip outlives it: a block with no line takes its lone group with it.
     let mut t = Folds::default();
-    let mut scrollback = Vec::new();
+    let mut scrollback = Scrollback::default();
     t.start(&mut scrollback);
     t.toggle_current(&mut scrollback);
     assert!(t.folded, "the switch itself is not touched");
     assert_eq!(scrollback[0].folded(), Some(false));
     t.close_block(&mut scrollback);
-    assert!(scrollback.is_empty());
+    let drawn = ScrollbackRows::new(&scrollback, &Paint::new(false), 80, |_| true).count();
+    assert_eq!(drawn, 0, "nothing drawn");
+    assert!(!scrollback.iter().any(Row::is_steps), "no group left");
     assert!(!t.birth_fold());
 }
 
@@ -244,7 +247,7 @@ fn the_live_text_follows_the_streaming_group() {
     // The live region reads the group's own state, not the switch: a group
     // the user unfolded streams even though the switch still says folded.
     let mut t = Folds::default();
-    let mut scrollback = Vec::new();
+    let mut scrollback = Scrollback::default();
     t.start(&mut scrollback);
     assert!(t.holds(true, &scrollback));
     scrollback[0].set_folded(false);
@@ -259,7 +262,7 @@ fn a_global_flip_takes_the_current_group_with_it() {
         folded: false,
         ..Default::default()
     };
-    let mut scrollback = Vec::new();
+    let mut scrollback = Scrollback::default();
     streamed(&mut t, &mut scrollback);
     assert_eq!(scrollback[0].folded(), Some(true));
     t.flip_all(&mut scrollback);
@@ -272,7 +275,7 @@ fn flipping_every_group_moves_the_switch_with_them() {
     // The global key folds every group, current one included, and moves
     // the switch with them: rows and switch never disagree.
     let mut t = Folds::default();
-    let mut scrollback = Vec::new();
+    let mut scrollback = Scrollback::default();
     streamed(&mut t, &mut scrollback);
     t.toggle_current(&mut scrollback); // unfold the current group on its own
     t.close_block(&mut scrollback);
@@ -297,7 +300,7 @@ fn a_flip_applies_to_each_new_last_group_until_flipped_back() {
     t.toggle_current(&mut []);
     assert!(!t.birth_fold());
 
-    let mut scrollback = Vec::new();
+    let mut scrollback = Scrollback::default();
     streamed(&mut t, &mut scrollback);
     assert_eq!(scrollback[0].folded(), Some(false));
     t.close_block(&mut scrollback);
@@ -315,7 +318,7 @@ fn a_flip_applies_to_each_new_last_group_until_flipped_back() {
 #[test]
 fn the_key_flips_what_a_click_left() {
     let mut t = Folds::default();
-    let mut scrollback = Vec::new();
+    let mut scrollback = Scrollback::default();
     streamed(&mut t, &mut scrollback);
     assert!(scrollback[0].toggle_expand(), "a click unfolds it");
     t.toggle_current(&mut scrollback);
@@ -327,49 +330,49 @@ fn a_scrolled_up_view_holds_until_the_user_scrolls_back() {
     // Scrolled two rows up from ten rows of history, rows 5-8 stay put
     // as output arrives below; only the user's own scroll moves them.
     let mut content: Vec<String> = (1..=10).map(|n| n.to_string()).collect();
-    let (room, mut scroll, mut last_total) = (4usize, 0usize, None);
+    let (room, mut scroll, mut top) = (4usize, 0usize, None);
     scroll = scroll.saturating_add(2);
-    let first = frame(&content, room, &mut scroll, &mut last_total);
+    let first = frame(&content, room, &mut scroll, &mut top);
     assert_eq!(first, vec!["5", "6", "7", "8"]);
     for n in 11..=15 {
         content.push(n.to_string());
         assert_eq!(
-            frame(&content, room, &mut scroll, &mut last_total),
+            frame(&content, room, &mut scroll, &mut top),
             first,
             "row {n} arriving moved the scrolled-up window"
         );
     }
-    scroll = scroll.saturating_sub(1);
+    // As `scroll_view`: by rows from where the last frame stood.
+    (scroll, top) = (scroll.saturating_sub(1), None);
     assert_eq!(
-        frame(&content, room, &mut scroll, &mut last_total),
+        frame(&content, room, &mut scroll, &mut top),
         vec!["6", "7", "8", "9"]
     );
 }
 
 #[test]
 fn rows_gone_below_the_window_leave_the_view_put() {
-    // Rows removed below the window shrink the tail; the negative delta
-    // is absorbed like a positive one and the window stays put.
+    // Rows removed below the window shrink the tail; the window stays put.
     let mut content: Vec<String> = (1..=10).map(|n| n.to_string()).collect();
-    let (room, mut scroll, mut last_total) = (4usize, 0usize, None);
+    let (room, mut scroll, mut top) = (4usize, 0usize, None);
     scroll = scroll.saturating_add(2);
     assert_eq!(
-        frame(&content, room, &mut scroll, &mut last_total),
+        frame(&content, room, &mut scroll, &mut top),
         vec!["5", "6", "7", "8"]
     );
     for n in 11..=15 {
         content.push(n.to_string());
-        frame(&content, room, &mut scroll, &mut last_total);
+        frame(&content, room, &mut scroll, &mut top);
     }
     content.truncate(10);
     assert_eq!(
-        frame(&content, room, &mut scroll, &mut last_total),
+        frame(&content, room, &mut scroll, &mut top),
         vec!["5", "6", "7", "8"]
     );
 }
 
 // A row that wraps counts for the rows it takes, not the line it is:
-// both of its rows fold into the scroll, or the window drifts.
+// both of its rows go under the window, or the window drifts.
 #[test]
 fn a_wrapped_row_landing_below_moves_the_scroll_by_its_rows() {
     let mut ui = test_ui(20, 12);
@@ -377,22 +380,36 @@ fn a_wrapped_row_landing_below_moves_the_scroll_by_its_rows() {
     let mut view = View::default();
     view.surface.scrollback = (1..=12).map(|n| Row::notice(format!("row {n}"))).collect();
     ui.flush(&lane, &mut view);
-
-    // Scroll up, and base the measurement on this frame's layout.
-    view.surface.scroll = 2;
-    view.surface.counted = None;
+    ui.scroll_view(&mut view, true, 2);
     ui.flush(&lane, &mut view);
-    let rebased = view.surface.scroll;
-    assert_eq!(rebased, 2);
+    let (shown, scrolled) = (ui.drawn.clone(), view.surface.scroll);
 
     // 25 columns at a 19-column width: one line, two rows.
     view.surface.scrollback.push(Row::notice("x".repeat(25)));
     ui.flush(&lane, &mut view);
-    assert_eq!(
-        view.surface.scroll,
-        rebased + 2,
-        "both wrapped rows folded into the scroll"
-    );
+    assert_eq!(ui.drawn, shown, "the window stayed put");
+    assert_eq!(view.surface.scroll, scrolled + 2, "on both wrapped rows");
+}
+
+// Groups folding above the window take their rows with them; the line at
+// the top stays at the top.
+#[test]
+fn folding_above_the_window_leaves_its_top_line_put() {
+    let mut ui = test_ui(30, 8);
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    view.surface.scrollback = vec![block(1, 6, false)].into();
+    view.surface
+        .scrollback
+        .extend((1..=12).map(|n| Row::notice(format!("row {n}"))));
+    ui.flush(&lane, &mut view);
+    ui.scroll_view(&mut view, true, 6);
+    ui.flush(&lane, &mut view);
+    let top = ui.drawn[0].clone();
+    assert!(top.contains("row"), "{top:?}");
+    view.surface.folds.flip_all(&mut view.surface.scrollback);
+    ui.flush(&lane, &mut view);
+    assert_eq!(ui.drawn[0], top);
 }
 
 // A group can stop being unfoldable while unfolded — a call it held failed
@@ -400,10 +417,11 @@ fn a_wrapped_row_landing_below_moves_the_scroll_by_its_rows() {
 #[test]
 fn the_key_reads_a_group_with_nothing_to_unfold_as_folded() {
     let mut t = Folds::default();
-    let mut scrollback = vec![Row::steps(
+    let mut scrollback: Scrollback = vec![Row::steps(
         Step::Tool(FoldedTool::new("read", "a.rs", "", "")),
         false,
-    )];
+    )]
+    .into();
     t.toggle_current(&mut scrollback);
     assert!(!t.birth_fold(), "the next group is born open");
 }
@@ -416,7 +434,7 @@ fn a_panel_dims_the_transcript_under_it() {
     let mut ui = test_ui(30, 12);
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
-    view.surface.scrollback = vec![Row::notice("in the transcript")];
+    view.surface.scrollback = vec![Row::notice("in the transcript")].into();
     let dimmed = |ui: &crate::tui::Ui| {
         ui.screen.test_buffer()[(0, ui.regions.history.y)]
             .modifier
@@ -489,7 +507,7 @@ fn a_command_page_searches_only_its_own_lines() {
     let mut ui = test_ui(30, 12);
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
-    view.surface.scrollback = vec![Row::notice("beta in the transcript")];
+    view.surface.scrollback = vec![Row::notice("beta in the transcript")].into();
     ui.open_command(pi_store::listing::Listing::say(["alpha", "beta"]));
     ui.flush(&lane, &mut view);
     for c in "/beta".chars() {
@@ -645,4 +663,91 @@ fn a_step_after_moving_the_view_goes_from_the_view() {
         press(&mut ui, &mut view, typed('N')).as_deref(),
         Some("20/20")
     );
+}
+
+// A fold opened by a click grows under the line clicked, which stays on
+// the row it was on, even on the newest rows.
+#[test]
+fn a_clicked_fold_opens_under_the_line_clicked() {
+    use crate::tui::mouse::Target;
+    use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    let mut ui = test_ui(30, 24);
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    view.surface.scrollback = (1..=20).map(|n| Row::notice(format!("row {n}"))).collect();
+    view.surface.scrollback.push(block(1, 6, true));
+    view.surface.scrollback.push(Row::notice("after"));
+    ui.flush(&lane, &mut view);
+    let at = |ui: &crate::tui::Ui| {
+        ui.row_targets
+            .iter()
+            .position(|t| matches!(t, Target::Scrollback(20, 0)))
+            .expect("the fold drawn")
+    };
+    let (before, top) = (at(&ui), ui.drawn[0].clone());
+    let row = ui.regions.history.y + before as u16;
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        let event = Event::Mouse(MouseEvent {
+            kind,
+            column: 2,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+        ui.key(&lane, &mut view, event, false);
+    }
+    ui.flush(&lane, &mut view);
+    assert_eq!(
+        view.surface.scrollback[20].folded(),
+        Some(false),
+        "it opened"
+    );
+    assert_eq!((at(&ui), &ui.drawn[0]), (before, &top));
+}
+
+// A scroll by key is taken from the top row last drawn: what lands before
+// the next frame leaves it where the key put it.
+#[test]
+fn rows_landing_after_a_scroll_key_leave_where_it_went() {
+    let (_dir, lane) = a_running_lane();
+    let scrolled = |landing: usize| {
+        let mut ui = test_ui(30, 12);
+        let mut view = View::default();
+        view.surface.scrollback = (1..=30).map(|n| Row::notice(format!("row {n}"))).collect();
+        ui.flush(&lane, &mut view);
+        ui.scroll_view(&mut view, true, 3);
+        for n in 0..landing {
+            view.surface
+                .scrollback
+                .push(Row::notice(format!("new {n}")));
+        }
+        ui.flush(&lane, &mut view);
+        ui.drawn.clone()
+    };
+    assert_eq!(scrolled(4), scrolled(0));
+}
+
+// A top row in the answer still streaming stays put as the answer grows,
+// and when it lands among the settled rows with more coming under it.
+#[test]
+fn a_top_row_in_the_stream_holds_as_it_grows_and_lands() {
+    let mut ui = test_ui(30, 12);
+    let (_dir, lane) = a_running_lane();
+    let mut view = View::default();
+    view.surface.scrollback = (1..=5).map(|n| Row::notice(format!("row {n}"))).collect();
+    view.surface.stream.text = (1..=20).map(|n| format!("said {n}\n\n")).collect();
+    ui.flush(&lane, &mut view);
+    ui.scroll_view(&mut view, true, 6);
+    ui.flush(&lane, &mut view);
+    let top = ui.drawn[0].clone();
+    assert!(top.contains("said"), "the top row is the stream's: {top:?}");
+    view.surface.stream.text.push_str("said 21\n\nsaid 22\n\n");
+    ui.flush(&lane, &mut view);
+    assert_eq!(ui.drawn[0], top, "as it grew");
+    ui.close(&mut view);
+    view.surface.scrollback.push(Row::notice("next"));
+    ui.flush(&lane, &mut view);
+    assert_eq!(ui.drawn[0], top, "as it landed");
 }

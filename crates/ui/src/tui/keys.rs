@@ -29,9 +29,6 @@ impl Ui {
         let key = match event {
             TermEvent::Resize(w, h) => {
                 self.screen.resized(w, h);
-                // Re-measuring starts at the new width: the re-wrap is a
-                // change of layout, not output, and must not move the view.
-                view.surface.counted = None;
                 return Asked::Own(Deed::Nothing);
             }
             TermEvent::Paste(text) => {
@@ -379,8 +376,6 @@ impl Ui {
                 // Every group in the scrollback, last one included, and
                 // the switch with them: one key resets the whole screen.
                 view.surface.folds.flip_all(&mut view.surface.scrollback);
-                // A fold-all reflows groups above the view too; re-baseline.
-                view.surface.counted = None;
             }
             Some(Action::MenuAccept) => match self.highlighted() {
                 Some(MenuEntry::Completion(c)) => {
@@ -487,7 +482,7 @@ impl Ui {
             self.held = Some(line);
         } else if intent.echoed() {
             self.submit(view, &line);
-            view.surface.scroll = 0;
+            view.surface.follow();
         }
         self.submitted = true;
         Asked::Core(intent)

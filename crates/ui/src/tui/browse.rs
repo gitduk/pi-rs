@@ -8,6 +8,7 @@
 use ratatui::text::Line;
 
 use super::Ui;
+use super::search::Anchor;
 use super::ui::Focus;
 use super::view::View;
 use pi_store::listing::Listing;
@@ -26,13 +27,10 @@ pub(super) struct Read {
     pub(super) page: Page,
     // Rows the page is scrolled up by, as the transcript's `scroll`.
     pub(super) scroll: usize,
-    // The rows the page measured last, as the transcript's `counted`.
-    pub(super) counted: Option<usize>,
+    // The row the page opens on, as the transcript's `top`.
+    pub(super) top: Option<Anchor>,
     // What the page is searched for, `/` on.
     pub(super) search: Option<Box<super::search::Search>>,
-    // The line the next frame brings to the top, the rows it takes unknown
-    // until then.
-    pub(super) seek: Option<super::search::Place>,
 }
 
 pub(super) enum Page {
@@ -99,27 +97,26 @@ impl Ui {
         self.focus = Focus::Read(Read {
             page,
             scroll,
-            counted: None,
+            top: None,
             search: None,
-            seek: None,
         });
     }
 
-    // The scroll the wheel and the pager keys move: the page's while one
-    // is up, else the transcript's.
-    pub(super) fn scroll_mut<'a>(&'a mut self, view: &'a mut View) -> &'a mut usize {
+    // The scroll and top row of what is up: the page's, else the transcript's.
+    pub(super) fn window_mut<'a>(
+        &'a mut self,
+        view: &'a mut View,
+    ) -> (&'a mut usize, &'a mut Option<Anchor>) {
         match &mut self.focus {
-            Focus::Read(read) => &mut read.scroll,
-            _ => &mut view.surface.scroll,
+            Focus::Read(read) => (&mut read.scroll, &mut read.top),
+            _ => (&mut view.surface.scroll, &mut view.surface.top),
         }
     }
 
-    // A change the scroll was already moved for: the next frame measures
-    // from it rather than taking it for growth.
-    pub(super) fn rebase(&mut self, view: &mut View) {
-        view.surface.counted = None;
-        if let Focus::Read(read) = &mut self.focus {
-            read.counted = None;
-        }
+    // Keep the top row where it is through a change under it, even on the
+    // newest rows, which would otherwise follow the bottom.
+    pub(super) fn pin(&mut self, view: &mut View) {
+        let here = self.anchor_here(view);
+        *self.window_mut(view).1 = here;
     }
 }

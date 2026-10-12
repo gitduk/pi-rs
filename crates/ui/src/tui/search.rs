@@ -17,8 +17,8 @@ use super::select;
 use super::ui::Focus;
 
 /// A line of what a page shows, by where it comes from, so it is the same
-/// line from one frame to the next.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// line from one frame to the next. Ordered as a page lays them out.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub(super) enum Spot {
     Row(usize, usize),
     Live(usize),
@@ -26,11 +26,11 @@ pub(super) enum Spot {
 }
 
 impl Spot {
-    pub(super) fn of(target: Target) -> Option<Self> {
+    pub(super) fn of(target: Target) -> Self {
         match target {
-            Target::Scrollback(idx, line) => Some(Spot::Row(idx, line)),
-            Target::Text(n) => Some(Spot::Text(n)),
-            Target::None | Target::PendingTools => None,
+            Target::Scrollback(idx, line) => Spot::Row(idx, line),
+            Target::Text(n) => Spot::Text(n),
+            Target::PendingTools(i) | Target::Live(i) => Spot::Live(i),
         }
     }
 }
@@ -40,6 +40,23 @@ impl Spot {
 pub(super) struct Place {
     pub(super) spot: Spot,
     pub(super) row: usize,
+}
+
+/// Where a scrolled-up window opens: `rows` down from the first row of the
+/// line at `spot`, above it when negative and past its end when beyond it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) struct Anchor {
+    pub(super) spot: Spot,
+    pub(super) rows: isize,
+}
+
+impl From<Place> for Anchor {
+    fn from(place: Place) -> Self {
+        Anchor {
+            spot: place.spot,
+            rows: place.row as isize,
+        }
+    }
 }
 
 /// One match: the row it is on, and which of that row's matches.
@@ -100,22 +117,18 @@ enum Want {
 impl Ui {
     // The view's first and last rows, by the targets the last frame drew.
     fn view_places(&self) -> Option<(Place, Place)> {
-        let top = self.top_place()?;
-        let last = (0..self.row_targets.len())
-            .rev()
-            .find_map(|n| self.place_at(n))
-            .unwrap_or(top);
-        Some((top, last))
+        let last = self.place_at(self.row_targets.len().checked_sub(1)?)?;
+        Some((self.top_place()?, last))
     }
 
     // The top row the last frame drew, part of its line cut off above or not.
-    fn top_place(&self) -> Option<Place> {
+    pub(super) fn top_place(&self) -> Option<Place> {
         self.place_at(0)
     }
 
     fn place_at(&self, n: usize) -> Option<Place> {
         Some(Place {
-            spot: Spot::of(*self.row_targets.get(n)?)?,
+            spot: Spot::of(*self.row_targets.get(n)?),
             row: *self.row_of.get(n)?,
         })
     }
@@ -129,7 +142,7 @@ impl Ui {
             if let Some(search) = read.search.as_mut() {
                 search.typing = true;
                 search.from = top;
-                read.seek = top;
+                read.top = top.map(Anchor::from);
                 return;
             }
             read.search = Some(Box::new(Search {
@@ -145,7 +158,7 @@ impl Ui {
                 placed: false,
             }));
             // The prompt takes a row off the bottom: the top line stays put.
-            read.seek = top;
+            read.top = top.map(Anchor::from);
         }
     }
 
@@ -156,13 +169,13 @@ impl Ui {
         // The last frame was the line's, its rows not the page's.
         if let Focus::Read(Read {
             search: Some(search),
-            seek,
+            top,
             ..
         }) = &mut self.focus
         {
             search.from = None;
             search.brought = true;
-            *seek = None;
+            *top = None;
         }
     }
 
@@ -256,7 +269,7 @@ impl Ui {
             if search.brought {
                 self.focus = Focus::Editor;
             } else {
-                read.seek = search.from;
+                read.top = search.from.map(Anchor::from);
                 read.search = None;
             }
         }
@@ -298,16 +311,14 @@ impl Ui {
     // Whether the frame must lay every line out for the search.
     pub(super) fn search_due(&self) -> bool {
         match &self.focus {
-            Focus::Read(read) => {
-                read.seek.is_some() || read.search.as_ref().is_some_and(|s| s.want.is_some())
-            }
+            Focus::Read(read) => read.search.as_ref().is_some_and(|s| s.want.is_some()),
             _ => false,
         }
     }
 
     // What the keys asked, answered over every line the page lays out: the
-    // line to bring up, then the scroll that brings it to the top.
-    pub(super) fn search_answer(&mut self, laid: &[Laid], room: usize) {
+    // line the window then opens on.
+    pub(super) fn search_answer(&mut self, laid: &[Laid]) {
         let view = self.view_places();
         let Focus::Read(read) = &mut self.focus else {
             return;
@@ -397,19 +408,11 @@ impl Ui {
             }
             search.count = (next.map_or(0, |h| h + 1), n);
             search.placed = true;
-            read.seek = search.at.map(|h| h.at).or(search.from);
+            read.top = search.at.map(|h| h.at).or(search.from).map(Anchor::from);
             let entered = matches!(want, Want::Typed { entered: true } | Want::Step { .. });
             if search.at.is_none() && entered {
                 missed = Some(search.query.clone());
             }
-        }
-        // The row sought comes to the top, as near as the page's end allows.
-        if let Some(place) = read.seek.take()
-            && let Some(i) = laid.iter().position(|l| l.spot == place.spot)
-        {
-            let below: usize = laid[i..].iter().map(|l| l.rows.len()).sum();
-            let below = below.saturating_sub(place.row);
-            read.scroll = below.saturating_sub(room);
         }
         if let Some(query) = missed {
             self.flash(format!("not found: {query}"));

@@ -292,11 +292,6 @@ impl Tui {
         .await;
         let resumed = self.ui.screen.resume();
         self.ui.show_mode();
-        // A resize while the child held the terminal raised no event, so the
-        // view's measurements are against a width that may no longer exist.
-        front_view(&mut self.views, self.core.lane())
-            .surface
-            .counted = None;
         let ran = match ran {
             Err(e) => Err(format!("the editor did not run: {e}")),
             Ok(Err(e)) => Err(format!("could not run the editor: {e}")),

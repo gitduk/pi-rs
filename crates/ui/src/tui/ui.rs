@@ -315,10 +315,9 @@ impl Ui {
         self.show_mode();
         // The opening block is painted once at construction; rebuild it so a
         // reload lands on the new theme instead of the old.
-        let opening = Row::banner(resolved, &self.paint);
-        let rest = view.surface.scrollback.split_off(view.surface.opened);
-        view.surface.opened = opening.len();
-        view.surface.scrollback = opening.into_iter().chain(rest).collect();
+        if view.surface.opened {
+            view.surface.scrollback[0] = Row::banner(resolved, &self.paint);
+        }
     }
 
     // Every copy of the config the surface keeps, brought up to date — the one

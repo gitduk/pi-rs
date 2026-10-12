@@ -2,7 +2,7 @@ use crate::render::Paint;
 use crate::tui::View;
 use crate::tui::row::Row;
 use crate::tui::screen::{self, plain};
-use crate::tui::scrollback::{ScrollbackRows, absorb_growth};
+use crate::tui::scrollback::ScrollbackRows;
 use pi_core::core::Core;
 use pi_core::core::lane::Lane;
 use pi_store::keys::{Keys, Mode};
@@ -29,25 +29,23 @@ pub(super) fn text(piece: crate::tui::scrollback::Piece<'_>) -> String {
     screen::Piece::pieces(piece).iter().map(plain).collect()
 }
 
-// One frame of the scrolled-up view: what the window shows, through the
-// same growth absorption `flush` applies.
+// One frame of the scrolled-up view, each line known by its index: what
+// the window shows, opened on the top line the last frame kept, as `flush`.
 pub(super) fn frame(
     content: &[String],
     room: usize,
     scroll: &mut usize,
-    last_total: &mut Option<usize>,
+    top: &mut Option<usize>,
 ) -> Vec<String> {
-    let total = content.len();
-    *scroll = absorb_growth(*scroll, *last_total, total);
-    let (rows, s) = screen::window(
-        content.iter().map(|s| Line::from(s.clone())),
-        80,
-        room,
-        *scroll,
-    );
+    let lines = content.iter().enumerate().map(|(n, s)| {
+        let line = Line::from(s.clone());
+        (screen::Ready { line, width: 80 }, n)
+    });
+    let at = top.map(|t| (move |n: &usize| n.cmp(&t), 0));
+    let (rows, s) = screen::window_tagged(lines, room, *scroll, at, usize::MAX);
     *scroll = s;
-    *last_total = Some(total);
-    rows.into_iter().map(|l| plain(&l)).collect()
+    *top = rows.first().map(|r| r.1).filter(|_| s > 0);
+    rows.into_iter().map(|r| plain(&r.0)).collect()
 }
 
 // A lane just real enough to settle (real transcript/agent, `Run::Running`
