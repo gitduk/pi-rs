@@ -500,6 +500,11 @@ fn exchange(items: &[Item<'_>], start: usize) -> Vec<usize> {
         return out;
     }
     for (n, it) in items.iter().enumerate().skip(start + 1) {
+        // Some providers reuse ids across turns; a later turn's results
+        // are not this one's.
+        if matches!(it.entry, Entry::Answer { .. }) {
+            break;
+        }
         let answers = matches!(it.entry, Entry::Tool { result: r, .. }
             if calls.contains(&r.call.as_str()));
         if answers && !it.gone {

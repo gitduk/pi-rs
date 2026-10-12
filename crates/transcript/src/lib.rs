@@ -394,7 +394,8 @@ impl StopCause {
 }
 
 /// What an unanswered call is closed with when stopped by the user.
-pub const STOPPED_CALL: &str = "The user stopped this call before it returned.";
+pub const STOPPED_CALL: &str =
+    "The user stopped this call before it returned; it may have partly taken effect.";
 
 /// What an unanswered call is closed with when the run died under it.
 pub const DIED_CALL: &str =
@@ -610,16 +611,71 @@ impl Session {
         self.interrupted = Some(StopCause::User);
     }
 
+    /// Answer every call the last answer left open with `closing`
+    /// ([`STOPPED_CALL`] or [`DIED_CALL`]). The run that opened them calls
+    /// this as it ends: anything filed after an open call would split the
+    /// `tool_use` from its result on the wire.
+    pub fn close_open(&mut self, closing: &str) {
+        let open = self.open_calls();
+        self.close(open, closing);
+    }
+
+    /// Close what a run that never reported its end left open — a crash, or
+    /// a transcript saved before runs closed their own calls. For loaders.
+    pub fn close_dangling(&mut self) {
+        let open = self.open_calls();
+        if open.is_empty() {
+            return;
+        }
+        let cause = self.interrupted.take().unwrap_or(StopCause::Other);
+        let closing = match cause {
+            StopCause::User => STOPPED_CALL,
+            _ => DIED_CALL,
+        };
+        self.close(open, closing);
+        self.interrupted = Some(cause);
+    }
+
+    // The last answer's calls that no result answers yet, as (id, name).
+    fn open_calls(&self) -> Vec<(String, String)> {
+        let answered: HashSet<&str> = self
+            .entries
+            .iter()
+            .rev()
+            .take_while(|e| !matches!(e, Entry::Answer { .. }))
+            .filter_map(|e| match e {
+                Entry::Tool { result: r, .. } => Some(r.call.as_str()),
+                _ => None,
+            })
+            .collect();
+        self.entries
+            .iter()
+            .rev()
+            .find(|e| matches!(e, Entry::Answer { .. }))
+            .into_iter()
+            .flat_map(Entry::tool_calls)
+            .filter(|c| !answered.contains(c.id.as_str()))
+            .map(|c| (c.id.clone(), c.name.clone()))
+            .collect()
+    }
+
+    fn close(&mut self, open: Vec<(String, String)>, closing: &str) {
+        self.push_previewed(
+            open.into_iter()
+                .map(|(id, name)| (ToolResult::text(id, name, closing), None))
+                .collect(),
+        );
+    }
+
     // Feed a cause straight in, for tests shaping a session by hand.
     #[cfg(test)]
     fn mark_stopped(&mut self, cause: StopCause) {
         self.interrupted = Some(cause);
     }
 
-    /// Continue with a new prompt, repairing a turn that died mid-call:
-    /// unanswered tool calls are closed with a result naming the
-    /// interruption, and an unknown failure adds a note first. `shown` is
-    /// what the user typed, when it differs from what the model reads.
+    /// Continue with a new prompt; a run that died before it adds a note
+    /// first. `shown` is what the user typed, when it differs from what the
+    /// model reads.
     pub fn send_prompt(&mut self, prompt: impl Into<String>, shown: Option<String>) {
         self.send_prompt_with(prompt, shown, Vec::new());
     }
@@ -651,41 +707,9 @@ impl Session {
     }
 
     fn send(&mut self, ask: Prompt) {
-        let answered: HashSet<&str> = self
-            .entries
-            .iter()
-            .rev()
-            .take_while(|e| !matches!(e, Entry::Answer { .. }))
-            .filter_map(|e| match e {
-                Entry::Tool { result: r, .. } => Some(r.call.as_str()),
-                _ => None,
-            })
-            .collect();
-        let unanswered: Vec<ToolCall> = self
-            .entries
-            .iter()
-            .rev()
-            .find(|e| matches!(e, Entry::Answer { .. }))
-            .into_iter()
-            .flat_map(Entry::tool_calls)
-            .filter(|c| !answered.contains(c.id.as_str()))
-            .cloned()
-            .collect();
-        // Calls left open with no cause on record: the process died mid-run.
-        let cause = self
-            .interrupted
-            .take()
-            .or_else(|| (!unanswered.is_empty()).then_some(StopCause::Other));
-        let closing = match cause {
-            Some(StopCause::User) => STOPPED_CALL,
-            _ => DIED_CALL,
-        };
-        for c in unanswered {
-            self.push_previewed(vec![(ToolResult::text(c.id, c.name, closing), None)]);
-        }
         // A run that died tells the model so; a user stop leaves direction to
         // the next prompt.
-        if let Some(note) = cause.and_then(|c| c.note()) {
+        if let Some(note) = self.interrupted.take().and_then(|c| c.note()) {
             self.push_note(note);
         }
         self.push_ask(ask);
@@ -959,8 +983,44 @@ impl Session {
             }
             out.push(Message::User { content });
         }
+        debug_assert!(
+            paired(&out),
+            "a tool result is split from its call: {out:?}"
+        );
         out
     }
+}
+
+// Every result answers a call of the assistant turn just before it, ahead of
+// anything else the user side says — what providers refuse otherwise.
+fn paired(messages: &[Message]) -> bool {
+    let mut open: Vec<&str> = Vec::new();
+    for m in messages {
+        match m {
+            Message::Assistant { .. } => {
+                if !open.is_empty() {
+                    return false;
+                }
+                open = m.tool_calls().map(|c| c.id.as_str()).collect();
+            }
+            Message::User { content } => {
+                for b in content {
+                    match b {
+                        UserContent::ToolResult(r) => {
+                            let Some(at) = open.iter().position(|c| *c == r.call) else {
+                                return false;
+                            };
+                            open.remove(at);
+                        }
+                        _ if !open.is_empty() => return false,
+                        _ => {}
+                    }
+                }
+            }
+            Message::System { .. } => {}
+        }
+    }
+    true
 }
 
 /// One summary as `context` sends it. Named here because the estimate of a
@@ -1044,9 +1104,20 @@ mod tests {
     fn the_view_hands_over_one_message_per_entry() {
         let mut s = Session::new();
         s.prompt("go");
-        s.push_assistant(vec![AssistantContent::Text(MsgText {
-            text: "on it".into(),
-        })]);
+        let call = |id: &str, name: &str| {
+            AssistantContent::ToolCall(ToolCall {
+                id: id.into(),
+                name: name.into(),
+                args: serde_json::json!({}),
+            })
+        };
+        s.push_assistant(vec![
+            AssistantContent::Text(MsgText {
+                text: "on it".into(),
+            }),
+            call("c1", "read"),
+            call("c2", "grep"),
+        ]);
         s.push_results(vec![
             ToolResult::text("c1", "read", "a"),
             ToolResult::text("c2", "grep", "b"),
@@ -1304,11 +1375,40 @@ mod tests {
         assert!(matches!(&entries[0], Entry::Ask { .. }));
     }
 
-    // An open call is closed with what is known of why: the user stopped it,
-    // or the run died under it — an error, or a crash that left no cause.
+    // An open call is closed where the run ends, with what is known of why:
+    // the user stopped it, the run died of an error, or — found by a loader —
+    // a crash left it with no cause, or an older pi left it for later.
     #[test]
     fn an_unanswered_tool_call_is_closed_with_why_it_never_returned() {
-        let open = |cause: Option<StopCause>| {
+        let user_stop = |s: &mut Session| {
+            s.close_open(STOPPED_CALL);
+            s.note_user_stop();
+        };
+        let error = |s: &mut Session| {
+            s.close_open(DIED_CALL);
+            s.note_failure("died".into());
+        };
+        let crash = |s: &mut Session| s.close_dangling();
+        let legacy_stop = |s: &mut Session| {
+            s.mark_stopped(StopCause::User);
+            s.close_dangling();
+        };
+        for (why, end, closing, noted) in [
+            (
+                "a user stop",
+                &user_stop as &dyn Fn(&mut Session),
+                STOPPED_CALL,
+                false,
+            ),
+            ("an error", &error, DIED_CALL, true),
+            ("a crash", &crash, DIED_CALL, true),
+            (
+                "a stop an older pi left open",
+                &legacy_stop,
+                STOPPED_CALL,
+                false,
+            ),
+        ] {
             let mut s = Session::new();
             s.prompt("run something");
             s.push_assistant(vec![AssistantContent::ToolCall(ToolCall {
@@ -1316,23 +1416,14 @@ mod tests {
                 name: "bash".into(),
                 args: serde_json::json!({ "command": "cargo check" }),
             })]);
-            if let Some(cause) = cause {
-                s.mark_stopped(cause);
-            }
+            end(&mut s);
+            assert!(
+                matches!(s.entries().last(), Some(Entry::Tool { .. })),
+                "{why}: closed before anything else is said"
+            );
+            s.close_dangling();
             s.send_prompt("actually do this", None);
-            s
-        };
-        for (why, cause, closing, noted) in [
-            ("a user stop", Some(StopCause::User), STOPPED_CALL, false),
-            (
-                "an error",
-                Some(StopCause::Error("died".into())),
-                DIED_CALL,
-                true,
-            ),
-            ("a crash", None, DIED_CALL, true),
-        ] {
-            let s = open(cause);
+
             let entries = s.entries();
             let result = match &entries[2] {
                 Entry::Tool { result, .. } => result,
@@ -1341,8 +1432,62 @@ mod tests {
             assert!(!result.is_error, "{why}: a closed call is not an error");
             assert!(is_stopped_call(result), "{why}");
             assert_eq!(result.flatten_text(), closing, "{why}");
+            let closings = entries
+                .iter()
+                .filter(|e| matches!(e, Entry::Tool { .. }))
+                .count();
+            assert_eq!(closings, 1, "{why}: closed once");
             let note = entries.iter().any(|e| matches!(e, Entry::Note { .. }));
             assert_eq!(note, noted, "{why}");
+        }
+    }
+
+    // Whatever the user's side files after a stop — a `!` command, a job's or
+    // loop's note — must not split a `tool_use` from its result: providers
+    // 400 on a result that is not first in its user turn.
+    #[test]
+    fn user_side_entries_after_a_stop_follow_the_closing_result() {
+        let bang = |s: &mut Session| {
+            s.push_bash(Prompt {
+                text: "Ran `ls`".into(),
+                images: Vec::new(),
+                shown: None,
+                relayed: None,
+            });
+        };
+        let note = |s: &mut Session| {
+            s.push_note("loop round 2");
+        };
+        for (why, file) in [
+            ("a `!` command", &bang as &dyn Fn(&mut Session)),
+            ("a note", &note),
+        ] {
+            let mut s = Session::new();
+            s.prompt("run something");
+            s.push_assistant(vec![AssistantContent::ToolCall(ToolCall {
+                id: "c1".into(),
+                name: "bash".into(),
+                args: serde_json::json!({}),
+            })]);
+            s.close_open(STOPPED_CALL);
+            s.note_user_stop();
+            file(&mut s);
+            s.send_prompt("go on", None);
+
+            let entries = s.entries();
+            assert!(
+                matches!(&entries[2], Entry::Tool { .. }),
+                "{why}: {entries:?}"
+            );
+            assert!(
+                matches!(&entries[3], Entry::Bash { .. } | Entry::Note { .. }),
+                "{why}: {entries:?}"
+            );
+            assert!(
+                matches!(&entries[4], Entry::Ask { .. }),
+                "{why}: {entries:?}"
+            );
+            assert_eq!(entries.len(), 5, "{why}: the call is closed once");
         }
     }
 

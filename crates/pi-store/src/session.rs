@@ -155,8 +155,12 @@ impl ResumeChoice {
 }
 
 impl Stored {
+    /// The transcript, with any call a crash left open closed: every
+    /// loader comes through here, so no run starts on a dangling `tool_use`.
     pub fn into_session(self) -> Session {
-        self.session
+        let mut session = self.session;
+        session.close_dangling();
+        session
     }
 }
 

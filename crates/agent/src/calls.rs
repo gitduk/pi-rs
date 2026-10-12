@@ -26,7 +26,7 @@ enum Action {
 
 impl Agent {
     // One result per call, in call order, except a cancelled one, left
-    // unanswered for `send_prompt` to close; `spent` carries nested costs up.
+    // unanswered for the run's end to close; `spent` carries nested costs up.
     pub(crate) async fn run_calls(
         &self,
         calls: &[ToolCall],
@@ -165,7 +165,7 @@ impl Agent {
         for outcome in outcomes {
             match outcome {
                 // Left unanswered: its siblings may have acted, so theirs are
-                // kept, and the next prompt closes this one as stopped.
+                // kept, and the run's end closes this one as stopped.
                 Landed::Stopped => stopped = true,
                 Landed::Answered(result, preview) => results.push((result, preview)),
                 Landed::Ran(result, preview, used) => {

@@ -136,7 +136,7 @@ impl Tui {
             }
             Ask::Relayed { prompt, relay } => carried.send_relayed(prompt, relay.label, relay.note),
         }
-        // The repair results and stop note the send filed are entries now:
+        // The stop note the send filed is an entry now:
         // derive rows like any commit so they show without a rebuild.
         let view = front_view(&mut self.views, self.core.lane());
         let tail = view.surface.tail;

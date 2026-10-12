@@ -61,8 +61,8 @@ pub enum AgentError {
     Unstopped,
 }
 
-/// Fold how the run that just ended went into the next prompt: a run that did
-/// not answer its prompt records why, so its open calls are closed truthfully.
+/// Fold how the run that just ended went into the next prompt: a run that
+/// did not answer its prompt records why.
 pub trait NoteOutcome {
     fn note_outcome(&mut self, outcome: &Result<Usage, AgentError>);
 }
@@ -150,7 +150,26 @@ impl Agent {
     ///
     /// `retry` is read where the run starts, not kept on the agent, so a
     /// reload that changed it reaches the next run without a refresh.
+    ///
+    /// A run that ends unanswered closes the calls it left open before it
+    /// returns, so a transcript at rest never holds a dangling `tool_use`.
     pub async fn run(
+        &self,
+        session: &mut Session,
+        ctx: &Ctx,
+        tx: &UnboundedSender<Event>,
+        retry: &Retry,
+    ) -> Result<Usage, AgentError> {
+        let out = self.turns(session, ctx, tx, retry).await;
+        match &out {
+            Ok(_) => {}
+            Err(AgentError::Cancelled) => session.close_open(session::STOPPED_CALL),
+            Err(_) => session.close_open(session::DIED_CALL),
+        }
+        out
+    }
+
+    async fn turns(
         &self,
         session: &mut Session,
         ctx: &Ctx,

@@ -424,6 +424,8 @@ impl Subagent {
             }
         };
 
+        // A child dropped past its grace never reached its own close.
+        session.close_dangling();
         self.archive.keep(ctx.spill_namespace(), &id, session);
 
         let cut = match ran {

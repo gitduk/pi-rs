@@ -340,9 +340,10 @@ fn a_stopped_tool_call_is_silenced_in_tui() {
             args: serde_json::json!({ "command": "cargo check" }),
         },
     )]);
+    session.close_open(agent::session::STOPPED_CALL);
     session.send_prompt("do something else", None::<String>);
 
-    // The rebuild filter drops the repaired stopped tool entry.
+    // The rebuild filter drops the stopped call's closing entry.
     let stopped_entry = &session.entries()[2];
     assert!(crate::tui::scrollback::f_entry(stopped_entry, &tui.ui.paint).is_none());
 }
