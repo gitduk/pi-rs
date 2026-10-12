@@ -41,6 +41,8 @@ pub(super) struct Facts {
     /// What is wrong and stays so until it is fixed, drawn where a flash
     /// goes whenever none is up; `/status` says why.
     pub alerts: Vec<String>,
+    /// The version installed under this pi, while it is a different one.
+    pub update: Option<String>,
 }
 
 impl Facts {
@@ -66,6 +68,7 @@ impl Facts {
             .flatten()
             .map(str::to_string)
             .collect(),
+            update: pi_core::core::update::newer(),
         }
     }
 }
@@ -288,6 +291,7 @@ impl Ui {
             Part::Effort if facts.effort == Effort::Off => return None,
             Part::Effort => facts.effort.name().to_string(),
             Part::Tier => facts.tier.name(),
+            Part::Update => format!("{} {}", icons::UPDATE_MARK, facts.update.as_ref()?),
             Part::Status(segment) => return crate::status::render(segment, snap),
         })
     }

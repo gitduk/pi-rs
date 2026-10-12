@@ -90,6 +90,25 @@ fn distill_after(args: &Args, ended: &str, model: &str) {
     }
 }
 
+// `/restart`: this process becomes the pi installed now, on the session just
+// left, which keeps its own model and name.
+fn restart(root: &std::path::Path, id: Option<&str>, flags: &[String]) -> Result<ExitCode> {
+    let launcher = core::update::launcher().context("cannot tell which pi to start again")?;
+    let mut cmd = std::process::Command::new(launcher);
+    cmd.arg("-C").arg(root);
+    if let Some(id) = id {
+        cmd.args(["--resume", id]);
+    }
+    cmd.args(flags);
+    tracing::info!(target: "pi::session", path = %launcher.display(), session = ?id, "restarting");
+    #[cfg(unix)]
+    let e = std::os::unix::process::CommandExt::exec(&mut cmd);
+    #[cfg(not(unix))]
+    let e = std::io::Error::from(std::io::ErrorKind::Unsupported);
+    let again = id.map_or("pi".to_string(), |id| format!("pi --resume {id}"));
+    Err(e).with_context(|| format!("cannot start {} — run `{again}`", launcher.display()))
+}
+
 // The process `distill_after` starts. Nobody is watching it, so what happens
 // goes to the ended session's journal and nowhere else.
 async fn distill_alone(args: &Args, store: session::Store, ended: &str) -> Result<()> {
@@ -316,6 +335,7 @@ async fn main() -> Result<ExitCode> {
         };
         let drivers = pi_core::driver::Drivers::default();
         core.enable_jobs(drivers.jobs());
+        core::update::watch();
         let out = tui::Tui::new(core, key_map, drivers)?.run().await;
         // Subagents handed their transcripts to a background save; wait
         // for those to land before the runtime goes with them.
@@ -323,8 +343,14 @@ async fn main() -> Result<ExitCode> {
         if let Some(why) = journal::failure() {
             eprintln!("journal stopped recording: {why}");
         }
-        distill_after(&args, &ended, &model_id);
-        return out.map(|()| ExitCode::SUCCESS);
+        return match out? {
+            tui::Ended::Quit => {
+                distill_after(&args, &ended, &model_id);
+                Ok(ExitCode::SUCCESS)
+            }
+            // Not distilled: the session goes on in the pi that replaces this one.
+            tui::Ended::Restart { root, id, flags } => restart(&root, id.as_deref(), &flags),
+        };
     };
 
     // One request, so the servers get a moment to list their tools first.

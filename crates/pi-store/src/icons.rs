@@ -27,6 +27,7 @@ pub const DONE_MARK: &str = "✔"; // a tool row that finished well
 pub const RELAYED_MARK: &str = "◆"; // a turn pi sent for the model: a `later`, a subagent's answer
 pub const FAIL_MARK: &str = "✖"; // a failure, a denial, a refused edit
 pub const UNOPENED_MARK: &str = "○"; // a checkout on the bar that no lane has open
+pub const UPDATE_MARK: &str = "↑"; // on the bar: a different pi installed than the one running
 pub const COMPACT_RULE: &str = "───"; // the dashes a compaction banner wears
 
 pub const CURRENT_ITEM: &str = "●"; // the current row in `/model` and `/resume`

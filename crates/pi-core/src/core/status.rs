@@ -149,6 +149,12 @@ impl Core {
             (Some(p), None) => Row::new(["journal".into(), short(&p, root)]),
             (None, _) => Row::new(["journal", "off"]).noting("PI_LOG is off, or it would not open"),
         });
+        if let Some(version) = crate::core::update::newer() {
+            rows.push(Row::new([
+                "update".into(),
+                format!("{version} installed — /restart to switch"),
+            ]));
+        }
         Listing::of(rows)
     }
 

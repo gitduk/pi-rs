@@ -61,6 +61,8 @@ pub enum Builtin {
     // Leave now — `/exit`, `/quit`, `ctrl+d`, double `ctrl+c` — one intent,
     // so the four cannot answer differently.
     Quit,
+    // Leave, and start the pi installed now on this same session.
+    Restart,
 }
 
 /// What a line may do while a turn is in flight.
@@ -141,6 +143,9 @@ impl Intent {
             // Both reach for the transcript, and the run is holding it.
             // Leaving is never refused: a hung run must not trap the user.
             Intent::Builtin(Builtin::Quit) => Fate::Now,
+            Intent::Builtin(Builtin::Restart) => {
+                Fate::Refused("/restart would cut this run short — esc first")
+            }
         }
     }
 }
@@ -338,6 +343,13 @@ pub enum Step {
     // cached list, which would keep naming the checkout that just went.
     Worktrees(Listing),
     Quit,
+    // Leave as `Quit` does, then run pi again from `root`, on the session
+    // `id` if it has been filed, with the flags in force now (`/effort` moves one).
+    Restart {
+        root: std::path::PathBuf,
+        id: Option<String>,
+        flags: Vec<String>,
+    },
 }
 
 /// A command for a driver.

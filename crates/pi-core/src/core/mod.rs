@@ -18,6 +18,7 @@ pub mod resolve;
 pub mod settings;
 pub mod status;
 pub mod tools;
+pub mod update;
 pub mod worktree;
 
 use crate::core::lane::Lane;
@@ -235,6 +236,36 @@ impl Core {
 }
 
 impl Core {
+    // `/restart`, refused when the new pi would lose something: it takes up
+    // the front lane's transcript and nothing else this one holds.
+    fn restart(&self) -> Result<Step, String> {
+        if crate::core::update::launcher().is_none() {
+            return Err("cannot tell which pi to start again".into());
+        }
+        if self.lanes.iter().any(|lane| lane.is_running()) {
+            return Err("a turn is running in another checkout — wait, or stop it there".into());
+        }
+        if let Some(why) = self.lanes.iter().find_map(|lane| lane.unsaved()) {
+            return Err(format!("not saved, so nothing to restart on: {why}"));
+        }
+        if let Some(jobs) = &self.jobs
+            && self
+                .lanes
+                .iter()
+                .any(|lane| !jobs.jobs(lane.root()).is_empty())
+        {
+            return Err("background jobs would be cut off — /jobs lists them".into());
+        }
+        let lane = self.lane();
+        // A session nothing was said in is never filed.
+        let filed = self.store.path_of(lane.root(), lane.id()).is_file();
+        Ok(Step::Restart {
+            root: lane.root().to_path_buf(),
+            id: filed.then(|| lane.id().to_string()),
+            flags: self.pinned.args(),
+        })
+    }
+
     // Whether `goal` would start a turn. A skill is looked up, not
     // expanded — that would log it as invoked before any round has run.
     fn starts_turn(&self, goal: &str) -> bool {
@@ -263,6 +294,7 @@ impl Core {
                 )),
             },
             Intent::Builtin(Builtin::Quit) => Step::Quit,
+            Intent::Builtin(Builtin::Restart) => self.restart().unwrap_or_else(Step::Flash),
             Intent::Builtin(Builtin::Help) => Step::Handled(help(&self.commands)),
             Intent::Builtin(Builtin::Keys) => Step::Handled(self.keys.listing()),
             Intent::Builtin(Builtin::Status) => Step::Handled(self.status()),
@@ -504,6 +536,7 @@ mod tests {
             Intent::Builtin(Builtin::New),
             Intent::Builtin(Builtin::Resume("1756240000-1".into())),
             Intent::Builtin(Builtin::Compact(String::new())),
+            Intent::Builtin(Builtin::Restart),
         ] {
             assert!(
                 matches!(intent.fate(), Fate::Refused(_)),

@@ -37,7 +37,13 @@ impl Default for Layout {
         Self {
             lines: vec![Line {
                 left: vec![Item::Part(Part::Tabs), Item::Part(Part::Model)],
-                right: vec![Item::Part(Part::Flash)],
+                right: vec![
+                    Item::Styled(Styled {
+                        part: Part::Update,
+                        style: Look::Tone(Tone::Emphasis),
+                    }),
+                    Item::Part(Part::Flash),
+                ],
                 sep: None,
             }],
             refresh: None,
@@ -80,6 +86,8 @@ pub enum Part {
     /// Absent while thinking is off.
     Effort,
     Tier,
+    /// The version installed under the running pi, absent while they match.
+    Update,
     /// A status line part — `ctx`, `cost`, `elapsed` … — drawn as the status
     /// line draws it, from the run in flight or the one that last ended.
     Status(Segment),
@@ -94,6 +102,7 @@ enum Own {
     Model,
     Effort,
     Tier,
+    Update,
 }
 
 impl<'de> Deserialize<'de> for Part {
@@ -115,6 +124,7 @@ impl<'de> Deserialize<'de> for Part {
             Own::Model => Part::Model,
             Own::Effort => Part::Effort,
             Own::Tier => Part::Tier,
+            Own::Update => Part::Update,
         })
     }
 }

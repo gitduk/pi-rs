@@ -107,6 +107,7 @@ refused, and resuming one from another directory moves it here.
 | `/edit [file]`                     | edit `SYSTEM.md`, an `AGENTS.md`, or memory   |
 | `/status`, `/keys`, `/help`        | session paths and spend; bindings; commands   |
 | `/exit`                            | leave; `ctrl+d` does the same                 |
+| `/restart`                         | run the pi installed now on this session      |
 | `/content`                         | everything the model is given before you type |
 | `/<skill> [args]`                  | run a skill (also one-shot: `pi "/commit"`)   |
 | `! <command>`                      | run a shell command and record its output     |

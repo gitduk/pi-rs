@@ -1,6 +1,6 @@
 //! The command line: what one run was started with.
 
-use clap::Parser;
+use clap::{Parser, ValueEnum as _};
 
 use pi_store::args::{EffortArg, TierArg};
 
@@ -97,6 +97,41 @@ pub struct Pinned {
     pub no_context_files: bool,
     pub effort: Option<EffortArg>,
     pub tier: Option<TierArg>,
+}
+
+impl Pinned {
+    /// As flags again, for a pi started in this one's place. Destructured so
+    /// a field added here and not passed on fails to compile.
+    pub fn args(&self) -> Vec<String> {
+        let Self {
+            config,
+            base_url,
+            context,
+            system,
+            no_skills,
+            no_context_files,
+            effort,
+            tier,
+        } = self;
+        let mut out = Vec::new();
+        let mut pass = |flag: &str, value: Option<String>| {
+            if let Some(value) = value {
+                out.extend([flag.to_string(), value]);
+            }
+        };
+        pass("--config", config.clone());
+        pass("--base-url", base_url.clone());
+        pass("--context", context.map(|c| c.to_string()));
+        pass("--system", system.clone());
+        pass(
+            "--effort",
+            effort.and_then(|e| Some(e.to_possible_value()?.get_name().to_string())),
+        );
+        pass("--tier", tier.map(TierArg::name));
+        out.extend(no_skills.then(|| "--no-skills".to_string()));
+        out.extend(no_context_files.then(|| "--no-context-files".to_string()));
+        out
+    }
 }
 
 impl Args {

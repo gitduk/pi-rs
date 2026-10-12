@@ -132,6 +132,17 @@ enum Wake {
     Leave,
 }
 
+/// How the surface was left.
+pub enum Ended {
+    Quit,
+    /// `/restart`: run pi again from `root` with `flags`, on the session `id` if it has one.
+    Restart {
+        root: std::path::PathBuf,
+        id: Option<String>,
+        flags: Vec<String>,
+    },
+}
+
 pub struct Tui {
     core: Core,
     // What each lane looks like, keyed by token — held here, not on the
@@ -479,7 +490,8 @@ impl Tui {
 
     /// Drives the terminal until the user leaves. Each lane owns the
     /// channel its runs post to, so a lane left behind keeps working.
-    pub async fn run(mut self) -> Result<()> {
+    pub async fn run(mut self) -> Result<Ended> {
+        let mut ended = Ended::Quit;
         // Every lane's runs report here when they end. One channel rather than a
         // handle per lane: the loop waits on it like any other source.
         let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel::<Done>();
@@ -492,6 +504,7 @@ impl Tui {
         // Off while nothing runs, so the interval falls behind; one
         // late tick then ordinary cadence avoids a catch-up spin.
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let update = core::update::changed();
         loop {
             self.serve_lanes().await;
             // Before the bar rebuilds, so a vanished tab goes with its lane.
@@ -622,6 +635,8 @@ impl Tui {
                         if bar_due.is_some() => Wake::Nothing,
                     // Something was left, cancelled or finished: look again.
                     _ = jobs.changed().notified() => Wake::Nothing,
+                    // A different pi installed: the bar says so.
+                    _ = update.notified() => Wake::Nothing,
                     _ = tokio::time::sleep_until(due_back.unwrap_or_else(tokio::time::Instant::now)),
                         if due_back.is_some() => Wake::Nothing,
                     key = self.events.recv() => match key {
@@ -690,6 +705,10 @@ impl Tui {
             let deferred = matches!(step, Step::McpPrompt { .. });
             match step {
                 Step::Quit => break,
+                Step::Restart { root, id, flags } => {
+                    ended = Ended::Restart { root, id, flags };
+                    break;
+                }
                 // A refusal is an answer: it was asked for by a line, so it
                 // goes where every other answer does.
                 Step::Flash(line) => self.ui.open_command(Listing::say([line])),
@@ -751,7 +770,7 @@ impl Tui {
         }
         self.save_history();
         self.settle_all(&mut done_rx).await;
-        Ok(())
+        Ok(ended)
     }
 
     // The line a driver sends the front lane next, drawn and its spend
