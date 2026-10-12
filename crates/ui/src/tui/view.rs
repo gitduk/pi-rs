@@ -111,7 +111,7 @@ pub(super) struct Queued {
     pub(super) intent: Intent,
     pub(super) origin: Origin,
     // A typed line, kept off the transcript while it waits: up hands it back
-    // to the editor, or its turn echoes it when it starts.
+    // to the editor, or its answer echoes it if it lands under the line.
     pub(super) line: Option<String>,
 }
 

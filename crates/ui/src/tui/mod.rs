@@ -120,8 +120,9 @@ enum Asked {
 }
 
 enum Wake {
-    // Something to carry out, once the select's borrows are gone.
-    Do(Asked),
+    // Something to carry out, once the select's borrows are gone, with the
+    // line it was read from: echoed if the answer lands under it.
+    Do(Asked, Option<String>),
     // A line pi relays for the model: always a turn, never a command.
     Relay(String, job::Relay),
     // A turn ended and has to be settled, whichever lane it belongs to.
@@ -275,6 +276,20 @@ impl Tui {
         }
     }
 
+    // The line that asked, kept on screen only if `step` answers under it.
+    fn echo_under(&mut self, step: &Step, line: Option<String>) {
+        if let Some(line) = line.filter(|_| step.lands_under()) {
+            self.echo(&line);
+        }
+    }
+
+    // The line a turn or a `!` answers, onto the screen as it starts.
+    fn echo(&mut self, line: &str) {
+        let view = front_view(&mut self.views, self.core.lane());
+        self.ui.submit(view, line);
+        view.surface.follow();
+    }
+
     // A handled command's lines are its answer, and the answer goes to the
     // command page — the screen is not a log of what the user typed at the interface.
     fn land_lines(&mut self, rows: Listing) {
@@ -422,7 +437,7 @@ impl Tui {
     // thing can't get different answers. `fate` decides only mid-run.
     fn admit(&mut self, asked: Asked, origin: Origin, line: Option<String>) -> Wake {
         if !self.core.lane().is_running() {
-            return Wake::Do(asked);
+            return Wake::Do(asked, line);
         }
         let intent = match asked {
             // A deed is the screen's own move: it never waits for the run,
@@ -434,13 +449,13 @@ impl Tui {
                     self.ui.flash(why);
                     return Wake::Nothing;
                 }
-                Fate::Now => return Wake::Do(Asked::Own(deed)),
+                Fate::Now => return Wake::Do(Asked::Own(deed), None),
                 Fate::Queued => unreachable!("a deed waits for nothing"),
             },
             Asked::Core(intent) => intent,
         };
         match intent.fate() {
-            Fate::Now => Wake::Do(Asked::Core(intent)),
+            Fate::Now => Wake::Do(Asked::Core(intent), line),
             Fate::Queued => {
                 front_view(&mut self.views, self.core.lane())
                     .queued
@@ -594,6 +609,7 @@ impl Tui {
                                 false
                             }
                             Ok(send) if front && !self.core.lane().is_running() => {
+                                self.echo(&typed);
                                 self.start_turn(send, Some(typed), &done_tx);
                                 true
                             }
@@ -644,11 +660,11 @@ impl Tui {
                             let lane = self.core.lane();
                             let view = front_view(&mut self.views, lane);
                             let intent = self.ui.key(lane, view, key, running);
-                            if self.ui.took_submit() {
+                            let line = self.ui.took_submit();
+                            if line.is_some() {
                                 self.save_history();
                             }
-                            let held = self.ui.held.take();
-                            self.admit(intent, Origin::Typed, held)
+                            self.admit(intent, Origin::Typed, line)
                         }
                         None => Wake::Leave,
                     },
@@ -660,15 +676,10 @@ impl Tui {
                     .queued
                     .remove(0);
                 origin = queued.origin;
-                if let Some(line) = &queued.line {
-                    let view = front_view(&mut self.views, self.core.lane());
-                    self.ui.submit(view, line);
-                    view.surface.follow();
-                }
-                Wake::Do(Asked::Core(queued.intent))
+                Wake::Do(Asked::Core(queued.intent), queued.line)
             };
             // Out here, where all of `self` is free again.
-            let asked = match woke {
+            let (asked, line) = match woke {
                 Wake::Turn(done) => {
                     self.settle(done).await;
                     continue;
@@ -680,7 +691,7 @@ impl Tui {
                     self.start_relayed(line, relay, &done_tx);
                     continue;
                 }
-                Wake::Do(asked) => asked,
+                Wake::Do(asked, line) => (asked, line),
             };
             // What the surface answers for itself: the screen, the keyboard
             // and the process are not `Core`'s to move.
@@ -700,6 +711,7 @@ impl Tui {
             );
             let step = self.core.dispatch(intent);
             self.reconcile(was);
+            self.echo_under(&step, line);
             let prompt = matches!(step, Step::Prompt { .. });
             // Its turn starts when the server answers; drivers hear then.
             let deferred = matches!(step, Step::McpPrompt { .. });
@@ -801,11 +813,10 @@ impl Tui {
                     Origin::Input(_) => Intent::Prompt(next.line.clone()),
                     _ => input::read(&next.line, &self.core.commands),
                 };
-                self.ui.submit(view, &next.line);
                 if !next.note.is_empty() {
                     self.core.lane_mut().push_note(&next.note);
                 }
-                Wake::Do(Asked::Core(intent))
+                Wake::Do(Asked::Core(intent), Some(next.line))
             }
         };
         Some((next.origin, wake))

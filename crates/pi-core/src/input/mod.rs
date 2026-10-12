@@ -81,14 +81,6 @@ pub enum Fate {
 }
 
 impl Intent {
-    /// Whether the surface shows the line this was read from, above the answer.
-    ///
-    /// Shown when the answer lands under it (a turn, a `!`'s output); not for
-    /// a command's output, which is dismissed rather than kept.
-    pub fn echoed(&self) -> bool {
-        !matches!(self, Intent::Builtin(_))
-    }
-
     /// Exhaustive on purpose, with no catch-all arm: an intent added without an
     /// answer here should fail to compile rather than default to one.
     ///
@@ -346,6 +338,31 @@ pub enum Step {
         id: Option<String>,
         flags: Vec<String>,
     },
+}
+
+impl Step {
+    /// Whether the answer lands under the line that asked, so the surface
+    /// keeps that line on screen. A page or a flash is dismissed rather than
+    /// kept, and a line left above nothing reads as a question unanswered.
+    ///
+    /// Asked of the step, not the intent: only the step knows whether a word
+    /// named a skill or nothing at all. No catch-all, so a new step decides.
+    pub fn lands_under(&self) -> bool {
+        match self {
+            Step::Prompt { .. } | Step::Bash(_) => true,
+            // Its turn starts only if the server answers; echoed then.
+            Step::McpPrompt { .. } => false,
+            Step::Flash(_)
+            | Step::Compact(_)
+            | Step::Drive(_)
+            | Step::Edit(_)
+            | Step::Handled(_)
+            | Step::Swap(_)
+            | Step::Worktrees(_)
+            | Step::Quit
+            | Step::Restart { .. } => false,
+        }
+    }
 }
 
 /// A command for a driver.

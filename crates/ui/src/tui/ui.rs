@@ -55,11 +55,9 @@ pub(super) struct Ui {
     // Text the list was dismissed at. Any edit brings the list back —
     // Esc means "not that", not "never again".
     pub(super) dismissed_at: Option<String>,
-    // A line was submitted. Echo happens here (the view is in hand), but
-    // the recall list is the surface's, so it's told once per line.
-    pub(super) submitted: bool,
-    // The echoed line submitted mid-run: its echo waits with it in the queue.
-    pub(super) held: Option<String>,
+    // The line just submitted, carried to its answer: echoed only once the
+    // answer is known to land under it. The recall list hears of it too.
+    pub(super) submitted: Option<String>,
     // What `/model` can complete to. A copy rather than a borrow of the
     // config: the loop holds the session mutably while it draws.
     pub(super) choices: Vec<Choice>,
@@ -206,8 +204,7 @@ impl Ui {
         Self {
             screen,
             keys,
-            submitted: false,
-            held: None,
+            submitted: None,
             choices,
             commands,
             lists,

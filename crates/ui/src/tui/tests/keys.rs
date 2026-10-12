@@ -74,7 +74,8 @@ async fn an_idle_lane_opens_the_rewind_selector() {
         "the second opens the selector: {asked:?}"
     );
 
-    let crate::tui::Wake::Do(Asked::Own(deed)) = tui.admit(asked, crate::tui::Origin::Typed, None)
+    let crate::tui::Wake::Do(Asked::Own(deed), _) =
+        tui.admit(asked, crate::tui::Origin::Typed, None)
     else {
         panic!("an idle lane refused the rewind: {:?}", tui.ui.flash);
     };
@@ -107,7 +108,7 @@ async fn the_rewind_of_a_lane_with_no_transcript_says_so() {
         "the transcript is gone"
     );
 
-    let crate::tui::Wake::Do(Asked::Own(deed)) =
+    let crate::tui::Wake::Do(Asked::Own(deed), _) =
         tui.admit(Asked::Own(Deed::Rewind), crate::tui::Origin::Typed, None)
     else {
         panic!("an idle lane refused the rewind: {:?}", tui.ui.flash);
@@ -148,10 +149,11 @@ async fn esc_closes_the_command_page_rather_than_reaching_the_run() {
     assert!(!matches!(tui.ui.focus, Focus::Read(_)), "the esc closed it");
 }
 
-// A command's output is a dismissed page, so echoing it strands the line
-// above nothing; a prompt is echoed since the turn streams under it.
+// A command's output and a typo's refusal are dismissed pages, so echoing
+// them strands the line above nothing; a prompt is echoed since the turn
+// streams under it. Decided by the answer, which only dispatch knows.
 #[tokio::test]
-async fn a_command_is_not_echoed_and_a_prompt_is() {
+async fn only_an_answer_under_the_line_echoes_it() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
@@ -164,23 +166,22 @@ async fn a_command_is_not_echoed_and_a_prompt_is() {
     let rows = |tui: &mut crate::tui::Tui| view_at(&mut tui.views, token).surface.scrollback.len();
     let enter = || crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
-    let before = rows(&mut tui);
-    tui.ui.editor.set_line("/keys");
-    let lane = tui.core.lane_mut();
-    tui.ui
-        .key(lane, view_at(&mut tui.views, token), enter(), false);
-    assert_eq!(rows(&mut tui), before, "a command leaves no row");
-
-    let before = rows(&mut tui);
-    tui.ui.editor.set_line("what changed?");
-    let lane = tui.core.lane_mut();
-    tui.ui
-        .key(lane, view_at(&mut tui.views, token), enter(), false);
-    assert_eq!(
-        rows(&mut tui),
-        before + 1,
-        "a prompt is one, answered under"
-    );
+    for (typed, echoed) in [("/keys", 0), ("/nosuch'", 0), ("what changed?", 1)] {
+        let before = rows(&mut tui);
+        tui.ui.editor.set_line(typed);
+        let lane = tui.core.lane_mut();
+        let Asked::Core(intent) = tui
+            .ui
+            .key(lane, view_at(&mut tui.views, token), enter(), false)
+        else {
+            panic!("{typed} is read");
+        };
+        let line = tui.ui.took_submit();
+        assert_eq!(line.as_deref(), Some(typed));
+        let step = tui.core.dispatch(intent);
+        tui.echo_under(&step, line);
+        assert_eq!(rows(&mut tui), before + echoed, "{typed}");
+    }
 }
 
 // A command page has the keyboard: one place takes keys at a time, so a
@@ -233,7 +234,7 @@ async fn enter_and_the_stop_close_a_command_page() {
     tui.ui
         .key(lane, view_at(&mut tui.views, token), enter, false);
     assert!(!matches!(tui.ui.focus, Focus::Read(_)), "Enter closed it");
-    assert!(!tui.ui.took_submit(), "and sent nothing");
+    assert!(tui.ui.took_submit().is_none(), "and sent nothing");
     assert_eq!(tui.ui.editor.text(), "/help", "the line waits");
 
     tui.ui.open_command(Listing::say(["/status answered this"]));

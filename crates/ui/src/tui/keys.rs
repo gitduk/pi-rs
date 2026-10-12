@@ -13,9 +13,9 @@ use pi_store::keys::{Action, Layers, Mode, Press, Surface};
 use std::time::Instant;
 
 impl Ui {
-    // Whether a line has been submitted since this was last asked: the surface
-    // catches the recall list up when it has.
-    pub(super) fn took_submit(&mut self) -> bool {
+    // The line submitted since this was last asked, if any: the surface
+    // catches the recall list up and carries the line to its answer.
+    pub(super) fn took_submit(&mut self) -> Option<String> {
         std::mem::take(&mut self.submitted)
     }
 
@@ -89,7 +89,7 @@ impl Ui {
         match self.focus {
             Focus::Read(_) => self.pager_key(view, action),
             Focus::Rewind(_) => self.rewind_key(action),
-            Focus::Editor => self.editor_key(lane, view, key, action, running),
+            Focus::Editor => self.editor_key(lane, view, key, action),
         }
     }
 
@@ -221,7 +221,6 @@ impl Ui {
         view: &mut View,
         key: crossterm::event::KeyEvent,
         action: Option<Action>,
-        running: bool,
     ) -> Asked {
         match action {
             Some(Action::LineSubmit) => {
@@ -232,7 +231,7 @@ impl Ui {
                         // The completion's line runs; the prefix that
                         // produced it goes, so it can't resubmit as a stray prompt.
                         self.editor.take();
-                        self.run_line(view, c.line, running)
+                        self.run_line(c.line)
                     }
                     Some(MenuEntry::File {
                         start,
@@ -248,7 +247,7 @@ impl Ui {
                     }
                     Some(MenuEntry::Message { .. }) | None => {
                         let typed = self.editor.take();
-                        self.run_line(view, typed, running)
+                        self.run_line(typed)
                     }
                 };
             }
@@ -470,7 +469,7 @@ impl Ui {
     }
 
     // Submit `line` as typed: kept in history if it can be recalled, then read.
-    fn run_line(&mut self, view: &mut View, line: String, running: bool) -> Asked {
+    fn run_line(&mut self, line: String) -> Asked {
         if input::recallable(&line, &self.commands) {
             self.editor.remember(&line);
         }
@@ -478,13 +477,7 @@ impl Ui {
             return Asked::Own(Deed::Nothing);
         }
         let intent = input::read(&line, &self.commands);
-        if intent.echoed() && running {
-            self.held = Some(line);
-        } else if intent.echoed() {
-            self.submit(view, &line);
-            view.surface.follow();
-        }
-        self.submitted = true;
+        self.submitted = Some(line);
         Asked::Core(intent)
     }
 }

@@ -1040,7 +1040,7 @@ async fn a_persons_line_through_a_job_is_always_a_prompt() {
         job.input(line.into());
         let got = tui.driver_line();
         assert!(
-            matches!(&got, Some((Origin::Input(_), crate::tui::Wake::Do(Asked::Core(Intent::Prompt(p))))) if p == line),
+            matches!(&got, Some((Origin::Input(_), crate::tui::Wake::Do(Asked::Core(Intent::Prompt(p)), _))) if p == line),
             "{line} is a prompt"
         );
     }
