@@ -22,6 +22,19 @@ impl Ui {
         };
     }
 
+    // The columns a drawn row's border takes before its text.
+    pub(super) fn lead(&self, view: &View, at: usize) -> usize {
+        let Some(Target::Scrollback(idx, line)) = self.row_targets.get(at) else {
+            return 0;
+        };
+        let width = self.screen.usable();
+        view.surface
+            .scrollback
+            .get(*idx)
+            .and_then(|r| r.line(*line, &self.paint, width).1)
+            .map_or(0, |b| b.width())
+    }
+
     pub(super) fn target_at(&self, row: u16) -> Option<Target> {
         self.row_targets
             .get(row.checked_sub(self.regions.history.y)? as usize)
@@ -35,17 +48,10 @@ impl Ui {
         let Target::Scrollback(idx, line) = target else {
             return None;
         };
-        // How many rows of this same line sit above the pointer, those
-        // scrolled off included: a drawn block is one line, its label the first.
-        let at = row.checked_sub(self.regions.history.y)? as usize;
-        let mut below_top = self.row_targets[..at]
-            .iter()
-            .rev()
-            .take_while(|t| matches!(t, Target::Scrollback(i, l) if (*i, *l) == (idx, line)))
-            .count();
-        if below_top == at {
-            below_top += self.top_cut;
-        }
+        // A drawn block is one line, its label the first row.
+        let below_top = *self
+            .row_of
+            .get(row.checked_sub(self.regions.history.y)? as usize)?;
         let row = view.surface.scrollback.get(idx)?;
         let width = self.screen.usable();
         let clicked = line;
@@ -245,20 +251,14 @@ impl Ui {
             .drawn
             .iter()
             .zip(&self.row_targets)
-            .map(|(text, target)| {
-                let line = match target {
+            .enumerate()
+            .map(|(at, (text, target))| Drawn {
+                text: text.clone(),
+                line: match target {
                     Target::Scrollback(idx, line) => Some((*idx, *line)),
                     _ => None,
-                };
-                let lead = line
-                    .and_then(|(idx, l)| view.surface.scrollback.get(idx).map(|r| (r, l)))
-                    .and_then(|(row, l)| row.line(l, &self.paint, width).1)
-                    .map_or(0, |border| border.width());
-                Drawn {
-                    text: text.clone(),
-                    line,
-                    lead,
-                }
+                },
+                lead: self.lead(view, at),
             })
             .collect();
         let text = select::text(&sel, &rows, width);
@@ -278,11 +278,13 @@ impl Ui {
     // A page keeps 4 rows of context at the edge, the way the upstream pi
     // TUI does (`Math.max(1, viewportHeight - 4)`).
     pub(super) fn page_scroll_step(&self) -> usize {
-        (self.screen.height as usize).saturating_sub(4).max(1)
+        (self.regions.history.height as usize)
+            .saturating_sub(4)
+            .max(1)
     }
 
     pub(super) fn half_scroll_step(&self) -> usize {
-        ((self.screen.height as usize) / 2).max(1)
+        (self.regions.history.height as usize / 2).max(1)
     }
 }
 
@@ -336,13 +338,22 @@ pub(super) fn at_row_name(path: &str, dir: bool) -> String {
 pub(super) const HISTORY_GAP: u16 = 1;
 
 impl Regions {
-    pub(super) fn layout(area: Rect, menu_h: u16, bar_h: u16, editor_h: u16) -> Self {
+    /// The rows each part asks for, as many as `area` holds: input last, so
+    /// the caret sits on the bottom row and the bar reads as history's edge.
+    pub(super) fn layout(area: Rect, menu: usize, bar: usize, editor: usize) -> Self {
+        // A short screen takes from the menu, then the editor, then the bar;
+        // a row of history and a row to type on stay.
+        let mut left = (area.height as usize).saturating_sub(1 + HISTORY_GAP as usize);
+        let bar = bar.min(left.saturating_sub(1));
+        left -= bar;
+        let editor = editor.min(left);
+        let menu = menu.min(left - editor);
         let chunks = Layout::vertical([
             Constraint::Fill(1),
             Constraint::Length(HISTORY_GAP),
-            Constraint::Length(menu_h),
-            Constraint::Length(bar_h),
-            Constraint::Length(editor_h),
+            Constraint::Length(menu as u16),
+            Constraint::Length(bar as u16),
+            Constraint::Length(editor as u16),
         ])
         .split(area);
         Self {

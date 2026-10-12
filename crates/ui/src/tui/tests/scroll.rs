@@ -418,7 +418,7 @@ fn a_panel_dims_the_transcript_under_it() {
     let mut view = View::default();
     view.surface.scrollback = vec![Row::notice("in the transcript")];
     let dimmed = |ui: &crate::tui::Ui| {
-        ui.screen.test_buffer()[(0, 0)]
+        ui.screen.test_buffer()[(0, ui.regions.history.y)]
             .modifier
             .contains(Modifier::DIM)
     };
@@ -500,7 +500,7 @@ fn a_command_page_searches_only_its_own_lines() {
     let marked = |line: &str| {
         let row = ui.drawn.iter().position(|r| r.trim() == line).unwrap();
         let col = ui.drawn[row].find("beta").unwrap();
-        ui.screen.test_buffer()[(col as u16, row as u16)]
+        ui.screen.test_buffer()[(col as u16, ui.regions.history.y + row as u16)]
             .modifier
             .contains(Modifier::REVERSED)
     };

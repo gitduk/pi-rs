@@ -2,7 +2,7 @@
 //! up, the menu, the bar and the editor, laid bottom-up and drawn.
 
 use pi_core::core::lane::Lane;
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::text::Line;
 use ratatui::widgets::{List, ListState};
 
@@ -25,9 +25,8 @@ impl Ui {
     pub(super) fn flush(&mut self, lane: &Lane, view: &mut View) {
         let menu = self.menu();
         let width = self.screen.usable();
-        // The reading page has no editor. Browsing it reads the conversation
-        // alone (no thinking, calls, notices); a preview reads none of the
-        // transcript. The tally and window share this one predicate.
+        // Browsing reads the conversation alone (no thinking, calls, notices);
+        // a preview reads none of the transcript. Tally and window share this.
         let reading = self.reading();
         let browse = self.browsing();
         let alone = matches!(self.page(), Some(Page::Preview(_)));
@@ -36,44 +35,25 @@ impl Ui {
         let text = self.page_lines();
         let mut bar = call::job_lines(&self.jobs, &self.paint, width);
         bar.extend(self.bar_lines(&Facts::of(lane), &snapshot(lane, view), width));
-        // The bar's rows are not worth a terminal that cannot hold them, a row
-        // to type on and a row of history: one that short keeps the other two.
-        bar.truncate((self.screen.height as usize).saturating_sub(2));
-        let bar_h = bar.len();
-        // Nothing to type on but a search, so nothing else pinned to the
-        // bottom: the rows the editor would have taken go to the history.
         let caret_shown = matches!(self.focus, Focus::Editor) || self.search_typing();
-        let (input, caret) = if reading {
-            match self.search_line() {
-                Some((line, col)) => (vec![line], (0, col)),
-                None => (Vec::new(), (0, 0)),
-            }
-        } else {
-            self.editor.view(&self.paint, width)
+        // A command's output sits on what was being typed; another reading
+        // page gives the editor's rows to the history, a search's row aside.
+        let (input, caret) = match self.search_line() {
+            Some((line, col)) if reading => (vec![line], (0, col)),
+            _ if reading && !command => (Vec::new(), (0, 0)),
+            _ => self.editor.view(&self.paint, width),
         };
-        // A paste taller than the terminal must not push the editor area off
-        // the bottom; the editor scrolls to keep the caret's row visible.
-        let editor_h = input
-            .len()
-            .min((self.screen.height as usize).saturating_sub(1 + bar_h));
+        let area = self.screen.area();
+        let mut regions = Regions::layout(area, menu.len(), bar.len(), input.len());
+        bar.truncate(regions.bar.height as usize);
+        let menu_h = regions.menu.height as usize;
+        // A paste taller than the terminal keeps the caret's row in view.
+        let editor_h = regions.editor.height as usize;
         let editor_top = (caret.0 as usize + 1).saturating_sub(editor_h);
         let mut input_view: Vec<Line<'static>> =
             input.into_iter().skip(editor_top).take(editor_h).collect();
         let caret_in_view = (caret.0 as usize).saturating_sub(editor_top);
-        // Bottom-up: input pinned, the menu above it, history fills the
-        // rest — bar always keeps its row.
-        let gap = super::mouse::HISTORY_GAP as usize;
-        let room = (self.screen.height as usize).saturating_sub(editor_h + bar_h + 1 + gap);
-        let menu_h = if menu.is_empty() {
-            0
-        } else {
-            menu.len().min(room)
-        };
-        // Every pinned row, bar included: what `Fill(1)` is left with;
-        // `Rows` fills top-down and drops overflow off the bottom (newest).
-        let hist_view = (self.screen.height as usize)
-            .saturating_sub(editor_h + menu_h + bar_h + gap)
-            .max(1);
+        let hist_view = regions.history.height as usize;
         // The group live calls fold into, when it's the last scrollback
         // row: theirs to draw, so the live block leaves them alone.
         let last = view.surface.scrollback.len().checked_sub(1);
@@ -177,38 +157,33 @@ impl Ui {
             )
         });
 
-        let (tagged_rows, scroll, cut) = screen::window_tagged(
+        let (tagged_rows, scroll) = screen::window_tagged(
             scrollback.chain(live_stream).chain(text_stream),
             hist_view,
             scroll,
         );
 
-        let (rows, row_targets): (Vec<Line<'static>>, Vec<Target>) =
-            tagged_rows.into_iter().unzip();
-        self.row_targets = row_targets;
-        self.top_cut = cut;
+        let mut rows = Vec::with_capacity(tagged_rows.len());
+        self.row_targets.clear();
+        self.row_of.clear();
+        for (row, target, at) in tagged_rows {
+            rows.push(row);
+            self.row_targets.push(target);
+            self.row_of.push(at);
+        }
         self.search_settle();
-        // The query marked on the rows a search reads, a command page's own;
-        // a row counts within its line, the top one past what fell off above.
+        // The query marked on the rows a search reads, a command page's own.
         let rows = match self.search_query() {
             Some((query, at)) => {
-                let mut place: Option<(Spot, usize)> = None;
+                let places = self.row_targets.iter().zip(&self.row_of);
                 rows.into_iter()
-                    .zip(&self.row_targets)
-                    .enumerate()
-                    .map(|(n, (row, target))| {
-                        let spot = Spot::of(*target);
-                        place = match (spot, place) {
-                            (Some(s), Some((was, r))) if s == was => Some((s, r + 1)),
-                            (Some(s), _) if n == 0 => Some((s, self.top_cut)),
-                            (Some(s), _) => Some((s, 0)),
-                            (None, _) => None,
-                        };
+                    .zip(places)
+                    .map(|(row, (target, &r))| {
                         if command && !matches!(target, Target::Text(_)) {
                             return row;
                         }
                         let current = at
-                            .filter(|h| place == Some((h.at.spot, h.at.row)))
+                            .filter(|h| Spot::of(*target) == Some(h.at.spot) && r == h.at.row)
                             .map(|h| h.k);
                         search::marked(row, query, current)
                     })
@@ -221,18 +196,7 @@ impl Ui {
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect();
         let rows = match &self.selection {
-            Some(sel) => {
-                let lead = |at: usize| match self.row_targets.get(at) {
-                    Some(Target::Scrollback(idx, line)) => view
-                        .surface
-                        .scrollback
-                        .get(*idx)
-                        .and_then(|r| r.line(*line, &self.paint, width).1)
-                        .map_or(0, |b| b.width()),
-                    _ => 0,
-                };
-                super::select::highlight(rows, sel, lead)
-            }
+            Some(sel) => super::select::highlight(rows, sel, |at| self.lead(view, at)),
             None => rows,
         };
 
@@ -251,12 +215,20 @@ impl Ui {
             .paint
             .band(&self.paint.theme.prompt.panel.input)
             .unwrap_or_default();
+        // A command's output sits on the input even when the transcript
+        // above is too short to push it there.
+        if command {
+            [regions.history] = Layout::vertical([Constraint::Length(rows.len() as u16)])
+                .flex(Flex::End)
+                .areas(regions.history);
+        }
+        self.regions = regions;
         let _ = self.screen.draw(|frame| {
-            // Input last, so the caret sits on the bottom row and the bar
-            // reads as history's edge, not something hanging off the typed line.
-            let regions =
-                Regions::layout(frame.area(), menu_h as u16, bar_h as u16, editor_h as u16);
-            self.regions = regions;
+            // Laid out for the size last reported: a frame of another would
+            // draw off its edge, and the resize on its way redraws.
+            if frame.area() != area {
+                return;
+            }
             frame.render_widget(Rows(&rows), regions.history);
             // While the keys are a panel's, the transcript under it steps back so
             // the two do not read as one; a menu that comes with typing does not.

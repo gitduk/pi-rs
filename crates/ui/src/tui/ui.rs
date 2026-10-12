@@ -103,8 +103,8 @@ pub(super) struct Ui {
     // The frame just drawn showed a hover its own layout disagrees with.
     pub(super) redraw: bool,
     pub(super) row_targets: Vec<Target>,
-    // Rows of the top drawn line scrolled off above the window.
-    pub(super) top_cut: usize,
+    // Which row of its line each drawn row is, row for row with `row_targets`.
+    pub(super) row_of: Vec<usize>,
     // The transcript rows as last drawn, in plain text: what a selection
     // reads, row for row with `row_targets`.
     pub(super) drawn: Vec<String>,
@@ -240,7 +240,7 @@ impl Ui {
             pointer: None,
             redraw: false,
             row_targets: Vec::new(),
-            top_cut: 0,
+            row_of: Vec::new(),
             drawn: Vec::new(),
             selection: None,
             press: None,

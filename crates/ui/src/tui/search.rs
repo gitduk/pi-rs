@@ -98,32 +98,25 @@ enum Want {
 }
 
 impl Ui {
-    // The top row the last frame drew, part of its line cut off above or not.
     // The view's first and last rows, by the targets the last frame drew.
     fn view_places(&self) -> Option<(Place, Place)> {
         let top = self.top_place()?;
-        let mut last = top;
-        for target in self.row_targets.iter().skip(1) {
-            let Some(spot) = Spot::of(*target) else {
-                continue;
-            };
-            last = if spot == last.spot {
-                Place {
-                    spot,
-                    row: last.row + 1,
-                }
-            } else {
-                Place { spot, row: 0 }
-            };
-        }
+        let last = (0..self.row_targets.len())
+            .rev()
+            .find_map(|n| self.place_at(n))
+            .unwrap_or(top);
         Some((top, last))
     }
 
+    // The top row the last frame drew, part of its line cut off above or not.
     fn top_place(&self) -> Option<Place> {
-        let spot = self.row_targets.first().copied().and_then(Spot::of)?;
+        self.place_at(0)
+    }
+
+    fn place_at(&self, n: usize) -> Option<Place> {
         Some(Place {
-            spot,
-            row: self.top_cut,
+            spot: Spot::of(*self.row_targets.get(n)?)?,
+            row: *self.row_of.get(n)?,
         })
     }
 
@@ -131,6 +124,14 @@ impl Ui {
     pub(super) fn search_open(&mut self) {
         let top = self.top_place();
         if let Focus::Read(read) = &mut self.focus {
+            // Once entered, `/` takes the query up again to be edited; esc
+            // then puts the view back where this `/` found it.
+            if let Some(search) = read.search.as_mut() {
+                search.typing = true;
+                search.from = top;
+                read.seek = top;
+                return;
+            }
             read.search = Some(Box::new(Search {
                 query: String::new(),
                 typing: true,
