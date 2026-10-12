@@ -128,13 +128,9 @@ impl Intent {
             Intent::Builtin(Builtin::Compact(_)) => {
                 Fate::Refused("/compact rewrites the transcript this run is writing — esc first")
             }
-            // An argument is a refusal, and a refusal answers now; bare hands
-            // the terminal to an editor and reloads, which waits for the run.
-            Intent::Builtin(Builtin::Settings(rest)) if !rest.trim().is_empty() => Fate::Now,
-            Intent::Builtin(Builtin::Settings(_)) => Fate::Queued,
-            // Bare it lists; naming a file hands the terminal to an editor.
-            Intent::Builtin(Builtin::Edit(name)) if name.trim().is_empty() => Fate::Now,
-            Intent::Builtin(Builtin::Edit(_)) => Fate::Queued,
+            // The editor shares the terminal the way ctrl+g does, and the
+            // reload re-arms through `Arc::make_mut`, as a file watched does.
+            Intent::Builtin(Builtin::Settings(_) | Builtin::Edit(_)) => Fate::Now,
             Intent::Other { .. } | Intent::Prompt(_) => Fate::Queued,
             // Its first round is due at once, and a round wants the lane free.
             Intent::Builtin(Builtin::Loop(_)) => Fate::Queued,

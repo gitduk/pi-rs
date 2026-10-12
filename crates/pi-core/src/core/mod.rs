@@ -553,6 +553,8 @@ mod tests {
             Intent::Builtin(Builtin::Keys),
             Intent::Builtin(Builtin::Model(String::new())),
             Intent::Builtin(Builtin::Worktree("tree".into())),
+            Intent::Builtin(Builtin::Settings(String::new())),
+            Intent::Builtin(Builtin::Edit("AGENTS.md".into())),
         ] {
             assert!(
                 matches!(intent.fate(), Fate::Now),
@@ -566,7 +568,6 @@ mod tests {
         for intent in [
             Intent::Prompt("the bug is in parse.rs".into()),
             Intent::Bash("ls".into()),
-            Intent::Builtin(Builtin::Settings(String::new())),
             Intent::Other {
                 word: "/commit".into(),
                 args: String::new(),
