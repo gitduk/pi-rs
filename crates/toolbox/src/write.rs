@@ -168,8 +168,9 @@ impl Tool for Write {
         }
         // Only an overwrite is gated: a new file that fails to parse is just a
         // stub with nothing to lose, but an overwrite that fails is usually content that ran short.
-        if let Ok(old) = tokio::fs::read_to_string(&path).await
-            && let Some((row, text)) = crate::parses::broke(&rel, Some(&old), &content)
+        let was = tokio::fs::read(&path).await.ok();
+        if let Some(old) = was.as_deref().and_then(|b| std::str::from_utf8(b).ok())
+            && let Some((row, text)) = crate::parses::broke(&rel, Some(old), &content)
         {
             return Err(ToolError::Invalid(format!(
                 "{rel} would not parse: line {row} is `{text}`, and it did \
@@ -203,14 +204,17 @@ impl Tool for Write {
         // Same split as read: the model's line names the version an edit matches
         // against; the log keeps the hash too, for when an edit goes wrong.
         tracing::info!(target: "pi::write", path = %rel, hash = %hash, "wrote");
+        let mut preview = crate::edit::rewrite_sketch(
+            &rel,
+            &String::from_utf8_lossy(&was.unwrap_or_default()),
+            &content,
+        );
+        preview.insert_str(preview.find('\n').unwrap_or(preview.len()), note);
         Ok(ToolOutput::text(format!(
             "{} wrote {lines} {unit}, {} bytes{note}",
             crate::rows::header(&rel),
             content.len()
         ))
-        .with_preview(format!(
-            "[{rel}] wrote {lines} {unit}, {} bytes{note}",
-            content.len()
-        )))
+        .with_preview(preview))
     }
 }

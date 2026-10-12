@@ -115,11 +115,12 @@ impl Ui {
                 } else if let Some((idx, line)) = hit
                     && let Some(row) = view.surface.scrollback.get_mut(idx)
                 {
-                    // Too long to read in place: read on a page of its own,
-                    // the line clicked heading it, and left folded here.
+                    // Too long or too wide to read in place: read on a page of
+                    // its own, the line clicked heading it, left folded here.
                     if matches!(self.focus, super::ui::Focus::Editor)
                         && let Some((head, body)) = row.opening(line, &self.paint, width)
-                        && body.len() > self.regions.history.height as usize / 2
+                        && (body.len() > self.regions.history.height as usize / 2
+                            || row.clipped(width))
                     {
                         self.preview(std::iter::once((head, None)).chain(body).collect());
                         return;

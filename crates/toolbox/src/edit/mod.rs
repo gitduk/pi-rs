@@ -4,7 +4,7 @@ mod sketch;
 
 use self::edits::{Anchor, Refusal};
 use self::notes::{blank_note, broke_syntax, notes};
-use self::sketch::sketch;
+use self::sketch::{CHANGED_RUN, sketch};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -12,6 +12,26 @@ use serde_json::{Value, json};
 use crate::rows::view_hash;
 use tool::limit::{MAX_BYTES, over_limit};
 use tool::{Ctx, Tier, Tool, ToolError, ToolOutput};
+
+/// The diff a whole-file write shows: one landing that took every old row.
+pub(crate) fn rewrite_sketch(path: &str, old: &str, new: &str) -> String {
+    let rows = edits::split_bom(new).1.lines().count();
+    let applied = edits::Applied {
+        content: new.to_string(),
+        landed: vec![edits::Landed {
+            start: 1,
+            end: rows,
+            took: edits::split_bom(old)
+                .1
+                .lines()
+                .map(str::to_string)
+                .collect(),
+            took_at: 1,
+        }],
+        left_blank: Vec::new(),
+    };
+    sketch(path, &applied, usize::MAX)
+}
 
 // What a call that gets the arguments wrong is told, so it resends the call
 // instead of staring at a bare serde error for a field it never named.
@@ -307,7 +327,7 @@ impl Tool for Edit {
             "edit applied"
         );
 
-        let patch = sketch(path, &applied);
+        let patch = sketch(path, &applied, CHANGED_RUN);
         // Compared against apply's own view: `apply` strips the BOM, so
         // matching against raw content would miss a block starting on line 1.
         let (_, body) = edits::split_bom(&content);
@@ -320,6 +340,7 @@ impl Tool for Edit {
         if stale {
             report.push_str(&format!("\nfile changed since your last view: {path}"));
         }
-        Ok(ToolOutput::text(report).with_preview(patch))
+        // The model is spared a long run; the screen opens it on a page.
+        Ok(ToolOutput::text(report).with_preview(sketch(path, &applied, usize::MAX)))
     }
 }

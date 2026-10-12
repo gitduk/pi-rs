@@ -6,9 +6,9 @@ use super::edits::{self, Applied, Landed};
 // Rows kept either side of a change: of file the edit did not touch, enough
 // to place it, few enough that the change stays the subject.
 const CONTEXT: usize = 3;
-// Changed rows shown before the rest are counted: the rows the edit wrote are
-// what the reader came for, and a window this wide fits what one edit meant.
-const CHANGED_RUN: usize = 40;
+// Changed rows the model is shown before the rest are counted: a window this
+// wide fits what one edit meant. The screen's copy is uncut.
+pub(super) const CHANGED_RUN: usize = 40;
 // Rows either side of a landing the line diff will align; past that the
 // landing is shown whole, the alignment costing rows squared.
 const DIFF_LINES: usize = 200;
@@ -149,8 +149,8 @@ fn untouched<'x>(out: &mut Vec<Row<'x>>, lines: &[&'x str], from: usize, to: usi
 }
 
 // The moved rows: `-` for what went, `+` for what came, with enough kept
-// rows to place them. Rendered once, so model and UI show the same bytes.
-pub(super) fn sketch(path: &str, applied: &Applied) -> String {
+// rows to place them; a changed run past `changed_run` rows is cut.
+pub(super) fn sketch(path: &str, applied: &Applied, changed_run: usize) -> String {
     // Shown without the mark, like every other view of the file: a row carrying
     // an invisible character is a row an anchor copied from it cannot match.
     let lines: Vec<&str> = edits::split_bom(&applied.content).1.lines().collect();
@@ -185,11 +185,11 @@ pub(super) fn sketch(path: &str, applied: &Applied) -> String {
             let end = |bordered: bool| if bordered { CONTEXT } else { 0 };
             (end(sole || i > 0), end(sole || i + 1 < runs.len()))
         } else {
-            (CHANGED_RUN, 0)
+            (changed_run, 0)
         };
         // Fold only when it drops more than one row: a run one row past its
         // window is shown whole rather than trimmed.
-        if run.len() <= head + tail + 1 {
+        if run.len() <= head.saturating_add(tail).saturating_add(1) {
             shown.extend_from_slice(run);
             continue;
         }

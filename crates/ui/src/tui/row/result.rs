@@ -3,6 +3,7 @@
 use std::cell::RefCell;
 
 use ratatui::text::Line;
+use unicode_width::UnicodeWidthStr;
 
 use super::{Fold, Opening};
 use crate::render::{self, Paint};
@@ -16,6 +17,8 @@ pub(super) struct ToolOut {
     // The row count, so expandability and toggle don't re-walk the
     // preview string on every mouse move.
     preview_lines: usize,
+    // The widest preview line: past the room a frame gives, it is cut.
+    widest: usize,
     expanded: bool,
     hovered: bool,
     // Caches the last clip, keyed by width: painting the whole result
@@ -29,6 +32,11 @@ impl ToolOut {
             ok,
             name,
             preview_lines: preview.lines().count(),
+            widest: preview
+                .lines()
+                .map(UnicodeWidthStr::width)
+                .max()
+                .unwrap_or(0),
             preview,
             expanded: false,
             hovered: false,
@@ -66,9 +74,9 @@ impl ToolOut {
         rows.get(i).cloned().unwrap_or_default()
     }
 
-    // Only a result that opens is lit under the pointer.
+    // The pointer is only ever over a result that opens.
     pub(super) fn hover(&mut self, hovered: bool) {
-        if self.expandable() && self.hovered != hovered {
+        if self.hovered != hovered {
             self.hovered = hovered;
             *self.painted.get_mut() = None;
         }
@@ -80,14 +88,22 @@ impl Fold for ToolOut {
         self.preview_lines > render::SKETCHED_ROWS
     }
 
+    fn clipped(&self, width: usize) -> bool {
+        self.widest > render::result_room(width)
+    }
+
+    fn click_line(&self, _i: usize, width: usize) -> Option<usize> {
+        (self.expandable() || self.clipped(width)).then_some(0)
+    }
+
     fn flip(&mut self) {
         self.expanded = !self.expanded;
         *self.painted.get_mut() = None;
     }
 
-    // The whole preview, its head as the closed row reads.
+    // The whole preview, uncut: a page wraps what the row would clip.
     fn opening(&self, _i: usize, paint: &Paint, width: usize) -> Option<Opening> {
-        if self.expanded || !self.expandable() {
+        if self.expanded || !(self.expandable() || self.clipped(width)) {
             return None;
         }
         let mut rows = render::result_rows(
@@ -97,7 +113,7 @@ impl Fold for ToolOut {
             true,
             false,
             paint,
-            width,
+            usize::MAX,
         )
         .into_iter();
         Some((rows.next()?, rows.map(|line| (line, None)).collect()))

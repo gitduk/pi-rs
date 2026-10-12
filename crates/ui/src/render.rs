@@ -371,6 +371,11 @@ const SKETCH_LIMIT: usize = 16;
 /// The preview rows a folded result shows: the head plus the sketch limit.
 pub const SKETCHED_ROWS: usize = 1 + SKETCH_LIMIT;
 
+/// The columns a result's lines are cut to at `width`.
+pub fn result_room(width: usize) -> usize {
+    width.saturating_sub(2).max(20)
+}
+
 /// The rows a finished tool result takes on screen: its head, clipped to fit,
 /// and under it whatever a tool sketched — an edit's diff rows.
 pub fn result_rows(
@@ -382,7 +387,7 @@ pub fn result_rows(
     p: &Paint,
     width: usize,
 ) -> Vec<ratatui::text::Line<'static>> {
-    let room = width.saturating_sub(2).max(20);
+    let room = result_room(width);
     let (mark_style, mark) = if is_error {
         (&p.theme.status.err, icons::FAIL_MARK)
     } else {
@@ -392,7 +397,7 @@ pub fn result_rows(
     let mut out = vec![Line::from(vec![
         p.span(mark_style, mark),
         Span::raw(format!(" {name} ")),
-        p.span(&p.theme.muted, clip(head, room)),
+        p.span_hovered(hovered, &p.theme.muted, clip(head, room)),
     ])];
     let diff_lines: Vec<&str> = rest.lines().collect();
     let footer = |text: &str| Line::from(p.span_hovered(hovered, &p.theme.muted, text));

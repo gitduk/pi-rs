@@ -134,6 +134,10 @@ trait Fold {
     }
     // What opening line `i` would show, while it is closed.
     fn opening(&self, i: usize, paint: &Paint, width: usize) -> Option<Opening>;
+    // Whether lines are cut at `width` that only its opening shows whole.
+    fn clipped(&self, _width: usize) -> bool {
+        false
+    }
 }
 
 impl Row {
@@ -355,6 +359,11 @@ impl Row {
     /// step's reasoning or call, a result whole, a relayed turn's text.
     pub fn opening(&self, i: usize, paint: &Paint, width: usize) -> Option<Opening> {
         self.fold()?.opening(i, paint, width)
+    }
+
+    /// Whether lines are cut at `width` that only its opening shows whole.
+    pub fn clipped(&self, width: usize) -> bool {
+        self.fold().is_some_and(|f| f.clipped(width))
     }
 
     /// Brings a row up to date before the frame draws: hover line, spinner
