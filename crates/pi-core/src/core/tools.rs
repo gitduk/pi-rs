@@ -5,7 +5,7 @@ use std::sync::LazyLock;
 use tool::Tier;
 
 /// Whether the tool `name` changes files. What it changed is the result, so
-/// a surface keeps it in view rather than folding it away.
+/// a surface shows it whole rather than in brief.
 pub fn modifies(name: &str) -> bool {
     // Built-ins only: no other source offers a tool at the write tier.
     static WRITERS: LazyLock<Vec<String>> = LazyLock::new(|| {

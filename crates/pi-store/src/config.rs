@@ -86,7 +86,7 @@ pub struct Config {
     /// How many rounds a `/loop` may run before it stops on its own. Defaults
     /// to 10 — the fingerprint and thin-round brakes catch a converging loop,
     /// and this is the floor for the shape they cannot (a round that keeps
-    /// changing files forever). Unset reads as 10; esc is always the brake.
+    /// changing files forever). Unset reads as 10; the user's stop is always the brake.
     #[serde(
         default = "default_loop_max_rounds",
         skip_serializing_if = "Option::is_none"
@@ -444,19 +444,6 @@ pub enum ModelOrigin {
     OnlyModel,
 }
 
-impl ModelOrigin {
-    pub fn describe(self) -> &'static str {
-        match self {
-            ModelOrigin::Flag => "-m",
-            ModelOrigin::Command => "/model",
-            ModelOrigin::Resumed => "the resumed session",
-            ModelOrigin::Project => "`model` in the project's .pi.toml",
-            ModelOrigin::Global => "`model` in ~/.pi/settings.toml",
-            ModelOrigin::OnlyModel => "the only model in ~/.pi/settings.toml",
-        }
-    }
-}
-
 /// What the flags said, so the chain below can be resolved in one place.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Flags {
@@ -648,7 +635,7 @@ fn project_path(start: &Path, home: Option<&Path>) -> Option<PathBuf> {
     None
 }
 
-/// Where `/settings` writes for `workspace`: the project file in force, else a
+/// Where settings for `workspace` are written: the project file in force, else a
 /// new one at the repository root, or in the workspace outside a repository.
 /// `None` in `$HOME` itself, whose `.pi.toml` is never read.
 pub fn project_target(workspace: &Path) -> Option<PathBuf> {
@@ -785,7 +772,7 @@ impl Config {
 
     /// The config a run uses: the tree, the environment's endpoint over it,
     /// and every model checked against the endpoint it ends up with. Startup,
-    /// a reload and `/settings` all come through here, so none of them
+    /// a reload and an edit all come through here, so none of them
     /// accepts what another would refuse.
     pub fn in_force(tree: toml::Value) -> Result<Config> {
         let mut config = Self::from_tree(tree)?;
@@ -799,8 +786,8 @@ impl Config {
 
 /// A key written into a file others can read is worth one line of warning.
 ///
-/// Returned rather than printed: the same check runs behind `/model`, where the
-/// terminal is in raw mode and a stray `eprintln!` lands wherever the cursor
+/// Returned rather than printed: the same check runs mid-session, where the
+/// terminal may be in raw mode and a stray `eprintln!` lands wherever the cursor
 /// happens to be.
 pub fn warn_if_exposed(path: &Path) -> Option<String> {
     #[cfg(unix)]

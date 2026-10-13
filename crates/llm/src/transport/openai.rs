@@ -191,7 +191,7 @@ pub(crate) fn build_body(spec: &ModelSpec, req: &Request) -> Value {
         "stream": true,
         "input": encode(&req.messages, spec),
         "max_output_tokens": max_output_tokens,
-        // A transcript on someone else's disk is not pi's to leave behind, and
+        // A transcript on someone else's disk is not ours to leave behind, and
         // the reference page documents no default for this — so it is said.
         "store": false,
         // Without it a stateless reasoning item comes back with nothing to

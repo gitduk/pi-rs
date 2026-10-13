@@ -21,7 +21,7 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 #[derive(serde::Deserialize)]
 struct Args {
     // Never read by the child — this is the caller's word to the screen and
-    // the journal, which otherwise show a delegated job as a bare `subagent`.
+    // the log, which otherwise show a delegated job as a bare `subagent`.
     description: String,
     prompt: String,
     // Run after the child stops, in the same checkout. Never seen by the
@@ -66,7 +66,7 @@ pub struct Subagent {
     agent: Arc<Agent>,
     archive: Arc<dyn Archive>,
     // How long the child may run silent before it is read as wedged: the one
-    // brake here, and the only way a child ends that is not esc.
+    // brake here, and the only way a child ends that is not a stop.
     deadline: Duration,
     // The retry schedule the child runs on, handed in when the tool is hung:
     // a tool has no way to reach the config where it is called.
@@ -247,7 +247,7 @@ impl Tool for Subagent {
 }
 
 impl Subagent {
-    // Started apart from the turn: the table's token, so esc leaves it
+    // Started apart from the turn: the job's own token, so a stop leaves it
     // running, and its own record of writes, since the caller's run will end.
     fn send_off(&self, args: Args, ctx: &Ctx) -> Result<ToolOutput, ToolError> {
         let Some(sink) = ctx.jobs() else {
@@ -352,7 +352,7 @@ impl Subagent {
             heard
         });
         // The watchdog: silence for a whole deadline is a wedged call — a
-        // hung tool speaks no events. It trips the same token esc does.
+        // hung tool speaks no events. It trips the same token a stop does.
         let wedged = Arc::new(AtomicBool::new(false));
         let watchdog_stop = stop.clone();
         let wedged_flag = wedged.clone();
@@ -377,7 +377,7 @@ impl Subagent {
             }
         });
         let mut session = Session::with_prompt(args.prompt);
-        // One span for the whole child, so the journal can file its records
+        // One span for the whole child, so the log can file its records
         // under it rather than lose them among its siblings'.
         let child_span = tracing::info_span!(
             target: "pi::subagent",
@@ -385,8 +385,8 @@ impl Subagent {
             session = %child.spill_namespace(),
             description = %args.description,
         );
-        // The token ends the run — the watchdog or esc — unwinding like an
-        // esc; one ignoring it is dropped after STOP_GRACE.
+        // The token ends the run — the watchdog or a stop — unwinding like a
+        // stop; one ignoring it is dropped after STOP_GRACE.
         let started = Instant::now();
         let ran = {
             let mut run = std::pin::pin!(
@@ -430,7 +430,7 @@ impl Subagent {
 
         let cut = match ran {
             Ok(_) => None,
-            // Esc only: our own token tripping leaves the parent's alone —
+            // A stop only: our own token tripping leaves the parent's alone —
             // conflating them would end the caller's whole turn over a wedged child.
             Err(AgentError::Cancelled) if ctx.cancel.is_cancelled() => {
                 return Err(ToolError::Cancelled);
@@ -488,7 +488,7 @@ impl Subagent {
                         code: ran.code,
                         body: ran.body,
                     },
-                    // Esc ends the caller's turn as elsewhere; anything else is an
+                    // A stop ends the caller's turn as elsewhere; anything else is an
                     // outcome, not a reason to drop the work the child already did.
                     Err(ToolError::Cancelled) => return Err(ToolError::Cancelled),
                     Err(ToolError::Timeout { ms }) => Outcome::CutOff { ms },

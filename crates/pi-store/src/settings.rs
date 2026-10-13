@@ -1,8 +1,8 @@
 //! The config files as one tree: the user's, with the project's `.pi.toml`
 //! laid over it key by key.
 //!
-//! There is no session layer: `/settings` opens the project's file in an
-//! editor, and a reload re-reads both.
+//! There is no session layer: the files are edited in place, and a reload
+//! re-reads both.
 
 use std::path::{Path, PathBuf};
 

@@ -14,18 +14,18 @@ pub struct Bashed {
     pub text: String,
     /// Said on screen only — `cancelled`, or why the runner refused. There
     /// is no entry to file, so there is nothing to rebuild from either.
-    pub flash: Option<String>,
+    pub why_not: Option<String>,
 }
 
 /// Run what `!` named. Same runner, workspace and timeout as the model's own
-/// `bash` tool; `ctx` carries the token that lets Esc stop it.
+/// `bash` tool; `ctx` carries the token that lets a stop end it.
 ///
 /// Free of `Core` so the surface can spawn it: holding `&mut Core` across the
 /// await pinned the whole loop.
 pub async fn run_bash(ctx: &tool::Ctx, command: &str) -> Bashed {
-    let refused = |flash: String| Bashed {
+    let refused = |why: String| Bashed {
         text: String::new(),
-        flash: Some(flash),
+        why_not: Some(why),
     };
     let out = match toolbox::bash::Bash
         .execute(serde_json::json!({ "command": command }), ctx)
@@ -48,7 +48,7 @@ pub async fn run_bash(ctx: &tool::Ctx, command: &str) -> Bashed {
                 &body
             }
         ),
-        flash: None,
+        why_not: None,
     }
 }
 
@@ -70,11 +70,11 @@ pub fn is_stream_tag(line: &str) -> bool {
 }
 
 impl Bashed {
-    /// What the screen shows for this run: the derived lines, plus the flash
-    /// for one that never ran. Everything the surface turns into notice rows.
+    /// What the screen shows for this run: the derived lines, plus why one
+    /// never ran. Everything the surface turns into notice rows.
     pub fn screen(self) -> Vec<String> {
         let mut lines = bash_said(&self.text);
-        lines.extend(self.flash);
+        lines.extend(self.why_not);
         lines
     }
 }

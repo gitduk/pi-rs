@@ -69,8 +69,8 @@ impl Tool for Bash {
         if ran.code != 0 {
             body.push_str(&format!("exit {}\n", ran.code));
         }
-        // One line: the diff-row renderer and journal treat further newlines as
-        // structure, not text.
+        // One line: whoever reads the preview, and the log, treat further
+        // newlines as structure, not text.
         let preview = command.split('\n').next().unwrap_or_default();
         if body.is_empty() {
             // Preview stays set: without it the row falls back to body, hiding
@@ -82,7 +82,7 @@ impl Tool for Bash {
 }
 
 // The command as it will run, and where: rtk rewrites it in its own
-// vocabulary, from `cwd` for project filters, racing esc so it isn't delayed.
+// vocabulary, from `cwd` for project filters, racing a stop so it isn't delayed.
 async fn prepare(
     args: Args,
     tier: Tier,

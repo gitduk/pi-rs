@@ -1,6 +1,6 @@
 //! Where a subagent's transcript is filed: pi's side of `agent::Archive`.
 //!
-//! A subagent has no lane, no view and no place on the bar, so this is the
+//! A subagent has no lane and nothing on screen, so this is the
 //! whole of what it leaves behind. What it spent no longer lands here: the
 //! tool result carries it back, and the run that called it reports it.
 

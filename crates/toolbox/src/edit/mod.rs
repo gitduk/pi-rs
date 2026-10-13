@@ -340,7 +340,7 @@ impl Tool for Edit {
         if stale {
             report.push_str(&format!("\nfile changed since your last view: {path}"));
         }
-        // The model is spared a long run; the screen opens it on a page.
+        // The model is spared a long run; the preview carries it whole.
         Ok(ToolOutput::text(report).with_preview(sketch(path, &applied, usize::MAX)))
     }
 }

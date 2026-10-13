@@ -209,7 +209,7 @@ impl Journal {
         })
     }
 
-    // Points the same journal at another session's file (`/resume` or `/new`)
+    // Points the same journal at another session's file
     // without reinstalling the subscriber; the cap applies to the new file fresh.
     fn retarget(&self, path: &Path) -> std::io::Result<()> {
         let file = open_file(path)?;
@@ -509,7 +509,7 @@ where
 // surface can reach it without the path threaded through the terminal loop.
 static JOURNAL: std::sync::OnceLock<std::sync::Arc<Journal>> = std::sync::OnceLock::new();
 
-/// Where the journal is writing right now, for `/status` and the failure line.
+/// Where the journal is writing right now, for a status and the failure line.
 /// Read back from the journal itself — the sink holds its own path — so there
 /// is no second copy to keep in step.
 pub fn path() -> Option<PathBuf> {
@@ -626,10 +626,9 @@ pub fn opening(
     }
 }
 
-/// The run has moved to a different session — a `/resume` or a `/new` — so
-/// point the journal at that session's file, and mark the seam in it. Each
-/// session keeps one journal across every run that touched it, which is how
-/// `/status` and the file both follow the session.
+/// The run has moved to a different session, so point the journal at that
+/// session's file, and mark the seam in it. Each session keeps one journal
+/// across every run that touched it, so whoever names the file follows it.
 pub fn switched(path: &Path, id: &str) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);

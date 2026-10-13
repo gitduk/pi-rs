@@ -97,7 +97,7 @@ fn warn(hook: &Hook, why: &str) {
 }
 
 // The hook's exit code and what it printed, stdout then stderr. Run like a
-// tool's child: its own group, bounded output, and esc stops it.
+// tool's child: its own group, bounded output, and a stop ends it.
 async fn run(hook: &Hook, input: &[u8], ctx: &Ctx) -> Result<(i32, String), String> {
     let mut cmd = tokio::process::Command::new("sh");
     cmd.arg("-c")

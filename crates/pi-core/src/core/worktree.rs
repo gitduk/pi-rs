@@ -359,7 +359,7 @@ impl Core {
             .and_then(|ws| ws.with_write_roots(&self.config.writable()))
             .map_err(|e| refused("worktree", anyhow::anyhow!("{}: {e}", tree.path.display())))?;
         if ws.root() == from {
-            return Ok(Step::Flash(format!("already in {}", tree.name)));
+            return Ok(Step::Answer(format!("already in {}", tree.name)));
         }
         // Saved before the move, against the root it belongs to; an empty
         // session has nothing to keep, and a run in flight saves its own.
@@ -369,7 +369,7 @@ impl Core {
             tracing::warn!(target: "pi::session", error = %e, "the leaving session was not saved");
         }
         // Already open: the lane that holds it comes back whole. Nothing is
-        // said — the screen changing, bar included, says where you are.
+        // said — the lane coming to the front says where you are.
         if let Some(i) = self.lane_at(ws.root()) {
             self.current = i;
             self.in_force();

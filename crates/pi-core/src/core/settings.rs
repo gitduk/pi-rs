@@ -21,6 +21,37 @@ impl Core {
         self.try_reload().unwrap_or_else(|why| vec![why])
     }
 
+    /// Before a run: read the prompt's files again if the session is new or
+    /// compacted since. `Some` names the files that read differently.
+    pub fn refresh_prompt_files(&mut self) -> Option<Vec<String>> {
+        if !self.lane_mut().prompt_files_due() {
+            return None;
+        }
+        let lane = self.lane();
+        let root = lane.root().to_path_buf();
+        let was = lane.resolved().prompt_files.clone();
+        let resolved = match resolve::resolve(
+            &self.pinned,
+            lane.workspace(),
+            &self.config,
+            &self.settings,
+            None,
+        ) {
+            Ok(r) => r,
+            Err(e) => return Some(vec![format!("prompt files not re-read — {e:#}")]),
+        };
+        if *resolved.prompt_files == *was {
+            return None;
+        }
+        let moved = was.moved(&resolved.prompt_files, &root);
+        let archive = self.archive(root, lane.agent().spec().model.clone());
+        let retry = crate::core::retry(&self.config);
+        let jobs = self.jobs.clone();
+        self.lane_mut()
+            .rearm(std::sync::Arc::new(resolved), archive, retry, jobs, |_| {});
+        (!moved.is_empty()).then(|| vec![format!("re-read — {}", moved.join(", "))])
+    }
+
     /// The same, with a refusal as `Err`: why nothing was reloaded.
     pub fn try_reload(&mut self) -> Result<Vec<String>, String> {
         let root = self.lane().root().to_path_buf();
@@ -29,7 +60,7 @@ impl Core {
         }
         let before = self.lane().resolved().endpoint.clone();
         let mut said = self.rebuilt()?;
-        // The banner is drawn once, so a moved endpoint is said here instead.
+        // What the run stands on is shown once, so a moved endpoint is said here.
         // An edit needs no such line: it names the value it wrote.
         let after = &self.lane().resolved().endpoint;
         if *after != before {
@@ -54,6 +85,7 @@ impl Core {
             &workspace,
             &config,
             &self.settings,
+            Some(self.lane().resolved().prompt_files.clone()),
         ) {
             Ok(r) => r,
             Err(e) => return failed(e),
@@ -141,7 +173,7 @@ impl Core {
         }
         match files.into_iter().find(|f| f.name == name) {
             Some(file) => Step::Edit(file.path),
-            None => Step::Flash(format!(
+            None => Step::Answer(format!(
                 "`{name}` is not a file /edit offers — bare /edit lists them"
             )),
         }

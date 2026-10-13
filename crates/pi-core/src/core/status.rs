@@ -1,7 +1,7 @@
 //! What a status line reads: the parts of a lane a reader is shown, and the
 //! numbers behind them.
 //!
-//! The vocabulary is `pi_store::status` and the drawing is `ui/status.rs`; this
+//! The vocabulary is `pi_store::status` and the drawing is the surface's; this
 //! is where the values come from.
 
 use agent::Totals;

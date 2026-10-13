@@ -1,14 +1,13 @@
 //! The shape of a read-only answer: the rows a command has to show, before
 //! anyone lays them out.
 //!
-//! Lives here rather than beside `Step` because the key table in `keys`
-//! also fills one in, and `pi-core`'s `input` can't be reached from here.
+//! Lives here because the key table in `keys` fills one in too.
 
 /// A read-only answer, as rows of cells: the layout is decided by whoever
 /// draws it, not here.
 ///
-/// One shape for every such answer (`/keys`, `/help`, `/resume`, `/worktree`,
-/// `/model`, `/status`) since they differ in content, not in how a row reads.
+/// One shape for every such answer, since they differ in content, not in how
+/// a row reads.
 #[derive(Debug, Default, PartialEq)]
 pub struct Listing {
     pub rows: Vec<Row>,

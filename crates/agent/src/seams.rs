@@ -1,5 +1,5 @@
 //! What the loop reaches the outside world through: the transport it sends on,
-//! the gate it asks before a call, where a finished subagent's work goes, what
+//! the gate it asks before a call, where a finished child run's work goes, what
 //! shrinks a transcript that outgrows the window, and the lines said to a run
 //! already working.
 
@@ -30,7 +30,7 @@ pub trait Approver: Send + Sync {
     fn approve(&self, name: &str, tier: Tier, args: &Value) -> Decision;
 }
 
-/// Where a finished subagent's work goes.
+/// Where a finished child run's work goes.
 ///
 /// This layer says what it needs and the surface provides it; what a child
 /// spent travels back on the tool result instead.

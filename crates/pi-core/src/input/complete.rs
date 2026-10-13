@@ -7,9 +7,9 @@ use std::path::Path;
 // Where a token ends and a new one may start. The newline keeps the scan
 // inside the line the caret is on, as the per-line parse upstream does.
 const DELIMS: [char; 6] = [' ', '\t', '"', '\'', '=', '\n'];
-// A listing stops here: a folder this full is no menu anyway.
+// A listing stops here: a folder this full is no list to pick from anyway.
 const WALK_CAP: usize = 2000;
-// What the menu shows at most.
+// What is offered at most.
 const TOP: usize = 20;
 
 /// One candidate: the path as the completed `@token` should read,

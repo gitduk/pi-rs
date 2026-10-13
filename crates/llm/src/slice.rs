@@ -1,5 +1,4 @@
-//! Char-boundary string slicing shared by the tools that clip long output
-//! (bash, read) and the compaction that prunes it again.
+//! Char-boundary string slicing, shared by whatever clips long text.
 
 /// Largest prefix of `s` within `max` bytes that ends on a char boundary.
 pub fn head_bytes(s: &str, max: usize) -> &str {

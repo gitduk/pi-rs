@@ -10,7 +10,7 @@ use tool::output::{Capture, Captured};
 use tool::{Ctx, ToolError};
 
 /// The longest any child may run, whatever its caller asked for.
-pub(crate) const MAX_RUN: Duration = Duration::from_secs(600);
+pub(crate) const MAX_RUN: Duration = tool::limit::MAX_CALL;
 
 pub struct Exited {
     pub status: ExitStatus,

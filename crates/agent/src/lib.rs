@@ -77,16 +77,16 @@ impl NoteOutcome for Session {
     }
 }
 
-/// The wire a lane talks on, and the model on the other end. Swapped whole by
-/// `/model`, which moves nothing else about a run.
+/// The wire a run talks on, and the model on the other end. Swapped whole when
+/// the model changes, which moves nothing else about a run.
 #[derive(Clone)]
 pub struct Model {
     pub transport: Arc<dyn Transport>,
     pub spec: ModelSpec,
 }
 
-/// What a run is allowed to do and what it is told. Rebuilt whole by a reload
-/// and by an opened checkout; a subagent derives its own from its caller's.
+/// What a run is allowed to do and what it is told. Rebuilt whole by whoever
+/// sets the run up; a child run derives its own from its caller's.
 #[derive(Clone)]
 pub struct Briefing {
     pub registry: Registry,

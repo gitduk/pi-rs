@@ -1,8 +1,7 @@
-//! Figures the surfaces show, said the one way every surface says them.
+//! Figures a person is shown, said the one way everywhere.
 //!
-//! Here rather than in the CLI because the agent crate has figures to show
-//! too — a subagent's — and a count spelled `8400` beside one spelled `8.4k`
-//! reads as a different unit.
+//! Down here so every crate that shows a count spells it alike: `8400` beside
+//! `8.4k` reads as a different unit.
 
 use std::time::Duration;
 
@@ -27,7 +26,7 @@ pub fn in_out(input: u64, output: u64) -> String {
     format!("{} in / {} out", reported(input), reported(output))
 }
 
-/// The same two figures where the words will not fit: a scrollback row that
+/// The same two figures where the words will not fit: a row that
 /// has already said what it is, and needs the columns for what it did. Same
 /// unit and same dash as `in_out` — a narrower spelling, not another count.
 pub fn slash(input: u64, output: u64) -> String {

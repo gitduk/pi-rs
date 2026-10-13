@@ -55,11 +55,11 @@ pub enum Builtin {
     Jobs(String),
     // Bare, the MCP servers and their tools; `restart [name]` reconnects.
     Mcp(String),
-    // `/new` and `ctrl+l` twice are one variant: a fresh session, old one
+    // `/new` and the keys bound to it are one variant: a fresh session, old one
     // kept on disk, screen rebuilt empty — one intent, however expressed.
     New,
-    // Leave now — `/exit`, `/quit`, `ctrl+d`, double `ctrl+c` — one intent,
-    // so the four cannot answer differently.
+    // Leave now — `/exit`, `/quit`, or the keys bound to leaving — one intent,
+    // so none can answer differently.
     Quit,
     // Leave, and start the pi installed now on this same session.
     Restart,
@@ -109,18 +109,18 @@ impl Intent {
                 Fate::Now
             }
             Intent::Builtin(Builtin::Resume(_)) => Fate::Refused(
-                "/resume would replace the transcript this run is writing — esc first",
+                "/resume would replace the transcript this run is writing — stop the run first",
             ),
             // A lane of its own to move to, and the one being left keeps
             // working in the tree it was already in.
             Intent::Builtin(Builtin::Worktree(_)) => Fate::Now,
-            Intent::Builtin(Builtin::New) => {
-                Fate::Refused("/new would replace the transcript this run is writing — esc first")
-            }
-            Intent::Builtin(Builtin::Compact(_)) => {
-                Fate::Refused("/compact rewrites the transcript this run is writing — esc first")
-            }
-            // The editor shares the terminal the way ctrl+g does, and the
+            Intent::Builtin(Builtin::New) => Fate::Refused(
+                "/new would replace the transcript this run is writing — stop the run first",
+            ),
+            Intent::Builtin(Builtin::Compact(_)) => Fate::Refused(
+                "/compact rewrites the transcript this run is writing — stop the run first",
+            ),
+            // The editor takes the terminal while the run carries on, and the
             // reload re-arms through `Arc::make_mut`, as a file watched does.
             Intent::Builtin(Builtin::Settings(_) | Builtin::Edit(_)) => Fate::Now,
             Intent::Other { .. } | Intent::Prompt(_) => Fate::Queued,
@@ -132,7 +132,7 @@ impl Intent {
             // Leaving is never refused: a hung run must not trap the user.
             Intent::Builtin(Builtin::Quit) => Fate::Now,
             Intent::Builtin(Builtin::Restart) => {
-                Fate::Refused("/restart would cut this run short — esc first")
+                Fate::Refused("/restart would cut this run short — stop the run first")
             }
         }
     }
@@ -216,7 +216,7 @@ pub(crate) fn step_for(commands: &[Command], word: &str, args: &str) -> Step {
                 typed: typed(),
             };
         }
-        _ => return Step::Flash(format!("unknown command {word} — /help lists them")),
+        _ => return Step::Answer(format!("unknown command {word} — /help lists them")),
     };
     match expanded(skill, args) {
         Ok(send) => Step::Prompt {
@@ -294,14 +294,14 @@ pub enum Rewound {
 
 #[derive(Debug)]
 pub enum Step {
-    // "Nothing happened" shown once over the editor, filed nowhere — no
-    // state moved, so there's nothing for a rebuild to draw later.
-    Flash(String),
+    // A one-line answer, filed nowhere — no state moved, so there's
+    // nothing for a rebuild to draw later.
+    Answer(String),
     // A `!` command to run. The surface runs and records it, because only it
     // can await; `run_bash` does the work and `record_bash` files it.
     Bash(String),
     // What to send, and the typed line when a skill expanded into it —
-    // `rewind_nodes()` reads the latter so a menu doesn't offer raw SKILL.md.
+    // `rewind_nodes()` reads the latter so a pick list doesn't offer raw SKILL.md.
     Prompt {
         send: String,
         typed: Option<String>,
@@ -342,8 +342,8 @@ pub enum Step {
 
 impl Step {
     /// Whether the answer lands under the line that asked, so the surface
-    /// keeps that line on screen. A page or a flash is dismissed rather than
-    /// kept, and a line left above nothing reads as a question unanswered.
+    /// keeps that line on screen. An answer set apart is dismissed rather
+    /// than kept, and a line left above nothing reads as a question unanswered.
     ///
     /// Asked of the step, not the intent: only the step knows whether a word
     /// named a skill or nothing at all. No catch-all, so a new step decides.
@@ -352,7 +352,7 @@ impl Step {
             Step::Prompt { .. } | Step::Bash(_) => true,
             // Its turn starts only if the server answers; echoed then.
             Step::McpPrompt { .. } => false,
-            Step::Flash(_)
+            Step::Answer(_)
             | Step::Compact(_)
             | Step::Drive(_)
             | Step::Edit(_)

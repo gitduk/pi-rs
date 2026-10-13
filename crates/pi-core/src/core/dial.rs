@@ -45,8 +45,21 @@ pub struct Dialled {
 fn unknown(model: &str, named_by: config::ModelOrigin) -> String {
     format!(
         "`{model}`, named by {}, cannot be reached — see examples/pi.toml",
-        named_by.describe()
+        said_by(named_by)
     )
+}
+
+// Who named the model, as the user would recognise it.
+fn said_by(origin: config::ModelOrigin) -> &'static str {
+    use config::ModelOrigin as O;
+    match origin {
+        O::Flag => "-m",
+        O::Command => "/model",
+        O::Resumed => "the resumed session",
+        O::Project => "`model` in the project's .pi.toml",
+        O::Global => "`model` in ~/.pi/settings.toml",
+        O::OnlyModel => "the only model in ~/.pi/settings.toml",
+    }
 }
 
 /// Resolve a model name; startup and `/model` share this so the two agree.

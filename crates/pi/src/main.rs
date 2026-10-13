@@ -233,7 +233,7 @@ async fn main() -> Result<ExitCode> {
     let pinned = args.pinned();
     let dialled = dial(&pinned, &config, &named, named_by)?;
 
-    let mut resolved = resolve(&pinned, &workspace, &config, &settings)?;
+    let mut resolved = resolve(&pinned, &workspace, &config, &settings, None)?;
     pi_core::core::mcp::sync(&config, workspace.root());
     pi_core::core::warm_rtk();
     if prompt.is_none() {

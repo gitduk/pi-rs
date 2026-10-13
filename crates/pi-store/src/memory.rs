@@ -1,7 +1,7 @@
 //! What pi has come to know across sessions, as plain markdown under
 //! `~/.pi/memory/`: `<key>.md`, its name the project's path with `-` for
 //! `/`, is one project's; every other `*.md` there is global. Distillation writes it; anyone may read or edit it by hand.
-//! What the prompt makes of it is `pi-core`'s.
+//! What a prompt makes of it is the reader's.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

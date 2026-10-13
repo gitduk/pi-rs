@@ -101,12 +101,12 @@ pub struct Prompt {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub images: Vec<Image>,
-    /// What a person reads — the rollback menu, `/resume` naming, the screen.
+    /// What a person reads — the rewind points, session naming, the screen.
     /// `None` when it is the same as `text`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shown: Option<String>,
     /// Set when pi sent this ask on the model's own behalf — a `later` come
-    /// due, a background subagent's answer: what the model is told of where
+    /// due, a background job's answer: what the model is told of where
     /// it came from. Nobody typed it, so `shown` names it rather than echoes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relayed: Option<String>,
@@ -277,7 +277,7 @@ impl Entry {
 /// One place the conversation can be rewound to.
 ///
 /// Not one operation with a flag: going back to something the user said
-/// unsends it — text returns to the editor — while going back to an answer
+/// unsends it — the text goes back to the user — while going back to an answer
 /// keeps it, since that is what the conversation carries on from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Node {
@@ -375,7 +375,7 @@ pub struct Session {
 // the transcript alone can't say whose stop it was.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum StopCause {
-    // The user asked the run to stop: Esc, `/stop`, an interrupt.
+    // The user asked the run to stop: a stop, `/stop`, an interrupt.
     User,
     // It died on its own — an error or a crash — and no more is known.
     Other,
@@ -734,7 +734,7 @@ impl Session {
         self.entries.iter().rev().find_map(node_of)
     }
 
-    /// The text to hand back to the editor when this entry is unsent; `None`
+    /// The text to hand back to the user when this entry is unsent; `None`
     /// for anything the user did not say, which is what tells the two rewind
     /// semantics apart.
     pub fn unsent_text(&self, entry: EntryId) -> Option<String> {
@@ -748,10 +748,9 @@ impl Session {
     /// The last question the user asked, when there is one to take back.
     ///
     /// Prompts only: a `!` command's output is not something anyone sent, and
-    /// unsending it would put a line back in the editor that was never typed
-    /// as a question. None when the last ask is one pi relayed: taking it back
-    /// would throw away an answer the model is owed, and put a line nobody typed
-    /// in the editor.
+    /// unsending it would hand back a line that was never typed as a question.
+    /// None when the last ask is one pi relayed: taking it back would throw
+    /// away an answer the model is owed, and hand back a line nobody typed.
     pub fn last_ask(&self) -> Option<EntryId> {
         self.entries.iter().rev().find_map(|e| match e {
             Entry::Ask { id, ask, .. } => Some(ask.relayed.is_none().then_some(*id)),
@@ -770,7 +769,7 @@ impl Session {
 
     /// Rewind to just before an entry: it goes too, along with everything
     /// after it. What unsending a message does — the message has to leave the
-    /// transcript, or the editor and the model both hold it.
+    /// transcript, or the user and the model both hold it.
     pub fn rollback_before(&mut self, entry: EntryId) -> usize {
         self.truncate(entry, false)
     }
@@ -873,7 +872,7 @@ impl Session {
 
     /// Everything, in order, compaction or no — what a person can see, as
     /// against `view` (what the model can). Used by the screen, the rewind
-    /// menu, and the session's own name.
+    /// points, and the session's own name.
     pub fn history(&self) -> impl Iterator<Item = &Entry> {
         self.entries.iter()
     }
@@ -1166,7 +1165,7 @@ mod tests {
         assert_eq!(s.rewind_nodes().first().map(Node::id), Some(first));
     }
 
-    // And because the menu can still name it, rewinding to it truncates the
+    // And because a rewind can still name it, rewinding to it truncates the
     // compaction entry too — which puts the dropped turns back.
     #[test]
     fn rewinding_past_a_compaction_undoes_it() {
@@ -1183,7 +1182,7 @@ mod tests {
 
         assert!(
             s.rewind_nodes().iter().any(|n| n.id() == first),
-            "the menu must reach it"
+            "a rewind must reach it"
         );
         s.rollback_to(second);
 
@@ -1195,7 +1194,7 @@ mod tests {
     }
 
     // Unsending is the other half of the rewind: the message itself has to
-    // leave, or the editor holds a line the model is still being sent.
+    // leave, or the user holds a line the model is still being sent.
     #[test]
     fn unsending_a_message_takes_it_out_of_the_transcript() {
         let mut s = Session::new();
@@ -1219,7 +1218,7 @@ mod tests {
         assert_eq!(s.rewind_nodes().len(), 1, "the first turn, the ask alone");
     }
 
-    // The menu lists what was said, never what came back: an answer is a
+    // Rewind points are what was said, never what came back: an answer is a
     // place to continue from, a tool-only turn just a step of the work.
     #[test]
     fn only_asks_reach_the_rewind_menu() {
@@ -1329,7 +1328,7 @@ mod tests {
     }
 
     // The note is the session's words, not the user's: it stays out of the
-    // rewind menu, and nothing an unsend hands back to the editor.
+    // rewind points, and nothing an unsend hands back.
     #[test]
     fn a_stop_note_is_model_only_and_not_rewindable() {
         let mut s = Session::new();
@@ -1515,11 +1514,7 @@ mod tests {
 
         assert_eq!(s.rollback_to(reply), 1);
         assert!(s.history().any(|e| e.id() == reply), "the answer stays");
-        assert_eq!(
-            s.unsent_text(reply),
-            None,
-            "nothing goes back to the editor"
-        );
+        assert_eq!(s.unsent_text(reply), None, "nothing goes back to the user");
     }
 
     // The one user message that legitimately carries more than one block.
@@ -1583,7 +1578,7 @@ mod tests {
         );
         let rewindable: Vec<_> = s.rewind_nodes().iter().map(Node::id).collect();
         assert_eq!(rewindable, [mine], "only what the user said");
-        assert_eq!(s.last_ask(), None, "Esc keeps the answer it is owed");
+        assert_eq!(s.last_ask(), None, "a stop keeps the answer it is owed");
         assert_eq!(
             s.last_node().map(|n| n.show().to_string()),
             Some("subagent #1 find".into())

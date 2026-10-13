@@ -5,7 +5,7 @@ use crate::{Tier, ToolError};
 /// The workspace root every relative tool path is resolved against. Absolute
 /// paths pass through untouched; nothing else in this crate calls the
 /// filesystem directly. `write_roots` widen the boundary every tier above
-/// read is held to: `bash`'s working directory, and what `write`/`edit` touch.
+/// read is held to: where a command runs, and what a write touches.
 #[derive(Debug, Clone)]
 pub struct Workspace {
     root: PathBuf,
@@ -81,7 +81,7 @@ impl Workspace {
     }
 
     /// Widen the boundary to extra absolute directories, for every tier above
-    /// read (`bash`, `write`, `edit`). Absolute, needn't exist yet, dangling
+    /// read. Absolute, needn't exist yet, dangling
     /// symlinks refused; reduced like `resolve` so one can't sneak a root in.
     pub fn with_write_roots(mut self, extra: &[impl AsRef<Path>]) -> std::io::Result<Self> {
         for dir in extra {

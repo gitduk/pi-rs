@@ -5,7 +5,6 @@ mod bar;
 mod browse;
 mod call;
 mod clipboard;
-mod command;
 mod editor;
 mod frame;
 mod job;
@@ -17,6 +16,7 @@ mod screen;
 mod scrollback;
 mod search;
 mod select;
+mod slash;
 mod stream;
 mod term;
 mod ui;
@@ -70,10 +70,10 @@ fn flash_for(line: &str) -> std::time::Duration {
 const NO_TRANSCRIPT: &str = "this checkout has no transcript — /new or /resume first";
 const NOTHING_TO_REWIND: &str = "nothing to rewind to";
 
-// What a `Step::Handled` leaves behind: its lines as the command page, config
+// What a `Step::Handled` leaves behind: its lines as the slash page, config
 // changes applied. A free fn since a run in flight calls it mid-borrow.
 fn land_handled(ui: &mut Ui, core: &Core, view: &mut View, rows: Listing) {
-    ui.open_command(rows);
+    ui.open_slash(rows);
     ui.adopt_config(core, view);
 }
 
@@ -293,7 +293,7 @@ impl Tui {
     }
 
     // A handled command's lines are its answer, and the answer goes to the
-    // command page — the screen is not a log of what the user typed at the interface.
+    // slash page — the screen is not a log of what the user typed at the interface.
     fn land_lines(&mut self, rows: Listing) {
         land_handled(
             &mut self.ui,
@@ -310,7 +310,7 @@ impl Tui {
         // `at` forgets the lists: a swap that didn't move repeats the root,
         // dropping them either way.
         self.ui.lists.at(self.core.lane_mut().root());
-        self.ui.open_command(said);
+        self.ui.open_slash(said);
     }
 
     // Take what every lane's run has posted since the last look into its own
@@ -459,7 +459,7 @@ impl Tui {
             // because waiting is one of the answers about lines.
             Asked::Own(deed) => match deed.fate() {
                 // A key, not a command: a deed's refusal is the answer to a
-                // press, and the command page is for what a slash command output.
+                // press, and the slash page is for what a slash command output.
                 Fate::Refused(why) => {
                     self.ui.flash(why);
                     return Wake::Nothing;
@@ -484,7 +484,7 @@ impl Tui {
             // A command refused because a run is in flight. It was typed, so
             // its refusal is that command's answer.
             Fate::Refused(why) => {
-                self.ui.open_command(Listing::say([why]));
+                self.ui.open_slash(Listing::say([why]));
                 Wake::Nothing
             }
         }
@@ -545,9 +545,9 @@ impl Tui {
                 self.ui
                     .say(front_view(&mut self.views, self.core.lane()), said);
             }
-            // What changed on disk is taken up within a second: settings,
-            // instructions and memory resolve the lane again, a skill's word
-            // starts to answer. Not on every frame: each look is a walk.
+            // What changed on disk is taken up within a second: settings
+            // resolve the lane again, a skill's word starts to answer. Not on
+            // every frame: each look is a walk.
             if looked.elapsed() >= std::time::Duration::from_secs(1) {
                 looked = std::time::Instant::now();
                 if let Some(said) = self.core.refresh_config() {
@@ -738,7 +738,7 @@ impl Tui {
                 }
                 // A refusal is an answer: it was asked for by a line, so it
                 // goes where every other answer does.
-                Step::Flash(line) => self.ui.open_command(Listing::say([line])),
+                Step::Answer(line) => self.ui.open_slash(Listing::say([line])),
                 Step::Bash(command) => self.start_bash(command, &done_tx),
                 Step::McpPrompt {
                     prompt,
@@ -773,7 +773,7 @@ impl Tui {
                     let lane = self.core.lane();
                     match self.drivers.command(drive, lane.token(), lane.ctx()) {
                         Said::Nothing => {}
-                        Said::Command(lines) => self.ui.open_command(Listing::say(lines)),
+                        Said::Command(lines) => self.ui.open_slash(Listing::say(lines)),
                         Said::Transcript(line) => self
                             .ui
                             .say(front_view(&mut self.views, self.core.lane()), line),

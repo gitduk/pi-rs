@@ -442,7 +442,7 @@ fn a_panel_dims_the_transcript_under_it() {
     };
     ui.flush(&lane, &mut view);
     assert!(!dimmed(&ui));
-    ui.open_command(pi_store::listing::Listing::say(["/status answered"]));
+    ui.open_slash(pi_store::listing::Listing::say(["/status answered"]));
     ui.flush(&lane, &mut view);
     assert!(dimmed(&ui), "under the panel");
     ui.focus = crate::tui::ui::Focus::Editor;
@@ -499,8 +499,9 @@ fn a_search_brings_each_line_holding_it_to_the_top() {
     assert!(ui.reading(), "esc leaves the query, not the page");
 }
 
-// A command page searches its own lines, not the transcript it was typed
-// over, though both hold the query.
+// A slash page searches its own lines, not the transcript it was typed
+// over, though both hold the query. Long enough to page: a page that fits
+// gives `/` to the line.
 #[test]
 fn a_command_page_searches_only_its_own_lines() {
     use ratatui::style::Modifier;
@@ -508,7 +509,9 @@ fn a_command_page_searches_only_its_own_lines() {
     let (_dir, lane) = a_running_lane();
     let mut view = View::default();
     view.surface.scrollback = vec![Row::notice("beta in the transcript")].into();
-    ui.open_command(pi_store::listing::Listing::say(["alpha", "beta"]));
+    let lines = ["alpha", "beta"].into_iter().map(String::from);
+    let filler = (0..20).map(|n| format!("filler {n}"));
+    ui.open_slash(pi_store::listing::Listing::say(lines.chain(filler)));
     ui.flush(&lane, &mut view);
     for c in "/beta".chars() {
         ui.key(&lane, &mut view, typed(c), false);
@@ -523,7 +526,7 @@ fn a_command_page_searches_only_its_own_lines() {
             .contains(Modifier::REVERSED)
     };
     assert!(marked("beta"), "the page's own");
-    assert!(!marked("beta in the transcript"), "the transcript over it");
+    assert!(ui.reading(), "a page past its region keeps `/` for search");
 }
 
 // The query is edited with the line's own keys: `ctrl+w` takes a word.

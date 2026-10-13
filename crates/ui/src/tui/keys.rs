@@ -1,5 +1,6 @@
 //! Where a press goes: the key table read against who has the keyboard —
 //! the line, the rewind menu or the reading page — and the mouse.
+use super::browse::Page;
 use super::menu::MenuEntry;
 use super::ui::{Focus, LastPress};
 use super::view::View;
@@ -61,8 +62,16 @@ impl Ui {
         let prev = last
             .filter(|l| now.duration_since(l.at) < self.pair_window_after(l.press))
             .map(|l| l.press);
-        let layers = self.layers(running);
-        let hit = self.keys.hit(prev, press, layers);
+        let mut layers = self.layers(running);
+        let mut hit = self.keys.hit(prev, press, layers);
+        // Output with nothing to page through is gone at the next key, which
+        // goes to the line; only the page's own close keys stop there.
+        let stays = |a| matches!(a, Action::PagerClose | Action::AppCancel | Action::AppQuit);
+        if self.slash_fits() && !hit.is_some_and(|h| stays(h.action)) {
+            self.close_overlay();
+            layers = self.layers(running);
+            hit = self.keys.hit(None, press, layers);
+        }
         if let Some(h) = hit
             && h.pair
         {
@@ -91,6 +100,12 @@ impl Ui {
             Focus::Rewind(_) => self.rewind_key(action),
             Focus::Editor => self.editor_key(lane, view, key, action),
         }
+    }
+
+    // A command's output that fits its region whole.
+    pub(super) fn slash_fits(&self) -> bool {
+        matches!(self.page(), Some(Page::Slash(lines))
+            if lines.len() <= self.regions.history.height as usize)
     }
 
     // The layers the key table reads, from who has the keyboard.
@@ -227,7 +242,7 @@ impl Ui {
                 // Enter with a menu open runs what's highlighted, the typed
                 // text a mere prefix. Pick before draining the editor.
                 return match self.highlighted() {
-                    Some(MenuEntry::Completion(c)) if !c.tab_only || self.picked.is_some() => {
+                    Some(MenuEntry::Completion(c)) if !c.picked_only || self.picked.is_some() => {
                         // The completion's line runs; the prefix that
                         // produced it goes, so it can't resubmit as a stray prompt.
                         self.editor.take();

@@ -292,9 +292,9 @@ pub struct Candidate {
     /// Something is still expected after it, so accepting leaves a trailing
     /// space and the caret past it.
     pub more: bool,
-    /// Taken by Tab, or by Enter once moved onto; Enter on the line as it
-    /// stands runs what was typed, which this would turn into something else.
-    pub tab_only: bool,
+    /// Taken only when picked; the line submitted as it stands runs what was
+    /// typed, which this would turn into something else.
+    pub picked_only: bool,
 }
 
 // The names among `choices` that `typed` begins and does not already finish,
@@ -308,14 +308,14 @@ fn offer(choices: &[Choice], head: &str, typed: &str) -> Vec<Candidate> {
             line: format!("{head}{}", c.name),
             help: c.note.clone(),
             more: false,
-            tab_only: false,
+            picked_only: false,
         })
         .collect()
 }
 
 // The ids after `/jobs stop` not named yet, completing the one being typed.
-// Once one is named, a bare space offers nothing: Enter then runs the line
-// as typed, not the highlighted id tacked on.
+// Once one is named, a bare space offers nothing: submitting runs the line
+// as typed, not an offered id tacked on.
 fn stop_ids(jobs: &[Choice], args: &str) -> Vec<Candidate> {
     let mut named: Vec<&str> = args.split_whitespace().collect();
     let typing = if args.is_empty() || args.ends_with(char::is_whitespace) {
@@ -336,7 +336,7 @@ fn stop_ids(jobs: &[Choice], args: &str) -> Vec<Candidate> {
             line: format!("/jobs stop {head}{}", j.name),
             help: j.note.clone(),
             more: false,
-            tab_only: false,
+            picked_only: false,
         })
         .collect()
 }
@@ -364,7 +364,7 @@ pub fn complete<'a>(
     }
     let Some((word, rest)) = line.split_once(char::is_whitespace) else {
         // The exact word stays in the list: dropping it would leave only
-        // `/news` when `/new` is typed in full, and Tab would pick wrong.
+        // `/news` when `/new` is typed in full, and accepting would pick wrong.
         return commands
             .iter()
             .filter(|c| c.word.starts_with(line))
@@ -373,7 +373,7 @@ pub fn complete<'a>(
                 line: c.word.to_string(),
                 help: c.help.to_string(),
                 more: !c.args.is_empty(),
-                tab_only: false,
+                picked_only: false,
             })
             .collect();
     };
@@ -398,14 +398,14 @@ pub fn complete<'a>(
             stop_ids(jobs, typed["stop ".len()..].trim_start())
         }
         "/jobs" if typed.contains(char::is_whitespace) => Vec::new(),
-        // Enter on a bare `/jobs ` still lists them, not stops them all.
+        // Submitting a bare `/jobs ` still lists them, not stops them all.
         "/jobs" if "stop".starts_with(typed) && typed != "stop" && !jobs.is_empty() => {
             vec![Candidate {
                 show: "stop".into(),
                 line: "/jobs stop".into(),
                 help: "end them by id, or every running one".into(),
                 more: true,
-                tab_only: typed.is_empty(),
+                picked_only: typed.is_empty(),
             }]
         }
         // `rm` marks what follows it for removal; a bare `rm` still means the
@@ -439,7 +439,7 @@ pub fn complete<'a>(
                     line: format!("/resume {}", s.id),
                     help,
                     more: false,
-                    tab_only: false,
+                    picked_only: false,
                 })
                 .collect()
         }

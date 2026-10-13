@@ -6,8 +6,8 @@ use crate::model::ModelSpec;
 use crate::request::ToolDef;
 use serde_json::Value;
 
-// Bytes per token. Deliberately low: overestimating trips compaction a little
-// early, underestimating trips a 400 from the provider mid-run.
+// Bytes per token. Deliberately low: overestimating sends a little less than
+// would fit, underestimating trips a 400 from the provider mid-run.
 const BYTES_PER_TOKEN: usize = 3;
 
 /// Framing every message carries regardless of content.

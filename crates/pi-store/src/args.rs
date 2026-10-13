@@ -24,8 +24,8 @@ impl FormatArg {
         }
     }
 
-    /// Delegated rather than matched again, so a model `/model` lists and one
-    /// it has just switched to cannot print two names for the same protocol.
+    /// Delegated rather than matched again, so a model listed and one just
+    /// switched to cannot print two names for the same protocol.
     pub fn name(self) -> &'static str {
         self.format().name()
     }

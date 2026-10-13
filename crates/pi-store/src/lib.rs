@@ -38,7 +38,7 @@ pub fn older_than(path: &std::path::Path, keep: std::time::Duration) -> bool {
         .is_some_and(|age| age > keep)
 }
 
-/// Where images pasted with ctrl+v are saved.
+/// Where pasted images are saved.
 pub fn images_dir() -> Option<PathBuf> {
     dir().map(|d| d.join("images"))
 }

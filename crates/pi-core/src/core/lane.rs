@@ -41,17 +41,17 @@ pub enum Run {
     // Nothing running, nothing waiting to be looked at.
     Idle,
     Running {
-        // What `esc` cancels, and only for the lane in front.
+        // What a stop cancels, and only for the lane in front.
         cancel: CancellationToken,
-        // Esc caught the prompt on its way out: stop the run, then unsend it.
+        // A stop caught the prompt on its way out: end the run, then unsend it.
         // Set while the run works, acted on when it ends.
         unsend: bool,
     },
-    // Ended out of sight, view already closed: the bar's mark until someone
-    // looks, and an Esc-asked rewind that waits for the screen.
+    // Ended out of sight: marked until someone looks, and a rewind asked
+    // with the stop that waits for the lane to be in front.
     Ended {
         ok: bool,
-        // Esc asked for the prompt back while this was still running.
+        // The stop asked for the prompt back while this was still running.
         unsend: bool,
     },
 }
@@ -71,13 +71,16 @@ struct Checkout {
     // Shared so a run can take it along; `rearm` goes through `make_mut`, so
     // a run in flight keeps the agent it started on.
     agent: Arc<Agent>,
-    // The agent's brief, key map, command table and instructions files: one
-    // value, swapped whole by a reload and by an opened checkout.
+    // The agent's brief, key map, command table and prompt files: one value,
+    // swapped whole by a reload, an opened checkout and a prompt re-read.
     resolved: Arc<Resolved>,
     // Carried across turns: the file locks and edit shifts outlive any one run.
     ctx: Ctx,
     // Which worktree this is, or None in the repository's own checkout.
     worktree: Option<String>,
+    // The session and its newest compaction when the prompt's files were
+    // last looked at: either moving lets them be read again unnoticed.
+    read_at: Option<(String, Option<EntryId>)>,
 }
 
 // One session: replaced whole by `/new` and `/resume`, so nothing of the one
@@ -209,6 +212,7 @@ pub fn a_resolved(standing: &str) -> Arc<Resolved> {
         keys: Arc::new(pi_store::keys::Keys::default()),
         commands: Arc::new(Vec::new()),
         watched: Vec::new(),
+        prompt_files: Default::default(),
         shelf: None,
         shelf_seen: 0,
         notes: Vec::new(),
@@ -262,6 +266,7 @@ impl Lane {
                 resolved: parts.resolved,
                 ctx: parts.ctx,
                 worktree: parts.worktree,
+                read_at: None,
             },
             talk: Conversation::new(parts.id, parts.created, None, parts.name, parts.claim),
             runner: Runner {
@@ -282,7 +287,7 @@ impl Lane {
     /// of sight, and say whether its prompt was asked back.
     ///
     /// Only an ended one: a lane still working must keep its `Running`, or the
-    /// token `esc` reaches and the request to unsend go with it.
+    /// token a stop reaches and the request to unsend go with it.
     pub fn take_ended(&mut self) -> Option<bool> {
         match self.runner.run {
             Run::Ended { unsend, .. } => {
@@ -295,7 +300,7 @@ impl Lane {
 
     /// A job has given this lane's transcript back. The one place `Running`
     /// ends: a lane left in it queues every later prompt and never drains.
-    /// Says whether esc asked for the prompt back.
+    /// Says whether the stop asked for the prompt back.
     pub fn finish(&mut self) -> bool {
         match std::mem::replace(&mut self.runner.run, Run::Idle) {
             Run::Running { unsend, .. } => unsend,
@@ -317,7 +322,7 @@ impl Lane {
     }
 
     /// Ask the run under way to stop, and say whether there was one. `unsend`
-    /// also takes the prompt back, which is what `esc` means.
+    /// also takes the prompt back, as the usual stop does.
     pub fn stop(&mut self, unsend: bool) -> bool {
         match &mut self.runner.run {
             Run::Running {
@@ -371,6 +376,21 @@ impl Lane {
     /// command table — without re-arming anything.
     pub(super) fn keep(&mut self, resolved: Arc<Resolved>) {
         self.checkout.resolved = resolved;
+    }
+
+    /// Whether the session moved or was compacted since the last look; the
+    /// first look only marks where things stand.
+    pub(super) fn prompt_files_due(&mut self) -> bool {
+        let Some(session) = &self.talk.session else {
+            return false;
+        };
+        let compacted = session.entries().iter().rev().find_map(|e| match e {
+            agent::session::Entry::Compaction { id, .. } => Some(*id),
+            _ => None,
+        });
+        let now = Some((self.talk.id.clone(), compacted));
+        let was = std::mem::replace(&mut self.checkout.read_at, now.clone());
+        was.is_some() && was != now
     }
 
     /// What this checkout and the config decide.
@@ -548,8 +568,8 @@ impl Lane {
     /// A row for this lane's screen and nothing else, filed so a rebuild
     /// from the transcript draws it too; held when a run has the transcript.
     ///
-    /// Returns the id so the surface's draw cursor can skip past it; `None`
-    /// for a held row, filed later.
+    /// Returns the id so a surface can tell it from what it has yet to show;
+    /// `None` for a held row, filed later.
     pub fn push_screen(&mut self, text: &str) -> Option<EntryId> {
         match self.talk.session.as_mut() {
             Some(session) => Some(session.push_screen(text)),
@@ -615,7 +635,7 @@ impl Core {
     /// Rewind the conversation to an entry and write the shorter transcript
     /// back.
     ///
-    /// The entry decides which of the two it is; a stale menu row falls
+    /// The entry decides which of the two it is; a stale pick falls
     /// through to removing nothing.
     pub fn rewind_to(&mut self, entry: agent::session::EntryId) -> anyhow::Result<Rewound> {
         // A rewind is refused while a run has the transcript, so this is the
@@ -693,7 +713,7 @@ impl Core {
         let root = ws.root().to_path_buf();
         let failed = |e| format!("nothing opened — {}", refused("worktree", e));
         let resolved =
-            crate::core::resolve::resolve(&self.pinned, &ws, &self.config, &self.settings)
+            crate::core::resolve::resolve(&self.pinned, &ws, &self.config, &self.settings, None)
                 .map_err(failed)?;
 
         // The model travels; what the root decides does not. A switch changes
@@ -768,7 +788,7 @@ impl Core {
                 format!("{mark} {}  {facts}", pi_store::text::pad(&s.label(), width))
             })
             .collect();
-        out.push("resume one by typing /resume and Tab".into());
+        out.push("/resume <id> switches to one".into());
         out
     }
     // Switches transcript, name and id; the model does not change — reasoning

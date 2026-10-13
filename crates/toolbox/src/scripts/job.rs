@@ -141,7 +141,7 @@ pub async fn run(
                 ),
             },
             // The pipes too: what the script left running may hold them, and
-            // the deadline and esc still have to reach that.
+            // the deadline and a stop still have to reach that.
             (status, stdout, stderr) = async {
                 (child.wait().await, captured(&mut stdout).await, captured(&mut stderr).await)
             } => {

@@ -27,7 +27,7 @@ pub enum Origin {
 /// How a turn ended, as every driver that began it is told.
 pub enum Ended {
     Done,
-    // Esc, or a stop asked for another way.
+    // The user stopped it, or a stop was asked for another way.
     Stopped,
     // The prompt was taken back before the model said a word.
     Unsent,
@@ -37,7 +37,7 @@ pub enum Ended {
 /// What a driver's command answers, and where it goes.
 pub enum Said {
     Nothing,
-    // The command's output, on the command page.
+    // The answer to the command, for whoever typed it.
     Command(Vec<String>),
     // Something that happened to the lane, filed with its transcript.
     Transcript(String),

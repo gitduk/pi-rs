@@ -90,7 +90,7 @@ struct PeekAsk {
 }
 
 impl Peek {
-    // When this session was last worked on, which is what `/resume` sorts by.
+    // When this session was last worked on, which is what a listing sorts by.
     fn touched(&self) -> u64 {
         self.entries.last().map_or(self.created, |e| e.at)
     }
@@ -193,7 +193,7 @@ pub struct Progress {
 #[derive(Debug, Clone)]
 pub struct Store {
     root: PathBuf,
-    // Shared by every clone: the core writes through one, the menu reads
+    // Shared by every clone: the core writes through one, a reader reads
     // through another.
     version: std::sync::Arc<AtomicU64>,
 }
@@ -263,7 +263,7 @@ fn claim_dir(dir: PathBuf, id: &str) -> Result<Claim> {
     match file.try_lock() {
         Ok(()) => Ok(Claim { _file: file, dir }),
         Err(std::fs::TryLockError::WouldBlock) => {
-            anyhow::bail!("session {id} is open in another pi, or another lane of this one")
+            anyhow::bail!("session {id} is already open, in this pi or another")
         }
         Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
     }
@@ -377,7 +377,7 @@ impl Store {
     /// since it answers to the same key and expires with them.
     ///
     /// Per workspace, not per session: what you're reaching back for is
-    /// usually something typed before `/new`.
+    /// usually something typed in an earlier session.
     pub fn history_path(&self, workspace: &Path) -> PathBuf {
         self.dir_of(workspace).join("history")
     }
@@ -421,7 +421,7 @@ impl Store {
             .collect()
     }
 
-    /// Where one session's transcript is, written or not yet. `/status` names
+    /// Where one session's transcript is, written or not yet. A status names
     /// it: a transcript nobody can find is one nobody reads back when a run
     /// goes wrong.
     pub fn path_of(&self, workspace: &Path, id: &str) -> PathBuf {
@@ -494,7 +494,7 @@ impl Store {
     }
 
     /// Where a subagent's transcript is: inside its parent's session, so
-    /// `/resume` never offers it and dropping the parent drops it too.
+    /// listing sessions never offers it and dropping the parent drops it too.
     pub fn subagent_path(&self, workspace: &Path, parent: &str, id: &str) -> PathBuf {
         self.dir_of(workspace)
             .join(tool::state::file_stem(parent))
@@ -758,7 +758,7 @@ mod tests {
         let ws = std::path::Path::new("/w");
         let held = store.claim(ws, "a").unwrap();
         let err = store.claim(ws, "a").err().unwrap().to_string();
-        assert!(err.contains("another pi"), "{err}");
+        assert!(err.contains("already open"), "{err}");
         drop(held);
         let dir = store.path_of(ws, "a").parent().unwrap().to_path_buf();
         assert!(!dir.exists());
@@ -1105,7 +1105,7 @@ mod tests {
 
         let held = store.claim(a, "s").unwrap();
         let err = store.take(b, "s").err().unwrap().to_string();
-        assert!(err.contains("another pi"), "{err}");
+        assert!(err.contains("already open"), "{err}");
         assert!(store.path_of(a, "s").is_file(), "refused, nothing moved");
         drop(held);
 
@@ -1116,7 +1116,7 @@ mod tests {
         assert!(!store.path_of(a, "s").parent().unwrap().exists());
     }
 
-    // The menu's cached `/resume` list is dropped by this number alone: a
+    // A cached `/resume` list is dropped by this number alone: a
     // write that changes `choices` without moving it leaves the list stale.
     #[test]
     fn writes_that_change_the_choices_move_the_version_every_clone_sees() {

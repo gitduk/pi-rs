@@ -255,7 +255,7 @@ fn count_changes(prev: &[u8], now: &[u8]) -> usize {
 /// The loop goes with the run on any of the three: a stopped, failed or
 /// taken-back round never left the tree a verdict to read.
 pub enum Cut {
-    // Esc, or a stop asked for another way.
+    // The user stopped it, or a stop was asked for another way.
     Stopped,
     // The round died rather than finishing. Its error has a line of its own.
     Failed,
@@ -278,7 +278,7 @@ pub enum Round {
     Thin,
     // `loop_max_rounds` reached, with rounds still changing the tree.
     Capped(usize),
-    // Esc, an error, or a prompt taken back. The loop goes with the run.
+    // A stop, an error, or a prompt taken back. The loop goes with the run.
     Cut(Cut),
 }
 
@@ -319,7 +319,7 @@ impl Looping {
     // round short, and `None` is a round that reached its own end.
     fn step(&mut self, ctx: &Ctx, cut: Option<Cut>, cap: Option<usize>) -> Round {
         self.round += 1;
-        // A cut round ends the loop without measuring: esc may have stopped
+        // A cut round ends the loop without measuring: a stop may have cut
         // the run mid-write, so the tree's state isn't a judgement to read.
         if let Some(cut) = cut {
             return Round::Cut(cut);

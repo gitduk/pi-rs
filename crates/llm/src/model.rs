@@ -1,8 +1,7 @@
 //! Everything a model needs before it can be talked to: where it lives, which
 //! shape it speaks, and what it costs.
 //!
-//! No built-in model list: the user writes what they can reach in
-//! `~/.pi/settings.toml`; `examples/pi.toml` carries measured starting points.
+//! No built-in model list: the caller says what each model is.
 //!
 //! Two axes, kept apart: an **endpoint fact** rides `Format`, a **model
 //! fact** (e.g. temperature support) sits on `ModelSpec`.
@@ -23,7 +22,7 @@ pub enum Format {
 
 impl Format {
     /// The name this format goes by everywhere it is written down: the config
-    /// key, the journal's `format` field, an API error's word — not the
+    /// key, the log's `format` field, an API error's word — not the
     /// credential contract, since OpenAI-family wires share one key.
     pub fn name(&self) -> &'static str {
         match self {

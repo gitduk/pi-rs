@@ -27,18 +27,19 @@ impl Ui {
         let width = self.screen.usable();
         let reading = self.reading();
         let alone = matches!(self.page(), Some(Page::Preview(_)));
-        let command = matches!(self.page(), Some(Page::Command(_)));
+        let slash = matches!(self.page(), Some(Page::Slash(_)));
         let keep = self.keeps();
         let text = self.page_lines();
         let hovered_job = self.pointer.and_then(|(_, row)| self.job_at(row));
         let mut bar = call::job_lines(&self.jobs, hovered_job, &self.paint, width);
         bar.extend(self.bar_lines(&Facts::of(lane), &snapshot(lane, view), width));
-        let caret_shown = matches!(self.focus, Focus::Editor) || self.search_typing();
+        let caret_shown =
+            matches!(self.focus, Focus::Editor) || self.slash_fits() || self.search_typing();
         // A command's output sits on what was being typed; another reading
         // page gives the editor's rows to the history, a search's row aside.
         let (input, caret) = match self.search_line() {
             Some((line, col)) if reading => (vec![line], (0, col)),
-            _ if reading && !command => (Vec::new(), (0, 0)),
+            _ if reading && !slash => (Vec::new(), (0, 0)),
             _ => self.editor.view(&self.paint, width),
         };
         let area = self.screen.area();
@@ -159,7 +160,7 @@ impl Ui {
         });
 
         let at = top.map(|a| (move |t: &Target| Spot::of(*t).cmp(&a.spot), a.rows));
-        let (tagged_rows, scroll) = if command {
+        let (tagged_rows, scroll) = if slash {
             // The output lies over the transcript's bottom rows: the
             // transcript stays where it stood, not pushed up by it.
             let (text, scroll) = screen::window_tagged(text_stream, hist_view, scroll, at, most);
@@ -197,14 +198,14 @@ impl Ui {
             self.row_of.push(at);
         }
         self.search_settle();
-        // The query marked on the rows a search reads, a command page's own.
+        // The query marked on the rows a search reads, a slash page's own.
         let rows = match self.search_query() {
             Some((query, at)) => {
                 let places = self.row_targets.iter().zip(&self.row_of);
                 rows.into_iter()
                     .zip(places)
                     .map(|(row, (target, &r))| {
-                        if command && !matches!(target, Target::Text(_)) {
+                        if slash && !matches!(target, Target::Text(_)) {
                             return row;
                         }
                         let current = at
@@ -253,7 +254,7 @@ impl Ui {
             let dim = ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::DIM);
             if matches!(self.focus, Focus::Rewind(_)) {
                 frame.buffer_mut().set_style(regions.history, dim);
-            } else if command {
+            } else if slash {
                 // The transcript the output lies over steps back.
                 let above = self
                     .row_targets
@@ -335,7 +336,7 @@ impl Ui {
     fn page_lines(&self) -> Vec<Line<'static>> {
         match &self.focus {
             Focus::Read(Read {
-                page: Page::Command(lines),
+                page: Page::Slash(lines),
                 ..
             }) => std::iter::once(Line::default())
                 .chain(lines.iter().cloned())
@@ -348,11 +349,11 @@ impl Ui {
         }
     }
 
-    // How far back the window may go. A command page's stops at its head:
+    // How far back the window may go. A slash page's stops at its head:
     // the transcript under it is only what it was asked over.
     fn most(&self, text: &[Line], hist_view: usize, width: usize) -> usize {
         match self.page() {
-            Some(Page::Command(_)) => {
+            Some(Page::Slash(_)) => {
                 let rows: usize = text.iter().map(|l| screen::fit(l, width).len()).sum();
                 rows.saturating_sub(hist_view)
             }

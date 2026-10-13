@@ -122,10 +122,10 @@ impl Ui {
     }
 
     // The top row the last frame drew, part of its line cut off above or not.
-    // A command page's top is its own text's, the transcript under it aside.
+    // A slash page's top is its own text's, the transcript under it aside.
     pub(super) fn top_place(&self) -> Option<Place> {
         let n = match self.page() {
-            Some(Page::Command(_)) => {
+            Some(Page::Slash(_)) => {
                 (self.row_targets.iter()).position(|t| matches!(t, Target::Text(_)))?
             }
             _ => 0,
@@ -334,10 +334,9 @@ impl Ui {
         if let Some(search) = &mut read.search
             && let Some(want) = search.want.take()
         {
-            // A command page's own lines only, not the transcript over it.
-            let own = |spot: Spot| {
-                !matches!(read.page, Page::Command(_)) || matches!(spot, Spot::Text(_))
-            };
+            // A slash page's own lines only, not the transcript over it.
+            let own =
+                |spot: Spot| !matches!(read.page, Page::Slash(_)) || matches!(spot, Spot::Text(_));
             // Every match, row by row: a line's index, its row, which of the row's.
             let query = &search.query;
             let hits: Vec<(usize, usize, usize)> = laid

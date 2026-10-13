@@ -36,9 +36,12 @@ pub struct Resolved {
     /// because a skill discovered at reload has to reach the prompt the same
     /// way everything else the config decides does.
     pub commands: std::sync::Arc<Vec<Command>>,
-    /// Every file this was built from, as it stood: when one moves, the lane
-    /// is resolved again. Skills and scripts are read live and are not here.
+    /// The config files this was built from, as they stood: when one moves,
+    /// the lane is resolved again. Skills and scripts are read live, and the
+    /// prompt's files are `prompt_files`, so neither is here.
     pub watched: Vec<Stamp>,
+    /// What the prompt was told from files, held through every reload.
+    pub prompt_files: Arc<PromptFiles>,
     /// Where skills are read from, live; `None` under `--no-skills`.
     pub shelf: Option<std::sync::Arc<skills::Shelf>>,
     /// Which state of the shelf `commands` was built from.
@@ -46,8 +49,8 @@ pub struct Resolved {
     /// Worth saying once, at startup and at each reload.
     pub notes: Vec<String>,
     /// The instructions files folded into the system prompt, named as a person
-    /// would. Shown under the banner rather than said as a note: it is what
-    /// this run is standing on, not news.
+    /// would. Shown with what the run stands on rather than said as a note:
+    /// it is not news.
     pub instructions: Vec<String>,
     /// The memory files folded into the prompt, by path.
     pub memory: Vec<String>,
@@ -56,20 +59,98 @@ pub struct Resolved {
     /// Where requests go and which source said so, for `/status`: two files
     /// can each name one now.
     pub endpoint: Option<String>,
-    /// The MCP servers the config names, for the banner.
+    /// The MCP servers the config names, shown with what the run stands on.
     pub mcp: Vec<String>,
     /// What the project file sets that reaches past its checkout, as key and
     /// value, said at startup: nothing refuses it.
     pub project: Vec<(String, String)>,
 }
 
+/// What the prompt carries from files — the system prompt, the instructions,
+/// memory — and the day. Read for a new session and after a compaction, held
+/// through reloads between: a prompt that moves mid-session contradicts what
+/// the model already read, and throws away the cached prefix.
+#[derive(Clone, Default, PartialEq)]
+pub struct PromptFiles {
+    system_file: Option<PathBuf>,
+    system: String,
+    instructions: Vec<(PathBuf, String)>,
+    memory: Vec<(String, String)>,
+    day: String,
+}
+
+impl PromptFiles {
+    /// The files as they stand now in `root`.
+    pub fn read(pinned: &Pinned, root: &Path) -> Result<Self> {
+        // The flag's file has to be there; `SYSTEM.md` only when it is.
+        let system_file =
+            system_file(pinned).filter(|path| pinned.system.is_some() || path.is_file());
+        let system = match &system_file {
+            Some(path) => std::fs::read_to_string(path)
+                .with_context(|| format!("cannot read system prompt {}", path.display()))?,
+            None => agent::DEFAULT_SYSTEM.to_string(),
+        };
+        let (instructions, memory) = if pinned.no_context_files {
+            (Vec::new(), Vec::new())
+        } else {
+            (
+                instructions::load(root, pi_store::dir().as_deref()).files,
+                crate::core::memory::kept(&pi_store::memory::Memory::default(), root),
+            )
+        };
+        let stamp = journal::rfc3339(std::time::SystemTime::now());
+        let day = stamp.split_once('T').map_or(&*stamp, |(day, _)| day);
+        Ok(Self {
+            system_file,
+            system,
+            instructions,
+            memory,
+            day: day.to_string(),
+        })
+    }
+
+    /// The files that read differently in `now`, named as a person would.
+    pub fn moved(&self, now: &Self, root: &Path) -> Vec<String> {
+        let mut moved = Vec::new();
+        if self.system != now.system {
+            let path = now.system_file.as_ref().or(self.system_file.as_ref());
+            moved.push(path.map_or("system prompt".into(), |p| instructions::short(p, root)));
+        }
+        moved.extend(
+            changed(&self.instructions, &now.instructions).map(|p| instructions::short(p, root)),
+        );
+        let memory_dir = pi_store::memory::Memory::default();
+        let main = crate::core::worktree::main_root(root);
+        moved.extend(
+            changed(&self.memory, &now.memory)
+                .map(|name| instructions::short(&memory_dir.path_of(name, &main), root)),
+        );
+        moved
+    }
+}
+
+// The files that differ between `was` and `now`, added and removed ones included.
+fn changed<'a, K: PartialEq>(
+    was: &'a [(K, String)],
+    now: &'a [(K, String)],
+) -> impl Iterator<Item = &'a K> {
+    let gone = was.iter().filter(|w| !now.iter().any(|n| n.0 == w.0));
+    now.iter()
+        .filter(|n| !was.contains(n))
+        .chain(gone)
+        .map(|f| &f.0)
+}
+
 /// Fails whole or not at all. A half-applied config is worse than a stale one,
 /// which is why a reload computes all of this before touching anything.
+///
+/// `prompt_files` is the prompt's files as last read; `None` reads them now.
 pub fn resolve(
     pinned: &Pinned,
     workspace: &tool::Workspace,
     config: &config::Config,
     settings: &Settings,
+    prompt_files: Option<Arc<PromptFiles>>,
 ) -> Result<Resolved> {
     let root = workspace.root();
     let mut notes = Vec::new();
@@ -159,16 +240,13 @@ pub fn resolve(
         EffortArg::High => Effort::High,
     };
 
-    // The flag's file has to be there; `SYSTEM.md` only when it is.
-    let system_file = system_file(pinned).filter(|path| pinned.system.is_some() || path.is_file());
-    let mut system = match &system_file {
-        Some(path) => std::fs::read_to_string(path)
-            .with_context(|| format!("cannot read system prompt {}", path.display()))?,
-        None => agent::DEFAULT_SYSTEM.to_string(),
+    let prompt_files = match prompt_files {
+        Some(files) => files,
+        None => Arc::new(PromptFiles::read(pinned, root)?),
     };
+    let mut system = prompt_files.system.clone();
     // Everything the run needs to know about pi rides here rather than in the
     // system prompt, so that a replaced or empty one loses none of it.
-    let stamp = journal::rfc3339(std::time::SystemTime::now());
     // Said only where `pi-extend` is offered and the home may be written; the
     // write tool's own check, so a symlinked home is judged as it is.
     let pi_home = pi_store::dir().filter(|home| {
@@ -178,21 +256,15 @@ pub fn resolve(
                 .to_str()
                 .is_some_and(|h| workspace.resolve(h, tool::Tier::Write).is_ok())
     });
-    let (instructions, memory) = if pinned.no_context_files {
-        (Vec::new(), Vec::new())
-    } else {
-        (
-            instructions::load(root, pi_store::dir().as_deref()).files,
-            crate::core::memory::kept(&pi_store::memory::Memory::default(), root),
-        )
-    };
-    let instruction_names = instructions
+    let instruction_names = prompt_files
+        .instructions
         .iter()
         .map(|(p, _)| instructions::short(p, root))
         .collect();
     let memory_dir = pi_store::memory::Memory::default();
     let main = crate::core::worktree::main_root(root);
-    let memory_files = memory
+    let memory_files = prompt_files
+        .memory
         .iter()
         .map(|(name, _)| instructions::short(&memory_dir.path_of(name, &main), root))
         .collect();
@@ -202,12 +274,9 @@ pub fn resolve(
         workspace: root.to_path_buf(),
         write_paths: workspace.write_roots().to_vec(),
         pi_home,
-        instructions,
-        memory,
-        day: stamp
-            .split_once('T')
-            .map_or(&*stamp, |(day, _)| day)
-            .to_string(),
+        instructions: prompt_files.instructions.clone(),
+        memory: prompt_files.memory.clone(),
+        day: prompt_files.day.clone(),
         tier,
     }
     .render();
@@ -234,7 +303,8 @@ pub fn resolve(
         notes,
         instructions: instruction_names,
         memory: memory_files,
-        system: system_file,
+        system: prompt_files.system_file.clone(),
+        prompt_files,
         endpoint: endpoint(pinned, config, settings, root),
         mcp: mcp_names(config, settings),
         project: settings
@@ -266,9 +336,8 @@ const PI_SKILL: &str = concat!(
 /// A file as last seen: its path, time and size.
 pub type Stamp = (PathBuf, Option<std::time::SystemTime>, u64);
 
-/// The files a resolve in `root` reads, as they stand now: the settings, the
-/// system prompt, the instructions and memory. Missing ones are left out, so
-/// one appearing is a change too.
+/// The config files a resolve in `root` reads, as they stand now. Missing
+/// ones are left out, so one appearing is a change too.
 pub fn watched(pinned: &Pinned, root: &Path) -> Vec<Stamp> {
     let mut paths: Vec<PathBuf> = Vec::new();
     paths.extend(
@@ -279,17 +348,6 @@ pub fn watched(pinned: &Pinned, root: &Path) -> Vec<Stamp> {
             .or_else(config::global_path),
     );
     paths.extend(config::project_file(root));
-    paths.extend(system_file(pinned));
-    if !pinned.no_context_files {
-        let pi = pi_store::dir();
-        paths.extend(instructions::paths(
-            root,
-            instructions::home().as_deref(),
-            pi.as_deref(),
-        ));
-        let memory = pi_store::memory::Memory::default();
-        paths.extend(memory.paths(&crate::core::worktree::main_root(root)));
-    }
     paths
         .into_iter()
         .filter_map(|path| {

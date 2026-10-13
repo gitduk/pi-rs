@@ -57,9 +57,11 @@ keys, every one of them. The keys that reach past the checkout — `mcp`,
 `base_url` or `api_key` — are named under the banner when pi starts. Read the
 file in a checkout you did not write before running pi there.
 
-Nothing needs a restart. Within a second of a save to the settings, a system
-prompt file, an `AGENTS.md` or memory, the lane in front is rebuilt from them;
-a file that does not parse is named once and the old config stays.
+Nothing needs a restart. Within a second of a save to the settings, the lane
+in front is rebuilt from them; a file that does not parse is named once and the
+old config stays. A system prompt file, an `AGENTS.md` or memory is read again
+at the next session or compaction instead: changed mid-session, the prompt would
+contradict what the model already read, and its cached prefix would be lost.
 
 ## Run
 

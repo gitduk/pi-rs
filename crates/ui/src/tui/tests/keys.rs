@@ -127,18 +127,18 @@ async fn the_rewind_of_a_lane_with_no_transcript_says_so() {
 async fn an_empty_command_page_is_not_opened() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
-    tui.ui.open_command(Listing::default());
+    tui.ui.open_slash(Listing::default());
     assert!(!matches!(tui.ui.focus, Focus::Read(_)));
 }
 
-// Esc goes to the command page, not past it: reaching the run would stop a turn
+// Esc goes to the slash page, not past it: reaching the run would stop a turn
 // the user meant to leave alone.
 #[tokio::test]
 async fn esc_closes_the_command_page_rather_than_reaching_the_run() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
-    tui.ui.open_command(Listing::say(["/help answered this"]));
+    tui.ui.open_slash(Listing::say(["/help answered this"]));
 
     let token = tui.core.lane().token();
     let esc = crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -184,14 +184,14 @@ async fn only_an_answer_under_the_line_echoes_it() {
     }
 }
 
-// A command page has the keyboard: one place takes keys at a time, so a
+// A slash page has the keyboard: one place takes keys at a time, so a
 // stray letter neither types into the hidden line nor takes the page down.
 #[tokio::test]
 async fn a_command_page_has_the_keyboard_until_closed() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
-    tui.ui.open_command(Listing::say(["/status answered this"]));
+    tui.ui.open_slash(Listing::say(["/status answered this"]));
     let token = tui.core.lane().token();
     let press = |code| crate::tui::TermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
 
@@ -218,7 +218,7 @@ async fn a_command_page_has_the_keyboard_until_closed() {
     assert!(!matches!(tui.ui.focus, Focus::Read(_)), "`q` closes it");
 }
 
-// Enter closes a command page without sending the line behind it; `ctrl+c` closes
+// Enter closes a slash page without sending the line behind it; `ctrl+c` closes
 // it and, with a run in flight, still stops the run.
 #[tokio::test]
 async fn enter_and_the_stop_close_a_command_page() {
@@ -226,7 +226,7 @@ async fn enter_and_the_stop_close_a_command_page() {
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
     tui.ui.editor.set_line("/help");
-    tui.ui.open_command(Listing::say(["/status answered this"]));
+    tui.ui.open_slash(Listing::say(["/status answered this"]));
 
     let token = tui.core.lane().token();
     let enter = crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -237,7 +237,7 @@ async fn enter_and_the_stop_close_a_command_page() {
     assert!(tui.ui.took_submit().is_none(), "and sent nothing");
     assert_eq!(tui.ui.editor.text(), "/help", "the line waits");
 
-    tui.ui.open_command(Listing::say(["/status answered this"]));
+    tui.ui.open_slash(Listing::say(["/status answered this"]));
     let ctrl_c =
         crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
     let lane = tui.core.lane_mut();
@@ -333,13 +333,13 @@ fn esc_takes_the_list_first_and_the_run_next() {
 }
 
 // A `ctrl+c` that closed something is not the first of a quit: two quick
-// presses to put a command page away must not leave the app.
+// presses to put a slash page away must not leave the app.
 #[tokio::test]
 async fn the_stop_that_closed_a_command_page_is_not_half_a_quit() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
-    tui.ui.open_command(Listing::say(["/status answered this"]));
+    tui.ui.open_slash(Listing::say(["/status answered this"]));
     let token = tui.core.lane().token();
     let ctrl_c =
         || crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
@@ -401,14 +401,14 @@ async fn the_rewind_selector_has_the_keyboard() {
     }
 }
 
-// The `esc` that closed a command page is not the first of `esc esc`: a quick
+// The `esc` that closed a slash page is not the first of `esc esc`: a quick
 // second press on the empty line must not open the rewind selector.
 #[tokio::test]
 async fn the_esc_that_closed_a_command_page_is_not_half_a_rewind() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let dir = tempfile::tempdir().expect("a checkout");
     let mut tui = surface(dir.path());
-    tui.ui.open_command(Listing::say(["/status answered this"]));
+    tui.ui.open_slash(Listing::say(["/status answered this"]));
     let token = tui.core.lane().token();
     let esc = || crate::tui::TermEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 

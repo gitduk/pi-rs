@@ -1,8 +1,8 @@
 //! How a config file names a colour, a style and the theme it is made of.
 //!
 //! The types are a config's, not a painter's: they are what a file is read
-//! into, and what a run keeps in force. Turning them into something ratatui
-//! draws is `ui::sgr`'s.
+//! into, and what a run keeps in force. Turning them into something drawn is
+//! the surface's.
 
 use std::fmt::Write as _;
 use std::sync::OnceLock;

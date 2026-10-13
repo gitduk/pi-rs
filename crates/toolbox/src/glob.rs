@@ -80,7 +80,7 @@ impl Tool for Glob {
                     }
                 };
                 // A blocking task cannot be aborted from outside; checking here
-                // is what makes Esc land during the walk at all.
+                // is what makes a stop land during the walk at all.
                 if seen % 512 == 0 && cancel.is_cancelled() {
                     cancelled = true;
                     break;

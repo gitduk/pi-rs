@@ -68,8 +68,8 @@ pub struct Core {
     /// What a slash answers to: built-ins and skills. Rebuilt by
     /// a reload, since a skill can appear between one turn and the next.
     ///
-    /// Shared rather than copied: the terminal holds the same table and
-    /// re-reads it whenever this is replaced.
+    /// Shared rather than copied: a surface may hold the same table and
+    /// re-read it whenever this is replaced.
     pub commands: std::sync::Arc<Vec<Command>>,
     /// The servers' list generation `commands` holds the prompts of.
     pub prompts_seen: u64,
@@ -289,12 +289,12 @@ impl Core {
             Intent::Builtin(Builtin::Loop(goal)) => match goal.trim() {
                 "" => Step::Drive(Drive::Loop(None)),
                 goal if self.starts_turn(goal) => Step::Drive(Drive::Loop(Some(goal.to_string()))),
-                goal => Step::Flash(format!(
+                goal => Step::Answer(format!(
                     "`{goal}` starts no turn — a loop needs one to measure"
                 )),
             },
             Intent::Builtin(Builtin::Quit) => Step::Quit,
-            Intent::Builtin(Builtin::Restart) => self.restart().unwrap_or_else(Step::Flash),
+            Intent::Builtin(Builtin::Restart) => self.restart().unwrap_or_else(Step::Answer),
             Intent::Builtin(Builtin::Help) => Step::Handled(help(&self.commands)),
             Intent::Builtin(Builtin::Keys) => Step::Handled(self.keys.listing()),
             Intent::Builtin(Builtin::Status) => Step::Handled(self.status()),
@@ -367,12 +367,12 @@ impl Core {
                 match pi_store::config::project_target(self.lane().root()) {
                     Some(file) => Step::Edit(file),
                     None => {
-                        Step::Flash("no project here: a .pi.toml in $HOME is never read".into())
+                        Step::Answer("no project here: a .pi.toml in $HOME is never read".into())
                     }
                 }
             }
             Intent::Builtin(Builtin::Settings(_)) => {
-                Step::Flash("bare /settings opens the project's .pi.toml".into())
+                Step::Answer("bare /settings opens the project's .pi.toml".into())
             }
             Intent::Builtin(Builtin::Edit(name)) => self.edit(name.trim()),
         }
@@ -471,7 +471,7 @@ mod tests {
 
         let elsewhere = core.store.claim(&root, "s2").unwrap();
         let err = core.resume("s2").unwrap_err();
-        assert!(err.contains("another pi"), "{err}");
+        assert!(err.contains("already open"), "{err}");
         drop(elsewhere);
         // A child another test is forking may hold the lock's descriptor a
         // moment longer: the release is eventual, not instant.
@@ -527,14 +527,14 @@ mod tests {
 
     #[test]
     fn a_key_and_a_line_that_mean_the_same_thing_are_one_intent() {
-        // `ctrl+l` twice also returns `Intent::Builtin(Builtin::New)`; the
+        // A key bound to it also returns `Intent::Builtin(Builtin::New)`; the
         // typed word lands on the same variant, so `fate` sees one value.
         assert_eq!(read("/new", BUILTIN), Intent::Builtin(Builtin::New));
     }
 
     #[test]
     fn leaving_is_never_refused() {
-        // One intent for `/exit`, `/quit`, ctrl+d and double ctrl+c; it
+        // One intent for `/exit`, `/quit` and the keys bound to leaving; it
         // always proceeds — a wedged run must not trap the user.
         assert!(matches!(Intent::Builtin(Builtin::Quit).fate(), Fate::Now));
     }

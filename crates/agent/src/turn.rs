@@ -137,7 +137,7 @@ impl Agent {
         *generating = started.map(|at| at.elapsed());
 
         // What the host owed and did not send, said once per session by the
-        // reporter. Said here too, not just the journal — else it looks ordinary.
+        // reporter. Said here too, not just the log — else it looks ordinary.
         for gap in self.model.transport.gaps() {
             say(tx, Event::Warning(gap));
         }

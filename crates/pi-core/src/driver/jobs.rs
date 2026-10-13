@@ -59,7 +59,7 @@ struct Item {
     interrupt: bool,
     // Lines for the screen, not yet shown.
     notices: VecDeque<String>,
-    // Asks it to wind down: a subagent the way esc does, a process by signal.
+    // Asks it to wind down: a subagent as a stopped run is, a process by signal.
     stop: CancellationToken,
 }
 

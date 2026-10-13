@@ -85,7 +85,7 @@ pub(crate) fn say(tx: &tokio::sync::mpsc::UnboundedSender<Event>, event: Event) 
 }
 
 // Deltas are the exception: they are the transcript, they arrive thousands at
-// a time, and the transcript is saved beside the journal already.
+// a time, and the transcript is saved beside the log already.
 fn note(event: &Event) {
     match event {
         Event::TextDelta(_)

@@ -22,7 +22,7 @@ const FAILED: &str = "[tool error]";
 /// One exchange, from the request going out to the response coming back.
 ///
 /// Owns the whole flow rather than logging at scattered call sites: a bare
-/// `send().await?` can fail silently (DNS, TLS) without the journal seeing it.
+/// `send().await?` can fail silently (DNS, TLS) without the log seeing it.
 pub(crate) async fn exchange(
     format: &'static str,
     url: String,
@@ -55,7 +55,7 @@ pub(crate) async fn exchange(
                 target: "pi::wire",
                 format,
                 took_ms = began.elapsed().as_millis() as u64,
-                // As the trait object, so the journal unwinds the source chain —
+                // As the trait object, so the log unwinds the source chain —
                 // reqwest's own line just says "error sending request".
                 error = &e as &dyn std::error::Error,
                 "unreachable"
@@ -208,7 +208,7 @@ pub(crate) struct Gaps {
     // One line per (event, thing), for the *session*'s life, not the stream —
     // said every turn, a host defect teaches the reader to skip it.
     said: BTreeSet<(String, String)>,
-    // Gaps waiting to reach the reader. The journal has them either way; this
+    // Gaps waiting to reach the reader. The log has them either way; this
     // is the half seen without being grepped for.
     pending: Vec<String>,
 }
@@ -233,7 +233,7 @@ impl Gaps {
 
     /// Something the model produced is not in the turn. Warned rather than
     /// noted: the run continues and looks ordinary, which is exactly why the
-    /// journal has to say it happened.
+    /// log has to say it happened.
     pub(crate) fn lost(&mut self, event: &str, thing: &str) {
         if self.first_time(event, thing) {
             tracing::warn!(

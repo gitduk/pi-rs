@@ -115,6 +115,12 @@ impl Tui {
     }
 
     fn begin(&mut self, ask: Ask, done: &UnboundedSender<Done>) {
+        if let Some(said) = self.core.refresh_prompt_files() {
+            let view = front_view(&mut self.views, self.core.lane());
+            for line in said {
+                self.ui.say_muted(view, line);
+            }
+        }
         // Lent to the run for the turn's length. Missing only when a panic
         // took the transcript and the archive won't read back.
         let Some(mut carried) = self.take_carried() else {
@@ -300,7 +306,7 @@ impl Tui {
         (ran, resumed)
     }
 
-    // A config, instructions or memory file in `$EDITOR`, then the reload that makes it
+    // A config or prompt file in `$EDITOR`, then the reload that makes it
     // count. A non-zero exit (`:cq`) is "forget it": nothing is reloaded.
     pub(super) async fn edit_file(&mut self, path: std::path::PathBuf) {
         let (ran, resumed) = self.in_editor(&path).await;
@@ -316,10 +322,19 @@ impl Tui {
             Ok(_) => match self.core.config_edited() {
                 // The file edited first: what else the reload says follows it.
                 Ok(notes) => {
-                    let name = agent::instructions::short(&path, self.core.lane().root());
-                    let line = format!("{name} — in force from the next turn");
+                    let root = self.core.lane().root();
+                    let name = agent::instructions::short(&path, root);
+                    let prompt = pi_core::core::resolve::editable(&self.core.pinned, root)
+                        .iter()
+                        .any(|f| f.path == path);
+                    let when = if prompt {
+                        "the next session or compaction"
+                    } else {
+                        "the next turn"
+                    };
+                    let line = format!("{name} — in force from {when}");
                     // Nothing else to report: an aside for the bar, not a
-                    // command page that waits on a keypress.
+                    // slash page that waits on a keypress.
                     if notes.is_empty() {
                         self.ui.flash(line);
                         Vec::new()
@@ -574,7 +589,7 @@ impl Tui {
             let now = self.core.tokens_now_at(lane);
             // `/compact` answered, and there was nothing to do: the answer to
             // a command, not news about the lane.
-            self.ui.open_command(Listing::say([format!(
+            self.ui.open_slash(Listing::say([format!(
                 "nothing to compact — {now} tokens, all inside the {held} kept as working context"
             )]));
         }

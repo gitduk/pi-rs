@@ -228,7 +228,7 @@ impl Servers {
         }
     }
 
-    /// One line per server, for `/status`.
+    /// One line per server, for a status listing.
     pub fn summary(&self) -> Vec<String> {
         self.shown()
             .into_iter()
@@ -260,8 +260,8 @@ impl tool::Source for Servers {
                     name: tool_name(&server.name, "unavailable"),
                     description: format!(
                         "MCP server `{}` is not running: {why}. Its tools come back once \
-                         [mcp.{}] in pi's settings.toml starts; calling this only says so.",
-                        server.name, server.name
+                         it starts; calling this only says so.",
+                        server.name
                     ),
                 })),
             }
@@ -439,7 +439,7 @@ fn with_stderr(why: String, said: &str) -> String {
     }
 }
 
-// Read a server's stderr to its end: every line to the journal, the last few
+// Read a server's stderr to its end: every line to the log, the last few
 // hundred bytes kept to say why it would not start.
 async fn tail(mut stderr: tokio::process::ChildStderr, name: String) -> String {
     const KEEP: usize = 512;
@@ -529,8 +529,8 @@ impl Tool for Remote {
         if let Value::Object(map) = args {
             params = params.with_arguments(map);
         }
-        // As long as `bash` may run: past that, a server is wedged, not busy.
-        const WAIT: std::time::Duration = std::time::Duration::from_secs(600);
+        // As long as any call may run: past that, a server is wedged, not busy.
+        const WAIT: std::time::Duration = tool::limit::MAX_CALL;
         let result = tokio::select! {
             r = tokio::time::timeout(WAIT, self.peer.call_tool(params)) => match r {
                 Ok(r) => r,
