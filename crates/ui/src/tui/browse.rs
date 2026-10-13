@@ -36,7 +36,8 @@ pub(super) struct Read {
 pub(super) enum Page {
     // The conversation alone: no thinking, calls or notices.
     Conversation,
-    // A command's output, under the transcript it was typed over.
+    // A command's output, lying over the bottom of the transcript it was
+    // typed over.
     Command(Vec<Line<'static>>),
     // What a closed line opens onto, standing alone: its first line is the
     // one clicked, copied out when the page opened.

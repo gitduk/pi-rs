@@ -2,7 +2,7 @@
 //! up, the menu, the bar and the editor, laid bottom-up and drawn.
 
 use pi_core::core::lane::Lane;
-use ratatui::layout::{Constraint, Flex, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::text::Line;
 use ratatui::widgets::{List, ListState};
 
@@ -42,7 +42,7 @@ impl Ui {
             _ => self.editor.view(&self.paint, width),
         };
         let area = self.screen.area();
-        let mut regions = Regions::layout(area, menu.len(), bar.len(), input.len());
+        let regions = Regions::layout(area, menu.len(), bar.len(), input.len());
         bar.truncate(regions.bar.height as usize);
         let menu_h = regions.menu.height as usize;
         // A paste taller than the terminal keeps the caret's row in view.
@@ -159,13 +159,34 @@ impl Ui {
         });
 
         let at = top.map(|a| (move |t: &Target| Spot::of(*t).cmp(&a.spot), a.rows));
-        let (tagged_rows, scroll) = screen::window_tagged(
-            scrollback.chain(live_stream).chain(text_stream),
-            hist_view,
-            scroll,
-            at,
-            most,
-        );
+        let (tagged_rows, scroll) = if command {
+            // The output lies over the transcript's bottom rows: the
+            // transcript stays where it stood, not pushed up by it.
+            let (text, scroll) = screen::window_tagged(text_stream, hist_view, scroll, at, most);
+            let surface = &view.surface;
+            let under =
+                (surface.top).map(|a| (move |t: &Target| Spot::of(*t).cmp(&a.spot), a.rows));
+            let (mut rows, _) = screen::window_tagged(
+                scrollback.chain(live_stream),
+                hist_view,
+                surface.scroll,
+                under,
+                usize::MAX,
+            );
+            let room = hist_view.saturating_sub(text.len());
+            rows.truncate(room);
+            rows.resize(room, (Line::default(), Target::Text(0), 0));
+            rows.extend(text);
+            (rows, scroll)
+        } else {
+            screen::window_tagged(
+                scrollback.chain(live_stream).chain(text_stream),
+                hist_view,
+                scroll,
+                at,
+                most,
+            )
+        };
 
         let mut rows = Vec::with_capacity(tagged_rows.len());
         self.row_targets.clear();
@@ -219,13 +240,6 @@ impl Ui {
             .paint
             .band(&self.paint.theme.prompt.panel.input)
             .unwrap_or_default();
-        // A command's output sits on the input even when the transcript
-        // above is too short to push it there.
-        if command {
-            [regions.history] = Layout::vertical([Constraint::Length(rows.len() as u16)])
-                .flex(Flex::End)
-                .areas(regions.history);
-        }
         self.regions = regions;
         let _ = self.screen.draw(|frame| {
             // Laid out for the size last reported: a frame of another would
@@ -240,7 +254,7 @@ impl Ui {
             if matches!(self.focus, Focus::Rewind(_)) {
                 frame.buffer_mut().set_style(regions.history, dim);
             } else if command {
-                // The command's output comes last, under the transcript.
+                // The transcript the output lies over steps back.
                 let above = self
                     .row_targets
                     .iter()
@@ -335,7 +349,7 @@ impl Ui {
     }
 
     // How far back the window may go. A command page's stops at its head:
-    // the transcript above it is only what it was asked over.
+    // the transcript under it is only what it was asked over.
     fn most(&self, text: &[Line], hist_view: usize, width: usize) -> usize {
         match self.page() {
             Some(Page::Command(_)) => {

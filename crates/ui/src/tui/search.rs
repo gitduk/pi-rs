@@ -122,8 +122,15 @@ impl Ui {
     }
 
     // The top row the last frame drew, part of its line cut off above or not.
+    // A command page's top is its own text's, the transcript under it aside.
     pub(super) fn top_place(&self) -> Option<Place> {
-        self.place_at(0)
+        let n = match self.page() {
+            Some(Page::Command(_)) => {
+                (self.row_targets.iter()).position(|t| matches!(t, Target::Text(_)))?
+            }
+            _ => 0,
+        };
+        self.place_at(n)
     }
 
     fn place_at(&self, n: usize) -> Option<Place> {
